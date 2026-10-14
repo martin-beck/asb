@@ -26,7 +26,7 @@ asb-runtime = { version = "=0.1.0", path = "../asb-runtime" }
 asb-store = { version = "=0.1.0", path = "../asb-store" }
 asb-workloads = { version = "=0.1.0", path = "../asb-workloads" }
 schemars = "=1.0.4"
-flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.143"
 sha2 = "=0.10.9"
