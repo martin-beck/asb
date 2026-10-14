@@ -98,7 +98,7 @@ jobs:
           echo "kind=$validated" >> "$GITHUB_OUTPUT"
       - name: Retain rolling-hosted portability evidence
         if: steps.evidence.outputs.kind == 'hosted-portability'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: hosted-portability-${{ matrix.runner }}
           path: ${{ runner.temp }}/hosted-portability-${{ matrix.runner }}.json
@@ -106,7 +106,7 @@ jobs:
           retention-days: 30
       - name: Retain exact native qualification evidence
         if: steps.evidence.outputs.kind == 'native-qualification'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: native-qualification-${{ matrix.runner }}
           path: ${{ runner.temp }}/native-qualification-${{ matrix.runner }}.json
