@@ -25,7 +25,7 @@ asb-replay = { version = "=0.1.0", path = "../asb-replay" }
 asb-runtime = { version = "=0.1.0", path = "../asb-runtime" }
 asb-store = { version = "=0.1.0", path = "../asb-store" }
 asb-workloads = { version = "=0.1.0", path = "../asb-workloads" }
-schemars = "=1.0.4"
+schemars = "=1.2.2"
 flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.143"
