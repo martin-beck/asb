@@ -43,6 +43,8 @@ struct RunResult<'a> {
     elapsed_ms: u128,
     exit_code: Option<i32>,
     token_usage: measurements::TokenUsage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cassette: Option<String>,
     stdout: String,
     stderr: String,
 }
@@ -226,6 +228,20 @@ fn run_mode(
     if let Some(session) = tape_session.take() {
         session.stop()?;
     }
+    if let Some((tape::Mode::Record, cassette)) = tape_cassette.as_ref() {
+        let metadata = std::fs::metadata(cassette).map_err(|error| {
+            Error::Run(format!(
+                "record completed without creating cassette {}; verify the provider endpoint and llmtape installation: {error}",
+                cassette.display()
+            ))
+        })?;
+        if metadata.len() == 0 {
+            return Err(Error::Run(format!(
+                "record created an empty cassette {}; the agent made no provider request; verify its provider base URL and credentials",
+                cassette.display()
+            )));
+        }
+    }
     let elapsed_ms = started.elapsed().as_millis();
     let success = child.status.success();
     let token_usage = measurements::token_usage_from_sources(
@@ -247,6 +263,9 @@ fn run_mode(
         elapsed_ms,
         exit_code: child.status.code(),
         token_usage,
+        cassette: tape_cassette
+            .as_ref()
+            .map(|(_, cassette)| cassette.display().to_string()),
         stdout: bounded(&child.stdout),
         stderr: bounded(&child.stderr),
     };
@@ -615,6 +634,7 @@ mod tests {
                 total_tokens: Some(7),
                 source: Some("test".into()),
             },
+            cassette: None,
             stdout: "done".into(),
             stderr: String::new(),
         }

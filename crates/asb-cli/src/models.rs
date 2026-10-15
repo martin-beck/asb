@@ -151,11 +151,23 @@ pub fn ensure_replay_tool_capable(cassette: &Path, model: &str) -> Result<(), Er
     for line in text.lines() {
         let value: Value = serde_json::from_str(line)
             .map_err(|_| Error::Input("replay cassette contains invalid JSONL".into()))?;
-        let body = value
+        let raw_body = value
             .get("request")
             .and_then(|request| request.get("body"))
             .unwrap_or(&value);
-        if body.get("model").and_then(Value::as_str) != Some(model) {
+        let body = if let Some(text) = raw_body.as_str() {
+            serde_json::from_str::<Value>(text).map_err(|_| {
+                Error::Input(
+                    "replay cassette contains a request body that is not valid JSON".into(),
+                )
+            })?
+        } else {
+            raw_body.clone()
+        };
+        let Some(recorded_model) = body.get("model").and_then(Value::as_str) else {
+            continue;
+        };
+        if !models_match(recorded_model, model) {
             continue;
         }
         saw_model = true;
@@ -181,6 +193,12 @@ pub fn ensure_replay_tool_capable(cassette: &Path, model: &str) -> Result<(), Er
             "replay cassette has no request for model `{model}`; record the same configuration before replay"
         )))
     }
+}
+
+fn models_match(recorded: &str, configured: &str) -> bool {
+    recorded == configured
+        || recorded.ends_with(&format!("/{configured}"))
+        || configured.ends_with(&format!("/{recorded}"))
 }
 
 fn fetch(spec: providers::ModelSpec) -> Result<Vec<u8>, Error> {
@@ -633,6 +651,20 @@ mod tests {
         let error =
             ensure_replay_tool_capable(&path, "other-model").expect_err("wrong model rejected");
         assert!(error.to_string().contains("no request for model"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn replay_accepts_json_encoded_request_bodies_and_provider_namespaces() {
+        let path =
+            std::env::temp_dir().join(format!("asb-tool-cassette-json-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"request":{"body":"{\"model\":\"openrouter/tool-model\",\"tools\":[{\"type\":\"function\"}]}"},"response":{"status":200}}
+"#,
+        )
+        .expect("cassette writes");
+        ensure_replay_tool_capable(&path, "tool-model").expect("namespaced model accepted");
         let _ = std::fs::remove_file(path);
     }
 
