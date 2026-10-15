@@ -13,7 +13,8 @@ ASB is deliberately split into a small CLI and a file-backed workload directory:
   file, copies the bundled workload prompts and fixture trees, and creates its
   configured `tools_dir`, `workloads_dir`, and `workspace_dir`;
   every command resolves relative paths from this project root;
-- `runner`: configuration loading and live agent process execution;
+- `runner`: configuration loading, bounded agent-output logging, and live agent
+  process execution;
 - `measurements`: opt-in system/runtime collection. It writes bounded JSON
   records for host facts, elapsed time, success rate, and token usage, and
   owns optional `mpstat`, `iostat`, `perf`, BPFTrace, and FlameGraph adapters;
@@ -24,7 +25,7 @@ ASB is deliberately split into a small CLI and a file-backed workload directory:
   workspace without overwriting existing edits.
 
 The CLI is the stable user boundary. A benchmark configuration names an agent,
-workload, provider, model, and workspace. Provider credentials are never stored
+workload, provider, model, workspace, and log file. Provider credentials are never stored
 in that file. The runner passes provider/model selection through environment
 variables and gives the selected agent one bounded workload prompt.
 Provider credentials are not stored in benchmark configuration. Known providers
@@ -40,6 +41,11 @@ execution.
 Workloads are loaded from `workloads/` beside the configuration file. Set
 `ASB_WORKLOAD_DIR` to use another directory; add a new `.txt` file to extend
 the catalogue.
+
+`run`, `record`, and `replay` append one bounded JSON record per execution to
+the configured `log_file`, including the captured agent output and error text.
+Their terminal output is intentionally limited to success rate, elapsed time,
+and token usage; `--json` changes only the representation of those metrics.
 
 `asb tool install` installs a pinned package recipe into the configured tools
 directory for supported agents and support tools, or downloads/copies an

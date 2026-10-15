@@ -104,6 +104,10 @@ pub fn setup(args: &[String], output: &mut dyn Write) -> Result<(), Error> {
         provider,
         model,
         workspace: workspace.unwrap_or(project_config.workspace_dir),
+        log_file: destination
+            .as_deref()
+            .map(default_log_name)
+            .unwrap_or_else(|| "benchmark.log".into()),
         measurements: Some(MeasurementConfig {
             enabled: true,
             directory: "measurements".into(),
@@ -122,6 +126,15 @@ pub fn setup(args: &[String], output: &mut dyn Write) -> Result<(), Error> {
     Ok(())
 }
 
+fn default_log_name(destination: &str) -> String {
+    std::path::Path::new(destination)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("{value}.log"))
+        .unwrap_or_else(|| "benchmark.log".into())
+}
+
 fn required(value: Option<String>) -> Result<String, Error> {
     let value = value.ok_or(Error::Usage(
         "setup requires agent, workload, provider, and model",
@@ -134,7 +147,13 @@ fn required(value: Option<String>) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::setup;
+    use super::{default_log_name, setup};
+
+    #[test]
+    fn setup_derives_log_name_from_configuration_stem() {
+        assert_eq!(default_log_name("configs/foo.toml"), "foo.log");
+        assert_eq!(default_log_name("benchmark"), "benchmark.log");
+    }
 
     #[test]
     fn explains_single_dash_long_option_typo() {

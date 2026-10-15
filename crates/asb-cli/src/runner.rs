@@ -13,7 +13,7 @@ use crate::tape;
 use crate::workloads;
 use serde::Serialize;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -39,8 +39,10 @@ struct RunResult<'a> {
     workload: &'a str,
     provider: &'a str,
     model: &'a str,
+    success_rate: f64,
     elapsed_ms: u128,
     exit_code: Option<i32>,
+    token_usage: measurements::TokenUsage,
     stdout: String,
     stderr: String,
 }
@@ -252,35 +254,36 @@ fn run_mode(
         session.stop()?;
     }
     let elapsed_ms = started.elapsed().as_millis();
+    let success = child.status.success();
+    let token_usage = measurements::token_usage();
     let result = RunResult {
-        status: if child.status.success() {
-            "completed"
-        } else {
-            "failed"
-        },
+        status: if success { "completed" } else { "failed" },
         agent: &config.agent,
         workload: &config.workload,
         provider: &config.provider,
         model: &config.model,
+        success_rate: if success { 1.0 } else { 0.0 },
         elapsed_ms,
         exit_code: child.status.code(),
+        token_usage,
         stdout: bounded(&child.stdout),
         stderr: bounded(&child.stderr),
     };
+    write_log(config_path, &config.log_file, &result)?;
     if let Some(session) = measurement_session {
         let measured = measurements::RunMeasurement {
             schema_version: 1,
             run_id: format!("{}-{}", result.workload, result.elapsed_ms),
             status: result.status,
-            success: child.status.success(),
-            success_rate: if child.status.success() { 1.0 } else { 0.0 },
+            success,
+            success_rate: result.success_rate,
             agent: result.agent,
             workload: result.workload,
             provider: result.provider,
             model: result.model,
             elapsed_ms,
             exit_code: result.exit_code,
-            token_usage: measurements::token_usage(),
+            token_usage: result.token_usage.clone(),
             started_unix_ms: session.started_unix_ms(),
         };
         session.finish(measured).map_err(Error::Run)?;
@@ -290,7 +293,7 @@ fn run_mode(
     } else {
         render_human(&result, output)?;
     }
-    if child.status.success() {
+    if success {
         Ok(())
     } else {
         Err(Error::Run("agent exited unsuccessfully".into()))
@@ -328,8 +331,55 @@ fn safe_name(value: &str) -> String {
         .collect()
 }
 
+fn write_log(
+    config_path: &Path,
+    configured_path: &str,
+    result: &RunResult<'_>,
+) -> Result<(), Error> {
+    let path = resolve_log_path(config_path, configured_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            Error::Run(format!(
+                "cannot create log directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| Error::Run(format!("cannot open log file {}: {error}", path.display())))?;
+    serde_json::to_writer(&mut file, result).map_err(|error| {
+        Error::Run(format!("cannot write log file {}: {error}", path.display()))
+    })?;
+    writeln!(file).map_err(|error| {
+        Error::Run(format!(
+            "cannot finish log file {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn resolve_log_path(config_path: &Path, configured_path: &str) -> PathBuf {
+    let path = Path::new(configured_path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(path)
+    }
+}
+
 fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Error> {
-    serde_json::to_writer_pretty(&mut *output, result)
+    let summary = serde_json::json!({
+        "success_rate": result.success_rate,
+        "elapsed_ms": result.elapsed_ms,
+        "token_usage": result.token_usage,
+    });
+    serde_json::to_writer_pretty(&mut *output, &summary)
         .map_err(|error| Error::Io(error.to_string()))?;
     writeln!(output).map_err(io_error)
 }
@@ -337,34 +387,18 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
 fn render_human(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Error> {
     writeln!(
         output,
-        "{} benchmark: agent={} workload={} provider={} model={} elapsed={}ms exit={}",
-        result.status,
-        result.agent,
-        result.workload,
-        result.provider,
-        result.model,
+        "success_rate={:.3} elapsed_ms={} input_tokens={} output_tokens={} total_tokens={}",
+        result.success_rate,
         result.elapsed_ms,
-        result
-            .exit_code
-            .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
+        format_token(result.token_usage.input_tokens),
+        format_token(result.token_usage.output_tokens),
+        format_token(result.token_usage.total_tokens),
     )
-    .map_err(io_error)?;
-    if !result.stdout.trim().is_empty() {
-        writeln!(output, "output:\n{}", excerpt(&result.stdout)).map_err(io_error)?;
-    }
-    if !result.stderr.trim().is_empty() {
-        writeln!(output, "stderr:\n{}", excerpt(&result.stderr)).map_err(io_error)?;
-    }
-    Ok(())
+    .map_err(io_error)
 }
 
-fn excerpt(value: &str) -> &str {
-    const MAX_HUMAN_OUTPUT: usize = 8 * 1024;
-    if value.len() <= MAX_HUMAN_OUTPUT {
-        value
-    } else {
-        &value[..value.floor_char_boundary(MAX_HUMAN_OUTPUT)]
-    }
+fn format_token(value: Option<u64>) -> String {
+    value.map_or_else(|| "unknown".into(), |value| value.to_string())
 }
 
 struct CommandSpec {
@@ -569,8 +603,12 @@ fn bounded(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunResult, command_for, opencode_model, render_human, render_json};
+    use super::{
+        RunResult, command_for, opencode_model, render_human, render_json, resolve_log_path,
+        write_log,
+    };
     use crate::benchmark::BenchmarkConfig;
+    use crate::measurements::TokenUsage;
 
     fn result<'a>() -> RunResult<'a> {
         RunResult {
@@ -579,8 +617,15 @@ mod tests {
             workload: "bug-fix",
             provider: "openrouter",
             model: "test-model",
+            success_rate: 1.0,
             elapsed_ms: 12,
             exit_code: Some(0),
+            token_usage: TokenUsage {
+                input_tokens: Some(3),
+                output_tokens: Some(4),
+                total_tokens: Some(7),
+                source: Some("test".into()),
+            },
             stdout: "done".into(),
             stderr: String::new(),
         }
@@ -591,8 +636,10 @@ mod tests {
         let mut output = Vec::new();
         render_human(&result(), &mut output).expect("human rendering succeeds");
         let text = String::from_utf8(output).expect("utf8");
-        assert!(text.starts_with("completed benchmark:"));
-        assert!(text.contains("output:\ndone"));
+        assert!(text.starts_with("success_rate=1.000"));
+        assert!(text.contains("elapsed_ms=12"));
+        assert!(text.contains("total_tokens=7"));
+        assert!(!text.contains("done"));
         assert!(!text.starts_with('{'));
     }
 
@@ -601,8 +648,38 @@ mod tests {
         let mut output = Vec::new();
         render_json(&result(), &mut output).expect("json rendering succeeds");
         let value: serde_json::Value = serde_json::from_slice(&output).expect("valid json");
-        assert_eq!(value["status"], "completed");
+        assert_eq!(value["success_rate"], 1.0);
+        assert_eq!(value["elapsed_ms"], 12);
+        assert_eq!(value["token_usage"]["total_tokens"], 7);
+        assert!(value.get("stdout").is_none());
+    }
+
+    #[test]
+    fn log_path_is_relative_to_configuration_file() {
+        assert_eq!(
+            resolve_log_path(std::path::Path::new("projects/foo.toml"), "foo.log"),
+            std::path::PathBuf::from("projects/foo.log")
+        );
+        assert_eq!(
+            resolve_log_path(
+                std::path::Path::new("projects/foo.toml"),
+                "/tmp/asb-run.log"
+            ),
+            std::path::PathBuf::from("/tmp/asb-run.log")
+        );
+    }
+
+    #[test]
+    fn log_contains_full_bounded_result_while_summary_hides_agent_output() {
+        let directory = std::env::temp_dir().join(format!("asb-runner-log-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("log test directory");
+        let config = directory.join("foo.toml");
+        write_log(&config, "foo.log", &result()).expect("log writes");
+        let text = std::fs::read_to_string(directory.join("foo.log")).expect("log reads");
+        let value: serde_json::Value = serde_json::from_str(text.trim()).expect("log JSON");
         assert_eq!(value["stdout"], "done");
+        assert_eq!(value["success_rate"], 1.0);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -613,6 +690,7 @@ mod tests {
             provider: "cli2key".into(),
             model: "gpt-test".into(),
             workspace: "workspace".into(),
+            log_file: "run.log".into(),
             measurements: None,
         };
         let command = command_for(&config, Some("http://127.0.0.1:3456/v1"), "prompt")
@@ -630,6 +708,7 @@ mod tests {
             provider: "cli2key".into(),
             model: "gpt-6.1-sol".into(),
             workspace: "workspace".into(),
+            log_file: "run.log".into(),
             measurements: None,
         };
         let command = command_for(&config, Some("http://127.0.0.1:3456/v1"), "prompt")
@@ -649,6 +728,7 @@ mod tests {
             provider: "opencode-zen".into(),
             model: "mimo-v2.6-flash-free".into(),
             workspace: "workspace".into(),
+            log_file: "run.log".into(),
             measurements: None,
         };
         assert_eq!(opencode_model(&config), "opencode/mimo-v2.6-flash-free");
@@ -662,6 +742,7 @@ mod tests {
             provider: "cli2key".into(),
             model: "gpt-test".into(),
             workspace: "workspace".into(),
+            log_file: "run.log".into(),
             measurements: None,
         };
         assert!(command_for(&config, Some("http://127.0.0.1:3456/v1"), "prompt").is_err());
@@ -675,6 +756,7 @@ mod tests {
             provider: "local".into(),
             model: "test-model".into(),
             workspace: "workspace".into(),
+            log_file: "run.log".into(),
             measurements: None,
         };
         let error = match command_for(&config, None, "prompt") {

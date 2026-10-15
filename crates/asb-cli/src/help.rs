@@ -18,16 +18,16 @@ pub fn command(name: &str, output: &mut dyn Write) -> Result<(), Error> {
             "Usage: asb init [PROJECT_DIR] [--reset]\n\nCreate project state and bundled workloads. Existing projects are preserved unless --reset is supplied."
         }
         "setup" => {
-            "Usage: asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--workspace DIR] [--output FILE]\n\nWrite a benchmark TOML configuration. Generated configurations enable every measurement module; credentials remain in the environment."
+            "Usage: asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--workspace DIR] [--output FILE]\n\nWrite a benchmark TOML configuration. The generated `log_file` defaults to the configuration stem with a `.log` extension. Generated configurations enable every measurement module; credentials remain in the environment."
         }
         "record" => {
-            "Usage: asb record CONFIG [--cassette FILE] [--json] [--measurements DIR]\n\nRun the configured workload through the local llmtape proxy and save LLM requests and responses to a JSONL cassette. Install it project-locally with `asb tool install llmtape`, or set ASB_LLM_TAPE to another executable. The cassette is local output and is never committed automatically."
+            "Usage: asb record CONFIG [--cassette FILE] [--json] [--measurements DIR]\n\nRun the configured workload through the local llmtape proxy and save LLM requests and responses to a JSONL cassette. Full agent output is appended to the `log_file` from CONFIG; terminal output is limited to success rate, elapsed time, and token usage. Install llmtape project-locally with `asb tool install llmtape`."
         }
         "replay" => {
-            "Usage: asb replay CONFIG [--cassette FILE] [--json] [--measurements DIR]\n\nRun the configured workload against a local llmtape cassette. Replay refuses a missing cassette, does not start cli2key or any live provider, and redirects provider endpoints to the local replay server."
+            "Usage: asb replay CONFIG [--cassette FILE] [--json] [--measurements DIR]\n\nRun the configured workload against a local llmtape cassette. Full agent output is appended to the `log_file` from CONFIG; terminal output is limited to success rate, elapsed time, and token usage. Replay refuses a missing cassette, does not start cli2key or any live provider, and redirects provider endpoints to the local replay server."
         }
         "run" => {
-            "Usage: asb run CONFIG [--json] [--measurements DIR]\n\nRun the configured workload with the selected local agent and provider. Human-readable output is default; --json emits machine-readable output. --measurements writes bounded machine-readable system, runtime, collector, token, and success-rate data. Optional collectors are enabled with ASB_MEASURE_MPSTAT, ASB_MEASURE_IOSTAT, ASB_MEASURE_PERF, and ASB_MEASURE_BPFTRACE."
+            "Usage: asb run CONFIG [--json] [--measurements DIR]\n\nRun the configured workload with the selected local agent and provider. Full agent output is appended to the `log_file` from CONFIG; terminal output is limited to success rate, elapsed time, and token usage. `--json` emits those metrics as JSON. --measurements writes bounded machine-readable system, runtime, collector, token, and success-rate data."
         }
         "provider" => {
             "Usage: asb provider models [PROVIDER] [--json] [--free]\n\nAccess provider-related commands. `models` lists live provider catalogs."

@@ -11,6 +11,8 @@ pub struct BenchmarkConfig {
     pub model: String,
     #[serde(default = "default_workspace")]
     pub workspace: String,
+    #[serde(default = "default_log_file")]
+    pub log_file: String,
     #[serde(default)]
     pub measurements: Option<MeasurementConfig>,
 }
@@ -25,4 +27,8 @@ pub struct MeasurementConfig {
 
 fn default_workspace() -> String {
     "./asb-workspace".into()
+}
+
+fn default_log_file() -> String {
+    "benchmark.log".into()
 }
