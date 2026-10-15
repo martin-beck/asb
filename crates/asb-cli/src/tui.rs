@@ -1,7 +1,7 @@
 //! Interactive, modular setup wizard built with Ratatui.
 
 use crate::benchmark::{BenchmarkConfig, MeasurementConfig};
-use crate::{Error, measurements, project, providers};
+use crate::{Error, measurements, models, project, providers};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
@@ -193,14 +193,19 @@ impl App {
             .collect::<Vec<_>>();
         let mut choices = Vec::new();
         for provider in selected_providers {
-            let models = providers::known_models(&provider)
-                .map(|values| values.to_vec())
-                .unwrap_or_else(|| vec![default_model(&provider)]);
+            let discovered = models::discover_for_setup(&provider).unwrap_or_default();
+            let models = if discovered.is_empty() {
+                providers::known_models(&provider)
+                    .map(|values| values.iter().map(|value| (*value).to_owned()).collect())
+                    .unwrap_or_else(|| vec![default_model(&provider).to_owned()])
+            } else {
+                discovered
+            };
             for model in models {
                 choices.push(Choice {
                     label: format!("{provider}:{model}"),
                     provider: Some(provider.clone()),
-                    model: Some(model.to_string()),
+                    model: Some(model),
                 });
             }
         }
@@ -260,7 +265,8 @@ pub fn setup(args: &[String], output: &mut dyn Write) -> Result<(), Error> {
         generated.tests,
         generated.sweep.display()
     )
-    .map_err(crate::io_error)
+    .map_err(crate::io_error)?;
+    output.flush().map_err(crate::io_error)
 }
 
 fn start_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, io::Error> {
@@ -271,6 +277,7 @@ fn start_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, io::Error> {
 }
 
 fn stop_terminal(mut terminal: Terminal<CrosstermBackend<Stdout>>) -> Result<(), io::Error> {
+    terminal.clear()?;
     terminal::disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),

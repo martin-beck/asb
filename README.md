@@ -21,7 +21,10 @@ asb replay CONFIG [--cassette FILE] [--json] [--measurements DIR]
 `setup tui` opens a Ratatui wizard with agent, provider, model, workload, and
 measurement steps. Select multiple entries with Space; Tab or Enter advances
 only after a selection. It writes one uniquely named test TOML per compatible
-combination and one sweep TOML referencing those files. `init` writes
+combination and one sweep TOML referencing those files. The model step queries
+the selected provider catalogs and lists all returned tool-capable models (for
+example DeepSeek, GLM, GPT, and Fable on OpenRouter), falling back to a pinned
+local default only when discovery is unavailable. `init` writes
 `.asb/project.toml` with project-local tool, workload, and
 workspace directories and copies the bundled workload prompts into
 `workloads/` and seeds `.asb/fixtures/` with the source, tests, and supporting

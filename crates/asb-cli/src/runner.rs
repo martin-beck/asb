@@ -191,7 +191,11 @@ fn run_mode(
     if specification.append_prompt {
         command.arg(prompt);
     }
-    command.current_dir(&workspace).stdin(Stdio::null());
+    command
+        .current_dir(&workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     providers::configure(&mut command, &config.provider, &config.model);
     let cli2key_endpoint = tape_url.or_else(|| bridge.as_ref().map(cli2key::Bridge::base_url));
     prepare::apply(

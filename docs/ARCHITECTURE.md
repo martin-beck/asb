@@ -6,7 +6,9 @@ ASB is deliberately split into a small CLI and a file-backed workload directory:
 - `config`: the `setup` command and TOML writer;
 - `tui`: the Ratatui setup wizard. It composes reusable selection panes for
   agents, providers, models, workloads, and measurements, with filtering and
-  keyboard navigation, then writes test configurations and a sweep manifest;
+  keyboard navigation. Its model pane uses the existing provider discovery
+  path and falls back only when a catalog is unavailable, then writes test
+  configurations and a sweep manifest;
 - `install`: local copying of agent executables and workload prompt files;
 - `providers`: a concise provider-name and environment-variable registry;
 - `models`: bounded live model-catalog discovery using provider-specific

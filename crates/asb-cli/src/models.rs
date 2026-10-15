@@ -102,6 +102,11 @@ fn discover(provider: &str, free_only: bool) -> Result<Vec<ModelInfo>, Error> {
     parse_models(&body, spec.kind, provider, free_only)
 }
 
+/// Discover tool-capable models for interactive setup without rendering them.
+pub(crate) fn discover_for_setup(provider: &str) -> Result<Vec<String>, Error> {
+    discover(provider, false).map(|models| models.into_iter().map(|model| model.id).collect())
+}
+
 /// Require a model to be advertised as tool-capable before execution.
 pub fn ensure_tool_capable(provider: &str, model: &str) -> Result<(), Error> {
     if let Some(models) = providers::known_models(provider) {
