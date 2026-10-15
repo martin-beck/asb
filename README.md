@@ -11,13 +11,18 @@ asb tool install llmtape
 asb workload list
 asb workload install SOURCE.txt|URL
 asb provider models [PROVIDER] [--free]
+asb setup tui
 asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--workspace DIR] [--output FILE]
 asb run CONFIG [--json] [--measurements DIR]
 asb record CONFIG [--cassette FILE] [--json] [--measurements DIR]
 asb replay CONFIG [--cassette FILE] [--json] [--measurements DIR]
 ```
 
-`init` writes `.asb/project.toml` with project-local tool, workload, and
+`setup tui` opens a Ratatui wizard with agent, provider, model, workload, and
+measurement steps. Select multiple entries with Space; Tab or Enter advances
+only after a selection. It writes one uniquely named test TOML per compatible
+combination and one sweep TOML referencing those files. `init` writes
+`.asb/project.toml` with project-local tool, workload, and
 workspace directories and copies the bundled workload prompts into
 `workloads/` and seeds `.asb/fixtures/` with the source, tests, and supporting
 files for every built-in workload. `run` copies the selected fixture into the

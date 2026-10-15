@@ -7,7 +7,7 @@ use std::io::Write;
 pub fn root(output: &mut dyn Write) -> Result<(), Error> {
     write_text(
         output,
-        "ASB\n\nUsage:\n  asb init [PROJECT_DIR] [--reset]\n  asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--workspace DIR] [--output FILE]\n  asb run CONFIG [--json] [--measurements DIR]\n  asb record CONFIG [--cassette FILE] [--json] [--measurements DIR]\n  asb replay CONFIG [--cassette FILE] [--json] [--measurements DIR]\n  asb provider models [PROVIDER] [--json] [--free]\n  asb tool list\n  asb tool install AGENT [--source URL|PATH] [--dir DIR] [--dry-run]\n  asb workload list [--dir DIR]\n  asb workload install SOURCE.txt|URL [--name NAME] [--dir DIR]\n\nUse `asb COMMAND --help` for concise help for one command.",
+        "ASB\n\nUsage:\n  asb init [PROJECT_DIR] [--reset]\n  asb setup tui\n  asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--workspace DIR] [--output FILE]\n  asb run CONFIG [--json] [--measurements DIR]\n  asb record CONFIG [--cassette FILE] [--json] [--measurements DIR]\n  asb replay CONFIG [--cassette FILE] [--json] [--measurements DIR]\n  asb provider models [PROVIDER] [--json] [--free]\n  asb tool list\n  asb tool install AGENT [--source URL|PATH] [--dir DIR] [--dry-run]\n  asb workload list [--dir DIR]\n  asb workload install SOURCE.txt|URL [--name NAME] [--dir DIR]\n\nUse `asb COMMAND --help` for concise help for one command.",
     )
 }
 
@@ -18,7 +18,10 @@ pub fn command(name: &str, output: &mut dyn Write) -> Result<(), Error> {
             "Usage: asb init [PROJECT_DIR] [--reset]\n\nCreate project state and bundled workloads. Existing projects are preserved unless --reset is supplied."
         }
         "setup" => {
-            "Usage: asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--workspace DIR] [--output FILE]\n\nWrite a benchmark TOML configuration. The generated `log_file` defaults to the configuration stem with a `.log` extension. Generated configurations enable every measurement module; credentials remain in the environment."
+            "Usage: asb setup tui | asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--workspace DIR] [--output FILE]\n\n`setup tui` opens the modular keyboard-driven wizard and writes one TOML per selected combination plus a sweep TOML. The non-interactive form writes one configuration. Generated configurations enable every measurement module; credentials remain in the environment."
+        }
+        "setup tui" => {
+            "Usage: asb setup tui\n\nOpen the modular terminal wizard. Select agents, providers, models, workloads, and measurements with Space; navigate with arrows and Tab or Enter. The wizard writes one uniquely named TOML per compatible combination and one sweep TOML."
         }
         "record" => {
             "Usage: asb record CONFIG [--cassette FILE] [--json] [--measurements DIR]\n\nRun the configured workload through the local llmtape proxy and save LLM requests and responses to a JSONL cassette. Full agent output is appended to the `log_file` from CONFIG; terminal output is limited to success rate, elapsed time, and token usage. Install llmtape project-locally with `asb tool install llmtape`."

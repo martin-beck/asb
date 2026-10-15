@@ -14,6 +14,7 @@ mod providers;
 mod runner;
 mod suggestions;
 mod tape;
+mod tui;
 mod workloads;
 
 use std::ffi::OsString;
@@ -69,11 +70,21 @@ pub fn run(args: &[OsString], stdout: &mut dyn Write, stderr: &mut dyn Write) ->
             help::command("provider models", stdout)
         }
         [command, subcommand, help_arg]
+            if command == "setup"
+                && subcommand == "tui"
+                && (help_arg == "--help" || help_arg == "-h") =>
+        {
+            help::command("setup tui", stdout)
+        }
+        [command, subcommand, help_arg]
             if (command == "tool" || command == "workload")
                 && (subcommand == "list" || subcommand == "install")
                 && (help_arg == "--help" || help_arg == "-h") =>
         {
             help::command(&format!("{command} {subcommand}"), stdout)
+        }
+        [command, subcommand, rest @ ..] if command == "setup" && subcommand == "tui" => {
+            tui::setup(rest, stdout)
         }
         [command, rest @ ..] if command == "setup" => config::setup(rest, stdout),
         [command, rest @ ..] if command == "init" => project::init(rest, stdout),
@@ -248,6 +259,7 @@ mod tests {
         for words in [
             vec!["init", "--help"],
             vec!["setup", "--help"],
+            vec!["setup", "tui", "--help"],
             vec!["run", "--help"],
             vec!["record", "--help"],
             vec!["replay", "--help"],
