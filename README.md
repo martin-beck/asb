@@ -13,9 +13,8 @@ asb workload install SOURCE.txt|URL
 asb provider models [PROVIDER] [--free]
 asb setup tui
 asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--workspace DIR] [--output FILE]
-asb run CONFIG [--json] [--measurements DIR]
-asb record CONFIG [--cassette FILE] [--json] [--measurements DIR]
-asb replay CONFIG [--cassette FILE] [--json] [--measurements DIR]
+asb run CONFIG [--record|--replay] [--cassette FILE] [--json] [--measurements DIR]
+asb sweep SWEEP.toml [--record|--replay] [--json]
 ```
 
 `setup tui` opens a Ratatui wizard with agent, provider, model, workload, and
@@ -68,14 +67,14 @@ section listing every collector module and defaulting its output directory to
 the no-collection behavior, or pass `--measurements DIR` to enable collection
 for one run.
 
-`asb record CONFIG` runs the same configuration through the local `llmtape`
+`asb run CONFIG --record` runs the same configuration through the local `llmtape`
 proxy and writes a JSONL cassette (by default below `cassettes/` next to the
 configuration). Install the proxy into the current benchmark project with
 `asb tool install llmtape`; this installs the pinned npm library plus ASB's
 project-local `llmtape` proxy wrapper. No global llmtape installation is required. ASB
 does not search the host `PATH` implicitly. To deliberately use another
 executable, set `ASB_LLM_TAPE`. Use `--cassette FILE` to choose an explicit
-path. `asb replay CONFIG` starts llmtape's cassette server and routes
+path. `asb run CONFIG --replay` starts llmtape's cassette server and routes
 all supported provider endpoints to it; it refuses a missing cassette and does
 not start cli2key or connect to any live provider. Cassettes are local test
 artifacts and should not be committed when they contain provider responses.
@@ -90,7 +89,7 @@ an API key. Model
 discovery uses the provider credential and endpoint environment variables but
 never writes or prints credential values.
 Only models that advertise tool-calling support are enumerated. `run` and
-`record` revalidate the selected model before launch; `replay` validates that
+`run --record` revalidate the selected model before launch; `run --replay` validates that
 the cassette contains a tool-calling request for the configured model. Models
 without tool support are rejected because the bundled workloads depend on
 agent tools.

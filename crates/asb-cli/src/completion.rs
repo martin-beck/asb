@@ -5,7 +5,7 @@ use std::fmt::Write as FmtWrite;
 use std::io::Write;
 
 const TOP_LEVEL: &[&str] = &[
-    "init", "setup", "run", "record", "replay", "provider", "tool", "workload",
+    "init", "setup", "run", "sweep", "provider", "tool", "workload",
 ];
 const INIT_OPTIONS: &[&str] = &["--reset"];
 const SETUP_OPTIONS: &[&str] = &[
@@ -16,8 +16,14 @@ const SETUP_OPTIONS: &[&str] = &[
     "--workspace",
     "--output",
 ];
-const RUN_OPTIONS: &[&str] = &["--json", "--measurements"];
-const TAPE_OPTIONS: &[&str] = &["--cassette", "--json", "--measurements"];
+const RUN_OPTIONS: &[&str] = &[
+    "--record",
+    "--replay",
+    "--cassette",
+    "--json",
+    "--measurements",
+];
+const SWEEP_OPTIONS: &[&str] = &["--record", "--replay", "--json"];
 const PROVIDER_SUBCOMMANDS: &[&str] = &["models"];
 const PROVIDER_MODELS_OPTIONS: &[&str] = &["--json", "--free"];
 const TOOL_SUBCOMMANDS: &[&str] = &["list", "install"];
@@ -72,8 +78,7 @@ fn generate_bash() -> String {
     simple_case(&mut script, "init", INIT_OPTIONS);
     simple_case(&mut script, "setup", SETUP_OPTIONS);
     simple_case(&mut script, "run", RUN_OPTIONS);
-    simple_case(&mut script, "record", TAPE_OPTIONS);
-    simple_case(&mut script, "replay", TAPE_OPTIONS);
+    simple_case(&mut script, "sweep", SWEEP_OPTIONS);
     nested_case(
         &mut script,
         "provider",
@@ -145,8 +150,7 @@ fn generate_zsh() -> String {
     zsh_simple_case(&mut script, "init", INIT_OPTIONS);
     zsh_simple_case(&mut script, "setup", SETUP_OPTIONS);
     zsh_simple_case(&mut script, "run", RUN_OPTIONS);
-    zsh_simple_case(&mut script, "record", TAPE_OPTIONS);
-    zsh_simple_case(&mut script, "replay", TAPE_OPTIONS);
+    zsh_simple_case(&mut script, "sweep", SWEEP_OPTIONS);
     zsh_nested_case(
         &mut script,
         "provider",

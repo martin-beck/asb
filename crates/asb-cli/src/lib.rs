@@ -13,6 +13,7 @@ mod project;
 mod providers;
 mod runner;
 mod suggestions;
+mod sweep;
 mod tape;
 mod tui;
 mod workloads;
@@ -22,7 +23,7 @@ use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
 const COMMANDS: &[&str] = &[
-    "init", "setup", "run", "record", "replay", "provider", "tool", "workload",
+    "init", "setup", "run", "sweep", "provider", "tool", "workload",
 ];
 
 /// Run the process CLI.
@@ -89,29 +90,18 @@ pub fn run(args: &[OsString], stdout: &mut dyn Write, stderr: &mut dyn Write) ->
         [command, rest @ ..] if command == "setup" => config::setup(rest, stdout),
         [command, rest @ ..] if command == "init" => project::init(rest, stdout),
         [command, rest @ ..] if command == "run" => match parse_run_args(rest) {
-            Ok((path, json, measurements, _cassette)) => {
-                runner::run(&path, json, measurements.as_deref(), stdout)
-            }
-            Err(error) => Err(error),
-        },
-        [command, rest @ ..] if command == "record" => match parse_run_args(rest) {
-            Ok((path, json, measurements, cassette)) => runner::record(
+            Ok((path, json, measurements, mode, cassette)) => runner::run_with_tape(
                 &path,
                 json,
                 measurements.as_deref(),
+                mode,
                 cassette.as_deref(),
                 stdout,
             ),
             Err(error) => Err(error),
         },
-        [command, rest @ ..] if command == "replay" => match parse_run_args(rest) {
-            Ok((path, json, measurements, cassette)) => runner::replay(
-                &path,
-                json,
-                measurements.as_deref(),
-                cassette.as_deref(),
-                stdout,
-            ),
+        [command, rest @ ..] if command == "sweep" => match parse_sweep_args(rest) {
+            Ok((path, json, mode)) => sweep::run(&path, json, mode, stdout),
             Err(error) => Err(error),
         },
         [command, subcommand] if command == "tool" && subcommand == "list" => {
@@ -153,47 +143,131 @@ pub fn run(args: &[OsString], stdout: &mut dyn Write, stderr: &mut dyn Write) ->
 
 fn parse_run_args(
     args: &[String],
-) -> Result<(String, bool, Option<String>, Option<String>), CliError> {
+) -> Result<
+    (
+        String,
+        bool,
+        Option<String>,
+        Option<tape::Mode>,
+        Option<String>,
+    ),
+    CliError,
+> {
+    parse_run_args_named(args, "run")
+}
+
+fn parse_run_args_named(
+    args: &[String],
+    command: &str,
+) -> Result<
+    (
+        String,
+        bool,
+        Option<String>,
+        Option<tape::Mode>,
+        Option<String>,
+    ),
+    CliError,
+> {
     let mut path = None;
     let mut json = false;
     let mut measurements = None;
     let mut cassette = None;
+    let mut mode = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "--json" => json = true,
+            "--record" => {
+                if mode.replace(tape::Mode::Record).is_some() {
+                    return Err(CliError::Input(
+                        "--record and --replay are mutually exclusive; choose one".into(),
+                    ));
+                }
+            }
+            "--replay" => {
+                if mode.replace(tape::Mode::Replay).is_some() {
+                    return Err(CliError::Input(
+                        "--record and --replay are mutually exclusive; choose one".into(),
+                    ));
+                }
+            }
             "--measurements" => {
                 index += 1;
                 let value = args.get(index).ok_or(CliError::Usage(
-                    "Usage: asb run CONFIG [--json] [--measurements DIR]",
+                    "Usage: asb run CONFIG [--record|--replay] [--cassette FILE] [--json] [--measurements DIR]",
                 ))?;
                 measurements = Some(value.clone());
             }
             "--cassette" => {
                 index += 1;
                 let value = args.get(index).ok_or(CliError::Usage(
-                    "Usage: asb record|replay CONFIG [--cassette FILE] [--json] [--measurements DIR]",
+                    "Usage: asb run CONFIG [--record|--replay] [--cassette FILE] [--json] [--measurements DIR]",
                 ))?;
                 cassette = Some(value.clone());
             }
             value if value.starts_with('-') => {
                 return Err(CliError::Input(format!(
-                    "unknown run option `{value}`; use `asb run --help`"
+                    "unknown {command} option `{value}`; use `asb {command} --help`"
                 )));
             }
             value if path.is_none() => path = Some(value.to_owned()),
             value => {
                 return Err(CliError::Input(format!(
-                    "unexpected run argument `{value}`; use `asb run --help`"
+                    "unexpected {command} argument `{value}`; use `asb {command} --help`"
                 )));
             }
         }
         index += 1;
     }
-    path.map(|value| (value, json, measurements, cassette))
-        .ok_or(CliError::Usage(
-            "Usage: asb run|record|replay CONFIG [--cassette FILE] [--json] [--measurements DIR]",
-        ))
+    if cassette.is_some() && mode.is_none() {
+        return Err(CliError::Input(
+            "--cassette requires --record or --replay; choose a tape mode first".into(),
+        ));
+    }
+    path.map(|value| (value, json, measurements, mode, cassette))
+        .ok_or(CliError::Usage("Usage: asb run CONFIG [--record|--replay] [--cassette FILE] [--json] [--measurements DIR]"))
+}
+
+fn parse_sweep_args(args: &[String]) -> Result<(String, bool, Option<tape::Mode>), CliError> {
+    let mut path = None;
+    let mut json = false;
+    let mut mode = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => json = true,
+            "--record" => {
+                if mode.replace(tape::Mode::Record).is_some() {
+                    return Err(CliError::Input(
+                        "--record and --replay are mutually exclusive; choose one".into(),
+                    ));
+                }
+            }
+            "--replay" => {
+                if mode.replace(tape::Mode::Replay).is_some() {
+                    return Err(CliError::Input(
+                        "--record and --replay are mutually exclusive; choose one".into(),
+                    ));
+                }
+            }
+            value if value.starts_with('-') => {
+                return Err(CliError::Input(format!(
+                    "unknown sweep option `{value}`; use `asb sweep --help`"
+                )));
+            }
+            value if path.is_none() => path = Some(value.to_owned()),
+            value => {
+                return Err(CliError::Input(format!(
+                    "unexpected sweep argument `{value}`; use `asb sweep --help`"
+                )));
+            }
+        }
+        index += 1;
+    }
+    path.map(|value| (value, json, mode)).ok_or(CliError::Usage(
+        "Usage: asb sweep SWEEP.toml [--record|--replay] [--json]",
+    ))
 }
 
 fn write_help(output: &mut dyn Write) -> Result<(), CliError> {
@@ -261,8 +335,7 @@ mod tests {
             vec!["setup", "--help"],
             vec!["setup", "tui", "--help"],
             vec!["run", "--help"],
-            vec!["record", "--help"],
-            vec!["replay", "--help"],
+            vec!["sweep", "--help"],
             vec!["provider", "--help"],
             vec!["provider", "models", "--help"],
             vec!["tool", "--help"],
@@ -362,9 +435,10 @@ mod tests {
     }
 
     #[test]
-    fn record_and_replay_accept_an_explicit_cassette() {
+    fn run_tape_modes_are_exclusive_and_accept_a_cassette() {
         let parsed = super::parse_run_args(&[
             "benchmark.toml".into(),
+            "--record".into(),
             "--cassette".into(),
             "cassettes/demo.jsonl".into(),
             "--json".into(),
@@ -372,7 +446,16 @@ mod tests {
         .expect("cassette options parse");
         assert_eq!(parsed.0, "benchmark.toml");
         assert!(parsed.1);
-        assert_eq!(parsed.3.as_deref(), Some("cassettes/demo.jsonl"));
+        assert_eq!(parsed.3, Some(crate::tape::Mode::Record));
+        assert_eq!(parsed.4.as_deref(), Some("cassettes/demo.jsonl"));
+        assert!(
+            super::parse_run_args(&[
+                "benchmark.toml".into(),
+                "--record".into(),
+                "--replay".into()
+            ])
+            .is_err()
+        );
     }
 
     #[test]

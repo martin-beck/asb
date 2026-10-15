@@ -48,7 +48,7 @@ Workloads are loaded from `workloads/` beside the configuration file. Set
 `ASB_WORKLOAD_DIR` to use another directory; add a new `.txt` file to extend
 the catalogue.
 
-`run`, `record`, and `replay` append one bounded JSON record per execution to
+`run` (optionally with `--record` or `--replay`) appends one bounded JSON record per execution to
 the configured `log_file`, including the captured agent output and error text.
 Token usage is collected from generic/provider/agent environment variables,
 structured agent JSON events, and recorded cassette responses, then normalized
@@ -84,9 +84,9 @@ The ASB source checkout is not a benchmark project: `init` rejects its
 distinctive workspace layout before creating any files.
 
 Recording and replay are implemented as a separate `tape` module behind the
-runner boundary. It starts the project-local `llmtape` loopback proxy,
+runner boundary. The `run --record` and `run --replay` flags start the project-local `llmtape` loopback proxy,
 routes provider endpoints to that proxy, and tears it down after the child
-exits. `record` writes a JSONL cassette; `replay` requires that cassette and
+exits. `--record` writes a JSONL cassette; `--replay` requires that cassette and
 never starts cli2key or a live provider. This keeps the benchmark
 configuration contract unchanged and keeps llmtape an optional, project-local
 development tool rather than a runtime dependency. Installation includes the

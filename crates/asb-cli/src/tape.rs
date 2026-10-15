@@ -32,7 +32,7 @@ impl Session {
     ) -> Result<Self, Error> {
         if mode == Mode::Replay && !cassette.is_file() {
             return Err(Error::Input(format!(
-                "replay cassette {} does not exist; run `asb record CONFIG --cassette {}` first",
+                "replay cassette {} does not exist; run `asb run CONFIG --record --cassette {}` first",
                 cassette.display(),
                 cassette.display()
             )));

@@ -7,7 +7,7 @@ use std::io::Write;
 pub fn root(output: &mut dyn Write) -> Result<(), Error> {
     write_text(
         output,
-        "ASB\n\nUsage:\n  asb init [PROJECT_DIR] [--reset]\n  asb setup tui\n  asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--workspace DIR] [--output FILE]\n  asb run CONFIG [--json] [--measurements DIR]\n  asb record CONFIG [--cassette FILE] [--json] [--measurements DIR]\n  asb replay CONFIG [--cassette FILE] [--json] [--measurements DIR]\n  asb provider models [PROVIDER] [--json] [--free]\n  asb tool list\n  asb tool install AGENT [--source URL|PATH] [--dir DIR] [--dry-run]\n  asb workload list [--dir DIR]\n  asb workload install SOURCE.txt|URL [--name NAME] [--dir DIR]\n\nUse `asb COMMAND --help` for concise help for one command.",
+        "ASB\n\nUsage:\n  asb init [PROJECT_DIR] [--reset]\n  asb setup tui\n  asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--workspace DIR] [--output FILE]\n  asb run CONFIG [--record|--replay] [--cassette FILE] [--json] [--measurements DIR]\n  asb sweep SWEEP.toml [--record|--replay] [--json]\n  asb provider models [PROVIDER] [--json] [--free]\n  asb tool list\n  asb tool install AGENT [--source URL|PATH] [--dir DIR] [--dry-run]\n  asb workload list [--dir DIR]\n  asb workload install SOURCE.txt|URL [--name NAME] [--dir DIR]\n\nUse `asb COMMAND --help` for concise help for one command.",
     )
 }
 
@@ -23,14 +23,11 @@ pub fn command(name: &str, output: &mut dyn Write) -> Result<(), Error> {
         "setup tui" => {
             "Usage: asb setup tui\n\nOpen the modular terminal wizard. Select agents, providers, models, workloads, and measurements with Space; navigate with arrows and Tab or Enter. The wizard writes one uniquely named TOML per compatible combination and one sweep TOML."
         }
-        "record" => {
-            "Usage: asb record CONFIG [--cassette FILE] [--json] [--measurements DIR]\n\nRun the configured workload through the local llmtape proxy and save LLM requests and responses to a JSONL cassette. Full agent output is appended to the `log_file` from CONFIG; terminal output is limited to success rate, elapsed time, and token usage. Install llmtape project-locally with `asb tool install llmtape`."
-        }
-        "replay" => {
-            "Usage: asb replay CONFIG [--cassette FILE] [--json] [--measurements DIR]\n\nRun the configured workload against a local llmtape cassette. Full agent output is appended to the `log_file` from CONFIG; terminal output is limited to success rate, elapsed time, and token usage. Replay refuses a missing cassette, does not start cli2key or any live provider, and redirects provider endpoints to the local replay server."
-        }
         "run" => {
-            "Usage: asb run CONFIG [--json] [--measurements DIR]\n\nRun the configured workload with the selected local agent and provider. Full agent output is appended to the `log_file` from CONFIG; terminal output is limited to success rate, elapsed time, and token usage. `--json` emits those metrics as JSON. --measurements writes bounded machine-readable system, runtime, collector, token, and success-rate data."
+            "Usage: asb run CONFIG [--record|--replay] [--cassette FILE] [--json] [--measurements DIR]\n\nRun one configured workload. `--record` routes the provider through project-local llmtape and writes a cassette; `--replay` uses that cassette without a live provider. The flags are mutually exclusive. Full agent output is logged; terminal output is limited to success rate, elapsed time, and token usage. Install llmtape with `asb tool install llmtape`."
+        }
+        "sweep" => {
+            "Usage: asb sweep SWEEP.toml [--record|--replay] [--json]\n\nValidate a `configs = [...]` sweep manifest (not a normal benchmark TOML), then run each referenced benchmark sequentially. Each run gets its own `<sweep>-results/<index>-<name>/` folder containing an isolated config, workspace, log, measurements, and tape cassette. `--record` and `--replay` are mutually exclusive; replay never contacts a live provider."
         }
         "provider" => {
             "Usage: asb provider models [PROVIDER] [--json] [--free]\n\nAccess provider-related commands. `models` lists live provider catalogs."

@@ -47,48 +47,17 @@ struct RunResult<'a> {
     stderr: String,
 }
 
-/// Execute the selected agent with the selected workload prompt.
-pub fn run(
+/// Execute one configured benchmark, optionally through a local llmtape proxy.
+pub fn run_with_tape(
     path: &str,
     json: bool,
     measurement_dir: Option<&str>,
-    output: &mut dyn Write,
-) -> Result<(), Error> {
-    run_mode(path, json, measurement_dir, None, output)
-}
-
-/// Record one configured benchmark through a local llmtape proxy.
-pub fn record(
-    path: &str,
-    json: bool,
-    measurement_dir: Option<&str>,
+    mode: Option<tape::Mode>,
     cassette: Option<&str>,
     output: &mut dyn Write,
 ) -> Result<(), Error> {
-    run_mode(
-        path,
-        json,
-        measurement_dir,
-        Some((tape::Mode::Record, cassette)),
-        output,
-    )
-}
-
-/// Replay one configured benchmark without starting a live provider or bridge.
-pub fn replay(
-    path: &str,
-    json: bool,
-    measurement_dir: Option<&str>,
-    cassette: Option<&str>,
-    output: &mut dyn Write,
-) -> Result<(), Error> {
-    run_mode(
-        path,
-        json,
-        measurement_dir,
-        Some((tape::Mode::Replay, cassette)),
-        output,
-    )
+    let tape_request = mode.map(|value| (value, cassette));
+    run_mode(path, json, measurement_dir, tape_request, output)
 }
 
 fn run_mode(
