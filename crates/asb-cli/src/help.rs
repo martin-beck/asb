@@ -7,7 +7,7 @@ use std::io::Write;
 pub fn root(output: &mut dyn Write) -> Result<(), Error> {
     write_text(
         output,
-        "ASB\n\nUsage:\n  asb init [PROJECT_DIR] [--reset]\n  asb setup tui\n  asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--workspace DIR] [--output FILE]\n  asb run CONFIG [--record|--replay] [--cassette FILE] [--json] [--measurements DIR]\n  asb sweep SWEEP.toml [--record|--replay] [--json]\n  asb provider models [PROVIDER] [--json] [--free]\n  asb tool list\n  asb tool install AGENT [--source URL|PATH] [--dir DIR] [--dry-run]\n  asb workload list [--dir DIR]\n  asb workload install SOURCE.txt|URL [--name NAME] [--dir DIR]\n\nUse `asb COMMAND --help` for concise help for one command.",
+        "ASB\n\nUsage:\n  asb init [PROJECT_DIR] [--reset]\n  asb setup tui\n  asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--workspace DIR] [--output FILE]\n  asb run CONFIG [--record|--replay] [--cassette FILE] [--json] [--measurements DIR]\n  asb sweep SWEEP.toml [--record|--replay] [--json]\n  asb compare SWEEP.toml\n  asb provider models [PROVIDER] [--json] [--free]\n  asb tool list\n  asb tool install AGENT [--source URL|PATH] [--dir DIR] [--dry-run]\n  asb workload list [--dir DIR]\n  asb workload install SOURCE.txt|URL [--name NAME] [--dir DIR]\n\nUse `asb COMMAND --help` for concise help for one command.",
     )
 }
 
@@ -28,6 +28,9 @@ pub fn command(name: &str, output: &mut dyn Write) -> Result<(), Error> {
         }
         "sweep" => {
             "Usage: asb sweep SWEEP.toml [--record|--replay] [--json]\n\nValidate a `configs = [...]` sweep manifest (not a normal benchmark TOML), then run each referenced benchmark sequentially. Each run gets its own `<sweep>-results/<index>-<name>/` folder containing an isolated config, workspace, log, measurements, and tape cassette. `--record` and `--replay` are mutually exclusive; replay never contacts a live provider."
+        }
+        "compare" => {
+            "Usage: asb compare SWEEP.toml\n\nRead completed sweep result folders, compare every numeric measurement, and write comparison.json plus SVG bar charts under `results/<sweep>-comparison/`. Collector time-series output is rendered as line charts with one series per benchmark."
         }
         "provider" => {
             "Usage: asb provider models [PROVIDER] [--json] [--free]\n\nAccess provider-related commands. `models` lists live provider catalogs."

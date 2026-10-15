@@ -5,7 +5,7 @@ use std::fmt::Write as FmtWrite;
 use std::io::Write;
 
 const TOP_LEVEL: &[&str] = &[
-    "init", "setup", "run", "sweep", "provider", "tool", "workload",
+    "init", "setup", "run", "sweep", "compare", "provider", "tool", "workload",
 ];
 const INIT_OPTIONS: &[&str] = &["--reset"];
 const SETUP_OPTIONS: &[&str] = &[
@@ -79,6 +79,7 @@ fn generate_bash() -> String {
     simple_case(&mut script, "setup", SETUP_OPTIONS);
     simple_case(&mut script, "run", RUN_OPTIONS);
     simple_case(&mut script, "sweep", SWEEP_OPTIONS);
+    simple_case(&mut script, "compare", &[]);
     nested_case(
         &mut script,
         "provider",
@@ -151,6 +152,7 @@ fn generate_zsh() -> String {
     zsh_simple_case(&mut script, "setup", SETUP_OPTIONS);
     zsh_simple_case(&mut script, "run", RUN_OPTIONS);
     zsh_simple_case(&mut script, "sweep", SWEEP_OPTIONS);
+    zsh_simple_case(&mut script, "compare", &[]);
     zsh_nested_case(
         &mut script,
         "provider",

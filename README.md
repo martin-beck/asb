@@ -15,6 +15,7 @@ asb setup tui
 asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--workspace DIR] [--output FILE]
 asb run CONFIG [--record|--replay] [--cassette FILE] [--json] [--measurements DIR]
 asb sweep SWEEP.toml [--record|--replay] [--json]
+asb compare SWEEP.toml
 ```
 
 `setup tui` opens a Ratatui wizard with agent, provider, model, workload, and

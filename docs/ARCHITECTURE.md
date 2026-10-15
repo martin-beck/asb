@@ -20,6 +20,8 @@ ASB is deliberately split into a small CLI and a file-backed workload directory:
   every command resolves relative paths from this project root;
 - `runner`: configuration loading, bounded agent-output logging, and live agent
   process execution;
+- `compare`: offline sweep-result loading, numeric aggregation, and dependency-free
+  SVG bar/line chart generation;
 - `measurements`: opt-in system/runtime collection. It writes bounded JSON
   records for host facts, elapsed time, success rate, and normalized input,
   output, cached, and total token usage, and
@@ -106,3 +108,7 @@ cli2key hook starts or connects to the OpenAI-compatible bridge, supplies the
 bridge endpoint and API key to the selected agent, and tears down a bridge
 process owned by ASB after the run. Additional preparation operations can be
 added without changing `run` or the benchmark configuration format.
+
+`asb compare SWEEP.toml` reads the isolated `<sweep>-results/` directories
+created by `asb sweep`. It writes bounded `comparison.json` data and SVG charts
+to `results/<sweep>-comparison/`; no provider or agent is contacted.

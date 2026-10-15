@@ -2,6 +2,7 @@
 
 mod benchmark;
 mod cli2key;
+mod compare;
 mod completion;
 mod config;
 mod help;
@@ -23,7 +24,7 @@ use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
 const COMMANDS: &[&str] = &[
-    "init", "setup", "run", "sweep", "provider", "tool", "workload",
+    "init", "setup", "run", "sweep", "compare", "provider", "tool", "workload",
 ];
 
 /// Run the process CLI.
@@ -103,6 +104,13 @@ pub fn run(args: &[OsString], stdout: &mut dyn Write, stderr: &mut dyn Write) ->
         [command, rest @ ..] if command == "sweep" => match parse_sweep_args(rest) {
             Ok((path, json, mode)) => sweep::run(&path, json, mode, stdout),
             Err(error) => Err(error),
+        },
+        [command, rest @ ..] if command == "compare" => match rest {
+            [path] => compare::run(path, stdout),
+            [] => Err(CliError::Usage("Usage: asb compare SWEEP.toml")),
+            _ => Err(CliError::Input(
+                "compare accepts exactly one SWEEP.toml; use `asb compare --help`".into(),
+            )),
         },
         [command, subcommand] if command == "tool" && subcommand == "list" => {
             install::tool_list(stdout)
@@ -336,6 +344,7 @@ mod tests {
             vec!["setup", "tui", "--help"],
             vec!["run", "--help"],
             vec!["sweep", "--help"],
+            vec!["compare", "--help"],
             vec!["provider", "--help"],
             vec!["provider", "models", "--help"],
             vec!["tool", "--help"],
@@ -378,6 +387,7 @@ mod tests {
         assert!(script.starts_with("# bash completion for asb"));
         assert!(!script.contains("completion)"));
         assert!(script.contains("cli2key"));
+        assert!(script.contains("compare"));
         for flag in [
             "--reset",
             "--agent",
