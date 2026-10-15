@@ -19,7 +19,8 @@ ASB is deliberately split into a small CLI and a file-backed workload directory:
 - `runner`: configuration loading, bounded agent-output logging, and live agent
   process execution;
 - `measurements`: opt-in system/runtime collection. It writes bounded JSON
-  records for host facts, elapsed time, success rate, and token usage, and
+  records for host facts, elapsed time, success rate, and normalized input,
+  output, cached, and total token usage, and
   owns optional `mpstat`, `iostat`, `perf`, BPFTrace, and FlameGraph adapters;
   each adapter is isolated from the runner and can be extended without adding
   provider-specific fields to the benchmark configuration;
@@ -47,6 +48,10 @@ the catalogue.
 
 `run`, `record`, and `replay` append one bounded JSON record per execution to
 the configured `log_file`, including the captured agent output and error text.
+Token usage is collected from generic/provider/agent environment variables,
+structured agent JSON events, and recorded cassette responses, then normalized
+without inferring counts from text size. OpenCode is launched in JSON event
+mode so its provider-reported usage can be read for OpenRouter and cli2key.
 Their terminal output is intentionally limited to success rate, elapsed time,
 and token usage; `--json` changes only the representation of those metrics.
 

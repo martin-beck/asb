@@ -38,9 +38,14 @@ environment. `setup` writes a `log_file` entry (for example `foo.log` for
 `foo.toml`); full bounded agent output is appended there. The terminal prints
 only success rate, elapsed time, and token usage; pass `--json` for those same
 metrics as JSON. Credentials stay outside the configuration. Pass `--measurements DIR` to write machine-readable
-`system.json`, `run.json`, and bounded `summary.json` records. The run record
-contains elapsed time, success rate, and token counts when the selected agent
-exports `ASB_INPUT_TOKENS`, `ASB_OUTPUT_TOKENS`, or `ASB_TOTAL_TOKENS`.
+`system.json`, `run.json`, and bounded `summary.json` records. Token usage is
+normalized into input, output, cached, and total tokens. ASB reads generic
+`ASB_*_TOKENS` variables, provider/agent-prefixed equivalents such as
+`OPENROUTER_PROMPT_TOKENS` and `CLI2KEY_COMPLETION_TOKENS`, structured JSON
+usage emitted by agents, and recorded response usage in llmtape cassettes.
+OpenCode runs use its JSON event format so OpenRouter and cli2key usage details
+are captured when the provider reports them. A missing usage field remains
+`null`; ASB never guesses token counts from text length.
 
 Measurement collectors are opt-in environment switches so normal and CI runs
 remain deterministic: `ASB_MEASURE_MPSTAT=1`, `ASB_MEASURE_IOSTAT=1`, and

@@ -255,7 +255,15 @@ fn run_mode(
     }
     let elapsed_ms = started.elapsed().as_millis();
     let success = child.status.success();
-    let token_usage = measurements::token_usage();
+    let token_usage = measurements::token_usage_from_sources(
+        &config.provider,
+        &config.agent,
+        &bounded(&child.stdout),
+        &bounded(&child.stderr),
+        tape_cassette
+            .as_ref()
+            .map(|(_, cassette)| cassette.as_path()),
+    );
     let result = RunResult {
         status: if success { "completed" } else { "failed" },
         agent: &config.agent,
@@ -387,11 +395,12 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
 fn render_human(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Error> {
     writeln!(
         output,
-        "success_rate={:.3} elapsed_ms={} input_tokens={} output_tokens={} total_tokens={}",
+        "success_rate={:.3} elapsed_ms={} input_tokens={} output_tokens={} cached_tokens={} total_tokens={}",
         result.success_rate,
         result.elapsed_ms,
         format_token(result.token_usage.input_tokens),
         format_token(result.token_usage.output_tokens),
+        format_token(result.token_usage.cached_tokens),
         format_token(result.token_usage.total_tokens),
     )
     .map_err(io_error)
@@ -455,7 +464,13 @@ fn command_for(
         },
         "opencode" => CommandSpec {
             program: "opencode".into(),
-            args: vec!["run".into(), "--model".into(), opencode_model(config)],
+            args: vec![
+                "run".into(),
+                "--model".into(),
+                opencode_model(config),
+                "--format".into(),
+                "json".into(),
+            ],
             append_prompt: true,
         },
         "qwen-code" => CommandSpec {
@@ -623,6 +638,7 @@ mod tests {
             token_usage: TokenUsage {
                 input_tokens: Some(3),
                 output_tokens: Some(4),
+                cached_tokens: Some(1),
                 total_tokens: Some(7),
                 source: Some("test".into()),
             },
@@ -638,6 +654,7 @@ mod tests {
         let text = String::from_utf8(output).expect("utf8");
         assert!(text.starts_with("success_rate=1.000"));
         assert!(text.contains("elapsed_ms=12"));
+        assert!(text.contains("cached_tokens=1"));
         assert!(text.contains("total_tokens=7"));
         assert!(!text.contains("done"));
         assert!(!text.starts_with('{'));
@@ -651,6 +668,7 @@ mod tests {
         assert_eq!(value["success_rate"], 1.0);
         assert_eq!(value["elapsed_ms"], 12);
         assert_eq!(value["token_usage"]["total_tokens"], 7);
+        assert_eq!(value["token_usage"]["cached_tokens"], 1);
         assert!(value.get("stdout").is_none());
     }
 
