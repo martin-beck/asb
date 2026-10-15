@@ -92,6 +92,7 @@ struct Collector {
 /// A measurement session owns all optional collector processes for one run.
 pub struct Session {
     dir: PathBuf,
+    tool_dir: Option<PathBuf>,
     started_unix_ms: u128,
     collectors: Vec<Collector>,
     perf_data: Option<PathBuf>,
@@ -107,7 +108,11 @@ impl Session {
     /// Start with the stable collector names from a generated configuration.
     /// An empty list means environment-only opt-in, useful for tests and
     /// hand-written configurations.
-    pub fn start_with_collectors(dir: &Path, selected: &[String]) -> Result<Self, String> {
+    pub fn start_with_collectors(
+        dir: &Path,
+        selected: &[String],
+        tool_dir: Option<&Path>,
+    ) -> Result<Self, String> {
         fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create measurements directory: {e}"))?;
         let started_unix_ms = unix_ms();
@@ -125,6 +130,7 @@ impl Session {
 
         let mut session = Self {
             dir: dir.to_path_buf(),
+            tool_dir: tool_dir.map(Path::to_path_buf),
             started_unix_ms,
             collectors: Vec::new(),
             perf_data: None,
@@ -157,7 +163,8 @@ impl Session {
         let stdout_path = self.dir.join("perf.stdout");
         let stdout = File::create(&stdout_path)
             .map_err(|e| format!("cannot create perf standard output: {e}"))?;
-        let child = match Command::new("perf")
+        let child = match self
+            .command("perf")
             .args(["record", "-g", "-p"])
             .arg(pid.to_string())
             .args(["-o"])
@@ -244,7 +251,8 @@ impl Session {
         }
         let stdout_path = self.dir.join(format!("{name}.stdout"));
         let stderr_path = self.dir.join(format!("{name}.stderr"));
-        let child = match Command::new(name)
+        let child = match self
+            .command(name)
             .args(args)
             .stdout(Stdio::from(
                 File::create(&stdout_path)
@@ -289,7 +297,7 @@ impl Session {
             .enumerate()
         {
             let (program, params) = spec.split_once('?').map_or((spec, ""), |parts| parts);
-            let mut command = Command::new("bpftrace");
+            let mut command = self.command("bpftrace");
             command.arg(program);
             for parameter in params.split('&').filter(|s| !s.is_empty()) {
                 let (key, value) = parameter.split_once('=').ok_or_else(|| {
@@ -346,7 +354,8 @@ impl Session {
         let Some(render) = std::env::var_os("ASB_FLAMEGRAPH_RENDER") else {
             return Ok(());
         };
-        let script = Command::new("perf")
+        let script = self
+            .command("perf")
             .args(["script", "-i"])
             .arg(data)
             .output()
@@ -404,6 +413,16 @@ impl Session {
                 artifact: "flamegraph.svg",
             },
         )
+    }
+
+    fn command(&self, name: &str) -> Command {
+        if let Some(tool_dir) = &self.tool_dir {
+            let local = tool_dir.join("bin").join(name);
+            if local.is_file() {
+                return Command::new(local);
+            }
+        }
+        Command::new(name)
     }
 }
 
@@ -776,7 +795,7 @@ mod tests {
     #[test]
     fn writes_machine_readable_run_and_summary() {
         let dir = std::env::temp_dir().join(format!("asb-measure-{}", unix_ms()));
-        let session = Session::start_with_collectors(&dir, &[]).expect("session");
+        let session = Session::start_with_collectors(&dir, &[], None).expect("session");
         let run = RunMeasurement {
             schema_version: 1,
             run_id: "test".into(),

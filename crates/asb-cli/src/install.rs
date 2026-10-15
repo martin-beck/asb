@@ -19,6 +19,9 @@ enum Recipe {
         package: &'static str,
         executable: &'static str,
     },
+    Host {
+        executable: &'static str,
+    },
 }
 
 struct ExternalWorkload {
@@ -46,6 +49,11 @@ const BUILTIN_TOOLS: &[&str] = &[
     "openjiuwen",
     "cli2key",
     "llmtape",
+    "mpstat",
+    "iostat",
+    "perf",
+    "bpftrace",
+    "flamegraph",
 ];
 
 const EXTERNAL_WORKLOADS: &[ExternalWorkload] = &[
@@ -194,6 +202,19 @@ fn recipe(name: &str) -> Option<Recipe> {
         "llmtape" => Some(Recipe::Npm {
             package: "llmtape@1.2.0",
             executable: "llmtape",
+        }),
+        "mpstat" => Some(Recipe::Host {
+            executable: "mpstat",
+        }),
+        "iostat" => Some(Recipe::Host {
+            executable: "iostat",
+        }),
+        "perf" => Some(Recipe::Host { executable: "perf" }),
+        "bpftrace" => Some(Recipe::Host {
+            executable: "bpftrace",
+        }),
+        "flamegraph" => Some(Recipe::Host {
+            executable: "flamegraph",
         }),
         _ => None,
     }
@@ -487,12 +508,28 @@ fn install_recipe(recipe: Recipe, root: &Path) -> Result<PathBuf, Error> {
                 .args(["-m", "pip", "install", package])
                 .status()
         }
+        Recipe::Host { executable } => {
+            let source = host_executable(executable)?;
+            let destination = root.join("bin").join(executable);
+            fs::create_dir_all(destination.parent().expect("host tool parent"))
+                .map_err(|error| Error::Io(format!("cannot create {}: {error}", root.display())))?;
+            fs::copy(&source, &destination).map_err(|error| {
+                Error::Io(format!(
+                    "cannot copy host tool {} to {}: {error}",
+                    source.display(),
+                    destination.display()
+                ))
+            })?;
+            make_executable(&destination)?;
+            return Ok(destination);
+        }
     }
     .map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             let dependency = match recipe {
                 Recipe::Npm { .. } => "npm",
                 Recipe::Python { .. } => "python3",
+                Recipe::Host { .. } => "host measurement binary",
             };
             missing_dependency(dependency, "agent installation", error)
         } else {
@@ -525,6 +562,7 @@ fn executable(recipe: Recipe, root: &Path) -> PathBuf {
         } if package == "llmtape@1.2.0" => root.join("bin").join(executable),
         Recipe::Npm { executable, .. } => root.join("node_modules/.bin").join(executable),
         Recipe::Python { executable, .. } => root.join("venv/bin").join(executable),
+        Recipe::Host { executable } => root.join("bin").join(executable),
     }
 }
 
@@ -545,6 +583,9 @@ fn describe(recipe: Recipe, root: &Path) -> String {
             "python3 -m venv {}/venv && pip install {package}",
             root.display()
         ),
+        Recipe::Host { executable } => {
+            format!("copy host `{executable}` into {}/bin", root.display())
+        }
     }
 }
 
@@ -560,7 +601,23 @@ fn tool_summary(recipe: Recipe) -> String {
             executable,
             ..
         } => format!("python {package} -> {executable}"),
+        Recipe::Host { executable } => format!("host binary -> {executable}"),
     }
+}
+
+fn host_executable(name: &str) -> Result<PathBuf, Error> {
+    let path = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .map(|directory| directory.join(name))
+        .chain([PathBuf::from("/usr/bin").join(name), PathBuf::from("/bin").join(name)])
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            Error::Io(format!(
+                "measurement tool `{name}` is not installed on this host; install its distribution package and rerun `asb tool install {name}`"
+            ))
+        })?;
+    Ok(path)
 }
 
 fn parse_tool(args: &[String]) -> Result<(String, Option<String>, PathBuf, bool), Error> {
@@ -766,6 +823,11 @@ mod tests {
             "openjiuwen",
             "cli2key",
             "llmtape",
+            "mpstat",
+            "iostat",
+            "perf",
+            "bpftrace",
+            "flamegraph",
         ] {
             let recipe = recipe(agent).expect("documented agent has a recipe");
             assert!(!describe(recipe, Path::new(".asb-tools")).is_empty());
@@ -794,6 +856,8 @@ mod tests {
         assert!(text.contains("pi"));
         assert!(text.contains("openjiuwen"));
         assert!(text.contains("llmtape"));
+        assert!(text.contains("mpstat"));
+        assert!(text.contains("bpftrace"));
         assert!(text.contains("custom"));
     }
 

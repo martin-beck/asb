@@ -213,7 +213,13 @@ fn run_mode(
         .map_or(&[][..], |value| value.collectors.as_slice());
     let mut measurement_session = measurement_path
         .as_deref()
-        .map(|dir| measurements::Session::start_with_collectors(dir, measurement_collectors))
+        .map(|dir| {
+            measurements::Session::start_with_collectors(
+                dir,
+                measurement_collectors,
+                Some(&project::resolve(&project_root, &project_config.tools_dir)),
+            )
+        })
         .transpose()
         .map_err(Error::Run)?;
     let child = command
