@@ -31,7 +31,6 @@ const TOOL_INSTALL_VALUES: &[&str] = &[
     "codex",
     "pi",
     "opencode",
-    "codeagent",
     "workbuddy",
     "gemini",
     "qwen-code",

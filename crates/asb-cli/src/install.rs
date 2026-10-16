@@ -66,7 +66,6 @@ const BUILTIN_TOOLS: &[&str] = &[
     "codex",
     "pi",
     "opencode",
-    "codeagent",
     "workbuddy",
     "gemini",
     "qwen-code",
@@ -206,10 +205,6 @@ fn recipe(name: &str) -> Option<Recipe> {
         "opencode" => Some(Recipe::Npm {
             package: "opencode-ai@1.19.0",
             executable: "opencode",
-        }),
-        "codeagent" => Some(Recipe::Npm {
-            package: "@bryanhu/code-agent@1.14.1",
-            executable: "code-agent",
         }),
         "workbuddy" => Some(Recipe::Npm {
             package: "@tencent-ai/codebuddy-code@2.167.0",
@@ -1050,7 +1045,6 @@ fn parse_workload(args: &[String]) -> Result<(String, String, PathBuf), Error> {
 
 fn executable_name(agent: &str) -> &str {
     match agent {
-        "codeagent" => "code-agent",
         "workbuddy" => "codebuddy",
         "qwen-code" => "qwen",
         "mini-swe" => "mini",
@@ -1169,7 +1163,6 @@ mod tests {
             "codex",
             "pi",
             "opencode",
-            "codeagent",
             "workbuddy",
             "gemini",
             "qwen-code",
@@ -1253,7 +1246,7 @@ mod tests {
         let mut output = Vec::new();
         tool_list(&mut output).expect("tool list succeeds");
         let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("codeagent"));
+        assert!(!text.contains("codeagent"));
         assert!(text.contains("pi"));
         assert!(text.contains("openjiuwen"));
         assert!(text.contains("llmtape"));

@@ -74,9 +74,7 @@ The bundled bridge executes workloads through `codex`, `opencode`,
 `qwen-code`, `mini-swe`, `openhands`, `openjiuwen`, and `workbuddy`.
 WorkBuddy receives the bridge endpoint through its project-local CodeBuddy API
 settings. Aider requires OpenAI Chat Completions and therefore needs an
-OpenAI-compatible provider. Gemini still requires its Google provider, and
-`codeagent` is a web-server-only installer that cannot run a non-interactive
-workload.
+OpenAI-compatible provider. Gemini still requires its Google provider.
 
 `asb init` copies the bundled `.txt` workloads into `workloads/` and seeds
 `.asb/fixtures/` with the source, tests, and scripts required by every built-in
@@ -125,7 +123,6 @@ The built-in recipes are:
 | --- | --- | --- |
 | `codex` | pinned npm package | `codex` |
 | `opencode` | pinned npm package | `opencode` |
-| `codeagent` | pinned npm package | `code-agent` |
 | `workbuddy` | pinned npm package | `codebuddy` |
 | `gemini` | pinned npm package | `gemini` |
 | `qwen-code` | pinned npm package | `qwen` |

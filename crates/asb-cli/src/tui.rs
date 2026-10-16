@@ -25,7 +25,6 @@ const AGENTS: &[&str] = &[
     "codex",
     "pi",
     "opencode",
-    "codeagent",
     "workbuddy",
     "gemini",
     "qwen-code",

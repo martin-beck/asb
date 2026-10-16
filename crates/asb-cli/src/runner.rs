@@ -22,7 +22,6 @@ const BUILTIN_AGENTS: &[&str] = &[
     "codex",
     "pi",
     "opencode",
-    "codeagent",
     "workbuddy",
     "gemini",
     "qwen-code",
@@ -603,11 +602,6 @@ fn command_for(
             ],
             append_prompt: true,
         },
-        "codeagent" => {
-            return Err(Error::Run(
-                "codeagent provides a web server and has no non-interactive prompt command; use an executable agent such as codex, opencode, qwen-code, openhands, or openjiuwen".into(),
-            ))
-        }
         other => CommandSpec {
             program: other.into(),
             args: Vec::new(),
@@ -639,7 +633,6 @@ fn local_agent(agent: &str, project_root: &Path, tools_dir: &str) -> Option<Stri
         "qwen-code" => "qwen",
         "mini-swe" => "mini",
         "cli2key" => "codex-bridge",
-        "codeagent" => "code-agent",
         "workbuddy" => "codebuddy",
         other => other,
     };
@@ -874,22 +867,6 @@ mod tests {
             measurements: None,
         };
         assert_eq!(opencode_model(&config), "opencode/mimo-v2.6-flash-free");
-    }
-
-    #[test]
-    fn codeagent_is_rejected_without_a_noninteractive_command() {
-        let config = BenchmarkConfig {
-            agent: "codeagent".into(),
-            workload: "bug-fix".into(),
-            provider: "cli2key".into(),
-            model: "gpt-test".into(),
-            trial_set: None,
-            trial: None,
-            workspace: "workspace".into(),
-            log_file: "run.log".into(),
-            measurements: None,
-        };
-        assert!(command_for(&config, Some("http://127.0.0.1:3456/v1"), "prompt").is_err());
     }
 
     #[test]
