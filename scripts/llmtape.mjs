@@ -130,6 +130,12 @@ function normalizeRequestBody(url, body) {
         changed = true;
       }
     }
+    if (url.includes("/messages") && parsed.temperature === undefined) {
+      // Keep record/replay agent trajectories stable when a CLI leaves the
+      // provider's sampling default unspecified.
+      parsed.temperature = 0;
+      changed = true;
+    }
     if (!Array.isArray(parsed.tools)) return changed ? JSON.stringify(parsed) : body;
     parsed.tools = parsed.tools
       .filter((tool) => {
