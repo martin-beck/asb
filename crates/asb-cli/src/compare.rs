@@ -312,7 +312,10 @@ fn artifact_links(sweep_parent: &Path, result_dir: &Path) -> Vec<String> {
             }
         }
     }
-    collect_artifacts(result_dir, 0, &mut files);
+    // Never inventory the benchmark workspace: external workloads can contain
+    // thousands of source files and those are not comparison evidence. The
+    // measurements directory is the bounded, machine-readable artifact set.
+    collect_artifacts(&measurement_dir, 0, &mut files);
     files.sort();
     files.dedup();
     files

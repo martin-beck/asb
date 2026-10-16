@@ -319,6 +319,7 @@ fn run_mode(
         } else {
             None
         },
+        Some(&project::resolve(&project_root, &project_config.tools_dir).join("codex/config")),
         Some(&project::resolve(&project_root, &project_config.tools_dir).join("pi/config")),
         Some(&project::resolve(&project_root, &project_config.tools_dir).join("workbuddy/config")),
         Some(&project::resolve(&project_root, &project_config.tools_dir).join("continue/config")),

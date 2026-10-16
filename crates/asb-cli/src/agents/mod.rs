@@ -44,6 +44,7 @@ pub(crate) struct PreparationContext<'a> {
     pub provider: &'a str,
     pub model: &'a str,
     pub cli2key: Option<(&'a str, &'a str)>,
+    pub codex_config_dir: Option<&'a Path>,
     pub pi_config_dir: Option<&'a Path>,
     pub workbuddy_config_dir: Option<&'a Path>,
     pub continue_config_dir: Option<&'a Path>,
@@ -115,6 +116,8 @@ impl AgentAdapter for BuiltinAdapter {
                 args: vec![
                     "exec".into(),
                     "--skip-git-repo-check".into(),
+                    "--ephemeral".into(),
+                    "--ignore-rules".into(),
                     "--json".into(),
                     "--model".into(),
                     config.model.clone(),
@@ -217,6 +220,8 @@ impl AgentAdapter for BuiltinAdapter {
                 program: self.executable.into(),
                 args: vec![
                     "-p".into(),
+                    "--bare".into(),
+                    "--no-session-persistence".into(),
                     "--output-format".into(),
                     "json".into(),
                     "--model".into(),
@@ -277,6 +282,19 @@ impl AgentAdapter for BuiltinAdapter {
         let is_openrouter = context.provider.eq_ignore_ascii_case("openrouter");
         let credentials = context.cli2key;
         match self.kind {
+            CommandKind::Codex if is_cli2key => {
+                let directory = context.codex_config_dir.ok_or_else(|| {
+                    Error::Run(
+                        "cannot configure Codex without a project-local configuration directory"
+                            .into(),
+                    )
+                })?;
+                let (_, base_url) = credentials
+                    .ok_or_else(|| Error::Run("cli2key provider has no API endpoint".into()))?;
+                prepare::configure_codex(directory, context.model, base_url)?;
+                context.command.env("CODEX_HOME", directory);
+                Ok(())
+            }
             CommandKind::Pi if is_cli2key || is_openrouter => {
                 let directory = context.pi_config_dir.ok_or_else(|| Error::Run(
                     "cannot configure Pi without a project-local provider configuration directory".into(),
@@ -365,12 +383,24 @@ impl AgentAdapter for BuiltinAdapter {
                 if let Some((key, base_url)) = credentials {
                     context
                         .command
-                        .env("GOOSE_PROVIDER", "openai")
+                        .env("GOOSE_PROVIDER", "anthropic")
                         .env("GOOSE_MODEL", context.model)
-                        .env("OPENAI_HOST", base_url.trim_end_matches("/v1"))
-                        .env("OPENAI_BASE_PATH", "/v1/chat/completions")
-                        .env("OPENAI_API_KEY", key);
+                        .env("ANTHROPIC_HOST", base_url.trim_end_matches("/v1"))
+                        .env("ANTHROPIC_API_KEY", key)
+                        .env("ANTHROPIC_AUTH_TOKEN", key);
                 }
+                Ok(())
+            }
+            CommandKind::ClaudeCode if is_cli2key => {
+                let (key, base_url) = credentials
+                    .ok_or_else(|| Error::Run("cli2key provider has no API endpoint".into()))?;
+                context
+                    .command
+                    .env("ANTHROPIC_BASE_URL", base_url)
+                    .env("ANTHROPIC_API_KEY", key)
+                    .env("ANTHROPIC_AUTH_TOKEN", key)
+                    .env_remove("CLAUDE_CODE_USE_BEDROCK")
+                    .env_remove("CLAUDE_CODE_USE_VERTEX");
                 Ok(())
             }
             CommandKind::Cline if is_cli2key => {
@@ -443,7 +473,19 @@ impl AgentAdapter for BuiltinAdapter {
                     .map(|(_, url)| url.to_owned())
                     .or_else(|| std::env::var("OPENROUTER_BASE_URL").ok())
                     .unwrap_or_else(|| "https://openrouter.ai/api/v1".into());
-                prepare::configure_continue(directory, context.model, &base_url)?;
+                let key_name = if is_cli2key {
+                    "CLI2KEY_API_KEY"
+                } else {
+                    "OPENROUTER_API_KEY"
+                };
+                let continue_provider = if is_cli2key { "anthropic" } else { "openai" };
+                prepare::configure_continue(
+                    directory,
+                    continue_provider,
+                    context.model,
+                    &base_url,
+                    key_name,
+                )?;
                 context
                     .command
                     .env("CONTINUE_CONFIG", directory.join("config.yaml"))
@@ -461,6 +503,7 @@ pub(crate) fn prepare(
     provider: &str,
     model: &str,
     cli2key: Option<(&str, &str)>,
+    codex_config_dir: Option<&Path>,
     pi_config_dir: Option<&Path>,
     workbuddy_config_dir: Option<&Path>,
     continue_config_dir: Option<&Path>,
@@ -474,6 +517,7 @@ pub(crate) fn prepare(
         provider,
         model,
         cli2key,
+        codex_config_dir,
         pi_config_dir,
         workbuddy_config_dir,
         continue_config_dir,

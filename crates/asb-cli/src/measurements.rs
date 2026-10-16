@@ -796,16 +796,26 @@ impl Session {
             );
         }
         let collapse = std::env::var_os("ASB_FLAMEGRAPH_STACKCOLLAPSE").or_else(|| {
-            self.tool_dir
-                .as_ref()
-                .map(|dir| dir.join("bin/stackcollapse-perf.pl").into_os_string())
-                .filter(|path| Path::new(path).is_file())
+            self.tool_dir.as_ref().and_then(|dir| {
+                [
+                    dir.join("flamegraph/bin/stackcollapse-perf.pl"),
+                    dir.join("bin/stackcollapse-perf.pl"),
+                ]
+                .into_iter()
+                .find(|path| path.is_file())
+                .map(|path| path.into_os_string())
+            })
         });
         let render = std::env::var_os("ASB_FLAMEGRAPH_RENDER").or_else(|| {
-            self.tool_dir
-                .as_ref()
-                .map(|dir| dir.join("bin/flamegraph").into_os_string())
-                .filter(|path| Path::new(path).is_file())
+            self.tool_dir.as_ref().and_then(|dir| {
+                [
+                    dir.join("flamegraph/bin/flamegraph"),
+                    dir.join("bin/flamegraph"),
+                ]
+                .into_iter()
+                .find(|path| path.is_file())
+                .map(|path| path.into_os_string())
+            })
         });
         let (Some(collapse), Some(render)) = (collapse, render) else {
             return write_flamegraph_status(
@@ -1807,10 +1817,10 @@ fn parse_perf_stat_series(output: &str) -> BTreeMap<String, Vec<f64>> {
         }) else {
             continue;
         };
-        let Some(value) = fields[..event_index]
-            .iter()
-            .rev()
-            .find_map(|field| parse_float(field))
+        let Some(value) = event_index
+            .checked_sub(2)
+            .and_then(|index| fields.get(index))
+            .and_then(|field| parse_float(field))
         else {
             continue;
         };
@@ -1884,10 +1894,10 @@ fn parse_perf_stat_metrics(output: &str) -> BTreeMap<String, f64> {
         }) else {
             continue;
         };
-        let Some(value) = fields[..event_index]
-            .iter()
-            .rev()
-            .find_map(|field| parse_float(field))
+        let Some(value) = event_index
+            .checked_sub(2)
+            .and_then(|index| fields.get(index))
+            .and_then(|field| parse_float(field))
         else {
             continue;
         };
@@ -1945,14 +1955,15 @@ fn trace_marker_path() -> Option<PathBuf> {
 }
 
 fn perfetto_config(pid: Option<u32>) -> String {
-    let pid_filter = pid.map_or_else(String::new, |pid| format!("      pid_filter: {pid}\n"));
+    // Tracebox's bundled schema rejects FtraceConfig.pid_filter. Process
+    // scoping is applied during post-processing using ASB lifecycle markers.
+    let _ = pid;
     r#"duration_ms: 3600000
 buffers { size_kb: 65536 fill_policy: RING_BUFFER }
 data_sources {
   config {
     name: "linux.ftrace"
     ftrace_config {
-{pid_filter}
       compact_sched { enabled: true }
       ftrace_events: "sched/sched_switch"
       ftrace_events: "sched/sched_waking"
@@ -1972,7 +1983,7 @@ data_sources {
   }
 }
 "#
-    .replace("{pid_filter}", &pid_filter)
+    .to_owned()
 }
 
 fn perfetto_probe_config() -> String {
@@ -2975,9 +2986,9 @@ mod tests {
     }
 
     #[test]
-    fn perfetto_configuration_filters_scheduler_events_to_agent_pid() {
+    fn perfetto_configuration_uses_supported_tracebox_schema() {
         let config = perfetto_config(Some(42));
-        assert!(config.contains("pid_filter: 42"));
+        assert!(!config.contains("pid_filter"));
         assert!(config.contains("scan_all_processes_on_start: false"));
     }
 

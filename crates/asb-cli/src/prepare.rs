@@ -16,6 +16,7 @@ pub fn apply_with_tape(
     model: &str,
     codex_executable: Option<&str>,
     cli2key: Option<(&str, &str)>,
+    codex_config_dir: Option<&Path>,
     pi_config_dir: Option<&Path>,
     workbuddy_config_dir: Option<&Path>,
     continue_config_dir: Option<&Path>,
@@ -34,6 +35,7 @@ pub fn apply_with_tape(
         provider,
         model,
         cli2key,
+        codex_config_dir,
         pi_config_dir,
         workbuddy_config_dir,
         continue_config_dir,
@@ -161,6 +163,24 @@ pub(crate) fn configure_pi_provider(
     Ok(())
 }
 
+/// Configure Codex to use the project-local CLI2KEY bridge without writing a
+/// credential to disk. Codex reads the key from the inherited environment.
+pub(crate) fn configure_codex(directory: &Path, model: &str, base_url: &str) -> Result<(), Error> {
+    std::fs::create_dir_all(directory).map_err(|error| {
+        Error::Run(format!(
+            "cannot create Codex provider configuration directory: {error}"
+        ))
+    })?;
+    let configuration = format!(
+        "model = \"{model}\"\nmodel_provider = \"cli2key\"\n\n[model_providers.cli2key]\nname = \"CLI2KEY bridge\"\nbase_url = \"{base_url}\"\nenv_key = \"CLI2KEY_API_KEY\"\nwire_api = \"responses\"\nrequires_openai_auth = false\n"
+    );
+    std::fs::write(directory.join("config.toml"), configuration).map_err(|error| {
+        Error::Run(format!(
+            "cannot write Codex provider configuration: {error}"
+        ))
+    })
+}
+
 pub(crate) fn configure_workbuddy(
     directory: &Path,
     model: &str,
@@ -192,8 +212,10 @@ pub(crate) fn configure_workbuddy(
 
 pub(crate) fn configure_continue(
     directory: &Path,
+    provider: &str,
     model: &str,
     base_url: &str,
+    api_key_env: &str,
 ) -> Result<(), Error> {
     std::fs::create_dir_all(directory).map_err(|error| {
         Error::Run(format!(
@@ -201,7 +223,7 @@ pub(crate) fn configure_continue(
         ))
     })?;
     let configuration = format!(
-        "name: ASB provider\nversion: 1.0.0\nmodels:\n  - name: {model}\n    provider: openai\n    model: {model}\n    apiBase: {base_url}\n"
+        "name: ASB provider\nversion: 1.0.0\nmodels:\n  - name: {model}\n    provider: {provider}\n    model: {model}\n    apiBase: {base_url}\n    apiKey: ${{{{ secrets.//{api_key_env} }}}}\n"
     );
     std::fs::write(directory.join("config.yaml"), configuration).map_err(|error| {
         Error::Run(format!(
@@ -305,6 +327,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
         )
         .expect("preparation succeeds");
@@ -366,6 +389,7 @@ mod tests {
             "gpt-6.1-sol",
             None,
             Some(("cb_test", "http://127.0.0.1:3456/v1")),
+            None,
             Some(&directory),
             None,
             None,
@@ -398,6 +422,7 @@ mod tests {
             "gpt-6.1-sol",
             None,
             Some(("cb_test", "http://127.0.0.1:3456/v1")),
+            None,
             None,
             Some(&directory),
             None,
@@ -460,6 +485,7 @@ mod tests {
             Some(("cb_test", "http://127.0.0.1:3456/v1")),
             None,
             None,
+            None,
             Some(&directory),
             None,
             None,
@@ -467,9 +493,10 @@ mod tests {
         )
         .expect("Continue preparation succeeds");
         let config = std::fs::read_to_string(directory.join("config.yaml")).expect("config");
-        assert!(config.contains("provider: openai"));
+        assert!(config.contains("provider: anthropic"));
         assert!(config.contains("model: gpt-test"));
         assert!(config.contains("apiBase: http://127.0.0.1:3456/v1"));
+        assert!(config.contains("apiKey: ${{ secrets.//CLI2KEY_API_KEY }}"));
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -558,6 +585,7 @@ mod tests {
             "pi",
             "openrouter",
             "tool-model",
+            None,
             None,
             None,
             Some(&directory),

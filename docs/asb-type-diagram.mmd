@@ -25,9 +25,11 @@ classDiagram
         +provider: &'a str
         +model: &'a str
         +cli2key: Option~(&'a str, &'a str)~
+        +codex_config_dir: Option~&'a Path~
         +pi_config_dir: Option~&'a Path~
         +workbuddy_config_dir: Option~&'a Path~
         +continue_config_dir: Option~&'a Path~
+        +cline_data_dir: Option~&'a Path~
     }
     class asb-cli_src_agents_CommandContext~'a~ {
         +config: &'a BenchmarkConfig
