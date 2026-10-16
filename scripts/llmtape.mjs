@@ -77,6 +77,27 @@ function responseHeaders(headers) {
   return result;
 }
 
+// Preserve server-sent event boundaries during replay.  Several agent CLIs
+// dispatch tool calls as soon as the terminating SSE event arrives; sending
+// the complete cassette body as one write can make those clients finish the
+// turn before their tool dispatcher observes the event sequence.
+async function replayResponse(response, interaction) {
+  const body = interaction.response.body || "";
+  const contentType = Object.entries(interaction.response.headers || {})
+    .find(([name]) => name.toLowerCase() === "content-type")?.[1] || "";
+  response.writeHead(interaction.response.status, interaction.response.headers || {});
+  if (!/text\/event-stream/i.test(contentType) || !body.includes("\n\n")) {
+    response.end(body);
+    return;
+  }
+  const events = body.match(/[\s\S]*?(?:\r?\n\r?\n|$)/g)?.filter(Boolean) || [body];
+  for (const event of events) {
+    response.write(event);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  response.end();
+}
+
 // Some agent CLIs emit Anthropic server-tool descriptors without the
 // input_schema required by the Anthropic wire format.  The loopback bridge is
 // deliberately provider-neutral, so make that descriptor valid while keeping
@@ -260,8 +281,7 @@ async function handle(request, response) {
     if (respectRecordTimings && Number.isFinite(delayMs) && delayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, Math.min(delayMs, MAX_DELAY_MS)));
     }
-    response.writeHead(interaction.response.status, interaction.response.headers || {});
-    response.end(interaction.response.body || "");
+    await replayResponse(response, interaction);
     return;
   }
 
