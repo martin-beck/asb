@@ -814,6 +814,13 @@ fn write_bar_svg(path: &Path, title: &str, values: &[(String, f64)]) -> Result<(
 }
 
 fn write_line_svg(path: &Path, title: &str, values: &[(String, TimeSeries)]) -> Result<(), Error> {
+    const WIDTH: f64 = 1_200.0;
+    const HEIGHT: f64 = 620.0;
+    const LEFT: f64 = 85.0;
+    const RIGHT: f64 = 1_160.0;
+    const BOTTOM: f64 = 530.0;
+    const LEGEND_COLUMN_WIDTH: f64 = 355.0;
+    const LEGEND_MAX_CHARS: usize = 34;
     let max = values
         .iter()
         .flat_map(|(_, points)| points.values.iter().copied())
@@ -829,15 +836,22 @@ fn write_line_svg(path: &Path, title: &str, values: &[(String, TimeSeries)]) -> 
                 None => (timestamp, timestamp),
             })
         });
-    let mut svg = svg_header(900.0, 460.0, title);
-    append_y_axis(
+    let legend_columns = values.len().clamp(1, 3);
+    let legend_rows = values.len().div_ceil(legend_columns);
+    let plot_top = 92.0 + legend_rows as f64 * 40.0;
+    let mut svg = svg_header(WIDTH, HEIGHT, title);
+    append_y_axis(&mut svg, LEFT, plot_top, BOTTOM, RIGHT, max, title);
+    append_series_x_axis(
         &mut svg,
-        70.0,
-        PLOT_TOP,
-        PLOT_BOTTOM,
-        PLOT_RIGHT,
-        max,
-        title,
+        timestamp_bounds,
+        values
+            .iter()
+            .map(|(_, points)| points.values.len())
+            .max()
+            .unwrap_or(0),
+        LEFT,
+        BOTTOM,
+        RIGHT,
     );
     for (series_index, (label, points)) in values.iter().enumerate() {
         let color = ["#4472c4", "#ed7d31", "#70ad47", "#a5a5a5", "#ffc000"][series_index % 5];
@@ -851,8 +865,10 @@ fn write_line_svg(path: &Path, title: &str, values: &[(String, TimeSeries)]) -> 
                     points.timestamps_ms.as_deref(),
                     timestamp_bounds,
                     points.values.len(),
+                    LEFT,
+                    RIGHT,
                 );
-                let y = PLOT_BOTTOM - value.max(0.0) / max * (PLOT_BOTTOM - PLOT_TOP);
+                let y = BOTTOM - value.max(0.0) / max * (BOTTOM - plot_top);
                 format!("{x:.1},{y:.1}")
             })
             .collect::<Vec<_>>()
@@ -867,8 +883,10 @@ fn write_line_svg(path: &Path, title: &str, values: &[(String, TimeSeries)]) -> 
                 points.timestamps_ms.as_deref(),
                 timestamp_bounds,
                 points.values.len(),
+                LEFT,
+                RIGHT,
             );
-            let y = PLOT_BOTTOM - value.max(0.0) / max * (PLOT_BOTTOM - PLOT_TOP);
+            let y = BOTTOM - value.max(0.0) / max * (BOTTOM - plot_top);
             let timestamp = points
                 .timestamps_ms
                 .as_ref()
@@ -881,11 +899,27 @@ fn write_line_svg(path: &Path, title: &str, values: &[(String, TimeSeries)]) -> 
                 escape(label)
             ));
         }
+        let column = series_index % legend_columns;
+        let row = series_index / legend_columns;
+        let legend_x = LEFT + column as f64 * LEGEND_COLUMN_WIDTH;
+        let legend_y = 60.0 + row as f64 * 40.0;
+        let lines = wrap_label(label, LEGEND_MAX_CHARS);
         svg.push_str(&format!(
-            "<text x=\"{}\" y=\"55\" font-size=\"12\" fill=\"{color}\">{}</text>",
-            80 + series_index * 150,
+            "<rect class=\"legend-swatch\" x=\"{legend_x:.1}\" y=\"{:.1}\" width=\"10\" height=\"10\" rx=\"2\" fill=\"{color}\"/><text class=\"legend-item\" data-series-index=\"{series_index}\" x=\"{:.1}\" y=\"{:.1}\" font-size=\"12\" fill=\"{color}\" aria-label=\"{}\">",
+            legend_y - 10.0,
+            legend_x + 16.0,
+            legend_y,
             escape(label)
         ));
+        for (line_index, line) in lines.iter().enumerate() {
+            svg.push_str(&format!(
+                "<tspan x=\"{:.1}\" dy=\"{}\">{}</tspan>",
+                legend_x + 16.0,
+                if line_index == 0 { 0 } else { 15 },
+                escape(line)
+            ));
+        }
+        svg.push_str("</text>");
     }
     svg.push_str("</svg>\n");
     fs::write(path, svg)
@@ -897,6 +931,8 @@ fn line_x(
     timestamps: Option<&[f64]>,
     bounds: Option<(f64, f64)>,
     length: usize,
+    left: f64,
+    right: f64,
 ) -> f64 {
     let fraction = timestamps
         .and_then(|timestamps| timestamps.get(index))
@@ -911,7 +947,67 @@ fn line_x(
                 }
             },
         );
-    75.0 + fraction.clamp(0.0, 1.0) * 800.0
+    left + fraction.clamp(0.0, 1.0) * (right - left)
+}
+
+fn append_series_x_axis(
+    svg: &mut String,
+    timestamp_bounds: Option<(f64, f64)>,
+    length: usize,
+    left: f64,
+    bottom: f64,
+    right: f64,
+) {
+    let label = if timestamp_bounds.is_some() {
+        "time (ms)"
+    } else {
+        "sample"
+    };
+    for tick in 0..=Y_TICKS {
+        let fraction = tick as f64 / Y_TICKS as f64;
+        let x = left + fraction * (right - left);
+        let value = timestamp_bounds
+            .map(|(min, max)| min + fraction * (max - min))
+            .unwrap_or_else(|| fraction * length.saturating_sub(1) as f64);
+        svg.push_str(&format!(
+            "<line class=\"x-axis-tick\" x1=\"{x:.1}\" y1=\"{bottom:.1}\" x2=\"{x:.1}\" y2=\"{:.1}\" stroke=\"#18212b\"/><text class=\"x-axis-value\" x=\"{x:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"11\">{}</text>",
+            bottom + 6.0,
+            bottom + 22.0,
+            format_tick(value)
+        ));
+    }
+    svg.push_str(&format!(
+        "<text class=\"x-axis-label\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"12\">{label}</text>",
+        (left + right) / 2.0,
+        bottom + 43.0
+    ));
+}
+
+fn wrap_label(value: &str, max_chars: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut remaining = value.trim();
+    while remaining.chars().count() > max_chars {
+        let boundary = remaining
+            .char_indices()
+            .take_while(|(index, _)| *index <= max_chars)
+            .filter(|(_, character)| matches!(character, '_' | '-' | '.' | '/' | ' '))
+            .map(|(index, character)| index + character.len_utf8())
+            .last()
+            .unwrap_or_else(|| {
+                remaining
+                    .char_indices()
+                    .nth(max_chars)
+                    .map_or(remaining.len(), |(index, _)| index)
+            });
+        let split_at = boundary.max(1).min(remaining.len());
+        let (line, rest) = remaining.split_at(split_at);
+        lines.push(line.trim().to_owned());
+        remaining = rest.trim_start();
+    }
+    if !remaining.is_empty() || lines.is_empty() {
+        lines.push(remaining.to_owned());
+    }
+    lines
 }
 
 fn append_y_axis(
@@ -1182,7 +1278,7 @@ mod tests {
             &root.join("tokens.svg"),
             "token_usage.total_tokens",
             &[(
-                "run".into(),
+                "agent-with-a-deliberately-long-series-name-for-the-legend".into(),
                 super::TimeSeries {
                     values: vec![0.0, 100.0],
                     timestamps_ms: Some(vec![10.0, 20.0]),
@@ -1195,6 +1291,12 @@ mod tests {
         assert!(svg.contains(">0</text>"));
         assert!(svg.contains(">100</text>"));
         assert!(svg.contains("data-timestamp=\"10\""));
+        assert!(svg.contains("class=\"x-axis-tick\""));
+        assert!(svg.contains("class=\"x-axis-value\""));
+        assert!(svg.contains("class=\"x-axis-label\""));
+        assert!(svg.contains(">time (ms)</text>"));
+        assert!(svg.contains("class=\"legend-item\""));
+        assert!(svg.contains("<tspan"));
         let _ = std::fs::remove_dir_all(root);
     }
 
