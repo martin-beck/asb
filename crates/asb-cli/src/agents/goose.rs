@@ -8,6 +8,8 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
         args: vec![
             "run".into(),
             "--no-session".into(),
+            "--max-turns".into(),
+            "1".into(),
             "--output-format".into(),
             "json".into(),
             "-t".into(),
