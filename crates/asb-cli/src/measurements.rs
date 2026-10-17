@@ -345,25 +345,13 @@ impl Session {
                     // summaries on an orderly interrupt. Do not SIGKILL either collector:
                     // a short benchmark would otherwise lose the very artifacts ASB is
                     // meant to report.
-                    if collector.name == "perf"
-                        || collector.name == "perfetto"
-                        || collector.name.starts_with("bpftrace-")
-                    {
-                        let interrupted = Command::new("kill")
-                            .arg("-INT")
-                            .arg(collector.child.id().to_string())
-                            .status()
-                            .is_ok_and(|status| status.success());
-                        if !interrupted {
-                            let _ = collector.child.kill();
-                        }
-                    } else {
-                        let _ = collector.child.kill();
-                    }
-                    collector
-                        .child
-                        .wait()
-                        .map_err(|e| format!("cannot finish {} collector: {e}", collector.name))?
+                    stop_collector(
+                        &mut collector.child,
+                        collector.name == "perf"
+                            || collector.name == "perfetto"
+                            || collector.name.starts_with("bpftrace-"),
+                    )
+                    .map_err(|e| format!("cannot finish {} collector: {e}", collector.name))?
                 }
                 Err(error) => {
                     return Err(format!(
@@ -2277,6 +2265,35 @@ fn measurement_interval_ms() -> u64 {
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(1_000)
         .clamp(100, 60_000)
+}
+
+/// Stop a collector without allowing a wrapper such as `sudo` to strand its
+/// real tracing child.  The previous unbounded `wait()` could deadlock an
+/// entire sweep after the agent had already exited.
+fn stop_collector(child: &mut Child, graceful: bool) -> std::io::Result<std::process::ExitStatus> {
+    let pid = child.id();
+    if graceful {
+        let _ = Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    let _ = child.kill();
+    // `sudo` may have spawned the actual collector as a direct child. Reap
+    // that child too; otherwise the pipe-backed collector can outlive ASB.
+    let _ = Command::new("pkill")
+        .args(["-KILL", "-P", &pid.to_string()])
+        .status();
+    child.wait()
 }
 
 fn pidstat_interval_seconds() -> String {
