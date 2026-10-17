@@ -270,8 +270,14 @@ fn run_mode(
         None
     };
     let tape_url = tape_session.as_ref().map(|session| session.url());
+    // Adapters run with the benchmark workspace as their current directory.
+    // Pass the canonical workspace explicitly so a relative configuration
+    // value is not resolved a second time inside that directory (which is
+    // especially important for OpenJiuwen's persistent workspace).
+    let mut command_config = config.clone();
+    command_config.workspace = workspace.to_string_lossy().into_owned();
     let specification = command_for(
-        &config,
+        &command_config,
         tape_url.or_else(|| providers::local_bridge_endpoint(&config.provider, bridge.as_ref())),
         &prompt,
     )?;
