@@ -1587,6 +1587,8 @@ fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<bool, String> {
             Some(status) => return Ok(status.success()),
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
+                let pid = child.id().to_string();
+                let _ = Command::new("pkill").args(["-KILL", "-P", &pid]).status();
                 let _ = child.wait();
                 return Ok(false);
             }
