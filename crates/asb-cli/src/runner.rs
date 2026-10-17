@@ -316,6 +316,7 @@ fn run_mode(
         &config.model,
         provider_credentials,
         &project::resolve(&project_root, &project_config.tools_dir),
+        &workspace,
     )?;
     if let Some(url) = tape_url {
         providers::configure_tape(
