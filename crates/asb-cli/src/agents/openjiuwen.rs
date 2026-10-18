@@ -5,6 +5,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "openjiuwen",
     Recipe::Python {
         package: "openjiuwen[cli]==0.1.19.post2",
+        dependencies: &[],
         executable: "openjiuwen",
     },
     command,

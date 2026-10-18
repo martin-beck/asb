@@ -63,6 +63,7 @@ pub(crate) enum Recipe {
     },
     Python {
         package: &'static str,
+        dependencies: &'static [&'static str],
         executable: &'static str,
     },
     Host {
@@ -606,7 +607,11 @@ fn install_recipe(
             .args(["--no-save", package])
             .logged_status()
         }
-        Recipe::Python { package, .. } => {
+        Recipe::Python {
+            package,
+            dependencies,
+            ..
+        } => {
             let venv = root.join("venv");
             let created = match Command::new("python3")
                 .args(["-m", "venv"])
@@ -635,9 +640,33 @@ fn install_recipe(
                 ));
             }
             progress(35, "installing Python package");
-            Command::new(venv.join("bin/python"))
+            let python = venv.join("bin/python");
+            let status = Command::new(&python)
                 .args(["-m", "pip", "install", package])
                 .logged_status()
+                .map_err(|error| Error::Io(format!("cannot install Python package {package}: {error}")))?;
+            if !status.success() {
+                return Err(Error::Io(format!(
+                    "Python package installation failed for {package}"
+                )));
+            }
+            for dependency in dependencies {
+                progress(45, "installing Python runtime dependency");
+                let dependency_status = Command::new(&python)
+                    .args(["-m", "pip", "install", dependency])
+                    .logged_status()
+                    .map_err(|error| {
+                        Error::Io(format!(
+                            "cannot install Python runtime dependency {dependency}: {error}"
+                        ))
+                    })?;
+                if !dependency_status.success() {
+                    return Err(Error::Io(format!(
+                        "Python runtime dependency installation failed for {dependency}"
+                    )));
+                }
+            }
+            Ok(status)
         }
         Recipe::Host { executable } => {
             progress(55, "copying host tool");
@@ -1077,10 +1106,21 @@ fn executable(recipe: Recipe, root: &Path) -> PathBuf {
 fn describe(recipe: Recipe, root: &Path) -> String {
     match recipe {
         Recipe::Npm { package, .. } => format!("npm install --prefix {} {package}", root.display()),
-        Recipe::Python { package, .. } => format!(
-            "python3 -m venv {}/venv && pip install {package}",
-            root.display()
-        ),
+        Recipe::Python {
+            package,
+            dependencies,
+            ..
+        } => {
+            let extras = if dependencies.is_empty() {
+                String::new()
+            } else {
+                format!(" && pip install {}", dependencies.join(" "))
+            };
+            format!(
+                "python3 -m venv {}/venv && pip install {package}{extras}",
+                root.display()
+            )
+        }
         Recipe::Host { executable } => {
             format!("copy host `{executable}` into {}/bin", root.display())
         }

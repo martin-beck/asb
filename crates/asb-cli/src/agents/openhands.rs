@@ -5,6 +5,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "openhands",
     Recipe::Python {
         package: "openhands==1.16.0",
+        dependencies: &[],
         executable: "openhands",
     },
     command,

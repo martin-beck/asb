@@ -8,6 +8,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "mini",
     Recipe::Python {
         package: "mini-swe-agent==2.4.6",
+        dependencies: &["mcp==2.3.0"],
         executable: "mini",
     },
     command,
