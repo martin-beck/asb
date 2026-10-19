@@ -10,7 +10,7 @@ license = "MIT"
 repository = "https://github.com/martin-beck/asb"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "warn"
 missing_docs = "deny"
 warnings = "deny"
 

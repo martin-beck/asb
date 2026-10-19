@@ -11,6 +11,7 @@ mod install;
 mod measurements;
 mod models;
 mod parser;
+mod process_gate;
 mod project;
 mod providers;
 mod proxy;
@@ -30,6 +31,9 @@ use std::process::ExitCode;
 /// Run the process CLI.
 #[must_use]
 pub fn entry(args: Vec<OsString>) -> ExitCode {
+    if args.first().is_some_and(|arg| arg == "__asb-gate") {
+        return process_gate::run_gate(&args[1..]);
+    }
     ExitCode::from(run(
         &args,
         &mut io::stdout().lock(),

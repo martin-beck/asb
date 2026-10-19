@@ -506,6 +506,7 @@ fn run_mode(
         |adapter| adapter.process(&program),
     )?;
     project::apply_network_proxy(&mut command, config_path)?;
+    let target_args = specification.args.clone();
     command.args(specification.args);
     // Do not leak an enclosing Codex session into the benchmark agent. These
     // variables are host-runner integration state; if inherited, a project
@@ -599,6 +600,7 @@ fn run_mode(
     let child = run_measured_agent(
         &mut command,
         &program,
+        Some(&target_args),
         measurement_session.as_mut(),
         show_output,
         output,
@@ -853,10 +855,20 @@ fn instrument_phase<T>(
 fn run_measured_agent(
     command: &mut Command,
     program: &str,
+    target_args: Option<&[String]>,
     mut session: Option<&mut measurements::Session>,
     show_output: bool,
     output: &mut dyn Write,
 ) -> Result<Output, Error> {
+    #[cfg(unix)]
+    if session.is_some()
+        && let Some(target_args) = target_args
+        && gate_target_available(program)
+    {
+        let executable = std::env::current_exe()
+            .map_err(|error| Error::Run(format!("cannot resolve ASB process gate: {error}")))?;
+        crate::process_gate::install(command, &executable, program, target_args);
+    }
     let child = {
         let mut emit = |event| {
             if let Some(session) = session.as_deref_mut() {
@@ -889,6 +901,12 @@ fn run_measured_agent(
             .map_err(Error::Run)?;
         return Err(Error::Run(error));
     }
+    #[cfg(unix)]
+    if session.is_some() && target_args.is_some() {
+        crate::process_gate::resume(child.id()).map_err(|error| {
+            Error::Run(format!("could not resume measured agent process: {error}"))
+        })?;
+    }
     let result = wait_with_output(child, show_output, output);
     if let Some(session) = session {
         session
@@ -903,6 +921,28 @@ fn run_measured_agent(
             .map_err(Error::Run)?;
     }
     result.map_err(|error| Error::Run(format!("could not wait for {program}: {error}")))
+}
+
+#[cfg(unix)]
+fn gate_target_available(program: &str) -> bool {
+    let path = Path::new(program);
+    if !path.is_file() {
+        return !program.contains('/');
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let Some(first_line) = bytes.split(|byte| *byte == b'\n').next() else {
+        return true;
+    };
+    if !first_line.starts_with(b"#!") {
+        return true;
+    }
+    let interpreter = first_line[2..]
+        .split(|byte| byte.is_ascii_whitespace())
+        .find(|part| !part.is_empty())
+        .and_then(|part| std::str::from_utf8(part).ok());
+    interpreter.is_none_or(|value| !value.starts_with('/') || Path::new(value).is_file())
 }
 
 fn default_cassette(config_path: &Path, config: &BenchmarkConfig) -> std::path::PathBuf {
@@ -1398,6 +1438,7 @@ mod tests {
         let _ = super::run_measured_agent(
             command,
             "fixture",
+            None,
             Some(&mut session),
             false,
             &mut Vec::new(),
@@ -1520,6 +1561,7 @@ mod tests {
         let output = super::run_measured_agent(
             &mut command,
             "sleep",
+            None,
             Some(&mut session),
             false,
             &mut Vec::new(),
