@@ -69,6 +69,8 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
         program: "openjiuwen".into(),
         args: [
             "-v",
+            "-w",
+            context.config.workspace.as_str(),
             "--model",
             context.config.model.as_str(),
             "--provider",
@@ -209,7 +211,11 @@ mod tests {
             prompt: "repair",
         });
         assert_eq!(spec.args.first().map(String::as_str), Some("-v"));
-        assert!(!spec.args.iter().any(|arg| arg == "-w"));
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|pair| pair[0] == "-w" && pair[1] == "workspace")
+        );
         assert!(
             spec.args
                 .windows(2)

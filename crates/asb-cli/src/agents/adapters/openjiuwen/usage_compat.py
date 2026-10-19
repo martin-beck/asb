@@ -6,6 +6,7 @@ cumulative fields; it does not alter model requests or generated content.
 """
 import runpy
 import sys
+import json
 
 try:
     from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
@@ -37,5 +38,34 @@ def _add_with_usage(left, right):
 
 
 AssistantMessageChunk.__add__ = _add_with_usage
+
+# OpenJiuwen 0.1.19.post2 emits TraceSchema objects for trace events.  Its
+# stream-json renderer unconditionally reads ``chunk.index`` (which belongs to
+# OutputSchema), aborting after the first tool call.  Keep stream-json output
+# compatible by preserving the upstream shape while treating trace events as
+# unindexed.  This is deliberately scoped to the launched client process.
+try:
+    from openjiuwen.harness.cli.ui import runner as _runner
+except ImportError:
+    # The usage-only compatibility fixture does not ship the CLI UI module.
+    # The real pinned client does, so leave the stream renderer untouched in
+    # that narrow test environment.
+    _runner = None
+
+
+async def _output_stream_json_compat(stream):
+    async for chunk in stream:
+        payload = chunk.payload
+        line = {
+            "type": chunk.type,
+            "index": getattr(chunk, "index", None),
+            "payload": payload if isinstance(payload, (str, dict)) else str(payload),
+        }
+        _runner._write_terminal(json.dumps(line, ensure_ascii=False, default=str))
+        _runner._write_terminal("\n")
+
+
+if _runner is not None:
+    _runner._output_stream_json = _output_stream_json_compat
 sys.argv = sys.argv[1:]
 runpy.run_path(sys.argv[0], run_name="__main__")

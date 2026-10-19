@@ -112,17 +112,17 @@ impl measurements::Session {
         let stdout_path = self.dir.join("perf.stdout");
         let stdout = File::create(&stdout_path)
             .map_err(|e| format!("cannot create perf standard output: {e}"))?;
-        let target_pids = measurements::process_tree_pids(pid)
-            .into_iter()
-            .map(|value| value.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
+        // Attach to the runner root and inherit counters into every child.
+        // Unlike a one-time comma-separated PID snapshot, perf's inheritance
+        // follows helpers forked after attachment as well as descendants of
+        // those helpers, while remaining scoped to this benchmark tree.
+        let target_pid = pid.to_string();
         let child = match self
             .command("perf")
             // Keep perf data bounded enough for the offline flamegraph
             // renderer while retaining process-scoped call samples.
             .args(["record", "-g", "-F", "19", "--inherit", "-p"])
-            .arg(&target_pids)
+            .arg(&target_pid)
             .args(["-o"])
             .arg(&data)
             .stderr(Stdio::from(output))
@@ -168,7 +168,7 @@ impl measurements::Session {
                 "--inherit",
                 "-p",
             ])
-            .arg(&target_pids)
+            .arg(&target_pid)
             .stdout(Stdio::from(stat_stdout))
             .stderr(Stdio::from(stat_stderr))
             .spawn();
