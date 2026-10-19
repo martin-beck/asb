@@ -164,20 +164,30 @@ function normalizeCassetteBody(body) {
   if (typeof body !== "string") body = JSON.stringify(body);
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const normalized = (workspace ? body.replaceAll(workspace, "<asb-workspace>") : body)
+    .replace(/\/[^"\\\s]+\/workspace-concurrency-\d+/g, "<asb-workspace>")
     // Agent SDKs generate fresh message/session IDs for every invocation;
     // those identifiers are not provider semantics and must not prevent a
     // cassette recorded in one process from replaying in another.
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<asb-uuid>")
-    .replace(/\b1[0-9]{12,}\b/g, "<asb-timestamp>");
+    .replace(/\b1[0-9]{12,}\b/g, "<asb-timestamp>")
+    // Shell directory listings include filesystem mtimes. They are not
+    // provider input and naturally differ between record and replay.
+    .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{2}:\d{2}\b/g, "<asb-file-mtime>")
+    .replace(/\b20\d{2}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?\b/g, "<asb-file-mtime>");
   try {
     const sort = (value) => {
+      if (typeof value === "string") {
+        const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
+        const cleaned = value.replace(/\n?\.\.\/.*AGENTS\.md\n?/gm, "");
+        return hadParentGuidance ? cleaned.replace(/\n+$/g, "") : cleaned;
+      }
       if (Array.isArray(value)) return value.map(sort);
       if (value && typeof value === "object") {
         return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sort(value[key])]));
       }
       return value;
     };
-    return JSON.stringify(sort(JSON.parse(normalized)));
+    return JSON.stringify(sort(JSON.parse(normalized))).replace(/\.\.\/[^"\\]*AGENTS\.md(?:\\n)?/g, "");
   } catch {
     return normalized;
   }

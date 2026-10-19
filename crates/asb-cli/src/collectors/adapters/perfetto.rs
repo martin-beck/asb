@@ -1033,7 +1033,12 @@ mod marker_tests {
     #[test]
     fn trace_marker_capture_requires_actual_processor_evidence() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("asb-marker-capture-{}", std::process::id()));
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("asb-marker-capture-{}-{nonce}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let trace = root.join("trace");
         fs::write(&trace, "fixture").unwrap();
