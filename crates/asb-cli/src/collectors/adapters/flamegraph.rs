@@ -143,14 +143,20 @@ impl measurements::Session {
                 "install stackcollapse-perf.pl and flamegraph in the project tool directory",
             );
         };
-        let mut script = self
-            .command("perf")
-            .args(["script", "-i"])
-            .arg(data)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("cannot start perf script for flamegraph: {e}"))?;
+        // `perf record` may require sudo, but the resulting perf.data is
+        // pre-created and owned by the benchmark user.  Run post-processing
+        // without sudo so perf's ownership check accepts that file and the
+        // flamegraph never needs elevated privileges.
+        let mut script = Command::new(measurements::resolve_executable(
+            self.tool_dir.as_deref(),
+            "perf",
+        ))
+        .args(["script", "-i"])
+        .arg(data)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("cannot start perf script for flamegraph: {e}"))?;
         let script_stdout = script
             .stdout
             .take()
@@ -247,4 +253,22 @@ pub(crate) fn write_flamegraph_status(
             reason: (!reason.is_empty()).then_some(reason),
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::measurements::resolve_executable;
+
+    #[test]
+    fn flamegraph_postprocessing_resolves_project_perf_without_privilege_wrapper() {
+        let tools =
+            std::env::temp_dir().join(format!("asb-flamegraph-test-{}", std::process::id()));
+        std::fs::create_dir_all(tools.join("perf/bin")).expect("create tool directory");
+        std::fs::write(tools.join("perf/bin/perf"), b"fixture").expect("write tool fixture");
+        assert_eq!(
+            resolve_executable(Some(&tools), "perf"),
+            tools.join("perf/bin/perf")
+        );
+        let _ = std::fs::remove_dir_all(tools);
+    }
 }
