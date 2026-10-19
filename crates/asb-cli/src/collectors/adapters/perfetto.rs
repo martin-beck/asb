@@ -96,8 +96,19 @@ fn process(
     session: &mut measurements::Session,
     context: &ProcessContext<'_>,
 ) -> Result<ProcessData, String> {
-    session.verify_perfetto_marker_capture()?;
     let mut result = ProcessData::from_output(context);
+    if let Err(error) = session.verify_perfetto_marker_capture() {
+        // Tracebox can begin recording just after readiness on a fast agent.
+        // The trace still contains process_stats and can be scoped by process
+        // lifetime, so retain it and persist a bounded warning instead of
+        // aborting an otherwise successful benchmark.
+        session.state::<PerfettoState>().borrow_mut().marker_warning = Some(error);
+    } else {
+        session
+            .state::<PerfettoState>()
+            .borrow_mut()
+            .marker_verified = true;
+    }
     result.metrics = session.perfetto_trace_metrics();
     (result.series, result.timestamps) = session.perfetto_trace_series();
     let state = session.state::<PerfettoState>();
@@ -136,6 +147,8 @@ fn finish(session: &mut measurements::Session) -> Result<(), String> {
             "tracepoint_count": state.tracepoint_count,
             "trace_marker": state.trace_marker.as_ref().map(|path| path.display().to_string()),
             "trace": state.trace.as_ref().map(|path| measurements::file_name(path)),
+            "marker_verified": state.marker_verified,
+            "marker_warning": state.marker_warning,
         }),
     )?;
     write_perfetto_metric_svgs(
@@ -258,6 +271,8 @@ struct PerfettoState {
     pid: Option<u32>,
     trace_marker: Option<PathBuf>,
     trace_marker_output: Option<File>,
+    marker_verified: bool,
+    marker_warning: Option<String>,
     tracepoint_count: u64,
     metrics: BTreeMap<String, f64>,
 }
