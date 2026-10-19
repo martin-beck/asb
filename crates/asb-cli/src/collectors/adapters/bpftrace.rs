@@ -3,6 +3,7 @@ use super::super::{
 };
 use crate::measurements;
 use std::fmt::Write as _;
+use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
 pub(super) static ADAPTER: StaticCollector = StaticCollector::new(
@@ -63,7 +64,7 @@ fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
     }
     if custom {
         for (program, _) in custom_programs()? {
-            std::fs::File::open(&program).map_err(|error| {
+            fs::File::open(&program).map_err(|error| {
                 let quoted = format!("'{}'", program.replace('\'', "'\\''"));
                 if error.kind() == std::io::ErrorKind::PermissionDenied {
                     format!("cannot read bpftrace program {program}: {error}. Check parent-directory access; if you own the file, run `chmod u+r -- {quoted}` and retry.")
@@ -71,6 +72,7 @@ fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
                     format!("cannot read bpftrace program {program}: {error}. Check the configured path in `ASB_BPFTRACE_PROGRAMS` and retry.")
                 }
             })?;
+            validate_custom_program_scope(Path::new(&program))?;
         }
     }
     let executable = measurements::resolve_executable(context.tool_dir, "bpftrace");
@@ -130,7 +132,7 @@ fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
 use crate::collectors;
 use crate::measurements::{Collector, env_true, escape_svg, parse_float, write_unavailable};
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::File;
 use std::time::Instant;
 
 #[derive(Default)]
@@ -151,9 +153,15 @@ impl measurements::Session {
 
     fn start_bpftrace(&mut self, pid: u32) -> Result<(), String> {
         for (index, (program, params)) in custom_programs()?.into_iter().enumerate() {
+            let source = scoped_custom_program(Path::new(&program), pid)?;
             let mut command = self.command("bpftrace");
-            command.args(["-p", &pid.to_string()]);
-            command.arg(&program);
+            // Attach every process that already belongs to the tree.  The
+            // injected fork map keeps tracepoint programs scoped as helpers
+            // are created after this command starts.
+            for target in measurements::process_tree_pids(pid) {
+                command.args(["-p", &target.to_string()]);
+            }
+            command.args(["-e", &source]);
             for (key, value) in params {
                 command.args(["-D", &format!("{key}={value}")]);
             }
@@ -238,6 +246,41 @@ impl measurements::Session {
         }
         Ok(())
     }
+}
+
+const MAX_CUSTOM_PROGRAM: u64 = 256 * 1024;
+
+fn validate_custom_program_scope(path: &Path) -> Result<(), String> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        format!(
+            "cannot inspect bpftrace program {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.len() > MAX_CUSTOM_PROGRAM {
+        return Err(format!(
+            "bpftrace program {} is too large ({} bytes; limit {}); keep custom collectors bounded and retry",
+            path.display(),
+            metadata.len(),
+            MAX_CUSTOM_PROGRAM
+        ));
+    }
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read bpftrace program {}: {error}", path.display()))?;
+    if !source.contains("@asb_tree") {
+        return Err(format!(
+            "bpftrace program {} is not process-tree scoped; add predicates using `@asb_tree[pid]` (or the relevant tracepoint PID) so it cannot measure unrelated host processes",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn scoped_custom_program(path: &Path, root: u32) -> Result<String, String> {
+    validate_custom_program_scope(path)?;
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read bpftrace program {}: {error}", path.display()))?;
+    Ok(format!("{}\n{}", process_tree_prelude(root), source))
 }
 
 fn custom_programs() -> Result<Vec<(String, Vec<(String, String)>)>, String> {
@@ -453,7 +496,7 @@ fn profile_probe_program(profile: BpftraceProfile) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BPFTRACE_PROFILES, profile_probe_program};
+    use super::{BPFTRACE_PROFILES, profile_probe_program, validate_custom_program_scope};
 
     #[test]
     fn profile_preflight_uses_the_same_seeded_tree_program_as_runtime() {
@@ -469,6 +512,32 @@ mod tests {
         assert!(program.contains("interval:ms:1 { exit(); }"));
         assert!(!program.contains("@asb_tree[1] = 1;"));
         assert!(!program.contains("BEGIN { exit(); }"));
+    }
+
+    #[test]
+    fn custom_programs_must_declare_the_process_tree_predicate() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-bpftrace-scope-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &root,
+            "tracepoint:syscalls:sys_enter_openat { @host = count(); }\n",
+        )
+        .expect("write fixture");
+        let error = validate_custom_program_scope(&root).expect_err("host-wide program");
+        assert!(error.contains("process-tree scoped"));
+        std::fs::write(
+            &root,
+            "tracepoint:syscalls:sys_enter_openat /@asb_tree[pid]/ { @asb_open = count(); }\n",
+        )
+        .expect("write scoped fixture");
+        validate_custom_program_scope(&root).expect("scoped program");
+        std::fs::remove_file(root).expect("remove fixture");
     }
 }
 

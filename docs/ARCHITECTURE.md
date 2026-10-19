@@ -73,8 +73,11 @@ ASB is deliberately split into a small CLI and a file-backed workload directory:
   (task clock, context switches, migrations, faults, cycles, instructions) for
   the complete process tree with explicit child inheritance; pidstat uses
   `-T ALL` for the same tree. Built-in BPFTrace profiles seed and maintain a
-  process-tree map across forks, while custom programs receive the root PID and
-  must still keep their tracepoint predicates target-scoped;
+  process-tree map across forks. Custom BPFTrace programs are rejected unless
+  they use the injected `@asb_tree` predicate, receive every currently-live
+  tree PID, and inherit the same fork tracking; this fail-closed contract keeps
+  arbitrary tracepoint programs from measuring unrelated host processes while
+  still covering helpers created during the run;
   each adapter is isolated from the runner and can be extended without adding
   provider-specific fields to the benchmark configuration;
 - `workloads/`: one UTF-8 `.txt` prompt per workload name. Built-in supporting
