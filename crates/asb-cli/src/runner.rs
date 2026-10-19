@@ -506,7 +506,7 @@ fn run_mode(
         |adapter| adapter.process(&program),
     )?;
     project::apply_network_proxy(&mut command, config_path)?;
-    let target_args = specification.args.clone();
+    let mut target_args = specification.args.clone();
     command.args(specification.args);
     // Do not leak an enclosing Codex session into the benchmark agent. These
     // variables are host-runner integration state; if inherited, a project
@@ -528,7 +528,8 @@ fn run_mode(
         command.env_remove(variable);
     }
     if specification.append_prompt {
-        command.arg(prompt);
+        command.arg(&prompt);
+        target_args.push(prompt.clone());
     }
     command
         .current_dir(&workspace)
