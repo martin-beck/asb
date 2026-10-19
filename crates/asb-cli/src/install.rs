@@ -18,6 +18,19 @@ const GOOSE_AARCH64_URL: &str = "https://github.com/aaif-goose/goose/releases/do
 const GOOSE_AARCH64_SHA256: &str =
     "0f174b5118a53888cd4e65b7ca9a4b72dd0b887e89142c8ce41e2409205e40d5";
 
+// Some current agent packages declare an AWS SDK version whose registry
+// metadata exists but whose tarball is not published. Keep the repair in the
+// project-local npm manifest so installation remains deterministic and does
+// not alter the host npm configuration.
+const NPM_INSTALL_MANIFEST: &str = r#"{
+  "private": true,
+  "overrides": {
+    "@aws-sdk/client-bedrock-runtime": "3.1030.0",
+    "@aws-sdk/credential-provider-http": "3.972.76"
+  }
+}
+"#;
+
 pub(crate) trait LoggedStatus {
     fn logged_status(&mut self) -> io::Result<ExitStatus>;
 }
@@ -743,6 +756,12 @@ fn install_recipe(
         .map_err(|error| Error::Io(format!("cannot create {}: {error}", root.display())))?;
     let status = match recipe {
         Recipe::Npm { package, .. } => {
+            let manifest = root.join("package.json");
+            if !manifest.exists() {
+                fs::write(&manifest, NPM_INSTALL_MANIFEST).map_err(|error| {
+                    Error::Io(format!("cannot prepare npm install manifest: {error}"))
+                })?;
+            }
             progress(15, "installing npm package");
             Command::new("npm")
                 .args(["install", "--prefix"])
@@ -1133,6 +1152,20 @@ pub(crate) fn make_executable(path: &Path) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn npm_install_manifest_pins_published_aws_sdk_artifacts() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(NPM_INSTALL_MANIFEST).expect("valid npm manifest");
+        assert_eq!(
+            manifest["overrides"]["@aws-sdk/client-bedrock-runtime"],
+            "3.1030.0"
+        );
+        assert_eq!(
+            manifest["overrides"]["@aws-sdk/credential-provider-http"],
+            "3.972.76"
+        );
+    }
     use crate::tools::bpftrace::{
         bpftrace_host_commands, bpftrace_missing_dependency, bpftrace_source_commands,
     };
