@@ -67,5 +67,24 @@ async def _output_stream_json_compat(stream):
 
 if _runner is not None:
     _runner._output_stream_json = _output_stream_json_compat
+
+# ASB launches OpenJiuwen with stdin closed, so the upstream confirmation rail
+# otherwise stops a non-interactive benchmark at the first file edit.  The
+# benchmark workspace is an isolated checkout owned by ASB; auto-approve only
+# the two file mutation tools in this child process and retain all other
+# confirmation decisions from the upstream rail.
+try:
+    from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
+
+    _original_is_auto_confirmed = ConfirmInterruptRail._is_auto_confirmed
+
+    @staticmethod
+    def _is_auto_confirmed_for_benchmark(config, key):
+        return key in {"write_file", "edit_file"} or _original_is_auto_confirmed(config, key)
+
+    ConfirmInterruptRail._is_auto_confirmed = _is_auto_confirmed_for_benchmark
+except ImportError:
+    pass
+
 sys.argv = sys.argv[1:]
 runpy.run_path(sys.argv[0], run_name="__main__")

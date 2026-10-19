@@ -105,11 +105,7 @@ fn start(session: &mut Session) -> Result<(), String> {
         virtualization: Some(virtualization.0),
         container_runtime: virtualization.1,
         compiler_versions: command_versions([("rustc", "--version"), ("cargo", "--version")]),
-        runtime_versions: command_versions([
-            ("node", "--version"),
-            ("python3", "--version"),
-            ("asb", "--version"),
-        ]),
+        runtime_versions: runtime_versions(),
         collector_versions: collector_versions(session.tool_dir.as_deref()),
         kernel_settings: kernel_settings(),
     };
@@ -289,6 +285,21 @@ fn command_versions<const N: usize>(commands: [(&str, &str); N]) -> BTreeMap<Str
         .collect()
 }
 
+/// Return versions for runtimes used by the benchmark.
+///
+/// ASB is the process collecting this metadata, so resolving `asb` through
+/// PATH can report an unrelated installation when a project-local binary is
+/// being exercised.  Record the compiled package version instead; the other
+/// runtimes remain externally resolved as before.
+fn runtime_versions() -> BTreeMap<String, String> {
+    let mut versions = command_versions([("node", "--version"), ("python3", "--version")]);
+    versions.insert(
+        "asb".to_owned(),
+        format!("asb {}", env!("CARGO_PKG_VERSION")),
+    );
+    versions
+}
+
 fn command_version(name: &str, argument: &str) -> Option<String> {
     let output = Command::new(name)
         .arg(argument)
@@ -358,7 +369,8 @@ fn sanitize(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_virtualization, parse_cpu_set, parse_cpuinfo, parse_memory_total_kib, sanitize,
+        classify_virtualization, parse_cpu_set, parse_cpuinfo, parse_memory_total_kib,
+        runtime_versions, sanitize,
     };
 
     #[test]
@@ -409,5 +421,14 @@ mod tests {
         assert!(!value.contains('\n'));
         assert_eq!(value.len(), 128);
         assert_eq!(sanitize(" \n\t"), None);
+    }
+
+    #[test]
+    fn records_the_running_asb_package_version_not_a_path_binary() {
+        let versions = runtime_versions();
+        assert_eq!(
+            versions.get("asb").map(String::as_str),
+            Some(concat!("asb ", env!("CARGO_PKG_VERSION")))
+        );
     }
 }

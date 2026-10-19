@@ -47,7 +47,10 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const FLAMEGRAPH_TIMEOUT: Duration = Duration::from_secs(60);
+// Large concurrent agent traces can take several minutes to decode. Keep the
+// post-processing bounded, but do not discard valid samples merely because
+// `perf script` needs longer than the old one-minute limit.
+const FLAMEGRAPH_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn flamegraph_commands(
     tool_dir: Option<&Path>,
@@ -166,7 +169,7 @@ impl measurements::Session {
                 &self.dir,
                 "unavailable",
                 None,
-                "perf script exceeded the 60 second flamegraph deadline or failed",
+                "perf script timed out after 300 seconds or exited unsuccessfully; inspect perf.stderr",
             );
         }
         if !wait_bounded(&mut collapsed, FLAMEGRAPH_TIMEOUT)? {
@@ -174,7 +177,7 @@ impl measurements::Session {
                 &self.dir,
                 "unavailable",
                 None,
-                "the stack collapse script exceeded the 60 second flamegraph deadline or failed",
+                "the stack collapse script timed out after 300 seconds or exited unsuccessfully; inspect flamegraph.folded",
             );
         }
         let mut render = Command::new(render);
@@ -194,7 +197,7 @@ impl measurements::Session {
                 &self.dir,
                 "unavailable",
                 None,
-                "the flamegraph renderer exceeded the 60 second deadline or failed",
+                "the flamegraph renderer timed out after 300 seconds or exited unsuccessfully",
             );
         }
         write_flamegraph_status(&self.dir, "completed", Some("flamegraph.svg"), "")
