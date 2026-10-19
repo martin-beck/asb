@@ -3,6 +3,38 @@ use super::super::PreflightContext;
 use super::super::{ProcessContext, ProcessData, SharedArtifact};
 use crate::measurements;
 use std::process::{Command, Stdio};
+
+/// Build the process-scoped `perf record` arguments.  Attaching to the runner
+/// root with inheritance is deliberate: the root may fork a bridge, agent
+/// helper, or workload process after attachment, and each descendant must be
+/// included without sampling unrelated host processes.
+fn record_args(pid: u32) -> Vec<String> {
+    vec![
+        "record".into(),
+        "-g".into(),
+        "-F".into(),
+        "19".into(),
+        "--inherit".into(),
+        "-p".into(),
+        pid.to_string(),
+    ]
+}
+
+/// Build the process-scoped interval counter arguments with the same
+/// inheritance contract as call-stack recording.
+fn stat_args(pid: u32, interval_ms: u64) -> Vec<String> {
+    vec![
+        "stat".into(),
+        "-I".into(),
+        interval_ms.to_string(),
+        "-x,".into(),
+        "-e".into(),
+        "task-clock,context-switches,cpu-migrations,page-faults,cycles,instructions".into(),
+        "--inherit".into(),
+        "-p".into(),
+        pid.to_string(),
+    ]
+}
 pub(super) struct PerfCollector;
 pub(super) static ADAPTER: PerfCollector = PerfCollector;
 
@@ -148,13 +180,12 @@ impl measurements::Session {
         // Unlike a one-time comma-separated PID snapshot, perf's inheritance
         // follows helpers forked after attachment as well as descendants of
         // those helpers, while remaining scoped to this benchmark tree.
-        let target_pid = pid.to_string();
+        let record_args = record_args(pid);
         let child = match self
             .command("perf")
             // Keep perf data bounded enough for the offline flamegraph
             // renderer while retaining process-scoped call samples.
-            .args(["record", "-g", "-F", "19", "--inherit", "-p"])
-            .arg(&target_pid)
+            .args(&record_args)
             .args(["-o"])
             .arg(&data)
             .stderr(Stdio::from(output))
@@ -187,20 +218,10 @@ impl measurements::Session {
             .map_err(|e| format!("cannot create perf stat output: {e}"))?;
         let stat_stderr = File::create(&stat_stderr_path)
             .map_err(|e| format!("cannot create perf stat error output: {e}"))?;
-        let interval_ms = measurement_interval_ms().to_string();
+        let stat_args = stat_args(pid, measurement_interval_ms());
         let stat = self
             .command("perf")
-            .args([
-                "stat",
-                "-I",
-                &interval_ms,
-                "-x,",
-                "-e",
-                "task-clock,context-switches,cpu-migrations,page-faults,cycles,instructions",
-                "--inherit",
-                "-p",
-            ])
-            .arg(&target_pid)
+            .args(&stat_args)
             .stdout(Stdio::from(stat_stdout))
             .stderr(Stdio::from(stat_stderr))
             .spawn();
@@ -304,4 +325,35 @@ fn perf_metric_name(event: &str) -> Option<&'static str> {
 
 pub(crate) fn perf_permission_error() -> String {
     "perf was denied access to performance events. A restrictive kernel.perf_event_paranoid setting is one possible cause.\nWhat to do: if your administrator approves system-wide perf access, run:\n  sudo sysctl -w kernel.perf_event_paranoid=-1\nTo persist the setting across reboots:\n  printf 'kernel.perf_event_paranoid=-1\\n' | sudo tee /etc/sysctl.d/99-asb-perf.conf\nThis changes access for the whole host; containers, capabilities, security policy or other restrictions may still prevent tracing. ASB does not create sudoers rules for perf.".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{record_args, stat_args};
+
+    #[test]
+    fn perf_record_is_root_attached_and_inherits_all_descendants() {
+        assert_eq!(
+            record_args(42),
+            vec!["record", "-g", "-F", "19", "--inherit", "-p", "42"]
+        );
+    }
+
+    #[test]
+    fn perf_stat_uses_the_same_process_tree_scope() {
+        assert_eq!(
+            stat_args(42, 1000),
+            vec![
+                "stat",
+                "-I",
+                "1000",
+                "-x,",
+                "-e",
+                "task-clock,context-switches,cpu-migrations,page-faults,cycles,instructions",
+                "--inherit",
+                "-p",
+                "42"
+            ]
+        );
+    }
 }
