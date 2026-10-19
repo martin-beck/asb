@@ -506,7 +506,6 @@ fn run_mode(
         |adapter| adapter.process(&program),
     )?;
     project::apply_network_proxy(&mut command, config_path)?;
-    let mut target_args = specification.args.clone();
     command.args(specification.args);
     // Do not leak an enclosing Codex session into the benchmark agent. These
     // variables are host-runner integration state; if inherited, a project
@@ -529,7 +528,6 @@ fn run_mode(
     }
     if specification.append_prompt {
         command.arg(&prompt);
-        target_args.push(prompt.clone());
     }
     command
         .current_dir(&workspace)
@@ -598,10 +596,20 @@ fn run_mode(
         );
     }
     project::apply_python_path(&mut command, &project_root, Path::new(&program))?;
+    // The process gate must execute the fully prepared command, not the
+    // adapter's original executable. Some adapters (for example OpenJiuwen)
+    // install a process wrapper that carries compatibility and output fixes;
+    // bypassing it at the gate would silently undo those fixes while still
+    // appearing to attach collectors correctly.
+    let gate_program = command.get_program().to_string_lossy().into_owned();
+    let gate_args = command
+        .get_args()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
     let child = run_measured_agent(
         &mut command,
-        &program,
-        Some(&target_args),
+        &gate_program,
+        Some(&gate_args),
         measurement_session.as_mut(),
         show_output,
         output,
