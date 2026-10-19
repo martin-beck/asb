@@ -118,15 +118,29 @@ fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
         return Err("Perfetto is required for the selected collector. Run `asb tool install perfetto` and retry.".into());
     }
     let marker = checked_trace_marker_path()?;
-    open_trace_marker(&marker)?;
-    preflight_perfetto(context, &executable)
+    match probe_trace_marker_io(&marker) {
+        Ok(()) => preflight_perfetto(context, &executable),
+        Err(error) if marker_probe_allows_fallback(&marker, &error) => {
+            // Some container kernels expose trace_marker but reject writes
+            // with EBADF. Process-bounded trace collection remains valid;
+            // post-processing will use the process lifetime instead of ASB
+            // lifecycle markers.
+            preflight_perfetto(context, &executable)
+        }
+        Err(error) => Err(marker_access_error(&marker, &error)),
+    }
 }
 
 #[cfg(test)]
 fn preflight_with_marker(context: &mut PreflightContext<'_>, marker: &Path) -> Result<(), String> {
     let executable = measurements::resolve_executable(context.tool_dir, "perfetto");
-    open_trace_marker(marker)?;
-    preflight_perfetto(context, &executable)
+    match probe_trace_marker_io(marker) {
+        Ok(()) => preflight_perfetto(context, &executable),
+        Err(error) if marker_probe_allows_fallback(marker, &error) => {
+            preflight_perfetto(context, &executable)
+        }
+        Err(error) => Err(marker_access_error(marker, &error)),
+    }
 }
 
 fn preflight_perfetto(context: &mut PreflightContext<'_>, executable: &Path) -> Result<(), String> {
@@ -279,13 +293,33 @@ impl measurements::Session {
                     stderr_path,
                 });
                 // Register the child before validating the live marker, so
-                // Session's drop path stops it if validation fails.
-                validate_active_marker(&mut marker_output, marker, &self.trace_id)?;
+                // Session's drop path stops it if validation fails. A
+                // container tracefs instance may reject marker writes with
+                // EBADF even after readiness; retain the trace and use the
+                // scoped process lifetime in that case.
+                if tracing_status(marker) == Some(false) {
+                    return Err(format!(
+                        "Perfetto reported readiness, but tracing is off in {}. The benchmark was not started. Check the Perfetto collector logs and other tracing sessions; ASB will not change the host-wide tracing state.",
+                        marker
+                            .parent()
+                            .unwrap_or(marker)
+                            .join("tracing_on")
+                            .display()
+                    ));
+                }
+                let ready_marker =
+                    format!("I|{}|asb.trace.ready.{}", std::process::id(), self.trace_id);
+                let marker_output =
+                    match write_active_marker_io(&mut marker_output, marker, &ready_marker) {
+                        Ok(()) => Some(marker_output),
+                        Err(error) if marker_probe_allows_fallback(marker, &error) => None,
+                        Err(error) => return Err(marker_access_error(marker, &error)),
+                    };
                 let state = self.state::<PerfettoState>();
                 let mut state = state.borrow_mut();
                 state.trace = Some(trace);
-                state.trace_marker = Some(marker.to_path_buf());
-                state.trace_marker_output = Some(marker_output);
+                state.trace_marker = marker_output.as_ref().map(|_| marker.to_path_buf());
+                state.trace_marker_output = marker_output;
             }
             Err(error) if !env_true("ASB_MEASURE_PERFETTO") => write_unavailable(
                 &self.dir.join("perfetto.json"),
@@ -311,14 +345,33 @@ impl measurements::Session {
         let Some(output) = state.trace_marker_output.as_mut() else {
             return Ok(());
         };
-        write_active_marker(output, &path, event)?;
-        state.tracepoint_count = state.tracepoint_count.saturating_add(1);
-        Ok(())
+        match write_active_marker_io(output, &path, event) {
+            Ok(()) => {
+                state.tracepoint_count = state.tracepoint_count.saturating_add(1);
+                Ok(())
+            }
+            Err(error) if marker_probe_allows_fallback(&path, &error) => {
+                // A tracefs inode can become unusable after Perfetto starts
+                // (notably in containers where tracing_on is controlled by a
+                // different namespace). Keep the collector alive and let
+                // scoped process bounds provide the time window.
+                state.trace_marker = None;
+                state.trace_marker_output = None;
+                Ok(())
+            }
+            Err(error) => Err(marker_access_error(&path, &error)),
+        }
     }
 
     fn verify_perfetto_marker_capture(&mut self) -> Result<(), String> {
         let state = self.state::<PerfettoState>();
         let state = state.borrow();
+        if state.trace_marker_output.is_none() {
+            // Marker writes are optional on kernels that expose an unusable
+            // tracefs inode. The trace remains process-scoped and queries
+            // fall back to the recorded process lifetime.
+            return Ok(());
+        }
         let trace = state.trace.as_ref().ok_or_else(|| {
             "Perfetto did not produce a trace to verify lifecycle markers".to_owned()
         })?;
@@ -510,6 +563,15 @@ fn open_trace_marker(path: &Path) -> Result<File, String> {
         .map_err(|error| marker_access_error(path, &error))
 }
 
+fn probe_trace_marker_io(path: &Path) -> std::io::Result<()> {
+    let mut marker = OpenOptions::new().write(true).open(path)?;
+    write!(marker, "I|{}|asb.preflight", std::process::id())
+}
+
+fn marker_probe_allows_fallback(path: &Path, error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(9) && path.starts_with("/sys/kernel/")
+}
+
 fn tracing_status(path: &Path) -> Option<bool> {
     let value = fs::read_to_string(path.parent()?.join("tracing_on")).ok()?;
     match value.trim() {
@@ -519,6 +581,7 @@ fn tracing_status(path: &Path) -> Option<bool> {
     }
 }
 
+#[cfg(test)]
 fn validate_active_marker(
     output: &mut impl Write,
     path: &Path,
@@ -534,8 +597,9 @@ fn validate_active_marker(
     write_active_marker(output, path, &marker)
 }
 
+#[cfg(test)]
 fn write_active_marker(output: &mut impl Write, path: &Path, event: &str) -> Result<(), String> {
-    output.write_all(event.as_bytes()).map_err(|error| {
+    write_active_marker_io(output, path, event).map_err(|error| {
         if error.raw_os_error() == Some(9) {
             let state = match tracing_status(path) {
                 Some(true) => "on",
@@ -547,6 +611,14 @@ fn write_active_marker(output: &mut impl Write, path: &Path, event: &str) -> Res
             marker_access_error(path, &error)
         }
     })
+}
+
+fn write_active_marker_io(
+    output: &mut impl Write,
+    _path: &Path,
+    event: &str,
+) -> std::io::Result<()> {
+    output.write_all(event.as_bytes())
 }
 
 fn verify_trace_marker_capture(
@@ -789,6 +861,19 @@ mod marker_tests {
         let error = marker_access_error(Path::new("/dev/full"), &std::io::Error::other("full"));
         assert!(error.contains("check the tracefs mount"));
         assert!(!error.contains("systemd-tmpfiles"));
+    }
+
+    #[test]
+    fn ebadf_tracefs_marker_uses_process_bounds_fallback() {
+        let path = Path::new("/sys/kernel/tracing/trace_marker");
+        assert!(marker_probe_allows_fallback(
+            path,
+            &std::io::Error::from_raw_os_error(9)
+        ));
+        assert!(!marker_probe_allows_fallback(
+            path,
+            &std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        ));
     }
 
     #[test]
