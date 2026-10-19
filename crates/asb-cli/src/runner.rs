@@ -232,7 +232,18 @@ fn replica_cassette(mode: tape::Mode, base: &Path, index: usize) -> PathBuf {
     if mode == tape::Mode::Replay && base.is_file() {
         base.to_path_buf()
     } else {
-        append_path_suffix(base, index)
+        let candidate = append_path_suffix(base, index);
+        if mode != tape::Mode::Replay || candidate.is_file() {
+            return candidate;
+        }
+        // Sweep replay may intentionally use a larger concurrency than the
+        // recording. Reuse an existing replica recording rather than waiting
+        // forever for a cassette that can never be produced. Keep the
+        // requested path as the fail-closed fallback when no recording exists.
+        (1..=32)
+            .map(|recorded| append_path_suffix(base, recorded))
+            .find(|path| path.is_file())
+            .unwrap_or(candidate)
     }
 }
 
@@ -1625,6 +1636,13 @@ mod tests {
                 base
             );
         }
+        std::fs::remove_file(&base).unwrap();
+        let recorded_replica = root.join("record-concurrency-2.jsonl");
+        std::fs::write(&recorded_replica, "test").unwrap();
+        assert_eq!(
+            replica_cassette(crate::tape::Mode::Replay, &base, 3),
+            recorded_replica
+        );
         assert_eq!(
             replica_cassette(crate::tape::Mode::Record, &base, 8),
             root.join("record-concurrency-8.jsonl")
