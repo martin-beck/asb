@@ -21,6 +21,8 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
         program: "opencode".into(),
         args: vec![
             "run".into(),
+            "--dir".into(),
+            context.config.workspace.clone(),
             "--model".into(),
             model,
             "--format".into(),

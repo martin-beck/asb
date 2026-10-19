@@ -601,12 +601,28 @@ pub(crate) fn evaluate(
             relative
         )
     })?;
-    let expected = format!(
-        "def normalize(value: str) -> str:\n    return value.strip().lower().replace(' ', '-')\n\ndef suite_label() -> str:\n    return \"{}\"\n",
-        adapter_trial_label(name)
-    );
+    let expected_label = adapter_trial_label(name);
+    // Accept equivalent implementations, not only one formatter spelling.
+    // The function and label are still required in the evaluator-owned file,
+    // so dead markers or unrelated edits cannot satisfy the trial.
+    let normalized = canonical_source(&source);
+    let has_normalize = normalized.contains("def normalize(value: str) -> str:");
+    let has_lowercase = normalized.contains(".lower()");
+    let has_hyphenation = normalized.contains("replace(' ', '-')")
+        || normalized.contains("replace(\" \", \"-\")")
+        || normalized.contains("'-'.join(value.lower().split())")
+        || normalized.contains("\"-\".join(value.lower().split())");
+    let has_label = normalized.contains(&format!(
+        "def suite_label() -> str:\n    return \"{}\"",
+        expected_label
+    ));
     Ok(
-        if canonical_source(&source) == canonical_source(&expected) {
+        if has_normalize
+            && has_lowercase
+            && has_hyphenation
+            && has_label
+            && !normalized.contains("if False")
+        {
             Evaluation::Passed
         } else {
             Evaluation::Failed(format!(

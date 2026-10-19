@@ -16,7 +16,10 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             "run".into(),
             "--no-session".into(),
             "--max-turns".into(),
-            "1".into(),
+            // A single turn cannot complete even the bundled fixture: Goose
+            // needs one turn to inspect and another to edit/test. Keep the
+            // bound finite while allowing a normal agent trajectory.
+            "16".into(),
             "--output-format".into(),
             "json".into(),
             "-t".into(),
@@ -131,5 +134,34 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn bounded_turn_budget_allows_inspect_edit_and_test() {
+        let config = crate::benchmark::BenchmarkConfig {
+            agent: "goose".into(),
+            workload: "bug-fix".into(),
+            provider: "cli2key".into(),
+            model: "test-model".into(),
+            concurrency: 1,
+            trial_set: None,
+            trial: None,
+            workspace: "workspace".into(),
+            log_file: "run.log".into(),
+            measurements: None,
+        };
+        let spec = command(&CommandContext {
+            config: &config,
+            endpoint: Some("http://127.0.0.1:3000/v1"),
+            interface: Some(crate::endpoint::Interface::OpenAiChat),
+            prompt: "repair",
+        });
+        assert_eq!(
+            spec.args
+                .windows(2)
+                .find(|pair| pair[0] == "--max-turns")
+                .map(|pair| pair[1].as_str()),
+            Some("16")
+        );
     }
 }

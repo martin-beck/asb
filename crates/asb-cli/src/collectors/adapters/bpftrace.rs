@@ -553,6 +553,11 @@ pub(crate) fn parse_bpftrace_metrics(profile: &str, output: &str) -> BTreeMap<St
         let Some(name) = name.trim().strip_prefix("@asb_") else {
             continue;
         };
+        // @asb_tree is the internal PID membership map used to keep forked
+        // helpers in scope. It is control state, never a benchmark metric.
+        if name == "tree" || name.starts_with("tree[") {
+            continue;
+        }
         let Some(value) = parse_float(value) else {
             continue;
         };
@@ -570,6 +575,9 @@ pub(crate) fn parse_bpftrace_series(profile: &str, output: &str) -> BTreeMap<Str
         let Some(name) = name.trim().strip_prefix("@asb_") else {
             continue;
         };
+        if name == "tree" || name.starts_with("tree[") {
+            continue;
+        }
         let Some(value) = parse_float(value) else {
             continue;
         };

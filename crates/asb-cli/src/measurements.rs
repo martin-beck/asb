@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -93,6 +93,100 @@ struct ProcessSampler {
     stop: Arc<AtomicBool>,
     accounting: Arc<Mutex<ProcessAccounting>>,
     handle: Option<std::thread::JoinHandle<()>>,
+}
+
+/// A pidstat-compatible process-tree sampler.  pidstat's long-running
+/// `-p <root>` mode only follows the named process, not helpers forked after
+/// it starts.  Re-running a bounded sample with the complete live descendant
+/// set keeps CPU and I/O measurements scoped to the benchmark while including
+/// bridge and tool processes created later.
+struct ProcessTreeSnapshot {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ProcessTreeSnapshot {
+    fn start(
+        root: u32,
+        executable: PathBuf,
+        args: Vec<String>,
+        stdout_path: PathBuf,
+        stderr_path: PathBuf,
+    ) -> Option<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = std::thread::Builder::new()
+            .name("asb-process-tree-snapshot".into())
+            .spawn(move || {
+                while !thread_stop.load(Ordering::Relaxed) {
+                    let pids = process_tree_pids(root)
+                        .into_iter()
+                        .map(|pid| pid.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    if pids.is_empty() {
+                        break;
+                    }
+                    let mut sample_args = args.clone();
+                    if let Some(index) = sample_args.iter().position(|arg| arg == "-p")
+                        && let Some(value) = sample_args.get_mut(index + 1)
+                    {
+                        *value = pids;
+                    }
+                    // One bounded sample avoids leaving an untracked pidstat
+                    // process behind when the agent exits.
+                    sample_args.push("1".into());
+                    match Command::new(&executable).args(&sample_args).output() {
+                        Ok(output) => {
+                            if let Ok(mut file) = OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&stdout_path)
+                            {
+                                use std::io::Write;
+                                let _ = file.write_all(&output.stdout);
+                            }
+                            if let Ok(mut file) = OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&stderr_path)
+                            {
+                                use std::io::Write;
+                                let _ = file.write_all(&output.stderr);
+                            }
+                        }
+                        Err(error) => {
+                            if let Ok(mut file) = OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&stderr_path)
+                            {
+                                use std::io::Write;
+                                let _ =
+                                    writeln!(file, "process-tree pidstat sample failed: {error}");
+                            }
+                        }
+                    }
+                    let interval = measurement_interval_ms();
+                    let deadline = Instant::now() + Duration::from_millis(interval);
+                    while !thread_stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self {
+            stop,
+            handle: Some(handle),
+        })
+    }
+
+    fn stop(mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl ProcessSampler {
@@ -244,6 +338,7 @@ pub struct Session {
     component_starts: BTreeMap<String, Instant>,
     component_timings: BTreeMap<String, ComponentTiming>,
     process_sampler: Option<ProcessSampler>,
+    process_tree_snapshots: Vec<ProcessTreeSnapshot>,
     clock_ticks_per_second: Option<u64>,
 }
 
@@ -262,6 +357,7 @@ impl Drop for Session {
                 collector.adapter.graceful_shutdown(&collector.name),
             );
         }
+        self.stop_process_tree_snapshots();
         self.stop_process_sampler();
         if self.run_started {
             let _ = write_json(&self.dir.join("lifecycle.json"), &self.lifecycle);
@@ -320,6 +416,7 @@ impl Session {
             component_starts: BTreeMap::new(),
             component_timings: BTreeMap::new(),
             process_sampler: None,
+            process_tree_snapshots: Vec::new(),
             clock_ticks_per_second: clock_ticks_per_second(),
         };
         for collector in collectors::all() {
@@ -466,6 +563,7 @@ impl Session {
 
     /// Finish collectors and write the run record and aggregate summary.
     pub fn finish<'a>(mut self, measurement: RunMeasurement<'a>) -> Result<(), String> {
+        self.stop_process_tree_snapshots();
         self.stop_process_sampler();
         let collectors = std::mem::take(&mut self.collectors);
         for mut collector in collectors {
@@ -535,6 +633,42 @@ impl Session {
         }
         let stdout_path = self.dir.join(format!("{name}.stdout"));
         let stderr_path = self.dir.join(format!("{name}.stderr"));
+        if matches!(name, "mpstat" | "iostat")
+            && let Some(pid) = args
+                .iter()
+                .position(|arg| *arg == "-p")
+                .and_then(|index| args.get(index + 1))
+                .and_then(|value| value.parse::<u32>().ok())
+        {
+            let executable = executable.to_path_buf();
+            let sampler_args = args.iter().map(|arg| (*arg).to_owned()).collect();
+            let sampler = ProcessTreeSnapshot::start(
+                pid,
+                executable,
+                sampler_args,
+                stdout_path.clone(),
+                stderr_path.clone(),
+            )
+            .ok_or_else(|| format!("cannot start {name} process-tree sampler"))?;
+            self.process_tree_snapshots.push(sampler);
+            // Keep a bounded placeholder child so the existing collector
+            // lifecycle and result processing remain unchanged.
+            let child = Command::new("sleep")
+                .arg("86400")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|error| format!("cannot create {name} collector lifecycle: {error}"))?;
+            self.collectors.push(Collector {
+                name: name.into(),
+                adapter: collectors::find(name).expect("registered collector"),
+                child,
+                started: Instant::now(),
+                stdout_path,
+                stderr_path,
+            });
+            return Ok(());
+        }
         let child = match Command::new(executable)
             .args(args)
             .stdout(Stdio::from(
@@ -595,6 +729,12 @@ impl Session {
             }
         }
         PathBuf::from(tool_binary_name(name))
+    }
+
+    fn stop_process_tree_snapshots(&mut self) {
+        for sampler in std::mem::take(&mut self.process_tree_snapshots) {
+            sampler.stop();
+        }
     }
 }
 
@@ -1565,7 +1705,7 @@ mod tests {
         );
         let metrics = parse_bpftrace_metrics(
             "sched-latency",
-            "@asb_wakeup_latency_events: 7\n@asb_wakeup_latency_total_ns: 420\n@other: 99\n",
+            "@asb_tree[123]: 1\n@asb_wakeup_latency_events: 7\n@asb_wakeup_latency_total_ns: 420\n@other: 99\n",
         );
         assert_eq!(metrics["bpftrace.sched-latency.wakeup_latency_events"], 7.0);
         assert_eq!(

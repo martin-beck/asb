@@ -628,12 +628,16 @@ fn run_mode(
     // transient failed command that the agent repairs before its final answer;
     // scanning that whole transcript would incorrectly fail the run.
     let final_response = agents::final_response(&config.agent, &bounded(&child.stdout), &workspace);
-    let agent_failure = process_failure_reason(
-        &child.status,
-        &child.stdout,
-        &child.stderr,
-        final_response.as_deref(),
-    );
+    let agent_failure = if config.agent == "openjiuwen" && final_response.is_none() {
+        Some("OpenJiuwen exited without a final response; the last event appears to be an unexecuted tool call. Retry with a compatible OpenJiuwen client or inspect the benchmark log.".into())
+    } else {
+        process_failure_reason(
+            &child.status,
+            &child.stdout,
+            &child.stderr,
+            final_response.as_deref(),
+        )
+    };
     let process_success = agent_failure.is_none();
     let (workload_success, grading_failure) = if process_success && run_error.is_none() {
         match instrument_operation(
@@ -1979,6 +1983,12 @@ mod tests {
             command.args.windows(2).any(|pair| {
                 pair == ["--model".to_owned(), "asb/mimo-v2.6-flash-free".to_owned()]
             })
+        );
+        assert!(
+            command
+                .args
+                .windows(2)
+                .any(|pair| { pair == ["--dir".to_owned(), "workspace".to_owned()] })
         );
     }
 
