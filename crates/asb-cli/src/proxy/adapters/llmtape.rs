@@ -510,10 +510,10 @@ mod tests {
             &cassette,
             None,
             false,
-            Path::new("replay-sweep-results/000-record/workspace-concurrency-1"),
+            Path::new("replay-sweep-results/000-record/workspace-concurrency-1.asb-agent-runtime"),
         )
         .unwrap();
-        let replay = r#"{"model":"m","messages":[{"content":"work in replay-sweep-results/000-record/workspace-concurrency-1"}],"tools":[{"type":"function"}]}"#;
+        let replay = r#"{"model":"m","messages":[{"content":"work in replay-sweep-results/000-record/workspace-concurrency-1.asb-agent-runtime"}],"tools":[{"type":"function"}]}"#;
         assert!(request(&session, replay).contains("200 OK"));
         session.stop().unwrap();
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
