@@ -165,7 +165,10 @@ function normalizeCassetteBody(body) {
   if (typeof body !== "string") body = JSON.stringify(body);
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const normalized = (workspace ? body.replaceAll(workspace, "<asb-workspace>") : body)
-    .replace(/\/[^"\\\s]+\/workspace-concurrency-\d+/g, "<asb-workspace>")
+    // Sweep isolation may serialize either an absolute or a relative result
+    // path. Normalize the whole path so the result-root prefix cannot leak
+    // into replay keys (for example replay-sweep-results/.../workspace-*).
+    .replace(/\/?(?:[A-Za-z0-9_.-]+\/)+workspace-concurrency-\d+/g, "<asb-workspace>")
     // Agent SDKs generate fresh message/session IDs for every invocation;
     // those identifiers are not provider semantics and must not prevent a
     // cassette recorded in one process from replaying in another.
