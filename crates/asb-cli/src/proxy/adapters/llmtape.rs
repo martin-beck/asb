@@ -127,8 +127,14 @@ impl ProxyAdapter for LlmtapeAdapter {
                 }
             }
         }
+        // Agents may serialize either the configured relative workspace or
+        // the absolute path used by their process runner.  Give the tape
+        // normalizer the canonical form so record/replay keys remain stable
+        // when their result roots differ.
+        let tape_workspace =
+            std::fs::canonicalize(&request.workspace).unwrap_or_else(|_| request.workspace.clone());
         command
-            .env("ASB_TAPE_WORKSPACE", &request.workspace)
+            .env("ASB_TAPE_WORKSPACE", tape_workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

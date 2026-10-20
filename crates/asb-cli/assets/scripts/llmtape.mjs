@@ -77,7 +77,13 @@ function responseHeaders(headers) {
 // the complete cassette body as one write can make those clients finish the
 // turn before their tool dispatcher observes the event sequence.
 async function replayResponse(response, interaction) {
-  const body = interaction.response.body || "";
+  // Provider responses can contain agent tool-call arguments with the
+  // recording workspace path. Materialize the current run's canonical path
+  // before replay so agents never execute commands in the record directory.
+  const workspace = process.env.ASB_TAPE_WORKSPACE;
+  const body = workspace
+    ? normalizeCassetteBody(interaction.response.body || "").replaceAll("<asb-workspace>", workspace)
+    : interaction.response.body || "";
   const contentType = Object.entries(interaction.response.headers || {})
     .find(([name]) => name.toLowerCase() === "content-type")?.[1] || "";
   response.writeHead(interaction.response.status, interaction.response.headers || {});
@@ -169,6 +175,9 @@ function normalizeCassetteBody(body) {
     // path. Normalize the whole path so the result-root prefix cannot leak
     // into replay keys (for example replay-sweep-results/.../workspace-*).
     .replace(/\/?(?:[A-Za-z0-9_.-]+\/)+workspace-concurrency-\d+(?:\.asb-agent-runtime)?/g, "<asb-workspace>")
+    // Older recordings may contain an absolute result-root/workspace path
+    // rather than the normalized marker. Canonicalize that form as well.
+    .replace(/\/?(?:[A-Za-z0-9_.-]+\/)+workspace(?=\/|["\\])/g, "<asb-workspace>")
     // Agent SDKs generate fresh message/session IDs for every invocation;
     // those identifiers are not provider semantics and must not prevent a
     // cassette recorded in one process from replaying in another.
@@ -240,6 +249,9 @@ const interactions = mode === "replay"
         if (interaction.request) {
           interaction.request.url = requestPath(interaction.request.url);
           interaction.request.body = normalizeCassetteBody(interaction.request.body);
+        }
+        if (interaction.response?.body) {
+          interaction.response.body = normalizeCassetteBody(interaction.response.body);
         }
         return interaction;
       })
@@ -359,7 +371,7 @@ async function handle(request, response) {
   const recordedResponse = {
     status: upstreamResponse.status,
     headers: responseHeaders(upstreamResponse.headers),
-    body: responseBody,
+    body: normalizeCassetteBody(responseBody),
   };
   const delayMs = Math.min(Math.max(0, Math.round(performance.now() - startedAt)), MAX_DELAY_MS);
   appendFileSync(cassette, `${JSON.stringify({ request: recordedRequest, response: recordedResponse, delay_ms: delayMs })}\n`);
