@@ -173,13 +173,32 @@ function normalizeCassetteBody(body) {
     // Shell directory listings include filesystem mtimes. They are not
     // provider input and naturally differ between record and replay.
     .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{2}:\d{2}\b/g, "<asb-file-mtime>")
-    .replace(/\b20\d{2}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?\b/g, "<asb-file-mtime>");
+    .replace(/\b20\d{2}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?\b/g, "<asb-file-mtime>")
+    // Codex includes a diagnostic token count in shell-tool output. It is
+    // derived from the rendered transcript and can change during replay; it
+    // is not provider request semantics.
+    .replace(/Original token count: \d+/g, "Original token count: <asb-token-count>");
   try {
     const sort = (value) => {
       if (typeof value === "string") {
         const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
         const cleaned = value.replace(/\n?\.\.\/.*AGENTS\.md\n?/gm, "");
-        return hadParentGuidance ? cleaned.replace(/\n+$/g, "") : cleaned;
+        const withoutGuidance = hadParentGuidance ? cleaned.replace(/\n+$/g, "") : cleaned;
+        if (withoutGuidance.includes("Output:\n")) {
+          return withoutGuidance.replace(/(Output:\n)([\s\S]*?)(?=\nfatal:|$)/g, (match, prefix, listing) => {
+            const marker = "<asb-workspace>\n";
+            const markerIndex = listing.indexOf(marker);
+            if (markerIndex >= 0) {
+              const header = listing.slice(0, markerIndex);
+              const lines = listing.slice(markerIndex + marker.length).split("\n");
+              if (lines.every((line) => line === "" || line.startsWith("external-workload/"))) {
+                return prefix + header + marker + "<asb-workspace-listing>\n";
+              }
+            }
+            return match;
+          });
+        }
+        return withoutGuidance;
       }
       if (Array.isArray(value)) return value.map(sort);
       if (value && typeof value === "object") {

@@ -178,6 +178,10 @@ function normalizeCassetteBody(body) {
     // provider input and naturally differ between record and replay.
     .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{2}:\d{2}\b/g, "<asb-file-mtime>")
     .replace(/\b20\d{2}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?\b/g, "<asb-file-mtime>")
+    // Codex includes a diagnostic token count in shell-tool output. It is
+    // derived from the rendered transcript and can change during replay; it
+    // is not provider request semantics.
+    .replace(/Original token count: \d+/g, "Original token count: <asb-token-count>")
     .replace(/Chunk ID: [0-9a-f]+/gi, "Chunk ID: <asb-chunk>");
   try {
     const sort = (value, key = "", path = []) => {
@@ -193,11 +197,16 @@ function normalizeCassetteBody(body) {
         const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
         const cleaned = value.replace(/\n?\.\.\/.*AGENTS\.md\n?/gm, "");
         const withoutGuidance = hadParentGuidance ? cleaned.replace(/\n+$/g, "") : cleaned;
-        if (key === "output" && withoutGuidance.includes("Output:\n")) {
+        if (withoutGuidance.includes("Output:\n")) {
           return withoutGuidance.replace(/(Output:\n)([\s\S]*?)(?=\nfatal:|$)/g, (match, prefix, listing) => {
-            const lines = listing.split("\n");
-            if (lines.every((line) => line === "" || line === "<asb-workspace>" || line.startsWith("external-workload/"))) {
-              return prefix + lines.sort().join("\n");
+            const marker = "<asb-workspace>\n";
+            const markerIndex = listing.indexOf(marker);
+            if (markerIndex >= 0) {
+              const header = listing.slice(0, markerIndex);
+              const lines = listing.slice(markerIndex + marker.length).split("\n");
+              if (lines.every((line) => line === "" || line.startsWith("external-workload/"))) {
+                return prefix + header + marker + "<asb-workspace-listing>\n";
+              }
             }
             return match;
           });
