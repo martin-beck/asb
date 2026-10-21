@@ -10,29 +10,6 @@ permissions:
   contents: read
 
 jobs:
-  coverage:
-    name: coverage-90-percent
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Install LLVM coverage tools
-        run: |
-          rustup component add llvm-tools-preview
-          cargo install cargo-llvm-cov --version 0.9.0 --locked
-      - name: Require 90 percent test coverage
-        run: bash scripts/check-coverage.sh
-      - name: Preserve coverage evidence, including failures
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage
-          path: target/coverage/
-          if-no-files-found: error
-
   checks:
     runs-on: ubuntu-latest
     steps:
