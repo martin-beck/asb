@@ -7,3 +7,8 @@
 /.make/
 __pycache__/
 *.py[cod]
+# Auto-generated diagrams and interactive renderings. Regenerate with make uml,
+# make flows, or make interactive when needed; do not commit derived output.
+/docs/asb-dataflow.*
+/docs/asb-control-flow.*
+/docs/asb-type-diagram.*

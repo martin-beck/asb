@@ -1,8 +1,9 @@
 # Architecture
 
-The maintained overview below explains ASB's runtime boundaries. It is
-supplemented—not replaced—by the generated [Rust type diagram](asb-type-diagram.mmd)
-and its [SVG rendering](asb-type-diagram.svg). Regenerate both with `make uml`.
+The maintained overview below explains ASB's runtime boundaries. It can be
+supplemented—not replaced—by generated Rust type, dataflow, and control-flow
+diagrams. Generate them locally with `make uml`, `make flows`, or
+`make interactive`; the derived files are intentionally not tracked.
 Private implementation items are documented by `make rust-doc` under `target/doc/`.
 
 ASB is deliberately split into a small CLI and a file-backed workload directory:
