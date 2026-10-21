@@ -834,6 +834,10 @@ impl Drop for Session {
 }
 
 #[cfg(test)]
+#[path = "remote/coverage_tests.rs"]
+mod coverage_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
