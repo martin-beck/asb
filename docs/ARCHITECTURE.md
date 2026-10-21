@@ -596,6 +596,12 @@ an explicit end event stops execution accounting before metadata transfer and
 official grading. Perfetto resolves the numeric PID to one process lifetime
 alive at the start marker; ambiguous PID generations leave metrics unavailable
 with a scope warning instead of silently mixing processes or inventing zeros.
+Remote sessions separate installation preparation from protocol execution with
+private typed prepared-bootstrap data. Production always constructs this data
+through runtime validation and checksum-pinned prefetch; protocol-only unit
+fixtures cannot enable a production preparation bypass. Dispatch, bounded event
+receipt, measured-target resume and completion decoding remain separate phases
+inside the same failure/cancellation envelope.
 Failed preparation/execution cancels the controller through EOF and drains its
 bounded protocol until cleanup acknowledgement and child exit, retaining the
 original error and any cleanup failure. Normal completion still requires a

@@ -105,6 +105,18 @@ pub(crate) struct GuestBootstrap {
     public_package_cache: bool,
 }
 
+#[cfg(test)]
+impl GuestBootstrap {
+    /// A protocol fixture is not qualification of a client/runtime installation.
+    pub(crate) fn fixture_empty() -> Self {
+        Self {
+            runtime_tools: Vec::new(),
+            assets: Vec::new(),
+            public_package_cache: false,
+        }
+    }
+}
+
 /// Prefetch primary-source artifacts on the host, not via a task image's curl.
 /// The owning recipes still perform extraction/package installation in guest.
 pub(crate) fn guest_bootstrap(

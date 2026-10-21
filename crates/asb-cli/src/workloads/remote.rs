@@ -9,6 +9,16 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+const CANCELLATION_TIMEOUT: Duration = Duration::from_secs(240);
+const AGENT_TRANSPORT_ALLOWANCE: Duration = Duration::from_secs(1820);
+const EVALUATION_TIMEOUT_SECONDS: u64 = 1800;
+const EVALUATION_PROTOCOL_ALLOWANCE: Duration = Duration::from_secs(30);
+const INSPECTION_TIMEOUT: Duration = Duration::from_secs(60);
+const RETAINED_GRADING_TIMEOUT: Duration = Duration::from_secs(1980);
+const RECOVERY_TIMEOUT: Duration = Duration::from_secs(180);
+const WORKLOAD_READY_TIMEOUT: Duration = Duration::from_secs(900);
+const DEFAULT_AGENT_TIMEOUT_SECONDS: f64 = 900.0;
+
 /// Project paths/proxies cross the workload boundary, host capabilities do not.
 fn guest_project_configuration(project: &crate::project::ProjectConfig) -> Result<String, String> {
     #[derive(serde::Serialize)]
@@ -56,7 +66,7 @@ pub(crate) fn verify_retained(
     controller
         .send(&json!({"reference":recovery.reference,"summary":context.summary}))
         .map_err(crate::Error::Run)?;
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + INSPECTION_TIMEOUT;
     let result = controller.receive(deadline).map_err(crate::Error::Run)?;
     if result["ok"] != true
         || result["scope"] != "retained-artifact-consistency-not-historical-attestation"
@@ -125,8 +135,12 @@ fn retained_grade_request(
     controller
         .send(&json!({"reference":context.reference,"catalog":grading_catalog}))
         .map_err(crate::Error::Run)?;
-    let deadline =
-        Instant::now() + Duration::from_secs(if grading_catalog.is_some() { 1980 } else { 60 });
+    let deadline = Instant::now()
+        + if grading_catalog.is_some() {
+            RETAINED_GRADING_TIMEOUT
+        } else {
+            INSPECTION_TIMEOUT
+        };
     let report = controller.receive(deadline).map_err(crate::Error::Run)?;
     if report["ok"] == false {
         let error_class = report["error_class"]
@@ -338,7 +352,7 @@ pub(crate) fn recover(
         .stderr(std::process::Stdio::null());
     crate::project::apply_network_proxy(&mut command, context.project_root)?;
     let mut controller = Controller::spawn(&mut command).map_err(crate::Error::Run)?;
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + RECOVERY_TIMEOUT;
     let report = controller.receive(deadline).map_err(crate::Error::Run)?;
     if report["ok"] == false {
         let reason = if report["error_class"] == "RecoveryError" {
@@ -469,7 +483,7 @@ pub(crate) fn launch(
         .map_err(|error| error.to_string())?;
     let mut controller = Controller::spawn(&mut command)?;
     let prepared = (|| -> Result<_, String> {
-        let ready = controller.receive(Instant::now() + Duration::from_secs(900))?;
+        let ready = controller.receive(Instant::now() + WORKLOAD_READY_TIMEOUT)?;
         if ready["event"] != "ready" {
             return Err("official task did not become ready".into());
         }
@@ -500,7 +514,7 @@ pub(crate) fn launch(
         let agent_timeout = invocation
             .get("agent_timeout_seconds")
             .and_then(Value::as_f64)
-            .unwrap_or(900.0);
+            .unwrap_or(DEFAULT_AGENT_TIMEOUT_SECONDS);
         if !agent_timeout.is_finite() || !(0.001..=86400.0).contains(&agent_timeout) {
             return Err("official task returned an invalid agent time budget".into());
         }
@@ -509,7 +523,7 @@ pub(crate) fn launch(
     let (identity, prompt, guest_workspace, baseline, agent_timeout) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
-            return Err(match controller.cancel(Duration::from_secs(240)) {
+            return Err(match controller.cancel(CANCELLATION_TIMEOUT) {
                 Ok(()) => error,
                 Err(cleanup) => format!("{error}; workload cancellation cleanup failed: {cleanup}"),
             });
@@ -539,7 +553,20 @@ pub(crate) fn launch(
 impl Session {
     fn cancel(&mut self) -> Result<(), String> {
         self.cleanup_attempted = true;
-        self.controller.cancel(Duration::from_secs(240))
+        self.controller.cancel(CANCELLATION_TIMEOUT)
+    }
+
+    fn begin_agent_preparation(
+        &mut self,
+        context: &mut ExecutionContext<'_>,
+    ) -> Result<(), String> {
+        if let Some(session) = context.measurements.as_deref_mut() {
+            session.event(crate::collectors::LifecycleEvent::PhaseBegin(
+                crate::collectors::LifecyclePhase::AgentPreparation,
+            ))?;
+            self.preparation_active = true;
+        }
+        Ok(())
     }
 
     fn run(
@@ -550,23 +577,34 @@ impl Session {
         let connection = context
             .connection
             .ok_or("isolated execution needs a negotiated API connection")?;
-        if let Some(session) = context.measurements.as_deref_mut() {
-            session.event(crate::collectors::LifecycleEvent::PhaseBegin(
-                crate::collectors::LifecyclePhase::AgentPreparation,
-            ))?;
-            self.preparation_active = true;
-        }
-        let binary = runtime_binary()?;
-        let tools_root =
-            crate::project::resolve(context.project_root, &context.project_config.tools_dir);
-        let bootstrap = crate::install::guest_bootstrap(
-            &context.config.agent,
-            context.project_root,
-            &tools_root,
-        )
-        .map_err(|error| {
-            format!("cannot prepare selected agent installation artifacts: {error}")
-        })?;
+        self.begin_agent_preparation(context)?;
+        let prepared = PreparedBootstrap::prepare(context)?;
+        self.run_prepared(context, output, connection, prepared)
+    }
+
+    fn run_prepared(
+        &mut self,
+        context: &mut ExecutionContext<'_>,
+        output: &mut dyn std::io::Write,
+        connection: &crate::endpoint::Connection,
+        prepared: PreparedBootstrap,
+    ) -> Result<ExecutionResult, String> {
+        self.dispatch_agent(context, connection, prepared)?;
+        let deadline = Instant::now() + self.agent_timeout + AGENT_TRANSPORT_ALLOWANCE;
+        self.receive_execution(context, output, deadline)
+    }
+
+    fn dispatch_agent(
+        &mut self,
+        context: &mut ExecutionContext<'_>,
+        connection: &crate::endpoint::Connection,
+        prepared: PreparedBootstrap,
+    ) -> Result<(), String> {
+        let PreparedBootstrap {
+            binary,
+            tools_root,
+            installation: bootstrap,
+        } = prepared;
         let mut config = context.config.clone();
         config.workspace = self.guest_workspace.clone();
         config.concurrency = 1;
@@ -600,47 +638,20 @@ impl Session {
             "environment":environment, "network":std::env::var("ASB_BENCHMARK_NETWORK").ok(),
             "request":{"process_lifetime":self.process_lifetime,"config":config,"connection":connection,"prompt":self.invocation.prompt,
                 "project_root":"/opt/asb-project","runtime_dir":"/opt/asb-private","run_dir":"/opt/asb-private/attempt","replay":context.replay,
-                "namespace_collectors":namespace_collectors}}))?;
-        let deadline = Instant::now() + self.agent_timeout + Duration::from_secs(1820);
+                "namespace_collectors":namespace_collectors}}))
+    }
+
+    fn receive_execution(
+        &mut self,
+        context: &mut ExecutionContext<'_>,
+        output: &mut dyn std::io::Write,
+        deadline: Instant,
+    ) -> Result<ExecutionResult, String> {
         loop {
             let event = self.controller.receive(deadline)?;
             match event["event"].as_str() {
                 Some("paused") => {
-                    if let Some(session) = context.measurements.as_deref_mut() {
-                        use crate::collectors::LifecycleEvent as Event;
-                        if self.measurement_active {
-                            return Err(
-                                "isolated execution returned a second measurement target".into()
-                            );
-                        }
-                        let target = super::target::verify(&event["target"])?;
-                        crate::measurements::write_json(
-                            &session.dir.join("execution-target.json"),
-                            &json!({
-                                "schema_version":1,"scope":"verified-local-isolated-process-tree",
-                                "host_pid":target.pid,"namespace_pid":target.namespace_pid,
-                                "start_time_ticks":target.start_time_ticks,"cgroup":target.cgroup,
-                                "cgroup_membership":"preserved"
-                            }),
-                        )?;
-                        if let Err(error) =
-                            session.attach_isolated_pid(target.pid, target.start_time_ticks)
-                        {
-                            session.event(Event::AgentAttachFailed)?;
-                            return Err(error);
-                        }
-                        session.event(Event::PhaseEnd(
-                            crate::collectors::LifecyclePhase::AgentPreparation,
-                        ))?;
-                        self.preparation_active = false;
-                        session.event(Event::MeasurementsReady)?;
-                        session.event(Event::AgentSpawn)?;
-                        session.event(Event::AgentExecuteBegin)?;
-                        self.measurement_active = true;
-                        session.event(Event::AgentStarted)?;
-                    }
-                    self.controller
-                        .send(&json!({"op":"resume","exec_id":event["target"]["exec_id"]}))?;
+                    self.resume_measured_target(context, &event)?;
                 }
                 Some("output") => {
                     let bytes = decode_base64(&event["data"])?;
@@ -663,55 +674,159 @@ impl Session {
                     }
                 }
                 Some("completed") => {
-                    if self.measurement_active {
-                        return Err("isolated execution omitted its completion boundary".into());
-                    }
-                    let result = &event["result"];
-                    let metadata: crate::agents::driver::GuestResult =
-                        serde_json::from_value(result["metadata"].clone())
-                            .map_err(|_| "guest returned invalid agent result metadata")?;
-                    let delegated = self.process_lifetime
-                        == super::session::ProcessLifetime::ThroughEvaluation
-                        && result["workload_processes_retained"].as_bool() == Some(true)
-                        && metadata.workload_owner.as_ref().is_some_and(|owner| {
-                            owner.controller_namespace > 1
-                                && owner.guest_namespace > 1
-                                && owner.controller_namespace != owner.guest_namespace
-                                && owner.token.len() == 32
-                                && owner.token.bytes().all(|byte| byte.is_ascii_hexdigit())
-                        });
-                    if !metadata.tree_quiesced && !delegated {
-                        return Err("isolated agent process tree was not confirmed stopped before evaluation".into());
-                    }
-                    if let Some(session) = context.measurements.as_deref_mut() {
-                        session.import_execution_namespace_state(&metadata.namespace_collectors)?;
-                    }
-                    let code = result["exit_code"].as_i64().unwrap_or(1).clamp(0, 255) as i32;
-                    #[cfg(unix)]
-                    let status = {
-                        use std::os::unix::process::ExitStatusExt;
-                        std::process::ExitStatus::from_raw(code << 8)
-                    };
-                    #[cfg(not(unix))]
-                    return Err("isolated execution requires Unix".into());
-                    return Ok(ExecutionResult {
-                        output: std::process::Output {
-                            status,
-                            stdout: decode_base64(&result["stdout"])?,
-                            stderr: decode_base64(&result["stderr"])?,
-                        },
-                        metadata,
-                        elapsed_ms: result["elapsed_seconds"]
-                            .as_f64()
-                            .filter(|seconds| {
-                                seconds.is_finite() && (0.0..=86410.0).contains(seconds)
-                            })
-                            .map(|seconds| (seconds * 1000.0).round() as u128),
-                    });
+                    return self.completed_execution(context, &event);
                 }
                 _ => return Err("unexpected isolated execution event".into()),
             }
         }
+    }
+
+    fn resume_measured_target(
+        &mut self,
+        context: &mut ExecutionContext<'_>,
+        event: &Value,
+    ) -> Result<(), String> {
+        if let Some(session) = context.measurements.as_deref_mut() {
+            use crate::collectors::LifecycleEvent as Event;
+            if self.measurement_active {
+                return Err("isolated execution returned a second measurement target".into());
+            }
+            let target = super::target::verify(&event["target"])?;
+            crate::measurements::write_json(
+                &session.dir.join("execution-target.json"),
+                &json!({
+                    "schema_version":1,"scope":"verified-local-isolated-process-tree",
+                    "host_pid":target.pid,"namespace_pid":target.namespace_pid,
+                    "start_time_ticks":target.start_time_ticks,"cgroup":target.cgroup,
+                    "cgroup_membership":"preserved"
+                }),
+            )?;
+            if let Err(error) = session.attach_isolated_pid(target.pid, target.start_time_ticks) {
+                session.event(Event::AgentAttachFailed)?;
+                return Err(error);
+            }
+            session.event(Event::PhaseEnd(
+                crate::collectors::LifecyclePhase::AgentPreparation,
+            ))?;
+            self.preparation_active = false;
+            session.event(Event::MeasurementsReady)?;
+            session.event(Event::AgentSpawn)?;
+            session.event(Event::AgentExecuteBegin)?;
+            self.measurement_active = true;
+            session.event(Event::AgentStarted)?;
+        }
+        self.controller
+            .send(&json!({"op":"resume","exec_id":event["target"]["exec_id"]}))
+    }
+
+    fn completed_execution(
+        &mut self,
+        context: &mut ExecutionContext<'_>,
+        event: &Value,
+    ) -> Result<ExecutionResult, String> {
+        if self.measurement_active {
+            return Err("isolated execution omitted its completion boundary".into());
+        }
+        let result = &event["result"];
+        let metadata: crate::agents::driver::GuestResult =
+            serde_json::from_value(result["metadata"].clone())
+                .map_err(|_| "guest returned invalid agent result metadata")?;
+        let delegated = self.process_lifetime == super::session::ProcessLifetime::ThroughEvaluation
+            && result["workload_processes_retained"].as_bool() == Some(true)
+            && metadata.workload_owner.as_ref().is_some_and(|owner| {
+                owner.controller_namespace > 1
+                    && owner.guest_namespace > 1
+                    && owner.controller_namespace != owner.guest_namespace
+                    && owner.token.len() == 32
+                    && owner.token.bytes().all(|byte| byte.is_ascii_hexdigit())
+            });
+        if !metadata.tree_quiesced && !delegated {
+            return Err(
+                "isolated agent process tree was not confirmed stopped before evaluation".into(),
+            );
+        }
+        if let Some(session) = context.measurements.as_deref_mut() {
+            session.import_execution_namespace_state(&metadata.namespace_collectors)?;
+        }
+        let code = result["exit_code"].as_i64().unwrap_or(1).clamp(0, 255) as i32;
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(code << 8)
+        };
+        #[cfg(not(unix))]
+        return Err("isolated execution requires Unix".into());
+        Ok(ExecutionResult {
+            output: std::process::Output {
+                status,
+                stdout: decode_base64(&result["stdout"])?,
+                stderr: decode_base64(&result["stderr"])?,
+            },
+            metadata,
+            elapsed_ms: result["elapsed_seconds"]
+                .as_f64()
+                .filter(|seconds| seconds.is_finite() && (0.0..=86410.0).contains(seconds))
+                .map(|seconds| (seconds * 1000.0).round() as u128),
+        })
+    }
+
+    fn settle_execution(
+        &mut self,
+        context: &mut ExecutionContext<'_>,
+        mut result: Result<ExecutionResult, String>,
+    ) -> Result<ExecutionResult, String> {
+        if result.is_err() && self.preparation_active {
+            self.preparation_active = false;
+            if let Some(session) = context.measurements.as_deref_mut() {
+                let _ = session.event(crate::collectors::LifecycleEvent::PhaseFailed(
+                    crate::collectors::LifecyclePhase::AgentPreparation,
+                ));
+            }
+        }
+        if result.is_err() && self.measurement_active {
+            self.measurement_active = false;
+            if let Some(session) = context.measurements.as_deref_mut() {
+                let _ = session.event(crate::collectors::LifecycleEvent::AgentExecuteEnd);
+                let _ = session.event(crate::collectors::LifecycleEvent::AgentWaitFailed);
+            }
+        }
+        if let Err(error) = &mut result
+            && let Err(cleanup) = self.cancel()
+        {
+            error.push_str(&format!(
+                "; workload cancellation cleanup failed: {cleanup}"
+            ));
+        }
+        result
+    }
+}
+
+/// Installation preparation is complete before protocol execution begins.
+/// This is private data, never a CLI/configuration bypass for prefetch checks.
+struct PreparedBootstrap {
+    binary: PathBuf,
+    tools_root: PathBuf,
+    installation: crate::install::GuestBootstrap,
+}
+
+impl PreparedBootstrap {
+    fn prepare(context: &ExecutionContext<'_>) -> Result<Self, String> {
+        let binary = runtime_binary()?;
+        let tools_root =
+            crate::project::resolve(context.project_root, &context.project_config.tools_dir);
+        let installation = crate::install::guest_bootstrap(
+            &context.config.agent,
+            context.project_root,
+            &tools_root,
+        )
+        .map_err(|error| {
+            format!("cannot prepare selected agent installation artifacts: {error}")
+        })?;
+        Ok(Self {
+            binary,
+            tools_root,
+            installation,
+        })
     }
 }
 
@@ -741,7 +856,7 @@ impl WorkloadSession for Session {
             ));
         }
         self.cleanup_attempted = true;
-        match self.controller.finish(Duration::from_secs(240)) {
+        match self.controller.finish(CANCELLATION_TIMEOUT) {
             Ok(()) => Ok(()),
             Err(error) => Err(match self.cancel() {
                 Ok(()) => error,
@@ -766,37 +881,15 @@ impl WorkloadSession for Session {
         context: &mut ExecutionContext<'_>,
         output: &mut dyn std::io::Write,
     ) -> Option<Result<ExecutionResult, String>> {
-        let mut result = self.run(context, output);
-        if result.is_err() && self.preparation_active {
-            self.preparation_active = false;
-            if let Some(session) = context.measurements.as_deref_mut() {
-                let _ = session.event(crate::collectors::LifecycleEvent::PhaseFailed(
-                    crate::collectors::LifecyclePhase::AgentPreparation,
-                ));
-            }
-        }
-        if result.is_err() && self.measurement_active {
-            self.measurement_active = false;
-            if let Some(session) = context.measurements.as_deref_mut() {
-                let _ = session.event(crate::collectors::LifecycleEvent::AgentExecuteEnd);
-                let _ = session.event(crate::collectors::LifecycleEvent::AgentWaitFailed);
-            }
-        }
-        if let Err(error) = &mut result
-            && let Err(cleanup) = self.cancel()
-        {
-            error.push_str(&format!(
-                "; workload cancellation cleanup failed: {cleanup}"
-            ));
-        }
-        Some(result)
+        let result = self.run(context, output);
+        Some(self.settle_execution(context, result))
     }
     fn evaluate(&mut self, _response: &str) -> Result<Evaluation, String> {
         self.evaluation_completed = false;
         let event = self.controller.request(
-            json!({"op":"evaluate","timeout":1800}),
+            json!({"op":"evaluate","timeout":EVALUATION_TIMEOUT_SECONDS}),
             "evaluated",
-            Duration::from_secs(1830),
+            Duration::from_secs(EVALUATION_TIMEOUT_SECONDS) + EVALUATION_PROTOCOL_ALLOWANCE,
         )?;
         let result = &event["result"];
         if result["workload"] != self.invocation.identity.workload
@@ -836,6 +929,10 @@ impl Drop for Session {
 #[cfg(test)]
 #[path = "../../tests/unit/remote.rs"]
 mod coverage_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/remote_execution.rs"]
+mod execution_tests;
 
 #[cfg(test)]
 mod tests {

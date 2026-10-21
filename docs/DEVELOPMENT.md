@@ -223,6 +223,12 @@ test separately checks default/disabled collection, nonzero agent exits with
 valid grades, unresolved tasks, comparison regeneration and cached resume.
 Ordinary CI
 uses synthetic provider-free protocol tests.
+The remote execution unit tests use a private prepared-bootstrap fixture to
+exercise controller dispatch, output, metadata, lifecycle failures, deadlines and
+preserving cancellation independently of installation. This fixture does not
+qualify an installed runtime, SDK or workload container. Production execution
+always validates the runtime and performs checksum-pinned bootstrap preparation;
+there is no CLI, configuration or environment switch to bypass that phase.
 `benchmark_live_resources.py` additionally checks actual abrupt controller
 SIGKILL with an installed SWE-bench task image: the durable ownership journal
 quiesces only its recorded container, retains a partial output file and an
