@@ -834,7 +834,7 @@ impl Drop for Session {
 }
 
 #[cfg(test)]
-#[path = "remote/coverage_tests.rs"]
+#[path = "../../tests/unit/remote.rs"]
 mod coverage_tests;
 
 #[cfg(test)]
