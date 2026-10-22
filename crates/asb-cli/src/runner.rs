@@ -258,9 +258,20 @@ pub(crate) fn latest_direct_result(config_path: &Path) -> Result<Option<PathBuf>
     let mut runs = entries
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| Error::Run(format!("cannot inspect direct benchmark results: {error}")))?;
-    runs.retain(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false));
-    runs.sort_by_key(|entry| entry.file_name());
-    Ok(runs.pop().map(|entry| entry.path()))
+    let mut allocated = runs
+        .drain(..)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let index = name.strip_prefix("run-")?.parse::<u32>().ok()?;
+            (index <= 999_999
+                && name == format!("run-{index:03}")
+                && entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .then_some((index, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    allocated.sort_by_key(|(index, _)| *index);
+    Ok(allocated.pop().map(|(_, path)| path))
 }
 
 /// Seed a fresh direct-run workspace from the user-selected workspace.
@@ -1457,8 +1468,9 @@ mod boundary_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        RunDisposition, RunResult, RunStatus, command_for, isolated_direct_config, render_human,
-        render_json, replica_cassette, resolve_log_path, run_with_tape, write_log,
+        RunDisposition, RunResult, RunStatus, command_for, isolated_direct_config,
+        latest_direct_result, render_human, render_json, replica_cassette, resolve_log_path,
+        run_with_tape, write_log,
     };
     use crate::benchmark::BenchmarkConfig;
     use crate::measurements::TokenUsage;
@@ -1536,6 +1548,27 @@ mod tests {
 
         let error = isolated_direct_config(&config_path, config).expect_err("symlink rejected");
         assert!(error.to_string().contains("symbolic link"));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn latest_direct_result_uses_only_asb_allocated_run_directories() {
+        let root = std::env::temp_dir().join(
+            crate::workloads::TaskIdentity::local("direct-result-discovery", None).attempt_id,
+        );
+        let config_path = root.join("benchmark.toml");
+        let results = root.join("results/benchmark-runs");
+        std::fs::create_dir_all(results.join("run-002")).expect("allocated result");
+        std::fs::create_dir_all(results.join("run-010")).expect("allocated result");
+        std::fs::create_dir_all(results.join("run-9999999")).expect("foreign result");
+        std::fs::create_dir_all(results.join("run-11")).expect("foreign result");
+        std::fs::create_dir_all(results.join("z-untrusted")).expect("foreign result");
+        std::fs::write(&config_path, "fixture").expect("configuration");
+
+        assert_eq!(
+            latest_direct_result(&config_path).expect("result discovery"),
+            Some(results.join("run-010"))
+        );
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
