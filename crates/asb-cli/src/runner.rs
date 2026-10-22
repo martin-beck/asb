@@ -194,6 +194,7 @@ fn isolated_direct_config(
     mut config: BenchmarkConfig,
 ) -> Result<(BenchmarkConfig, PathBuf), Error> {
     let parent = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let configured_workspace = project::resolve(parent, &config.workspace);
     let root = parent
         .join("results")
         .join(format!("{}-runs", benchmark_stem(config_path)));
@@ -221,10 +222,9 @@ fn isolated_direct_config(
                 root.display()
             ))
         })??;
-    config.workspace = result_directory
-        .join("workspace")
-        .to_string_lossy()
-        .into_owned();
+    let workspace = result_directory.join("workspace");
+    seed_direct_workspace(&configured_workspace, &workspace)?;
+    config.workspace = workspace.to_string_lossy().into_owned();
     config.log_file = result_directory
         .join("run.log")
         .to_string_lossy()
@@ -236,6 +236,92 @@ fn isolated_direct_config(
             .into_owned();
     }
     Ok((config, result_directory))
+}
+
+/// Seed a fresh direct-run workspace from the user-selected workspace.
+///
+/// Direct runs retain their results in a newly claimed directory, but the
+/// configured workspace is still the benchmark input. Copy only ordinary
+/// files and directories: following a link here could give an agent write
+/// access outside the owned result generation.
+fn seed_direct_workspace(source: &Path, destination: &Path) -> Result<(), Error> {
+    let metadata = match std::fs::symlink_metadata(source) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(Error::Run(format!(
+                "cannot inspect configured workspace {}: {error}",
+                source.display()
+            )));
+        }
+    };
+    if !metadata.is_dir() {
+        return Err(Error::Input(format!(
+            "configured workspace {} must be a directory",
+            source.display()
+        )));
+    }
+
+    fn copy_directory(source: &Path, destination: &Path) -> Result<(), Error> {
+        std::fs::create_dir_all(destination).map_err(|error| {
+            Error::Run(format!(
+                "cannot create isolated workspace directory {}: {error}",
+                destination.display()
+            ))
+        })?;
+        let mut entries = std::fs::read_dir(source)
+            .map_err(|error| {
+                Error::Run(format!(
+                    "cannot read configured workspace {}: {error}",
+                    source.display()
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| Error::Run(format!("cannot inspect configured workspace: {error}")))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            let metadata = std::fs::symlink_metadata(&source_path).map_err(|error| {
+                Error::Run(format!(
+                    "cannot inspect configured workspace entry {}: {error}",
+                    source_path.display()
+                ))
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(Error::Input(format!(
+                    "configured workspace entry {} is a symbolic link; direct runs require self-contained workspace files",
+                    source_path.display()
+                )));
+            }
+            if metadata.is_dir() {
+                copy_directory(&source_path, &destination_path)?;
+            } else if metadata.is_file() {
+                std::fs::copy(&source_path, &destination_path).map_err(|error| {
+                    Error::Run(format!(
+                        "cannot copy configured workspace file {}: {error}",
+                        source_path.display()
+                    ))
+                })?;
+                std::fs::set_permissions(&destination_path, metadata.permissions()).map_err(
+                    |error| {
+                        Error::Run(format!(
+                            "cannot preserve permissions for workspace file {}: {error}",
+                            destination_path.display()
+                        ))
+                    },
+                )?;
+            } else {
+                return Err(Error::Input(format!(
+                    "configured workspace entry {} is not a regular file or directory",
+                    source_path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    copy_directory(source, destination)
 }
 
 fn run_loaded(
@@ -1357,6 +1443,9 @@ mod tests {
         let root = std::env::temp_dir()
             .join(crate::workloads::TaskIdentity::local("direct-results", None).attempt_id);
         std::fs::create_dir_all(&root).expect("project");
+        std::fs::create_dir_all(root.join("workspace/src")).expect("workspace");
+        std::fs::write(root.join("workspace/src/input.txt"), "configured input")
+            .expect("workspace input");
         let config_path = root.join("opencode-deepseek-swe.toml");
         std::fs::write(&config_path, "fixture").expect("configuration");
         let config: BenchmarkConfig = toml::from_str(
@@ -1394,6 +1483,34 @@ mod tests {
             second.measurements.unwrap().directory,
             second_directory.join("measurements").to_string_lossy()
         );
+        for directory in [&first_directory, &second_directory] {
+            assert_eq!(
+                std::fs::read_to_string(directory.join("workspace/src/input.txt"))
+                    .expect("seeded input"),
+                "configured input"
+            );
+        }
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_run_workspace_seed_refuses_symlinked_inputs() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir()
+            .join(crate::workloads::TaskIdentity::local("direct-symlink", None).attempt_id);
+        std::fs::create_dir_all(root.join("workspace")).expect("workspace");
+        symlink("/outside-owned-workspace", root.join("workspace/outside")).expect("symlink");
+        let config_path = root.join("benchmark.toml");
+        std::fs::write(&config_path, "fixture").expect("configuration");
+        let config: BenchmarkConfig = toml::from_str(
+            "agent='pi'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='fixture'\nworkspace='workspace'\nlog_file='run.log'\n",
+        )
+        .expect("configuration parses");
+
+        let error = isolated_direct_config(&config_path, config).expect_err("symlink rejected");
+        assert!(error.to_string().contains("symbolic link"));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
