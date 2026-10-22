@@ -107,7 +107,13 @@ fn native_plan_executes_with_the_validated_budget_and_keeps_output_for_grading()
         .output()
         .unwrap();
     assert!(!output.status.success());
-    let text = std::fs::read_to_string(project.0.join("native.log"))
+    let result_root = project.0.join("results/benchmark-runs");
+    let run_directory = std::fs::read_dir(&result_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.is_dir())
+        .expect("direct run result directory");
+    let text = std::fs::read_to_string(run_directory.join("run.log"))
         .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stderr)));
     let record: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
     assert!(
