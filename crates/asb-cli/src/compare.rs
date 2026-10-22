@@ -74,6 +74,7 @@ pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Er
     let loaded = source::load(path)?;
     let validated = ValidatedReport::validate(loaded)?;
     let prepared = PreparedReport::prepare(validated)?;
+    let perfetto_urls = perfetto_urls(&prepared);
     let mut files = prepared.graph_names();
     files.extend(["comparison.json".into(), "report.html".into()]);
     let publisher = publication::Publisher::begin(&prepared.data.request.comparison_dir, files)?;
@@ -94,7 +95,79 @@ pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Er
     if published.recoverable_fallback {
         writeln!(output,"Report published using recoverable replacement, not atomic exchange; a brief destination-absence/crash window was possible. The previous report backup was retained.").map_err(|error|published.confirmation_error(error))?;
     }
+    writeln!(
+        output,
+        "Result report: {}",
+        local_file_url(&published.report)
+    )
+    .map_err(|error| published.confirmation_error(error))?;
+    for url in perfetto_urls {
+        writeln!(output, "Perfetto UI: {url}")
+            .map_err(|error| published.confirmation_error(error))?;
+    }
     Ok(published.report)
+}
+
+/// Return the official Perfetto UI URL for a completed local trace.
+///
+/// The trace remains local: Perfetto UI is given a `file:` URL and never
+/// receives the trace through ASB. Browsers that disallow opening local URLs
+/// from a remote origin can still open the retained trace by drag-and-drop.
+pub(crate) fn perfetto_ui_url(trace: &Path) -> Option<String> {
+    if trace.extension().and_then(|extension| extension.to_str()) != Some("perfetto-trace") {
+        return None;
+    }
+    let metadata = fs::metadata(trace).ok()?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return None;
+    }
+    let file_url = local_file_url(trace);
+    Some(format!(
+        "https://ui.perfetto.dev/#!/?url={}",
+        percent_encode(&file_url)
+    ))
+}
+
+fn local_file_url(path: &Path) -> String {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path = path.to_string_lossy().replace('\\', "/");
+    let path = percent_encode_path(&path);
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
+}
+
+fn perfetto_urls(prepared: &PreparedReport) -> BTreeSet<String> {
+    prepared
+        .data
+        .rows
+        .iter()
+        .flat_map(|benchmark| benchmark.artifact_sources.values())
+        .filter_map(|trace| perfetto_ui_url(trace))
+        .collect()
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn percent_encode_path(value: &str) -> String {
+    value
+        .split('/')
+        .map(percent_encode)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 /// Invoke the platform opener without a shell; report paths are never commands.
 pub(crate) fn open_report(path: &Path) -> Result<(), Error> {
@@ -492,8 +565,14 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                 .artifacts
                 .iter()
                 .map(|artifact| {
+                    let perfetto = benchmark
+                        .artifact_sources
+                        .get(artifact)
+                        .and_then(|path| perfetto_ui_url(path))
+                        .map(|url| format!(" <a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open in Perfetto UI</a>", escape(&url)))
+                        .unwrap_or_default();
                     format!(
-                        "<li><a href=\"{}\" download>{}</a></li>",
+                        "<li><a href=\"{}\" download>{}</a>{perfetto}</li>",
                         escape(artifact),
                         escape(artifact.rsplit('/').next().unwrap_or(artifact))
                     )
@@ -1104,6 +1183,47 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn perfetto_ui_url_keeps_a_local_trace_local_and_encodes_its_path() {
+        let root = std::env::temp_dir().join(format!(
+            "asb perfetto trace {}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("trace directory");
+        let trace = root.join("capture #1.perfetto-trace");
+        std::fs::write(&trace, b"trace").expect("trace");
+        let url = super::perfetto_ui_url(&trace).expect("usable trace URL");
+        assert!(url.starts_with("https://ui.perfetto.dev/#!/?url=file%3A%2F%2F"));
+        // The `file:` URL is itself a query value, so its encoded path is
+        // encoded once more for the Perfetto UI URL.
+        assert!(url.contains("asb%2520perfetto%2520trace"));
+        assert!(url.contains("capture%2520%25231.perfetto-trace"));
+        assert!(!url.contains(trace.to_string_lossy().as_ref()));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn perfetto_ui_url_rejects_empty_or_non_trace_artifacts() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-perfetto-url-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("directory");
+        let empty = root.join("empty.perfetto-trace");
+        std::fs::write(&empty, b"").expect("empty trace");
+        let other = root.join("metrics.json");
+        std::fs::write(&other, b"{}").expect("artifact");
+        assert!(super::perfetto_ui_url(&empty).is_none());
+        assert!(super::perfetto_ui_url(&other).is_none());
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn missing_scheduler_states_are_unavailable_not_observed_zero_thread_time() {
         let root = std::env::temp_dir()
             .join(crate::workloads::TaskIdentity::local("missing-states", None).attempt_id);
@@ -1706,8 +1826,15 @@ mod tests {
             let dir = root.join(format!("sweep-results/{index:03}-{name}/measurements"));
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("run.json"), json!({"schema_version":1,"status":"completed","success":true,"process_success":true,"workload_success":true,"workload_baseline_passed":false,"workload_evaluation":evaluation,"success_rate":1.0,"steps":1,"token_usage":{"total_tokens":8917}}).to_string()).unwrap();
+            if index == 0 {
+                std::fs::write(dir.join("perfetto-scheduling.perfetto-trace"), b"trace").unwrap();
+            }
         }
-        run(root.join("sweep.toml").to_str().unwrap(), &mut Vec::new()).unwrap();
+        let mut output = Vec::new();
+        run(root.join("sweep.toml").to_str().unwrap(), &mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Result report: file://"));
+        assert!(output.contains("Perfetto UI: https://ui.perfetto.dev/#!/?url=file%3A%2F%2F"));
         let comparison: Value = serde_json::from_str(
             &std::fs::read_to_string(root.join("results/sweep-comparison/comparison.json"))
                 .unwrap(),
@@ -1743,6 +1870,8 @@ mod tests {
         assert!(html.contains("Not measured"));
         assert!(html.contains("100.0% (1/1)"));
         assert!(html.contains("No upstream task resolution was measured"));
+        assert!(html.contains("Open in Perfetto UI"));
+        assert!(html.contains("https://ui.perfetto.dev/#!/?url=file%3A%2F%2F"));
         let _ = std::fs::remove_dir_all(root);
     }
     #[test]

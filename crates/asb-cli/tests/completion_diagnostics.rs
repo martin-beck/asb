@@ -69,6 +69,8 @@ if fault=='parallel-failure':
         time.sleep(0.005)
     sys.exit(7 if Path.cwd().parent.name.endswith('benchmark-a') else 9)
 checkpoint=root/'sweep-results/.checkpoint'
+if fault=='continuation':
+    (Path.cwd().parent/'.asb-completions').write_text('fixture blocks metadata')
 if fault=='replica': (checkpoint/'replicas').write_text('fixture blocks receipt publication')
 if fault=='group': (checkpoint/'completed').write_text('fixture blocks group publication')
 if fault=='input-final':
@@ -121,9 +123,7 @@ fn blocked_task_record_preserves_each_grade_primary_failure_and_concurrent_json_
     for grade in [true, false] {
         for process_failure in [true, false] {
             for json in [true, false] {
-                let project = Project::new(grade, process_failure, 4, "");
-                fs::create_dir_all(project.0.join("logs")).unwrap();
-                fs::write(project.0.join("logs/.asb-completions"), "not a directory").unwrap();
+                let project = Project::new(grade, process_failure, 4, "continuation");
                 let args = if json {
                     vec!["run", "benchmark.toml", "--json"]
                 } else {
@@ -168,13 +168,13 @@ fn blocked_task_record_preserves_each_grade_primary_failure_and_concurrent_json_
                         1,
                         "{text}"
                     );
-                    assert!(text.contains("logs/.asb-completions"));
+                    assert!(text.contains(".asb-completions"));
                     assert!(text.contains("Do not rerun") || text.contains("do not rerun"));
                 }
                 for index in 1..=4 {
-                    let path = project
-                        .0
-                        .join(format!("logs/run-concurrency-{index}.jsonl"));
+                    let path = project.0.join(format!(
+                        "results/benchmark-runs/run-001/run-concurrency-{index}.log"
+                    ));
                     let log: Value = serde_json::from_str(
                         fs::read_to_string(path).unwrap().lines().last().unwrap(),
                     )
@@ -288,13 +288,16 @@ fn isolated_real_warning_writer_failure_preserves_grade_and_the_primary_error() 
         for (command, fault) in [("run", ""), ("sweep", "group"), ("sweep", "input-final")] {
             for grade in [true, false] {
                 for process_failure in [true, false] {
-                    let project = Project::new(grade, process_failure, 1, fault);
-                    fs::create_dir_all(project.0.join("logs")).unwrap();
-                    fs::write(
-                        project.0.join("logs/.asb-completions"),
-                        "fixture blocks metadata",
-                    )
-                    .unwrap();
+                    let project = Project::new(
+                        grade,
+                        process_failure,
+                        1,
+                        if command == "run" {
+                            "continuation"
+                        } else {
+                            fault
+                        },
+                    );
                     let output=Command::new(std::env::current_exe().unwrap())
                 .args(["--exact","isolated_real_warning_writer_failure_preserves_grade_and_the_primary_error","--nocapture"])
                 .current_dir(&project.0).isolated_env().env(MARKER,"1")

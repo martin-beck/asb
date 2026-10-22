@@ -26,7 +26,7 @@ pub(crate) mod workload_process;
 use super::{Error, io_error, read_config};
 use crate::agents;
 use crate::benchmark::BenchmarkConfig;
-use crate::benchmark_paths::component;
+use crate::benchmark_paths::{benchmark_stem, component};
 use crate::collectors::{LifecycleEvent, LifecyclePhase};
 use crate::measurements;
 use crate::models;
@@ -184,9 +184,63 @@ pub(crate) fn run_with_diagnostics(
     run_loaded(config_path, config, options, output, warnings)
 }
 
+/// Allocate fresh, benchmark-scoped output for one direct (non-campaign) run.
+///
+/// Existing evidence is never reused or replaced. `create_dir` claims the next
+/// numeric subdirectory atomically, so concurrent invocations also receive
+/// separate workspaces, logs, and collector captures.
+fn isolated_direct_config(
+    config_path: &Path,
+    mut config: BenchmarkConfig,
+) -> Result<(BenchmarkConfig, PathBuf), Error> {
+    let parent = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let root = parent
+        .join("results")
+        .join(format!("{}-runs", benchmark_stem(config_path)));
+    std::fs::create_dir_all(&root).map_err(|error| {
+        Error::Run(format!(
+            "cannot create benchmark results root {}: {error}",
+            root.display()
+        ))
+    })?;
+    let result_directory = (1u32..=999_999)
+        .find_map(|index| {
+            let candidate = root.join(format!("run-{index:03}"));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => Some(Ok(candidate)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(Error::Run(format!(
+                    "cannot allocate benchmark result directory {}: {error}",
+                    candidate.display()
+                )))),
+            }
+        })
+        .ok_or_else(|| {
+            Error::Run(format!(
+                "no free benchmark result directory (run-001 through run-999999) under {}",
+                root.display()
+            ))
+        })??;
+    config.workspace = result_directory
+        .join("workspace")
+        .to_string_lossy()
+        .into_owned();
+    config.log_file = result_directory
+        .join("run.log")
+        .to_string_lossy()
+        .into_owned();
+    if let Some(measurements) = config.measurements.as_mut().filter(|value| value.enabled) {
+        measurements.directory = result_directory
+            .join("measurements")
+            .to_string_lossy()
+            .into_owned();
+    }
+    Ok((config, result_directory))
+}
+
 fn run_loaded(
     config_path: &Path,
-    config: BenchmarkConfig,
+    mut config: BenchmarkConfig,
     options: RunOptions<'_>,
     output: &mut dyn Write,
     warnings: &Mutex<BTreeSet<String>>,
@@ -217,6 +271,9 @@ fn run_loaded(
             return reuse::render_reused(std::slice::from_ref(summary), options.json, output);
         }
     }
+    if public_direct_run(&options) {
+        (config, _) = isolated_direct_config(config_path, config)?;
+    }
     let mut cohort = measurements::ExecutionCohort {
         id: workloads::TaskIdentity::local("execution-cohort", None).attempt_id,
         selected_replicas: config.concurrency,
@@ -233,6 +290,19 @@ fn run_loaded(
         ..options
     };
     run_dispatched(config_path, config, options, output, warnings)
+}
+
+/// Only the public one-shot entrypoint allocates a new result generation.
+/// Internal campaign, preparation, reuse, and completion paths already own
+/// their isolated directories and must remain side-effect free here.
+fn public_direct_run(options: &RunOptions<'_>) -> bool {
+    !options.verify_initial_material
+        && options.reused.is_none()
+        && options.execution_cohort.is_none()
+        && options.preparation_gate.is_none()
+        && options.launch_gate.is_none()
+        && options.batch.is_none()
+        && options.on_completion.is_none()
 }
 
 /// Consume the workflow's selected runtime admission, rather than replacing its
@@ -1276,11 +1346,56 @@ mod boundary_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        RunDisposition, RunResult, RunStatus, command_for, render_human, render_json,
-        replica_cassette, resolve_log_path, run_with_tape, write_log,
+        RunDisposition, RunResult, RunStatus, command_for, isolated_direct_config, render_human,
+        render_json, replica_cassette, resolve_log_path, run_with_tape, write_log,
     };
     use crate::benchmark::BenchmarkConfig;
     use crate::measurements::TokenUsage;
+
+    #[test]
+    fn direct_runs_allocate_fresh_benchmark_scoped_result_directories() {
+        let root = std::env::temp_dir()
+            .join(crate::workloads::TaskIdentity::local("direct-results", None).attempt_id);
+        std::fs::create_dir_all(&root).expect("project");
+        let config_path = root.join("opencode-deepseek-swe.toml");
+        std::fs::write(&config_path, "fixture").expect("configuration");
+        let config: BenchmarkConfig = toml::from_str(
+            "agent='opencode'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='deepseek-v4.1-flash'\nworkspace='workspace'\nlog_file='benchmark.log'\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=[]\n",
+        )
+        .expect("configuration parses");
+
+        let (first, first_directory) =
+            isolated_direct_config(&config_path, config.clone()).expect("first allocation");
+        let (second, second_directory) =
+            isolated_direct_config(&config_path, config).expect("second allocation");
+        assert_eq!(
+            first_directory,
+            root.join("results/opencode-deepseek-swe-runs/run-001")
+        );
+        assert_eq!(
+            second_directory,
+            root.join("results/opencode-deepseek-swe-runs/run-002")
+        );
+        assert!(first_directory.is_dir());
+        assert!(second_directory.is_dir());
+        assert_eq!(
+            first.workspace,
+            first_directory.join("workspace").to_string_lossy()
+        );
+        assert_eq!(
+            first.log_file,
+            first_directory.join("run.log").to_string_lossy()
+        );
+        assert_eq!(
+            first.measurements.unwrap().directory,
+            first_directory.join("measurements").to_string_lossy()
+        );
+        assert_eq!(
+            second.measurements.unwrap().directory,
+            second_directory.join("measurements").to_string_lossy()
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
 
     #[test]
     fn intent_publication_failure_stops_before_provider_workload_or_measurement_startup() {

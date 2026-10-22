@@ -180,6 +180,8 @@ pub(crate) fn run_with_interactive(
                     "--respect-record-timings requires --replay; recording always stores response delays",
                 );
             }
+            let report_path = options.path.clone();
+            let json = options.json;
             runner::run_with_tape(
                 &options.path,
                 runner::RunOptions {
@@ -197,6 +199,13 @@ pub(crate) fn run_with_interactive(
                 },
                 stdout,
             )
+            .and_then(|_| {
+                if json {
+                    Ok(())
+                } else {
+                    super::compare::generate(&report_path, stdout).map(|_| ())
+                }
+            })
         }
         Some(CommandLine::Sweep(options)) => {
             let mode = match tape_mode(options.record, options.replay) {
