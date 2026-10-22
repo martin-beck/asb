@@ -7,6 +7,7 @@ use crate::suggestions;
 use crate::tools;
 use crate::workloads;
 use crate::workloads::catalog::{self, Catalog};
+use crate::workloads::readiness;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -194,30 +195,6 @@ fn external_workload(name: &str) -> Option<ExternalWorkload> {
 /// Return the pinned external workloads that the TUIs can offer for install.
 pub fn external_workload_names() -> impl Iterator<Item = &'static str> {
     catalog::installable_names()
-}
-
-/// Check whether an external workload has its runnable local bundle and
-/// prompt. This is side-effect free and safe to call while rendering a TUI.
-pub fn workload_available(name: &str, directory: &Path) -> bool {
-    if let Some(available) = workloads::installed_available(name, directory) {
-        return available;
-    }
-    if workloads::source_bundle(name).is_some() {
-        directory.join(name).join("ASB-BUNDLE").is_file()
-            && directory.join(name).join("source").is_dir()
-            && directory
-                .join(name)
-                .join("asb-trial/ASB-ADAPTER-FIXTURE")
-                .is_file()
-            && directory.join(format!("{name}.txt")).is_file()
-    } else {
-        directory.join(format!("{name}.txt")).is_file()
-            && (external_workload(name).is_none()
-                || directory
-                    .join(name)
-                    .join("asb-trial/ASB-ADAPTER-FIXTURE")
-                    .is_file())
-    }
 }
 
 pub struct ToolInstallOptions {
@@ -658,7 +635,7 @@ fn install_bundle_in(
     let bundle_dir = directory.join(name);
     let source_dir = bundle_dir.join("source");
     let marker = bundle_dir.join("ASB-BUNDLE");
-    if marker.is_file() && source_dir.is_dir() {
+    if readiness::bundle_material_present(name, directory) {
         progress(80, crate::install::ProgressStage::Validating);
         let installed = fs::read_to_string(&marker).map_err(|error| {
             Error::Io(format!(
@@ -1870,6 +1847,11 @@ mod tests {
         let mut progress = |percent: u8, stage: crate::install::ProgressStage| {
             stages.push((percent, stage.to_owned()))
         };
+        assert!(readiness::bundle_material_present(
+            "terminal-bench",
+            &directory
+        ));
+        assert!(!readiness::installed("terminal-bench", &directory));
         install_bundle(
             "terminal-bench",
             spec,
@@ -1880,7 +1862,7 @@ mod tests {
         .expect("existing bundle is reused");
         assert_eq!(stages.first().unwrap(), &(80, ProgressStage::Validating));
         assert_eq!(stages.last().unwrap(), &(100, ProgressStage::Ready));
-        assert!(workload_available("terminal-bench", &directory));
+        assert!(readiness::installed("terminal-bench", &directory));
         assert!(bundle_dir.join("asb-trial/ASB-ADAPTER-FIXTURE").is_file());
         let prompt = fs::read(directory.join("terminal-bench.txt")).unwrap();
         let mut changed = spec;

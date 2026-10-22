@@ -1,7 +1,8 @@
 //! Interactive, modular setup wizard built with Ratatui.
 
 use crate::benchmark::{BenchmarkConfig, MeasurementConfig};
-use crate::workloads::catalog::{Catalog, DefinitionKind};
+use crate::workloads::catalog::{self, Catalog, DefinitionKind};
+use crate::workloads::readiness;
 use crate::{Error, agents, install, measurements, models, project, providers, workloads};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
@@ -52,6 +53,39 @@ enum Availability {
     Available,
     Missing,
     Unknown,
+}
+
+#[derive(Clone, Copy)]
+enum WorkloadDisplayPolicy {
+    /// The trial wizard checks installation presence, including custom sources.
+    Installation,
+    /// The setup catalogue requires a readable prompt or an installed bundle.
+    SetupCatalog,
+    /// Setup refresh retains its existing installation-presence fallback.
+    SetupRefresh,
+}
+
+fn workload_availability(
+    name: &str,
+    directory: &Path,
+    policy: WorkloadDisplayPolicy,
+) -> Availability {
+    let ready = match policy {
+        WorkloadDisplayPolicy::Installation => readiness::installed(name, directory),
+        WorkloadDisplayPolicy::SetupCatalog if catalog::is_installable(name) => {
+            readiness::installed(name, directory)
+        }
+        WorkloadDisplayPolicy::SetupCatalog => workloads::load(name, directory).is_ok(),
+        WorkloadDisplayPolicy::SetupRefresh => {
+            readiness::installed(name, directory)
+                || (!catalog::is_installable(name) && workloads::load(name, directory).is_ok())
+        }
+    };
+    if ready {
+        Availability::Available
+    } else {
+        Availability::Missing
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -213,12 +247,9 @@ impl App {
             .collect();
         let workloads = workload_choices(&root, &project.workloads_dir);
         let mut workload_pane = Pane::new(workloads);
-        let external_names = install::external_workload_names()
-            .map(str::to_owned)
-            .collect::<BTreeSet<_>>();
         for (index, choice) in workload_pane.choices.iter().enumerate() {
             let name = choice.key.workload().expect("workload pane identity");
-            workload_pane.sections[index] = Some(if external_names.contains(name) {
+            workload_pane.sections[index] = Some(if catalog::is_installable(name) {
                 "External workloads"
             } else {
                 "Built-in workloads"
@@ -296,14 +327,8 @@ impl App {
         let workloads = project::resolve(&self.root, &self.project.workloads_dir);
         for choice in &mut self.panes[PaneKind::Workloads.index()].choices {
             let name = choice.key.workload().expect("workload pane identity");
-            let external = install::external_workload_names().any(|external| external == name);
-            choice.availability = if install::workload_available(name, &workloads)
-                || (!external && workloads::load(name, &workloads).is_ok())
-            {
-                Availability::Available
-            } else {
-                Availability::Missing
-            };
+            choice.availability =
+                workload_availability(name, &workloads, WorkloadDisplayPolicy::SetupRefresh);
         }
         for choice in &mut self.panes[PaneKind::Measurements.index()].choices {
             choice.availability = if crate::collectors::find(
@@ -512,21 +537,15 @@ struct WorkloadApp {
 
 fn external_workload_choices(directory: &Path) -> Vec<Choice> {
     let catalog = Catalog::best_effort(directory);
-    let mut names = install::external_workload_names()
+    let mut names = catalog::installable_names()
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     names.extend(catalog.sources);
-    let external_names = install::external_workload_names()
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
     let mut choices = names
         .into_iter()
         .map(|label| {
-            let availability = if install::workload_available(&label, directory) {
-                Availability::Available
-            } else {
-                Availability::Missing
-            };
+            let availability =
+                workload_availability(&label, directory, WorkloadDisplayPolicy::Installation);
             Choice {
                 key: ChoiceKey::Prompt(label.clone()),
                 label,
@@ -536,7 +555,7 @@ fn external_workload_choices(directory: &Path) -> Vec<Choice> {
         .collect::<Vec<_>>();
     choices.sort_by_key(|choice| {
         let name = choice.key.workload().expect("workload pane identity");
-        (!external_names.contains(name), choice.label.clone())
+        (!catalog::is_installable(name), choice.label.clone())
     });
     choices
 }
@@ -545,11 +564,8 @@ fn refresh_workload_availability(app: &mut WorkloadApp) {
     let directory = project::resolve(&app.root, &app.project.workloads_dir);
     for choice in &mut app.workloads.choices {
         let name = choice.key.workload().expect("workload pane identity");
-        choice.availability = if install::workload_available(name, &directory) {
-            Availability::Available
-        } else {
-            Availability::Missing
-        };
+        choice.availability =
+            workload_availability(name, &directory, WorkloadDisplayPolicy::Installation);
     }
 }
 
@@ -1722,28 +1738,19 @@ fn workload_choices(root: &Path, directory: &str) -> Vec<Choice> {
             availability: Availability::Unknown,
         }));
     }
-    choices.extend(install::external_workload_names().map(|name| Choice {
+    choices.extend(catalog::installable_names().map(|name| Choice {
         key: ChoiceKey::Prompt(name.into()),
         label: name.into(),
         availability: Availability::Unknown,
     }));
-    let external_names = install::external_workload_names().collect::<BTreeSet<_>>();
     for choice in &mut choices {
         let name = choice.key.workload().expect("workload identity");
-        let ready = if external_names.contains(name) {
-            install::workload_available(name, &directory)
-        } else {
-            workloads::load(name, &directory).is_ok()
-        };
-        choice.availability = if ready {
-            Availability::Available
-        } else {
-            Availability::Missing
-        };
+        choice.availability =
+            workload_availability(name, &directory, WorkloadDisplayPolicy::SetupCatalog);
     }
     choices.sort_by_key(|choice| {
         (
-            external_names.contains(choice.key.workload().expect("workload identity")),
+            catalog::is_installable(choice.key.workload().expect("workload identity")),
             choice.label.clone(),
             choice.key.clone(),
         )

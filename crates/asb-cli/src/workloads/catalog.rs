@@ -36,6 +36,11 @@ pub(crate) fn installable_names() -> impl Iterator<Item = &'static str> {
     super::registered_sources().map(|(id, _)| id)
 }
 
+/// A registered installation source, independent of local installation state.
+pub(crate) fn is_installable(name: &str) -> bool {
+    installable_names().any(|id| id == name)
+}
+
 impl Catalog {
     /// Interactive discovery tolerates unreadable directories and entries.
     pub fn best_effort(directory: &Path) -> Self {

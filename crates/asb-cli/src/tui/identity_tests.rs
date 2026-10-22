@@ -308,6 +308,78 @@ fn labels_cannot_retarget_install_readiness_or_collector_dependencies() {
 }
 
 #[test]
+fn workload_views_preserve_prompt_bundle_and_refresh_readiness() {
+    let fixture = Fixture::new();
+    for (name, prompt) in [
+        ("custom", "Local task.".to_owned()),
+        ("empty", " \n".to_owned()),
+        ("oversized", "x".repeat(64 * 1024 + 1)),
+        (
+            "terminal-bench",
+            "A prompt alone is not an installed bundle.".to_owned(),
+        ),
+    ] {
+        fixture.write(&format!("workloads/{name}.txt"), prompt);
+        if name != "terminal-bench" {
+            fs::create_dir_all(fixture.0.join("workloads").join(name).join("source")).unwrap();
+        }
+    }
+    fixture.write(
+        "workloads/original.custom.workload.toml",
+        "workload='original.custom'\n[[trials]]\nid='one'\n",
+    );
+    let initial = workload_choices(&fixture.0, "workloads");
+    let app = fixture.app();
+    let installed = external_workload_choices(&fixture.0.join("workloads"));
+    let availability = |choices: &[Choice], name: &str| {
+        choices
+            .iter()
+            .find(|choice| choice.key == ChoiceKey::Prompt(name.into()))
+            .unwrap()
+            .availability
+    };
+    for (name, initial_status, installed_status) in [
+        ("custom", Availability::Available, Availability::Available),
+        ("empty", Availability::Missing, Availability::Available),
+        ("oversized", Availability::Missing, Availability::Available),
+        (
+            "terminal-bench",
+            Availability::Missing,
+            Availability::Missing,
+        ),
+    ] {
+        assert_eq!(
+            availability(&initial, name),
+            initial_status,
+            "initial {name}"
+        );
+        assert_eq!(
+            availability(&installed, name),
+            installed_status,
+            "installed {name}"
+        );
+        assert_eq!(
+            availability(&app.pane(PaneKind::Workloads).choices, name),
+            installed_status,
+            "refreshed {name}"
+        );
+    }
+    // An original.* alias can load its underlying prompt without having a
+    // directly installed prompt at the alias path. Refresh must keep it ready.
+    assert!(!readiness::installed(
+        "original.custom",
+        &fixture.0.join("workloads")
+    ));
+    for choices in [&initial, &app.pane(PaneKind::Workloads).choices] {
+        let alias = choices
+            .iter()
+            .find(|choice| choice.key.workload() == Some("original.custom"))
+            .unwrap();
+        assert_eq!(alias.availability, Availability::Available);
+    }
+}
+
+#[test]
 fn saved_trial_reopen_uses_ids_after_labels_change_and_all_steps_have_named_transitions() {
     let mut wizard = WorkloadWizard::default();
     let trials = || {

@@ -139,7 +139,7 @@ fn catalog(directory: &Path) -> Result<Catalog, Error> {
 
 fn workload_names(directory: &Path) -> Result<Vec<String>, Error> {
     let mut names = crate::workloads::builtin_names()
-        .chain(crate::install::external_workload_names())
+        .chain(workload_catalog::installable_names())
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     let catalog = catalog(directory)?;
@@ -178,7 +178,7 @@ pub(super) fn trials(
                     validate(trial, "trial").map_err(Error::Input)?;
                     expanded.push(Some(trial.clone()));
                 }
-            } else if crate::install::external_workload_names().any(|name| name == workload) {
+            } else if workload_catalog::is_installable(workload) {
                 return Err(Error::Input(format!(
                     "cannot select all trials for `{workload}` without an installed catalog or --trial-set; select enabled trials with `asb workload tui` first"
                 )));
