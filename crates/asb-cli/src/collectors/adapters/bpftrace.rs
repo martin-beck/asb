@@ -758,6 +758,92 @@ mod tests {
     use super::{BPFTRACE_PROFILES, profile_probe_program, validate_custom_program_scope};
 
     #[test]
+    fn svg_renders_each_metric_and_escapes_status() {
+        let dir = std::env::temp_dir().join(format!("asb-bpf-svg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let metrics = std::collections::BTreeMap::from([
+            ("sched.total".to_owned(), 7.0),
+            ("sched.max".to_owned(), 3.0),
+        ]);
+        super::write_bpftrace_profile_svg(&dir, "sched_latency", "failure <mock>", &metrics)
+            .unwrap();
+        let svg = std::fs::read_to_string(dir.join("bpftrace-sched_latency.svg")).unwrap();
+        assert!(svg.contains("failure &lt;mock&gt;"));
+        assert!(svg.contains("total: 7"));
+        assert!(svg.contains("max: 3"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn svg_write_errors_report_the_artifact_type() {
+        let absent = std::env::temp_dir().join(format!(
+            "asb-no-such-bpftrace-metric-dir-{}",
+            std::process::id()
+        ));
+        assert!(
+            super::write_bpftrace_profile_svg(&absent, "sched", "error", &Default::default())
+                .unwrap_err()
+                .contains("bpftrace profile SVG")
+        );
+    }
+
+    #[test]
+    fn profiles_are_target_scoped_and_parse_only_asb_metrics() {
+        assert_eq!(
+            super::bpftrace_profile_names().collect::<Vec<_>>(),
+            vec![
+                "sched-latency",
+                "cpu-migrations",
+                "futex-wait",
+                "syscall-rate",
+                "lock-contention",
+                "socket-operations",
+                "io-wait"
+            ]
+        );
+        let profiles = super::selected_bpftrace_profiles(&[
+            "bpftrace:sched-latency".into(),
+            "bpftrace:futex-wait".into(),
+        ])
+        .expect("profile selection");
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(
+            super::selected_bpftrace_profiles(&["bpftrace".into()])
+                .expect("generic bpftrace selects built-ins")
+                .len(),
+            super::bpftrace_profile_names().count() - 2
+        );
+        assert!(
+            profiles
+                .iter()
+                .all(|profile| profile.program.contains("@asb_tree"))
+        );
+        assert!(
+            profiles
+                .iter()
+                .all(|profile| profile.program.contains("interval:s:1"))
+        );
+        let metrics = super::parse_bpftrace_metrics(
+            "sched-latency",
+            "@asb_tree[123]: 1\n@asb_wakeup_latency_events: 7\n@asb_wakeup_latency_total_ns: 420\n@other: 99\n",
+        );
+        assert_eq!(metrics["bpftrace.sched-latency.wakeup_latency_events"], 7.0);
+        assert_eq!(
+            metrics["bpftrace.sched-latency.wakeup_latency_total_ns"],
+            420.0
+        );
+        assert_eq!(metrics.len(), 2);
+        let series = super::parse_bpftrace_series(
+            "sched-latency",
+            "@asb_wakeup_latency_events: 2\n@asb_wakeup_latency_events: 5\n",
+        );
+        assert_eq!(
+            series["bpftrace.sched-latency.wakeup_latency_events"],
+            vec![2.0, 5.0]
+        );
+    }
+
+    #[test]
     fn bpf_processing_includes_final_cumulative_maps_beyond_the_diagnostic_cap() {
         let mut input = "@asb_syscalls: 2\n".to_owned();
         input.push_str(&"# ignored fixture filler\n".repeat(15000));

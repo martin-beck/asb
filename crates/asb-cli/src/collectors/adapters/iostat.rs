@@ -215,6 +215,33 @@ fn iostat_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn parses_pidstat_io_metrics_and_series() {
+        let io = super::parse_pidstat_io_metrics(
+            "Linux 6.1\n12:00:00 UID PID kB_rd/s kB_wr/s kB_ccwr/s iodelay Command\n12:00:01 1000 42 1.0 2.0 0.5 3 agent\n",
+        );
+        assert_eq!(io["process.io.read_kib_per_s"], 1.0);
+        assert_eq!(io["process.io.write_kib_per_s"], 2.0);
+        assert_eq!(io["process.io.delay_ticks"], 3.0);
+        let series = super::parse_series(
+            "Linux 6.1\n12:00:01 UID PID kB_rd/s kB_wr/s kB_ccwr/s iodelay Command\n12:00:01 1000 42 1.0 2.0 0.5 3 agent\n12:00:02 1000 42 2.0 4.0 1.0 5 agent\n",
+        );
+        assert_eq!(series["process.io.read_kib_per_s"], vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn parses_iostat_cpu_and_device_throughput_and_latency() {
+        let metrics = super::parse_iostat_metrics(
+            "avg-cpu:  %user   %nice %system %iowait  %steal   %idle\n           1.00    2.00    3.00    4.00    5.00   85.00\n\nDevice            r/s     rkB/s   r_await w/s     wkB/s   w_await aqu-sz %util\nvda              10.00   20.00   1.50    30.00   40.00   2.50    0.10   7.00\n",
+        );
+        assert_eq!(metrics["cpu.user_pct"], 1.0);
+        assert_eq!(metrics["cpu.iowait_pct"], 4.0);
+        assert_eq!(metrics["device.read_ops_per_s"], 10.0);
+        assert_eq!(metrics["device.read_await_ms"], 1.5);
+        assert_eq!(metrics["device.write_kib_per_s"], 40.0);
+        assert_eq!(metrics["device.util_pct"], 7.0);
+    }
+
+    #[test]
     fn io_processing_includes_observations_beyond_the_diagnostic_cap() {
         let mut input = "12:00:00 UID PID kB_rd/s kB_wr/s kB_ccwr/s iodelay Command\n12:00:01 1000 42 10 20 0 1 agent\n".to_owned();
         input.push_str(&"# ignored fixture filler\n".repeat(15000));

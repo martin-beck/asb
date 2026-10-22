@@ -1191,6 +1191,137 @@ mod marker_tests {
     use super::*;
 
     #[test]
+    fn metrics_produce_distinct_escaped_svg_artifacts() {
+        let dir = std::env::temp_dir().join(format!("asb-metric-svg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let metrics = BTreeMap::from([
+            ("perfetto.sched_switch".to_owned(), 3.0),
+            ("perfetto.wait<unsafe>".to_owned(), 12.0),
+        ]);
+        write_perfetto_metric_svgs(&dir, None, 2, &metrics).unwrap();
+        let first = std::fs::read_to_string(dir.join("perfetto-metric-sched_switch.svg")).unwrap();
+        let second = std::fs::read_to_string(dir.join("perfetto-metric-wait-unsafe-.svg")).unwrap();
+        assert!(first.contains("sched_switch"));
+        assert!(second.contains("wait&lt;unsafe&gt;"));
+        assert!(!second.contains("wait<unsafe>"));
+        assert!(second.contains("native trace unavailable"));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn without_metrics_reports_tracepoints_as_a_fallback() {
+        let dir = std::env::temp_dir().join(format!("asb-metric-fallback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_perfetto_metric_svgs(&dir, None, 9, &Default::default()).unwrap();
+        let svg = std::fs::read_to_string(dir.join("perfetto-metric-tracepoints.svg")).unwrap();
+        assert!(svg.contains("lifecycle markers: 9"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn svg_write_errors_report_the_artifact_type() {
+        let absent = std::env::temp_dir().join(format!(
+            "asb-no-such-perfetto-metric-dir-{}",
+            std::process::id()
+        ));
+        assert!(
+            write_perfetto_metric_svgs(&absent, None, 0, &Default::default())
+                .unwrap_err()
+                .contains("Perfetto metric SVG")
+        );
+    }
+
+    #[test]
+    fn config_collects_scheduler_process_and_trace_marker_events() {
+        let config = perfetto_config(None);
+        for event in [
+            "sched/sched_switch",
+            "sched/sched_waking",
+            "sched/sched_wakeup_new",
+            "sched/sched_process_exit",
+            "task/task_newtask",
+            "ftrace/print",
+        ] {
+            assert!(config.contains(event), "missing {event}");
+        }
+        assert!(config.contains("linux.process_stats"));
+        assert!(config.contains("compact_sched"));
+        assert!(!config.contains("sched_stat_"));
+    }
+
+    #[test]
+    fn configuration_uses_supported_tracebox_schema() {
+        let config = perfetto_config(Some(42));
+        assert!(!config.contains("pid_filter"));
+        assert!(config.contains("scan_all_processes_on_start: false"));
+    }
+
+    #[test]
+    fn project_local_install_uses_the_tracebox_binary_name() {
+        assert_eq!(
+            crate::measurements::tool_binary_name("perfetto"),
+            "tracebox"
+        );
+        assert_eq!(crate::measurements::tool_binary_name("perf"), "perf");
+    }
+
+    #[test]
+    fn queries_scope_to_the_target_process_tree() {
+        let metrics = perfetto_metric_queries(Some(42), "1-2");
+        assert!(
+            metrics
+                .iter()
+                .all(|(_, query)| query.contains("WITH RECURSIVE tree"))
+        );
+        assert!(metrics.iter().all(|(_, query)| query.contains("pid=42")));
+        assert!(
+            metrics
+                .iter()
+                .any(|(_, query)| query.contains("th.upid IN tree"))
+        );
+        let series = perfetto_series_queries(Some(42), "1-2");
+        assert!(
+            series
+                .iter()
+                .all(|(_, query)| query.contains("asb.agent.started.1-2"))
+        );
+        assert!(
+            series
+                .iter()
+                .all(|(_, query)| query.contains("asb.agent.exited.1-2"))
+        );
+        assert_ne!(perfetto_scope_sql(42, "1-2"), perfetto_scope_sql(42, "1-3"));
+        assert!(
+            series
+                .iter()
+                .all(|(_, query)| query.contains("bounds.start_ts"))
+        );
+        let event_series = &series[0].1;
+        assert!(event_series.contains("CAST((s.ts-bounds.start_ts)/1000000000 AS INTEGER)"));
+        assert!(event_series.contains("s.ts >= bounds.start_ts"));
+        let duration_series = &series[1].1;
+        assert!(duration_series.contains("bucket_ranges(bucket)"));
+        assert!(duration_series.contains("relevant AS"));
+        assert!(duration_series.contains(
+            "MIN(r.ts+r.dur,bounds.end_ts,bounds.start_ts+(bucket_ranges.bucket+1)*1000000000)"
+        ));
+        assert!(
+            duration_series.contains("MAX(r.ts,bounds.start_ts+bucket_ranges.bucket*1000000000)")
+        );
+        assert!(perfetto_metric_queries(None, "1-2").is_empty());
+    }
+
+    #[test]
+    fn parses_csv_series_with_trace_timestamps() {
+        let (timestamps, values) = parse_perfetto_series_output(
+            "\"timestamp_s\",\"value\"\n\"12\",\"3\"\n\"13.5\",\"7\"\n",
+        );
+        assert_eq!(timestamps, vec![12_000.0, 13_500.0]);
+        assert_eq!(values, vec![3.0, 7.0]);
+    }
+
+    #[test]
     fn capture_configuration_streams_with_bounded_storage_and_kernel_draining() {
         for config in [
             perfetto_config(None),

@@ -582,6 +582,34 @@ mod tests {
     use super::{record_args, stat_args};
 
     #[test]
+    fn permission_error_suggests_kernel_policy_not_sudoers() {
+        let message = super::perf_permission_error();
+        assert!(message.contains("kernel.perf_event_paranoid=-1"));
+        assert!(message.contains("sudo sysctl -w kernel.perf_event_paranoid=-1"));
+        assert!(message.contains("/etc/sysctl.d/99-asb-perf.conf"));
+        assert!(message.contains("does not create sudoers rules"));
+        assert!(!message.contains("sudoers.d"));
+    }
+
+    #[test]
+    fn parses_perf_stat_counters_into_stable_metrics() {
+        let metrics = super::parse_perf_stat_metrics(
+            "12.34,msec,task-clock,100.00,\n8,,context-switches,100.00,\n2,,cpu-migrations,100.00,\n4,,page-faults,100.00,\n1234,,cycles,100.00,\n567,,instructions,100.00,\n",
+        );
+        assert_eq!(metrics["perf.task_clock_ms"], 12.34);
+        assert_eq!(metrics["perf.context_switches"], 8.0);
+        assert_eq!(metrics["perf.cpu_migrations"], 2.0);
+        assert_eq!(metrics["perf.page_faults"], 4.0);
+        assert_eq!(metrics["perf.observed_cycles_count"], 1234.0);
+        assert_eq!(metrics["perf.observed_instructions_count"], 567.0);
+        let series = super::parse_perf_stat_series(
+            "0.000,12.34,msec,task-clock,100.00,\n1.000,20.00,msec,task-clock,100.00,\n0.000,8,,context-switches,100.00,\n",
+        );
+        assert_eq!(series["perf.task_clock_ms"], vec![12.34, 20.0]);
+        assert_eq!(series["perf.context_switches"], vec![8.0]);
+    }
+
+    #[test]
     fn complete_perf_stat_file_not_diagnostic_prefix_drives_totals_and_timestamps() {
         use std::io::Write;
         let dir = std::env::temp_dir()

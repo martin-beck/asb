@@ -182,6 +182,33 @@ fn mpstat_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn parses_mpstat_cpu_breakdown_into_averaged_metrics() {
+        let metrics = super::parse_mpstat_metrics(
+            "12:00:00 AM CPU %usr %nice %sys %iowait %irq %soft %steal %guest %gnice %idle\n12:00:00 AM all 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0 55.0\n",
+        );
+        assert_eq!(metrics["cpu.user_pct"], 1.0);
+        assert_eq!(metrics["cpu.system_pct"], 3.0);
+        assert_eq!(metrics["cpu.iowait_pct"], 4.0);
+        assert_eq!(metrics["cpu.guest_nice_pct"], 9.0);
+        assert_eq!(metrics["cpu.idle_pct"], 55.0);
+    }
+
+    #[test]
+    fn parses_process_scoped_pidstat_cpu_metrics() {
+        let cpu = super::parse_pidstat_cpu_metrics(
+            "Linux 6.1\n12:00:00 UID PID %usr %system %guest %wait %CPU CPU Command\n12:00:01 1000 42 10.00 2.00 0.00 1.00 12.00 3 agent\n12:00:02 1000 42 20.00 4.00 0.00 0.00 24.00 3 agent\n",
+        );
+        assert_eq!(cpu["process.cpu.user_pct"], 15.0);
+        assert_eq!(cpu["process.cpu.system_pct"], 3.0);
+        assert_eq!(cpu["process.cpu.total_pct"], 18.0);
+        let series = super::parse_series(
+            "Linux 6.1\n12:00:00 UID PID %usr %system %guest %wait %CPU CPU Command\n12:00:01 1000 42 10.00 2.00 0.00 1.00 12.00 3 agent\n12:00:02 1000 42 20.00 4.00 0.00 0.00 24.00 3 agent\n",
+        );
+        assert_eq!(series["process.cpu.user_pct"], vec![10.0, 20.0]);
+        assert_eq!(series["process.cpu.total_pct"], vec![12.0, 24.0]);
+    }
+
+    #[test]
     fn cpu_processing_includes_observations_beyond_the_diagnostic_cap() {
         let mut input = "12:00:00 UID PID %CPU Command\n12:00:01 1000 42 20 agent\n".to_owned();
         input.push_str(&"# ignored fixture filler\n".repeat(15000));
