@@ -6,6 +6,7 @@ use crate::project;
 use crate::suggestions;
 use crate::tools;
 use crate::workloads;
+use crate::workloads::catalog::{self, Catalog};
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -192,7 +193,7 @@ fn external_workload(name: &str) -> Option<ExternalWorkload> {
 
 /// Return the pinned external workloads that the TUIs can offer for install.
 pub fn external_workload_names() -> impl Iterator<Item = &'static str> {
-    workloads::registered_sources().map(|(id, _)| id)
+    catalog::installable_names()
 }
 
 /// Check whether an external workload has its runnable local bundle and
@@ -802,28 +803,19 @@ pub fn workload_list(
         .map(|value| resolve_path(&project_root, &value))
         .or_else(|| std::env::var_os("ASB_WORKLOAD_DIR").map(PathBuf::from))
         .unwrap_or_else(|| project::resolve(&project_root, &project_config.workloads_dir));
-    let mut names = fs::read_dir(&directory)
-        .map_err(|error| Error::Io(format!("cannot read {}: {error}", directory.display())))?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            (path.extension().and_then(|value| value.to_str()) == Some("txt"))
-                .then(|| path.file_stem()?.to_str().map(str::to_owned))
-                .flatten()
-        })
-        .collect::<Vec<_>>();
+    let catalog = Catalog::from_paths(
+        catalog::paths(&directory)
+            .map_err(|error| Error::Io(format!("cannot read {}: {error}", directory.display())))?
+            .filter_map(Result::ok),
+    );
+    let mut names = catalog.prompt_names().collect::<Vec<_>>();
     names.sort();
     for name in &names {
         crate::selection_names::validate(name, "workload").map_err(Error::Input)?;
     }
-    let mut trial_sets = fs::read_dir(&directory)
-        .map_err(|error| Error::Io(format!("cannot read {}: {error}", directory.display())))?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            let name = path.file_name()?.to_str()?;
-            name.strip_suffix(".workload.toml").map(str::to_owned)
-        })
+    let mut trial_sets = catalog
+        .trial_sets()
+        .map(|entry| entry.name.as_str())
         .collect::<Vec<_>>();
     for name in &trial_sets {
         crate::selection_names::validate(name, "trial set").map_err(Error::Input)?;

@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 mod adapters;
+pub(crate) mod catalog;
 pub(crate) mod contracts;
 mod evaluation;
 pub(crate) use evaluation::{KnownEvaluationKind, SavedEvaluationKind};

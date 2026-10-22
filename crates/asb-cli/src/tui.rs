@@ -1,6 +1,7 @@
 //! Interactive, modular setup wizard built with Ratatui.
 
 use crate::benchmark::{BenchmarkConfig, MeasurementConfig};
+use crate::workloads::catalog::{Catalog, DefinitionKind};
 use crate::{Error, agents, install, measurements, models, project, providers, workloads};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
@@ -510,21 +511,11 @@ struct WorkloadApp {
 }
 
 fn external_workload_choices(directory: &Path) -> Vec<Choice> {
+    let catalog = Catalog::best_effort(directory);
     let mut names = install::external_workload_names()
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
-    names.extend(
-        fs::read_dir(directory)
-            .ok()
-            .into_iter()
-            .flat_map(|entries| entries.filter_map(Result::ok))
-            .filter_map(|entry| {
-                let path = entry.path();
-                (path.is_dir() && path.join("source").is_dir())
-                    .then(|| path.file_name()?.to_str().map(str::to_owned))
-                    .flatten()
-            }),
-    );
+    names.extend(catalog.sources);
     let external_names = install::external_workload_names()
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
@@ -1701,34 +1692,27 @@ fn setup_install_request(app: &App, choice: &Choice) -> Option<install::operatio
 
 fn workload_choices(root: &Path, directory: &str) -> Vec<Choice> {
     let directory = project::resolve(root, directory);
-    let mut choices = fs::read_dir(&directory)
-        .ok()
+    let catalog = Catalog::best_effort(&directory);
+    let mut choices = catalog
+        .definitions
         .into_iter()
-        .flat_map(|entries| entries.filter_map(Result::ok))
-        .filter_map(|entry| {
-            let path = entry.path();
-            if !path.is_file() {
-                return None;
-            }
-            let filename = path.file_name()?.to_str()?;
-            let (key, label) = if let Some(name) = filename.strip_suffix(".txt") {
-                (ChoiceKey::Prompt(name.to_owned()), name.to_owned())
-            } else if let Some(name) = filename.strip_suffix(".workload.toml") {
-                (
+        .filter(|entry| entry.is_file)
+        .map(|entry| {
+            let (key, label) = match entry.kind {
+                DefinitionKind::Prompt => (ChoiceKey::Prompt(entry.name.clone()), entry.name),
+                DefinitionKind::TrialSet => (
                     ChoiceKey::TrialSet {
-                        workload: name.to_owned(),
-                        file: PathBuf::from(filename),
+                        workload: entry.name.clone(),
+                        file: entry.file,
                     },
-                    format!("{name} [trial set]"),
-                )
-            } else {
-                return None;
+                    format!("{} [trial set]", entry.name),
+                ),
             };
-            Some(Choice {
+            Choice {
                 key,
                 label,
                 availability: Availability::Unknown,
-            })
+            }
         })
         .collect::<Vec<_>>();
     if choices.is_empty() {

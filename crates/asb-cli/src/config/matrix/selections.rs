@@ -1,6 +1,7 @@
 //! Expand reserved selectors using the same owning registries as the wizard.
 use super::*;
 use crate::selection_names::{ALL, validate};
+use crate::workloads::catalog::{self as workload_catalog, Catalog};
 
 fn expand_values(values: &mut Vec<String>, catalog: Vec<String>, kind: &str) -> Result<(), Error> {
     for name in &catalog {
@@ -61,16 +62,18 @@ pub(super) fn expand(options: &mut SetupOptions) -> Result<(), Error> {
     }
     if options.trial_set.iter().any(|value| value == ALL) {
         let mut filenames = Vec::new();
-        for path in files(&directory)? {
-            let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if let Some(name) = filename.strip_suffix(".workload.toml") {
-                validate(name, "trial set").map_err(Error::Input)?;
-                let set = crate::workloads::read_trial_set(&path).map_err(Error::Input)?;
-                if options.workload.contains(&set.workload) {
-                    filenames.push(filename.to_owned());
-                }
+        for entry in catalog(&directory)?.trial_sets() {
+            validate(&entry.name, "trial set").map_err(Error::Input)?;
+            let set = crate::workloads::read_trial_set(&directory.join(&entry.file))
+                .map_err(Error::Input)?;
+            if options.workload.contains(&set.workload) {
+                filenames.push(
+                    entry
+                        .file
+                        .to_str()
+                        .expect("discovered UTF-8 filename")
+                        .to_owned(),
+                );
             }
         }
         expand_values(&mut options.trial_set, filenames, "trial set")?;
@@ -118,9 +121,9 @@ pub(super) fn expand(options: &mut SetupOptions) -> Result<(), Error> {
     Ok(())
 }
 
-fn files(directory: &Path) -> Result<Vec<PathBuf>, Error> {
-    let entries = match fs::read_dir(directory) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+fn catalog(directory: &Path) -> Result<Catalog, Error> {
+    let entries = match workload_catalog::paths(directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
         result => result.map_err(|error| {
             Error::Input(format!(
                 "cannot enumerate selections in {}: {error}",
@@ -128,12 +131,10 @@ fn files(directory: &Path) -> Result<Vec<PathBuf>, Error> {
             ))
         })?,
     };
-    let mut files = entries
-        .map(|entry| entry.map(|entry| entry.path()))
+    let paths = entries
         .collect::<Result<Vec<_>, _>>()
         .map_err(crate::io_error)?;
-    files.sort();
-    Ok(files)
+    Ok(Catalog::from_paths(paths))
 }
 
 fn workload_names(directory: &Path) -> Result<Vec<String>, Error> {
@@ -141,23 +142,15 @@ fn workload_names(directory: &Path) -> Result<Vec<String>, Error> {
         .chain(crate::install::external_workload_names())
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
-    for path in files(directory)? {
-        if path.extension().is_some_and(|extension| extension == "txt") {
-            if let Some(name) = path.file_stem().and_then(|name| name.to_str()) {
-                names.insert(name.to_owned());
-            }
-        } else if let Some(name) = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_suffix(".workload.toml"))
-        {
-            validate(name, "trial set").map_err(Error::Input)?;
-            names.insert(
-                crate::workloads::read_trial_set(&path)
-                    .map_err(Error::Input)?
-                    .workload,
-            );
-        }
+    let catalog = catalog(directory)?;
+    names.extend(catalog.prompt_names().map(str::to_owned));
+    for entry in catalog.trial_sets() {
+        validate(&entry.name, "trial set").map_err(Error::Input)?;
+        names.insert(
+            crate::workloads::read_trial_set(&directory.join(&entry.file))
+                .map_err(Error::Input)?
+                .workload,
+        );
     }
     for name in &names {
         validate(name, "workload").map_err(Error::Input)?;

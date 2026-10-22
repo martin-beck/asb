@@ -266,6 +266,7 @@ mod adapter_layout_tests {
                 // Task/session contracts are category-wide, not adapters.
                 root_modules: &[
                     "mod.rs",
+                    "catalog.rs", // Shared local workload discovery for CLI and TUI.
                     "session.rs",
                     "material.rs",   // Generic bounded initial-file material identity.
                     "census.rs",     // Descriptor-owned guest material observations.
