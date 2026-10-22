@@ -1732,23 +1732,11 @@ fn workload_choices(root: &Path, directory: &str) -> Vec<Choice> {
         })
         .collect::<Vec<_>>();
     if choices.is_empty() {
-        choices.extend(
-            [
-                "bug-fix",
-                "build-repair",
-                "dependency-migration",
-                "feature-addition",
-                "refactoring",
-                "repository-navigation",
-                "test-generation",
-            ]
-            .into_iter()
-            .map(|name| Choice {
-                key: ChoiceKey::Prompt(name.into()),
-                label: name.into(),
-                availability: Availability::Unknown,
-            }),
-        );
+        choices.extend(workloads::builtin_names().map(|name| Choice {
+            key: ChoiceKey::Prompt(name.into()),
+            label: name.into(),
+            availability: Availability::Unknown,
+        }));
     }
     choices.extend(install::external_workload_names().map(|name| Choice {
         key: ChoiceKey::Prompt(name.into()),
