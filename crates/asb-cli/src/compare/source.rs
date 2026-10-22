@@ -337,12 +337,28 @@ fn load_configuration(
                 config.display()
             ))
         })?;
-    let standalone = single.then(|| configuration.clone());
-    if let Some(configuration) = &standalone {
-        result_dir = crate::runner::resolve_log_path(&config, &configuration.log_file)
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
+    let mut standalone = single.then(|| configuration.clone());
+    if let Some(configuration) = standalone.as_mut() {
+        if let Some(directory) = crate::runner::latest_direct_result(&config)? {
+            result_dir = directory.clone();
+            configuration.workspace = directory.join("workspace").to_string_lossy().into_owned();
+            configuration.log_file = directory.join("run.log").to_string_lossy().into_owned();
+            if let Some(measurements) = configuration
+                .measurements
+                .as_mut()
+                .filter(|value| value.enabled)
+            {
+                measurements.directory = directory
+                    .join("measurements")
+                    .to_string_lossy()
+                    .into_owned();
+            }
+        } else {
+            result_dir = crate::runner::resolve_log_path(&config, &configuration.log_file)
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
+        }
     }
     let selection = plan
         .as_ref()

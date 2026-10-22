@@ -1111,7 +1111,7 @@ fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'applicati
     expect_success(&record);
     expect_success(&replay);
     assert!(
-        std::fs::read_to_string(project.0.join("run.log"))
+        std::fs::read_to_string(latest_direct_run(&project).join("run.log"))
             .unwrap()
             .contains("local-ollama-agent")
     );
@@ -1377,6 +1377,20 @@ fn replay(project: &Project, behavior: &str, additional: &[&str]) -> Output {
     ];
     args.extend_from_slice(additional);
     project.command_with_env(&args, &[("ASB_FIXTURE_BEHAVIOR", behavior)])
+}
+
+#[cfg(unix)]
+fn latest_direct_run(project: &Project) -> PathBuf {
+    let root = project.0.join("results/benchmark-runs");
+    let mut runs = std::fs::read_dir(&root)
+        .unwrap_or_else(|error| panic!("cannot read direct run root {}: {error}", root.display()))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("inspect direct run root");
+    runs.retain(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false));
+    runs.sort_by_key(|entry| entry.file_name());
+    runs.pop()
+        .unwrap_or_else(|| panic!("no direct run beneath {}", root.display()))
+        .path()
 }
 
 #[cfg(target_os = "linux")]
@@ -1817,8 +1831,9 @@ fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'applicati
     );
     expect_success(&result);
     let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    let run = latest_direct_run(&project);
     let log: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+        serde_json::from_slice(&std::fs::read(run.join("run.log")).unwrap()).unwrap();
     let measurement: serde_json::Value =
         serde_json::from_slice(&std::fs::read(project.0.join("measurements/run.json")).unwrap())
             .unwrap();
@@ -1879,8 +1894,9 @@ fn incomplete_replay_does_not_report_unconsumed_recording_tokens() {
             &["--json", "--measurements", "measurements"],
         );
         assert_eq!(result.status.success(), complete, "{}", stderr(&result));
+        let run = latest_direct_run(&project);
         let log: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(run.join("run.log")).unwrap()).unwrap();
         let measurement: serde_json::Value = serde_json::from_slice(
             &std::fs::read(project.0.join("measurements/run.json")).unwrap(),
         )
@@ -1950,8 +1966,9 @@ fetch(process.env.CONTINUE_API_BASE.replace(/\/$/, '') + '/chat/completions', {m
     );
     expect_success(&result);
     let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    let run = latest_direct_run(&project);
     let log: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+        serde_json::from_slice(&std::fs::read(run.join("run.log")).unwrap()).unwrap();
     let measurement: serde_json::Value =
         serde_json::from_slice(&std::fs::read(project.0.join("measurements/run.json")).unwrap())
             .unwrap();
@@ -2053,9 +2070,10 @@ fetch(endpoint.replace(/\/$/, '') + (isContinue ? '/chat/completions' : '/v1/cha
         project.write("benchmark.toml", &format!("agent='{agent}'\nworkload='bug-fix'\nprovider='cli2key'\nmodel='test-model'\nconcurrency=2\nworkspace='workspace'\nlog_file='run.log'\n"));
         let output = replay(&project, "success", &["--json"]);
         assert!(output.status.success(), "{agent}: {}", stderr(&output));
+        let run = latest_direct_run(&project);
         for index in 1..=2 {
             let log: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(project.0.join(format!("run-concurrency-{index}.log"))).unwrap(),
+                &std::fs::read(run.join(format!("run-concurrency-{index}.log"))).unwrap(),
             )
             .unwrap();
             assert_eq!(
@@ -2093,8 +2111,10 @@ fn replay_returns_json_and_writes_completed_log_offline() {
     expect_success(&result);
     let summary: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(summary["success_rate"], 1.0);
-    let log: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+    let log: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(latest_direct_run(&project).join("run.log")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(log["status"], "completed");
     assert_eq!(summary["task"], log["task"]);
     assert_eq!(summary["task"]["workload"], "bug-fix");
@@ -2416,8 +2436,10 @@ fn replay_reports_agent_exit_and_zero_exit_fatal_output() {
         };
         expect_failure(&result, expected);
         assert!(!stderr(&result).contains("fixture-secret"));
-        let log: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+        let log: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(latest_direct_run(&project).join("run.log")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(log["status"], "failed");
         assert_eq!(log["failure_kind"], "agent_failure");
         // Both fixtures leave the correct patch before failing as processes.
@@ -2451,8 +2473,10 @@ fn zero_exit_without_workload_change_is_not_success() {
     let project = replay_project(1);
     let result = replay(&project, "delete", &[]);
     expect_failure(&result, "required output file `src/parser.py` is missing");
-    let log: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+    let log: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(latest_direct_run(&project).join("run.log")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(log["process_success"], true);
     assert_eq!(log["workload_success"], false);
     assert_eq!(log["workload_evaluation"], "bundled-fixture");
@@ -2483,7 +2507,10 @@ fn no_op_zero_exit_cannot_resolve_a_failing_task() {
 #[test]
 fn pre_solved_workspace_is_preserved_but_never_earns_resolution_credit() {
     let project = replay_project(1);
-    expect_success(&replay(&project, "success", &[]));
+    project.write(
+        "workspace/src/parser.py",
+        "def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n",
+    );
     let before = std::fs::read(project.0.join("workspace/src/parser.py")).unwrap();
     let result = replay(
         &project,
@@ -2666,8 +2693,10 @@ fn grader_failures_and_errors_are_specific_in_human_and_json_output() {
         assert_eq!(json["workload_success"], serde_json::json!(success));
         assert_eq!(json["failure_kind"], kind);
         assert!(json["failure_reason"].as_str().unwrap().contains(expected));
-        let log: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+        let log: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(latest_direct_run(&project).join("run.log")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(log["failure_kind"], kind);
         assert!(log["failure_reason"].as_str().unwrap().contains(expected));
     }
@@ -2687,9 +2716,10 @@ fn concurrent_grading_failures_are_deduplicated_and_recorded_per_replica() {
         1,
         "{error}"
     );
+    let run = latest_direct_run(&project);
     for index in 1..=4 {
         let log: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(project.0.join(format!("run-concurrency-{index}.log"))).unwrap(),
+            &std::fs::read(run.join(format!("run-concurrency-{index}.log"))).unwrap(),
         )
         .unwrap();
         assert_eq!(log["process_success"], true);
@@ -2747,16 +2777,12 @@ fn concurrent_replay_isolates_replica_outputs_and_reports_partial_failure() {
         "{}",
         stderr(&result)
     );
+    let run = latest_direct_run(&project);
     for (index, status) in [(1, "completed"), (2, "failed")] {
-        let file = project.0.join(format!("run-concurrency-{index}.log"));
+        let file = run.join(format!("run-concurrency-{index}.log"));
         let log: serde_json::Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
         assert_eq!(log["status"], status);
-        assert!(
-            project
-                .0
-                .join(format!("workspace-concurrency-{index}"))
-                .is_dir()
-        );
+        assert!(run.join(format!("workspace-concurrency-{index}")).is_dir());
     }
     assert_tape_scratch_cleaned(&project);
 }
@@ -3217,7 +3243,7 @@ fn flamegraph_only_configuration_installs_and_starts_perf_for_concurrent_replay(
         "{calls}"
     );
     for index in 1..=2 {
-        let dir = project.0.join(format!("measurements-concurrency-{index}"));
+        let dir = latest_direct_run(&project).join(format!("measurements-concurrency-{index}"));
         assert!(
             dir.join("flamegraph.svg").is_file(),
             "no flamegraph in {}",
@@ -3537,7 +3563,10 @@ fetch(process.env.ASB_PROVIDER_BASE_URL + '/responses', {method:'POST',headers:{
     );
     expect_success(&result);
     assert_eq!(
-        std::fs::read_to_string(project.0.join("workspace/credential-observation")).unwrap(),
+        std::fs::read_to_string(
+            latest_direct_run(&project).join("workspace/credential-observation")
+        )
+        .unwrap(),
         "not-exposed"
     );
 }

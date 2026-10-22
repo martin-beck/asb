@@ -238,6 +238,31 @@ fn isolated_direct_config(
     Ok((config, result_directory))
 }
 
+/// Return the newest successfully allocated direct-run directory for a config.
+/// The directory name is controlled by ASB, not the benchmark configuration.
+pub(crate) fn latest_direct_result(config_path: &Path) -> Result<Option<PathBuf>, Error> {
+    let parent = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let root = parent
+        .join("results")
+        .join(format!("{}-runs", benchmark_stem(config_path)));
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(Error::Run(format!(
+                "cannot read direct benchmark results {}: {error}",
+                root.display()
+            )));
+        }
+    };
+    let mut runs = entries
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| Error::Run(format!("cannot inspect direct benchmark results: {error}")))?;
+    runs.retain(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false));
+    runs.sort_by_key(|entry| entry.file_name());
+    Ok(runs.pop().map(|entry| entry.path()))
+}
+
 /// Seed a fresh direct-run workspace from the user-selected workspace.
 ///
 /// Direct runs retain their results in a newly claimed directory, but the
