@@ -218,9 +218,12 @@ impl<'a> Policy<'a> {
     }
 }
 pub(super) fn parse_confirmation(answer: &str) -> Option<bool> {
-    match answer.trim() {
+    let answer = answer.strip_suffix('\n').unwrap_or(answer);
+    let answer = answer.strip_suffix('\r').unwrap_or(answer);
+    match answer {
         "y" | "Y" => Some(true),
         "n" | "N" => Some(false),
+        "" => Some(false),
         _ => None,
     }
 }
@@ -238,17 +241,20 @@ pub(super) fn consent(
         output.flush().map_err(crate::io_error)?;
         return Ok(true);
     }
-    write!(output, "Apply the listed privileged commands? y/N: ").map_err(crate::io_error)?;
-    output.flush().map_err(crate::io_error)?;
-    let mut answer = String::new();
-    reader
-        .read_line(&mut answer)
-        .map_err(|e| Error::Io(format!("cannot read host capability confirmation: {e}")))?;
-    match parse_confirmation(&answer) {
-        Some(value) => Ok(value),
-        None => {
-            writeln!(output, "Host capability setup: no valid y/n answer was provided; privileged commands were not run.").map_err(crate::io_error)?;
-            Ok(false)
+    loop {
+        write!(output, "Apply the listed privileged commands? y/N: ").map_err(crate::io_error)?;
+        output.flush().map_err(crate::io_error)?;
+        let mut answer = String::new();
+        let read = reader
+            .read_line(&mut answer)
+            .map_err(|e| Error::Io(format!("cannot read host capability confirmation: {e}")))?;
+        if read == 0 {
+            writeln!(output, "No answer received; defaulting to no.").map_err(crate::io_error)?;
+            return Ok(false);
+        }
+        match parse_confirmation(&answer) {
+            Some(value) => return Ok(value),
+            None => writeln!(output, "Please answer y or n.").map_err(crate::io_error)?,
         }
     }
 }
