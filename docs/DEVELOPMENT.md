@@ -167,6 +167,20 @@ make rust-doc
 make uml
 ```
 
+The default `Rust CI` workflow is the development gate. It intentionally does
+not build or test a distributable crate, so ordinary pull requests do not pay
+for a second complete test suite and a clean release rebuild. Run the separate
+manual `Package validation` workflow before a release or when changing package
+contents:
+
+```sh
+gh workflow run package-validation.yml --ref main
+```
+
+That workflow runs `cargo package --locked`, verifies required runtime assets,
+tests the extracted crate, and smoke-installs its executable. It is not a
+required development-build check.
+
 `make rust-doc` runs `cargo doc --locked --no-deps --document-private-items`,
 because the CLI implementation modules are intentionally private. `make uml`
 installs the pinned AutoUML release under `target/tools/`, generates the local
