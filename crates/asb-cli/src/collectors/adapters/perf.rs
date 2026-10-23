@@ -89,6 +89,9 @@ impl CollectorAdapter for PerfCollector {
                     && completion.capture_complete,
             )
     }
+    fn allows_failed_termination(&self, name: &str) -> bool {
+        matches!(name, "perf" | "perf-stat")
+    }
     fn retain_raw_on_processing_failure(&self) -> bool {
         true
     }

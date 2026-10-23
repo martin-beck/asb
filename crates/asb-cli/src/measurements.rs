@@ -870,6 +870,7 @@ impl Session {
                 && !collector
                     .adapter
                     .accepts_termination(&collector.name, &completion)
+                && !collector.adapter.allows_failed_termination(&collector.name)
             {
                 completion.capture_complete = false;
                 completion.error = Some(format!(
