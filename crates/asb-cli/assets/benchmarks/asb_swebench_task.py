@@ -1,5 +1,6 @@
 """SWE-bench-owned preparation and submission capture, using generic execution."""
 import hashlib
+import re
 import time
 from pathlib import Path
 import uuid
@@ -101,7 +102,7 @@ class SweBenchTask:
         return submission
 
     def initial_material(self, binary=None):
-        from asb_material import MaterialError, capture_task
+        from asb_material import canonical_digest
         if self.invocation is None:
             raise ExecutionError("official task must be prepared before material capture")
         deadline = time.monotonic() + 420
@@ -124,19 +125,24 @@ class SweBenchTask:
                 # timestamp/timezone fields are omitted; SDK reset actors are
                 # explicitly stable rather than inherited from container names.
                 "reflog_sha256":hashlib.sha256(checked(prefix + ["reflog", "show", "--all",
-                    "--format=%gD%x00%H%x00%gs%x00%gn%x00%ge%x00"], 4*1024**2)).hexdigest()}
+                    "--format=%gD%x00%H%x00%gs%x00%gn%x00%ge%x00"], 4*1024**2)).hexdigest(),
+                "local_config_sha256":hashlib.sha256(checked(prefix + ["config", "--null", "--local", "--list"], 4*1024**2)).hexdigest()}
         before = git_state()
-        try:
-            result = capture_task(self, {"baseline":self.invocation["baseline"],
-                "dataset":self.invocation["identity"]["dataset"],"sdk":self.invocation["sdk"],"git":before},
-                exclusions=[".git/index", ".git/logs"], deadline=deadline, binary=binary)
-        except MaterialError as error:
-            raise ExecutionError(str(error)) from None
-        except Exception as error:
-            raise ExecutionError("prepared material transport failed: " + type(error).__name__) from None
         if git_state() != before:
             raise ExecutionError("prepared repository changed during material capture")
-        return result
+        image_id = self.workspace.image_identity.get("image_id")
+        if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+            raise ExecutionError("prepared task image has no immutable identity")
+        # A SWE-bench workspace is a new private container from this immutable
+        # image, reset to the pinned commit above. The previous generic path
+        # streamed and hashed its whole source tree merely to prove those same
+        # facts. Bind the image, exact Git state and workload definition instead.
+        return {"schema_version":1,"scope":"prepared-workload-material-v1","sha256":canonical_digest({
+            "scope":"swe-bench-clean-git-worktree-and-image-v1",
+            "baseline":self.invocation["baseline"],
+            "dataset":self.invocation["identity"]["dataset"],
+            "sdk":self.invocation["sdk"],"image_id":image_id,"git":before},
+            "asb-prepared-workload-material-v1")}
 
     def __exit__(self, *_exception):
         self.interrupted = self.interrupted or bool(_exception and _exception[0] is not None)

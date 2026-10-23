@@ -1331,12 +1331,14 @@ pub(crate) fn run_guest_process(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     runtime: Duration,
+    on_spawn: &mut dyn FnMut(u32) -> Result<(), Error>,
 ) -> Result<Output, Error> {
     #[cfg(target_os = "linux")]
     let mut descendants = crate::process_gate::DescendantScope::new()
         .map_err(|error| Error::Run(format!("cannot retain guest agent descendants: {error}")))?;
     let child = OwnedChild::spawn_direct(command)
         .map_err(|error| Error::Run(format!("cannot start guest agent: {error}")))?;
+    on_spawn(child.id())?;
     wait_with_output_streams(child, true, stdout, Some(stderr), runtime, &mut || {
         #[cfg(target_os = "linux")]
         return descendants.quiesce();
