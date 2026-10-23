@@ -427,8 +427,13 @@ impl ProxySession for RunningLlmtape {
 }
 
 fn stop_proxy(child: &mut Child, builtin: bool) -> std::io::Result<()> {
+    let was_running = child.try_wait()?.is_none();
     crate::project::stop_network_child(child)?;
-    if builtin && !child.try_wait()?.is_some_and(|status| status.success()) {
+    let status = child.try_wait()?;
+    // A running built-in producer is deliberately terminated by ASB. Its
+    // signal status is not a failed cleanup when the owned child was reaped.
+    // An already-exited producer must still have succeeded on its own.
+    if builtin && !was_running && !status.is_some_and(|status| status.success()) {
         return Err(std::io::Error::other(
             "embedded tape proxy exited without confirming owned subprocess cleanup; inspect retained attempt artifacts",
         ));
