@@ -45,14 +45,12 @@ pub(crate) fn completion_command() -> clap::Command {
         })
         .mut_subcommand("workload", |workload| {
             workload
+                .mut_arg("name", |arg| possible(arg, registered_workload_names()))
                 .mut_subcommand("describe", |describe| {
                     describe.mut_arg("name", |arg| possible(arg, workloads.clone()))
                 })
                 .mut_subcommand("install", |install| {
                     install.mut_arg("source", |arg| possible(arg, workloads))
-                })
-                .mut_subcommand("trials", |trials| {
-                    trials.mut_arg("name", |arg| possible(arg, registered_workload_names()))
                 })
         })
         .mut_subcommand("measure", |measure| {
@@ -272,14 +270,21 @@ pub(crate) fn run_with_interactive(
             ToolCommand::Install(args) => install::tool(args.into(), stdout),
         },
         Some(CommandLine::Workload(options)) => match options.command {
-            WorkloadCommand::List(args) => install::workload_list(args.into(), stdout),
-            WorkloadCommand::Describe(args) => {
+            Some(WorkloadCommand::List(args)) => install::workload_list(args.into(), stdout),
+            Some(WorkloadCommand::Describe(args)) => {
                 crate::workloads::describe_module(&args.name, stdout)
             }
-            WorkloadCommand::Install(args) => install::workload(args.into(), stdout),
-            WorkloadCommand::Trials(args) => list_workload_trials(&args.name, stdout),
-            WorkloadCommand::Tui => tui::workload_tui(stdout),
-            WorkloadCommand::Recover(args) => {
+            Some(WorkloadCommand::Install(args)) => install::workload(args.into(), stdout),
+            Some(WorkloadCommand::Trials) => options.name.as_deref().map_or_else(
+                || {
+                    Err(Error::Input(
+                        "`asb workload WORKLOAD trials` requires a workload name".into(),
+                    ))
+                },
+                |name| list_workload_trials(name, stdout),
+            ),
+            Some(WorkloadCommand::Tui) => tui::workload_tui(stdout),
+            Some(WorkloadCommand::Recover(args)) => {
                 if args.grade {
                     crate::workloads::recovery::grade_retained(&args.reference, args.json, stdout)
                 } else if args.inspect_grade {
@@ -288,6 +293,9 @@ pub(crate) fn run_with_interactive(
                     crate::workloads::recovery::run(&args.reference, args.json, stdout)
                 }
             }
+            None => Err(Error::Input(
+                "choose a workload command, or use `asb workload WORKLOAD trials`".into(),
+            )),
         },
         Some(CommandLine::Measure(options)) => match options.command {
             None => list_measures(stdout),
@@ -597,8 +605,11 @@ enum ToolCommand {
 struct ToolListArgs {}
 #[derive(Debug, Args)]
 struct WorkloadArgs {
+    /// Workload whose installed trials will be listed.
+    #[arg(value_name = "WORKLOAD")]
+    name: Option<String>,
     #[command(subcommand)]
-    command: WorkloadCommand,
+    command: Option<WorkloadCommand>,
 }
 #[derive(Debug, Subcommand)]
 enum WorkloadCommand {
@@ -606,8 +617,8 @@ enum WorkloadCommand {
     /// Print a registered module's versioned JSON contract without installing or executing it.
     Describe(WorkloadDescribeArgs),
     Install(WorkloadInstallArgs),
-    /// List selectable installed trials for one workload.
-    Trials(WorkloadTrialsArgs),
+    /// List the selected workload's installed trials.
+    Trials,
     Tui,
     #[command(
         after_help = "By default, stops only a departed controller's recorded task containers, preserving partial files and volumes. --inspect-grade instead reads an existing official grade without changing the attempt or running an agent/evaluator. Neither operation resumes a sweep."
@@ -619,12 +630,6 @@ struct WorkloadDescribeArgs {
     #[arg(value_name = "WORKLOAD")]
     name: String,
 }
-#[derive(Debug, Args)]
-struct WorkloadTrialsArgs {
-    #[arg(value_name = "WORKLOAD")]
-    name: String,
-}
-
 #[derive(Debug, Args)]
 struct MeasureArgs {
     #[command(subcommand)]
@@ -900,7 +905,7 @@ mod tests {
             "bpftrace:all",
         ])
         .expect("bpftrace profile selection parses");
-        Cli::try_parse_from(["asb", "workload", "trials", "terminal-bench"])
+        Cli::try_parse_from(["asb", "workload", "terminal-bench", "trials"])
             .expect("workload trial listing parses");
     }
 }
