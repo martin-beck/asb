@@ -2437,7 +2437,7 @@ fn workload_choices(root: &Path, directory: &str) -> Vec<Choice> {
                         workload: name.to_owned(),
                         file: PathBuf::from(filename),
                     },
-                    format!("{name} [trial set]"),
+                    name.to_owned(),
                 )
             } else {
                 return None;
@@ -3533,11 +3533,7 @@ mod tests {
         let external_start = choices
             .iter()
             .position(|choice| {
-                let name = choice
-                    .label
-                    .strip_suffix(" [trial set]")
-                    .unwrap_or(&choice.label);
-                external_names.contains(name)
+                external_names.contains(choice.key.workload().expect("workload pane identity"))
             })
             .expect("external catalog is present");
         assert!(choices[..external_start].iter().all(|choice| {
