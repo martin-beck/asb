@@ -231,6 +231,13 @@ pub(crate) trait CollectorAdapter: Sync {
         matches!(backend, "native" | "local-docker")
     }
     fn id(&self) -> &'static str;
+    /// Whether this adapter owns a configured selection value.  Most
+    /// collectors are selected by their stable ID; adapters with typed
+    /// sub-selections can extend that grammar without teaching generic
+    /// planning or setup code about their syntax.
+    fn accepts_selection(&self, selection: &str) -> bool {
+        selection == self.id()
+    }
     fn runtime_inputs(
         &self,
         context: &crate::runtime_inputs::Context<'_>,
@@ -415,6 +422,15 @@ pub(crate) fn find(id: &str) -> Option<&'static dyn CollectorAdapter> {
     all().iter().copied().find(|collector| collector.id() == id)
 }
 
+/// Return the adapter that owns a configured collector selection, including
+/// adapter-defined sub-selections such as `bpftrace:sched-latency`.
+pub(crate) fn adapter_for_selection(selection: &str) -> Option<&'static dyn CollectorAdapter> {
+    all()
+        .iter()
+        .copied()
+        .find(|collector| collector.accepts_selection(selection))
+}
+
 pub(crate) fn bpftrace_profile_names() -> impl Iterator<Item = &'static str> {
     adapters::bpftrace::bpftrace_profile_names()
 }
@@ -428,7 +444,7 @@ pub(crate) fn expand_dependencies(selected: &[String]) -> Vec<String> {
     let mut expanded = selected.to_vec();
     let mut index = 0;
     while index < expanded.len() {
-        if let Some(adapter) = find(&expanded[index]) {
+        if let Some(adapter) = adapter_for_selection(&expanded[index]) {
             for dependency in adapter.dependencies() {
                 if !expanded.iter().any(|item| item == dependency) {
                     expanded.push((*dependency).into());
@@ -487,7 +503,9 @@ pub(crate) fn names() -> impl Iterator<Item = &'static str> {
 }
 pub(crate) fn selected_or_environment(id: &str, selected: &[String]) -> bool {
     find(id).is_some_and(|collector| {
-        selected.iter().any(|value| value == id)
+        selected
+            .iter()
+            .any(|value| collector.accepts_selection(value))
             || collector
                 .environment_flag()
                 .is_some_and(super::measurements::env_true)
@@ -589,6 +607,19 @@ mod tests {
             );
         }
         assert!(find("perf").unwrap().requires_pid());
+    }
+
+    #[test]
+    fn adapter_owned_subselections_resolve_without_generic_id_dispatch() {
+        assert_eq!(
+            adapter_for_selection("bpftrace:sched-latency").map(CollectorAdapter::id),
+            Some("bpftrace")
+        );
+        assert!(adapter_for_selection("bpftrace:not-a-profile").is_none());
+        assert!(selected_or_environment(
+            "bpftrace",
+            &["bpftrace:sched-latency".into()]
+        ));
     }
 
     #[test]
