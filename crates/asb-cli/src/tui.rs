@@ -15,7 +15,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
@@ -2419,7 +2419,7 @@ fn setup_install_request(app: &App, choice: &Choice) -> Option<install::operatio
 
 fn workload_choices(root: &Path, directory: &str) -> Vec<Choice> {
     let directory = project::resolve(root, directory);
-    let mut choices = fs::read_dir(&directory)
+    let choices = fs::read_dir(&directory)
         .ok()
         .into_iter()
         .flat_map(|entries| entries.filter_map(Result::ok))
@@ -2449,6 +2449,7 @@ fn workload_choices(root: &Path, directory: &str) -> Vec<Choice> {
             })
         })
         .collect::<Vec<_>>();
+    let mut choices = choices;
     if choices.is_empty() {
         choices.extend(
             [
@@ -2473,6 +2474,25 @@ fn workload_choices(root: &Path, directory: &str) -> Vec<Choice> {
         label: name.into(),
         availability: Availability::Unknown,
     }));
+    // A persisted trial set is configuration for its workload, not another
+    // selectable workload. Keep precisely one row per workload identity and
+    // prefer that saved selection so its enabled trials are retained when the
+    // setup wizard publishes a benchmark.
+    let mut unique = BTreeMap::<String, Choice>::new();
+    for choice in choices {
+        let Some(workload) = choice.key.workload().map(str::to_owned) else {
+            continue;
+        };
+        match unique.get(&workload) {
+            Some(existing)
+                if matches!(existing.key, ChoiceKey::TrialSet { .. })
+                    || !matches!(choice.key, ChoiceKey::TrialSet { .. }) => {}
+            _ => {
+                unique.insert(workload, choice);
+            }
+        }
+    }
+    let mut choices = unique.into_values().collect::<Vec<_>>();
     let external_names = install::external_workload_names().collect::<BTreeSet<_>>();
     for choice in &mut choices {
         let name = choice.key.workload().expect("workload identity");

@@ -76,7 +76,7 @@ fn scalar_app(fixture: &Fixture, workload: &str) -> App {
 }
 
 #[test]
-fn colliding_and_repeated_trial_suffixes_keep_raw_prompt_and_file_identities() {
+fn persisted_trial_sets_replace_duplicate_workload_rows() {
     let fixture = Fixture::new();
     for name in [
         "foo",
@@ -104,15 +104,24 @@ fn colliding_and_repeated_trial_suffixes_keep_raw_prompt_and_file_identities() {
             .iter()
             .filter(|choice| choice.label == "foo")
             .count(),
-        2
+        1
     );
     assert_eq!(
         pane.choices
             .iter()
             .filter(|choice| choice.label == "foo [trial set]")
             .count(),
-        2
+        1
     );
+    for name in ["foo", "foo [trial set]"] {
+        assert!(pane.choices.iter().any(|choice| {
+            matches!(
+                &choice.key,
+                ChoiceKey::TrialSet { workload, file }
+                    if workload == name && file == &PathBuf::from(format!("{name}.workload.toml"))
+            )
+        }));
+    }
     assert!(
         pane.choices
             .iter()
@@ -157,6 +166,24 @@ fn colliding_and_repeated_trial_suffixes_keep_raw_prompt_and_file_identities() {
     ]);
     assert_eq!(duplicate.choices.len(), 1);
     assert_eq!(duplicate.choices[0].label, "original");
+}
+
+#[test]
+fn persisted_swe_bench_trials_do_not_duplicate_the_external_workload() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "workloads/swe-bench.workload.toml",
+        "workload='swe-bench'\n[[trials]]\nid='fixture-task'\ndescription='Fixture'\n",
+    );
+    let app = fixture.app();
+    let choices = app
+        .pane(PaneKind::Workloads)
+        .choices
+        .iter()
+        .filter(|choice| choice.key.workload() == Some("swe-bench"))
+        .collect::<Vec<_>>();
+    assert_eq!(choices.len(), 1, "a trial set must not add a second row");
+    assert!(matches!(choices[0].key, ChoiceKey::TrialSet { .. }));
 }
 
 #[test]
