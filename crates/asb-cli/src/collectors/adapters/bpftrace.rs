@@ -17,6 +17,15 @@ impl CollectorAdapter for BpftraceCollector {
     fn id(&self) -> &'static str {
         "bpftrace"
     }
+    fn accepts_selection(&self, selection: &str) -> bool {
+        selection == self.id()
+            || selection.strip_prefix("bpftrace:").is_some_and(|profile| {
+                profile == "all"
+                    || BPFTRACE_PROFILES
+                        .iter()
+                        .any(|candidate| candidate.name == profile)
+            })
+    }
     fn environment_flag(&self) -> Option<&'static str> {
         Some("ASB_MEASURE_BPFTRACE")
     }

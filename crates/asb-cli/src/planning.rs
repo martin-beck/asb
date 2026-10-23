@@ -808,7 +808,7 @@ pub(crate) fn resolve_for_run(
     let mut plans = Vec::new();
     if measured {
         for id in &selected {
-            if collectors::find(id).is_none() {
+            if collectors::adapter_for_selection(id).is_none() {
                 return Err(Error::Input(format!(
                     "unknown measurement collector `{id}`"
                 )));
@@ -1345,5 +1345,25 @@ mod tests {
             .collectors
             .push("invented".into());
         assert!(resolve(&config).is_err());
+    }
+
+    #[test]
+    fn adapter_owned_bpftrace_profile_is_admitted_as_its_collector() {
+        let config = config(
+            "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['bpftrace', 'bpftrace:sched-latency']",
+        );
+        let plan = resolve(&config).expect("valid bpftrace profile should resolve");
+        assert_eq!(
+            plan.collectors
+                .iter()
+                .filter(|collector| collector.id == "bpftrace")
+                .count(),
+            1
+        );
+        assert!(
+            plan.collectors
+                .iter()
+                .any(|collector| collector.id == "bpftrace" && collector.selected)
+        );
     }
 }
