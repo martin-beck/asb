@@ -91,7 +91,7 @@ fn configuration(options: SetupOptions) -> Result<BenchmarkConfig, Error> {
         log_file: destination
             .as_deref()
             .map(default_log_name)
-            .unwrap_or_else(|| "benchmark.log".into()),
+            .unwrap_or_else(|| crate::benchmark::default_log_path("benchmark.log")),
         measurements: Some(MeasurementConfig {
             enabled: true,
             directory: "measurements".into(),
@@ -167,8 +167,8 @@ fn default_log_name(destination: &str) -> String {
         .file_stem()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
-        .map(|value| format!("{value}.log"))
-        .unwrap_or_else(|| "benchmark.log".into())
+        .map(|value| crate::benchmark::default_log_path(&format!("{value}.log")))
+        .unwrap_or_else(|| crate::benchmark::default_log_path("benchmark.log"))
 }
 
 fn run_command_message(path: &str) -> String {
@@ -191,8 +191,8 @@ mod tests {
 
     #[test]
     fn setup_derives_log_name_from_configuration_stem() {
-        assert_eq!(default_log_name("configs/foo.toml"), "foo.log");
-        assert_eq!(default_log_name("benchmark"), "benchmark.log");
+        assert_eq!(default_log_name("configs/foo.toml"), ".asb-logs/foo.log");
+        assert_eq!(default_log_name("benchmark"), ".asb-logs/benchmark.log");
     }
 
     #[test]

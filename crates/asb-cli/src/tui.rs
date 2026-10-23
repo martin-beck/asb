@@ -2173,7 +2173,10 @@ fn generate_configs(app: &App) -> Result<Generated, Error> {
                             trial_set: trial_set.clone(),
                             trial: trial.clone(),
                             workspace: app.project.workspace_dir.clone(),
-                            log_file: format!("{}.log", name.trim_end_matches(".toml")),
+                            log_file: crate::benchmark::default_log_path(&format!(
+                                "{}.log",
+                                name.trim_end_matches(".toml")
+                            )),
                             measurements: Some(MeasurementConfig {
                                 enabled: true,
                                 directory: "measurements".into(),
