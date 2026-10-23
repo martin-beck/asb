@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import posixpath
 import re
 import tarfile
 import tempfile
@@ -152,22 +153,26 @@ def stage_npm_package_tree(task, tree, tools, selected, owner=None):
                 name = member.name
                 parts = Path(name).parts
                 if (not name or name.startswith("/") or ".." in parts
-                        or parts[0] != "node_modules" or not (member.isdir() or member.isfile() or member.issym())):
+                        or parts[0] != "node_modules"
+                        or not (member.isdir() or member.isfile() or member.issym() or member.islnk())):
                     raise ExecutionError("npm package-tree bootstrap contains an unsafe member")
                 if member.isfile():
                     total += member.size
                     if member.size > 256 * 1024**2 or total > 512 * 1024**2:
                         raise ExecutionError("npm package-tree bootstrap exceeds its unpacked bound")
-                if member.issym():
+                if member.issym() or member.islnk():
                     link = member.linkname
-                    resolved = Path(name).parent.joinpath(link)
-                    if (not link or Path(link).is_absolute() or ".." in resolved.parts
-                            or not resolved.parts or resolved.parts[0] != "node_modules"):
+                    resolved = posixpath.normpath(posixpath.join(
+                        posixpath.dirname(name) if member.issym() else "",link))
+                    parts = Path(resolved).parts
+                    if (not link or Path(link).is_absolute() or resolved in {".",".."}
+                            or resolved.startswith("../") or not parts or parts[0] != "node_modules"):
                         raise ExecutionError("npm package-tree bootstrap contains an escaping link")
     except (OSError,tarfile.TarError) as error:
         raise ExecutionError("npm package-tree bootstrap cannot be inspected") from error
     with source.open("rb") as incoming:
         destination = "/opt/asb-project/.asb-tools/"+target
+        task.checked(["mkdir","-p",destination])
         if not task.workspace.container.put_archive(destination,incoming):
             raise ExecutionError("could not stage npm package-tree bootstrap")
     launcher = "/opt/asb-project/.asb-tools/"+target+"/node_modules/.bin/"+executable

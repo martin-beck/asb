@@ -338,18 +338,29 @@ class GuestBootstrapTests(unittest.TestCase):
                 directory_member = tarfile.TarInfo("node_modules/.bin")
                 directory_member.type = tarfile.DIRTYPE
                 output.addfile(directory_member)
-                launcher = tarfile.TarInfo("node_modules/.bin/cline")
-                launcher.mode = 0o755
                 payload = b"#!/bin/sh\nexit 0\n"
-                launcher.size = len(payload)
-                output.addfile(launcher, io.BytesIO(payload))
+                target = tarfile.TarInfo("node_modules/@cline/cli-linux-x64/bin/cline")
+                target.mode = 0o755
+                target.size = len(payload)
+                output.addfile(target, io.BytesIO(payload))
+                launcher = tarfile.TarInfo("node_modules/.bin/cline")
+                launcher.type = tarfile.SYMTYPE
+                launcher.linkname = "../@cline/cli-linux-x64/bin/cline"
+                output.addfile(launcher)
+                postinstall = tarfile.TarInfo("node_modules/cline/bin/.cline")
+                postinstall.type = tarfile.LNKTYPE
+                postinstall.linkname = "node_modules/@cline/cli-linux-x64/bin/cline"
+                output.addfile(postinstall)
             container = Container()
             checked = []
             task = SimpleNamespace(workspace=SimpleNamespace(container=container), artifacts=root,
                                    checked=lambda argv: checked.append(argv))
             tree = {"source":str(archive), "target":"cline", "executable":"cline"}
             stage_npm_package_tree(task, tree, tools, "cline")
-            self.assertEqual(checked, [["test", "-x", "/opt/asb-project/.asb-tools/cline/node_modules/.bin/cline"]])
+            self.assertEqual(checked, [
+                ["mkdir", "-p", "/opt/asb-project/.asb-tools/cline"],
+                ["test", "-x", "/opt/asb-project/.asb-tools/cline/node_modules/.bin/cline"],
+            ])
             self.assertTrue(any(destination == "/opt/asb-project/.asb-tools/cline"
                                 and name == "node_modules/.bin/cline"
                                 for destination,name,_ in container.files))
