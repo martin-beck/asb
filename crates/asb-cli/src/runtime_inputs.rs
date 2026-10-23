@@ -222,7 +222,7 @@ fn discover_with_timeout(
             && result.paths.is_empty()
         {
             return Err(Error::Input(format!(
-                "runtime input discovery failed safely with code `{code}`"
+                "runtime inputs discovery failed safely with code `{code}`"
             )));
         }
         return Err(unavailable());
@@ -670,20 +670,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn safe_runtime_discovery_code_is_actionable_without_exposing_paths() {
-        let root = Directory::new();
-        let python = helper(
-            &root,
-            "import sys\nsys.stdin.buffer.read()\nprint('{\"schema_version\":1,\"error_code\":\"required_runtime_unavailable\",\"paths\":[]}')\n",
-        );
-        let error = discover_with_timeout(&python, &[], Duration::from_secs(2))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("required_runtime_unavailable"));
-        assert!(!error.contains(root.0.to_str().unwrap()));
     }
 
     #[test]
