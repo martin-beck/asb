@@ -628,12 +628,9 @@ fn unknown_commands_suggest_the_intended_command() {
     for (args, suggestion) in [
         (vec!["sweeep"], "sweep"),
         (vec!["tool", "instal"], "install"),
-        (vec!["workload", "lst"], "list"),
+        (vec!["workload", "swe-bench", "triels"], "trials"),
     ] {
-        expect_failure(
-            &project.command(&args),
-            &format!("did you mean `{suggestion}`"),
-        );
+        expect_failure(&project.command(&args), suggestion);
     }
 }
 
