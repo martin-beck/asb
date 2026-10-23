@@ -806,6 +806,12 @@ impl Session {
                     }
                     self.resume_measured_target(context, &event, deadline)?;
                     launched = true;
+                    // Recording and replay can be silent until the first
+                    // provider response. Show the same immediate live frame
+                    // as a native run, then let the timed polling refresh it.
+                    if let Some(progress) = context.progress.as_deref_mut() {
+                        progress.update(&progress_stdout, &[]);
+                    }
                 }
                 Some(EventKind::PreparationFailed) => {
                     if let Some(launch) = context.launch {
