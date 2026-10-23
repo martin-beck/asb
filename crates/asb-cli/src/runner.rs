@@ -125,6 +125,8 @@ pub(crate) struct RunOptions<'a> {
     pub execution_cohort: Option<&'a measurements::ExecutionCohort>,
     pub json: bool,
     pub show_output: bool,
+    /// Print the selected trial before any run work begins.
+    pub announce_trial: bool,
     /// The process was launched with both presentation streams attached to a terminal.
     pub interactive: bool,
     pub measurement_dir: Option<&'a str>,
@@ -167,6 +169,9 @@ pub(crate) fn run_with_diagnostics(
     {
         return Err(Error::Input("--track and --seed require --replay".into()));
     }
+    if options.announce_trial {
+        write_trial_start(output, &config)?;
+    }
     let bundled_replay = if options.mode == Some(tape::Mode::Replay) {
         let source = replay_cassette(config_path, &config, options.cassette)?;
         crate::cassette::Source::is_bundle(&source)
@@ -182,6 +187,23 @@ pub(crate) fn run_with_diagnostics(
         return repeated::run(config_path, config, repeat, options, output, warnings);
     }
     run_loaded(config_path, config, options, output, warnings)
+}
+
+fn write_trial_start(output: &mut dyn Write, config: &BenchmarkConfig) -> Result<(), Error> {
+    let trial = config.trial.as_deref().unwrap_or("default");
+    let trial = trial
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    writeln!(output, "Starting trial: {trial}")
+        .and_then(|()| output.flush())
+        .map_err(io_error)
 }
 
 /// Allocate fresh, benchmark-scoped output for one direct (non-campaign) run.
@@ -1406,9 +1428,32 @@ mod tests {
     use super::{
         RunDisposition, RunResult, RunStatus, command_for, isolated_direct_config, render_human,
         render_json, replica_cassette, resolve_log_path, run_with_tape, write_log,
+        write_trial_start,
     };
     use crate::benchmark::BenchmarkConfig;
     use crate::measurements::TokenUsage;
+
+    #[test]
+    fn trial_start_uses_the_selected_name_without_record_or_replay_metadata() {
+        let mut config: BenchmarkConfig = toml::from_str(
+            "agent='pi'\nworkload='bug-fix'\nprovider='local'\nmodel='fixture'\ntrial='case-42'\n",
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        write_trial_start(&mut output, &config).unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "Starting trial: case-42\n"
+        );
+
+        config.trial = None;
+        let mut output = Vec::new();
+        write_trial_start(&mut output, &config).unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "Starting trial: default\n"
+        );
+    }
 
     #[test]
     fn direct_runs_allocate_fresh_benchmark_scoped_result_directories() {

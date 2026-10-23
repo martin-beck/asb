@@ -98,7 +98,7 @@ fetch(url + '/responses', {method:'POST', headers:{'content-type':'application/j
     );
     assert!(
         progress.contains(
-            "(1/1; 100% reached): benchmark.toml — pi, cli2key, test-model, bug-fix (concurrency 8)"
+            "(1/1; 100% reached): benchmark.toml — pi, cli2key, test-model, bug-fix, trial default (concurrency 8)"
         ),
         "{progress}"
     );
