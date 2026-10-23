@@ -34,14 +34,15 @@ fn request(requirement: Requirement, failure: FailurePolicy) -> Request {
 
 #[test]
 fn explicit_consent_matrix_never_probes_or_executes_declined_commands() {
-    for (answer, approved) in [
-        ("y\n", true),
-        ("Y\n", true),
-        ("n\n", false),
-        ("N\n", false),
-        ("\n", false),
-        ("yes\n", false),
-        ("", false),
+    for (answer, approved, prompts) in [
+        ("y\n", true, 1),
+        ("Y\n", true, 1),
+        ("n\n", false, 1),
+        ("N\n", false, 1),
+        ("\n", false, 1),
+        ("yes\nn\n", false, 2),
+        (" y\nN\n", false, 2),
+        ("", false, 1),
     ] {
         let mut fake = Fake {
             available: true,
@@ -71,6 +72,11 @@ fn explicit_consent_matrix_never_probes_or_executes_declined_commands() {
         assert!(text.contains("sudo -n mkdir -p '/fixture/with space'"));
         assert!(text.contains("sudo -n tee /fixture/control"));
         assert!(text.find("chmod").unwrap() < text.find("Apply the listed").unwrap());
+        assert_eq!(
+            text.matches("Apply the listed privileged commands? y/N:")
+                .count(),
+            prompts
+        );
     }
 }
 

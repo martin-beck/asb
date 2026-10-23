@@ -413,7 +413,7 @@ fn configure_host_capabilities_with(
     if !pending.is_empty() {
         let request = Request {
             heading: "Host capability setup needs to change these system-wide kernel tracing settings:",
-            explanation: "These changes affect the whole host. Enter y or n explicitly; pressing Enter is not accepted.",
+            explanation: "These changes affect the whole host. Enter y to approve; n or Enter leaves them unchanged.",
             operations: pending
                 .iter()
                 .map(|(setting, wanted, _)| {
@@ -956,10 +956,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn host_settings_confirmation_requires_explicit_answer() {
+    fn host_settings_confirmation_accepts_only_single_letter_answers_or_default() {
         assert_eq!(parse_host_settings_confirmation("y\n"), Some(true));
         assert_eq!(parse_host_settings_confirmation("N\n"), Some(false));
-        assert_eq!(parse_host_settings_confirmation("\n"), None);
+        assert_eq!(parse_host_settings_confirmation("\n"), Some(false));
         assert_eq!(parse_host_settings_confirmation("yes\n"), None);
     }
 
