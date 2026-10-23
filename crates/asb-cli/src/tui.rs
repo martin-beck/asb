@@ -21,6 +21,15 @@ use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+const LAST_SETUP_TUI_FILE: &str = "setup-tui-last.toml";
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct LastSetupTui {
+    schema_version: u32,
+    config: String,
+}
+
 const DESCRIPTIONS: &[&str] = &[
     "Choose one or more agents that will execute each benchmark.",
     "Choose the provider endpoint used by the selected agents.",
@@ -800,10 +809,15 @@ fn visible_message(message: &str, until: Option<std::time::Instant>) -> &str {
 }
 
 /// Launch the setup wizard and write one TOML per selected combination.
-pub fn setup(input: Option<&Path>, output: &mut dyn Write) -> Result<(), Error> {
+pub fn setup(input: Option<&Path>, last: bool, output: &mut dyn Write) -> Result<(), Error> {
     let (root, project) = project::load(Path::new("."))?;
-    let mut app = App::new(root, project);
-    if let Some(input) = input {
+    let selected = if last {
+        Some(last_setup_tui_config(&root)?)
+    } else {
+        input.map(Path::to_path_buf)
+    };
+    let mut app = App::new(root.clone(), project);
+    if let Some(input) = selected.as_deref() {
         app.preselect(input)?;
     }
     let mut terminal =
@@ -811,8 +825,75 @@ pub fn setup(input: Option<&Path>, output: &mut dyn Write) -> Result<(), Error> 
     let result = run_loop(&mut terminal, &mut app);
     let cleanup = stop_terminal(terminal);
     let generated = with_terminal_cleanup(result, cleanup)?;
+    record_last_setup_tui(&root, &generated)?;
     writeln!(output, "{}", generated_summary(&generated)).map_err(crate::io_error)?;
     output.flush().map_err(crate::io_error)
+}
+
+fn last_setup_tui_path(root: &Path) -> PathBuf {
+    root.join(".asb").join(LAST_SETUP_TUI_FILE)
+}
+
+fn last_setup_tui_config(root: &Path) -> Result<PathBuf, Error> {
+    let marker = last_setup_tui_path(root);
+    let text = fs::read_to_string(&marker).map_err(|error| {
+        Error::Input(format!(
+            "cannot load the last setup TUI configuration at {}: {error}; run `asb setup tui` first",
+            marker.display()
+        ))
+    })?;
+    let record: LastSetupTui = toml::from_str(&text).map_err(|error| {
+        Error::Input(format!(
+            "last setup TUI record {} is malformed: {error}; run `asb setup tui` again",
+            marker.display()
+        ))
+    })?;
+    if record.schema_version != 1 {
+        return Err(Error::Input(format!(
+            "last setup TUI record {} has unsupported schema version {}; run `asb setup tui` again",
+            marker.display(),
+            record.schema_version
+        )));
+    }
+    let relative = Path::new(&record.config);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(Error::Input(format!(
+            "last setup TUI record {} has an unsafe configuration path; run `asb setup tui` again",
+            marker.display()
+        )));
+    }
+    let config = root.join(relative);
+    if !config.is_file() {
+        return Err(Error::Input(format!(
+            "last setup TUI configuration {} is missing; run `asb setup tui` again",
+            config.display()
+        )));
+    }
+    Ok(config)
+}
+
+fn record_last_setup_tui(root: &Path, generated: &Generated) -> Result<(), Error> {
+    let relative = generated.sweep.strip_prefix(root).map_err(|_| {
+        Error::Io("setup TUI generated a configuration outside its project root".into())
+    })?;
+    let record = LastSetupTui {
+        schema_version: 1,
+        config: relative.to_string_lossy().into_owned(),
+    };
+    let text = toml::to_string(&record)
+        .map_err(|error| Error::Io(format!("cannot serialize last setup TUI record: {error}")))?;
+    fs::write(last_setup_tui_path(root), text)
+        .map_err(|error| Error::Io(format!("cannot save last setup TUI record: {error}")))
 }
 
 fn preselection_configs(input: &Path) -> Result<Vec<BenchmarkConfig>, Error> {
@@ -2525,7 +2606,8 @@ mod generation_tests;
 mod tests {
     use super::{
         App, Availability, Choice, ChoiceKey, Generated, Pane, PaneKind, default_model,
-        generate_configs, generated_summary, install_status_message,
+        generate_configs, generated_summary, install_status_message, last_setup_tui_config,
+        record_last_setup_tui,
     };
     use crate::install;
     use crate::project::ProjectConfig;
@@ -3431,6 +3513,46 @@ mod tests {
             sweep: std::path::PathBuf::from("asb-sweep-123.toml"),
         });
         assert!(summary.contains("Run it with: asb sweep asb-sweep-123.toml"));
+    }
+
+    #[test]
+    fn last_setup_tui_record_prefers_the_generated_sweep() {
+        let root = std::env::temp_dir().join(format!("asb-tui-last-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".asb")).unwrap();
+        let sweep = root.join("asb-sweep-123.toml");
+        let benchmark = root.join("asb-test-123-000.toml");
+        std::fs::write(&sweep, "configs=[]\n").unwrap();
+        std::fs::write(&benchmark, "agent='pi'\n").unwrap();
+        record_last_setup_tui(
+            &root,
+            &Generated {
+                tests: 2,
+                sweep: sweep.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(last_setup_tui_config(&root).unwrap(), sweep);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn last_setup_tui_record_rejects_escape_paths() {
+        let root = std::env::temp_dir().join(format!("asb-tui-last-unsafe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".asb")).unwrap();
+        std::fs::write(
+            root.join(".asb/setup-tui-last.toml"),
+            "schema_version=1\nconfig='../outside.toml'\n",
+        )
+        .unwrap();
+        assert!(
+            last_setup_tui_config(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("unsafe configuration path")
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
