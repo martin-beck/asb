@@ -21,6 +21,25 @@ impl Project {
         );
         project
     }
+
+    /// Matrix tests exercise selection expansion, not third-party installer
+    /// recipes.  Seed executable local entries so `setup --agent all` remains
+    /// entirely offline and does not turn a catalogue assertion into a series
+    /// of npm/pip downloads.
+    fn seed_agent_installations(&self, agents: &[(&str, &str)]) {
+        for (agent, executable) in agents {
+            self.write_executable(
+                &format!("tools/{agent}/bin/{executable}"),
+                "#!/bin/sh\nexit 0\n",
+            );
+        }
+    }
+    #[cfg(unix)]
+    fn write_executable(&self, path: &str, text: &str) {
+        let path = self.0.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fixture_writer::write(&self.0, &path, text.as_bytes(), Some(0o755)).unwrap();
+    }
     fn write(&self, path: &str, text: &str) {
         let path = self.0.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -599,6 +618,21 @@ fn configurations(project: &Project, manifest: &str) -> Vec<toml::Value> {
 #[test]
 fn all_agents_providers_and_measures_generate_a_matrix_without_literal_all() {
     let project = Project::new();
+    project.seed_agent_installations(&[
+        ("codex", "codex"),
+        ("pi", "pi"),
+        ("opencode", "opencode"),
+        ("workbuddy", "codebuddy"),
+        ("qwen-code", "qwen"),
+        ("mini-swe", "mini"),
+        ("openhands", "openhands"),
+        ("openjiuwen", "openjiuwen"),
+        ("claude-code", "claude"),
+        ("goose", "goose"),
+        ("hermes", "hermes"),
+        ("cline", "cline"),
+        ("continue", "cn"),
+    ]);
     success(project.command(&[
         "setup",
         "--agent",
@@ -642,13 +676,14 @@ fn all_agents_providers_and_measures_generate_a_matrix_without_literal_all() {
     }
     assert!(
         project.0.join("tools").exists(),
-        "setup all installs selected missing agents before publishing configurations"
+        "setup uses the project-local executable catalogue while publishing configurations"
     );
 }
 
 #[test]
 fn all_trial_sets_and_scoped_all_trials_match_explicit_selections() {
     let project = Project::new();
+    project.seed_agent_installations(&[("pi", "pi")]);
     project.write(
         "catalogs/a.workload.toml",
         "workload='agentbench'\n[[trials]]\nid='one'\n[[trials]]\nid='two'\n",

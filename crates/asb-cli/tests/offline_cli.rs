@@ -697,7 +697,7 @@ fn setup_writes_a_parseable_user_selected_configuration() {
     assert_eq!(config["model"].as_str(), Some("gpt-6.1-sol"));
     assert_eq!(config["concurrency"].as_integer(), Some(3));
     assert_eq!(config["workspace"].as_str(), Some("my workspace"));
-    assert_eq!(config["log_file"].as_str(), Some("selected.log"));
+    assert_eq!(config["log_file"].as_str(), Some(".asb-logs/selected.log"));
     assert!(!text.to_ascii_lowercase().contains("api_key"));
 }
 
