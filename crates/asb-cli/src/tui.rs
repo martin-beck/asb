@@ -3684,7 +3684,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("asb-tui-concurrency-{}", std::process::id()));
         std::fs::create_dir_all(&root).expect("test root");
         let app = App::new(root.clone(), ProjectConfig::default());
-        assert_eq!(app.panes.len(), 7);
+        assert_eq!(app.panes.len(), 8);
         assert_eq!(
             app.panes[PaneKind::Concurrency.index()]
                 .selected_choices()
