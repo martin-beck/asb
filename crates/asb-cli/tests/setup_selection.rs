@@ -1,6 +1,8 @@
 //! Provider-free setup contracts: catalogs are synthetic, no SDK is executed.
 use serde_json::json;
 mod support;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use support::IsolatedEnvironment;
@@ -27,28 +29,55 @@ impl Project {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
-    fn setup(&self, workload: &str, extra: &[&str]) -> Output {
+    fn command(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_asb"))
             .current_dir(&self.0)
             .isolated_env()
             .env("HOME", &self.0)
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .args([
-                "setup",
-                "--agent",
-                "pi",
-                "--provider",
-                "openrouter",
-                "--model",
-                "offline-fixture",
-                "--workload",
-                workload,
-                "--output",
-                "selected.toml",
-            ])
-            .args(extra)
+            .args(args)
             .output()
             .unwrap()
+    }
+    /// Selection coverage must not make an external agent installation part of
+    /// its synthetic-catalog contract.  The automatic installer itself has
+    /// focused coverage elsewhere.
+    fn seed_pi(&self) {
+        self.write_executable("tools/pi/bin/pi");
+    }
+    fn write_executable(&self, relative: &str) {
+        let executable = self.0.join(relative);
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fn seed_external_sdks(&self) {
+        for (tool, executable) in [
+            ("swebench", "swebench"),
+            ("terminal-bench", "tb"),
+            ("harbor", "harbor"),
+        ] {
+            self.write_executable(&format!("tools/{tool}/venv/bin/{executable}"));
+            self.write_executable(&format!("tools/{tool}/venv/bin/python"));
+        }
+    }
+    fn setup(&self, workload: &str, extra: &[&str]) -> Output {
+        let mut args = vec![
+            "setup",
+            "--agent",
+            "pi",
+            "--provider",
+            "openrouter",
+            "--model",
+            "offline-fixture",
+            "--workload",
+            workload,
+            "--output",
+            "selected.toml",
+        ];
+        args.extend_from_slice(extra);
+        self.command(&args)
     }
 }
 impl Drop for Project {
@@ -107,6 +136,8 @@ fn all_five_catalogs_accept_explicit_instances_and_reject_missing_or_unknown_bef
         ),
     ] {
         let project = Project::new();
+        project.seed_pi();
+        project.seed_external_sdks();
         let tasks = (0..population).map(|index| {
             let id = format!("fixture-{index}");
             if sdk == "swebench" {
@@ -141,10 +172,7 @@ fn all_five_catalogs_accept_explicit_instances_and_reject_missing_or_unknown_bef
         assert_eq!(config["workload"].as_str(), Some(workload));
         assert_eq!(config["trial"].as_str(), Some("fixture-0"));
         assert_eq!(config["workspace"].as_str(), Some("workspaces"));
-        assert!(
-            !project.0.join("tools").exists(),
-            "setup must not install or execute an SDK"
-        );
+        assert!(project.0.join("tools/pi/bin/pi").is_file());
         for arguments in [&[][..], &["--trial", "not-installed"][..]] {
             let result = project.setup(workload, arguments);
             assert!(!result.status.success(), "{workload}");
