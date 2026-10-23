@@ -47,11 +47,23 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
     prepare_missing_installables(&options, output)?;
     let repeated = requested_repeats || repeated(&options);
     for measure in &options.measure {
-        if !measurements::available_collectors().contains(measure) {
+        let valid_bpftrace_profile = measure.strip_prefix("bpftrace:").is_some_and(|profile| {
+            profile == "all"
+                || crate::collectors::bpftrace_profile_names().any(|candidate| candidate == profile)
+        });
+        if !measurements::available_collectors().contains(measure) && !valid_bpftrace_profile {
             return Err(Error::Input(format!(
-                "unknown measurement collector `{measure}`; use `asb setup tui` to see available measurements"
+                "unknown measurement collector `{measure}`; use `asb measure` to see collectors or `asb measure bpftrace programs` for eBPF programs"
             )));
         }
+    }
+    if options
+        .measure
+        .iter()
+        .any(|measure| measure.starts_with("bpftrace:"))
+        && !options.measure.iter().any(|measure| measure == "bpftrace")
+    {
+        options.measure.push("bpftrace".into());
     }
     let (root, settings) = project::load(Path::new("."))?;
     let directory = std::env::var_os("ASB_WORKLOAD_DIR")
@@ -317,8 +329,12 @@ fn prepare_missing_installables(
     let known_collectors = options
         .measure
         .iter()
-        .filter(|name| measurements::available_collectors().contains(*name))
-        .cloned()
+        .filter_map(|name| {
+            measurements::available_collectors()
+                .contains(name)
+                .then(|| name.clone())
+                .or_else(|| name.starts_with("bpftrace:").then(|| "bpftrace".into()))
+        })
         .collect::<Vec<_>>();
     crate::install::ensure_collector_dependencies(
         &known_collectors,

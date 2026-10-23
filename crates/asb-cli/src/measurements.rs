@@ -153,6 +153,23 @@ pub fn available_collectors() -> Vec<String> {
         .collect()
 }
 
+/// Concise descriptions for human-facing collector discovery.
+pub fn collector_description(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "agent-memory" => "selected agent process-tree memory usage",
+        "agent-workers" => "selected agent process-tree worker census",
+        "cpu-accounting" => "process-tree CPU time and scheduler accounting",
+        "system" => "host architecture and operating-system metadata",
+        "mpstat" => "per-CPU utilization time series",
+        "iostat" => "block-device throughput and latency time series",
+        "perf" => "process-tree performance counter samples",
+        "perfetto" => "timestamped execution trace for Perfetto",
+        "flamegraph" => "process-tree CPU flamegraph",
+        "bpftrace" => "selected process-tree eBPF programs",
+        _ => return None,
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RunMeasurement<'a> {
     /// Exact runtime identity inputs; independently usable without a run log.

@@ -405,6 +405,14 @@ pub(crate) fn find(id: &str) -> Option<&'static dyn CollectorAdapter> {
     all().iter().copied().find(|collector| collector.id() == id)
 }
 
+pub(crate) fn bpftrace_profile_names() -> impl Iterator<Item = &'static str> {
+    adapters::bpftrace::bpftrace_profile_names()
+}
+
+pub(crate) fn bpftrace_profiles() -> &'static [adapters::bpftrace::BpftraceProfile] {
+    adapters::bpftrace::bpftrace_profiles()
+}
+
 /// Resolve transitive dependencies once, keeping user-selected order stable.
 pub(crate) fn expand_dependencies(selected: &[String]) -> Vec<String> {
     let mut expanded = selected.to_vec();
