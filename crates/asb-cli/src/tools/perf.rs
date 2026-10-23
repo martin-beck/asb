@@ -22,6 +22,7 @@ pub(super) static ADAPTER: StaticTool = StaticTool::new(
         description: "install a distribution perf package or verified upstream source build",
         summary: "project-local Linux perf",
         install: install_perf,
+        guest_assets: None,
     },
     ToolKind::Collector,
 );

@@ -17,7 +17,7 @@ pub(crate) mod operation;
 pub(crate) mod process;
 mod progress;
 pub(crate) use progress::ProgressStage;
-mod goose;
+pub(crate) mod goose;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "../tests/unit/installer_process_boundary.rs"]
 mod process_boundary_red;
@@ -27,37 +27,24 @@ pub(crate) use process::{
 };
 pub(crate) use source::check_version_in;
 
-const GOOSE_X86_64_URL: &str = "https://github.com/aaif-goose/goose/releases/download/v1.54.0/goose-x86_64-unknown-linux-gnu.tar.gz";
-const GOOSE_X86_64_SHA256: &str =
-    "ab396c95aebbd28b4d38c175234be8d4a3ea0c96e7ccb24c307e4618c9be57e1";
-const GOOSE_AARCH64_URL: &str = "https://github.com/aaif-goose/goose/releases/download/v1.54.0/goose-aarch64-unknown-linux-gnu.tar.gz";
-const GOOSE_AARCH64_SHA256: &str =
-    "0f174b5118a53888cd4e65b7ca9a4b72dd0b887e89142c8ce41e2409205e40d5";
-
-// Some current agent packages declare an AWS SDK version whose registry
-// metadata exists but whose tarball is not published. Keep the repair in the
-// project-local npm manifest so installation remains deterministic and does
-// not alter the host npm configuration.
-const NPM_INSTALL_MANIFEST: &str = r#"{
-  "private": true,
-  "overrides": {
-    "@aws-sdk/client-bedrock-runtime": "3.1030.0",
-    "@aws-sdk/credential-provider-http": "3.972.76"
-  }
-}
-"#;
-
 type CustomInstall = fn(
     &OperationContext,
     &Path,
     &mut dyn FnMut(u8, crate::install::ProgressStage),
 ) -> InstallResult<PathBuf>;
+type CustomGuestAssets = fn(
+    &OperationContext,
+    &Path,
+    &mut dyn FnMut(u8, crate::install::ProgressStage),
+) -> InstallResult<Vec<tools::GuestAsset>>;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Recipe {
     Npm {
         package: &'static str,
         executable: &'static str,
+        /// Optional package-manager manifest supplied by the owning adapter.
+        manifest: Option<&'static str>,
     },
     Python {
         package: &'static str,
@@ -72,8 +59,8 @@ pub(crate) enum Recipe {
         description: &'static str,
         summary: &'static str,
         install: CustomInstall,
+        guest_assets: Option<CustomGuestAssets>,
     },
-    Goose,
 }
 
 impl Recipe {
@@ -90,7 +77,22 @@ impl Recipe {
         match self {
             Self::Npm { .. } => &["node"],
             Self::Python { .. } => &["uv"],
-            Self::Goose | Self::Host { .. } | Self::Custom { .. } => &[],
+            Self::Host { .. } | Self::Custom { .. } => &[],
+        }
+    }
+
+    fn guest_assets(
+        self,
+        context: &OperationContext,
+        root: &Path,
+        progress: &mut dyn FnMut(u8, crate::install::ProgressStage),
+    ) -> InstallResult<Option<Vec<tools::GuestAsset>>> {
+        match self {
+            Self::Custom {
+                guest_assets: Some(assets),
+                ..
+            } => assets(context, root, progress).map(Some),
+            _ => Ok(None),
         }
     }
 }
@@ -167,13 +169,11 @@ fn guest_bootstrap_in(
             plan.assets.push(asset);
         }
     }
-    if matches!(recipe, Recipe::Goose) {
-        let archive = goose_archive(context, &tools_root.join(id), &mut progress)?;
-        plan.assets.push(tools::GuestAsset {
-            source: archive,
-            target: Path::new(id).join("cache/goose.tar.gz"),
-            distribution: None,
-        });
+    if let Some(assets) = recipe.guest_assets(context, &tools_root.join(id), &mut progress)? {
+        plan.assets.extend(assets.into_iter().map(|mut asset| {
+            asset.target = Path::new(id).join(asset.target);
+            asset
+        }));
     }
     Ok(plan)
 }
@@ -854,10 +854,6 @@ pub fn workload_list(
 
 enum PreparedDistribution {
     Host(source::Input),
-    Goose {
-        archive: PathBuf,
-        checksum: &'static str,
-    },
     Package(Recipe),
     Custom(CustomInstall),
 }
@@ -872,16 +868,11 @@ impl<'a> PreparedRecipe<'a> {
         context: &'a OperationContext,
         recipe: Recipe,
         root: &'a Path,
-        progress: &mut dyn FnMut(u8, ProgressStage),
     ) -> InstallResult<Self> {
         let distribution = match recipe {
             Recipe::Host { executable } => {
                 PreparedDistribution::Host(source::Input::pin_local(host_executable(executable)?)?)
             }
-            Recipe::Goose => PreparedDistribution::Goose {
-                archive: goose_archive(context, root, progress)?,
-                checksum: goose_distribution()?.1,
-            },
             Recipe::Custom { install, .. } => PreparedDistribution::Custom(install),
             Recipe::Npm { .. } | Recipe::Python { .. } => PreparedDistribution::Package(recipe),
         };
@@ -918,9 +909,6 @@ impl<'a> PreparedRecipe<'a> {
                 )?;
                 Ok(self.destination)
             }
-            PreparedDistribution::Goose { archive, checksum } => {
-                goose::install_archive_in(self.context, self.root, &archive, checksum, progress)
-            }
             PreparedDistribution::Custom(install) => install(self.context, self.root, progress),
             PreparedDistribution::Package(recipe) => {
                 install_package(self.context, recipe, self.root, output, progress)
@@ -950,7 +938,7 @@ fn install_recipe_in(
 ) -> InstallResult<PathBuf> {
     fs::create_dir_all(root)
         .map_err(|error| Error::Io(format!("cannot create {}: {error}", root.display())))?;
-    PreparedRecipe::resolve(context, recipe, root, progress)?.install(output, progress)
+    PreparedRecipe::resolve(context, recipe, root)?.install(output, progress)
 }
 
 fn install_package(
@@ -965,7 +953,11 @@ fn install_package(
     let owner = ProducerDirectory::open(root)?;
     let mut scope = owner.scope(context);
     let status = match recipe {
-        Recipe::Npm { package, .. } => {
+        Recipe::Npm {
+            package,
+            manifest: adapter_manifest,
+            ..
+        } => {
             ensure_runtime_dependency_in(
                 context,
                 "node",
@@ -973,10 +965,12 @@ fn install_package(
                 output,
                 progress,
             )?;
-            let manifest = root.join("package.json");
-            if !manifest.exists() {
-                fs::write(&manifest, NPM_INSTALL_MANIFEST).map_err(|error| {
-                    Error::Io(format!("cannot prepare npm install manifest: {error}"))
+            let manifest_path = root.join("package.json");
+            if let Some(contents) = adapter_manifest.filter(|_| !manifest_path.exists()) {
+                fs::write(&manifest_path, contents).map_err(|error| {
+                    Error::Io(format!(
+                        "cannot prepare adapter npm install manifest: {error}"
+                    ))
                 })?;
             }
             progress(15, ProgressStage::InstallingPackage);
@@ -1096,7 +1090,7 @@ fn install_package(
             }
             installed.status
         }
-        Recipe::Host { .. } | Recipe::Custom { .. } | Recipe::Goose => {
+        Recipe::Host { .. } | Recipe::Custom { .. } => {
             unreachable!("prepared executable recipes bypass package managers")
         }
     };
@@ -1146,28 +1140,6 @@ pub(crate) fn ensure_runtime_dependency_in(
     writeln!(output, "Installed required runtime {id} for this project.")
         .map_err(crate::io_error)?;
     Ok(())
-}
-
-fn goose_archive(
-    context: &OperationContext,
-    root: &Path,
-    progress: &mut dyn FnMut(u8, crate::install::ProgressStage),
-) -> InstallResult<PathBuf> {
-    let (url, checksum) = goose_distribution()?;
-    let archive = root.join("cache/goose.tar.gz");
-    tools::runtime::cached_archive_in(context, &archive, url, checksum, progress)
-}
-
-fn goose_distribution() -> Result<(&'static str, &'static str), Error> {
-    Ok(match std::env::consts::ARCH {
-        "x86_64" => (GOOSE_X86_64_URL, GOOSE_X86_64_SHA256),
-        "aarch64" => (GOOSE_AARCH64_URL, GOOSE_AARCH64_SHA256),
-        architecture => {
-            return Err(Error::Input(format!(
-                "Goose is packaged by ASB only for Linux x86_64 and aarch64; this host is {architecture}"
-            )));
-        }
-    })
 }
 
 /// Inspect cached inputs without destroying evidence needed for repair.
@@ -1304,7 +1276,6 @@ fn executable(recipe: Recipe, root: &Path) -> PathBuf {
         Recipe::Python { executable, .. } => root.join("venv/bin").join(executable),
         Recipe::Host { executable } => root.join("bin").join(executable),
         Recipe::Custom { executable, .. } => root.join("bin").join(executable),
-        Recipe::Goose => root.join("bin").join("goose"),
     }
 }
 
@@ -1330,10 +1301,6 @@ fn describe(recipe: Recipe, root: &Path) -> String {
             format!("copy host `{executable}` into {}/bin", root.display())
         }
         Recipe::Custom { description, .. } => format!("{description} into {}/bin", root.display()),
-        Recipe::Goose => format!(
-            "download and verify pinned Goose binary into {}/bin",
-            root.display()
-        ),
     }
 }
 
@@ -1351,7 +1318,6 @@ fn tool_summary(recipe: Recipe) -> String {
         } => format!("python {package} -> {executable}"),
         Recipe::Host { executable } => format!("host binary -> {executable}"),
         Recipe::Custom { summary, .. } => summary.into(),
-        Recipe::Goose => "pinned Goose binary (x86_64/aarch64) -> goose".into(),
     }
 }
 
@@ -1516,7 +1482,7 @@ mod tests {
             let expected: &[&str] = match recipe {
                 Recipe::Npm { .. } => &["node"],
                 Recipe::Python { .. } => &["uv"],
-                Recipe::Goose => &[],
+                Recipe::Custom { .. } => &[],
                 _ => panic!("registered agent {id} needs an explicit guest bootstrap recipe"),
             };
             assert_eq!(recipe.guest_runtimes(), expected);
@@ -1569,9 +1535,16 @@ mod tests {
     }
 
     #[test]
-    fn npm_install_manifest_pins_published_aws_sdk_artifacts() {
+    fn opencode_adapter_owns_its_npm_compatibility_manifest() {
+        let Recipe::Npm {
+            manifest: Some(contents),
+            ..
+        } = agents::find("opencode").unwrap().recipe()
+        else {
+            panic!("opencode must own its npm compatibility manifest");
+        };
         let manifest: serde_json::Value =
-            serde_json::from_str(NPM_INSTALL_MANIFEST).expect("valid npm manifest");
+            serde_json::from_str(contents).expect("valid npm manifest");
         assert_eq!(
             manifest["overrides"]["@aws-sdk/client-bedrock-runtime"],
             "3.1030.0"

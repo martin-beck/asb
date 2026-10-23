@@ -6,6 +6,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     Recipe::Npm {
         package: "cline@3.0.72",
         executable: "cline",
+        manifest: None,
     },
     &[crate::endpoint::CHAT, crate::endpoint::RESPONSES],
     command,

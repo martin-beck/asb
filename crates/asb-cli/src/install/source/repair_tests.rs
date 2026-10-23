@@ -801,6 +801,7 @@ fn raw_project_child(root: &Path) {
         super::super::Recipe::Npm {
             package: "fixture-raw@1",
             executable: "fixture-client",
+            manifest: None,
         },
         &package,
         &project,

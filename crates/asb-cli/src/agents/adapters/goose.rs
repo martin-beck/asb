@@ -1,14 +1,76 @@
 use super::{CommandContext, CommandSpec, PreparationContext, StaticAdapter};
-use crate::{Error, install::Recipe};
+use crate::{
+    Error,
+    install::{InstallResult, OperationContext, Recipe},
+};
+use std::path::{Path, PathBuf};
+
+const X86_64_URL: &str = "https://github.com/aaif-goose/goose/releases/download/v1.54.0/goose-x86_64-unknown-linux-gnu.tar.gz";
+const X86_64_SHA256: &str = "ab396c95aebbd28b4d38c175234be8d4a3ea0c96e7ccb24c307e4618c9be57e1";
+const AARCH64_URL: &str = "https://github.com/aaif-goose/goose/releases/download/v1.54.0/goose-aarch64-unknown-linux-gnu.tar.gz";
+const AARCH64_SHA256: &str = "0f174b5118a53888cd4e65b7ca9a4b72dd0b887e89142c8ce41e2409205e40d5";
+
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "goose",
     "goose",
-    Recipe::Goose,
+    Recipe::Custom {
+        executable: "goose",
+        description: "download and verify the pinned Goose binary",
+        summary: "pinned Goose binary (x86_64/aarch64) -> goose",
+        install,
+        guest_assets: Some(guest_assets),
+    },
     &[crate::endpoint::CHAT, crate::endpoint::MESSAGES_KEY],
     command,
     prepare_adapter,
 )
 .with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"]);
+
+fn distribution() -> Result<(&'static str, &'static str), Error> {
+    Ok(match std::env::consts::ARCH {
+        "x86_64" => (X86_64_URL, X86_64_SHA256),
+        "aarch64" => (AARCH64_URL, AARCH64_SHA256),
+        architecture => {
+            return Err(Error::Input(format!(
+                "Goose is packaged by ASB only for Linux x86_64 and aarch64; this host is {architecture}"
+            )));
+        }
+    })
+}
+
+fn cached_archive(
+    context: &OperationContext,
+    root: &Path,
+    progress: &mut dyn FnMut(u8, crate::install::ProgressStage),
+) -> InstallResult<(PathBuf, &'static str)> {
+    let (url, checksum) = distribution()?;
+    let archive = root.join("cache/goose.tar.gz");
+    let archive =
+        crate::tools::runtime::cached_archive_in(context, &archive, url, checksum, progress)?;
+    Ok((archive, checksum))
+}
+
+fn install(
+    context: &OperationContext,
+    root: &Path,
+    progress: &mut dyn FnMut(u8, crate::install::ProgressStage),
+) -> InstallResult<PathBuf> {
+    let (archive, checksum) = cached_archive(context, root, progress)?;
+    crate::install::goose::install_archive_in(context, root, &archive, checksum, progress)
+}
+
+fn guest_assets(
+    context: &OperationContext,
+    root: &Path,
+    progress: &mut dyn FnMut(u8, crate::install::ProgressStage),
+) -> InstallResult<Vec<crate::tools::GuestAsset>> {
+    let (archive, _) = cached_archive(context, root, progress)?;
+    Ok(vec![crate::tools::GuestAsset {
+        source: archive,
+        target: PathBuf::from("cache/goose.tar.gz"),
+        distribution: None,
+    }])
+}
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
         program: "goose".into(),

@@ -10,6 +10,7 @@ pub(super) static ADAPTER: StaticTool = StaticTool::new(
         description: "download pinned FlameGraph scripts",
         summary: "pinned FlameGraph scripts -> flamegraph",
         install,
+        guest_assets: None,
     },
     ToolKind::Collector,
 )

@@ -10,6 +10,7 @@ pub(super) static ADAPTER: StaticTool = StaticTool::new(
         description: "install the pinned official static uv Python environment manager",
         summary: "uv 0.9.9 (static)",
         install,
+        guest_assets: None,
     },
     ToolKind::Support,
 )

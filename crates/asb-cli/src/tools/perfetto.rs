@@ -28,6 +28,7 @@ pub(super) static ADAPTER: StaticTool = StaticTool::new(
         description: "download pinned Perfetto Tracebox and trace processor and verify their SHA-256 checksums",
         summary: "pinned Perfetto Tracebox + trace processor",
         install: install_perfetto,
+        guest_assets: None,
     },
     ToolKind::Collector,
 ).with_helper_executables(&["trace_processor_shell"]);

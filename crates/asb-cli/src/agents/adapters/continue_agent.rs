@@ -9,6 +9,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     Recipe::Npm {
         package: "@continuedev/cli@1.5.47",
         executable: "cn",
+        manifest: None,
     },
     &[crate::endpoint::CHAT, crate::endpoint::MESSAGES_KEY],
     command,

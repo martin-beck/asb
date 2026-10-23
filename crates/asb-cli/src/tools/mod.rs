@@ -81,7 +81,6 @@ pub(crate) trait ToolAdapter: Sync {
             | Recipe::Python { executable, .. }
             | Recipe::Host { executable }
             | Recipe::Custom { executable, .. } => Some(executable),
-            Recipe::Goose => Some("goose"),
         }
     }
 }

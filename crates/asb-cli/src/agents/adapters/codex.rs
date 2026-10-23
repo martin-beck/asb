@@ -6,6 +6,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     Recipe::Npm {
         package: "@openai/codex@0.150.1",
         executable: "codex",
+        manifest: None,
     },
     &[crate::endpoint::RESPONSES],
     command,

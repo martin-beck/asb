@@ -10,6 +10,7 @@ pub(super) static ADAPTER: StaticTool = StaticTool::new(
         description: "install the pinned official Node.js distribution and npm",
         summary: "Node.js 22.20.0 + npm",
         install,
+        guest_assets: None,
     },
     ToolKind::Support,
 )

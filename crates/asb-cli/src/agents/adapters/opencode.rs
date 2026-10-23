@@ -1,11 +1,25 @@
 use super::{CommandContext, CommandSpec, PreparationContext, StaticAdapter};
 use crate::{Error, install::Recipe};
+
+// OpenCode's Bedrock integration currently resolves two AWS SDK entries whose
+// published registry metadata can outpace their tarballs. This repair belongs
+// to the owning adapter, never to unrelated npm-installed tools or agents.
+const NPM_MANIFEST: &str = r#"{
+  "private": true,
+  "overrides": {
+    "@aws-sdk/client-bedrock-runtime": "3.1030.0",
+    "@aws-sdk/credential-provider-http": "3.972.76"
+  }
+}
+"#;
+
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "opencode",
     "opencode",
     Recipe::Npm {
         package: "opencode-ai@1.19.0",
         executable: "opencode",
+        manifest: Some(NPM_MANIFEST),
     },
     &[
         crate::endpoint::CHAT,

@@ -314,6 +314,7 @@ fn installation_fixture_child() {
                 Recipe::Npm {
                     package: "fixture-success@1",
                     executable: "fixture-client",
+                    manifest: None,
                 },
                 &root.join("tools/npm-local"),
                 &root,
@@ -624,6 +625,7 @@ fn npm_contract(root: &Path) {
     let package = |package| Recipe::Npm {
         package,
         executable: "fixture-client",
+        manifest: None,
     };
     let directory = root.join("tools/npm-success");
     let mut progress = Vec::new();
@@ -640,13 +642,10 @@ fn npm_contract(root: &Path) {
         directory.join("node_modules/.bin/fixture-client")
     );
     assert!(executable.is_file());
-    assert_eq!(
-        fs::read_to_string(directory.join("package.json")).unwrap(),
-        NPM_INSTALL_MANIFEST
-    );
+    assert!(!directory.join("package.json").exists());
     assert!(progress.iter().any(|(percent, stage)| *percent == 15
         && *stage == crate::install::ProgressStage::InstallingPackage));
-    // Existing user manifests must never be replaced by the default overrides.
+    // Existing user manifests must never be replaced by an adapter manifest.
     fs::write(
         directory.join("package.json"),
         "{\"private\":true,\"name\":\"preserved\"}",

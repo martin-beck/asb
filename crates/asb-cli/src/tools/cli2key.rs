@@ -5,6 +5,7 @@ pub(super) static ADAPTER: StaticTool = StaticTool::new(
     Recipe::Npm {
         package: "codex-anthropic-bridge@0.1.10",
         executable: "codex-bridge",
+        manifest: None,
     },
     ToolKind::Support,
 )

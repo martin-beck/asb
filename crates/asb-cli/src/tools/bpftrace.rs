@@ -19,6 +19,7 @@ pub(super) static ADAPTER: StaticTool = StaticTool::new(
         description: "copy the host-compatible bpftrace and record uname metadata",
         summary: "host-compatible bpftrace + kernel metadata",
         install: install_bpftrace,
+        guest_assets: None,
     },
     ToolKind::Collector,
 );

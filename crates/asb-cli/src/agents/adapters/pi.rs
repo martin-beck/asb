@@ -7,6 +7,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     Recipe::Npm {
         package: "@mariozechner/pi-coding-agent@0.73.1",
         executable: "pi",
+        manifest: None,
     },
     &[crate::endpoint::RESPONSES, crate::endpoint::CHAT],
     command,

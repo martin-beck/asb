@@ -14,7 +14,7 @@ pub(super) fn install_archive(
         .map_err(InstallFailure::into_public)
 }
 
-pub(super) fn install_archive_in(
+pub(crate) fn install_archive_in(
     context: &OperationContext,
     root: &Path,
     archive: &Path,

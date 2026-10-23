@@ -6,6 +6,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     Recipe::Npm {
         package: "@qwen-code/qwen-code@0.25.1",
         executable: "qwen",
+        manifest: None,
     },
     &[crate::endpoint::CHAT, crate::endpoint::MESSAGES_KEY],
     command,

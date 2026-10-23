@@ -6,6 +6,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     Recipe::Npm {
         package: "@tencent-ai/codebuddy-code@2.167.0",
         executable: "codebuddy",
+        manifest: None,
     },
     &[crate::endpoint::RESPONSES],
     command,
