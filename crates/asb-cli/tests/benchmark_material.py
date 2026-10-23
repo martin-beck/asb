@@ -97,6 +97,7 @@ class MaterialTests(unittest.TestCase):
 
     def test_swe_capture_normalizes_only_proven_reset_artifacts_and_binds_git_config(self):
         from asb_swebench_task import SweBenchTask
+        import asb_material
         task = object.__new__(SweBenchTask)
         task.row = {"base_commit":"a"*40}
         task.invocation = {"baseline":{"kind":"upstream-task-definition","base_commit":"a"*40},
@@ -116,7 +117,22 @@ class MaterialTests(unittest.TestCase):
         def tree(index=b"timestamp-one",config=b"safe git settings"):
             return self.workspace([regular("src/file"),regular(".git/index",index),regular(".git/logs/HEAD",index),regular(".git/config",config)],workdir="/task")
         task.workspace = tree()
-        before = task.initial_material()
+        archive_calls = 0
+        original_archive = task.workspace.container.get_archive
+        def counted_archive(*arguments, **kwargs):
+            nonlocal archive_calls
+            archive_calls += 1
+            return original_archive(*arguments, **kwargs)
+        task.workspace.container.get_archive = counted_archive
+        original_capture = asb_material.capture_task
+        def unexpected_tree_capture(*_arguments, **_kwargs):
+            raise AssertionError("SWE-bench material must not stream the prepared tree")
+        asb_material.capture_task = unexpected_tree_capture
+        try:
+            before = task.initial_material(binary="ignored-by-swe-material-proof")
+        finally:
+            asb_material.capture_task = original_capture
+        self.assertEqual(archive_calls, 0)
         task.workspace = tree(index=b"different reset timestamps")
         self.assertEqual(before,task.initial_material())
         task.workspace = tree(config=b"changed hooks/config")
