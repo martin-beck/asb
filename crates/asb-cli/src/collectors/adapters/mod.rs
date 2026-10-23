@@ -15,6 +15,7 @@ pub(crate) mod perfetto;
 mod pidstat;
 mod process_accounting;
 mod system;
+mod tool_calls;
 
 pub(super) static REGISTRY: &[&dyn CollectorAdapter] = &[
     &agent_memory::ADAPTER,
@@ -27,4 +28,5 @@ pub(super) static REGISTRY: &[&dyn CollectorAdapter] = &[
     &perfetto::ADAPTER,
     &flamegraph::ADAPTER,
     &bpftrace::ADAPTER,
+    &tool_calls::ADAPTER,
 ];
