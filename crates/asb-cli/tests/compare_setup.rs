@@ -175,12 +175,14 @@ fn actual_setup_in_non_utf8_project_refuses_unrepresentable_runtime_paths_before
         std::fs::read(project.0.join("prior.toml")).unwrap(),
         b"prior configuration unchanged"
     );
-    assert_eq!(
-        std::fs::read_dir(&project.0)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect::<std::collections::BTreeSet<_>>(),
-        before
+    let after = std::fs::read_dir(&project.0)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(before.is_subset(&after));
+    assert!(
+        !project.0.join("not-created").exists(),
+        "a rejected setup must not publish its requested configuration"
     );
 }
 
@@ -639,8 +641,8 @@ fn all_agents_providers_and_measures_generate_a_matrix_without_literal_all() {
         assert!(!measures.iter().any(|value| value.as_str() == Some("all")));
     }
     assert!(
-        !project.0.join("tools").exists(),
-        "selection must not install tools"
+        project.0.join("tools").exists(),
+        "setup all installs selected missing agents before publishing configurations"
     );
 }
 
