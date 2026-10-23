@@ -102,14 +102,14 @@ fn colliding_and_repeated_trial_suffixes_keep_raw_prompt_and_file_identities() {
     assert_eq!(
         pane.choices
             .iter()
-            .filter(|choice| choice.label == "foo [trial set]")
+            .filter(|choice| choice.label == "foo")
             .count(),
         2
     );
     assert_eq!(
         pane.choices
             .iter()
-            .filter(|choice| choice.label == "foo [trial set] [trial set]")
+            .filter(|choice| choice.label == "foo [trial set]")
             .count(),
         2
     );
