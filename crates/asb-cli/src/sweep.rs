@@ -347,7 +347,7 @@ fn write_progress(
     };
     writeln!(
         output,
-        "Starting benchmark ({}/{}; {}% reached): {} — {}, {}, {}, {} (concurrency {})",
+        "Starting benchmark ({}/{}; {}% reached): {} — {}, {}, {}, {}, trial {} (concurrency {})",
         index + 1,
         total,
         (index + 1) * 100 / total,
@@ -356,6 +356,7 @@ fn write_progress(
         one_line(&config.provider),
         one_line(&config.model),
         one_line(&config.workload),
+        one_line(config.trial.as_deref().unwrap_or("default")),
         config.concurrency,
     )
     .and_then(|_| output.flush())
@@ -570,6 +571,7 @@ mod tests {
         let text = String::from_utf8(capture.bytes).unwrap();
         assert!(capture.flushed);
         assert!(text.contains("(2/3; 66% reached): bad name.toml"));
+        assert!(text.contains("trial default (concurrency 1)"));
         assert_eq!(text.lines().count(), 1);
         assert!(!text.contains('\u{1b}'));
     }

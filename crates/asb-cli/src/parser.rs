@@ -203,6 +203,7 @@ pub(crate) fn run_with_interactive(
                     repeat: options.repeat.or(options.record.then_some(1)),
                     json: options.json,
                     show_output: options.show_output,
+                    announce_trial: !options.json,
                     measurement_dir: options.measurements.as_deref(),
                     mode,
                     cassette: options.cassette.as_deref(),
