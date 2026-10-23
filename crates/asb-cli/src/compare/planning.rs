@@ -3,7 +3,7 @@ use super::*;
 pub(super) enum GraphKind {
     Metric(String),
     Series(String),
-    Composition,
+    Collector(usize),
 }
 pub(super) struct GraphSpec {
     pub filename: String,
@@ -13,6 +13,7 @@ pub(super) struct GraphSpec {
 pub(super) struct PreparedReport {
     pub data: ValidatedReport,
     pub graphs: Vec<GraphSpec>,
+    pub collector_graphs: Vec<crate::collectors::ReportGraph>,
     pub evaluation: coverage::EvaluationCoverage,
     pub populations: BTreeMap<String, coverage::PopulationCoverage>,
     pub resolution: BTreeMap<String, crate::workloads::ResolutionSummary>,
@@ -116,16 +117,41 @@ impl PreparedReport {
                 });
             }
         }
-        if !composition_rows(&data.rows).is_empty() {
+        let report_rows = data
+            .rows
+            .iter()
+            .map(|row| crate::collectors::ReportRow {
+                label: &row.label,
+                metrics: &row.metrics,
+                components: row.components.as_ref(),
+            })
+            .collect::<Vec<_>>();
+        let collector_graphs = crate::collectors::report_graphs(&report_rows);
+        let mut filenames = graphs
+            .iter()
+            .map(|graph| graph.filename.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for (index, graph) in collector_graphs.iter().enumerate() {
+            if !graph.filename.ends_with(".svg")
+                || graph.filename.contains('/')
+                || graph.filename.contains('\\')
+                || !filenames.insert(graph.filename.clone())
+            {
+                return Err(Error::Run(format!(
+                    "collector report graph has an invalid or duplicate filename: {}",
+                    graph.filename
+                )));
+            }
             graphs.push(GraphSpec {
-                filename: "execution-timeline.svg".into(),
-                kind: GraphKind::Composition,
+                filename: graph.filename.clone(),
+                kind: GraphKind::Collector(index),
                 rows: Vec::new(),
             });
         }
         Ok(Self {
             data,
             graphs,
+            collector_graphs,
             evaluation,
             populations,
             metric_groups,
