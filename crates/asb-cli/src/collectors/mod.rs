@@ -135,6 +135,30 @@ pub(crate) struct GraphSection {
     pub description: &'static str,
 }
 
+/// A row of immutable, validated comparison evidence made available to
+/// collector-owned report contributions.  The generic comparison pipeline does
+/// not interpret collector metric names or artifact formats.
+pub(crate) struct ReportRow<'a> {
+    pub label: &'a str,
+    pub metrics: &'a BTreeMap<String, f64>,
+    pub components: Option<&'a serde_json::Value>,
+}
+
+/// A collector-owned graph ready for generic publication in an offline report.
+/// `filename` is intentionally explicit so adapters, not comparison, own the
+/// stable artifact identity of their specialized visualizations.
+pub(crate) struct ReportGraph {
+    pub filename: String,
+    pub svg: String,
+}
+
+/// A supplemental link for an owned collector artifact (for example, a local
+/// trace opened by that collector's official viewer).
+pub(crate) struct ReportArtifactLink {
+    pub label: &'static str,
+    pub href: String,
+}
+
 /// Non-secret benchmark lifecycle events available to every collector.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(tag = "kind", content = "phase", rename_all = "snake_case")]
@@ -300,6 +324,17 @@ pub(crate) trait CollectorAdapter: Sync {
     fn graph_section(&self, _name: &str) -> Option<GraphSection> {
         None
     }
+    /// Render specialized offline-report graphs from validated rows.  Generic
+    /// comparison writes the returned SVGs without interpreting their metric
+    /// names, state taxonomy, or presentation semantics.
+    fn report_graphs(&self, _rows: &[ReportRow<'_>]) -> Vec<ReportGraph> {
+        Vec::new()
+    }
+    /// Return extra viewer links for one retained artifact.  The owning
+    /// collector validates both its name and source before exposing a link.
+    fn report_artifact_links(&self, _name: &str, _source: &Path) -> Vec<ReportArtifactLink> {
+        Vec::new()
+    }
     fn producer_policy(&self, _name: &str) -> crate::measurements::ProducerPolicy {
         crate::measurements::ProducerPolicy {
             stream_bytes: 256 * 1024 * 1024,
@@ -411,6 +446,18 @@ pub(crate) fn display_artifact(name: &str) -> Option<ArtifactDisplay> {
 }
 pub(crate) fn graph_section(name: &str) -> Option<GraphSection> {
     all().iter().find_map(|adapter| adapter.graph_section(name))
+}
+pub(crate) fn report_graphs(rows: &[ReportRow<'_>]) -> Vec<ReportGraph> {
+    all()
+        .iter()
+        .flat_map(|adapter| adapter.report_graphs(rows))
+        .collect()
+}
+pub(crate) fn report_artifact_links(name: &str, source: &Path) -> Vec<ReportArtifactLink> {
+    all()
+        .iter()
+        .flat_map(|adapter| adapter.report_artifact_links(name, source))
+        .collect()
 }
 #[cfg(test)]
 pub(crate) fn names() -> impl Iterator<Item = &'static str> {

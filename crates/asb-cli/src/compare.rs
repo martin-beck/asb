@@ -74,7 +74,6 @@ pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Er
     let loaded = source::load(path)?;
     let validated = ValidatedReport::validate(loaded)?;
     let prepared = PreparedReport::prepare(validated)?;
-    let perfetto_urls = perfetto_urls(&prepared);
     let mut files = prepared.graph_names();
     files.extend(["comparison.json".into(), "report.html".into()]);
     let publisher = publication::Publisher::begin(&prepared.data.request.comparison_dir, files)?;
@@ -101,31 +100,10 @@ pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Er
         local_file_url(&published.report)
     )
     .map_err(|error| published.confirmation_error(error))?;
-    for url in perfetto_urls {
-        writeln!(output, "Perfetto UI: {url}")
-            .map_err(|error| published.confirmation_error(error))?;
+    for (label, href) in collector_report_links(&prepared) {
+        writeln!(output, "{label}: {href}").map_err(|error| published.confirmation_error(error))?;
     }
     Ok(published.report)
-}
-
-/// Return the official Perfetto UI URL for a completed local trace.
-///
-/// The trace remains local: Perfetto UI is given a `file:` URL and never
-/// receives the trace through ASB. Browsers that disallow opening local URLs
-/// from a remote origin can still open the retained trace by drag-and-drop.
-pub(crate) fn perfetto_ui_url(trace: &Path) -> Option<String> {
-    if trace.extension().and_then(|extension| extension.to_str()) != Some("perfetto-trace") {
-        return None;
-    }
-    let metadata = fs::metadata(trace).ok()?;
-    if !metadata.is_file() || metadata.len() == 0 {
-        return None;
-    }
-    let file_url = local_file_url(trace);
-    Some(format!(
-        "https://ui.perfetto.dev/#!/?url={}",
-        percent_encode(&file_url)
-    ))
 }
 
 fn local_file_url(path: &Path) -> String {
@@ -139,13 +117,14 @@ fn local_file_url(path: &Path) -> String {
     }
 }
 
-fn perfetto_urls(prepared: &PreparedReport) -> BTreeSet<String> {
+fn collector_report_links(prepared: &PreparedReport) -> BTreeSet<(String, String)> {
     prepared
         .data
         .rows
         .iter()
-        .flat_map(|benchmark| benchmark.artifact_sources.values())
-        .filter_map(|trace| perfetto_ui_url(trace))
+        .flat_map(|benchmark| benchmark.artifact_sources.iter())
+        .flat_map(|(name, source)| crate::collectors::report_artifact_links(name, source))
+        .map(|link| (link.label.to_owned(), link.href))
         .collect()
 }
 
@@ -329,109 +308,6 @@ fn collect_artifacts(path: &Path, depth: usize, output: &mut Vec<PathBuf>) {
     }
 }
 
-/// Render the process-tree accounting captured for every agent execution.
-/// The bars are accounting composition, not a chronological thread timeline:
-/// a concurrent process tree can execute and sleep simultaneously.
-fn composition_rows(benchmarks: &[BenchmarkData]) -> Vec<(&str, [f64; 6], f64, bool)> {
-    let mut rows = Vec::new();
-    for benchmark in benchmarks {
-        let Some(component) = benchmark
-            .components
-            .as_ref()
-            .and_then(|v| v.pointer("/components/agent.execute"))
-        else {
-            continue;
-        };
-        let state = |name| {
-            benchmark
-                .metrics
-                .get(&format!("perfetto-state-summary.{name}"))
-                .copied()
-                .unwrap_or(0.0)
-        };
-        let running = state("running_ms");
-        let runnable = state("runnable_ms");
-        let sleeping = state("interruptible_sleep_ms");
-        let blocked = state("uninterruptible_sleep_ms");
-        let io_wait = benchmark
-            .metrics
-            .get("perfetto-state-summary.io_wait_observed_ms")
-            .copied()
-            .unwrap_or_else(|| state("io_wait_ms"));
-        let other_state = state("other_scheduler_state_ms");
-        let has_states = benchmark
-            .metrics
-            .keys()
-            .any(|key| key.starts_with("perfetto-state-summary.") && key.ends_with("_ms"));
-        let wall = component
-            .get("wall_ms")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
-        if running + runnable + sleeping + blocked + io_wait + other_state <= 0.0 && wall <= 0.0 {
-            continue;
-        }
-        rows.push((
-            benchmark.label.as_str(),
-            [running, runnable, sleeping, blocked, io_wait, other_state],
-            wall,
-            has_states,
-        ));
-    }
-    rows
-}
-
-fn write_execution_timeline_svg(path: &Path, benchmarks: &[BenchmarkData]) -> Result<bool, Error> {
-    let rows = composition_rows(benchmarks);
-    if rows.is_empty() {
-        return Ok(false);
-    }
-    let height = 140 + rows.len() * 60;
-    let colors = [
-        "#1976d2", "#c62828", "#78909c", "#6a1b9a", "#ef6c00", "#b0bec5",
-    ];
-    let labels = [
-        "running",
-        "runnable",
-        "interruptible sleep",
-        "uninterruptible (I/O may be unknown)",
-        "I/O wait (observed)",
-        "other scheduler state",
-    ];
-    let mut svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"980\" height=\"{height}\" viewBox=\"0 0 980 {height}\"><title>Agent execution time composition</title><rect width=\"100%\" height=\"100%\" fill=\"#fff\"/><text x=\"24\" y=\"30\" font-family=\"sans-serif\" font-size=\"18\" font-weight=\"bold\">Observed scheduler thread-time composition</text><text x=\"24\" y=\"51\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#52606d\">Concurrent thread-time totals are not additive wall-time categories. Elapsed wall is a separate reference, never a residual.</text>"
-    );
-    for (index, label) in labels.iter().enumerate() {
-        let x = 24 + (index % 3) * 310;
-        let y = 68 + (index / 3) * 20;
-        svg.push_str(&format!("<rect x=\"{x}\" y=\"{y}\" width=\"10\" height=\"10\" fill=\"{}\"/><text x=\"{}\" y=\"{}\" font-family=\"sans-serif\" font-size=\"11\">{}</text>", colors[index], x + 14,y+10, escape(label)));
-    }
-    for (row, (name, values, wall, has_states)) in rows.iter().enumerate() {
-        svg.push_str(&format!("<g data-benchmark=\"{}\">", escape(name)));
-        let y = 118 + row * 60;
-        let total: f64 = values.iter().sum();
-        svg.push_str(&format!("<text x=\"24\" y=\"{}\" font-family=\"sans-serif\" font-size=\"12\">{}</text><rect x=\"250\" y=\"{}\" width=\"690\" height=\"22\" rx=\"3\" fill=\"#edf1f4\"/>", y + 15, escape(name), y));
-        let mut x = 250.0;
-        let state_text = if *has_states {
-            format!("Observed thread-time: {total:.2} ms")
-        } else {
-            "Scheduler thread-time unavailable".into()
-        };
-        svg.push_str(&format!("<text x=\"250\" y=\"{}\" font-family=\"sans-serif\" font-size=\"11\">{state_text}; elapsed wall reference: {wall:.2} ms</text>",y+38));
-        for (i, value) in values.iter().enumerate() {
-            if *value > 0.0 {
-                let width = 690.0 * value / total;
-                svg.push_str(&format!("<rect class=\"bar\" data-label=\"{}\" data-value=\"{value:.2} ms\" x=\"{x:.2}\" y=\"{y}\" width=\"{width:.2}\" height=\"22\" fill=\"{}\"><title>{}: {:.2} ms</title></rect>", escape(labels[i]), colors[i], labels[i], value));
-                x += width;
-            }
-        }
-        svg.push_str("</g>");
-    }
-    svg.push_str("</svg>\n");
-    fs::write(path, svg)
-        .map_err(|e| Error::Run(format!("cannot write execution timeline SVG: {e}")))?;
-    Ok(true)
-}
-
 fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Error> {
     let benchmarks = &prepared.data.rows;
     let graphs = prepared.graph_names();
@@ -565,14 +441,22 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                 .artifacts
                 .iter()
                 .map(|artifact| {
-                    let perfetto = benchmark
+                    let supplemental_links = benchmark
                         .artifact_sources
                         .get(artifact)
-                        .and_then(|path| perfetto_ui_url(path))
-                        .map(|url| format!(" <a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open in Perfetto UI</a>", escape(&url)))
-                        .unwrap_or_default();
+                        .map(|path| crate::collectors::report_artifact_links(artifact, path))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|link| {
+                            format!(
+                                " <a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open in {}</a>",
+                                escape(&link.href),
+                                escape(link.label)
+                            )
+                        })
+                        .collect::<String>();
                     format!(
-                        "<li><a href=\"{}\" download>{}</a>{perfetto}</li>",
+                        "<li><a href=\"{}\" download>{}</a>{supplemental_links}</li>",
                         escape(artifact),
                         escape(artifact.rsplit('/').next().unwrap_or(artifact))
                     )
@@ -1177,102 +1061,9 @@ mod pipeline_tests;
 mod tests {
     use super::GraphNames;
     use super::run;
-    use super::{ResultSource, RowId};
     use serde_json::{Value, json};
     use std::collections::{BTreeMap, BTreeSet};
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn perfetto_ui_url_keeps_a_local_trace_local_and_encodes_its_path() {
-        let root = std::env::temp_dir().join(format!(
-            "asb perfetto trace {}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).expect("trace directory");
-        let trace = root.join("capture #1.perfetto-trace");
-        std::fs::write(&trace, b"trace").expect("trace");
-        let url = super::perfetto_ui_url(&trace).expect("usable trace URL");
-        assert!(url.starts_with("https://ui.perfetto.dev/#!/?url=file%3A%2F%2F"));
-        // The `file:` URL is itself a query value, so its encoded path is
-        // encoded once more for the Perfetto UI URL.
-        assert!(url.contains("asb%2520perfetto%2520trace"));
-        assert!(url.contains("capture%2520%25231.perfetto-trace"));
-        assert!(!url.contains(trace.to_string_lossy().as_ref()));
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[test]
-    fn perfetto_ui_url_rejects_empty_or_non_trace_artifacts() {
-        let root = std::env::temp_dir().join(format!(
-            "asb-perfetto-url-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).expect("directory");
-        let empty = root.join("empty.perfetto-trace");
-        std::fs::write(&empty, b"").expect("empty trace");
-        let other = root.join("metrics.json");
-        std::fs::write(&other, b"{}").expect("artifact");
-        assert!(super::perfetto_ui_url(&empty).is_none());
-        assert!(super::perfetto_ui_url(&other).is_none());
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[test]
-    fn missing_scheduler_states_are_unavailable_not_observed_zero_thread_time() {
-        let root = std::env::temp_dir()
-            .join(crate::workloads::TaskIdentity::local("missing-states", None).attempt_id);
-        std::fs::create_dir(&root).unwrap();
-        let benchmark = super::BenchmarkData {
-            observation: Default::default(),
-            id: RowId {
-                configuration: 0,
-                batch: None,
-                replica: 1,
-            },
-            execution: None,
-            planning: None,
-            effective_budgets: None,
-            legacy_evaluation_provenance: None,
-            execution_plan_fingerprint: None,
-            module: None,
-            benchmark_outcome: None,
-            result_source: ResultSource::Measurements,
-            reconciled: false,
-            replica_index: None,
-            execution_cohort: None,
-            label: "no-perfetto".into(),
-            directory: root.clone(),
-            agent: "pi".into(),
-            workload: "bug-fix".into(),
-            task: None,
-            selection: None,
-            evaluation_completed: false,
-            workload_evaluation: "unknown".into(),
-            provider: "local".into(),
-            model: "fixture".into(),
-            metrics: BTreeMap::new(),
-            series: BTreeMap::new(),
-            host_metadata: None,
-            components: Some(json!({"components":{"agent.execute":{"wall_ms":12}}})),
-            status: None,
-            artifacts: Vec::new(),
-            artifact_sources: BTreeMap::new(),
-        };
-        let path = root.join("timeline.svg");
-        assert!(super::write_execution_timeline_svg(&path, &[benchmark]).unwrap());
-        let svg = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            svg.contains("Scheduler thread-time unavailable; elapsed wall reference: 12.00 ms")
-        );
-        assert!(!svg.contains("Observed thread-time: 0.00"));
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn dispatch_provenance_is_not_a_numeric_measurement() {
@@ -1460,7 +1251,7 @@ mod tests {
                 )
                 .is_file()
         );
-        let timeline = root.join("results/sweep-comparison/execution-timeline.svg");
+        let timeline = root.join("results/sweep-comparison/perfetto-execution-composition.svg");
         assert!(timeline.is_file());
         let timeline_svg = std::fs::read_to_string(timeline).unwrap();
         assert!(timeline_svg.contains("Agent execution time composition"));

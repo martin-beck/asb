@@ -42,8 +42,16 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                     .collect::<Vec<_>>();
                 write_series_svg(&path, name, &values)?;
             }
-            GraphKind::Composition => {
-                write_execution_timeline_svg(&path, benchmark_data)?;
+            GraphKind::Collector(index) => {
+                let graph = prepared.collector_graphs.get(*index).ok_or_else(|| {
+                    Error::Run("prepared collector graph index is unavailable".into())
+                })?;
+                fs::write(&path, &graph.svg).map_err(|error| {
+                    Error::Run(format!(
+                        "cannot write collector report graph {}: {error}",
+                        graph.filename
+                    ))
+                })?;
             }
         }
     }

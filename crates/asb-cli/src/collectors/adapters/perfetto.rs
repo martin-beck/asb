@@ -1,6 +1,6 @@
 use super::super::{
     ArtifactDisplay, CollectorAdapter, LifecycleEvent, PreflightContext, ProcessContext,
-    ProcessData,
+    ProcessData, ReportArtifactLink, ReportGraph, ReportRow,
 };
 use crate::measurements;
 mod bootstrap;
@@ -52,6 +52,18 @@ impl CollectorAdapter for PerfettoCollector {
             class: "perfetto-metric",
             label: "Perfetto metric SVG",
         })
+    }
+    fn report_graphs(&self, rows: &[ReportRow<'_>]) -> Vec<ReportGraph> {
+        execution_composition_graph(rows).into_iter().collect()
+    }
+    fn report_artifact_links(&self, name: &str, source: &Path) -> Vec<ReportArtifactLink> {
+        perfetto_ui_url(name, source)
+            .map(|href| ReportArtifactLink {
+                label: "Perfetto UI",
+                href,
+            })
+            .into_iter()
+            .collect()
     }
     fn preflight(&self, context: &mut PreflightContext<'_>) -> Result<(), String> {
         preflight(context)
@@ -307,6 +319,178 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// Perfetto's scheduler-state composition is specific to its trace schema.
+/// Comparison merely publishes this adapter-owned SVG alongside other graphs.
+fn execution_composition_graph(source_rows: &[ReportRow<'_>]) -> Option<ReportGraph> {
+    let mut rows = Vec::new();
+    for row in source_rows {
+        let state = |name| {
+            row.metrics
+                .get(&format!("perfetto-state-summary.{name}"))
+                .copied()
+                .unwrap_or(0.0)
+        };
+        let values = [
+            state("running_ms"),
+            state("runnable_ms"),
+            state("interruptible_sleep_ms"),
+            state("uninterruptible_sleep_ms"),
+            row.metrics
+                .get("perfetto-state-summary.io_wait_observed_ms")
+                .copied()
+                .unwrap_or_else(|| state("io_wait_ms")),
+            state("other_scheduler_state_ms"),
+        ];
+        let has_states = row
+            .metrics
+            .keys()
+            .any(|key| key.starts_with("perfetto-state-summary.") && key.ends_with("_ms"));
+        let wall = row
+            .components
+            .and_then(|value| value.pointer("/components/agent.execute"))
+            .and_then(|value| value.get("wall_ms"))
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        if values.iter().sum::<f64>() > 0.0 || wall > 0.0 {
+            rows.push((row.label, values, wall, has_states));
+        }
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    let colors = [
+        "#1976d2", "#c62828", "#78909c", "#6a1b9a", "#ef6c00", "#b0bec5",
+    ];
+    let labels = [
+        "running",
+        "runnable",
+        "interruptible sleep",
+        "uninterruptible (I/O may be unknown)",
+        "I/O wait (observed)",
+        "other scheduler state",
+    ];
+    let height = 140 + rows.len() * 60;
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"980\" height=\"{height}\" viewBox=\"0 0 980 {height}\"><title>Agent execution time composition</title><rect width=\"100%\" height=\"100%\" fill=\"#fff\"/><text x=\"24\" y=\"30\" font-family=\"sans-serif\" font-size=\"18\" font-weight=\"bold\">Observed scheduler thread-time composition</text><text x=\"24\" y=\"51\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#52606d\">Concurrent thread-time totals are not additive wall-time categories. Elapsed wall is a separate reference, never a residual.</text>"
+    );
+    for (index, label) in labels.iter().enumerate() {
+        let x = 24 + (index % 3) * 310;
+        let y = 68 + (index / 3) * 20;
+        svg.push_str(&format!("<rect x=\"{x}\" y=\"{y}\" width=\"10\" height=\"10\" fill=\"{}\"/><text x=\"{}\" y=\"{}\" font-family=\"sans-serif\" font-size=\"11\">{}</text>", colors[index], x + 14, y + 10, escape_svg(label)));
+    }
+    for (index, (name, values, wall, has_states)) in rows.iter().enumerate() {
+        let y = 118 + index * 60;
+        let total: f64 = values.iter().sum();
+        svg.push_str(&format!("<g data-benchmark=\"{}\"><text x=\"24\" y=\"{}\" font-family=\"sans-serif\" font-size=\"12\">{}</text><rect x=\"250\" y=\"{y}\" width=\"690\" height=\"22\" rx=\"3\" fill=\"#edf1f4\"/>", escape_svg(name), y + 15, escape_svg(name)));
+        let text = if *has_states {
+            format!("Observed thread-time: {total:.2} ms")
+        } else {
+            "Scheduler thread-time unavailable".into()
+        };
+        svg.push_str(&format!("<text x=\"250\" y=\"{}\" font-family=\"sans-serif\" font-size=\"11\">{text}; elapsed wall reference: {wall:.2} ms</text>", y + 38));
+        if total > 0.0 {
+            let mut x = 250.0;
+            for (i, value) in values.iter().enumerate() {
+                if *value > 0.0 {
+                    let width = 690.0 * value / total;
+                    svg.push_str(&format!("<rect class=\"bar\" data-label=\"{}\" data-value=\"{value:.2} ms\" x=\"{x:.2}\" y=\"{y}\" width=\"{width:.2}\" height=\"22\" fill=\"{}\"><title>{}: {:.2} ms</title></rect>", escape_svg(labels[i]), colors[i], labels[i], value));
+                    x += width;
+                }
+            }
+        }
+        svg.push_str("</g>");
+    }
+    svg.push_str("</svg>\n");
+    Some(ReportGraph {
+        filename: "perfetto-execution-composition.svg".into(),
+        svg,
+    })
+}
+
+/// Return the official local-file Perfetto UI URL only for a nonempty trace.
+fn perfetto_ui_url(name: &str, trace: &Path) -> Option<String> {
+    if !name.ends_with(".perfetto-trace") || !trace.is_file() || trace.metadata().ok()?.len() == 0 {
+        return None;
+    }
+    let path = trace.canonicalize().unwrap_or_else(|_| trace.to_path_buf());
+    let path = path.to_string_lossy().replace('\\', "/");
+    let file_url = if path.starts_with('/') {
+        format!("file://{}", percent_encode_path(&path))
+    } else {
+        format!("file:///{}", percent_encode_path(&path))
+    };
+    Some(format!(
+        "https://ui.perfetto.dev/#!/?url={}",
+        percent_encode(&file_url)
+    ))
+}
+
+fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                char::from(byte).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+fn percent_encode_path(value: &str) -> String {
+    value
+        .split('/')
+        .map(percent_encode)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    #[test]
+    fn report_links_keep_a_local_trace_local_and_encode_its_path() {
+        let root = std::env::temp_dir().join(format!(
+            "asb perfetto trace {}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("trace directory");
+        let trace = root.join("capture #1.perfetto-trace");
+        fs::write(&trace, b"trace").expect("trace");
+        let url = perfetto_ui_url("capture #1.perfetto-trace", &trace).expect("usable trace URL");
+        assert!(url.starts_with("https://ui.perfetto.dev/#!/?url=file%3A%2F%2F"));
+        assert!(url.contains("asb%2520perfetto%2520trace"));
+        assert!(url.contains("capture%2520%25231.perfetto-trace"));
+        assert!(!url.contains(trace.to_string_lossy().as_ref()));
+        assert!(perfetto_ui_url("metrics.json", &trace).is_none());
+        fs::write(&trace, b"").expect("empty trace");
+        assert!(perfetto_ui_url("capture.perfetto-trace", &trace).is_none());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn report_composition_keeps_missing_scheduler_state_unavailable() {
+        let metrics = BTreeMap::new();
+        let components = serde_json::json!({"components":{"agent.execute":{"wall_ms":12}}});
+        let graph = execution_composition_graph(&[ReportRow {
+            label: "no-perfetto",
+            metrics: &metrics,
+            components: Some(&components),
+        }])
+        .expect("wall reference remains useful");
+        assert_eq!(graph.filename, "perfetto-execution-composition.svg");
+        assert!(
+            graph
+                .svg
+                .contains("Scheduler thread-time unavailable; elapsed wall reference: 12.00 ms")
+        );
+        assert!(!graph.svg.contains("Observed thread-time: 0.00"));
+    }
+}
 
 #[derive(Default)]
 struct PerfettoState {
