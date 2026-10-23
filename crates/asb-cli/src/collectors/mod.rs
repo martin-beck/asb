@@ -350,6 +350,10 @@ pub(crate) trait CollectorAdapter: Sync {
     ) -> bool {
         completion.exit.is_none_or(|status| status.success())
     }
+    /// Optional collectors may publish a complete failed capture as unavailable.
+    fn allows_failed_termination(&self, _name: &str) -> bool {
+        false
+    }
     /// Owning adapters can preserve raw evidence rejected by data validation.
     fn retain_raw_on_processing_failure(&self) -> bool {
         false

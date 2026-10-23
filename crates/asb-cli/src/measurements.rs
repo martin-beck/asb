@@ -870,6 +870,7 @@ impl Session {
                 && !collector
                     .adapter
                     .accepts_termination(&collector.name, &completion)
+                && !collector.adapter.allows_failed_termination(&collector.name)
             {
                 completion.capture_complete = false;
                 completion.error = Some(format!(
@@ -909,6 +910,15 @@ impl Session {
             elapsed_ms,
         } in std::mem::take(&mut self.stopped_collectors)
         {
+            // Some adapters can turn a complete failed process exit into an
+            // unavailable result. Let that adapter inspect the stopped files,
+            // but retain those files afterward: a failed capture is evidence,
+            // not a successful collector result eligible for consumption.
+            let failed_termination = completion.capture_complete
+                && !collector
+                    .adapter
+                    .accepts_termination(&collector.name, &completion)
+                && collector.adapter.allows_failed_termination(&collector.name);
             // Admission owns exact source handles, not post-exit pathnames.
             let captures = &mut collector.captures;
             let producer_incomplete = self.incomplete_collectors.contains_key(&collector.name)
@@ -975,6 +985,7 @@ impl Session {
                     errors.push(error);
                 }
             }
+            read_failed |= failed_termination;
             if read_failed {
                 data.status = "failed".into();
                 data.metrics.clear();
