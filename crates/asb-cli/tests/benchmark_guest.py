@@ -13,7 +13,8 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).parents[1] / "assets/benchmarks"))
 from asb_execution import ExecutionError
-from asb_guest import execute_agent, stage_public_cache, stage_bootstrap, PreparationBudget
+from asb_guest import (execute_agent, stage_npm_package_tree, stage_public_cache,
+                       stage_bootstrap, PreparationBudget)
 from asb_runtime import elf as inspect_elf
 
 
@@ -326,6 +327,37 @@ class GuestBootstrapTests(unittest.TestCase):
             (cache / "entry").write_text('hash\t' + json.dumps({"metadata":{"reqHeaders":{}}}))
             stage_public_cache(container, root)
             self.assertTrue(any(name == "npm/_cacache/index-v5/entry" for _, name, _ in container.files))
+
+    def test_npm_package_tree_is_bounded_selected_and_never_a_host_mount(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = root / "tools"
+            archive = tools / "cline/cache/guest-node-modules.tar"
+            archive.parent.mkdir(parents=True)
+            with tarfile.open(archive, "w") as output:
+                directory_member = tarfile.TarInfo("node_modules/.bin")
+                directory_member.type = tarfile.DIRTYPE
+                output.addfile(directory_member)
+                launcher = tarfile.TarInfo("node_modules/.bin/cline")
+                launcher.mode = 0o755
+                payload = b"#!/bin/sh\nexit 0\n"
+                launcher.size = len(payload)
+                output.addfile(launcher, io.BytesIO(payload))
+            container = Container()
+            checked = []
+            task = SimpleNamespace(workspace=SimpleNamespace(container=container), artifacts=root,
+                                   checked=lambda argv: checked.append(argv))
+            tree = {"source":str(archive), "target":"cline", "executable":"cline"}
+            stage_npm_package_tree(task, tree, tools, "cline")
+            self.assertEqual(checked, [["test", "-x", "/opt/asb-project/.asb-tools/cline/node_modules/.bin/cline"]])
+            self.assertTrue(any(destination == "/opt/asb-project/.asb-tools/cline"
+                                and name == "node_modules/.bin/cline"
+                                for destination,name,_ in container.files))
+            receipt = json.loads((root / "npm-package-tree.json").read_text())
+            self.assertEqual(receipt["target"], "cline")
+            self.assertNotIn(str(tools), json.dumps(receipt))
+            with self.assertRaises(ExecutionError):
+                stage_npm_package_tree(task, tree, tools, "other-agent")
 
     def test_bootstrap_uses_exact_selected_tool_and_private_request_not_argv(self):
         for timed_out, measured, confirmed in [(False, False, True), (True, False, False), (False, True, True), (False, False, False)]:

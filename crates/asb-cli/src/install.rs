@@ -102,6 +102,17 @@ pub(crate) struct GuestBootstrap {
     runtime_tools: Vec<&'static str>,
     assets: Vec<tools::GuestAsset>,
     public_package_cache: bool,
+    npm_package_tree: Option<NpmPackageTree>,
+}
+
+/// A bounded, project-owned npm installation that is staged into an isolated
+/// workload guest.  The guest validates and extracts this archive itself; it
+/// never receives a host directory mount.
+#[derive(serde::Serialize)]
+pub(crate) struct NpmPackageTree {
+    source: PathBuf,
+    target: String,
+    executable: &'static str,
 }
 
 #[cfg(test)]
@@ -112,6 +123,7 @@ impl GuestBootstrap {
             runtime_tools: Vec::new(),
             assets: Vec::new(),
             public_package_cache: false,
+            npm_package_tree: None,
         }
     }
 }
@@ -149,6 +161,7 @@ fn guest_bootstrap_in(
         runtime_tools: recipe.guest_runtimes().to_vec(),
         assets: Vec::new(),
         public_package_cache: matches!(recipe, Recipe::Npm { .. }),
+        npm_package_tree: None,
     };
     for id in &plan.runtime_tools {
         let tool = tools::find(id)
@@ -175,7 +188,84 @@ fn guest_bootstrap_in(
             asset
         }));
     }
+    if let Recipe::Npm {
+        executable: program,
+        ..
+    } = recipe
+    {
+        let root = tools_root.join(id);
+        let launcher = executable(recipe, &root);
+        if !crate::executables::is_executable(&launcher) {
+            return Err(Error::Input(format!(
+                "selected npm agent `{id}` is not installed or its executable is unavailable at {}; run `asb tool install {id}` before starting this workload",
+                launcher.display()
+            ))
+            .into());
+        }
+        let archive = npm_guest_package_tree_in(context, &root)?;
+        plan.npm_package_tree = Some(NpmPackageTree {
+            source: archive,
+            target: id.into(),
+            executable: program,
+        });
+    }
     Ok(plan)
+}
+
+fn npm_guest_package_tree_in(context: &OperationContext, root: &Path) -> InstallResult<PathBuf> {
+    let node_modules = root.join("node_modules");
+    if !node_modules.is_dir() {
+        return Err(Error::Input(format!(
+            "npm agent installation at {} has no node_modules tree; rerun its project-local installation",
+            root.display()
+        ))
+        .into());
+    }
+    let cache = root.join("cache");
+    fs::create_dir_all(&cache)
+        .map_err(|error| Error::Io(format!("cannot create npm guest cache: {error}")))?;
+    let archive = cache.join("guest-node-modules.tar");
+    let temporary = cache.join(format!(
+        ".guest-node-modules-{}.tar",
+        tools::runtime::unique_id()
+    ));
+    let owner = ProducerDirectory::open(root)?;
+    let mut scope = owner.scope(context);
+    let mut step = scope.prepare("tar", Purpose::Package, "npm guest package archive")?;
+    step.command_mut()
+        .args(["-C"])
+        .arg(root)
+        .args(["-cf"])
+        .arg(&temporary)
+        .arg("node_modules")
+        .stdin(Stdio::null());
+    let result = scope.run(step)?;
+    owner.consume(scope.finish()?)?;
+    if !result.status.success() {
+        return Err(Error::Io(format!(
+            "could not prepare the isolated npm agent payload ({})",
+            result.status
+        ))
+        .into());
+    }
+    let metadata = fs::metadata(&temporary).map_err(|error| {
+        Error::Io(format!(
+            "cannot inspect prepared npm agent payload: {error}"
+        ))
+    })?;
+    if !metadata.is_file() || metadata.len() > 512 * 1024 * 1024 {
+        let _ = fs::remove_file(&temporary);
+        return Err(Error::Input(
+            "npm agent payload exceeds the 512 MiB guest bootstrap limit; reduce the selected package tree before retrying".into(),
+        )
+        .into());
+    }
+    fs::rename(&temporary, &archive).map_err(|error| {
+        Error::Io(format!(
+            "cannot publish prepared npm agent payload: {error}"
+        ))
+    })?;
+    Ok(archive)
 }
 
 #[derive(Clone, Copy)]

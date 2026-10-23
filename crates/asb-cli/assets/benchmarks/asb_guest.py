@@ -79,7 +79,7 @@ def stage_public_cache(container, project, temporary_dir=None, owner=None):
 def stage_bootstrap(task, plan, tools, owner=None):
     """Consume declared installer assets; never infer dependencies from names."""
     if (not isinstance(plan,dict) or not {"runtime_tools","assets"}.issubset(plan)
-            or set(plan)-{"runtime_tools","assets","public_package_cache"}
+            or set(plan)-{"runtime_tools","assets","public_package_cache","npm_package_tree"}
             or type(plan.get("public_package_cache",False)) is not bool):
         raise ExecutionError("selected tool installation bootstrap plan is missing or invalid")
     runtimes,assets = plan["runtime_tools"],plan["assets"]
@@ -122,6 +122,62 @@ def stage_bootstrap(task, plan, tools, owner=None):
     path.write_text(json.dumps(receipt,sort_keys=True)+"\n")
     path.chmod(0o600)
     return runtimes
+
+
+def stage_npm_package_tree(task, tree, tools, selected, owner=None):
+    """Stage a declared, bounded npm tree without exposing a host mount.
+
+    The Rust installation adapter owns archive construction.  This consumer
+    verifies the narrow wire contract before Docker extracts the archive into
+    the selected guest tool root.  No client name or package name is inferred.
+    """
+    if (not isinstance(tree,dict) or set(tree) != {"source","target","executable"}
+            or not all(isinstance(tree[key],str) for key in tree)):
+        raise ExecutionError("npm package-tree bootstrap is invalid")
+    source,target,executable = Path(tree["source"]),tree["target"],tree["executable"]
+    if (target != selected or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,79}",target)
+            or not re.fullmatch(r"[A-Za-z0-9+_.-]{1,256}",executable)
+            or not source.is_absolute() or source.is_symlink() or not source.is_file()
+            or not source.resolve().is_relative_to(tools.resolve())):
+        raise ExecutionError("npm package-tree bootstrap escapes its selected guest tool")
+    if source.stat().st_size > 512 * 1024**2:
+        raise ExecutionError("npm package-tree bootstrap exceeds 512 MiB")
+    members,total = [],0
+    try:
+        with tarfile.open(source,mode="r:") as archive:
+            members = archive.getmembers()
+            if not 1 <= len(members) <= 100000:
+                raise ExecutionError("npm package-tree bootstrap has an invalid member count")
+            for member in members:
+                name = member.name
+                parts = Path(name).parts
+                if (not name or name.startswith("/") or ".." in parts
+                        or parts[0] != "node_modules" or not (member.isdir() or member.isfile() or member.issym())):
+                    raise ExecutionError("npm package-tree bootstrap contains an unsafe member")
+                if member.isfile():
+                    total += member.size
+                    if member.size > 256 * 1024**2 or total > 512 * 1024**2:
+                        raise ExecutionError("npm package-tree bootstrap exceeds its unpacked bound")
+                if member.issym():
+                    link = member.linkname
+                    resolved = Path(name).parent.joinpath(link)
+                    if (not link or Path(link).is_absolute() or ".." in resolved.parts
+                            or not resolved.parts or resolved.parts[0] != "node_modules"):
+                        raise ExecutionError("npm package-tree bootstrap contains an escaping link")
+    except (OSError,tarfile.TarError) as error:
+        raise ExecutionError("npm package-tree bootstrap cannot be inspected") from error
+    with source.open("rb") as incoming:
+        destination = "/opt/asb-project/.asb-tools/"+target
+        if not task.workspace.container.put_archive(destination,incoming):
+            raise ExecutionError("could not stage npm package-tree bootstrap")
+    launcher = "/opt/asb-project/.asb-tools/"+target+"/node_modules/.bin/"+executable
+    task.checked(["test","-x",launcher])
+    receipt = {"schema_version":1,"target":target,"executable":executable,
+               "archive_bytes":source.stat().st_size,"unpacked_bytes":total,
+               "members":len(members)}
+    path = task.artifacts / "npm-package-tree.json"
+    path.write_text(json.dumps(receipt,sort_keys=True)+"\n")
+    path.chmod(0o600)
 
 
 def prepare_agent(task, request, cancelled, resources=None, relays=None, preparation_budget=None):
@@ -171,12 +227,15 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
     guest = dict(guest,task_identity=task_identity,owned_instrumentation=ownership)
     upload(container, "/opt/asb-project/.asb", [("project.toml", configuration.encode(), 0o600)],temporary_dir=task.artifacts,owner=owner)
     runtimes = stage_bootstrap(task,request.get("bootstrap"),tools,owner=owner)
+    package_tree = request["bootstrap"].get("npm_package_tree")
+    if package_tree is not None:
+        stage_npm_package_tree(task,package_tree,tools,tool,owner=owner)
     check_budget()
     if request["bootstrap"].get("public_package_cache",False):
         stage_public_cache(container, project,temporary_dir=task.artifacts,owner=owner)
         check_budget()
     environment = request.get("environment", {})
-    for selected in [*runtimes, tool]:
+    for selected in [*runtimes, *([] if package_tree is not None else [tool])]:
         result = task.workspace.execute(["/bin/sh", "-c", 'cd /opt/asb-project && exec /opt/asb-runtime/asb tool install "$1"', "asb", selected],
                                         environment=environment, timeout=min(900,preparation_budget.remaining()) if preparation_budget else 900, output_limit=256 * 1024,
                                         cancelled=ForwardingCancellation(cancelled, relays),
