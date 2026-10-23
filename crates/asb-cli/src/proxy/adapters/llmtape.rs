@@ -837,6 +837,31 @@ mod tests {
     }
 
     #[test]
+    fn replay_preserves_distinct_tool_call_ids_in_a_response() {
+        let root = test_root();
+        let cassette = root.join("tool-calls.jsonl");
+        let request_body = r#"{"model":"m","messages":[{"role":"user","content":"work"}]}"#;
+        let response_body = r#"{"tool_calls":[{"id":"call_<asb-call-1>"},{"id":"call_<asb-call-2>"},{"id":"call_<asb-call-1>"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body":request_body},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":response_body}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let response = request(&session, request_body);
+        let ids = response
+            .split("call_asb-replay-")
+            .skip(1)
+            .map(|value| value.split('"').next().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 3, "{response}");
+        assert_eq!(ids[0], ids[2], "{response}");
+        assert_ne!(ids[0], ids[1], "{response}");
+        session.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_rejects_oversized_request_during_streaming() {
         let root = test_root();
         let cassette = cassette(&root);
