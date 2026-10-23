@@ -5,6 +5,7 @@ use super::*;
 pub(super) enum ChoiceKey {
     AllAgents,
     AllWorkloads,
+    AllCollectors,
     AllExtension {
         workload: String,
         extension: String,
@@ -34,19 +35,19 @@ impl ChoiceKey {
     pub fn is_all(&self) -> bool {
         matches!(
             self,
-            Self::AllAgents | Self::AllWorkloads | Self::AllExtension { .. }
+            Self::AllAgents | Self::AllWorkloads | Self::AllCollectors | Self::AllExtension { .. }
         )
     }
     pub fn is_control(&self) -> bool {
         matches!(
             self,
-            Self::AllAgents | Self::AllWorkloads | Self::AllExtension { .. }
+            Self::AllAgents | Self::AllWorkloads | Self::AllCollectors | Self::AllExtension { .. }
         )
     }
     pub fn valid(&self) -> bool {
         let valid = |name: &str| crate::selection_names::validate(name, "selection").is_ok();
         match self {
-            Self::AllAgents | Self::AllWorkloads => true,
+            Self::AllAgents | Self::AllWorkloads | Self::AllCollectors => true,
             Self::AllExtension {
                 workload,
                 extension,
@@ -175,7 +176,11 @@ mod tests {
 
     #[test]
     fn all_choice_keys_are_valid_but_never_domain_values() {
-        for key in [ChoiceKey::AllAgents, ChoiceKey::AllWorkloads] {
+        for key in [
+            ChoiceKey::AllAgents,
+            ChoiceKey::AllWorkloads,
+            ChoiceKey::AllCollectors,
+        ] {
             assert!(key.valid());
             assert!(key.is_all());
             assert!(key.agent().is_none());

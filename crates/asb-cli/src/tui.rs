@@ -282,14 +282,21 @@ impl App {
                 .into(),
             );
         }
-        let measures = measurements::available_collectors()
-            .into_iter()
-            .map(|name| Choice {
-                key: ChoiceKey::Collector(name.clone()),
-                label: name,
-                availability: Availability::Available,
-            })
-            .collect();
+        let measures = std::iter::once(Choice {
+            label: "[all]".into(),
+            key: ChoiceKey::AllCollectors,
+            availability: Availability::Available,
+        })
+        .chain(
+            measurements::available_collectors()
+                .into_iter()
+                .map(|name| Choice {
+                    key: ChoiceKey::Collector(name.clone()),
+                    label: name,
+                    availability: Availability::Available,
+                }),
+        )
+        .collect();
         let measure_pane = Pane::new(measures);
         let concurrency_choices = (1..=crate::benchmark::MAX_CONCURRENCY)
             .map(|value| Choice {
@@ -323,11 +330,10 @@ impl App {
         // Missing tools and their dependants are not selected implicitly.
         for index in 0..app.panes[PaneKind::Measurements.index()].choices.len() {
             let choice = &app.panes[PaneKind::Measurements.index()].choices[index];
-            let dependencies = crate::collectors::expand_dependencies(&[choice
-                .key
-                .collector()
-                .expect("collector pane identity")
-                .to_owned()]);
+            let Some(collector) = choice.key.collector() else {
+                continue;
+            };
+            let dependencies = crate::collectors::expand_dependencies(&[collector.to_owned()]);
             app.panes[PaneKind::Measurements.index()].selected[index] =
                 dependencies.iter().all(|name| {
                     app.panes[PaneKind::Measurements.index()]
@@ -339,6 +345,7 @@ impl App {
                         })
                 });
         }
+        sync_all_sentinel(&mut app.panes[PaneKind::Measurements.index()]);
         app
     }
 
@@ -373,6 +380,9 @@ impl App {
             };
         }
         for choice in &mut self.panes[PaneKind::Measurements.index()].choices {
+            if choice.key.is_all() {
+                continue;
+            }
             choice.availability = if crate::collectors::find(
                 choice.key.collector().expect("collector pane identity"),
             )
@@ -502,6 +512,7 @@ impl App {
                 *enabled = true;
             }
         }
+        sync_all_sentinel(pane);
         expanded
     }
 
@@ -1600,13 +1611,8 @@ where
     }
     app.panes[step.index()].selected[index] = true;
     let pane = &mut app.panes[step.index()];
-    if let Some(all) = pane.choices.iter().position(|choice| choice.key.is_all()) {
-        pane.selected[all] = pane
-            .choices
-            .iter()
-            .zip(pane.selected.iter())
-            .filter(|(choice, _)| !choice.key.is_all())
-            .all(|(_, selected)| *selected);
+    if pane.choices.iter().any(|choice| choice.key.is_all()) {
+        sync_all_sentinel(pane);
     }
     if step == PaneKind::Measurements {
         app.sync_collector_dependencies();
@@ -1618,6 +1624,18 @@ where
         app.refresh_extensions()?;
     }
     Ok(())
+}
+
+fn sync_all_sentinel(pane: &mut Pane) {
+    let Some(all) = pane.choices.iter().position(|choice| choice.key.is_all()) else {
+        return;
+    };
+    pane.selected[all] = pane
+        .choices
+        .iter()
+        .zip(pane.selected.iter())
+        .filter(|(choice, _)| !choice.key.is_all())
+        .all(|(_, selected)| *selected);
 }
 
 fn update_extension_sentinels(pane: &mut Pane, _changed: usize) {
@@ -2886,11 +2904,10 @@ mod tests {
     fn default_measurements_do_not_select_missing_tools_or_dependencies() {
         let app = App::new(std::env::temp_dir(), ProjectConfig::default());
         for choice in app.panes[PaneKind::Measurements.index()].selected_choices() {
-            let dependencies = crate::collectors::expand_dependencies(&[choice
-                .key
-                .collector()
-                .expect("collector pane identity")
-                .to_owned()]);
+            let Some(collector) = choice.key.collector() else {
+                continue;
+            };
+            let dependencies = crate::collectors::expand_dependencies(&[collector.to_owned()]);
             for name in dependencies {
                 assert!(
                     app.panes[PaneKind::Measurements.index()]
@@ -2901,6 +2918,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn measurement_all_control_installs_missing_collectors_and_toggles_every_selection() {
+        let mut app = App::new(std::env::temp_dir(), ProjectConfig::default());
+        app.step = PaneKind::Measurements;
+        app.panes[PaneKind::Measurements.index()] = Pane::new(vec![
+            Choice {
+                label: "[all]".into(),
+                key: ChoiceKey::AllCollectors,
+                availability: Availability::Available,
+            },
+            Choice {
+                label: "perf".into(),
+                key: ChoiceKey::Collector("perf".into()),
+                availability: Availability::Missing,
+            },
+            Choice {
+                label: "mpstat".into(),
+                key: ChoiceKey::Collector("mpstat".into()),
+                availability: Availability::Missing,
+            },
+        ]);
+        let mut installs = Vec::new();
+        super::toggle_setup_choice(&mut app, |app, dependencies| {
+            assert!(dependencies.is_none());
+            let cursor = app.panes[PaneKind::Measurements.index()].cursor;
+            installs.push(
+                app.panes[PaneKind::Measurements.index()].choices[cursor]
+                    .label
+                    .clone(),
+            );
+            app.panes[PaneKind::Measurements.index()].choices[cursor].availability =
+                Availability::Available;
+            Ok(true)
+        })
+        .unwrap();
+        assert_eq!(installs, ["perf", "mpstat"]);
+        assert!(
+            app.panes[PaneKind::Measurements.index()]
+                .selected
+                .iter()
+                .all(|selected| *selected)
+        );
+
+        app.panes[PaneKind::Measurements.index()].cursor = 0;
+        super::toggle_setup_choice(&mut app, |_, _| {
+            panic!("deselecting [all] must not install collectors")
+        })
+        .unwrap();
+        assert!(
+            app.panes[PaneKind::Measurements.index()]
+                .selected
+                .iter()
+                .all(|selected| !*selected)
+        );
     }
 
     #[test]
