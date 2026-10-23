@@ -21,6 +21,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64, asb-main-ci]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The selector compares the PR's immutable base and head commits.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -31,9 +34,19 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Build
         run: cargo build --locked
-      - name: Run tests
-        # The suite owns real process trees and filesystem fixtures. Run every
-        # test, but do not overlap those host-level fixture lifecycles.
+      - name: Verify pull-request test selection
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/test_ci_pr_tests.py
+      - name: Run changed-component tests
+        if: github.event_name == 'pull_request'
+        env:
+          ASB_CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          ASB_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/ci_pr_tests.py --base "$ASB_CI_BASE_SHA" --head "$ASB_CI_HEAD_SHA"
+      - name: Run full post-merge test suite
+        if: github.event_name != 'pull_request'
+        # The suite owns real process trees and filesystem fixtures. Main keeps
+        # the complete serial gate; PRs exercise only their owning component.
         run: cargo test --locked -- --test-threads=1
       - name: Check Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
