@@ -1,7 +1,7 @@
 //! Interactive, modular setup wizard built with Ratatui.
 
 use crate::benchmark::{BenchmarkConfig, MeasurementConfig};
-use crate::{Error, agents, install, measurements, models, project, providers, workloads};
+use crate::{Error, agents, install, measurements, models, project, providers, sweep, workloads};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -20,6 +20,15 @@ use std::fs;
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+const LAST_SETUP_TUI_FILE: &str = "setup-tui-last.toml";
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct LastSetupTui {
+    schema_version: u32,
+    config: String,
+}
 
 const DESCRIPTIONS: &[&str] = &[
     "Choose one or more agents that will execute each benchmark.",
@@ -349,6 +358,141 @@ impl App {
         app
     }
 
+    /// Restore every wizard selection representable by the supplied benchmark
+    /// or sweep TOML. A sweep becomes the TUI's normal selection matrix, so
+    /// deliberately paired configurations become editable selections.
+    fn preselect(&mut self, input: &Path) -> Result<(), Error> {
+        let configs = preselection_configs(input)?;
+        let concurrency = configs
+            .first()
+            .map(|config| config.concurrency)
+            .ok_or_else(|| {
+                Error::Input(format!(
+                    "{0} contains no benchmark configurations",
+                    input.display()
+                ))
+            })?;
+        if configs
+            .iter()
+            .any(|config| config.concurrency != concurrency)
+        {
+            return Err(Error::Input(format!(
+                "{} contains multiple concurrency values; the setup TUI edits one shared concurrency selection",
+                input.display()
+            )));
+        }
+
+        for config in &configs {
+            select_choice(
+                self.pane_mut(PaneKind::Agents),
+                ChoiceKey::Agent(config.agent.clone()),
+                input,
+            )?;
+            select_choice(
+                self.pane_mut(PaneKind::Providers),
+                ChoiceKey::Provider(config.provider.clone()),
+                input,
+            )?;
+        }
+        sync_all_sentinel(self.pane_mut(PaneKind::Agents));
+
+        let model_choices = configs
+            .iter()
+            .map(|config| Choice {
+                label: format!("{}:{}", config.provider, config.model),
+                key: ChoiceKey::Model {
+                    provider: config.provider.clone(),
+                    model: config.model.clone(),
+                },
+                availability: Availability::Unknown,
+            })
+            .collect();
+        self.panes[PaneKind::Models.index()] = Pane::new(model_choices);
+        for config in &configs {
+            select_choice(
+                self.pane_mut(PaneKind::Models),
+                ChoiceKey::Model {
+                    provider: config.provider.clone(),
+                    model: config.model.clone(),
+                },
+                input,
+            )?;
+        }
+
+        for config in &configs {
+            let key = config.trial_set.as_ref().map_or_else(
+                || ChoiceKey::Prompt(config.workload.clone()),
+                |file| ChoiceKey::TrialSet {
+                    workload: config.workload.clone(),
+                    file: PathBuf::from(file),
+                },
+            );
+            select_choice(self.pane_mut(PaneKind::Workloads), key, input)?;
+        }
+        sync_all_sentinel(self.pane_mut(PaneKind::Workloads));
+        self.refresh_extensions()?;
+
+        for config in &configs {
+            if config.trial_set.is_some() {
+                continue;
+            }
+            let Some(extension) = workloads::setup_extension(&config.workload) else {
+                continue;
+            };
+            let trial = config.trial.as_ref().ok_or_else(|| {
+                Error::Input(format!(
+                    "{} selects adapter workload `{}` without its required {} value",
+                    input.display(),
+                    config.workload,
+                    extension.tab
+                ))
+            })?;
+            select_choice(
+                self.pane_mut(PaneKind::Extensions),
+                ChoiceKey::ExtensionValue {
+                    workload: config.workload.clone(),
+                    extension: extension.id.into(),
+                    value: trial.clone(),
+                },
+                input,
+            )?;
+        }
+        for index in 0..self.pane(PaneKind::Extensions).choices.len() {
+            if matches!(
+                self.pane(PaneKind::Extensions).choices[index].key,
+                ChoiceKey::AllExtension { .. }
+            ) {
+                update_extension_sentinels(self.pane_mut(PaneKind::Extensions), index);
+            }
+        }
+
+        for config in &configs {
+            if let Some(measurements) = &config.measurements {
+                for collector in &measurements.collectors {
+                    select_choice(
+                        self.pane_mut(PaneKind::Measurements),
+                        ChoiceKey::Collector(collector.clone()),
+                        input,
+                    )?;
+                }
+            }
+        }
+        self.sync_collector_dependencies();
+        select_choice(
+            self.pane_mut(PaneKind::Concurrency),
+            ChoiceKey::Concurrency(concurrency),
+            input,
+        )?;
+        self.step = PaneKind::Agents;
+        self.message = format!(
+            "Loaded selections from {}; review or refine them.",
+            input.display()
+        );
+        self.message_color = Color::Yellow;
+        self.message_until = None;
+        Ok(())
+    }
+
     fn refresh_availability(&mut self) {
         let tools = project::resolve(&self.root, &self.project.tools_dir);
         for choice in &mut self.panes[PaneKind::Agents.index()].choices {
@@ -528,11 +672,20 @@ impl App {
             .selected_choices()
             .filter_map(|choice| choice.key.provider().map(str::to_owned))
             .collect::<Vec<_>>();
+        let selected = self.panes[PaneKind::Models.index()]
+            .selected_choices()
+            .filter_map(|choice| {
+                choice
+                    .key
+                    .model()
+                    .map(|(provider, model)| (provider.to_owned(), model.to_owned()))
+            })
+            .collect::<BTreeSet<_>>();
         let mut choices = Vec::new();
         let mut warnings = Vec::new();
-        for provider in selected_providers {
+        for provider in &selected_providers {
             let mut is_fallback = false;
-            let models = match discover(&provider) {
+            let models = match discover(provider) {
                 Ok(models) if models.is_empty() => {
                     warnings.push(format!("{provider}: no tool-capable models returned. Check `asb provider models {provider}`."));
                     Vec::new()
@@ -541,9 +694,9 @@ impl App {
                 Err(error) => {
                     is_fallback = true;
                     warnings.push(format!("{provider}: lookup failed; fallback only. Run `asb provider models {provider}`. {error}"));
-                    providers::known_models(&provider)
+                    providers::known_models(provider)
                         .map(|values| values.iter().map(|value| (*value).to_owned()).collect())
-                        .unwrap_or_else(|| vec![default_model(&provider).to_owned()])
+                        .unwrap_or_else(|| vec![default_model(provider).to_owned()])
                 }
             };
             for model in models {
@@ -560,7 +713,37 @@ impl App {
                 });
             }
         }
-        self.panes[PaneKind::Models.index()] = Pane::new(choices);
+        for (provider, model) in &selected {
+            if !selected_providers.contains(provider)
+                || choices.iter().any(|choice| {
+                    choice
+                        .key
+                        .model()
+                        .is_some_and(|(candidate_provider, candidate_model)| {
+                            candidate_provider == provider && candidate_model == model
+                        })
+                })
+            {
+                continue;
+            }
+            choices.push(Choice {
+                label: format!("{provider}:{model} [configured]"),
+                key: ChoiceKey::Model {
+                    provider: provider.clone(),
+                    model: model.clone(),
+                },
+                availability: Availability::Unknown,
+            });
+        }
+        let mut pane = Pane::new(choices);
+        for (index, choice) in pane.choices.iter().enumerate() {
+            if choice.key.model().is_some_and(|(provider, model)| {
+                selected.contains(&(provider.to_owned(), model.to_owned()))
+            }) {
+                pane.selected[index] = true;
+            }
+        }
+        self.panes[PaneKind::Models.index()] = pane;
         (!warnings.is_empty()).then(|| warnings.join(" | "))
     }
 
@@ -637,16 +820,187 @@ fn visible_message(message: &str, until: Option<std::time::Instant>) -> &str {
 }
 
 /// Launch the setup wizard and write one TOML per selected combination.
-pub fn setup(output: &mut dyn Write) -> Result<(), Error> {
+pub fn setup(input: Option<&Path>, last: bool, output: &mut dyn Write) -> Result<(), Error> {
     let (root, project) = project::load(Path::new("."))?;
-    let mut app = App::new(root, project);
+    let selected = if last {
+        Some(last_setup_tui_config(&root)?)
+    } else {
+        input.map(Path::to_path_buf)
+    };
+    let mut app = App::new(root.clone(), project);
+    if let Some(input) = selected.as_deref() {
+        app.preselect(input)?;
+    }
     let mut terminal =
         start_terminal().map_err(|error| Error::Io(format!("cannot start setup TUI: {error}")))?;
     let result = run_loop(&mut terminal, &mut app);
     let cleanup = stop_terminal(terminal);
     let generated = with_terminal_cleanup(result, cleanup)?;
+    record_last_setup_tui(&root, &generated)?;
     writeln!(output, "{}", generated_summary(&generated)).map_err(crate::io_error)?;
     output.flush().map_err(crate::io_error)
+}
+
+fn last_setup_tui_path(root: &Path) -> PathBuf {
+    root.join(".asb").join(LAST_SETUP_TUI_FILE)
+}
+
+fn last_setup_tui_config(root: &Path) -> Result<PathBuf, Error> {
+    let marker = last_setup_tui_path(root);
+    let text = fs::read_to_string(&marker).map_err(|error| {
+        Error::Input(format!(
+            "cannot load the last setup TUI configuration at {}: {error}; run `asb setup tui` first",
+            marker.display()
+        ))
+    })?;
+    let record: LastSetupTui = toml::from_str(&text).map_err(|error| {
+        Error::Input(format!(
+            "last setup TUI record {} is malformed: {error}; run `asb setup tui` again",
+            marker.display()
+        ))
+    })?;
+    if record.schema_version != 1 {
+        return Err(Error::Input(format!(
+            "last setup TUI record {} has unsupported schema version {}; run `asb setup tui` again",
+            marker.display(),
+            record.schema_version
+        )));
+    }
+    let relative = Path::new(&record.config);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(Error::Input(format!(
+            "last setup TUI record {} has an unsafe configuration path; run `asb setup tui` again",
+            marker.display()
+        )));
+    }
+    let config = root.join(relative);
+    if !config.is_file() {
+        return Err(Error::Input(format!(
+            "last setup TUI configuration {} is missing; run `asb setup tui` again",
+            config.display()
+        )));
+    }
+    Ok(config)
+}
+
+fn record_last_setup_tui(root: &Path, generated: &Generated) -> Result<(), Error> {
+    let relative = generated.sweep.strip_prefix(root).map_err(|_| {
+        Error::Io("setup TUI generated a configuration outside its project root".into())
+    })?;
+    let record = LastSetupTui {
+        schema_version: 1,
+        config: relative.to_string_lossy().into_owned(),
+    };
+    let text = toml::to_string(&record)
+        .map_err(|error| Error::Io(format!("cannot serialize last setup TUI record: {error}")))?;
+    fs::write(last_setup_tui_path(root), text)
+        .map_err(|error| Error::Io(format!("cannot save last setup TUI record: {error}")))
+}
+
+fn preselection_configs(input: &Path) -> Result<Vec<BenchmarkConfig>, Error> {
+    let text = sweep::read_manifest_text(input)?;
+    let value: toml::Value = toml::from_str(&text)
+        .map_err(|error| Error::Input(format!("cannot parse TOML {}: {error}", input.display())))?;
+    if value
+        .as_table()
+        .is_some_and(|table| table.contains_key("configs"))
+    {
+        let manifest = sweep::parse_manifest(input, value)?;
+        let parent = input.parent().unwrap_or_else(|| Path::new("."));
+        return manifest
+            .configs
+            .into_iter()
+            .map(|reference| {
+                let path = parent.join(reference);
+                let text = crate::read_config(&path)?;
+                toml::from_str(&text).map_err(|error| {
+                    Error::Input(format!(
+                        "cannot parse benchmark configuration {}: {error}",
+                        path.display()
+                    ))
+                })
+            })
+            .collect();
+    }
+    let text = crate::read_config(input)?;
+    toml::from_str(&text)
+        .map(|config| vec![config])
+        .map_err(|error| {
+            Error::Input(format!(
+                "cannot parse benchmark configuration {}: {error}",
+                input.display()
+            ))
+        })
+}
+
+fn select_choice(pane: &mut Pane, key: ChoiceKey, input: &Path) -> Result<(), Error> {
+    let index = pane.choices.iter().position(|choice| choice.key == key).ok_or_else(|| {
+        Error::Input(format!(
+            "{} selects unavailable {} `{}`; install or register it before reopening the setup TUI",
+            input.display(),
+            match &key {
+                ChoiceKey::Agent(_) => "agent",
+                ChoiceKey::Provider(_) => "provider",
+                ChoiceKey::Model { .. } => "model",
+                ChoiceKey::Prompt(_) | ChoiceKey::TrialSet { .. } => "workload",
+                ChoiceKey::Collector(_) => "collector",
+                ChoiceKey::Concurrency(_) => "concurrency",
+                ChoiceKey::AllAgents
+                | ChoiceKey::AllWorkloads
+                | ChoiceKey::AllExtension { .. }
+                | ChoiceKey::ExtensionValue { .. }
+                | ChoiceKey::Trial(_) => "selection",
+            },
+            choice_key_label(&key)
+        ))
+    })?;
+    pane.selected[index] = true;
+    Ok(())
+}
+
+fn choice_key_label(key: &ChoiceKey) -> String {
+    match key {
+        ChoiceKey::Agent(value)
+        | ChoiceKey::Provider(value)
+        | ChoiceKey::Prompt(value)
+        | ChoiceKey::Collector(value)
+        | ChoiceKey::Trial(value) => value.clone(),
+        ChoiceKey::Model { provider, model } => format!("{provider}:{model}"),
+        ChoiceKey::TrialSet { workload, file } => format!("{}:{}", workload, file.display()),
+        ChoiceKey::Concurrency(value) => value.to_string(),
+        ChoiceKey::AllAgents | ChoiceKey::AllWorkloads => "[all]".into(),
+        ChoiceKey::AllExtension {
+            workload,
+            extension,
+        } => format!("[all] {workload}:{extension}"),
+        ChoiceKey::ExtensionValue {
+            workload,
+            extension,
+            value,
+        } => format!("{workload}:{extension}:{value}"),
+    }
+}
+
+fn sync_all_sentinel(pane: &mut Pane) {
+    let Some(all) = pane.choices.iter().position(|choice| choice.key.is_all()) else {
+        return;
+    };
+    pane.selected[all] = pane
+        .choices
+        .iter()
+        .zip(pane.selected.iter())
+        .filter(|(choice, _)| !choice.key.is_all())
+        .all(|(_, selected)| *selected);
 }
 
 /// Launch the tree-shaped workload/trial selector. It reuses the setup TUI's
@@ -2270,7 +2624,8 @@ mod generation_tests;
 mod tests {
     use super::{
         App, Availability, Choice, ChoiceKey, Generated, Pane, PaneKind, default_model,
-        generate_configs, generated_summary, install_status_message,
+        generate_configs, generated_summary, install_status_message, last_setup_tui_config,
+        record_last_setup_tui,
     };
     use crate::install;
     use crate::project::ProjectConfig;
@@ -3231,6 +3586,164 @@ mod tests {
             sweep: std::path::PathBuf::from("asb-sweep-123.toml"),
         });
         assert!(summary.contains("Run it with: asb sweep asb-sweep-123.toml"));
+    }
+
+    #[test]
+    fn last_setup_tui_record_prefers_the_generated_sweep() {
+        let root = std::env::temp_dir().join(format!("asb-tui-last-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".asb")).unwrap();
+        let sweep = root.join("asb-sweep-123.toml");
+        let benchmark = root.join("asb-test-123-000.toml");
+        std::fs::write(&sweep, "configs=[]\n").unwrap();
+        std::fs::write(&benchmark, "agent='pi'\n").unwrap();
+        record_last_setup_tui(
+            &root,
+            &Generated {
+                tests: 2,
+                sweep: sweep.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(last_setup_tui_config(&root).unwrap(), sweep);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn last_setup_tui_record_rejects_escape_paths() {
+        let root = std::env::temp_dir().join(format!("asb-tui-last-unsafe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".asb")).unwrap();
+        std::fs::write(
+            root.join(".asb/setup-tui-last.toml"),
+            "schema_version=1\nconfig='../outside.toml'\n",
+        )
+        .unwrap();
+        assert!(
+            last_setup_tui_config(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("unsafe configuration path")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn benchmark_toml_preselects_every_wizard_pane_including_adapter_trials() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-tui-preselect-benchmark-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("benchmark.toml");
+        std::fs::write(
+            &input,
+            "agent='pi'\nprovider='openrouter'\nmodel='configured-model'\nworkload='terminal-bench'\ntrial='smoke'\nconcurrency=2\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['system']\n",
+        )
+        .unwrap();
+
+        let mut app = App::new(root.clone(), ProjectConfig::default());
+        app.preselect(&input).unwrap();
+        assert!(
+            app.pane(PaneKind::Agents)
+                .selected_choices()
+                .any(|choice| { choice.key.agent() == Some("pi") })
+        );
+        assert!(
+            app.pane(PaneKind::Providers)
+                .selected_choices()
+                .any(|choice| { choice.key.provider() == Some("openrouter") })
+        );
+        assert!(
+            app.pane(PaneKind::Models)
+                .selected_choices()
+                .any(|choice| { choice.key.model() == Some(("openrouter", "configured-model")) })
+        );
+        assert!(
+            app.pane(PaneKind::Workloads)
+                .selected_choices()
+                .any(|choice| { choice.key.workload() == Some("terminal-bench") })
+        );
+        assert!(app.pane(PaneKind::Extensions).selected_choices().any(|choice| {
+            matches!(&choice.key, ChoiceKey::ExtensionValue { workload, value, .. } if workload == "terminal-bench" && value == "smoke")
+        }));
+        assert!(
+            app.pane(PaneKind::Measurements)
+                .selected_choices()
+                .any(|choice| { choice.key.collector() == Some("system") })
+        );
+        assert!(
+            app.pane(PaneKind::Concurrency)
+                .selected_choices()
+                .any(|choice| { choice.key.concurrency() == Some(2) })
+        );
+        assert!(
+            app.refresh_models_with(|_| Ok(vec!["discovered-model".into()]))
+                .is_none()
+        );
+        assert!(
+            app.pane(PaneKind::Models)
+                .selected_choices()
+                .any(|choice| { choice.key.model() == Some(("openrouter", "configured-model")) })
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sweep_toml_unions_preselections_and_rejects_mixed_concurrency() {
+        let root =
+            std::env::temp_dir().join(format!("asb-tui-preselect-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("one.toml"),
+            "agent='pi'\nprovider='openrouter'\nmodel='first-model'\nworkload='bug-fix'\nconcurrency=3\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("two.toml"),
+            "agent='opencode'\nprovider='openrouter'\nmodel='second-model'\nworkload='build-repair'\nconcurrency=3\n",
+        )
+        .unwrap();
+        let sweep = root.join("saved-sweep.toml");
+        std::fs::write(&sweep, "configs=['one.toml', 'two.toml']\n").unwrap();
+
+        let mut app = App::new(root.clone(), ProjectConfig::default());
+        app.preselect(&sweep).unwrap();
+        assert_eq!(
+            app.pane(PaneKind::Agents)
+                .selected_choices()
+                .filter_map(|choice| choice.key.agent())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["opencode", "pi"])
+        );
+        assert_eq!(
+            app.pane(PaneKind::Models)
+                .selected_choices()
+                .filter_map(|choice| choice.key.model())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                ("openrouter", "first-model"),
+                ("openrouter", "second-model")
+            ])
+        );
+        assert!(
+            app.pane(PaneKind::Concurrency)
+                .selected_choices()
+                .any(|choice| { choice.key.concurrency() == Some(3) })
+        );
+
+        std::fs::write(
+            root.join("two.toml"),
+            "agent='opencode'\nprovider='openrouter'\nmodel='second-model'\nworkload='build-repair'\nconcurrency=4\n",
+        )
+        .unwrap();
+        let error = App::new(root.clone(), ProjectConfig::default())
+            .preselect(&sweep)
+            .unwrap_err();
+        assert!(error.to_string().contains("multiple concurrency values"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
