@@ -26,7 +26,7 @@ impl SetupExtension {
         Self {
             id: "trial",
             tab: "trials",
-            description: "Choose workload-specific trials. [all] enables every available trial; [none] clears the selection.",
+            description: "Choose workload-specific trials. [all] toggles every available trial.",
         }
     }
 }

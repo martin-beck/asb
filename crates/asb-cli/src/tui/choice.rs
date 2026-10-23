@@ -9,10 +9,6 @@ pub(super) enum ChoiceKey {
         workload: String,
         extension: String,
     },
-    NoExtension {
-        workload: String,
-        extension: String,
-    },
     Agent(String),
     Provider(String),
     Model {
@@ -44,10 +40,7 @@ impl ChoiceKey {
     pub fn is_control(&self) -> bool {
         matches!(
             self,
-            Self::AllAgents
-                | Self::AllWorkloads
-                | Self::AllExtension { .. }
-                | Self::NoExtension { .. }
+            Self::AllAgents | Self::AllWorkloads | Self::AllExtension { .. }
         )
     }
     pub fn valid(&self) -> bool {
@@ -55,10 +48,6 @@ impl ChoiceKey {
         match self {
             Self::AllAgents | Self::AllWorkloads => true,
             Self::AllExtension {
-                workload,
-                extension,
-            }
-            | Self::NoExtension {
                 workload,
                 extension,
             } => valid(workload) && valid(extension),

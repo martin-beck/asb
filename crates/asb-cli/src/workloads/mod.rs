@@ -75,7 +75,7 @@ pub(crate) fn setup_extension(name: &str) -> Option<adapters::SetupExtension> {
 }
 
 /// Enumerate adapter-owned choices for the active setup extension. Values are
-/// stable domain identifiers; the UI reserves its own `[all]` and `[none]`
+/// stable domain identifiers; the UI reserves its own `[all]`
 /// controls and never persists those labels as workload trials.
 pub(crate) fn setup_extension_values(
     name: &str,
