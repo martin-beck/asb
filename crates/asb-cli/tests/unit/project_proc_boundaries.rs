@@ -81,7 +81,7 @@ esac
             "n\n",
         ),
         (
-            "pending-invalid",
+            "pending-defaulted",
             "interactive",
             "0::/fixture-parent/session.scope\n",
             "\n",
@@ -150,7 +150,7 @@ esac
             if case == "pending-interactive" {
                 assert!(log.contains("sudo [sysctl] [-w]"));
             }
-            if matches!(case, "pending-declined" | "pending-invalid") {
+            if matches!(case, "pending-declined" | "pending-defaulted") {
                 assert!(!log.contains("[sysctl]"));
                 assert!(!log.contains("[mkdir]"));
             }
@@ -195,7 +195,7 @@ fn child(case: &str) {
     if case.starts_with("pending-") {
         let result = configure_host_capabilities(
             &mut output,
-            !matches!(case, "pending-declined" | "pending-invalid"),
+            !matches!(case, "pending-declined" | "pending-defaulted"),
         )
         .unwrap();
         let text = String::from_utf8(output).unwrap();
@@ -213,7 +213,7 @@ fn child(case: &str) {
                 assert!(text.contains("could not change kernel.perf_event_paranoid=-1"))
             }
             "pending-declined" => assert!(text.contains("unchanged by user request")),
-            "pending-invalid" => assert!(text.contains("no valid y/n answer")),
+            "pending-defaulted" => assert!(text.contains("unchanged by user request")),
             _ => unreachable!(),
         }
     } else {
