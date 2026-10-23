@@ -1060,6 +1060,14 @@ impl ResultFacts {
                     .flatten()
             })
         };
+        let tool_calls = if capture_complete {
+            agents::observed_tool_calls(
+                &String::from_utf8_lossy(&child.stdout),
+                &String::from_utf8_lossy(&child.stderr),
+            )
+        } else {
+            Vec::new()
+        };
         let mut stderr = bounded(&child.stderr);
         if let Some(error) = provider_cleanup_error.as_ref() {
             stderr.push_str("\nASB provider cleanup error: ");
@@ -1142,6 +1150,7 @@ impl ResultFacts {
             observation,
             token_usage,
             steps,
+            tool_calls,
             cassette: tape_cassette
                 .as_ref()
                 .map(|(_, cassette)| cassette.display().to_string()),

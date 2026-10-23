@@ -544,6 +544,7 @@ mod tests {
                 Some("bpftrace"),
                 true,
             ),
+            ("tool-calls", None, None, false),
         ];
         assert_eq!(all().len(), expected.len());
         for (adapter, (id, environment, tool, pid)) in all().iter().zip(expected) {

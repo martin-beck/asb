@@ -437,6 +437,8 @@ fn summary_retention_is_bounded_and_unscored_success_is_not_a_resolved_task() {
         exit_code: Some(0),
         token_usage: TokenUsage::default(),
         steps: None,
+        tool_call_count: 0,
+        tool_calls: &[],
         started_unix_ms: 1,
     };
     crate::workloads::summary::update_summary(&fixture.0, serde_json::to_value(&run).unwrap())

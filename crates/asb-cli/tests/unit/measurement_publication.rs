@@ -308,6 +308,8 @@ fn fixture_measurement() -> RunMeasurement<'static> {
         exit_code: Some(0),
         token_usage: TokenUsage::default(),
         steps: Some(1),
+        tool_call_count: 0,
+        tool_calls: &[],
         started_unix_ms: 0,
     }
 }

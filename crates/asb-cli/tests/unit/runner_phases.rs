@@ -1081,6 +1081,7 @@ fn result() -> RunResult<'static> {
         exit_code: Some(0),
         token_usage: Default::default(),
         steps: Some(3),
+        tool_calls: Vec::new(),
         cassette: None,
         measurement_directory: None,
         stdout: "submission".into(),

@@ -534,6 +534,8 @@ pub(super) fn finish_measurements(
         exit_code: result.exit_code,
         token_usage: result.token_usage.clone(),
         steps: result.steps,
+        tool_call_count: result.tool_calls.len(),
+        tool_calls: &result.tool_calls,
         started_unix_ms: session.started_unix_ms(),
     };
 

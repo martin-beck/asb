@@ -101,6 +101,7 @@ struct RunResult<'a> {
     observation: crate::process_termination::Observation,
     token_usage: measurements::TokenUsage,
     steps: Option<u64>,
+    tool_calls: Vec<agents::ToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cassette: Option<String>,
     /// Actual capture directory, including a CLI --measurements override.
@@ -1148,6 +1149,7 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
         "success_rate": result.success_rate,
         "elapsed_ms": result.elapsed_ms,
         "steps": result.steps,
+        "tool_call_count": result.tool_calls.len(),
         "token_usage": result.token_usage,
     });
     if let Some(execution) = &result.execution {
@@ -1172,10 +1174,11 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
 fn render_human(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Error> {
     writeln!(
         output,
-        "success_rate={} elapsed_ms={} steps={} input_tokens={} output_tokens={} cached_tokens={} total_tokens={} evaluation={}",
+        "success_rate={} elapsed_ms={} steps={} tool_calls={} input_tokens={} output_tokens={} cached_tokens={} total_tokens={} evaluation={}",
         result.success_rate.map_or_else(|| "unavailable".into(), |value| format!("{value:.3}")),
         result.elapsed_ms,
         format_token(result.steps),
+        result.tool_calls.len(),
         format_token(result.token_usage.input_tokens),
         format_token(result.token_usage.output_tokens),
         format_token(result.token_usage.cached_tokens),
@@ -1929,6 +1932,8 @@ mod tests {
                 exit_code: output.status.code(),
                 token_usage: crate::measurements::TokenUsage::default(),
                 steps: Some(1),
+                tool_call_count: 0,
+                tool_calls: &[],
                 started_unix_ms: 0,
             })
             .expect("finish collector");
@@ -2268,6 +2273,7 @@ mod tests {
                 source: Some("test".into()),
             },
             steps: Some(2),
+            tool_calls: Vec::new(),
             cassette: None,
             measurement_directory: None,
             stdout: "done".into(),

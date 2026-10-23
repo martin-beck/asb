@@ -166,6 +166,7 @@ pub fn collector_description(id: &str) -> Option<&'static str> {
         "perfetto" => "timestamped execution trace for Perfetto",
         "flamegraph" => "process-tree CPU flamegraph",
         "bpftrace" => "selected process-tree eBPF programs",
+        "tool-calls" => "structured agent tool-call observations",
         _ => return None,
     })
 }
@@ -215,7 +216,18 @@ pub struct RunMeasurement<'a> {
     pub exit_code: Option<i32>,
     pub token_usage: TokenUsage,
     pub steps: Option<u64>,
+    /// Number of structured tool-call events retained in tool-calls.json.
+    pub tool_call_count: usize,
+    #[serde(skip)]
+    pub(crate) tool_calls: &'a [crate::agents::ToolCall],
     pub started_unix_ms: u128,
+}
+
+#[derive(Serialize)]
+struct ToolCallMeasurements<'a> {
+    schema_version: u32,
+    count: usize,
+    calls: &'a [crate::agents::ToolCall],
 }
 
 #[derive(Debug, Serialize)]
@@ -877,6 +889,14 @@ impl Session {
         };
         observe(self.stop_collector_processes(false));
         observe(self.process_stopped_collectors());
+        observe(write_json(
+            &self.dir.join("tool-calls.json"),
+            &ToolCallMeasurements {
+                schema_version: 1,
+                count: measurement.tool_call_count,
+                calls: measurement.tool_calls,
+            },
+        ));
         observe(write_json(&self.dir.join("run.json"), &measurement));
         if self.run_started {
             observe(write_json(
@@ -1759,6 +1779,14 @@ mod tests {
                 collectors::LifecyclePhase::WorkloadPreparation,
             ))
             .unwrap();
+        let tool_calls = vec![crate::agents::ToolCall {
+            ordinal: 1,
+            source: "stdout",
+            kind: "function_call".into(),
+            name: Some("read_file".into()),
+            id: Some("call-1".into()),
+            arguments_present: true,
+        }];
         let run = RunMeasurement {
             planning: None,
             effective_budgets: None,
@@ -1795,6 +1823,8 @@ mod tests {
             exit_code: Some(0),
             token_usage: TokenUsage::default(),
             steps: Some(1),
+            tool_call_count: tool_calls.len(),
+            tool_calls: &tool_calls,
             started_unix_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -1814,6 +1844,12 @@ mod tests {
         let recorded: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("run.json")).unwrap()).unwrap();
         assert_eq!(recorded["elapsed_ms"], 2);
+        assert_eq!(recorded["tool_call_count"], 1);
+        let tool_calls: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("tool-calls.json")).unwrap())
+                .unwrap();
+        assert_eq!(tool_calls["count"], 1);
+        assert_eq!(tool_calls["calls"][0]["name"], "read_file");
         let components: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("components.json")).unwrap())
                 .unwrap();

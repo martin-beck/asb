@@ -873,6 +873,7 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("bpftrace\tselected process-tree eBPF programs"));
         assert!(output.contains("agent-memory\tselected agent process-tree memory usage"));
+        assert!(output.contains("tool-calls\tstructured agent tool-call observations"));
 
         let mut output = Vec::new();
         assert_eq!(

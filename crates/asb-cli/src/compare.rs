@@ -1177,7 +1177,7 @@ mod tests {
         std::fs::write(root.join("sweep.toml"), "configs=[\"one.toml\"]\n").unwrap();
         std::fs::write(
             root.join("sweep-results/000-one/measurements/run.json"),
-            r#"{"status":"completed","success":true,"success_rate":1.0,"elapsed_ms":12,"token_usage":{"total_tokens":7}}"#,
+            r#"{"status":"completed","success":true,"success_rate":1.0,"elapsed_ms":12,"tool_call_count":5,"token_usage":{"total_tokens":7}}"#,
         )
         .unwrap();
         std::fs::write(
@@ -1241,6 +1241,10 @@ mod tests {
         );
         assert!(
             root.join("results/sweep-comparison/metric-elapsed_ms.svg")
+                .is_file()
+        );
+        assert!(
+            root.join("results/sweep-comparison/metric-tool_call_count.svg")
                 .is_file()
         );
         assert!(
@@ -1325,6 +1329,7 @@ mod tests {
         assert!(line_svg.contains("</text></g>"));
         assert!(report.contains(">Details</th>"));
         assert!(report.contains("All metrics"));
+        assert!(report.contains("metric-tool_call_count.svg"));
         assert!(report.contains("Host metadata"));
         assert!(report.contains("Neoverse-N1"));
         assert!(report.contains("Component timings"));
