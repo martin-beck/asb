@@ -216,8 +216,10 @@ class GuestBootstrapTests(unittest.TestCase):
                 class Relay:
                     ports = (10001, 10002)
                     closed = False
-                    def __init__(self, targets, command, cancelled):
+                    def __init__(self, targets, command, cancellation, diagnostic_path):
                         self.targets = targets
+                        self.cancellation = cancellation
+                        self.diagnostic_path = diagnostic_path
                         resources.append(self)
                     def close(self):
                         self.closed = True
@@ -248,6 +250,8 @@ class GuestBootstrapTests(unittest.TestCase):
                         execute_agent(task,request,None,None,None)
                 self.assertTrue(resources[0].closed)
                 self.assertEqual(resources[0].targets, [("localhost",8000),("localhost",3128)])
+                self.assertIsNone(resources[0].cancellation)
+                self.assertEqual(resources[0].diagnostic_path, root / "endpoint-relay-0.json")
                 project = next(data for destination,name,data in container.files
                                if destination == "/opt/asb-project/.asb" and name == "project.toml")
                 self.assertIn(b"http://localhost:10002",project)
