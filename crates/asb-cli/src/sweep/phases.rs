@@ -52,6 +52,7 @@ impl<'a> PreparedSweep<'a> {
         options: Options<'a>,
         output_lock: lock::OutputLock,
         sweep: SweepFile,
+        output: &mut dyn std::io::Write,
     ) -> Result<Self, Error> {
         let sweep_path = Path::new(source);
         let parent = sweep_path.parent().unwrap_or_else(|| Path::new("."));
@@ -120,6 +121,22 @@ impl<'a> PreparedSweep<'a> {
             }
             plan = saved;
         }
+        // Validate cassette and continuation inputs first.  A malformed replay
+        // source is a deterministic invocation error, not a capacity decision;
+        // capacity is still checked before dependency preparation or output
+        // publication can start.
+        crate::disk_space::confirm_capacity(
+            parent,
+            crate::disk_space::sweep(
+                plan.entries
+                    .iter()
+                    .map(|entry| (&entry.configuration, entry.policy.as_ref())),
+                options.repeat.unwrap_or(1),
+                mode,
+            ),
+            options.interactive && !options.json,
+            output,
+        )?;
         // Warm selected workload dependencies before moving old output or taking
         // input snapshots. This is execution preflight, never optional metadata
         // discovery. Deduplicate over the full population, not once per task.
