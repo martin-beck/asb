@@ -40,6 +40,7 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
         .into_iter()
         .any(|values| values.iter().any(|value| value == "all"));
     selections::expand(&mut options)?;
+    validate_concurrency_before_install(options.concurrency)?;
     if !filter_incompatible {
         validate_before_install(&options)?;
     }
@@ -217,6 +218,25 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
         } else {
             output.write_all(text.as_bytes()).map_err(crate::io_error)?;
         }
+    }
+    Ok(())
+}
+
+/// Reject a numeric setup request before automatic installation can emit output
+/// or mutate a project. Per-configuration validation retains the same checks
+/// after expansion as a defensive boundary.
+fn validate_concurrency_before_install(concurrency: Option<usize>) -> Result<(), Error> {
+    let Some(concurrency) = concurrency else {
+        return Ok(());
+    };
+    if concurrency == 0 {
+        return Err(Error::Input("concurrency must be at least 1".into()));
+    }
+    if concurrency > crate::benchmark::MAX_CONCURRENCY {
+        return Err(Error::Input(format!(
+            "concurrency must not exceed {}; split larger selections into bounded sweeps",
+            crate::benchmark::MAX_CONCURRENCY
+        )));
     }
     Ok(())
 }
