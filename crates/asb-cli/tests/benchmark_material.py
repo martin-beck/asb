@@ -71,7 +71,8 @@ class MaterialTests(unittest.TestCase):
         labels = {"asb.owner":"asb","asb.attempt":"asb-"+"a"*32,"asb.recovery":"token"}
         container = SimpleNamespace(id="container-one",name="asb-"+"a"*32,image=image,attrs={"Config":{"Labels":labels},"Mounts":list(mounts)},reload=lambda:None,diff=lambda:[])
         container.get_archive = lambda path,**kwargs:(Chunks(archive(items,prefix=workdir.rsplit("/",1)[-1])),{"name":workdir.rsplit("/",1)[-1]})
-        return SimpleNamespace(container=container,workdir=workdir)
+        return SimpleNamespace(container=container,workdir=workdir,
+                               image_identity={"image_id":"sha256:" + "b" * 64})
 
     def test_workspace_capture_binds_actual_files_definition_and_explicit_coverage(self):
         definition = {"task":"fixture","base":"pinned"}
@@ -104,11 +105,12 @@ class MaterialTests(unittest.TestCase):
         labels = {"asb.owner":"asb","asb.attempt":"asb-"+"a"*32,"asb.recovery":"token"}
         task.journal = SimpleNamespace(lock=object(),labels=labels,record={"daemon":"fixture-daemon","resources":[{"kind":"containers","name":"asb-"+"a"*32}]})
         task.client = SimpleNamespace(info=lambda:{"ID":"fixture-daemon"},containers=SimpleNamespace(get=lambda _:task.workspace.container))
-        semantic = {"index":b"100644 object src/file\0","flags":b"H src/file\0","reflog":b"HEAD@{0}\0commit\0reset\0ASB\0asb@localhost\0","dirty":False}
+        semantic = {"index":b"100644 object src/file\0","flags":b"H src/file\0","reflog":b"HEAD@{0}\0commit\0reset\0ASB\0asb@localhost\0","config":b"core.bare=false\0","dirty":False}
         def checked(arguments,*_):
             if "rev-parse" in arguments:return b"a"*40+b"\n"
             if "status" in arguments:return b" M src/file\n" if semantic["dirty"] else b""
             if "reflog" in arguments:return semantic["reflog"]
+            if "config" in arguments:return semantic["config"]
             return semantic["index"] if "--stage" in arguments else semantic["flags"]
         task.checked = checked
         def tree(index=b"timestamp-one",config=b"safe git settings"):
@@ -118,6 +120,7 @@ class MaterialTests(unittest.TestCase):
         task.workspace = tree(index=b"different reset timestamps")
         self.assertEqual(before,task.initial_material())
         task.workspace = tree(config=b"changed hooks/config")
+        semantic["config"] = b"core.bare=true\0"
         self.assertNotEqual(before,task.initial_material())
         semantic["flags"] = b"H src/file\0"
         semantic["reflog"] = b"HEAD@{0}\0different-commit\0reset\0ASB\0asb@localhost\0"

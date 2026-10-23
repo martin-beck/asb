@@ -312,6 +312,16 @@ pub(crate) trait CollectorAdapter: Sync {
             .collect::<Vec<_>>();
         self.agent_launch(session, &target.program.to_string_lossy(), &args);
     }
+    /// The direct agent child has been created.  This is a provenance-bearing
+    /// identity, unlike an arbitrary matching descendant discovered later by
+    /// sampling: adapters may retain it when clients rewrite their argv.
+    fn agent_process_spawned(
+        &self,
+        _session: &mut crate::measurements::Session,
+        _pid: u32,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     fn preflight(&self, _context: &mut PreflightContext<'_>) -> Result<(), String> {
         Ok(())
     }

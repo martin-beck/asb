@@ -770,6 +770,16 @@ impl Session {
         }
     }
 
+    /// Record the PID returned by the exact direct agent launch.  Unlike a
+    /// later /proc discovery, this preserves launch provenance for clients
+    /// that intentionally rewrite argv after exec.
+    pub(crate) fn agent_process_spawned(&mut self, pid: u32) -> Result<(), String> {
+        for collector in self.adapters.clone() {
+            collector.agent_process_spawned(self, pid)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn execution_namespace_collectors(&mut self) -> Vec<String> {
         self.adapters
             .clone()

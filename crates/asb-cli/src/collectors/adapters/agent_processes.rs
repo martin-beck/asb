@@ -46,19 +46,25 @@ struct Identity {
 struct Totals {
     seen: BTreeSet<(u32, u64)>,
     admitted: BTreeSet<(u32, u64)>,
+    declared: BTreeSet<(u32, u64)>,
     peak_rss_kib: u64,
     samples: u64,
     incomplete: bool,
 }
 
 struct Sampler {
-    stop: mpsc::Sender<()>,
+    control: mpsc::Sender<Control>,
     thread: Option<JoinHandle<Totals>>,
+}
+
+enum Control {
+    Admit((u32, u64)),
+    Stop,
 }
 
 impl Sampler {
     fn finish(mut self) -> Totals {
-        let _ = self.stop.send(());
+        let _ = self.control.send(Control::Stop);
         self.thread
             .take()
             .and_then(|t| t.join().ok())
@@ -71,7 +77,7 @@ impl Sampler {
 
 impl Drop for Sampler {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
+        let _ = self.control.send(Control::Stop);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -210,10 +216,10 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
             && let Some(root) = root
             && let Some(identity) = state.identity.clone()
         {
-            let (stop, receiver) = mpsc::channel();
+            let (control, receiver) = mpsc::channel();
             let interval = Duration::from_millis(measurements::measurement_interval_ms());
             state.sampler = Some(Sampler {
-                stop,
+                control,
                 thread: Some(thread::spawn(move || {
                     let mut totals = Totals::default();
                     loop {
@@ -221,12 +227,39 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
                             return totals;
                         }
                         totals.sample(root, &identity);
-                        if receiver.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) {
-                            return totals;
+                        match receiver.recv_timeout(interval) {
+                            Err(mpsc::RecvTimeoutError::Timeout) => (),
+                            Ok(Control::Admit(process)) => {
+                                totals.declared.insert(process);
+                            }
+                            Ok(Control::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                return totals;
+                            }
                         }
                     }
                 })),
             });
+        }
+        Ok(())
+    }
+
+    fn agent_process_spawned(&self, session: &mut Session, pid: u32) -> Result<(), String> {
+        let process = measurements::ProcessIdentity::read(pid)
+            .ok_or_else(|| "cannot identify the direct agent process".to_owned())?;
+        let state = session.state::<State>();
+        let state = state.borrow();
+        if state.selected
+            && state.identity.is_some()
+            && let Some(sampler) = &state.sampler
+        {
+            // `pid` is returned by Command::spawn for the exact launch that
+            // the collector resolved before execution.  Keep that provenance
+            // through clients such as Pi that change argv after startup, but
+            // never grant the same exemption to subsequently discovered tools.
+            sampler
+                .control
+                .send(Control::Admit((process.pid, process.start_time_ticks)))
+                .map_err(|_| "agent-process sampler stopped before launch".to_owned())?;
         }
         Ok(())
     }
@@ -458,7 +491,10 @@ impl Totals {
         generation: (u32, u64),
         identity: &Identity,
     ) -> bool {
-        if identity.matches_sample(proc, self.admitted.contains(&generation)) {
+        if identity.matches_sample(
+            proc,
+            self.admitted.contains(&generation) || self.declared.contains(&generation),
+        ) {
             true
         } else {
             self.admitted.remove(&generation);
@@ -955,8 +991,6 @@ mod tests {
         assert_eq!(line.trim(), "ready");
         let generation = measurements::ProcessIdentity::read(agent.0.id()).unwrap();
         let mut totals = Totals::default();
-        totals.sample(generation, &identity);
-        assert_eq!(totals.samples, 1);
         agent
             .0
             .stdin
@@ -968,6 +1002,14 @@ mod tests {
         output.read_line(&mut line).unwrap();
         assert_eq!(line.trim(), "renamed");
         assert!(!identity.matches(&PathBuf::from(format!("/proc/{}", agent.0.id()))));
+        // Pi can rewrite argv before the one-second sampler sees it. The PID
+        // returned by the exact direct launch is the only permitted admission
+        // path in that case; a later matching Node process is still excluded.
+        totals
+            .declared
+            .insert((generation.pid, generation.start_time_ticks));
+        totals.sample(generation, &identity);
+        assert_eq!(totals.samples, 1);
         for _ in 0..20 {
             thread::sleep(Duration::from_millis(100));
             totals.sample(generation, &identity);
@@ -1007,9 +1049,9 @@ mod tests {
 
     #[test]
     fn stopping_sampler_does_not_wait_for_a_long_sampling_interval() {
-        let (stop, receiver) = mpsc::channel();
+        let (control, receiver) = mpsc::channel();
         let sampler = Sampler {
-            stop,
+            control,
             thread: Some(thread::spawn(move || {
                 let _ = receiver.recv_timeout(Duration::from_secs(60));
                 Totals::default()

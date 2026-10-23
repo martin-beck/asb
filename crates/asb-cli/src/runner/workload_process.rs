@@ -115,11 +115,23 @@ fn reader<R: Read + AsRawFd>(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn start<'a>(
     command: &mut Command,
     stdout: &'a mut dyn Write,
     stderr: &'a mut dyn Write,
     runtime: Duration,
+    after_exit: impl FnMut(std::process::ExitStatus, u64, bool) -> Result<(), Error>,
+) -> Result<HeldProcess, Error> {
+    start_with_spawn(command, stdout, stderr, runtime, |_| Ok(()), after_exit)
+}
+
+pub(crate) fn start_with_spawn<'a>(
+    command: &mut Command,
+    stdout: &'a mut dyn Write,
+    stderr: &'a mut dyn Write,
+    runtime: Duration,
+    mut on_spawn: impl FnMut(u32) -> Result<(), Error>,
     mut after_exit: impl FnMut(std::process::ExitStatus, u64, bool) -> Result<(), Error>,
 ) -> Result<HeldProcess, Error> {
     let scope = crate::process_gate::DescendantScope::new()
@@ -127,6 +139,7 @@ pub(crate) fn start<'a>(
     let started = Instant::now();
     let mut child = OwnedChild::spawn_direct(command)
         .map_err(|error| Error::Run(format!("cannot start workload client: {error}")))?;
+    on_spawn(child.id())?;
     let out = child
         .take_stdout()
         .ok_or_else(|| Error::Run("workload client stdout is not piped".into()))?;

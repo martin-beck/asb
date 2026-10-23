@@ -401,11 +401,17 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     ));
     #[cfg(target_os = "linux")]
     let held = if retained {
-        Some(crate::runner::workload_process::start(
+        Some(crate::runner::workload_process::start_with_spawn(
             &mut command,
             &mut std::io::stdout(),
             &mut std::io::stderr(),
             std::time::Duration::from_secs_f64(request.timeout_seconds),
+            |pid| {
+                if let Some(session) = capture.as_mut() {
+                    session.agent_process_spawned(pid).map_err(Error::Run)?;
+                }
+                Ok(())
+            },
             |status, elapsed, timed_out| {
                 let owner = request
                     .workload_owner
@@ -455,6 +461,12 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             #[cfg(not(unix))]
             &mut std::io::stderr(),
             std::time::Duration::from_secs_f64(request.timeout_seconds),
+            &mut |pid| {
+                if let Some(session) = capture.as_mut() {
+                    session.agent_process_spawned(pid).map_err(Error::Run)?;
+                }
+                Ok(())
+            },
         )?
     };
     #[cfg(target_os = "linux")]
