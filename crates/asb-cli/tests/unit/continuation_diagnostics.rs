@@ -38,6 +38,22 @@ fn filesystem_and_verification_classes_are_specific_without_exposing_values() {
             "checkpoint inputs could not be sealed",
             "declared inputs are missing, changing, unsupported or excessive",
         ),
+        (
+            "runtime inputs discovery failed safely with code `resource_bound`",
+            "declared runtime inputs exceed the supported verification bound",
+        ),
+        (
+            "runtime inputs discovery failed safely with code `required_runtime_unavailable`",
+            "a declared runtime executable is unavailable or not executable",
+        ),
+        (
+            "runtime inputs discovery failed safely with code `runtime_entry_unsupported`",
+            "a declared runtime entry has an unsupported executable or interpreter format",
+        ),
+        (
+            "runtime inputs discovery failed safely with code `runtime_input_validation_failed`",
+            "a declared runtime input could not be safely verified",
+        ),
     ] {
         assert_eq!(safe_reason(&Error::Io(text.into())), expected);
     }
