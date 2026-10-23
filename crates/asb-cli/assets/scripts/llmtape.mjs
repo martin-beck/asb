@@ -108,8 +108,13 @@ async function replayResponse(response, interaction) {
   // Request matching intentionally redacts provider-generated tool-call IDs,
   // but Claude requires IDs to be unique across turns. Give each replayed
   // response a fresh local ID without changing the cassette evidence.
-  const replayToolId = `asb-replay-${process.pid}-${Date.now()}`;
-  const replayBody = body.replaceAll("<asb-call>", replayToolId);
+  const replayToolIds = new Map();
+  const replayBody = body.replace(/<asb-call(?:-\d+)?>/g, (marker) => {
+    if (!replayToolIds.has(marker)) {
+      replayToolIds.set(marker, `asb-replay-${process.pid}-${Date.now()}-${replayToolIds.size + 1}`);
+    }
+    return replayToolIds.get(marker);
+  });
   const contentType = Object.entries(interaction.response.headers || {})
     .find(([name]) => name.toLowerCase() === "content-type")?.[1] || "";
   response.writeHead(interaction.response.status, interaction.response.headers || {});
@@ -196,8 +201,19 @@ function normalizeCassetteBody(body) {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
   const workspace = process.env.ASB_TAPE_WORKSPACE;
+  const callIdentifiers = new Map();
   const normalized = normalizeWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace)
     .replaceAll(workspace || "\u0000", "<asb-workspace>"))
+    // Preserve distinct call IDs before the generic UUID normalizer below.
+    // OpenCode uses `call-<uuid>` while some OpenAI-compatible clients use
+    // `call_<uuid>`; both forms are provider-generated rather than prompt
+    // semantics, but their relationship within a turn is significant.
+    .replace(/"(call[-_][A-Za-z0-9_-]+)"(?=\s*[,}\]])/g, (_, identifier) => {
+      if (!callIdentifiers.has(identifier)) {
+        callIdentifiers.set(identifier, `<asb-call-${callIdentifiers.size + 1}>`);
+      }
+      return `"${callIdentifiers.get(identifier)}"`;
+    })
     // Agent SDKs generate fresh message/session IDs for every invocation;
     // those identifiers are not provider semantics and must not prevent a
     // cassette recorded in one process from replaying in another.
@@ -217,12 +233,14 @@ function normalizeCassetteBody(body) {
     .replace(/original token count: \d+/g, "original token count: <asb-token-count>")
     .replace(/Total output lines: \d+/g, "Total output lines: <asb-line-count>")
     .replace(/codex-arg[A-Za-z0-9_-]+/g, "codex-arg<asb-random>")
-    // Normalize generated call identifiers, but never the JSON field name
-    // `call_id` itself. Replacing that key corrupts Responses tool events.
+    // Normalize generated call identifiers, but retain the relationship
+    // between distinct IDs in one request/response. OpenCode can receive
+    // multiple tool calls in a streamed response; collapsing every ID into
+    // one marker makes its later tool-result turn ambiguous and diverge from
+    // the recording. Never replace the JSON field name `call_id` itself.
     // Restore the malformed key emitted by older recordings before replacing
-    // their value marker.
+    // value markers.
     .replace(/"call_<asb-call>":/g, '"call_id":')
-    .replace(/"(call_[A-Za-z0-9_-]+)"(?=\s*[,}\]])/g, '"call_<asb-call>"')
     .replace(/\bmsg_resp_[A-Za-z0-9_-]+/g, "msg_resp_<asb-response>")
     .replace(/Chunk ID: [0-9a-f]+/gi, "Chunk ID: <asb-chunk>");
   try {
