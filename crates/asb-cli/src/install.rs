@@ -683,6 +683,7 @@ fn install_bundle_in(
         workloads::materialize_external_adapter(name, directory).map_err(|error| {
             Error::Io(format!("cannot materialize {name} adapter trial: {error}"))
         })?;
+        workloads::finalize_install(name, directory).map_err(Error::Input)?;
         workloads::write_default_trial_set(name, directory)
             .map_err(|error| Error::Io(format!("cannot write {name} trial set: {error}")))?;
         writeln!(
@@ -777,6 +778,7 @@ fn install_bundle_in(
     }
     workloads::materialize_external_adapter(name, directory)
         .map_err(|error| Error::Io(format!("cannot materialize {name} adapter trial: {error}")))?;
+    workloads::finalize_install(name, directory).map_err(Error::Input)?;
     workloads::write_default_trial_set(name, directory)
         .map_err(|error| Error::Io(format!("cannot write {name} trial set: {error}")))?;
     let _ = fs::remove_file(&archive);
