@@ -160,7 +160,7 @@ pub(crate) fn run_with_interactive(
             }
         }
         Some(CommandLine::Setup(options)) => match options.mode {
-            Some(SetupMode::Tui) => tui::setup(stdout),
+            Some(SetupMode::Tui) => tui::setup(options.input.as_deref(), stdout),
             None => config::setup(options.into(), stdout),
         },
         Some(CommandLine::Run(options)) => {
@@ -368,6 +368,9 @@ enum SetupMode {
 struct SetupArgs {
     #[arg(value_enum)]
     mode: Option<SetupMode>,
+    /// Optional benchmark or sweep TOML whose selections prefill the setup TUI.
+    #[arg(value_name = "CONFIG", requires = "mode")]
+    input: Option<PathBuf>,
     /// Agent ID; repeat for a sweep.
     #[arg(long)]
     agent: Vec<String>,
@@ -739,6 +742,16 @@ mod tests {
         assert!(rendered.contains("gpt-6.1-sol"));
         assert!(rendered.contains("benchmark.toml"));
         assert!(rendered.contains("selected.workload.toml"));
+    }
+
+    #[test]
+    fn setup_tui_accepts_one_preselection_toml() {
+        let cli = Cli::try_parse_from(["asb", "setup", "tui", "saved-sweep.toml"])
+            .expect("TUI preselection path parses");
+        let rendered = format!("{cli:?}");
+        assert!(rendered.contains("Tui"));
+        assert!(rendered.contains("saved-sweep.toml"));
+        assert!(Cli::try_parse_from(["asb", "setup", "saved-sweep.toml"]).is_err());
     }
 
     #[test]
