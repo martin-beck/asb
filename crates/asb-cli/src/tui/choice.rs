@@ -57,7 +57,10 @@ impl ChoiceKey {
     pub fn valid(&self) -> bool {
         let valid = |name: &str| crate::selection_names::validate(name, "selection").is_ok();
         match self {
-            Self::AllAgents | Self::AllWorkloads | Self::AllCollectors | Self::AllBpftracePrograms => true,
+            Self::AllAgents
+            | Self::AllWorkloads
+            | Self::AllCollectors
+            | Self::AllBpftracePrograms => true,
             Self::AllExtension {
                 workload,
                 extension,

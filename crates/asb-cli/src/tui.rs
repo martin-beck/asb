@@ -1013,10 +1013,13 @@ fn select_choice(pane: &mut Pane, key: ChoiceKey, input: &Path) -> Result<(), Er
                 ChoiceKey::Model { .. } => "model",
                 ChoiceKey::Prompt(_) | ChoiceKey::TrialSet { .. } => "workload",
                 ChoiceKey::Collector(_) => "collector",
+                ChoiceKey::BpftraceProgram(_) => "bpftrace program",
                 ChoiceKey::Concurrency(_) => "concurrency",
                 ChoiceKey::AllAgents
                 | ChoiceKey::AllWorkloads
+                | ChoiceKey::AllCollectors
                 | ChoiceKey::AllExtension { .. }
+                | ChoiceKey::AllBpftracePrograms
                 | ChoiceKey::ExtensionValue { .. }
                 | ChoiceKey::Trial(_) => "selection",
             },
@@ -1033,11 +1036,15 @@ fn choice_key_label(key: &ChoiceKey) -> String {
         | ChoiceKey::Provider(value)
         | ChoiceKey::Prompt(value)
         | ChoiceKey::Collector(value)
+        | ChoiceKey::BpftraceProgram(value)
         | ChoiceKey::Trial(value) => value.clone(),
         ChoiceKey::Model { provider, model } => format!("{provider}:{model}"),
         ChoiceKey::TrialSet { workload, file } => format!("{}:{}", workload, file.display()),
         ChoiceKey::Concurrency(value) => value.to_string(),
-        ChoiceKey::AllAgents | ChoiceKey::AllWorkloads => "[all]".into(),
+        ChoiceKey::AllAgents
+        | ChoiceKey::AllWorkloads
+        | ChoiceKey::AllCollectors
+        | ChoiceKey::AllBpftracePrograms => "[all]".into(),
         ChoiceKey::AllExtension {
             workload,
             extension,
@@ -2045,18 +2052,6 @@ where
         app.refresh_extensions()?;
     }
     Ok(())
-}
-
-fn sync_all_sentinel(pane: &mut Pane) {
-    let Some(all) = pane.choices.iter().position(|choice| choice.key.is_all()) else {
-        return;
-    };
-    pane.selected[all] = pane
-        .choices
-        .iter()
-        .zip(pane.selected.iter())
-        .filter(|(choice, _)| !choice.key.is_all())
-        .all(|(_, selected)| *selected);
 }
 
 fn update_extension_sentinels(pane: &mut Pane, _changed: usize) {
