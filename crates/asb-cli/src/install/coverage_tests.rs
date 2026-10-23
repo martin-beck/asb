@@ -173,7 +173,7 @@ fn npm_recipe_uses_project_local_only_runtime_path() {
     crate::write_test_file(
         &fixture.0,
         &npm,
-        b"#!/bin/sh\nset -eu\nprintf local > \"$ASB_FIXTURE_ROOT/local-npm-started\"\n/bin/mkdir -p \"$3/node_modules/.bin\"\nprintf fixture > \"$3/node_modules/.bin/fixture-client\"\n",
+        b"#!/bin/sh\nset -eu\nprintf local > \"$ASB_FIXTURE_ROOT/local-npm-started\"\n/bin/mkdir -p \"$3/node_modules/.bin\"\nprintf '#!/bin/sh\\nexit 0\\n' > \"$3/node_modules/.bin/fixture-client\"\n/bin/chmod 755 \"$3/node_modules/.bin/fixture-client\"\n",
     )
     .unwrap();
     fs::set_permissions(npm, fs::Permissions::from_mode(0o755)).unwrap();
@@ -195,7 +195,9 @@ if test "$2" = venv; then
 fi
 test "$2" = pip; test "$3" = install
 printf '%s\n' "$4" >> "$ASB_FIXTURE_ROOT/pip-invocations"
-case "$4" in fixture-package-fail|fixture-dependency-fail) exit 23 ;; esac"#,
+case "$4" in fixture-package-fail|fixture-dependency-fail) exit 23 ;; esac
+printf '#!/bin/sh\nexit 0\n' > "$(/usr/bin/dirname "$0")/fixture-client"
+/bin/chmod 755 "$(/usr/bin/dirname "$0")/fixture-client""#,
     );
     let project_python = fixture.0.join(".asb/python/venv/bin/python");
     fs::create_dir_all(project_python.parent().unwrap()).unwrap();
@@ -324,10 +326,9 @@ fn installation_fixture_child() {
             )
             .unwrap();
             assert_eq!(fs::read(root.join("local-npm-started")).unwrap(), b"local");
-            assert_eq!(
-                fs::read(root.join("tools/npm-local/node_modules/.bin/fixture-client")).unwrap(),
-                b"fixture"
-            );
+            assert!(crate::executables::is_executable(
+                &root.join("tools/npm-local/node_modules/.bin/fixture-client")
+            ));
         }
         "python" => python_contract(&root),
         "bundle" => bundle_contract(&root),
