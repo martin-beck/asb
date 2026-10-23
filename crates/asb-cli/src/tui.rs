@@ -429,14 +429,6 @@ impl App {
                 },
                 availability: Availability::Available,
             });
-            choices.push(Choice {
-                label: format!("[none] {workload}"),
-                key: ChoiceKey::NoExtension {
-                    workload: workload.clone(),
-                    extension: extension.id.into(),
-                },
-                availability: Availability::Available,
-            });
             choices.extend(values.into_iter().map(|value| Choice {
                 label: value.clone(),
                 key: ChoiceKey::ExtensionValue {
@@ -451,7 +443,6 @@ impl App {
         for (index, choice) in pane.choices.iter().enumerate() {
             match &choice.key {
                 ChoiceKey::AllExtension { workload, .. }
-                | ChoiceKey::NoExtension { workload, .. }
                 | ChoiceKey::ExtensionValue { workload, .. } => {
                     pane.sections[index] = Some(format!("{workload} trials"));
                 }
@@ -1527,27 +1518,7 @@ where
             {
                 *selected = enable;
             }
-            if matches!(&choice.key, ChoiceKey::NoExtension { workload: candidate, extension: candidate_extension } if candidate == &workload && candidate_extension == &extension)
-            {
-                *selected = false;
-            }
         }
-        update_extension_sentinels(pane, index);
-        return Ok(());
-    }
-    if let ChoiceKey::NoExtension {
-        workload,
-        extension,
-    } = app.panes[step.index()].choices[index].key.clone()
-    {
-        let pane = &mut app.panes[step.index()];
-        for (choice, selected) in pane.choices.iter().zip(pane.selected.iter_mut()) {
-            if matches!(&choice.key, ChoiceKey::ExtensionValue { workload: candidate, extension: candidate_extension, .. } if candidate == &workload && candidate_extension == &extension)
-            {
-                *selected = false;
-            }
-        }
-        pane.selected[index] = true;
         update_extension_sentinels(pane, index);
         return Ok(());
     }
@@ -1641,10 +1612,6 @@ fn update_extension_sentinels(pane: &mut Pane, _changed: usize) {
                 workload,
                 extension,
             }
-            | ChoiceKey::NoExtension {
-                workload,
-                extension,
-            }
             | ChoiceKey::ExtensionValue {
                 workload,
                 extension,
@@ -1660,7 +1627,6 @@ fn update_extension_sentinels(pane: &mut Pane, _changed: usize) {
             .enumerate()
             .filter(|(_, choice)| matches!(&choice.key, ChoiceKey::ExtensionValue { workload: candidate, extension: candidate_extension, .. } if candidate == &workload && candidate_extension == &extension))
             .collect::<Vec<_>>();
-        let any = values.iter().any(|(index, _)| pane.selected[*index]);
         let all = !values.is_empty() && values.iter().all(|(index, _)| pane.selected[*index]);
         for (index, choice) in pane.choices.iter().enumerate() {
             match &choice.key {
@@ -1669,12 +1635,6 @@ fn update_extension_sentinels(pane: &mut Pane, _changed: usize) {
                     extension: candidate_extension,
                 } if candidate == &workload && candidate_extension == &extension => {
                     pane.selected[index] = all
-                }
-                ChoiceKey::NoExtension {
-                    workload: candidate,
-                    extension: candidate_extension,
-                } if candidate == &workload && candidate_extension == &extension => {
-                    pane.selected[index] = !any
                 }
                 _ => {}
             }
@@ -3181,19 +3141,11 @@ mod tests {
     }
 
     #[test]
-    fn extension_controls_select_all_or_none_without_persisting_control_values() {
+    fn extension_all_control_tracks_and_toggles_every_value() {
         let mut pane = Pane::new(vec![
             Choice {
                 label: "[all] terminal-bench".into(),
                 key: ChoiceKey::AllExtension {
-                    workload: "terminal-bench".into(),
-                    extension: "trial".into(),
-                },
-                availability: Availability::Available,
-            },
-            Choice {
-                label: "[none] terminal-bench".into(),
-                key: ChoiceKey::NoExtension {
                     workload: "terminal-bench".into(),
                     extension: "trial".into(),
                 },
@@ -3218,16 +3170,14 @@ mod tests {
                 availability: Availability::Available,
             },
         ]);
+        pane.selected[1] = true;
         pane.selected[2] = true;
-        pane.selected[3] = true;
-        super::update_extension_sentinels(&mut pane, 2);
+        super::update_extension_sentinels(&mut pane, 1);
         assert!(pane.selected[0]);
-        assert!(!pane.selected[1]);
+        pane.selected[1] = false;
         pane.selected[2] = false;
-        pane.selected[3] = false;
-        super::update_extension_sentinels(&mut pane, 2);
+        super::update_extension_sentinels(&mut pane, 1);
         assert!(!pane.selected[0]);
-        assert!(pane.selected[1]);
         assert!(!pane.has_selection());
         assert!(
             pane.selected_choices()
