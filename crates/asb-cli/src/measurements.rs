@@ -286,6 +286,36 @@ impl Collector {
             None => format!("{reason}; {raw}"),
         }
     }
+    /// Optional collectors can fail after their process and capture worker have
+    /// been admitted but before they observe the measured target. Treat that
+    /// as an unavailable collector, rather than discovering it only during
+    /// finalization after a benchmark may already have been graded.
+    pub(crate) fn startup_exit(&mut self) -> Result<Option<String>, String> {
+        self.producer.poll().map(|completion| {
+            completion.and_then(|completion| {
+                // A collector such as perf may legitimately produce a bounded
+                // capture and exit before the measured process does. Preserve
+                // that completed capture for normal adapter processing. Only
+                // surface an abnormal principal exit (or an incomplete capture)
+                // as startup unavailability.
+                if let Some(error) = completion.error {
+                    return Some(format!(
+                        "collector capture failed during startup: {error}; principal exit: {:?}",
+                        completion.exit
+                    ));
+                }
+                completion
+                    .exit
+                    .is_some_and(|status| !status.success())
+                    .then(|| {
+                        format!(
+                            "collector principal exited during startup: {:?}",
+                            completion.exit
+                        )
+                    })
+            })
+        })
+    }
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn fixture(
         name: &str,

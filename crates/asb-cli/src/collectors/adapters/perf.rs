@@ -3,6 +3,7 @@ use super::super::PreflightContext;
 use super::super::{ProcessContext, ProcessData, SharedArtifact};
 use crate::measurements;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 #[cfg(all(test, target_os = "linux"))]
 #[path = "../../../tests/unit/perf_stop_contract.rs"]
@@ -331,7 +332,7 @@ impl measurements::Session {
             .args(&record_args)
             .args(["-o"])
             .arg(&data);
-        let collector = match Collector::spawn("perf", &ADAPTER, command, route, captures) {
+        let mut collector = match Collector::spawn("perf", &ADAPTER, command, route, captures) {
             Ok(collector) => collector,
             Err(error) if !env_true("ASB_MEASURE_PERF") => {
                 write_unavailable(&self.dir.join("perf.json"), "perf", error.to_string())?;
@@ -343,6 +344,14 @@ impl measurements::Session {
                 ));
             }
         };
+        if let Some(reason) = startup_failure(&mut collector)? {
+            write_unavailable(
+                &self.dir.join("perf.json"),
+                "perf",
+                collector.startup_failure(reason),
+            )?;
+            return Ok(());
+        }
         self.set_artifact(SharedArtifact::StackSamples, data);
         self.collectors.push(collector);
         let stat_stdout_path = self.dir.join("perf-stat.stdout");
@@ -356,7 +365,17 @@ impl measurements::Session {
         command.args(&stat_args);
         let stat = Collector::spawn("perf-stat", &ADAPTER, command, route, captures);
         match stat {
-            Ok(collector) => self.collectors.push(collector),
+            Ok(mut collector) => {
+                if let Some(reason) = startup_failure(&mut collector)? {
+                    write_unavailable(
+                        &self.dir.join("perf-stat.json"),
+                        "perf-stat",
+                        collector.startup_failure(reason),
+                    )?;
+                } else {
+                    self.collectors.push(collector);
+                }
+            }
             Err(error) => write_unavailable(
                 &self.dir.join("perf-stat.json"),
                 "perf-stat",
@@ -365,6 +384,13 @@ impl measurements::Session {
         }
         Ok(())
     }
+}
+
+fn startup_failure(collector: &mut Collector) -> Result<Option<String>, String> {
+    // perf reports inaccessible PMUs immediately. Give its owned capture
+    // worker one scheduling interval to observe that deterministic exit.
+    std::thread::sleep(Duration::from_millis(25));
+    collector.startup_exit()
 }
 
 // These are explicit failure bounds, never silent prefix limits. Diagnostics
