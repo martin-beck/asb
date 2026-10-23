@@ -1,4 +1,5 @@
 """Provider-free real-executable tests of the private guest TCP relay."""
+import json
 import os
 from pathlib import Path
 import select
@@ -303,6 +304,27 @@ class ForwardingTests(unittest.TestCase):
                     HostRelay([("127.0.0.1", 12345)], [sys.executable, "-c", script])
                 self.assertEqual(len(children), 1)
                 self.assertIsNotNone(children[0].poll())
+
+    def test_disconnect_keeps_bounded_child_diagnostics_in_an_attempt_artifact(self):
+        # Use a private temporary directory; the diagnostic must be useful
+        # after a controller failure without exposing an unbounded stderr pipe.
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "endpoint-relay-0.json"
+            script = ("import os,struct,sys; "
+                      "os.write(1,struct.pack('!BII',5,0,2)+struct.pack('!H',12345)); "
+                      "sys.stderr.write('fixture relay diagnostic\\n'); sys.stderr.flush()")
+            relay = HostRelay([("127.0.0.1", 12345)], [sys.executable, "-c", script],
+                              diagnostic_path=artifact)
+            relay.reader.join(timeout=3)
+            self.assertFalse(relay.reader.is_alive())
+            with self.assertRaisesRegex(ExecutionError, "control stream closed"):
+                relay.check()
+            relay.close()
+            diagnostic = json.loads(artifact.read_text())
+            self.assertEqual(diagnostic["reason"], "relay control stream closed")
+            self.assertEqual(diagnostic["stderr_tail"], "fixture relay diagnostic")
+            self.assertLessEqual(artifact.stat().st_size, 12 * 1024)
 
     def test_cancellation_closes_host_connections_and_owned_relay(self):
         cancelled = threading.Event()

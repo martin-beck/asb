@@ -160,7 +160,8 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
             raise ExecutionError("local endpoint forwarding needs an owned execution scope")
         from asb_docker import docker_command
         relay = HostRelay(targets, [*docker_command(), "exec", "-i", container.id,
-                                   "/opt/asb-runtime/asb", "__asb-relay"], cancelled)
+                                   "/opt/asb-runtime/asb", "__asb-relay"], cancelled,
+                          task.artifacts / f"endpoint-relay-{len(relays)}.json")
         resources.callback(relay.close)
         relays.append(relay)
         return relay

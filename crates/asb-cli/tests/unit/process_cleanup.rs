@@ -54,7 +54,7 @@ fn poisoned_handoff_retains_and_reaps_a_real_direct_child_without_drop_panic() {
     let scope = test_support::Scope::new();
     let reaper = OwnedReaper::new("fixture").unwrap();
     let poisoned = std::panic::catch_unwind(|| {
-        let _state = reaper.0.0.lock().unwrap();
+        let _state = reaper.state.0.lock().unwrap();
         panic!("fixture handoff poison");
     });
     assert!(poisoned.is_err());
@@ -102,7 +102,7 @@ fn wait_only_custody_does_not_kill_a_live_supervisor() {
     assert_eq!(&ready, b"ready");
     reaper.adopt_wait_only(child);
     assert!(matches!(
-        reaper.0.0.lock().unwrap().children[0].1,
+        reaper.state.0.lock().unwrap().children[0].1,
         ReapPolicy::WaitOnly
     ));
     drop(reaper);
