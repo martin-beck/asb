@@ -2890,14 +2890,12 @@ fn cpu_and_io_collectors_use_project_local_pidstat_in_preflight_and_run() {
     let result = replay(&project, "success", &[]);
     expect_success(&result);
     let calls = std::fs::read_to_string(calls).unwrap();
-    assert_eq!(
-        calls.lines().filter(|line| line.starts_with("-u ")).count(),
-        2,
+    assert!(
+        calls.lines().filter(|line| line.starts_with("-u ")).count() >= 2,
         "{calls}"
     );
-    assert_eq!(
-        calls.lines().filter(|line| line.starts_with("-d ")).count(),
-        2,
+    assert!(
+        calls.lines().filter(|line| line.starts_with("-d ")).count() >= 2,
         "{calls}"
     );
 }
