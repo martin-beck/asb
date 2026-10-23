@@ -181,6 +181,13 @@ That workflow runs `cargo package --locked`, verifies required runtime assets,
 tests the extracted crate, and smoke-installs its executable. It is not a
 required development-build check.
 
+Pull requests run formatting, a clean build, strict Clippy, and the test owner
+for each changed Rust component.  This is intentionally a short development
+gate: the full serial suite, which owns real process trees and filesystem
+fixtures, runs after merge on `main`.  Changes to shared CLI roots run the
+compact config/parser/project smoke group.  The selector is path-derived and
+cannot accept a pull-request supplied test name.
+
 `make rust-doc` runs `cargo doc --locked --no-deps --document-private-items`,
 because the CLI implementation modules are intentionally private. `make uml`
 installs the pinned AutoUML release under `target/tools/`, generates the local
