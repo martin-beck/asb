@@ -1553,6 +1553,23 @@ where
     }
     if app.panes[step.index()].choices[index].key.is_all() {
         let enable = !app.panes[step.index()].selected[index];
+        if enable {
+            let missing = app.panes[step.index()]
+                .choices
+                .iter()
+                .enumerate()
+                .filter_map(|(candidate, choice)| {
+                    (!choice.key.is_all() && choice.availability == Availability::Missing)
+                        .then_some(candidate)
+                })
+                .collect::<Vec<_>>();
+            for candidate in missing {
+                app.panes[step.index()].cursor = candidate;
+                if !install(app, None)? {
+                    return Ok(());
+                }
+            }
+        }
         let pane = &mut app.panes[step.index()];
         for (choice, selected) in pane.choices.iter().zip(pane.selected.iter_mut()) {
             if !choice.key.is_all() {

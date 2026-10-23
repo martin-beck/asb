@@ -40,6 +40,10 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
         .into_iter()
         .any(|values| values.iter().any(|value| value == "all"));
     selections::expand(&mut options)?;
+    if !filter_incompatible {
+        validate_before_install(&options)?;
+    }
+    prepare_missing_installables(&options, output)?;
     let repeated = requested_repeats || repeated(&options);
     for measure in &options.measure {
         if !measurements::available_collectors().contains(measure) {
@@ -215,6 +219,95 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
         }
     }
     Ok(())
+}
+
+/// Preserve input diagnostics before an automatic installer can perform side
+/// effects.  `all` deliberately filters incompatible pairs later instead.
+fn validate_before_install(options: &SetupOptions) -> Result<(), Error> {
+    for agent in unique(&options.agent) {
+        let adapter = agents::find(agent).ok_or_else(|| {
+            let known = agents::all()
+                .iter()
+                .map(|item| item.id())
+                .collect::<Vec<_>>();
+            let suggestion = crate::suggestions::closest(agent, &known)
+                .map(|candidate| format!("; did you mean `{candidate}`?"))
+                .unwrap_or_default();
+            Error::Input(format!("unknown agent `{agent}`{suggestion}"))
+        })?;
+        for provider in unique(&options.provider) {
+            providers::model_spec(provider).ok_or_else(|| {
+                let suggestion = crate::suggestions::closest(provider, providers::names())
+                    .map(|candidate| format!("; did you mean `{candidate}`?"))
+                    .unwrap_or_default();
+                Error::Input(format!("unknown provider `{provider}`{suggestion}"))
+            })?;
+            for model in scoped(&options.model, provider) {
+                crate::endpoint::choose_from(
+                    adapter.id(),
+                    adapter.supported_endpoints(),
+                    provider,
+                    &model,
+                    &providers::offered_endpoints(provider, &model),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Materialize explicitly selected local capabilities before writing a setup
+/// result.  `all` is expanded first, so this treats explicit and all-selected
+/// agents, external workloads, and collector dependencies identically.
+fn prepare_missing_installables(
+    options: &SetupOptions,
+    output: &mut dyn Write,
+) -> Result<(), Error> {
+    let (root, settings) = project::load(Path::new("."))?;
+    let tools = project::resolve(&root, &settings.tools_dir);
+    let workloads = project::resolve(&root, &settings.workloads_dir);
+    for agent in unique(&options.agent) {
+        if agents::find(agent).is_some() && !crate::install::tool_installed_locally(agent, &tools) {
+            crate::install::tool(
+                crate::install::ToolInstallOptions {
+                    name: agent.clone(),
+                    source: None,
+                    dir: None,
+                    dry_run: false,
+                },
+                output,
+            )?;
+        }
+    }
+    for workload in unique(&options.workload) {
+        if crate::install::external_workload_names().any(|name| name == workload)
+            && !crate::install::workload_available(workload, &workloads)
+        {
+            crate::install::workload(
+                crate::install::WorkloadInstallOptions {
+                    source: workload.clone(),
+                    name: None,
+                    dir: None,
+                },
+                output,
+            )?;
+        }
+    }
+    let mut progress = |_percent, _stage| {};
+    let known_collectors = options
+        .measure
+        .iter()
+        .filter(|name| measurements::available_collectors().contains(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    crate::install::ensure_collector_dependencies(
+        &known_collectors,
+        &root,
+        &tools,
+        output,
+        &mut progress,
+        false,
+    )
 }
 
 fn repeated(options: &SetupOptions) -> bool {
