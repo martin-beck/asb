@@ -5,9 +5,8 @@
 
 mod adapters;
 mod artifacts;
-mod tool_calls;
+pub(crate) use adapters::tool_calls::{ToolCall, observed_tool_calls};
 pub(crate) use artifacts::{ArtifactOwner, ArtifactSpec, FrozenArtifacts};
-pub(crate) use tool_calls::{ToolCall, observed_tool_calls};
 pub(crate) mod driver;
 use adapters::REGISTRY;
 
