@@ -161,7 +161,8 @@ impl Sweep {
             source_bound(config)?;
             crate::planning::resolve(config)?;
             let filename = format!("benchmark-{index:03}.toml");
-            config.log_file = format!("benchmark-{index:03}.log");
+            config.log_file =
+                crate::benchmark::default_log_path(&format!("benchmark-{index:03}.log"));
             if let Some(measures) = config.measurements.as_mut() {
                 measures.directory = directory
                     .join(format!("measurements-{index:03}"))
@@ -256,6 +257,25 @@ mod tests {
         );
         config.workspace.push('x');
         assert!(render(&config).unwrap_err().to_string().contains("64 KiB"));
+    }
+
+    #[test]
+    fn generated_sweep_configurations_keep_each_log_under_asb_logs() {
+        let prepared = Sweep::new(Path::new("selection.toml"), vec![config(), config()])
+            .expect("generated sweep");
+        let logs: Vec<_> = prepared
+            .configurations
+            .iter()
+            .map(|(_, text)| {
+                toml::from_str::<BenchmarkConfig>(text)
+                    .expect("generated benchmark configuration")
+                    .log_file
+            })
+            .collect();
+        assert_eq!(
+            logs,
+            [".asb-logs/benchmark-000.log", ".asb-logs/benchmark-001.log",]
+        );
     }
 
     #[test]
@@ -358,7 +378,7 @@ mod tests {
     #[test]
     fn aggregate_serialization_accepts_exact_32_mib_and_rejects_one_extra_byte() {
         let mut base = config();
-        base.log_file = "benchmark-000.log".into();
+        base.log_file = crate::benchmark::default_log_path("benchmark-000.log");
         base.workspace.clear();
         let overhead = render(&base).unwrap().len();
         let mut full = base.clone();

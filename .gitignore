@@ -3,6 +3,7 @@
 /artifacts/
 /recordings/
 /cassettes/
+/.asb-logs/
 /datasets/
 /.make/
 __pycache__/
