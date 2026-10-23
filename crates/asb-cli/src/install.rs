@@ -1098,7 +1098,21 @@ fn install_package(
     if !status.success() {
         return Err(Error::Io(format!("agent package installation failed ({status}); verify the prerequisite tool and rerun `asb tool install`")).into());
     }
-    Ok(executable(recipe, root))
+    let executable = executable(recipe, root);
+    // Package managers can successfully resolve a manifest while omitting a
+    // platform-specific optional package.  Returning the expected pathname in
+    // that case makes the install look successful and defers the actionable
+    // failure until an unrelated runner later tries to resolve the client.
+    // Follow the launcher symlink and require the same executable readiness
+    // contract that the registry uses before publishing this installation.
+    if !crate::executables::is_executable(&executable) {
+        return Err(Error::Io(format!(
+            "agent package installation completed, but its required executable `{}` was not installed or is not executable; verify that the selected package supports this platform and rerun `asb tool install`",
+            executable.display()
+        ))
+        .into());
+    }
+    Ok(executable)
 }
 
 /// Reuse a compatible host runtime or install its registered project-local recipe.

@@ -154,7 +154,8 @@ test "$4" = --no-save
 test "$NPM_CONFIG_CACHE" = "$ASB_FIXTURE_ROOT/.asb-cache/npm"
 printf '%s\n' "$5" >> "$ASB_FIXTURE_ROOT/npm-invocations"
 case "$5" in
- fixture-success@1) /bin/mkdir -p "$3/node_modules/.bin"; printf '#!/bin/sh\nexit 0\n' > "$3/node_modules/.bin/fixture-client" ;;
+ fixture-success@1) /bin/mkdir -p "$3/node_modules/.bin"; printf '#!/bin/sh\nexit 0\n' > "$3/node_modules/.bin/fixture-client"; /bin/chmod 755 "$3/node_modules/.bin/fixture-client" ;;
+ fixture-missing-executable@1) /bin/mkdir -p "$3/node_modules/.bin" ;;
  fixture-fail@1) exit 41 ;;
  fixture-exit127@1) printf started > "$ASB_FIXTURE_ROOT/npm127-started"; exit 127 ;;
  *) exit 99 ;;
@@ -664,6 +665,18 @@ fn npm_contract(root: &Path) {
             .unwrap()
             .contains("preserved")
     );
+    let absent = install_recipe(
+        package("fixture-missing-executable@1"),
+        &root.join("tools/npm-missing-executable"),
+        root,
+        &mut Vec::new(),
+        &mut |_, _| {},
+    )
+    .unwrap_err();
+    assert!(
+        absent.to_string().contains("required executable"),
+        "missing package executable must not be reported as a successful installation: {absent}"
+    );
     let failure = install_recipe(
         package("fixture-fail@1"),
         &root.join("tools/npm-fail"),
@@ -704,7 +717,7 @@ fn npm_contract(root: &Path) {
             .unwrap()
             .lines()
             .count(),
-        4
+        5
     );
     assert!(
         missing.to_string().contains("npm"),
