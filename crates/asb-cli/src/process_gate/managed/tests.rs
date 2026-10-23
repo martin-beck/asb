@@ -124,6 +124,40 @@ fn actual_observation_distinguishes_codes_from_signals_without_interruption() {
 }
 
 #[test]
+fn completed_gates_do_not_accumulate_idle_custody_threads() {
+    let scope = test_support::Scope::new();
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    // A sweep creates many short-lived controller gates.  Every completed
+    // admission must join its otherwise-idle custody worker before the next
+    // attempt can leave a growing `asb-gate-custody-reaper` thread census.
+    for _ in 0..8 {
+        let (mut command, route) = command(&binary, "/bin/true", &[]);
+        let mut gate = Admission::new(route.validate_gate(&mut command).unwrap())
+            .unwrap()
+            .spawn()
+            .unwrap();
+        gate.resume().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while gate.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(gate);
+        assert!(
+            scope.finished(),
+            "idle custody worker survived completed gate"
+        );
+    }
+    assert_eq!(scope.count(), 8);
+}
+
+#[test]
 fn bad_optional_observations_do_not_hide_matching_base_quiescence() {
     let root = root();
     for kind in [

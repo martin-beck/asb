@@ -19,7 +19,7 @@ from urllib.parse import urlsplit, urlunsplit
 from asb_execution import ExecutionError
 
 OPEN, DATA, EOF, CLOSE, READY = range(1, 6)
-MAX_FRAME, MAX_CHANNELS = 65536, 128
+MAX_FRAME, MAX_CHANNELS, MAX_DIAGNOSTIC = 65536, 128, 8192
 PROXY_NAMES = ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
                "all_proxy", "ALL_PROXY", "socks_proxy", "SOCKS_PROXY")
 
@@ -88,7 +88,7 @@ def project_toml(document):
 
 class HostRelay:
     """One owned exec process, bounded channels and buffers; no HTTP interpretation."""
-    def __init__(self, targets, command, cancelled=lambda: False):
+    def __init__(self, targets, command, cancelled=lambda: False, diagnostic_path=None):
         if not 1 <= len(targets) <= 64 or any(
                 loopback_target("http://" + ("[" + host + "]" if ":" in host else host)
                                 + ":" + str(port)) != (host, port) for host, port in targets):
@@ -99,16 +99,56 @@ class HostRelay:
         self.stop, self.ready = threading.Event(), threading.Event()
         self.lock, self.write_lock = threading.Lock(), threading.Lock()
         self.channels, self.workers, self.ports, self.error = {}, [], None, None
+        self.diagnostic_path, self.stderr_tail = diagnostic_path, bytearray()
+        self.stderr_lock, self.stderr_done = threading.Lock(), threading.Event()
+        self.cancelled_by_owner = False
         addresses = ["127.0.0.1" if host == "localhost" else host for host, _ in targets]
         self.process = subprocess.Popen([*command, str(len(targets)), *addresses],
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=subprocess.DEVNULL, bufsize=0, start_new_session=True)
+                                        stderr=subprocess.PIPE, bufsize=0, start_new_session=True)
         os.set_blocking(self.process.stdin.fileno(), False)
+        self.stderr_reader = threading.Thread(target=self.drain_stderr, daemon=True)
+        self.stderr_reader.start()
         self.reader = threading.Thread(target=self.run, daemon=True)
         self.reader.start()
         if not self.ready.wait(10) or self.error or self.ports is None:
             self.close()
             raise ExecutionError("private endpoint relay did not become ready")
+
+    def drain_stderr(self):
+        """Drain stderr continuously, retaining only a safe bounded tail."""
+        try:
+            while True:
+                chunk = os.read(self.process.stderr.fileno(), 4096)
+                if not chunk:
+                    return
+                with self.stderr_lock:
+                    self.stderr_tail.extend(chunk)
+                    if len(self.stderr_tail) > MAX_DIAGNOSTIC:
+                        del self.stderr_tail[:-MAX_DIAGNOSTIC]
+        except OSError:
+            pass
+        finally:
+            self.stderr_done.set()
+
+    def diagnostic(self):
+        with self.stderr_lock:
+            stderr = bytes(self.stderr_tail).decode("utf-8", "replace").strip()
+        status = self.process.poll()
+        return {"schema_version": 1, "component": "private-endpoint-relay",
+                "reason": self.error, "cancelled_by_owner": self.cancelled_by_owner,
+                "exit_code": status if isinstance(status, int) else None,
+                "stderr_tail": stderr or None}
+
+    def save_diagnostic(self):
+        if self.diagnostic_path is None:
+            return
+        try:
+            self.diagnostic_path.write_text(json.dumps(self.diagnostic(), sort_keys=True) + "\n")
+            self.diagnostic_path.chmod(0o600)
+        except OSError:
+            # Diagnostics must not mask the execution's original result.
+            pass
 
     def read(self, count):
         data = bytearray()
@@ -252,9 +292,18 @@ class HostRelay:
                                     self.disconnect(channel, notify=True)
                         except OSError:
                             self.disconnect(channel, notify=True)
-        except (OSError, EOFError, ValueError):
-            if not self.stop.is_set():
-                self.error = "private endpoint relay disconnected"
+        except (OSError, EOFError, ValueError) as error:
+            if self.cancelled():
+                # The owner cancellation is already reported by the workload
+                # execution. Do not mislabel it as a relay transport failure.
+                self.cancelled_by_owner = True
+            elif not self.stop.is_set():
+                if isinstance(error, ValueError):
+                    self.error = "relay protocol rejected a frame"
+                elif isinstance(error, OSError):
+                    self.error = "relay control stream I/O failed"
+                else:
+                    self.error = "relay control stream closed"
         finally:
             self.stop.set()
             self.ready.set()
@@ -262,10 +311,19 @@ class HostRelay:
                 channels = list(self.channels)
             for channel in channels:
                 self.disconnect(channel)
+            self.save_diagnostic()
 
     def check(self):
-        if self.error or self.stop.is_set():
-            raise ExecutionError("private endpoint relay disconnected during the attempt")
+        if self.error:
+            diagnostic = self.diagnostic()
+            detail = diagnostic["reason"]
+            if diagnostic["exit_code"] is not None:
+                detail += f" (relay exit {diagnostic['exit_code']})"
+            raise ExecutionError("private endpoint relay disconnected during the attempt: " + detail)
+        if self.stop.is_set():
+            if self.cancelled_by_owner:
+                raise ExecutionError("private endpoint relay stopped because the attempt was cancelled")
+            raise ExecutionError("private endpoint relay stopped unexpectedly during the attempt")
 
     def close(self):
         self.stop.set()
@@ -287,7 +345,9 @@ class HostRelay:
                 self.process.wait(timeout=2)
         for worker in self.workers:
             worker.join(timeout=1)
-        for stream in (self.process.stdin, self.process.stdout):
+        self.stderr_reader.join(timeout=1)
+        self.save_diagnostic()
+        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
             if not stream.closed:
                 stream.close()
 

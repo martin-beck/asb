@@ -5,6 +5,7 @@
 //! This does not supervise descendants or provide crash-persistent recovery.
 use std::process::Child;
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 
 fn poll_owned(child: &mut Child) -> std::io::Result<Option<std::process::ExitStatus>> {
     #[cfg(all(test, target_os = "linux"))]
@@ -24,8 +25,16 @@ enum ReapPolicy {
 }
 
 /// A private handoff cannot disconnect like a channel. The worker retains its
-/// Arc until all transferred children are reaped; no thread is created by Drop.
-pub(crate) struct OwnedReaper(Arc<(Mutex<State>, Condvar)>);
+/// Arc until all transferred children are reaped; Drop joins it only when no
+/// child was handed off.
+pub(crate) struct OwnedReaper {
+    state: Arc<(Mutex<State>, Condvar)>,
+    // Retain the handle so the overwhelmingly common no-handoff path can
+    // synchronously retire its one custody worker.  A handoff deliberately
+    // remains detached: it may need to wait for a live child, and Drop must
+    // never turn that uncertainty into an unbounded caller wait.
+    worker: Option<JoinHandle<()>>,
+}
 
 impl OwnedReaper {
     pub(crate) fn new(label: &str) -> Result<Self, String> {
@@ -37,7 +46,7 @@ impl OwnedReaper {
         let receipt = test_support::worker_receipt();
         #[cfg(all(test, target_os = "linux"))]
         let fault = test_support::worker_fault();
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name(format!("asb-{label}-reaper"))
             .spawn(move || {
                 #[cfg(all(test, target_os = "linux"))]
@@ -73,7 +82,10 @@ impl OwnedReaper {
                 test_support::confirm_worker_exit(receipt);
             })
             .map_err(|error| format!("cannot establish {label} cleanup worker: {error}"))?;
-        Ok(Self(shared))
+        Ok(Self {
+            state: shared,
+            worker: Some(worker),
+        })
     }
 
     /// Transfer custody without creating another worker or waiting for exit.
@@ -89,7 +101,7 @@ impl OwnedReaper {
     }
 
     fn adopt_with_policy(&self, child: Child, policy: ReapPolicy) {
-        self.0
+        self.state
             .0
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -100,12 +112,19 @@ impl OwnedReaper {
 
 impl Drop for OwnedReaper {
     fn drop(&mut self) {
-        let (state, ready) = &*self.0;
-        state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .closed = true;
+        let (state, ready) = &*self.state;
+        // If no child was handed off, the worker has no cleanup work.  Join it
+        // here so one successful gate admission cannot leave a transient
+        // `asb-*-reaper` thread behind for every benchmark attempt.
+        let idle = {
+            let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+            state.closed = true;
+            state.children.is_empty()
+        };
         ready.notify_one();
+        if idle && let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
