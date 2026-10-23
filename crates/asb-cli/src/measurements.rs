@@ -219,7 +219,7 @@ pub struct RunMeasurement<'a> {
     /// Number of structured tool-call events retained in tool-calls.json.
     pub tool_call_count: usize,
     #[serde(skip)]
-    pub(crate) tool_calls: &'a [crate::agents::ToolCall],
+    pub(crate) tool_calls: &'a [crate::proxy::tool_calls::ToolCall],
     pub started_unix_ms: u128,
 }
 
@@ -227,7 +227,7 @@ pub struct RunMeasurement<'a> {
 struct ToolCallMeasurements<'a> {
     schema_version: u32,
     count: usize,
-    calls: &'a [crate::agents::ToolCall],
+    calls: &'a [crate::proxy::tool_calls::ToolCall],
 }
 
 #[derive(Debug, Serialize)]
@@ -1779,13 +1779,16 @@ mod tests {
                 collectors::LifecyclePhase::WorkloadPreparation,
             ))
             .unwrap();
-        let tool_calls = vec![crate::agents::ToolCall {
+        let tool_calls = vec![crate::proxy::tool_calls::ToolCall {
             ordinal: 1,
-            source: "stdout",
+            source: "llmtape.provider_response",
             kind: "function_call".into(),
             name: Some("read_file".into()),
             id: Some("call-1".into()),
             arguments_present: true,
+            response_observed_unix_ms: Some(10),
+            execution_duration_ms: Some(3),
+            classes: vec!["filesystem.read".into()],
         }];
         let run = RunMeasurement {
             planning: None,

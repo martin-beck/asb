@@ -72,6 +72,9 @@ impl Dependency {
 #[serde(deny_unknown_fields)]
 struct Discovered {
     schema_version: u32,
+    #[serde(default)]
+    error_code: Option<String>,
+    #[serde(default)]
     paths: Vec<PathBuf>,
 }
 
@@ -210,6 +213,20 @@ fn discover_with_timeout(
     #[cfg(not(unix))]
     let bytes = legacy_exchange(python, &source, request, timeout)?;
     let result: Discovered = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+    if let Some(code) = result.error_code {
+        if !code.is_empty()
+            && code.len() <= 80
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            && result.paths.is_empty()
+        {
+            return Err(Error::Input(format!(
+                "runtime input discovery failed safely with code `{code}`"
+            )));
+        }
+        return Err(unavailable());
+    }
     if result.schema_version != 1
         || result.paths.len() > 100000
         || result.paths.iter().any(|path| !path.is_absolute())
@@ -653,6 +670,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn safe_runtime_discovery_code_is_actionable_without_exposing_paths() {
+        let root = Directory::new();
+        let python = helper(
+            &root,
+            "import sys\nsys.stdin.buffer.read()\nprint('{\"schema_version\":1,\"error_code\":\"required_runtime_unavailable\",\"paths\":[]}')\n",
+        );
+        let error = discover_with_timeout(&python, &[], Duration::from_secs(2))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("required_runtime_unavailable"));
+        assert!(!error.contains(root.0.to_str().unwrap()));
     }
 
     #[test]

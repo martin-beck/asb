@@ -101,7 +101,7 @@ struct RunResult<'a> {
     observation: crate::process_termination::Observation,
     token_usage: measurements::TokenUsage,
     steps: Option<u64>,
-    tool_calls: Vec<agents::ToolCall>,
+    tool_calls: Vec<crate::proxy::tool_calls::ToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cassette: Option<String>,
     /// Actual capture directory, including a CLI --measurements override.

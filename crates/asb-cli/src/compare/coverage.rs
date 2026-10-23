@@ -439,6 +439,7 @@ mod tests {
             series: BTreeMap::new(),
             host_metadata: None,
             components: None,
+            collector_documents: BTreeMap::new(),
             status: None,
             artifacts: vec![],
         }

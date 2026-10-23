@@ -9,7 +9,11 @@ import sys
 import time
 
 MAX_BYTES = 64 * 1024**3
-MAX_NODES = 300000
+# A fully provisioned project containing every supported local agent includes
+# large Node/Python dependency trees. Keep sealing bounded, but allow that
+# supported configuration to be admitted rather than silently losing its
+# continuation checkpoint.
+MAX_NODES = 2000000
 MAX_REQUEST = 16 * 1024**2
 MAX_ROOTS = 100000
 

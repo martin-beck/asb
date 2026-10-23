@@ -5,7 +5,6 @@
 
 mod adapters;
 mod artifacts;
-pub(crate) use adapters::tool_calls::{ToolCall, observed_tool_calls};
 pub(crate) use artifacts::{ArtifactOwner, ArtifactSpec, FrozenArtifacts};
 pub(crate) mod driver;
 use adapters::REGISTRY;
@@ -62,6 +61,13 @@ pub(crate) trait AgentAdapter: Sync {
     fn prepare(&self, context: &mut PreparationContext<'_>) -> Result<(), Error>;
     fn process(&self, executable: &str) -> Result<crate::launch::ProcessLaunch, Error> {
         Ok(crate::launch::ProcessLaunch::new(executable))
+    }
+    /// The identity used for the client process inside an owned workload
+    /// container.  Most clients accept the workload default; clients which
+    /// refuse unattended operation as root opt into the isolated non-root
+    /// identity below.
+    fn execution_identity(&self) -> ExecutionIdentity {
+        ExecutionIdentity::WorkloadDefault
     }
     fn replay_credential_vars(&self) -> &'static [&'static str] {
         &[]
@@ -136,6 +142,12 @@ pub(crate) struct CommandSpec {
     pub program: String,
     pub args: Vec<String>,
     pub append_prompt: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExecutionIdentity {
+    WorkloadDefault,
+    Unprivileged,
 }
 #[derive(Default)]
 pub(crate) struct AgentArtifacts {
@@ -253,6 +265,7 @@ pub(super) struct StaticAdapter {
     replay_credential_vars: &'static [&'static str],
     state_environment_vars: &'static [&'static str],
     preferred_executables: Option<PreferredExecutablesHook>,
+    execution_identity: ExecutionIdentity,
 }
 impl StaticAdapter {
     pub(super) const fn new(
@@ -281,6 +294,7 @@ impl StaticAdapter {
             replay_credential_vars: &[],
             state_environment_vars: &[],
             preferred_executables: None,
+            execution_identity: ExecutionIdentity::WorkloadDefault,
         }
     }
 
@@ -346,6 +360,11 @@ impl StaticAdapter {
         self.state_environment_vars = vars;
         self
     }
+
+    pub(super) const fn with_unprivileged_execution(mut self) -> Self {
+        self.execution_identity = ExecutionIdentity::Unprivileged;
+        self
+    }
 }
 impl AgentAdapter for StaticAdapter {
     fn state_environment_vars(&self) -> &'static [&'static str] {
@@ -389,6 +408,9 @@ impl AgentAdapter for StaticAdapter {
             || Ok(crate::launch::ProcessLaunch::new(executable)),
             |hook| hook(executable),
         )
+    }
+    fn execution_identity(&self) -> ExecutionIdentity {
+        self.execution_identity
     }
     fn replay_credential_vars(&self) -> &'static [&'static str] {
         self.replay_credential_vars

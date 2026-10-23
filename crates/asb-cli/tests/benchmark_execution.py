@@ -347,6 +347,43 @@ class ExecutionTests(unittest.TestCase):
         workspace.close()
         self.assertEqual(container.events.count("remove"), 1)
 
+    def test_gate_accepts_reordered_installer_stderr_before_readiness(self):
+        workspace, _, api, _ = self.workspace()
+        class StderrFirst(Stream):
+            def __init__(self, api):
+                super().__init__(api)
+                self.diagnostic_sent = False
+            def __next__(self):
+                if not self.diagnostic_sent:
+                    self.diagnostic_sent = True
+                    return None, b"installer diagnostic\\n"
+                return super().__next__()
+        def start(*_args, **_kwargs):
+            api.stream = StderrFirst(api)
+            return api.stream
+        api.exec_start = start
+        with workspace:
+            result = workspace.execute(["agent"])
+        self.assertEqual(result["stderr"], b"installer diagnostic\\nstderr")
+        self.assertEqual(result["stdout"], b"stdout")
+
+    def test_gate_failure_preserves_bounded_preparation_diagnostic(self):
+        workspace, _, api, _ = self.workspace()
+        class FailedBeforeReady(Stream):
+            def __next__(self):
+                if self.index == 0:
+                    self.index += 1
+                    return None, b"ASB guest agent could not execute: fixture preparation failed\\n"
+                raise StopIteration
+        def start(*_args, **_kwargs):
+            api.stream = FailedBeforeReady(api)
+            return api.stream
+        api.exec_start = start
+        with workspace:
+            with self.assertRaisesRegex(RUNTIME.ExecutionError,
+                                        "fixture preparation failed"):
+                workspace.execute(["agent"])
+
     def test_application_gate_preserves_self_contained_adapter_driver(self):
         workspace, _container, api, _ = self.workspace()
         with workspace:

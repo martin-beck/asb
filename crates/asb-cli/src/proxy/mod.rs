@@ -2,6 +2,7 @@
 
 pub(crate) mod adapters;
 pub(crate) mod capture;
+pub(crate) mod tool_calls;
 pub(crate) mod usage;
 
 use crate::Error;

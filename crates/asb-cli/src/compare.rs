@@ -59,6 +59,7 @@ struct BenchmarkData {
     series: BTreeMap<String, TimeSeries>,
     host_metadata: Option<Value>,
     components: Option<Value>,
+    collector_documents: BTreeMap<String, Value>,
     status: Option<String>,
     artifacts: Vec<String>,
     artifact_sources: BTreeMap<String, PathBuf>,

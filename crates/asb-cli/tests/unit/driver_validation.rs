@@ -126,6 +126,94 @@ fn fresh_native_state_is_private_create_new_and_preserves_runtime_credentials() 
     assert_eq!(fs::read_to_string(file).unwrap(), "preserve");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn unprivileged_access_changes_only_owned_regular_nodes_without_following_links() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let fixture = Fixture::new();
+    let owned = fixture.0.join("owned");
+    let nested = owned.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    let regular = nested.join("task.txt");
+    fs::write(&regular, "task source").unwrap();
+    fs::set_permissions(&owned, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&regular, fs::Permissions::from_mode(0o600)).unwrap();
+    let outside = fixture.0.join("outside.txt");
+    fs::write(&outside, "must remain private").unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+    symlink(&outside, nested.join("outside-link")).unwrap();
+
+    grant_unprivileged_access(&owned, true).unwrap();
+
+    assert_eq!(
+        fs::metadata(&owned).unwrap().permissions().mode() & 0o777,
+        0o777
+    );
+    assert_eq!(
+        fs::metadata(&nested).unwrap().permissions().mode() & 0o777,
+        0o777
+    );
+    assert_eq!(
+        fs::metadata(&regular).unwrap().permissions().mode() & 0o666,
+        0o666
+    );
+    assert_eq!(
+        fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(
+        fs::symlink_metadata(nested.join("outside-link"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unprivileged_project_access_is_read_execute_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let project = fixture.0.join("project-access");
+    fs::create_dir_all(&project).unwrap();
+    let executable = project.join("client");
+    fs::write(&executable, "fixture").unwrap();
+    fs::set_permissions(&project, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+
+    grant_unprivileged_access(&project, false).unwrap();
+
+    assert_eq!(
+        fs::metadata(&project).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert_eq!(
+        fs::metadata(&executable).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unprivileged_runtime_access_grants_traversal_only_at_the_sealed_prefix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let runtime = fixture.0.join("sealed-runtime");
+    fs::create_dir(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+
+    grant_unprivileged_traverse(&runtime).unwrap();
+
+    assert_eq!(
+        fs::metadata(&runtime).unwrap().permissions().mode() & 0o777,
+        0o711
+    );
+}
+
 #[test]
 fn selected_adapter_replaces_removed_parent_alias_with_its_fresh_configuration() {
     let fixture = Fixture::new();

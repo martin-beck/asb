@@ -471,6 +471,9 @@ writeProgress();
 
 async function handle(request, response, recording) {
   const startedAt = performance.now();
+  // Provider-boundary timestamps are authoritative tool-call evidence. ASB
+  // never derives tool calls or timings from agent stdout/stderr.
+  const requestReceivedUnixMs = Math.round(performance.timeOrigin + startedAt);
   const chunks = [];
   let bodySize = 0;
   for await (const chunk of request.iterator({ destroyOnReturn: false })) {
@@ -617,7 +620,15 @@ async function handle(request, response, recording) {
     body: normalizeCassetteBody(responseBody),
   };
   const delayMs = Math.min(Math.max(0, Math.round(performance.now() - startedAt)), MAX_DELAY_MS);
-  const interaction = { request: recordedRequest, response: recordedResponse, delay_ms: delayMs };
+  const interaction = {
+    request: recordedRequest,
+    response: recordedResponse,
+    delay_ms: delayMs,
+    timing: {
+      request_received_unix_ms: requestReceivedUnixMs,
+      response_observed_unix_ms: Math.round(performance.timeOrigin + performance.now()),
+    },
+  };
   if (capture) capture.append(recording.token, interaction, !isReplayProbe(recordedRequest));
   else {
     if (stopping) return;

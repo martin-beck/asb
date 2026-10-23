@@ -71,7 +71,7 @@ impl Fingerprint {
             && self.digest.len() == 64
             && self.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
             && self.bytes <= 64 * 1024u64.pow(3)
-            && self.nodes <= 300000
+            && self.nodes <= 2_000_000
     }
 }
 
@@ -708,6 +708,25 @@ fn fill_random(_: &mut [u8]) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_the_supported_bounded_fingerprint_node_limit() {
+        let fingerprint = Fingerprint {
+            schema_version: 1,
+            digest: "a".repeat(64),
+            bytes: 0,
+            nodes: 2_000_000,
+        };
+        assert!(fingerprint.valid());
+        assert!(
+            !Fingerprint {
+                nodes: 2_000_001,
+                ..fingerprint
+            }
+            .valid()
+        );
+    }
+
     struct Directory(PathBuf);
     impl Directory {
         fn new() -> Self {

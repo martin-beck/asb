@@ -142,6 +142,7 @@ pub(crate) struct ReportRow<'a> {
     pub label: &'a str,
     pub metrics: &'a BTreeMap<String, f64>,
     pub components: Option<&'a serde_json::Value>,
+    pub documents: &'a BTreeMap<String, serde_json::Value>,
 }
 
 /// A collector-owned graph ready for generic publication in an offline report.

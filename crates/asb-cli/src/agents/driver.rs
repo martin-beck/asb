@@ -9,6 +9,9 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
+const UNPRIVILEGED_UID: u32 = 65_534;
+const UNPRIVILEGED_GID: u32 = 65_534;
+
 const REQUEST: &str = "ASB_GUEST_AGENT_REQUEST";
 
 #[cfg(test)]
@@ -188,10 +191,131 @@ fn execution_workspace(request: &GuestRequest) -> Result<PathBuf, Error> {
     }
 }
 
+/// Make an owned private tree accessible to the fixed non-root client
+/// identity. Callers grant write access only to task material and per-attempt
+/// state; installed tools and project configuration remain read/execute-only.
+///
+/// The workload container is already private.  We deliberately change mode
+/// bits rather than invoking a host utility such as `chown`: minimal benchmark
+/// images need not contain that utility, and `symlink_metadata` guarantees
+/// that task-controlled links are never followed outside the owned tree.
+#[cfg(target_os = "linux")]
+fn grant_unprivileged_access(path: &Path, writable: bool) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt;
+
+    const MAX_OWNED_NODES: usize = 1_000_000;
+    let mut pending = vec![path.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(current) = pending.pop() {
+        visited += 1;
+        if visited > MAX_OWNED_NODES {
+            return Err(Error::Run(
+                "owned workspace exceeds the safe node limit for unprivileged execution".into(),
+            ));
+        }
+        let metadata = fs::symlink_metadata(&current).map_err(crate::io_error)?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        let mode = metadata.permissions().mode();
+        let accessible_mode = if metadata.is_dir() {
+            mode | if writable { 0o777 } else { 0o555 }
+        } else if metadata.is_file() {
+            if writable {
+                mode | 0o666
+            } else {
+                mode | 0o444 | if mode & 0o111 != 0 { 0o111 } else { 0 }
+            }
+        } else {
+            continue;
+        };
+        if accessible_mode != mode {
+            fs::set_permissions(&current, fs::Permissions::from_mode(accessible_mode))
+                .map_err(crate::io_error)?;
+        }
+        if metadata.is_dir() {
+            for entry in fs::read_dir(&current).map_err(crate::io_error)? {
+                pending.push(entry.map_err(crate::io_error)?.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn grant_unprivileged_access(_: &Path, _: bool) -> Result<(), Error> {
+    Err(Error::Run(
+        "this agent requires an isolated Linux non-root workload identity".into(),
+    ))
+}
+
+fn configure_execution_identity(
+    command: &mut Command,
+    identity: crate::agents::ExecutionIdentity,
+    workspace: &Path,
+    runtime: &Path,
+) -> Result<(), Error> {
+    if identity != crate::agents::ExecutionIdentity::Unprivileged {
+        return Ok(());
+    }
+    grant_unprivileged_access(workspace, true)?;
+    grant_unprivileged_access(runtime, true)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.uid(UNPRIVILEGED_UID).gid(UNPRIVILEGED_GID);
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    Err(Error::Run(
+        "this agent requires an isolated Unix non-root workload identity".into(),
+    ))
+}
+
+/// The staged project prefix is sealed and verified during guest preparation.
+/// Its mode may only be relaxed after that verification, immediately before
+/// the stopped launch gate is published. The client still receives no write
+/// access to this private project/tool tree.
+fn activate_unprivileged_project_access(
+    identity: crate::agents::ExecutionIdentity,
+    project: &Path,
+    runtime: &Path,
+) -> Result<(), Error> {
+    if identity == crate::agents::ExecutionIdentity::Unprivileged {
+        grant_unprivileged_access(project, false)?;
+        grant_unprivileged_traverse(runtime)?;
+    }
+    Ok(())
+}
+
+/// Permit traversal into the already writable `agent-state` child without
+/// exposing the sealed runtime prefix for listing, reading, or writing.
+#[cfg(target_os = "linux")]
+fn grant_unprivileged_traverse(path: &Path) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::symlink_metadata(path).map_err(crate::io_error)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(Error::Run(
+            "private runtime prefix is not a real directory for unprivileged execution".into(),
+        ));
+    }
+    let mode = metadata.permissions().mode();
+    fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o011)).map_err(crate::io_error)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn grant_unprivileged_traverse(_: &Path) -> Result<(), Error> {
+    Err(Error::Run(
+        "this agent requires an isolated Linux non-root workload identity".into(),
+    ))
+}
+
 struct PreparedGuest {
     command: Command,
     artifact_owner: super::ArtifactOwner,
     instrumentation: Option<crate::workloads::staging::Guard>,
+    execution_identity: crate::agents::ExecutionIdentity,
 }
 impl std::fmt::Debug for PreparedGuest {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -315,6 +439,10 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     isolate_parent_state(&mut command);
+    // Guest executions need the same fresh conventional client state as native
+    // executions.  Adapters then add only their own selected-provider state.
+    let state_root = request.runtime_dir.join("agent-state");
+    prepare_fresh_state(&mut command, &state_root)?;
     if request.replay {
         super::mask_replay_credentials(&mut command);
     }
@@ -327,13 +455,20 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         command: &mut command,
         model: &request.config.model,
         connection: &request.connection,
-        runtime_dir: &request.runtime_dir,
+        runtime_dir: &state_root,
         run_dir: &request.run_dir,
     })?;
+    configure_execution_identity(
+        &mut command,
+        adapter.execution_identity(),
+        &workspace,
+        &state_root,
+    )?;
     Ok(PreparedGuest {
         command,
         artifact_owner,
         instrumentation,
+        execution_identity: adapter.execution_identity(),
     })
 }
 
@@ -364,6 +499,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         mut command,
         mut artifact_owner,
         instrumentation,
+        execution_identity,
     } = prepare(&request)?;
     // Keep the same launch identity even if a tool renames/deletes its cwd.
     // Looking up current_dir again after execution can erase a valid outcome.
@@ -388,6 +524,11 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     if let (Some(guard), Some(owner)) = (&instrumentation, &request.owned_instrumentation) {
         guard.revalidate(owner)?;
     }
+    activate_unprivileged_project_access(
+        execution_identity,
+        &request.project_root,
+        &request.runtime_dir,
+    )?;
     // Preparation and command construction are complete before the outer
     // collector attaches. Credentials remain only in process memory/env.
     println!("__ASB_GATE__:{}", std::process::id());
