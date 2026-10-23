@@ -10,6 +10,7 @@ pub(super) enum ChoiceKey {
         workload: String,
         extension: String,
     },
+    AllBpftracePrograms,
     Agent(String),
     Provider(String),
     Model {
@@ -22,6 +23,7 @@ pub(super) enum ChoiceKey {
         file: PathBuf,
     },
     Collector(String),
+    BpftraceProgram(String),
     Concurrency(usize),
     Trial(String),
     ExtensionValue {
@@ -35,19 +37,27 @@ impl ChoiceKey {
     pub fn is_all(&self) -> bool {
         matches!(
             self,
-            Self::AllAgents | Self::AllWorkloads | Self::AllCollectors | Self::AllExtension { .. }
+            Self::AllAgents
+                | Self::AllWorkloads
+                | Self::AllCollectors
+                | Self::AllExtension { .. }
+                | Self::AllBpftracePrograms
         )
     }
     pub fn is_control(&self) -> bool {
         matches!(
             self,
-            Self::AllAgents | Self::AllWorkloads | Self::AllCollectors | Self::AllExtension { .. }
+            Self::AllAgents
+                | Self::AllWorkloads
+                | Self::AllCollectors
+                | Self::AllExtension { .. }
+                | Self::AllBpftracePrograms
         )
     }
     pub fn valid(&self) -> bool {
         let valid = |name: &str| crate::selection_names::validate(name, "selection").is_ok();
         match self {
-            Self::AllAgents | Self::AllWorkloads | Self::AllCollectors => true,
+            Self::AllAgents | Self::AllWorkloads | Self::AllCollectors | Self::AllBpftracePrograms => true,
             Self::AllExtension {
                 workload,
                 extension,
@@ -56,6 +66,7 @@ impl ChoiceKey {
             | Self::Provider(name)
             | Self::Prompt(name)
             | Self::Collector(name)
+            | Self::BpftraceProgram(name)
             | Self::Trial(name) => valid(name),
             Self::ExtensionValue {
                 workload,
@@ -94,6 +105,13 @@ impl ChoiceKey {
             None
         }
     }
+    pub fn bpftrace_program(&self) -> Option<&str> {
+        if let Self::BpftraceProgram(name) = self {
+            Some(name)
+        } else {
+            None
+        }
+    }
     pub fn trial(&self) -> Option<&str> {
         if let Self::Trial(name) = self {
             Some(name)
@@ -126,6 +144,7 @@ pub(super) enum PaneKind {
     Measurements,
     Concurrency,
     Extensions,
+    BpftracePrograms,
 }
 
 impl PaneKind {
@@ -160,11 +179,13 @@ impl PaneKind {
             Self::Measurements => "measurement",
             Self::Concurrency => "concurrency",
             Self::Extensions => "workload options",
+            Self::BpftracePrograms => "eBPF programs",
         }
     }
     pub fn description(self) -> &'static str {
         match self {
             Self::Extensions => "Choose adapter-owned options for the selected workloads.",
+            Self::BpftracePrograms => "Choose the built-in eBPF programs to run with bpftrace.",
             _ => DESCRIPTIONS[self.index()],
         }
     }

@@ -187,7 +187,7 @@ impl Pane {
 struct App {
     root: PathBuf,
     project: project::ProjectConfig,
-    panes: [Pane; 7],
+    panes: [Pane; 8],
     step: PaneKind,
     extension_tab: String,
     extension_description: String,
@@ -205,10 +205,20 @@ impl App {
     }
 
     fn navigation_order(&self) -> Vec<PaneKind> {
-        let mut order = Vec::from(PaneKind::ORDER);
+        let mut order = vec![
+            PaneKind::Agents,
+            PaneKind::Providers,
+            PaneKind::Models,
+            PaneKind::Workloads,
+        ];
         if !self.pane(PaneKind::Extensions).choices.is_empty() {
-            order.insert(4, PaneKind::Extensions);
+            order.push(PaneKind::Extensions);
         }
+        order.push(PaneKind::Measurements);
+        if !self.pane(PaneKind::BpftracePrograms).choices.is_empty() {
+            order.push(PaneKind::BpftracePrograms);
+        }
+        order.push(PaneKind::Concurrency);
         order
     }
 
@@ -326,6 +336,7 @@ impl App {
                 workload_pane,
                 measure_pane,
                 concurrency_pane,
+                Pane::new(Vec::new()),
                 Pane::new(Vec::new()),
             ],
             step: PaneKind::Agents,
@@ -640,6 +651,51 @@ impl App {
         Ok(())
     }
 
+    fn refresh_bpftrace_programs(&mut self) {
+        let previous = self
+            .pane(PaneKind::BpftracePrograms)
+            .selected_choices()
+            .filter_map(|choice| choice.key.bpftrace_program().map(str::to_owned))
+            .collect::<BTreeSet<_>>();
+        let selected = self
+            .pane(PaneKind::Measurements)
+            .selected_choices()
+            .any(|choice| choice.key.collector() == Some("bpftrace"));
+        if !selected {
+            self.panes[PaneKind::BpftracePrograms.index()] = Pane::new(Vec::new());
+            return;
+        }
+        let mut choices = vec![Choice {
+            label: "[all]".into(),
+            key: ChoiceKey::AllBpftracePrograms,
+            availability: Availability::Available,
+        }];
+        choices.extend(
+            crate::collectors::bpftrace_profiles()
+                .iter()
+                .map(|profile| Choice {
+                    label: format!("{} — {}", profile.name, profile.description),
+                    key: ChoiceKey::BpftraceProgram(profile.name.into()),
+                    availability: Availability::Available,
+                }),
+        );
+        let mut pane = Pane::new(choices);
+        for (index, choice) in pane.choices.iter().enumerate() {
+            if let Some(program) = choice.key.bpftrace_program() {
+                pane.selected[index] = if previous.is_empty() {
+                    crate::collectors::bpftrace_profiles()
+                        .iter()
+                        .find(|profile| profile.name == program)
+                        .is_some_and(|profile| profile.default_selection)
+                } else {
+                    previous.contains(program)
+                };
+            }
+        }
+        pane.selected[0] = pane.selected.iter().skip(1).all(|selected| *selected);
+        self.panes[PaneKind::BpftracePrograms.index()] = pane;
+    }
+
     fn sync_collector_dependencies(&mut self) -> Vec<String> {
         let selected = self.panes[PaneKind::Measurements.index()]
             .selected_choices()
@@ -757,6 +813,9 @@ impl App {
             .flatten();
         if self.step == PaneKind::Workloads {
             self.refresh_extensions()?;
+        }
+        if self.step == PaneKind::Measurements {
+            self.refresh_bpftrace_programs();
         }
         if let Some(next) = self.next_step() {
             self.step = next;
@@ -1765,6 +1824,12 @@ fn run_loop(
             KeyEvent {
                 code: KeyCode::Char(' '),
                 ..
+            } if app.step == PaneKind::BpftracePrograms => {
+                toggle_setup_choice(app, |_app, _selected| Ok(true))?;
+            }
+            KeyEvent {
+                code: KeyCode::Char(' '),
+                ..
             } if app.step.installable() => {
                 toggle_setup_choice(app, |app, selected| match selected {
                     Some(selected) => install_setup_dependencies(terminal, app, selected),
@@ -1926,6 +1991,7 @@ where
         }
         if step == PaneKind::Measurements {
             app.sync_collector_dependencies();
+            app.refresh_bpftrace_programs();
             if app.panes[step.index()].selected[index] {
                 set_message(
                     &mut app.message,
@@ -1970,6 +2036,7 @@ where
     }
     if step == PaneKind::Measurements {
         app.sync_collector_dependencies();
+        app.refresh_bpftrace_programs();
     }
     if step == PaneKind::Extensions {
         update_extension_sentinels(&mut app.panes[step.index()], index);
@@ -2462,12 +2529,28 @@ fn generate_configs(app: &App) -> Result<Generated, Error> {
         .filter(|choice| !choice.key.is_control())
         .map(|choice| selected_workload_trials(app, &choice.key))
         .collect::<Result<Vec<_>, _>>()?;
-    let measures = crate::collectors::expand_dependencies(
+    let mut measures = crate::collectors::expand_dependencies(
         &app.panes[PaneKind::Measurements.index()]
             .selected_choices()
             .filter_map(|choice| choice.key.collector().map(str::to_owned))
             .collect::<Vec<_>>(),
     );
+    if measures.iter().any(|measure| measure == "bpftrace") {
+        let programs = app.panes[PaneKind::BpftracePrograms.index()]
+            .selected_choices()
+            .filter_map(|choice| choice.key.bpftrace_program().map(str::to_owned))
+            .collect::<Vec<_>>();
+        if programs.is_empty() {
+            return Err(Error::Input(
+                "select at least one eBPF program for the bpftrace collector".into(),
+            ));
+        }
+        measures.extend(
+            programs
+                .into_iter()
+                .map(|program| format!("bpftrace:{program}")),
+        );
+    }
     let mut concurrency = app.panes[PaneKind::Concurrency.index()].selected_choices();
     let value = concurrency
         .next()
@@ -3068,6 +3151,42 @@ mod tests {
                     choice.label.as_str(),
                     "token_usage" | "steps" | "success_rate" | "runtime"
                 ))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bpftrace_selection_exposes_program_tab_with_defaults_and_all_control() {
+        let root = std::env::temp_dir().join(format!("asb-tui-bpftrace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = App::new(root.clone(), ProjectConfig::default());
+        let index = app.panes[PaneKind::Measurements.index()]
+            .choices
+            .iter()
+            .position(|choice| choice.key.collector() == Some("bpftrace"))
+            .expect("bpftrace collector");
+        app.panes[PaneKind::Measurements.index()].selected[index] = true;
+        app.refresh_bpftrace_programs();
+        let pane = app.pane(PaneKind::BpftracePrograms);
+        assert!(matches!(
+            pane.choices[0].key,
+            ChoiceKey::AllBpftracePrograms
+        ));
+        assert!(
+            pane.choices
+                .iter()
+                .any(|choice| { choice.key.bpftrace_program() == Some("sched-latency") })
+        );
+        assert!(pane.selected.iter().skip(1).any(|selected| *selected));
+        assert!(app.navigation_order().contains(&PaneKind::BpftracePrograms));
+        app.step = PaneKind::BpftracePrograms;
+        super::toggle_setup_choice(&mut app, |_app, _selected| Ok(true)).unwrap();
+        assert!(
+            app.pane(PaneKind::BpftracePrograms)
+                .selected
+                .iter()
+                .all(|selected| *selected)
         );
         let _ = std::fs::remove_dir_all(root);
     }

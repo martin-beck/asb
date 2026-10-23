@@ -23,7 +23,14 @@ pub(crate) fn completion_command() -> clap::Command {
                 .mut_arg("provider", |arg| possible(arg, providers.iter().copied()))
                 .mut_arg("model", |arg| possible_owned(arg, models.clone()))
                 .mut_arg("measure", |arg| {
-                    possible_owned(arg, crate::measurements::available_collectors())
+                    let mut values = crate::measurements::available_collectors();
+                    values.extend(
+                        std::iter::once("bpftrace:all".into()).chain(
+                            crate::collectors::bpftrace_profile_names()
+                                .map(|name| format!("bpftrace:{name}")),
+                        ),
+                    );
+                    possible_owned(arg, values)
                 })
         })
         .mut_subcommand("provider", |provider| {
@@ -44,6 +51,14 @@ pub(crate) fn completion_command() -> clap::Command {
                 .mut_subcommand("install", |install| {
                     install.mut_arg("source", |arg| possible(arg, workloads))
                 })
+                .mut_subcommand("trials", |trials| {
+                    trials.mut_arg("name", |arg| possible(arg, registered_workload_names()))
+                })
+        })
+        .mut_subcommand("measure", |measure| {
+            measure.mut_subcommand("bpftrace", |bpftrace| {
+                bpftrace.mut_subcommand("programs", |programs| programs)
+            })
         })
 }
 
@@ -262,6 +277,7 @@ pub(crate) fn run_with_interactive(
                 crate::workloads::describe_module(&args.name, stdout)
             }
             WorkloadCommand::Install(args) => install::workload(args.into(), stdout),
+            WorkloadCommand::Trials(args) => list_workload_trials(&args.name, stdout),
             WorkloadCommand::Tui => tui::workload_tui(stdout),
             WorkloadCommand::Recover(args) => {
                 if args.grade {
@@ -272,6 +288,12 @@ pub(crate) fn run_with_interactive(
                     crate::workloads::recovery::run(&args.reference, args.json, stdout)
                 }
             }
+        },
+        Some(CommandLine::Measure(options)) => match options.command {
+            None => list_measures(stdout),
+            Some(MeasureCommand::Bpftrace(args)) => match args.command {
+                BpftraceCommand::Programs => list_bpftrace_programs(stdout),
+            },
         },
     };
     match result {
@@ -287,12 +309,14 @@ fn close_command(args: &[OsString]) -> Option<&'static str> {
         "tool" => (args.get(1)?.to_str()?, &["list", "install"]),
         "workload" => (
             args.get(1)?.to_str()?,
-            &["list", "install", "tui", "recover"],
+            &["list", "install", "trials", "tui", "recover"],
         ),
+        "measure" => (args.get(1)?.to_str()?, &["bpftrace"]),
         _ => (
             first,
             &[
                 "init", "setup", "run", "sweep", "compare", "provider", "tool", "workload",
+                "measure",
             ],
         ),
     };
@@ -319,6 +343,39 @@ fn io_error(error: io::Error) -> CliError {
     CliError::Io(error.to_string())
 }
 
+fn list_measures(output: &mut dyn Write) -> Result<(), Error> {
+    for id in crate::measurements::available_collectors() {
+        let description = crate::measurements::collector_description(&id).unwrap_or("collector");
+        writeln!(output, "{id}\t{description}").map_err(|error| Error::Io(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn list_bpftrace_programs(output: &mut dyn Write) -> Result<(), Error> {
+    writeln!(output, "all\tall built-in eBPF programs")
+        .map_err(|error| Error::Io(error.to_string()))?;
+    for profile in crate::collectors::bpftrace_profiles() {
+        writeln!(output, "{}\t{}", profile.name, profile.description)
+            .map_err(|error| Error::Io(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn list_workload_trials(name: &str, output: &mut dyn Write) -> Result<(), Error> {
+    let (root, project) = project::load(std::path::Path::new("."))?;
+    let directory = project::resolve(&root, &project.workloads_dir);
+    let trials = crate::workloads::installed_trials(name, &directory).map_err(Error::Input)?;
+    if trials.is_empty() {
+        return Err(Error::Input(format!(
+            "workload `{name}` has no installed trials; run `asb workload install {name}` and retry"
+        )));
+    }
+    for trial in trials {
+        writeln!(output, "{}", trial.id).map_err(|error| Error::Io(error.to_string()))?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "asb",
@@ -340,6 +397,7 @@ enum CommandLine {
     Provider(ProviderArgs),
     Tool(ToolArgs),
     Workload(WorkloadArgs),
+    Measure(MeasureArgs),
 }
 
 #[derive(Debug, Args)]
@@ -548,6 +606,8 @@ enum WorkloadCommand {
     /// Print a registered module's versioned JSON contract without installing or executing it.
     Describe(WorkloadDescribeArgs),
     Install(WorkloadInstallArgs),
+    /// List selectable installed trials for one workload.
+    Trials(WorkloadTrialsArgs),
     Tui,
     #[command(
         after_help = "By default, stops only a departed controller's recorded task containers, preserving partial files and volumes. --inspect-grade instead reads an existing official grade without changing the attempt or running an agent/evaluator. Neither operation resumes a sweep."
@@ -558,6 +618,31 @@ enum WorkloadCommand {
 struct WorkloadDescribeArgs {
     #[arg(value_name = "WORKLOAD")]
     name: String,
+}
+#[derive(Debug, Args)]
+struct WorkloadTrialsArgs {
+    #[arg(value_name = "WORKLOAD")]
+    name: String,
+}
+
+#[derive(Debug, Args)]
+struct MeasureArgs {
+    #[command(subcommand)]
+    command: Option<MeasureCommand>,
+}
+#[derive(Debug, Subcommand)]
+enum MeasureCommand {
+    Bpftrace(BpftraceMeasureArgs),
+}
+#[derive(Debug, Args)]
+struct BpftraceMeasureArgs {
+    #[command(subcommand)]
+    command: BpftraceCommand,
+}
+#[derive(Debug, Subcommand)]
+enum BpftraceCommand {
+    /// List built-in eBPF programs selectable as bpftrace:PROGRAM.
+    Programs,
 }
 #[derive(Debug, Args)]
 struct WorkloadRecoverArgs {
@@ -770,5 +855,52 @@ mod tests {
         let error = Cli::try_parse_from(["asb", "setup", "-workload", "bug-fix"])
             .expect_err("single dash long option must be rejected");
         assert!(error.to_string().contains("unexpected argument"));
+    }
+
+    #[test]
+    fn measure_catalog_lists_collectors_and_bpftrace_programs() {
+        let mut output = Vec::new();
+        assert_eq!(
+            super::run(&["measure".into()], &mut output, &mut Vec::new()),
+            0
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("bpftrace\tselected process-tree eBPF programs"));
+        assert!(output.contains("agent-memory\tselected agent process-tree memory usage"));
+
+        let mut output = Vec::new();
+        assert_eq!(
+            super::run(
+                &["measure".into(), "bpftrace".into(), "programs".into()],
+                &mut output,
+                &mut Vec::new(),
+            ),
+            0
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("all\tall built-in eBPF programs"));
+        assert!(output.contains("sched-latency\twakeup-to-run latency"));
+        assert!(output.contains("io-wait\tcompleted kernel-accounted I/O waits"));
+    }
+
+    #[test]
+    fn bpftrace_profile_selectors_are_typed_setup_values() {
+        Cli::try_parse_from([
+            "asb",
+            "setup",
+            "--agent",
+            "opencode",
+            "--provider",
+            "cli2key",
+            "--model",
+            "gpt-6.1-sol",
+            "--workload",
+            "bug-fix",
+            "--measure",
+            "bpftrace:all",
+        ])
+        .expect("bpftrace profile selection parses");
+        Cli::try_parse_from(["asb", "workload", "trials", "terminal-bench"])
+            .expect("workload trial listing parses");
     }
 }

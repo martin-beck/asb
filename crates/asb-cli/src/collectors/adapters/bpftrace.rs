@@ -483,7 +483,7 @@ pub(crate) struct BpftraceProfile {
     pub(crate) name: &'static str,
     pub(crate) description: &'static str,
     pub(crate) program: &'static str,
-    default_selection: bool,
+    pub(crate) default_selection: bool,
 }
 
 const BPFTRACE_PROFILES: &[BpftraceProfile] = &[
@@ -535,6 +535,12 @@ const BPFTRACE_PROFILES: &[BpftraceProfile] = &[
 /// `ASB_BPFTRACE_PROFILES=PROFILE,...`.
 pub fn bpftrace_profile_names() -> impl Iterator<Item = &'static str> {
     BPFTRACE_PROFILES.iter().map(|profile| profile.name)
+}
+
+/// Stable built-in programs shown by the CLI and setup wizard. The program
+/// text remains adapter-private: callers choose only these identifiers.
+pub(crate) fn bpftrace_profiles() -> &'static [BpftraceProfile] {
+    BPFTRACE_PROFILES
 }
 
 pub(crate) fn selected_bpftrace_profiles(
