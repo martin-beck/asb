@@ -4,6 +4,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import pty
 import signal
 import subprocess
 import sys
@@ -54,13 +55,29 @@ def public_cli(binary, root, sibling):
         if measured:
             config += "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=[]\n"
         (case / "benchmark.toml").write_text(config)
+        # The capacity guard intentionally accepts low-space execution only
+        # after an interactive confirmation. Give the public binary a PTY and
+        # answer that real prompt; do not relax its non-interactive policy.
+        terminal, child_terminal = pty.openpty()
         process = subprocess.Popen([binary, "run", "benchmark.toml", "--replay", "--cassette", "tape"],
-                                   cwd=case, env=env, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                   cwd=case, env=env, stdin=child_terminal,
+                                   stdout=child_terminal, stderr=child_terminal)
+        os.close(child_terminal)
+        os.write(terminal, b"y\n")
         try:
             def started():
                 if process.poll() is not None:
-                    raise AssertionError(process.stderr.read().decode())
+                    os.set_blocking(terminal, False)
+                    output = bytearray()
+                    while True:
+                        try:
+                            chunk = os.read(terminal, 8192)
+                        except BlockingIOError:
+                            break
+                        if not chunk:
+                            break
+                        output.extend(chunk)
+                    raise AssertionError(output.decode(errors="replace"))
                 return (case / "principal").exists() and (case / "helper").exists()
             until(started, "public CLI did not start native client")
             ready_files = list(case.glob(".asb-tape-*/ready.json"))
@@ -83,6 +100,7 @@ def public_cli(binary, root, sibling):
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=3)
+            os.close(terminal)
 
 
 def guardian(scripts, root, binary):
