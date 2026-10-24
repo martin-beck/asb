@@ -119,6 +119,23 @@ pub(crate) struct PreparationContext<'a> {
     pub runtime_dir: &'a Path,
     /// A unique path for artifacts belonging to this individual run.
     pub run_dir: &'a Path,
+    /// Provider-tape identity for an execution whose agent-local tools must
+    /// share the same record/replay boundary.  This is explicit rather than
+    /// inferred from the provider URL: record and replay both use loopback
+    /// endpoints.
+    pub tape: Option<TapeContext<'a>>,
+}
+
+/// Immutable provider-tape identity made available to agent adapters.
+///
+/// Adapters that own an interceptable tool transport use this to place their
+/// own causal tool transcript beside the provider cassette.  The transport is
+/// deliberately adapter-owned; the generic runner does not know tool names or
+/// result formats.
+#[derive(Clone, Copy)]
+pub(crate) struct TapeContext<'a> {
+    pub mode: crate::tape::Mode,
+    pub cassette: &'a Path,
 }
 
 impl PreparationContext<'_> {
@@ -237,6 +254,7 @@ pub(super) fn final_result_counter(stdout: &str, field: &str) -> Option<u64> {
 
 type CommandBuilder = for<'a> fn(&CommandContext<'a>) -> CommandSpec;
 type PreparationHook = for<'a> fn(&mut PreparationContext<'a>) -> Result<(), Error>;
+type ToolReplayHook = for<'a> fn(&mut PreparationContext<'a>, TapeContext<'a>) -> Result<(), Error>;
 type CollectionHook = for<'a> fn(&CollectionContext<'a>) -> AgentArtifacts;
 type UsageHook = fn(&str, &str, bool) -> crate::measurements::TokenUsage;
 type FinalResponseHook = fn(&str, &Path) -> Option<String>;
@@ -254,6 +272,7 @@ pub(super) struct StaticAdapter {
     supported_endpoints: &'static [Support],
     command: CommandBuilder,
     prepare: PreparationHook,
+    tool_replay: Option<ToolReplayHook>,
     collect: Option<CollectionHook>,
     artifact_specs: &'static [ArtifactSpec],
     output_usage: Option<UsageHook>,
@@ -283,6 +302,7 @@ impl StaticAdapter {
             supported_endpoints,
             command,
             prepare,
+            tool_replay: None,
             collect: None,
             artifact_specs: &[],
             output_usage: None,
@@ -300,6 +320,14 @@ impl StaticAdapter {
 
     pub(super) const fn with_collection(mut self, collect: CollectionHook) -> Self {
         self.collect = Some(collect);
+        self
+    }
+
+    /// Adapter-owned interception of local tool execution during a tape-backed
+    /// record or replay.  The runner provides only cassette identity and mode;
+    /// the adapter owns the client protocol and tool semantics.
+    pub(super) const fn with_tool_replay(mut self, hook: ToolReplayHook) -> Self {
+        self.tool_replay = Some(hook);
         self
     }
 
@@ -400,6 +428,9 @@ impl AgentAdapter for StaticAdapter {
                     .contains(&context.connection.authentication)
         }) {
             return Err(context.unsupported_endpoint(self.id));
+        }
+        if let (Some(hook), Some(tape)) = (self.tool_replay, context.tape) {
+            hook(context, tape)?;
         }
         (self.prepare)(context)
     }
@@ -720,6 +751,7 @@ mod tests {
                     connection: &connection,
                     runtime_dir: &runtime,
                     run_dir: &runtime,
+                    tape: None,
                 },
             )
             .unwrap();
@@ -852,6 +884,7 @@ mod tests {
                             connection: &connection,
                             runtime_dir: &root,
                             run_dir: &root,
+                            tape: None,
                         })
                         .expect_err("unadvertised pair must fail without panicking")
                         .to_string();
@@ -899,6 +932,7 @@ mod tests {
                             connection: &connection,
                             runtime_dir: &runtime,
                             run_dir: &runtime,
+                            tape: None,
                         })
                         .unwrap_or_else(|error| panic!("{} {interface:?}: {error}", adapter.id()));
                 }

@@ -73,6 +73,7 @@ fn static_adapter_defaults_are_empty_and_preparation_command_hooks_are_called() 
             connection: &connection,
             runtime_dir: Path::new("not-created"),
             run_dir: Path::new("not-created"),
+            tape: None,
         })
         .unwrap();
     assert_eq!(process.get_args().collect::<Vec<_>>(), ["prepared"]);
@@ -240,6 +241,7 @@ fn unknown_preparation_does_not_mutate_command_or_create_directories() {
             connection: &connection,
             runtime_dir: Path::new("not-created"),
             run_dir: Path::new("not-created"),
+            tape: None,
         },
     )
     .unwrap();

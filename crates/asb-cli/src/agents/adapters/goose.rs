@@ -24,6 +24,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_tool_replay(prepare_tool_replay)
 .with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"]);
 
 fn distribution() -> Result<(&'static str, &'static str), Error> {
@@ -120,9 +121,25 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+fn prepare_tool_replay(
+    context: &mut PreparationContext<'_>,
+    tape: super::super::TapeContext<'_>,
+) -> Result<(), Error> {
+    let mode = match tape.mode {
+        crate::tape::Mode::Record => "record",
+        crate::tape::Mode::Replay => "replay",
+    };
+    context
+        .command
+        .env("ASB_TOOL_REPLAY_MODE", mode)
+        .env("ASB_TOOL_REPLAY_CASSETTE", tape.cassette);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentAdapter;
     use std::collections::HashMap;
     use std::path::Path;
     use std::process::Command;
@@ -156,6 +173,7 @@ mod tests {
             connection: &connection,
             runtime_dir: Path::new("."),
             run_dir: Path::new("."),
+            tape: None,
         })
         .unwrap();
         let env = environment(&command);
@@ -184,6 +202,7 @@ mod tests {
                 connection: &connection,
                 runtime_dir: Path::new("."),
                 run_dir: Path::new("."),
+                tape: None,
             })
             .unwrap();
             let env = environment(&command);
@@ -198,6 +217,37 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn tape_backed_preparation_exposes_only_explicit_tool_replay_context() {
+        let mut command = Command::new("goose");
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiChat,
+            base_url: "http://127.0.0.1:4321/v1".into(),
+            credential: Some("asb-replay".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let cassette = Path::new("/private/run/cassette.asb.zip");
+        ADAPTER
+            .prepare(&mut PreparationContext {
+                command: &mut command,
+                model: "test-model",
+                connection: &connection,
+                runtime_dir: Path::new("."),
+                run_dir: Path::new("."),
+                tape: Some(crate::agents::TapeContext {
+                    mode: crate::tape::Mode::Replay,
+                    cassette,
+                }),
+            })
+            .unwrap();
+        let env = environment(&command);
+        assert_eq!(env["ASB_TOOL_REPLAY_MODE"], "replay");
+        assert_eq!(
+            env["ASB_TOOL_REPLAY_CASSETTE"],
+            cassette.display().to_string()
+        );
     }
 
     #[test]
