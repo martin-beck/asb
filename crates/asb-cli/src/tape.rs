@@ -64,7 +64,15 @@ impl Session {
 
 /// Validate a replay input before allocating run resources or starting a proxy.
 pub(crate) fn require_replay_cassette(cassette: &Path) -> Result<(), Error> {
-    if cassette.is_file() {
+    let mut present = crate::cassette::Source::is_present(cassette)
+        .map_err(|error| Error::Input(error.to_string()))?;
+    for replica in 1..=crate::benchmark::MAX_CONCURRENCY {
+        present |= crate::cassette::Source::is_present(&crate::benchmark_paths::replica_path(
+            cassette, replica,
+        ))
+        .map_err(|error| Error::Input(error.to_string()))?;
+    }
+    if present {
         Ok(())
     } else {
         Err(Error::Input(format!(

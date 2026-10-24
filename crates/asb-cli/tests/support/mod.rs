@@ -15,7 +15,7 @@ impl IsolatedEnvironment for Command {
         }
         // Integration fixtures launch the separately compiled debug CLI. Its
         // capacity premise is explicit and cannot exist in release builds.
-        self.env("ASB_TEST_AVAILABLE_MIB", "100000");
+        self.env("ASB_TEST_AVAILABLE_MIB", "18446744073709551615");
         self
     }
 }
@@ -34,12 +34,12 @@ fn isolated_environment_preserves_only_coverage_instrumentation() {
             assert_eq!(actual[0].0, "LLVM_PROFILE_FILE");
             assert_eq!(actual[0].1, Some(value.as_os_str()));
             assert_eq!(actual[1].0, "ASB_TEST_AVAILABLE_MIB");
-            assert_eq!(actual[1].1, Some("100000".as_ref()));
+            assert_eq!(actual[1].1, Some("18446744073709551615".as_ref()));
         }
         None => {
             assert_eq!(actual.len(), 1);
             assert_eq!(actual[0].0, "ASB_TEST_AVAILABLE_MIB");
-            assert_eq!(actual[0].1, Some("100000".as_ref()));
+            assert_eq!(actual[0].1, Some("18446744073709551615".as_ref()));
         }
     }
 }
