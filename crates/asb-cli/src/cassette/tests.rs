@@ -447,6 +447,16 @@ fn auxiliary_artifacts_reject_unlisted_or_duplicate_paths() {
         sha256: digest(b"{}\n"),
     });
     assert!(manifest.validate(Limits::default()).is_err());
+    let mut one_artifact = manifest.clone();
+    one_artifact.tracks[0].artifacts.truncate(1);
+    assert!(
+        one_artifact
+            .validate(Limits {
+                max_tracks: 1,
+                ..Limits::default()
+            })
+            .is_err()
+    );
 }
 
 #[test]

@@ -261,6 +261,7 @@ impl Manifest {
         }
         let mut prior = 0;
         let mut bytes = 0u64;
+        let mut payload_entries = self.tracks.len();
         for track in &self.tracks {
             let expected = track
                 .batch
@@ -293,6 +294,12 @@ impl Manifest {
                     return Err(Error(
                         "cassette track contains duplicate auxiliary artifact kinds".into(),
                     ));
+                }
+                payload_entries = payload_entries
+                    .checked_add(1)
+                    .ok_or_else(|| Error("cassette payload entry count overflow".into()))?;
+                if payload_entries > limits.max_tracks {
+                    return Err(Error("cassette exceeds payload entry limit".into()));
                 }
                 bytes = bytes
                     .checked_add(artifact.bytes)

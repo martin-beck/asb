@@ -19,7 +19,8 @@ pub struct Limits {
     pub max_directory_bytes: u64,
     /// Maximum manifest JSON bytes.
     pub max_manifest_bytes: u64,
-    /// Maximum tracks, excluding the manifest entry.
+    /// Maximum cassette payload entries (provider tracks plus auxiliary
+    /// artifacts), excluding the manifest entry.
     pub max_tracks: usize,
     /// Maximum uncompressed length of one JSONL track.
     pub max_track_bytes: u64,
@@ -51,7 +52,7 @@ impl Limits {
             || self.max_tracks > 65_533
         {
             return Err(Error(
-                "cassette reader limits must be positive; this ZIP32 schema supports at most 65533 tracks"
+                "cassette reader limits must be positive; this ZIP32 schema supports at most 65533 payload entries"
                     .into(),
             ));
         }
