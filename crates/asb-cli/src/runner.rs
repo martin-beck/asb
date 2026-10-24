@@ -102,6 +102,11 @@ struct RunResult<'a> {
     token_usage: measurements::TokenUsage,
     steps: Option<u64>,
     tool_calls: Vec<crate::proxy::tool_calls::ToolCall>,
+    /// Private, validated input for cassette publication. This is never put
+    /// in user-facing run JSON or logs; the recorder seals it as an auxiliary
+    /// `local-tools` cassette payload.
+    #[serde(skip)]
+    local_tool_transcript: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cassette: Option<String>,
     /// Actual capture directory, including a CLI --measurements override.
@@ -2291,6 +2296,7 @@ mod tests {
             },
             steps: Some(2),
             tool_calls: Vec::new(),
+            local_tool_transcript: None,
             cassette: None,
             measurement_directory: None,
             stdout: "done".into(),
@@ -2436,6 +2442,7 @@ mod tests {
                 command: &mut prepared,
                 model: &base.model,
                 connection: &connection,
+                workspace: std::path::Path::new("fixture-workspace"),
                 runtime_dir: std::path::Path::new("fixture-private"),
                 run_dir: run,
                 tape: None,

@@ -3,8 +3,8 @@ mod raw;
 pub(crate) mod union;
 use super::{RunResult, io_error, replica};
 use crate::cassette::{
-    Compatibility, Limits, Manifest, Publication, RecordingJournal, Statistics, Track,
-    TrackEvidence,
+    Artifact, ArtifactInput, Compatibility, Limits, Manifest, Publication, RecordingJournal,
+    Statistics, Track, TrackEvidence,
 };
 use crate::{Error, proxy};
 use serde::{Deserialize, Serialize};
@@ -490,21 +490,63 @@ impl Recorder {
                 .journal
                 .as_mut()
                 .ok_or_else(|| Error::Io("recording has no verified material identity".into()))?;
+            let mut local_tools = result
+                .local_tool_transcript
+                .as_deref()
+                .map(crate::agents::tool_replay::canonicalize)
+                .transpose()?
+                .map(std::io::Cursor::new);
+            let local_tools_artifact = local_tools.as_ref().map(|bytes| Artifact {
+                kind: "local-tools".into(),
+                bytes: bytes.get_ref().len() as u64,
+                sha256: crate::cassette::digest(bytes.get_ref()),
+            });
             if let Some(file) = &mut file {
                 file.seek(SeekFrom::Start(0)).map_err(io_error)?;
                 journal
-                    .commit(track.clone(), file)
+                    .commit_with_artifacts(
+                        track.clone(),
+                        file,
+                        local_tools_artifact
+                            .clone()
+                            .zip(local_tools.as_mut())
+                            .map(|(artifact, source)| ArtifactInput { artifact, source })
+                            .into_iter()
+                            .collect(),
+                    )
                     .map_err(recording_error)?;
             } else {
                 journal
-                    .commit(track.clone(), &mut std::io::empty())
+                    .commit_with_artifacts(
+                        track.clone(),
+                        &mut std::io::empty(),
+                        local_tools_artifact
+                            .zip(local_tools.as_mut())
+                            .map(|(artifact, source)| ArtifactInput { artifact, source })
+                            .into_iter()
+                            .collect(),
+                    )
                     .map_err(recording_error)?;
             }
+            // commit_with_artifacts constructs the immutable artifact list
+            // itself; obtain that committed track before asking for evidence.
+            // Supplying an already-populated list would be rejected by the
+            // journal, while retaining the pre-commit track would fail its
+            // strict immutable-metadata comparison.
+            let committed_track = journal
+                .snapshot()
+                .map_err(recording_error)?
+                .tracks
+                .into_iter()
+                .find(|candidate| candidate.id == track.id)
+                .ok_or_else(|| Error::Io("recording lost its committed track".into()))?;
             let evidence = Evidence {
                 campaign_root: self.root.clone(),
                 producer: output,
                 attempt_id: result.task.attempt_id.clone(),
-                track: journal.track_evidence(&track).map_err(recording_error)?,
+                track: journal
+                    .track_evidence(&committed_track)
+                    .map_err(recording_error)?,
                 generation: self.binding.clone(),
             };
             let evidence_bytes =

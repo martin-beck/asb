@@ -77,6 +77,7 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
         )),
         steps: None,
         final_response: None,
+        ..Default::default()
     }
 }
 

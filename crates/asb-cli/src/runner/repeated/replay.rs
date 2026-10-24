@@ -156,7 +156,8 @@ impl Prepared {
             let index = if let Some(index) = seen.get(id) {
                 *index
             } else {
-                let (path, bytes, sha256, complete) = if let Some(manifest) = self.source.manifest()
+                let (path, bytes, sha256, complete, local_tools) = if let Some(manifest) =
+                    self.source.manifest()
                 {
                     let track = manifest.track(*id).map_err(input_error)?;
                     (
@@ -164,6 +165,11 @@ impl Prepared {
                         track.bytes,
                         track.sha256.clone(),
                         Some(track.complete),
+                        track
+                            .artifacts
+                            .iter()
+                            .any(|artifact| artifact.kind == "local-tools")
+                            .then(|| PathBuf::from(format!("inputs/local-tools-{id}.jsonl"))),
                     )
                 } else {
                     let track = self
@@ -172,7 +178,13 @@ impl Prepared {
                         .iter()
                         .find(|track| track.id == *id)
                         .ok_or_else(|| Error::Input("selected legacy track disappeared".into()))?;
-                    (track.path.clone(), track.bytes, track.sha256.clone(), None)
+                    (
+                        track.path.clone(),
+                        track.bytes,
+                        track.sha256.clone(),
+                        None,
+                        None,
+                    )
                 };
                 total = total
                     .checked_add(bytes)
@@ -186,6 +198,7 @@ impl Prepared {
                     track: Some(*id),
                     source: path,
                     private: PathBuf::from(format!("inputs/track-{id}.jsonl")),
+                    local_tools,
                     bytes,
                     sha256,
                 });
@@ -213,6 +226,13 @@ impl Prepared {
                 ));
             }
             publish_bytes(&root.join(&input.private), &bytes)?;
+            if let Some(local_tools) = &input.local_tools {
+                let bytes = self
+                    .source
+                    .read_artifact(input.track.expect("selected bundle track"), "local-tools")
+                    .map_err(input_error)?;
+                publish_bytes(&root.join(local_tools), &bytes)?;
+            }
         }
         Ok(())
     }
@@ -306,12 +326,34 @@ pub(super) fn stage_selected(
         } else {
             crate::benchmark_paths::replica_path(&base, slot.replica)
         };
-        fs::hard_link(root.join(&input.private), destination).map_err(crate::io_error)?;
+        fs::hard_link(root.join(&input.private), &destination).map_err(crate::io_error)?;
+        stage_local_tools(root, input, &destination, slot.replica, concurrency)?;
     }
     fs::File::open(base.parent().expect("batch parent"))
         .and_then(|file| file.sync_all())
         .map_err(crate::io_error)?;
     path_text(&base)
+}
+
+fn stage_local_tools(
+    root: &Path,
+    input: &ReplayInput,
+    destination: &Path,
+    replica: usize,
+    concurrency: usize,
+) -> Result<(), Error> {
+    let Some(local_tools) = &input.local_tools else {
+        return Ok(());
+    };
+    let destination = destination
+        .parent()
+        .expect("replay destination has parent")
+        .join(if concurrency == 1 {
+            "local-tools.jsonl".into()
+        } else {
+            format!("local-tools-{replica}.jsonl")
+        });
+    fs::hard_link(root.join(local_tools), destination).map_err(crate::io_error)
 }
 
 fn generated_seed() -> u64 {
@@ -354,4 +396,66 @@ pub(super) fn disclose_incomplete<'a>(
 
 fn input_error(error: crate::cassette::Error) -> Error {
     Error::Input(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_local_tool_payload_is_linked_only_into_its_replica_batch() {
+        let root =
+            std::env::temp_dir().join(format!("asb-replay-local-tools-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("inputs")).unwrap();
+        fs::create_dir_all(root.join("batch")).unwrap();
+        fs::write(
+            root.join("inputs/local-tools-7.jsonl"),
+            b"{\"sequence\":1}\n",
+        )
+        .unwrap();
+        let input = ReplayInput {
+            complete: Some(true),
+            track: Some(7),
+            source: PathBuf::from("sealed.asb.zip"),
+            private: PathBuf::from("inputs/track-7.jsonl"),
+            local_tools: Some(PathBuf::from("inputs/local-tools-7.jsonl")),
+            bytes: 2,
+            sha256: "a".repeat(64),
+        };
+        let destination = root.join("batch/replay.jsonl");
+        stage_local_tools(&root, &input, &destination, 3, 4).unwrap();
+        assert_eq!(
+            fs::read(root.join("batch/local-tools-3.jsonl")).unwrap(),
+            b"{\"sequence\":1}\n"
+        );
+        assert!(!root.join("batch/local-tools-1.jsonl").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn singleton_local_tool_payload_uses_the_provider_basename() {
+        let root =
+            std::env::temp_dir().join(format!("asb-replay-local-tools-one-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("inputs")).unwrap();
+        fs::create_dir_all(root.join("batch")).unwrap();
+        fs::write(root.join("inputs/local-tools-1.jsonl"), b"{}\n").unwrap();
+        let input = ReplayInput {
+            complete: Some(true),
+            track: Some(1),
+            source: root.join("source"),
+            private: PathBuf::from("inputs/track-1.jsonl"),
+            local_tools: Some(PathBuf::from("inputs/local-tools-1.jsonl")),
+            bytes: 3,
+            sha256: crate::cassette::digest(b"{}\n"),
+        };
+        stage_local_tools(&root, &input, &root.join("batch/replay.jsonl"), 1, 1).unwrap();
+        assert_eq!(
+            fs::read(root.join("batch/local-tools.jsonl")).unwrap(),
+            b"{}\n"
+        );
+        assert!(!root.join("batch/local-tools-1.jsonl").exists());
+        let _ = fs::remove_dir_all(root);
+    }
 }

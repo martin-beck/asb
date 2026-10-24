@@ -19,6 +19,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_artifact_specs(&[super::super::ArtifactSpec {
     namespace: "mini-swe",
     filename: "trajectory.json",
+    format: super::super::ArtifactFormat::Json,
 }]);
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
@@ -81,6 +82,7 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
         final_response: super::super::final_text_from_event(document),
         token_usage: Some(trajectory_usage(document)),
         steps: trajectory_steps(document),
+        ..Default::default()
     }
 }
 

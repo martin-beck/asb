@@ -27,6 +27,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_artifact_specs(&[super::super::ArtifactSpec {
     namespace: "hermes",
     filename: "usage.json",
+    format: super::super::ArtifactFormat::Json,
 }])
 .with_state_environment_vars(&["HERMES_HOME"])
 .with_final_response(final_response);
@@ -149,6 +150,7 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
         token_usage: Some(super::super::usage_fields(value).with_derived_total()),
         steps: value.get("api_calls").and_then(serde_json::Value::as_u64),
         final_response: None,
+        ..Default::default()
     }
 }
 
@@ -220,6 +222,7 @@ mod tests {
             command: &mut command,
             model: "fixture",
             connection: &connection,
+            workspace: &root,
             runtime_dir: &root,
             run_dir: &run,
             tape: None,

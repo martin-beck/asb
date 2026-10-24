@@ -228,6 +228,7 @@ fn selected_adapter_replaces_removed_parent_alias_with_its_fresh_configuration()
             command: &mut command,
             model: "fixture",
             connection: &request.connection,
+            workspace: &request.project_root,
             runtime_dir: &request.runtime_dir,
             run_dir: &request.run_dir,
             tape: None,

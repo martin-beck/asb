@@ -100,6 +100,11 @@ pub(crate) struct GuestResult {
     pub final_response: Option<String>,
     pub token_usage: crate::measurements::TokenUsage,
     pub steps: Option<u64>,
+    /// Private, frozen tool transcript returned only to the owning host
+    /// recorder. It is sealed into the cassette before the run is published;
+    /// reports and command output never render its contents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_tool_transcript: Option<Vec<u8>>,
     pub execution_failure: Option<String>,
     #[serde(default)]
     pub tree_quiesced: bool,
@@ -460,6 +465,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         command: &mut command,
         model: &request.config.model,
         connection: &request.connection,
+        workspace: &workspace,
         runtime_dir: &state_root,
         run_dir: &request.run_dir,
         tape: request
@@ -683,6 +689,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         steps: artifacts
             .steps
             .or_else(|| adapter.step_count(&stdout, &stderr)),
+        local_tool_transcript: artifacts.local_tool_transcript,
         execution_failure: {
             #[cfg(target_os = "linux")]
             let timed_out = held.as_ref().is_some_and(|held| held.timed_out);
@@ -807,6 +814,7 @@ mod artifact_publication_tests {
                 &[super::super::ArtifactSpec {
                     namespace: "scratch",
                     filename: "evidence.json",
+                    format: super::super::ArtifactFormat::Json,
                 }],
             )
             .unwrap();
@@ -833,6 +841,7 @@ mod artifact_publication_tests {
                     ..Default::default()
                 },
                 steps: Some(4),
+                local_tool_transcript: None,
                 execution_failure: None,
                 tree_quiesced: true,
                 namespace_collectors: Default::default(),

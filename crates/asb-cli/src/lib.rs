@@ -127,6 +127,9 @@ pub fn entry(args: Vec<OsString>) -> ExitCode {
     if args.first().is_some_and(|arg| arg == "__asb-agent") {
         return agents::driver::entry();
     }
+    if args.first().is_some_and(|arg| arg == "__asb-tool-replay") {
+        return agents::tool_replay_mcp::entry(&args[1..]);
+    }
     if args.first().is_some_and(|arg| arg == "__asb-gate") {
         return process_gate::run_gate(&args[1..]);
     }
@@ -252,8 +255,15 @@ mod adapter_layout_tests {
             CategoryLayout {
                 category: "agents",
                 ids: super::agents::names().collect(),
-                // Attempt artifact ownership is generic adapter infrastructure.
-                root_modules: &["mod.rs", "driver.rs", "artifacts.rs"],
+                // Attempt artifact ownership and the sealed causal local-tool
+                // replay transport are generic adapter infrastructure.
+                root_modules: &[
+                    "mod.rs",
+                    "driver.rs",
+                    "artifacts.rs",
+                    "tool_replay.rs",
+                    "tool_replay_mcp.rs",
+                ],
                 root_directories: &[],
             },
             CategoryLayout {

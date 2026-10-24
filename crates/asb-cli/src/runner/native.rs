@@ -179,6 +179,7 @@ impl NativePlan<'_> {
                         command: &mut command,
                         model: &config.model,
                         connection,
+                        workspace,
                         runtime_dir: &runtime_path,
                         run_dir: &run_dir,
                         tape: tape_mode

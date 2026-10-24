@@ -1074,6 +1074,10 @@ impl ResultFacts {
             .filter(|_| cassette_usage_verified)
             .map(|(_, cassette)| crate::proxy::tool_calls::from_cassette(cassette))
             .unwrap_or_default();
+        let local_tool_transcript = guest
+            .as_ref()
+            .and_then(|metadata| metadata.local_tool_transcript.clone())
+            .or(adapter_artifacts.local_tool_transcript.clone());
         let mut stderr = bounded(&child.stderr);
         if let Some(error) = provider_cleanup_error.as_ref() {
             stderr.push_str("\nASB provider cleanup error: ");
@@ -1157,6 +1161,7 @@ impl ResultFacts {
             token_usage,
             steps,
             tool_calls,
+            local_tool_transcript,
             cassette: tape_cassette
                 .as_ref()
                 .map(|(_, cassette)| cassette.display().to_string()),

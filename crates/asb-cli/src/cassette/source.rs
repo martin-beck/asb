@@ -283,6 +283,17 @@ impl Source {
             }
         }
     }
+
+    /// Read one catalogue-declared auxiliary payload from a ZIP cassette.
+    /// Legacy JSONL recordings deliberately cannot manufacture such evidence.
+    pub fn read_artifact(&mut self, id: u64, kind: &str) -> Result<Vec<u8>, Error> {
+        match &mut self.storage {
+            Storage::Bundle(archive) => archive.read_artifact(id, kind),
+            Storage::Legacy { .. } => Err(Error(
+                "legacy cassette has no sealed auxiliary artifacts".into(),
+            )),
+        }
+    }
 }
 
 fn open_regular(path: &Path) -> Result<Option<File>, Error> {

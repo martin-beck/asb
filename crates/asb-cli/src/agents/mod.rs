@@ -5,7 +5,9 @@
 
 mod adapters;
 mod artifacts;
-pub(crate) use artifacts::{ArtifactOwner, ArtifactSpec, FrozenArtifacts};
+pub(crate) mod tool_replay;
+pub(crate) mod tool_replay_mcp;
+pub(crate) use artifacts::{ArtifactFormat, ArtifactOwner, ArtifactSpec, FrozenArtifacts};
 pub(crate) mod driver;
 use adapters::REGISTRY;
 
@@ -115,6 +117,9 @@ pub(crate) struct PreparationContext<'a> {
     pub command: &'a mut Command,
     pub model: &'a str,
     pub connection: &'a crate::endpoint::Connection,
+    /// Canonical workload workspace.  Adapter-owned local tools must receive
+    /// this explicitly rather than inferring it from a process cwd.
+    pub workspace: &'a Path,
     /// Private mutable configuration for this agent execution.
     pub runtime_dir: &'a Path,
     /// A unique path for artifacts belonging to this individual run.
@@ -173,6 +178,10 @@ pub(crate) struct AgentArtifacts {
     /// Agent-reported completed model/tool calls, when the adapter exposes a
     /// bounded structured usage artifact.
     pub steps: Option<u64>,
+    /// A validated JSONL transcript of client-local tool turns.  The generic
+    /// runner treats this only as a sealed auxiliary cassette payload; tool
+    /// semantics remain in the adapter-owned replay transport.
+    pub local_tool_transcript: Option<Vec<u8>>,
 }
 
 pub(crate) struct CollectionContext<'a> {
@@ -447,9 +456,17 @@ impl AgentAdapter for StaticAdapter {
         self.replay_credential_vars
     }
     fn collect(&self, context: &CollectionContext<'_>) -> AgentArtifacts {
-        self.collect
+        let mut artifacts = self
+            .collect
             .map(|collect| collect(context))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if self.tool_replay.is_some() {
+            artifacts.local_tool_transcript = context
+                .frozen
+                .bytes("local-tools.jsonl")
+                .map(ToOwned::to_owned);
+        }
+        artifacts
     }
     fn artifact_specs(&self) -> &'static [ArtifactSpec] {
         self.artifact_specs
@@ -749,6 +766,7 @@ mod tests {
                     command: &mut command,
                     model: "test-model",
                     connection: &connection,
+                    workspace: &runtime,
                     runtime_dir: &runtime,
                     run_dir: &runtime,
                     tape: None,
@@ -882,6 +900,7 @@ mod tests {
                             command: &mut command,
                             model: "unused",
                             connection: &connection,
+                            workspace: &root,
                             runtime_dir: &root,
                             run_dir: &root,
                             tape: None,
@@ -930,6 +949,7 @@ mod tests {
                             command: &mut command,
                             model: "example/model",
                             connection: &connection,
+                            workspace: &runtime,
                             runtime_dir: &runtime,
                             run_dir: &runtime,
                             tape: None,

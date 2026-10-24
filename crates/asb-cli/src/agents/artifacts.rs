@@ -10,10 +10,23 @@ const LIMIT: u64 = 16 * 1024 * 1024;
 pub(crate) struct ArtifactSpec {
     pub namespace: &'static str,
     pub filename: &'static str,
+    pub format: ArtifactFormat,
+}
+
+/// The bounded, parseable form expected from an agent-owned artifact.
+///
+/// JSON is the historical default.  JSONL is used only for the causal
+/// local-tool transcript, whose individual events are validated by its owning
+/// replay module before it enters a cassette.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ArtifactFormat {
+    Json,
+    JsonLines,
 }
 
 struct OwnedFile {
     path: PathBuf,
+    format: ArtifactFormat,
     namespace: File,
     directory: Observation,
     observed: Option<Observation>,
@@ -135,12 +148,16 @@ pub(crate) struct ArtifactSettlement {
 #[derive(Default)]
 pub(crate) struct FrozenArtifacts {
     documents: BTreeMap<String, serde_json::Value>,
+    bytes: BTreeMap<String, Vec<u8>>,
     pub error: bool,
     diagnostics: Vec<String>,
 }
 impl FrozenArtifacts {
     pub fn document(&self, filename: &str) -> Option<&serde_json::Value> {
         self.documents.get(filename)
+    }
+    pub fn bytes(&self, filename: &str) -> Option<&[u8]> {
+        self.bytes.get(filename).map(Vec::as_slice)
     }
     pub fn diagnostic(&self) -> Option<String> {
         (!self.diagnostics.is_empty()).then(|| self.diagnostics.join("; "))
@@ -149,6 +166,7 @@ impl FrozenArtifacts {
     pub(crate) fn for_test(filename: &str, value: serde_json::Value) -> Self {
         Self {
             documents: [(filename.into(), value)].into_iter().collect(),
+            bytes: BTreeMap::new(),
             error: false,
             diagnostics: Vec::new(),
         }
@@ -210,6 +228,7 @@ impl ArtifactOwner {
             let metadata = Observation::read(&namespace).map_err(crate::io_error)?;
             owner.files.push(OwnedFile {
                 path: directory.join(spec.filename),
+                format: spec.format,
                 namespace,
                 directory: metadata,
                 observed: None,
@@ -273,22 +292,27 @@ impl ArtifactOwner {
                 {
                     return Err(std::io::Error::other("artifact changed or exceeds bound"));
                 }
-                serde_json::from_slice(&bytes)
-                    .map(|document| Some((document, bytes)))
-                    .map_err(|_| std::io::Error::other("malformed artifact JSON"))
+                match owned.format {
+                    ArtifactFormat::Json => serde_json::from_slice(&bytes)
+                        .map(|document| Some((Some(document), bytes)))
+                        .map_err(|_| std::io::Error::other("malformed artifact JSON")),
+                    ArtifactFormat::JsonLines => Ok(Some((None, bytes))),
+                }
             })();
             match result {
                 Ok(Some((document, bytes))) => {
                     owned.snapshot = Some(bytes);
-                    frozen.documents.insert(
-                        owned
-                            .path
-                            .file_name()
-                            .expect("artifact filename")
-                            .to_string_lossy()
-                            .into_owned(),
-                        document,
-                    );
+                    let name = owned
+                        .path
+                        .file_name()
+                        .expect("artifact filename")
+                        .to_string_lossy()
+                        .into_owned();
+                    if let Some(document) = document {
+                        frozen.documents.insert(name, document);
+                    } else if let Some(snapshot) = owned.snapshot.as_ref() {
+                        frozen.bytes.insert(name, snapshot.clone());
+                    }
                 }
                 Ok(None) => (),
                 Err(error) => {
@@ -754,6 +778,7 @@ mod tests {
     const SPEC: &[ArtifactSpec] = &[ArtifactSpec {
         namespace: "scratch",
         filename: "evidence.json",
+        format: ArtifactFormat::Json,
     }];
     struct Fixture(PathBuf);
     impl Fixture {
@@ -845,6 +870,24 @@ mod tests {
                 r#"{"answer":"old"}"#
             );
         }
+    }
+
+    #[test]
+    fn jsonl_artifact_is_frozen_as_exact_private_bytes_not_parsed_as_json() {
+        let fixture = Fixture::new();
+        let spec = [ArtifactSpec {
+            namespace: "tool-replay",
+            filename: "local-tools.jsonl",
+            format: ArtifactFormat::JsonLines,
+        }];
+        let mut owner = ArtifactOwner::prepare(&fixture.0, &spec).unwrap();
+        let bytes = b"{\"schema_version\":1}\n{\"schema_version\":1}\n";
+        fs::write(fixture.0.join("tool-replay/local-tools.jsonl"), bytes).unwrap();
+        let frozen = owner.freeze();
+        assert!(!frozen.error);
+        assert_eq!(frozen.bytes("local-tools.jsonl"), Some(bytes.as_slice()));
+        assert!(frozen.document("local-tools.jsonl").is_none());
+        assert!(owner.settle().is_ok());
     }
 
     #[test]
