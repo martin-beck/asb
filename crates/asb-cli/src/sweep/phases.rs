@@ -135,6 +135,7 @@ impl<'a> PreparedSweep<'a> {
                 mode,
             ),
             options.interactive && !options.json,
+            options.json,
             output,
         )?;
         // Warm selected workload dependencies before moving old output or taking
