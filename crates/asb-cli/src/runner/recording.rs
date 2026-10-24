@@ -484,6 +484,7 @@ impl Recorder {
                     requests: capture.map(|capture| capture.inference_requests),
                     steps: result.steps,
                 },
+                artifacts: Vec::new(),
             };
             let journal = state
                 .journal
@@ -885,6 +886,7 @@ mod tests {
                 bytes: 3,
                 sha256: crate::cassette::digest(b"{}\n"),
                 statistics: Statistics::default(),
+                artifacts: Vec::new(),
             };
             let replacement_root = root.clone();
             BEFORE_RAW_UNLINK.with_borrow_mut(|hook| {
@@ -1023,6 +1025,7 @@ mod tests {
                 bytes: 3,
                 sha256: crate::cassette::digest(b"{}\n"),
                 statistics: Statistics::default(),
+                artifacts: Vec::new(),
             };
             match mode {
                 "mutated" => fs::write(&output, b"[]\n").unwrap(),

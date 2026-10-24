@@ -283,5 +283,6 @@ fn maximum_track(count: u64, repeat: u64, concurrency: u64, limits: Limits) -> T
             requests: Some(u64::MAX),
             steps: Some(u64::MAX),
         },
+        artifacts: Vec::new(),
     }
 }

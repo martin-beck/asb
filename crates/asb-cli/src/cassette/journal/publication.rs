@@ -338,6 +338,24 @@ impl RecordingJournal {
                     "staged payload is missing during ZIP publication".into(),
                 ));
             }
+            for artifact in &track.artifacts {
+                self.publication_fault.check("before-zip-artifact")?;
+                writer
+                    .start_file(track.artifact_entry_name(&artifact.kind), options)
+                    .map_err(zip_error)?;
+                let path = self.artifact_path(track.id, &artifact.kind);
+                let copied = std::io::copy(
+                    &mut open_regular(&path, artifact.bytes)?
+                        .take(artifact.bytes.saturating_add(1)),
+                    &mut writer,
+                )
+                .map_err(io_error)?;
+                if copied != artifact.bytes {
+                    return Err(Error(
+                        "staged auxiliary artifact changed while building ZIP".into(),
+                    ));
+                }
+            }
         }
         self.publication_fault.check("before-zip-finish")?;
         let output = writer.finish().map_err(zip_error)?;
@@ -430,6 +448,17 @@ impl RecordingJournal {
                 "staged recording payload changed after freeze".into(),
             ));
         }
+        for artifact in &track.artifacts {
+            if hash_file(
+                &self.artifact_path(track.id, &artifact.kind),
+                artifact.bytes,
+            )? != (artifact.bytes, artifact.sha256.clone())
+            {
+                return Err(Error(
+                    "staged recording auxiliary artifact changed after freeze".into(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -459,6 +488,9 @@ impl RecordingJournal {
         }
         for track in &manifest.tracks {
             archive.read_track(track.id)?;
+            for artifact in &track.artifacts {
+                archive.read_artifact(track.id, &artifact.kind)?;
+            }
         }
         Ok(())
     }
@@ -522,6 +554,31 @@ impl RecordingJournal {
                     track.id
                 ));
                 return warnings;
+            }
+            for artifact in &track.artifacts {
+                let path = self.artifact_path(track.id, &artifact.kind);
+                let result = (|| {
+                    self.check_root_identity()?;
+                    self.publication_fault.check("before-payload-cleanup")?;
+                    if exists(&path)? {
+                        if hash_file(&path, artifact.bytes)?
+                            != (artifact.bytes, artifact.sha256.clone())
+                        {
+                            return Err(Error(
+                                "staged recording auxiliary artifact changed after freeze".into(),
+                            ));
+                        }
+                        fs::remove_file(&path).map_err(io_error)?;
+                        sync_directory(&self.root)?;
+                    }
+                    self.publication_fault.check("after-payload-cleanup")
+                })();
+                if let Err(error) = result {
+                    warnings.push(format!(
+                        "could not remove sealed auxiliary recording payload {}: {error}",
+                        path.display()
+                    ));
+                }
             }
         }
         let candidate = self.root.join(&prepared.candidate);

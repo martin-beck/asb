@@ -64,6 +64,7 @@ pub struct Archive {
     archive: ZipArchive<MetadataReader>,
     manifest: Manifest,
     entries: BTreeMap<u64, usize>,
+    artifact_entries: BTreeMap<(u64, String), usize>,
     limits: Limits,
     metadata_bytes: (u64, u64),
 }
@@ -149,12 +150,21 @@ impl Archive {
                 .and_then(|value| value.strip_suffix(".jsonl"))
                 .and_then(|value| value.parse::<u64>().ok())
                 .is_some_and(|id| id > 0 && name == format!("tracks/{id}.jsonl"));
+            let canonical_artifact = name
+                .strip_prefix("artifacts/")
+                .and_then(|value| value.split_once('/'))
+                .and_then(|(id, kind)| {
+                    kind.strip_suffix(".jsonl")
+                        .filter(|base| !base.is_empty())
+                        .and_then(|base| id.parse::<u64>().ok().map(|id| (id, base)))
+                })
+                .is_some_and(|(id, kind)| id > 0 && name == format!("artifacts/{id}/{kind}.jsonl"));
             let size_limit = if is_manifest {
                 limits.max_manifest_bytes
             } else {
                 limits.max_track_bytes
             };
-            if (!is_manifest && !canonical_track)
+            if (!is_manifest && !canonical_track && !canonical_artifact)
                 || names.contains_key(&name)
                 || entry.encrypted()
                 || entry.compression() != CompressionMethod::Deflated
@@ -190,12 +200,18 @@ impl Archive {
             .map_err(|error| Error(format!("invalid cassette manifest: {error}")))?;
         manifest.validate(limits)?;
         manifest.validate_imports()?;
-        if names.len() != manifest.tracks.len() + 1 {
+        let artifact_count = manifest
+            .tracks
+            .iter()
+            .map(|track| track.artifacts.len())
+            .sum::<usize>();
+        if names.len() != manifest.tracks.len() + artifact_count + 1 {
             return Err(Error(
                 "cassette manifest and ZIP track catalogue differ".into(),
             ));
         }
         let mut entries = BTreeMap::new();
+        let mut artifact_entries = BTreeMap::new();
         for track in &manifest.tracks {
             let index = *names
                 .get(&track.entry_name())
@@ -207,11 +223,28 @@ impl Archive {
                 )));
             }
             entries.insert(track.id, index);
+            for artifact in &track.artifacts {
+                let name = track.artifact_entry_name(&artifact.kind);
+                let index = *names.get(&name).ok_or_else(|| {
+                    Error(format!(
+                        "cassette track {} auxiliary artifact {} payload is missing",
+                        track.id, artifact.kind
+                    ))
+                })?;
+                if archive.by_index_data(index).map_err(zip_error)?.size() != artifact.bytes {
+                    return Err(Error(format!(
+                        "cassette track {} auxiliary artifact {} length differs from manifest",
+                        track.id, artifact.kind
+                    )));
+                }
+                artifact_entries.insert((track.id, artifact.kind.clone()), index);
+            }
         }
         Ok(Self {
             archive,
             manifest,
             entries,
+            artifact_entries,
             limits,
             metadata_bytes: (directory_bytes, bytes.len() as u64),
         })
@@ -238,6 +271,31 @@ impl Archive {
         if bytes.len() as u64 != track.bytes || digest(&bytes) != track.sha256 {
             return Err(Error(format!(
                 "cassette track {id} checksum or length mismatch"
+            )));
+        }
+        Ok(bytes)
+    }
+
+    /// Decode one sealed auxiliary payload for the selected execution track.
+    pub fn read_artifact(&mut self, id: u64, kind: &str) -> Result<Vec<u8>, Error> {
+        let track = self.manifest.track(id)?;
+        let artifact = track
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == kind)
+            .ok_or_else(|| {
+                Error(format!(
+                    "cassette track {id} has no auxiliary artifact {kind}"
+                ))
+            })?;
+        let index = *self
+            .artifact_entries
+            .get(&(id, kind.to_owned()))
+            .ok_or_else(|| Error("cassette auxiliary artifact payload is absent".into()))?;
+        let bytes = read_bounded(&mut self.archive, index, self.limits.max_track_bytes)?;
+        if bytes.len() as u64 != artifact.bytes || digest(&bytes) != artifact.sha256 {
+            return Err(Error(format!(
+                "cassette track {id} auxiliary artifact {kind} checksum or length mismatch"
             )));
         }
         Ok(bytes)
