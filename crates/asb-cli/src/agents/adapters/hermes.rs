@@ -222,6 +222,7 @@ mod tests {
             command: &mut command,
             model: "fixture",
             connection: &connection,
+            workspace: &root,
             runtime_dir: &root,
             run_dir: &run,
             tape: None,

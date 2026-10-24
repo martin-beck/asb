@@ -4,7 +4,10 @@
 //! configuration. It records canonical calls in record mode and applies only
 //! the pre-recorded effects in replay mode.
 
-use super::tool_replay::{self, Effect, Event, SCHEMA_VERSION, Transcript};
+use super::{
+    PreparationContext, TapeContext,
+    tool_replay::{self, Effect, Event, SCHEMA_VERSION, Transcript},
+};
 use crate::Error;
 use serde_json::{Value, json};
 use std::ffi::OsString;
@@ -28,6 +31,64 @@ struct Options {
     mode: Mode,
     workspace: PathBuf,
     transcript: PathBuf,
+}
+
+/// The adapter-facing, private stdio command for a single tape-backed run.
+/// It is deliberately constructed here so every adapter gets the same sealed
+/// transcript naming and replay fail-closed behavior.
+pub(crate) struct Launch {
+    pub program: std::path::PathBuf,
+    pub args: Vec<std::ffi::OsString>,
+}
+
+pub(crate) fn launch(
+    context: &PreparationContext<'_>,
+    tape: TapeContext<'_>,
+) -> Result<Launch, Error> {
+    let transcript = match tape.mode {
+        crate::tape::Mode::Record => context.run_dir.join("tool-replay/local-tools.jsonl"),
+        crate::tape::Mode::Replay => replay_transcript(tape.cassette)?,
+    };
+    if tape.mode == crate::tape::Mode::Replay && !transcript.is_file() {
+        return Err(Error::Run(
+            "this replay requires its sealed local-tool transcript; record the benchmark again before replaying it".into(),
+        ));
+    }
+    let program = std::env::current_exe().map_err(|error| {
+        Error::Run(format!(
+            "cannot locate the ASB local-tool replay executable: {error}"
+        ))
+    })?;
+    Ok(Launch {
+        program,
+        args: vec![
+            "__asb-tool-replay".into(),
+            "--mode".into(),
+            match tape.mode {
+                crate::tape::Mode::Record => "record".into(),
+                crate::tape::Mode::Replay => "replay".into(),
+            },
+            "--workspace".into(),
+            context.workspace.as_os_str().to_owned(),
+            "--transcript".into(),
+            transcript.into_os_string(),
+        ],
+    })
+}
+
+fn replay_transcript(cassette: &Path) -> Result<PathBuf, Error> {
+    let name = cassette
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::Run("replay cassette has no valid private filename".into()))?;
+    let suffix = name
+        .strip_prefix("replay")
+        .and_then(|suffix| suffix.strip_suffix(".jsonl"))
+        .ok_or_else(|| Error::Run("replay cassette has an unexpected private filename".into()))?;
+    let parent = cassette
+        .parent()
+        .ok_or_else(|| Error::Run("replay cassette has no private directory".into()))?;
+    Ok(parent.join(format!("local-tools{suffix}.jsonl")))
 }
 
 fn run(args: &[OsString]) -> Result<(), Error> {
@@ -252,5 +313,42 @@ mod tests {
     fn options_refuse_unknown_or_partial_arguments() {
         assert!(options(&[OsString::from("--mode"), OsString::from("record")]).is_err());
         assert!(options(&[OsString::from("--unknown"), OsString::from("value")]).is_err());
+    }
+
+    #[test]
+    fn replay_launch_refuses_an_unsealed_local_tool_track() {
+        let root = std::env::temp_dir().join(format!("asb-mcp-launch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let replay = root.join("replay.jsonl");
+        std::fs::write(&replay, "{}\n").unwrap();
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiChat,
+            base_url: "http://127.0.0.1:1/v1".into(),
+            credential: None,
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let mut command = std::process::Command::new("unused");
+        let error = launch(
+            &PreparationContext {
+                command: &mut command,
+                model: "fixture",
+                connection: &connection,
+                workspace: &workspace,
+                runtime_dir: &root,
+                run_dir: &root,
+                tape: None,
+            },
+            TapeContext {
+                mode: crate::tape::Mode::Replay,
+                cassette: &replay,
+            },
+        )
+        .err()
+        .expect("unsealed cassette must not enable host tools")
+        .to_string();
+        assert!(error.contains("sealed local-tool transcript"), "{error}");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

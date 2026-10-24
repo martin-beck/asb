@@ -2442,6 +2442,7 @@ mod tests {
                 command: &mut prepared,
                 model: &base.model,
                 connection: &connection,
+                workspace: std::path::Path::new("fixture-workspace"),
                 runtime_dir: std::path::Path::new("fixture-private"),
                 run_dir: run,
                 tape: None,

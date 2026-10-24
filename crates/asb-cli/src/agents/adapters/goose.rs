@@ -130,15 +130,28 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
-    let mode = match tape.mode {
-        crate::tape::Mode::Record => "record",
-        crate::tape::Mode::Replay => "replay",
-    };
+    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    let extension = std::iter::once(launch.program.as_os_str())
+        .chain(launch.args.iter().map(std::ffi::OsString::as_os_str))
+        .map(shell_quote)
+        .collect::<Result<Vec<_>, _>>()?
+        .join(" ");
     context
         .command
-        .env("ASB_TOOL_REPLAY_MODE", mode)
-        .env("ASB_TOOL_REPLAY_CASSETTE", tape.cassette);
+        // A profile may contribute arbitrary host extensions.  Replay uses
+        // only the explicit ASB server so no external tool can bypass the
+        // sealed transcript.
+        .arg("--no-profile")
+        .arg("--with-extension")
+        .arg(extension);
     Ok(())
+}
+
+fn shell_quote(value: &std::ffi::OsStr) -> Result<String, Error> {
+    let value = value
+        .to_str()
+        .ok_or_else(|| Error::Run("ASB local-tool replay argument is not valid UTF-8".into()))?;
+    Ok(format!("'{}'", value.replace('\'', "'\\\"'\\\"'")))
 }
 
 #[cfg(test)]
@@ -176,6 +189,7 @@ mod tests {
             command: &mut command,
             model: "test-model",
             connection: &connection,
+            workspace: Path::new("."),
             runtime_dir: Path::new("."),
             run_dir: Path::new("."),
             tape: None,
@@ -205,6 +219,7 @@ mod tests {
                 command: &mut command,
                 model: "test-model",
                 connection: &connection,
+                workspace: Path::new("."),
                 runtime_dir: Path::new("."),
                 run_dir: Path::new("."),
                 tape: None,
@@ -225,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn tape_backed_preparation_exposes_only_explicit_tool_replay_context() {
+    fn tape_backed_preparation_uses_only_private_mcp_extension() {
         let mut command = Command::new("goose");
         let connection = crate::endpoint::Connection {
             interface: crate::endpoint::Interface::OpenAiChat,
@@ -233,26 +248,42 @@ mod tests {
             credential: Some("asb-replay".into()),
             authentication: crate::endpoint::Authentication::Bearer,
         };
-        let cassette = Path::new("/private/run/cassette.asb.zip");
+        let root =
+            std::env::temp_dir().join(format!("asb-goose-tool-replay-{}", std::process::id()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let replay = root.join("replay.jsonl");
+        let transcript = root.join("local-tools.jsonl");
+        std::fs::write(&replay, "{}\n").unwrap();
+        std::fs::write(&transcript, "{\"schema_version\":1,\"events\":[]}\n").unwrap();
         ADAPTER
             .prepare(&mut PreparationContext {
                 command: &mut command,
                 model: "test-model",
                 connection: &connection,
-                runtime_dir: Path::new("."),
-                run_dir: Path::new("."),
+                workspace: &workspace,
+                runtime_dir: &root,
+                run_dir: &root,
                 tape: Some(crate::agents::TapeContext {
                     mode: crate::tape::Mode::Replay,
-                    cassette,
+                    cassette: &replay,
                 }),
             })
             .unwrap();
-        let env = environment(&command);
-        assert_eq!(env["ASB_TOOL_REPLAY_MODE"], "replay");
-        assert_eq!(
-            env["ASB_TOOL_REPLAY_CASSETTE"],
-            cassette.display().to_string()
-        );
+        let args = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.iter().any(|argument| argument == "--no-profile"));
+        let extension = args
+            .windows(2)
+            .find(|pair| pair[0] == "--with-extension")
+            .map(|pair| pair[1].as_str())
+            .expect("private extension");
+        assert!(extension.contains("__asb-tool-replay"));
+        assert!(extension.contains("--workspace"));
+        assert!(!environment(&command).contains_key("ASB_TOOL_REPLAY_MODE"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

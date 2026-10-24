@@ -465,6 +465,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         command: &mut command,
         model: &request.config.model,
         connection: &request.connection,
+        workspace: &workspace,
         runtime_dir: &state_root,
         run_dir: &request.run_dir,
         tape: request

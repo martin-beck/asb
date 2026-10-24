@@ -117,6 +117,9 @@ pub(crate) struct PreparationContext<'a> {
     pub command: &'a mut Command,
     pub model: &'a str,
     pub connection: &'a crate::endpoint::Connection,
+    /// Canonical workload workspace.  Adapter-owned local tools must receive
+    /// this explicitly rather than inferring it from a process cwd.
+    pub workspace: &'a Path,
     /// Private mutable configuration for this agent execution.
     pub runtime_dir: &'a Path,
     /// A unique path for artifacts belonging to this individual run.
@@ -763,6 +766,7 @@ mod tests {
                     command: &mut command,
                     model: "test-model",
                     connection: &connection,
+                    workspace: &runtime,
                     runtime_dir: &runtime,
                     run_dir: &runtime,
                     tape: None,
@@ -896,6 +900,7 @@ mod tests {
                             command: &mut command,
                             model: "unused",
                             connection: &connection,
+                            workspace: &root,
                             runtime_dir: &root,
                             run_dir: &root,
                             tape: None,
@@ -944,6 +949,7 @@ mod tests {
                             command: &mut command,
                             model: "example/model",
                             connection: &connection,
+                            workspace: &runtime,
                             runtime_dir: &runtime,
                             run_dir: &runtime,
                             tape: None,

@@ -85,14 +85,45 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
-    let mode = match tape.mode {
-        crate::tape::Mode::Record => "record",
-        crate::tape::Mode::Replay => "replay",
-    };
+    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    let program = launch.program.to_str().ok_or_else(|| {
+        Error::Run("ASB local-tool replay executable path is not valid UTF-8".into())
+    })?;
+    let args = launch
+        .args
+        .iter()
+        .map(|argument| {
+            argument.to_str().map(str::to_owned).ok_or_else(|| {
+                Error::Run("ASB local-tool replay arguments are not valid UTF-8".into())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // CodeBuddy accepts an inline MCP document.  Do not materialize this
+    // inside the workload checkout: an untracked .mcp.json changes both the
+    // agent trajectory and the grader's view of the repository.
+    let configuration = serde_json::json!({
+        "mcpServers": {
+            "asb-local-tools": {
+                "type": "stdio",
+                "command": program,
+                "args": args,
+            }
+        }
+    });
+    let configuration = serde_json::to_string(&configuration).map_err(|error| {
+        Error::Run(format!(
+            "cannot encode WorkBuddy MCP configuration: {error}"
+        ))
+    })?;
     context
         .command
-        .env("ASB_TOOL_REPLAY_MODE", mode)
-        .env("ASB_TOOL_REPLAY_CASSETTE", tape.cassette);
+        // No inherited CodeBuddy tools can bypass the sealed private MCP
+        // track.  The selected server is the only local-tool authority.
+        .arg("--tools")
+        .arg("")
+        .arg("--strict-mcp-config")
+        .arg("--mcp-config")
+        .arg(configuration);
     Ok(())
 }
 
@@ -185,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn tape_backed_preparation_exposes_only_explicit_tool_replay_context() {
+    fn tape_backed_preparation_uses_inline_private_mcp_configuration() {
         let root =
             std::env::temp_dir().join(format!("asb-workbuddy-tool-replay-{}", std::process::id()));
         let mut command = std::process::Command::new("codebuddy");
@@ -195,35 +226,44 @@ mod tests {
             credential: Some("asb-replay".into()),
             authentication: crate::endpoint::Authentication::Bearer,
         };
-        let cassette = std::path::Path::new("/private/run/cassette.asb.zip");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let replay = root.join("replay.jsonl");
+        let transcript = root.join("local-tools.jsonl");
+        std::fs::write(&replay, "{}\n").unwrap();
+        std::fs::write(&transcript, "{\"schema_version\":1,\"events\":[]}\n").unwrap();
         ADAPTER
             .prepare(&mut PreparationContext {
                 command: &mut command,
                 model: "test-model",
                 connection: &connection,
+                workspace: &workspace,
                 runtime_dir: &root,
                 run_dir: &root,
                 tape: Some(crate::agents::TapeContext {
-                    mode: crate::tape::Mode::Record,
-                    cassette,
+                    mode: crate::tape::Mode::Replay,
+                    cassette: &replay,
                 }),
             })
             .unwrap();
-        let env = command
-            .get_envs()
-            .filter_map(|(key, value)| {
-                value.map(|value| {
-                    (
-                        key.to_string_lossy().into_owned(),
-                        value.to_string_lossy().into_owned(),
-                    )
-                })
-            })
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(env["ASB_TOOL_REPLAY_MODE"], "record");
+        let args = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["--tools", ""]));
+        assert!(
+            args.iter()
+                .any(|argument| argument == "--strict-mcp-config")
+        );
+        let mcp = args
+            .windows(2)
+            .find(|pair| pair[0] == "--mcp-config")
+            .map(|pair| serde_json::from_str::<serde_json::Value>(&pair[1]).unwrap())
+            .expect("inline MCP configuration");
+        assert_eq!(mcp["mcpServers"]["asb-local-tools"]["type"], "stdio");
         assert_eq!(
-            env["ASB_TOOL_REPLAY_CASSETTE"],
-            cassette.display().to_string()
+            mcp["mcpServers"]["asb-local-tools"]["args"][0],
+            "__asb-tool-replay"
         );
         let _ = std::fs::remove_dir_all(root);
     }
