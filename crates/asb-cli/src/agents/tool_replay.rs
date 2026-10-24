@@ -124,6 +124,13 @@ impl Transcript {
     }
 }
 
+/// Parse and re-encode a transcript before it enters a cassette.  This makes
+/// the payload canonical and rejects malformed or out-of-order events while
+/// it is still private run evidence.
+pub(crate) fn canonicalize(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    Transcript::decode(bytes)?.encode()
+}
+
 fn valid_tool(tool: &str) -> bool {
     !tool.is_empty()
         && tool.len() <= 128

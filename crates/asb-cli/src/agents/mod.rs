@@ -5,8 +5,8 @@
 
 mod adapters;
 mod artifacts;
-mod tool_replay;
-pub(crate) use artifacts::{ArtifactOwner, ArtifactSpec, FrozenArtifacts};
+pub(crate) mod tool_replay;
+pub(crate) use artifacts::{ArtifactFormat, ArtifactOwner, ArtifactSpec, FrozenArtifacts};
 pub(crate) mod driver;
 use adapters::REGISTRY;
 
@@ -174,6 +174,10 @@ pub(crate) struct AgentArtifacts {
     /// Agent-reported completed model/tool calls, when the adapter exposes a
     /// bounded structured usage artifact.
     pub steps: Option<u64>,
+    /// A validated JSONL transcript of client-local tool turns.  The generic
+    /// runner treats this only as a sealed auxiliary cassette payload; tool
+    /// semantics remain in the adapter-owned replay transport.
+    pub local_tool_transcript: Option<Vec<u8>>,
 }
 
 pub(crate) struct CollectionContext<'a> {
@@ -448,9 +452,17 @@ impl AgentAdapter for StaticAdapter {
         self.replay_credential_vars
     }
     fn collect(&self, context: &CollectionContext<'_>) -> AgentArtifacts {
-        self.collect
+        let mut artifacts = self
+            .collect
             .map(|collect| collect(context))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if self.tool_replay.is_some() {
+            artifacts.local_tool_transcript = context
+                .frozen
+                .bytes("local-tools.jsonl")
+                .map(ToOwned::to_owned);
+        }
+        artifacts
     }
     fn artifact_specs(&self) -> &'static [ArtifactSpec] {
         self.artifact_specs

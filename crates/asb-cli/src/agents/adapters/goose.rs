@@ -25,6 +25,11 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_tool_replay(prepare_tool_replay)
+.with_artifact_specs(&[super::super::ArtifactSpec {
+    namespace: "tool-replay",
+    filename: "local-tools.jsonl",
+    format: super::super::ArtifactFormat::JsonLines,
+}])
 .with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"]);
 
 fn distribution() -> Result<(&'static str, &'static str), Error> {
