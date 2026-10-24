@@ -293,10 +293,15 @@ assert children[0].poll() is not None
         script = "import sys;sys.path.insert(0,"+repr(str(ASSETS))+ ");import asb_runtime_inputs as m;raise SystemExit(m.main())"
         result = subprocess.run([sys.executable,"-I","-S","-B","-c",script],
             input=json.dumps(request).encode(),capture_output=True,timeout=5)
-        self.assertNotEqual(result.returncode,0)
+        # The helper has a structured, private-safe error protocol: a parsed
+        # discovery failure is reported in JSON rather than as an opaque
+        # subprocess failure.  The Rust caller consumes `error_code`.
+        self.assertEqual(result.returncode,0)
         self.assertEqual(result.stderr,b"")
         self.assertNotIn(b"SECRET",result.stdout)
-        self.assertIn("error_class",json.loads(result.stdout))
+        response=json.loads(result.stdout)
+        self.assertEqual(response["error_code"],"required_runtime_unavailable")
+        self.assertEqual(response["paths"],[])
 
 
 if __name__=="__main__": unittest.main()
