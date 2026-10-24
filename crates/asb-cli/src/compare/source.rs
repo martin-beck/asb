@@ -536,6 +536,7 @@ fn load_attempt(
             series: BTreeMap::new(),
             host_metadata: None,
             components: None,
+            collector_documents: BTreeMap::new(),
             status: Some(format!(
                 "missing measurements: expected {} (measurement collection may be disabled, or the run stopped before writing results)",
                 run_path.display()
@@ -753,7 +754,7 @@ fn load_attempt(
     {
         metrics.remove("steps");
     }
-    let (series, host_metadata, components) =
+    let (series, host_metadata, components, collector_documents) =
         load_collectors(&measurement_dir, measured, &mut metrics)?;
     Ok(BenchmarkData {
         execution: run_value
@@ -815,6 +816,7 @@ fn load_attempt(
         series,
         host_metadata,
         components,
+        collector_documents,
         status: run_status,
         artifacts,
         artifact_sources,
@@ -1052,7 +1054,12 @@ fn decode_record(run_value: &Value, attempt: &AttemptContext<'_>) -> Result<Deco
         run_status,
     })
 }
-type CollectorRecords = (BTreeMap<String, TimeSeries>, Option<Value>, Option<Value>);
+type CollectorRecords = (
+    BTreeMap<String, TimeSeries>,
+    Option<Value>,
+    Option<Value>,
+    BTreeMap<String, Value>,
+);
 fn load_collectors(
     measurement_dir: &Path,
     measured: bool,
@@ -1061,6 +1068,7 @@ fn load_collectors(
     let mut series = BTreeMap::new();
     let mut host_metadata = None;
     let mut components = None;
+    let mut documents = BTreeMap::new();
     let collector_files = if measured {
         Some(fs::read_dir(measurement_dir).map_err(|error| Error::Input(error.to_string()))?)
     } else {
@@ -1080,6 +1088,7 @@ fn load_collectors(
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("collector");
+        documents.insert(name.to_owned(), collector.clone());
         if name == "system" {
             host_metadata = Some(collector.clone());
             flatten_numbers("host", &collector, metrics)?;
@@ -1127,5 +1136,5 @@ fn load_collectors(
             }
         }
     }
-    Ok((series, host_metadata, components))
+    Ok((series, host_metadata, components, documents))
 }

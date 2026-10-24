@@ -1061,14 +1061,13 @@ impl ResultFacts {
                     .flatten()
             })
         };
-        let tool_calls = if capture_complete {
-            agents::observed_tool_calls(
-                &String::from_utf8_lossy(&child.stdout),
-                &String::from_utf8_lossy(&child.stderr),
-            )
-        } else {
-            Vec::new()
-        };
+        // Tool-call evidence is parsed from provider responses retained by the
+        // llmtape proxy. Agent stdout/stderr are presentation streams only.
+        let tool_calls = tape_cassette
+            .as_ref()
+            .filter(|_| cassette_usage_verified)
+            .map(|(_, cassette)| crate::proxy::tool_calls::from_cassette(cassette))
+            .unwrap_or_default();
         let mut stderr = bounded(&child.stderr);
         if let Some(error) = provider_cleanup_error.as_ref() {
             stderr.push_str("\nASB provider cleanup error: ");

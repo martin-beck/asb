@@ -8,6 +8,7 @@ import socketserver
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -180,6 +181,81 @@ class Echo(socketserver.BaseRequestHandler):
         while data := self.request.recv(65536):
             self.request.sendall(data)
         self.request.sendall(b"after-half-close")
+
+
+class GzipJsonProvider(socketserver.StreamRequestHandler):
+    """Tiny provider double that keeps the wire body and header distinct."""
+
+    def handle(self):
+        import gzip
+
+        while self.rfile.readline() not in (b"", b"\r\n"):
+            pass
+        body = gzip.compress(b'{"choices":[{"message":{"content":"ok"}}]}')
+        self.wfile.write(
+            b"HTTP/1.1 200 OK\r\n"
+            b"content-type: application/json\r\n"
+            b"content-encoding: gzip\r\n"
+            + f"content-length: {len(body)}\r\n\r\n".encode()
+            + body
+        )
+
+
+class TapeHeaderTests(unittest.TestCase):
+    def setUp(self):
+        self.upstream = socketserver.ThreadingTCPServer(("127.0.0.1", 0), GzipJsonProvider)
+        self.upstream.daemon_threads = True
+        self.thread = threading.Thread(target=self.upstream.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.upstream.server_close)
+        self.addCleanup(self.upstream.shutdown)
+
+    def test_recorded_decoded_response_drops_stale_content_encoding(self):
+        script = Path(__file__).parents[1] / "assets/scripts/llmtape.mjs"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ready, cassette = root / "ready.json", root / "cassette.jsonl"
+            environment = {**os.environ, "ASB_TAPE_READY_FILE": str(ready), "NO_PROXY": "*", "no_proxy": "*"}
+            for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+                environment.pop(name, None)
+            process = subprocess.Popen(
+                ["node", str(script), "record", "--port", "0", "--upstream",
+                 f"http://127.0.0.1:{self.upstream.server_address[1]}", "--out", str(cassette)],
+                env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            self.addCleanup(lambda: process.poll() is None and process.terminate())
+            deadline = time.monotonic() + 5
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), f"tape listener did not become ready (exit={process.poll()})")
+            port = json.loads(ready.read_text())["port"]
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+                client.sendall(
+                    b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n"
+                    b"Connection: close\r\nContent-Length: 2\r\n\r\n{}"
+                )
+                response = bytearray()
+                client.settimeout(0.2)
+                while True:
+                    try:
+                        chunk = client.recv(65536)
+                    except TimeoutError:
+                        break
+                    if not chunk:
+                        break
+                    response.extend(chunk)
+            # The production owner performs graceful draining.  This isolated
+            # wire test has no owner/capture receipt to close, so stop the
+            # private listener directly once its response has been observed.
+            process.kill()
+            process.wait(timeout=5)
+            process.stdout.close()
+            process.stderr.close()
+            headers, body = bytes(response).split(b"\r\n\r\n", 1)
+            self.assertNotIn(b"content-encoding:", headers.lower())
+            self.assertIn(b'"content":"ok"', body)
+            recorded = json.loads(cassette.read_text())
+            self.assertNotIn("content-encoding", {key.lower() for key in recorded["response"]["headers"]})
 
 
 class ForwardingTests(unittest.TestCase):

@@ -15,6 +15,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"])
 .with_state_environment_vars(&["CLAUDE_CONFIG_DIR"])
+.with_unprivileged_execution()
 .with_output_usage(output_usage)
 .with_step_count(step_count);
 
@@ -133,6 +134,30 @@ mod tests {
         assert_eq!(
             ADAPTER.step_count(r#"[{"type":"result","num_turns":3},{"type":"result"}]"#, ""),
             None
+        );
+    }
+
+    #[test]
+    fn unattended_execution_uses_the_owned_non_root_identity() {
+        assert_eq!(
+            ADAPTER.execution_identity(),
+            crate::agents::ExecutionIdentity::Unprivileged
+        );
+        let config: crate::benchmark::BenchmarkConfig = toml::from_str(
+            "agent='claude-code'\nworkload='fixture'\nprovider='fixture'\nmodel='fixture'\nworkspace='/work'\n",
+        )
+        .unwrap();
+        let command = ADAPTER.command(&CommandContext {
+            config: &config,
+            endpoint: None,
+            interface: None,
+            prompt: "fixture prompt",
+        });
+        assert!(
+            command
+                .args
+                .iter()
+                .any(|argument| argument == "--dangerously-skip-permissions")
         );
     }
     #[test]

@@ -480,6 +480,7 @@ mod report_tests {
             label: "no-perfetto",
             metrics: &metrics,
             components: Some(&components),
+            documents: &BTreeMap::new(),
         }])
         .expect("wall reference remains useful");
         assert_eq!(graph.filename, "perfetto-execution-composition.svg");

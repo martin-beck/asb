@@ -72,6 +72,9 @@ impl Dependency {
 #[serde(deny_unknown_fields)]
 struct Discovered {
     schema_version: u32,
+    #[serde(default)]
+    error_code: Option<String>,
+    #[serde(default)]
     paths: Vec<PathBuf>,
 }
 
@@ -210,6 +213,20 @@ fn discover_with_timeout(
     #[cfg(not(unix))]
     let bytes = legacy_exchange(python, &source, request, timeout)?;
     let result: Discovered = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+    if let Some(code) = result.error_code {
+        if !code.is_empty()
+            && code.len() <= 80
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            && result.paths.is_empty()
+        {
+            return Err(Error::Input(format!(
+                "runtime inputs discovery failed safely with code `{code}`"
+            )));
+        }
+        return Err(unavailable());
+    }
     if result.schema_version != 1
         || result.paths.len() > 100000
         || result.paths.iter().any(|path| !path.is_absolute())

@@ -16,6 +16,13 @@ mod stop_contract_tests;
 fn record_args(pid: u32) -> Vec<String> {
     vec![
         "record".into(),
+        // Do not let perf select a host-specific hardware default.  On hybrid
+        // systems that can expand to cpu_core/cycles or cpu_atom/cycles and
+        // fail after attaching to a container-owned workload even though the
+        // generic host probe succeeded.  cpu-clock is a software event and
+        // keeps the stack-sample/flamegraph contract portable.
+        "-e".into(),
+        "cpu-clock".into(),
         "-g".into(),
         "-F".into(),
         "19".into(),
@@ -35,7 +42,10 @@ fn stat_args(pid: u32, interval_ms: u64) -> Vec<String> {
         interval_ms.to_string(),
         "-x,".into(),
         "-e".into(),
-        "task-clock,context-switches,cpu-migrations,page-faults,cycles,instructions".into(),
+        // These software counters remain available when a workload's cgroup
+        // or hybrid-PMU policy rejects hardware cycles/instructions.  Hardware
+        // counters are deliberately not estimated or silently substituted.
+        "task-clock,context-switches,cpu-migrations,page-faults".into(),
         "--inherit".into(),
         "-p".into(),
         pid.to_string(),
@@ -266,7 +276,7 @@ fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
                 "stat",
                 "--no-scale",
                 "-e",
-                "task-clock,context-switches,cpu-migrations,page-faults,cycles,instructions",
+                "task-clock,context-switches,cpu-migrations,page-faults",
                 "--inherit",
                 "--",
                 "sleep",
@@ -802,7 +812,17 @@ mod tests {
     fn perf_record_is_root_attached_and_inherits_all_descendants() {
         assert_eq!(
             record_args(42),
-            vec!["record", "-g", "-F", "19", "--inherit", "-p", "42"]
+            vec![
+                "record",
+                "-e",
+                "cpu-clock",
+                "-g",
+                "-F",
+                "19",
+                "--inherit",
+                "-p",
+                "42"
+            ]
         );
     }
 
@@ -817,7 +837,7 @@ mod tests {
                 "1000",
                 "-x,",
                 "-e",
-                "task-clock,context-switches,cpu-migrations,page-faults,cycles,instructions",
+                "task-clock,context-switches,cpu-migrations,page-faults",
                 "--inherit",
                 "-p",
                 "42"

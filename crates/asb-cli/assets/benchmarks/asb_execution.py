@@ -308,9 +308,18 @@ class ManagedDockerWorkspace:
             command = argv if gate == "application" else ["/bin/sh", "-c", GATE, "asb-gate", *argv]
             stream = (transport_factory or DockerExecTransport)(api,container,command,environment,self.workdir)
             ready = bytearray()
+            # Docker's multiplexed stream may deliver stderr before the gate's
+            # already-written stdout readiness frame. Installer diagnostics are
+            # ordinary agent output, not proof that the gate itself failed.
+            # Retain them with the eventual stderr result after the gate is
+            # authenticated and stopped.
+            gate_stderr = bytearray()
             for out, err in stream:
                 if err:
-                    raise ExecutionError("container execution gate failed before the agent started")
+                    room = output_limit - len(gate_stderr)
+                    if len(err) > room:
+                        raise ExecutionError("container execution gate stderr exceeded its output limit before readiness")
+                    gate_stderr.extend(err)
                 ready.extend(out or b"")
                 if len(ready) > 64:
                     raise ExecutionError("container execution gate returned an invalid readiness frame")
@@ -318,7 +327,15 @@ class ManagedDockerWorkspace:
                     break
             match = re.fullmatch(rb"__ASB_GATE__:(\d+)\n", ready)
             if match is None or expired.is_set() or interrupted.is_set():
-                raise ExecutionError("container execution gate did not become ready before its deadline")
+                # Before readiness this is the only diagnostic emitted by the
+                # private guest driver. Preserve a bounded, single-line tail
+                # so a failed pre-gate preparation can be repaired rather than
+                # being reported as an indistinguishable timeout.
+                detail = " ".join(gate_stderr.decode("utf-8", "replace").split())[-4096:]
+                message = "container execution gate did not become ready before its deadline"
+                if detail:
+                    message += f": {detail}"
+                raise ExecutionError(message)
             namespace_pid = int(match.group(1))
             if namespace_pid <= 1:
                 raise ExecutionError("container gate did not identify a distinct agent process")
@@ -349,7 +366,7 @@ class ManagedDockerWorkspace:
             resumed = container.exec_run(["/bin/sh", "-c", 'kill -CONT "$1"', "asb-resume", str(namespace_pid)])
             if resumed.exit_code != 0:
                 raise ExecutionError("container execution gate could not be resumed")
-            stdout, stderr = bytearray(), bytearray()
+            stdout, stderr = bytearray(), gate_stderr
             truncated = False
             frames = WorkloadFrames(namespace_pid, workload_owner, on_execution_end) if workload_owner else None
             for out, err in stream:

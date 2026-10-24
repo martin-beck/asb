@@ -101,7 +101,7 @@ struct RunResult<'a> {
     observation: crate::process_termination::Observation,
     token_usage: measurements::TokenUsage,
     steps: Option<u64>,
-    tool_calls: Vec<agents::ToolCall>,
+    tool_calls: Vec<crate::proxy::tool_calls::ToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cassette: Option<String>,
     /// Actual capture directory, including a CLI --measurements override.
@@ -1241,8 +1241,8 @@ fn process_failure_reason(
         || output.contains("Saved trajectory to \".asb-mini-swe.traj.json\"");
     // Provider and authentication failures are unambiguous and must remain
     // fatal even when an agent emitted a later structured response. Generic
-    // command errors are ambiguous (the agent may have repaired them), so
-    // inspect those only in the final response when one is available.
+    // command-error text is not an agent launch outcome: it can be emitted by
+    // a task's tests or by a repaired intermediate tool invocation.
     let has_provider_fatal_marker = [
         "Authentication required. Please use /login command to sign in to your account",
         "Endpoint /v1/chat/completions was not found",
@@ -1253,9 +1253,6 @@ fn process_failure_reason(
     ]
     .iter()
     .any(|marker| transcript.contains(marker));
-    let has_command_fatal_marker = ["unexpected keyword argument"]
-        .iter()
-        .any(|marker| output.contains(marker));
     let cannot_run_tests = [
         "I can’t run tests",
         "I can't run tests",
@@ -1298,8 +1295,6 @@ fn process_failure_reason(
         Some(format!(
             "agent exited unsuccessfully ({status}); inspect the benchmark log for agent output"
         ))
-    } else if (final_response.is_some() || !has_completion_evidence) && has_command_fatal_marker {
-        Some("agent reported an incompatible command or argument; inspect the benchmark log and agent configuration".into())
     } else if (final_response.is_some() || !has_completion_evidence) && cannot_run_tests {
         Some(
             "agent reported it could not run tests; inspect the benchmark log and test environment"
@@ -2565,10 +2560,6 @@ mod tests {
                 "missing provider endpoint",
             ),
             ("litellm.InternalServerError secret-value", "provider error"),
-            (
-                "unexpected keyword argument secret-value",
-                "incompatible command or argument",
-            ),
             ("I can't run tests secret-value", "could not run tests"),
             (
                 "workspace is read-only secret-value",
@@ -2590,6 +2581,20 @@ mod tests {
         assert!(reason.contains("authentication failure"), "{reason}");
         assert!(reason.contains("exit status"), "{reason}");
         assert!(!reason.contains("secret-value"));
+    }
+
+    #[test]
+    fn structured_agent_completion_is_not_failed_by_a_workload_test_phrase() {
+        let status = std::process::Command::new("true").status().unwrap();
+        assert!(
+            super::process_failure_reason(
+                &status,
+                b"agent protocol completed",
+                b"",
+                Some("official workload test reported unexpected keyword argument")
+            )
+            .is_none()
+        );
     }
 
     #[test]

@@ -124,6 +124,7 @@ impl PreparedReport {
                 label: &row.label,
                 metrics: &row.metrics,
                 components: row.components.as_ref(),
+                documents: &row.collector_documents,
             })
             .collect::<Vec<_>>();
         let collector_graphs = crate::collectors::report_graphs(&report_rows);

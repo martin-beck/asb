@@ -14,7 +14,6 @@ mod openhands;
 mod openjiuwen;
 mod pi;
 mod qwen_code;
-pub(crate) mod tool_calls;
 mod workbuddy;
 
 pub(super) static REGISTRY: &[&dyn AgentAdapter] = &[

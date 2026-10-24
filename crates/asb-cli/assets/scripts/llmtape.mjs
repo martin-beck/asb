@@ -84,7 +84,14 @@ function redactHeaders(headers) {
 function responseHeaders(headers) {
   const result = {};
   for (const [name, value] of headers) {
-    if (!/^(connection|content-length|transfer-encoding)$/i.test(name)) result[name] = value;
+    // `fetch` exposes a decoded body, including when its upstream response was
+    // compressed.  Forwarding the original content-encoding would make
+    // OpenAI-compatible clients attempt to decode the already-decoded body and
+    // surface a misleading connection failure.  These are hop/body framing
+    // fields, so the fresh loopback response must let Node compute them.
+    if (!/^(connection|content-encoding|content-length|transfer-encoding)$/i.test(name)) {
+      result[name] = value;
+    }
   }
   return result;
 }
@@ -471,6 +478,9 @@ writeProgress();
 
 async function handle(request, response, recording) {
   const startedAt = performance.now();
+  // Provider-boundary timestamps are authoritative tool-call evidence. ASB
+  // never derives tool calls or timings from agent stdout/stderr.
+  const requestReceivedUnixMs = Math.round(performance.timeOrigin + startedAt);
   const chunks = [];
   let bodySize = 0;
   for await (const chunk of request.iterator({ destroyOnReturn: false })) {
@@ -617,7 +627,15 @@ async function handle(request, response, recording) {
     body: normalizeCassetteBody(responseBody),
   };
   const delayMs = Math.min(Math.max(0, Math.round(performance.now() - startedAt)), MAX_DELAY_MS);
-  const interaction = { request: recordedRequest, response: recordedResponse, delay_ms: delayMs };
+  const interaction = {
+    request: recordedRequest,
+    response: recordedResponse,
+    delay_ms: delayMs,
+    timing: {
+      request_received_unix_ms: requestReceivedUnixMs,
+      response_observed_unix_ms: Math.round(performance.timeOrigin + performance.now()),
+    },
+  };
   if (capture) capture.append(recording.token, interaction, !isReplayProbe(recordedRequest));
   else {
     if (stopping) return;

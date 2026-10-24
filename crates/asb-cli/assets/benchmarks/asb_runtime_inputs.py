@@ -274,8 +274,20 @@ def main():
     except Exception as error:
         # File paths, environment, private interpreter output and exception
         # messages never enter the public error response.
-        print(json.dumps({"schema_version":1,"error_class":type(error).__name__}))
-        return 2
+        # Preserve only a small stable code so the caller can distinguish an
+        # actionable capacity/installation problem from an opaque helper
+        # failure without exposing private paths or environment values.
+        message = str(error)
+        if "resource bound" in message or "population exceeded" in message:
+            code = "resource_bound"
+        elif "unavailable" in message or "not executable" in message:
+            code = "required_runtime_unavailable"
+        elif "unsupported" in message or "interpreter" in message:
+            code = "runtime_entry_unsupported"
+        else:
+            code = "runtime_input_validation_failed"
+        print(json.dumps({"schema_version":1,"error_code":code,"paths":[]}))
+        return 0
 
 
 if __name__=="__main__":
