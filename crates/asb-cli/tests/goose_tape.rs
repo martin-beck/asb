@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -95,20 +95,46 @@ fn run(root: &Path, endpoint: &str, args: &[&str]) -> Output {
 }
 
 fn run_with_changed_request(root: &Path, endpoint: &str, args: &[&str], changed: bool) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_asb"));
+    // The capacity admission guard deliberately requires a terminal and an
+    // explicit answer when its conservative estimate exceeds free space. Run
+    // this fixture through util-linux `script`, which gives the child a PTY,
+    // and supply that answer. This keeps the production binary's fail-closed
+    // non-interactive behavior covered rather than adding a test-only bypass.
+    let mut command_line = shell_quote(env!("CARGO_BIN_EXE_asb"));
+    for argument in args {
+        command_line.push(' ');
+        command_line.push_str(&shell_quote(argument));
+    }
+    let mut command = Command::new("script");
     command
+        .args(["--quiet", "--return", "--flush", "--command"])
+        .arg(command_line)
+        .arg("/dev/null")
         .current_dir(root)
-        .args(args)
         .isolated_env()
         .env("HOME", root)
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("OPENROUTER_BASE_URL", endpoint)
         .env("OPENROUTER_API_KEY", "fixture-key")
-        .env("ASB_TEST_UPSTREAM", endpoint.trim_end_matches("/v1"));
+        .env("ASB_TEST_UPSTREAM", endpoint.trim_end_matches("/v1"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if changed {
         command.env("ASB_TEST_CHANGED", "1");
     }
-    command.output().expect("ASB starts")
+    let mut child = command.spawn().expect("ASB starts in a PTY");
+    child
+        .stdin
+        .take()
+        .expect("PTY launcher has stdin")
+        .write_all(b"y\n")
+        .expect("answer capacity confirmation");
+    child.wait_with_output().expect("ASB exits")
+}
+
+fn shell_quote(argument: &str) -> String {
+    format!("'{}'", argument.replace('\'', "'\\\"'\\\"'"))
 }
 
 #[test]
@@ -247,7 +273,13 @@ fetch(host + process.env.OPENAI_BASE_PATH, {method:'POST',headers:{'content-type
         !mismatch.status.success(),
         "changed replay request must fail"
     );
-    assert!(String::from_utf8_lossy(&mismatch.stderr).contains("rejected"));
+    assert!(
+        String::from_utf8_lossy(&mismatch.stdout).contains("rejected")
+            || String::from_utf8_lossy(&mismatch.stderr).contains("rejected"),
+        "mismatch: stdout={} stderr={}",
+        String::from_utf8_lossy(&mismatch.stdout),
+        String::from_utf8_lossy(&mismatch.stderr)
+    );
     assert_eq!(
         *provider.requests.lock().unwrap(),
         before_replay,
