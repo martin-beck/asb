@@ -231,7 +231,9 @@ fn qualify_guest_directory(inherit_directory: bool, rename: bool) {
     let mut first = String::new();
     stdout.read_line(&mut first).unwrap();
     assert_eq!(first.trim(), format!("__ASB_GATE__:{}", process.0.id()));
-    assert!(project.0.join("private/pi/config").is_dir());
+    // Guest adapter state is intentionally isolated beneath the owned
+    // agent-state root, never directly under the workload-private root.
+    assert!(project.0.join("private/agent-state/pi/config").is_dir());
     assert!(!project.0.join("workspace/performed.txt").exists());
     let deadline = Instant::now() + Duration::from_secs(3);
     while !std::fs::read_to_string(format!("/proc/{}/status", process.0.id()))
