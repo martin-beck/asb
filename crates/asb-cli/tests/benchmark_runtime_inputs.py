@@ -293,10 +293,13 @@ assert children[0].poll() is not None
         script = "import sys;sys.path.insert(0,"+repr(str(ASSETS))+ ");import asb_runtime_inputs as m;raise SystemExit(m.main())"
         result = subprocess.run([sys.executable,"-I","-S","-B","-c",script],
             input=json.dumps(request).encode(),capture_output=True,timeout=5)
-        self.assertNotEqual(result.returncode,0)
+        # Runtime discovery publishes a sanitized machine-readable outcome;
+        # expected validation failures are not helper crashes.
+        self.assertEqual(result.returncode,0)
         self.assertEqual(result.stderr,b"")
         self.assertNotIn(b"SECRET",result.stdout)
-        self.assertIn("error_class",json.loads(result.stdout))
+        self.assertEqual(json.loads(result.stdout),{
+            "schema_version":1,"error_code":"required_runtime_unavailable","paths":[]})
 
 
 if __name__=="__main__": unittest.main()
