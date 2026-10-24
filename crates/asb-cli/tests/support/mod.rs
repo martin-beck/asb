@@ -13,6 +13,9 @@ impl IsolatedEnvironment for Command {
         if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
             self.env("LLVM_PROFILE_FILE", profile);
         }
+        // Integration fixtures launch the separately compiled debug CLI. Its
+        // capacity premise is explicit and cannot exist in release builds.
+        self.env("ASB_TEST_AVAILABLE_MIB", "100000");
         self
     }
 }
@@ -27,10 +30,16 @@ fn isolated_environment_preserves_only_coverage_instrumentation() {
     let expected = std::env::var_os("LLVM_PROFILE_FILE");
     match expected.as_ref() {
         Some(value) => {
-            assert_eq!(actual.len(), 1);
+            assert_eq!(actual.len(), 2);
             assert_eq!(actual[0].0, "LLVM_PROFILE_FILE");
             assert_eq!(actual[0].1, Some(value.as_os_str()));
+            assert_eq!(actual[1].0, "ASB_TEST_AVAILABLE_MIB");
+            assert_eq!(actual[1].1, Some("100000".as_ref()));
         }
-        None => assert!(actual.is_empty()),
+        None => {
+            assert_eq!(actual.len(), 1);
+            assert_eq!(actual[0].0, "ASB_TEST_AVAILABLE_MIB");
+            assert_eq!(actual[0].1, Some("100000".as_ref()));
+        }
     }
 }

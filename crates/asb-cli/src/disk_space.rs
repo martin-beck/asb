@@ -23,7 +23,7 @@ thread_local! {
     static TEST_AVAILABLE_MIB: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 const TEST_AVAILABLE_MIB_ENV: &str = "ASB_TEST_AVAILABLE_MIB";
 
 #[cfg(test)]
@@ -230,10 +230,10 @@ fn available_mib(path: &Path) -> Option<u64> {
     if let Some(available) = TEST_AVAILABLE_MIB.with(Cell::get) {
         return Some(available);
     }
-    // Subprocess-backed test fixtures cannot inherit thread-local state. This
-    // test-only premise is explicit at the child launch site and never exists
-    // in a production build.
-    #[cfg(test)]
+    // Subprocess-backed fixtures execute the separately compiled debug CLI,
+    // not this test crate.  Accept their explicit premise only in test/debug
+    // builds; optimized release binaries always probe the target filesystem.
+    #[cfg(any(test, debug_assertions))]
     if let Some(available) = std::env::var_os(TEST_AVAILABLE_MIB_ENV)
         .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
     {
