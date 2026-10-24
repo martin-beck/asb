@@ -431,6 +431,11 @@ impl RecordingJournal {
                 "import is already committed; refusing duplicate recovery".into(),
             ));
         }
+        if !track.artifacts.is_empty() {
+            return Err(Error(
+                "artifact-bearing imports require an auxiliary artifact-copy API".into(),
+            ));
+        }
         // commit_payload's create-new open is authoritative even if a foreign
         // pathname appears after this check. No retained bytes are truncated.
         if exists(&self.payload_path(track.id))? {
