@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -142,8 +143,18 @@ def native(scenario="normal"):
             (root / "workspace").chmod(0o755)
         env = environment(root,"cleanup" if scenario.startswith("cleanup") else scenario)
         env["ASB_ARTIFACT_NATIVE"] = "1"
-        result = subprocess.run([str(ASB),"run",str(config_path),"--replay","--cassette",str(tape),"--json"],
-            cwd=root,env=env,capture_output=True,timeout=30)
+        # The production capacity guard is intentionally fail-closed for a
+        # detached process.  Exercise its actual confirmation path through a
+        # PTY instead of bypassing the guard in this native artifact fixture.
+        # `--json` intentionally disables prompts, so omit it here: this
+        # fixture validates retained artifacts rather than CLI JSON output.
+        invocation = [str(ASB), "run", str(config_path), "--replay",
+                      "--cassette", str(tape)]
+        result = subprocess.run(
+            ["script", "--quiet", "--return", "--flush", "--command",
+             shlex.join(invocation), "/dev/null"],
+            cwd=root, env=env, input=b"y\n", capture_output=True, timeout=30,
+        )
         (root / f"invocation-{len(records)}.stderr").write_bytes(result.stderr)
         (root / f"invocation-{len(records)}.stdout").write_bytes(result.stdout)
         result_directory = native_result_directory(root, len(records) + 1)
