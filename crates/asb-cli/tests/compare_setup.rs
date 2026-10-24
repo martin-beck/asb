@@ -171,6 +171,14 @@ fn actual_setup_in_non_utf8_project_refuses_unrepresentable_runtime_paths_before
         ".asb/project.toml",
         "tools_dir='tools'\nworkloads_dir='catalogs'\nworkspace_dir='workspace'\n",
     );
+    // This fixture verifies setup's path-serialization boundary, not automatic
+    // installation. Supply the selected project's expected local executable so
+    // setup reaches that boundary without an unrelated installer attempt.
+    let pi = project.0.join("tools/pi/node_modules/.bin/pi");
+    std::fs::create_dir_all(pi.parent().unwrap()).unwrap();
+    std::fs::write(&pi, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
     project.write("prior.toml", "prior configuration unchanged");
     let before = std::fs::read_dir(&project.0)
         .unwrap()
