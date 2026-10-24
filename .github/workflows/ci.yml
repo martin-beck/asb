@@ -25,12 +25,13 @@ jobs:
           # The selector compares the PR's immutable base and head commits.
           fetch-depth: 0
       - name: Prepare runner fixture directory
-        # Rust's test fixtures use std::env::temp_dir(). Keep them on the
-        # provisioned runner volume rather than the host's shared /tmp, whose
-        # capacity is deliberately not an ASB test prerequisite.
+        # Rust's test fixtures use std::env::temp_dir(). Put them on the
+        # checked-out workspace volume rather than the runner's shared /tmp
+        # or RUNNER_TEMP volume: either may be a small root filesystem and is
+        # deliberately not an ASB capacity-test prerequisite.
         run: |
-          mkdir -p "$RUNNER_TEMP/asb-fixtures"
-          echo "TMPDIR=$RUNNER_TEMP/asb-fixtures" >> "$GITHUB_ENV"
+          mkdir -p "$GITHUB_WORKSPACE/target/ci-fixtures"
+          echo "TMPDIR=$GITHUB_WORKSPACE/target/ci-fixtures" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -76,10 +77,12 @@ jobs:
         with:
           persist-credentials: false
       - name: Prepare runner fixture directory
-        # Keep fixture-heavy serial tests off the shared host /tmp filesystem.
+        # Keep fixture-heavy serial tests off shared root-backed temporary
+        # filesystems; the checkout volume is the runner's provisioned ASB
+        # workspace capacity.
         run: |
-          mkdir -p "$RUNNER_TEMP/asb-fixtures"
-          echo "TMPDIR=$RUNNER_TEMP/asb-fixtures" >> "$GITHUB_ENV"
+          mkdir -p "$GITHUB_WORKSPACE/target/ci-fixtures"
+          echo "TMPDIR=$GITHUB_WORKSPACE/target/ci-fixtures" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
