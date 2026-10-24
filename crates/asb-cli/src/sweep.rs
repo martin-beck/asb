@@ -241,7 +241,7 @@ pub(crate) fn run_with_options(
         }
         return recovered::import(sweep_path, &sweep, parent, stem, json, output);
     }
-    let prepared = phases::PreparedSweep::prepare(path, options, _output_lock, sweep)?;
+    let prepared = phases::PreparedSweep::prepare(path, options, _output_lock, sweep, output)?;
     let activated = prepared.activate()?;
     let mut presentation = presentation::Presentation::new(output);
     activated

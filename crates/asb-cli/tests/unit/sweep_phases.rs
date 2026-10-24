@@ -92,6 +92,9 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
         let executable = std::env::current_exe().unwrap();
         let runtime = executable.parent().unwrap().parent().unwrap().join("asb");
         assert!(runtime.is_file(), "build actual ASB before focused tests");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/sweep-phase-fixtures")
+            .join(crate::workloads::TaskIdentity::local("sweep-phase", None).attempt_id);
         for case in [
             "json",
             "replicas",
@@ -108,9 +111,25 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
             "campaign-reservation-last",
             "campaign-admission",
         ] {
+            // The real capacity probe is intentionally exercised elsewhere.
+            // This fixture has a separate assertion surface: continuation and
+            // presentation failure handling.  Its child-only PATH supplies a
+            // bounded `df -Pk` responder with sufficient free space.
+            let fixture_bin = root.join("fixture-bin");
+            std::fs::create_dir_all(&fixture_bin).unwrap();
+            let fixture_df = fixture_bin.join("df");
+            std::fs::write(
+                &fixture_df,
+                "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfixture 1 1 99999999 0%% /\\n'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&fixture_df, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut fixture_path = std::ffi::OsString::from(fixture_bin.as_os_str());
+            fixture_path.push(":");
+            fixture_path.push(std::env::var_os("PATH").unwrap());
             let child=Command::new(&executable)
                 .args(["--exact","sweep::phases::tests::actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_reports","--nocapture"])
-                .isolated_env().env("PATH",std::env::var_os("PATH").unwrap())
+                .isolated_env().env("PATH",fixture_path)
                 .env("ASB_RUNTIME_EXECUTABLE",&runtime).env("ASB_SWEEP_PHASE_CASE",case).output().unwrap();
             assert!(
                 child.status.success(),

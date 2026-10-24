@@ -165,6 +165,19 @@ pub(crate) fn run_with_diagnostics(
     let text = read_config(config_path)?;
     let config: BenchmarkConfig = toml::from_str(&text)
         .map_err(|error| Error::Input(format!("cannot parse {path}: {error}")))?;
+    let disk_policy = crate::planning::resolve(&config)?;
+    let output_directory = config_path.parent().unwrap_or_else(|| Path::new("."));
+    crate::disk_space::confirm_capacity(
+        output_directory,
+        crate::disk_space::benchmark(
+            &config,
+            Some(&disk_policy),
+            options.repeat.unwrap_or(1),
+            options.mode,
+        ),
+        options.interactive && !options.json,
+        output,
+    )?;
     if (options.track.is_some() || options.replay_seed.is_some())
         && options.mode != Some(tape::Mode::Replay)
     {

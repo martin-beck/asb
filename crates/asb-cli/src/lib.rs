@@ -8,6 +8,7 @@ mod collectors;
 mod compare;
 mod completion;
 mod config;
+mod disk_space;
 mod endpoint;
 mod evidence;
 #[cfg(all(test, target_os = "linux"))]

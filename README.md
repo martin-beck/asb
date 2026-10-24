@@ -152,6 +152,15 @@ same input, output, cached, and total fields whenever the provider reports
 them. A missing usage field remains `null`; ASB never guesses token counts from
 text length.
 
+Before a run or sweep begins, ASB derives a conservative disk-space estimate
+for the filesystem holding the configuration's results. It includes the
+selected workload/task reservation, agent workspace, provider session,
+collectors, concurrency, repetitions, recording/replay data, reports, and a
+2x safety margin. When free space is lower, an interactive terminal displays
+the estimate and asks for explicit `y` confirmation. A non-interactive or JSON
+invocation fails before starting work instead of silently risking a partial
+benchmark; free space first or rerun interactively to approve the risk.
+
 Qwen Code usage comes from its final run summary rather than intermediate
 message snapshots. OpenJiuwen uses its per-model-call streaming usage events;
 ASB applies a process-local compatibility fix for the pinned client's loss of
