@@ -127,6 +127,9 @@ pub fn entry(args: Vec<OsString>) -> ExitCode {
     if args.first().is_some_and(|arg| arg == "__asb-agent") {
         return agents::driver::entry();
     }
+    if args.first().is_some_and(|arg| arg == "__asb-tool-replay") {
+        return agents::tool_replay_mcp::entry(&args[1..]);
+    }
     if args.first().is_some_and(|arg| arg == "__asb-gate") {
         return process_gate::run_gate(&args[1..]);
     }

@@ -185,7 +185,7 @@ fn parent(root: &Path, relative: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn apply(root: &Path, effect: &Effect) -> Result<(), Error> {
+pub(crate) fn apply(root: &Path, effect: &Effect) -> Result<(), Error> {
     let root = root
         .canonicalize()
         .map_err(|_| Error::Run("local-tool replay workspace is unavailable".into()))?;
@@ -225,6 +225,33 @@ fn apply(root: &Path, effect: &Effect) -> Result<(), Error> {
         },
     }
     .map_err(|_| Error::Run("cannot apply confined local-tool replay effect".into()))
+}
+
+pub(crate) fn read_text(root: &Path, value: &str) -> Result<String, Error> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| Error::Run("local-tool workspace is unavailable".into()))?;
+    let relative = Path::new(value);
+    let path = confined(&root, value)?;
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let mut current = root.clone();
+    for component in parent.components() {
+        let Component::Normal(name) = component else {
+            return Err(Error::Run("local-tool path escapes the workspace".into()));
+        };
+        current.push(name);
+        let metadata = std::fs::symlink_metadata(&current)
+            .map_err(|_| Error::Run("local-tool path is unavailable".into()))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(Error::Run("local-tool path crosses a symlink".into()));
+        }
+    }
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|_| Error::Run("cannot read local-tool file".into()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(Error::Run("cannot read local-tool file".into()));
+    }
+    std::fs::read_to_string(path).map_err(|_| Error::Run("cannot read local-tool file".into()))
 }
 
 #[cfg(test)]
