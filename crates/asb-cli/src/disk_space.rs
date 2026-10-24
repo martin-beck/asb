@@ -298,4 +298,21 @@ mod tests {
         assert!(needs_confirmation(2047, estimate));
         assert!(!needs_confirmation(2048, estimate));
     }
+
+    #[test]
+    fn json_output_stays_machine_readable_when_capacity_is_unavailable() {
+        let mut output = Vec::new();
+        confirm_capacity(
+            Path::new("\0"),
+            Estimate {
+                required_mib: 2048,
+                attempts: 1,
+            },
+            false,
+            false,
+            &mut output,
+        )
+        .unwrap();
+        assert!(output.is_empty());
+    }
 }
