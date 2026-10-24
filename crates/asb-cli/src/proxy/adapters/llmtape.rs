@@ -874,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_accepts_responses_input_with_omitted_tool_turns() {
+    fn replay_rejects_omitted_tool_turns_and_query_mutations() {
         let root = test_root();
         let cassette = root.join("responses.jsonl");
         let expected = r#"{"model":"m","input":[{"role":"user","content":"work"},{"type":"function_call_output","call_id":"old","output":"done"}]}"#;
@@ -884,26 +884,24 @@ mod tests {
         });
         std::fs::write(&cassette, format!("{line}\n")).unwrap();
         let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
-        let compatible =
+        let omitted_tool_turn =
             r#"{"model":"m","input":[{"role":"user","content":"work"}],"temperature":0.2}"#;
-        let response = request_to(&session, "/v1/responses", compatible);
-        assert!(response.contains("200 OK"));
-        assert!(
-            response.contains("\"call_id\":\"call_asb-replay-"),
-            "{response}"
-        );
-        let changed = r#"{"model":"m","input":[{"role":"user","content":"different"}]}"#;
-        assert!(request_to(&session, "/v1/responses", changed).contains("409 Conflict"));
+        assert!(request_to(&session, "/v1/responses", omitted_tool_turn).contains("409 Conflict"));
         assert!(session.stop().unwrap_err().to_string().contains("rejected"));
 
-        // Provider bridges may add harmless query parameters while preserving
-        // the same API endpoint. Replay matches the path, not those transport
-        // parameters, while still enforcing method, model, and prompt.
+        // A query can influence provider semantics. It must not be discarded
+        // just because the path and the initial user item happen to match.
         let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
         assert!(
-            request_to(&session, "/v1/responses?api-version=2025-01-01", compatible)
-                .contains("200 OK")
+            request_to(&session, "/v1/responses?api-version=2025-01-01", expected)
+                .contains("409 Conflict")
         );
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        // The whole original request remains replayable, including the tool
+        // result. The proxy never fabricates or elides a local tool turn.
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", expected).contains("200 OK"));
         session.stop().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -913,8 +911,12 @@ mod tests {
         let root = test_root();
         let cassette = root.join("probe.jsonl");
         let embedding = r#"{"model":"text-embedding-3-small","input":["memory"]}"#;
-        let probe = r#"{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"What color is this image? Reply with one word."}]}]}"#;
-        let workload = r#"{"model":"m","messages":[{"role":"user","content":"work"}]}"#;
+        // The recorder canonicalizes an omitted Anthropic temperature to 0,
+        // so the cassette uses the same normalized wire request that the
+        // replay proxy will compare.
+        let probe = r#"{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"What color is this image? Reply with one word."}]}],"temperature":0}"#;
+        let workload =
+            r#"{"model":"m","messages":[{"role":"user","content":"work"}],"temperature":0}"#;
         let interaction = |body: &str| {
             serde_json::json!({
                 "request": {"method":"POST", "url":"/v1/messages", "body":body},
