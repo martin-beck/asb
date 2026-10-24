@@ -2092,8 +2092,14 @@ mod tests {
 
     #[test]
     fn concurrent_replay_without_explicit_cassette_fails_closed() {
-        let root =
-            std::env::temp_dir().join(format!("asb-replay-no-cassette-{}", std::process::id()));
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "asb-replay-no-cassette-{}-{unique}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir(root.join(".asb")).unwrap();
         std::fs::write(
