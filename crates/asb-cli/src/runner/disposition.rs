@@ -83,6 +83,10 @@ pub(super) struct RunFacts<'a> {
     pub evaluation_kind: crate::workloads::KnownEvaluationKind,
     pub process_success: bool,
     pub agent_failure: Option<&'a str>,
+    /// The runner could not retain a complete agent transcript. This is
+    /// distinct from an execution or evaluator failure: a completed
+    /// evaluator can still authoritatively resolve the workload.
+    pub capture_incomplete: bool,
     pub run_error: Option<&'a str>,
     pub collector_error: Option<&'a str>,
     pub output_error: Option<&'a str>,
@@ -113,6 +117,19 @@ impl RunDisposition {
     }
 
     pub fn from_facts(facts: RunFacts<'_>) -> Self {
+        // A completed evaluator is the workload authority. A bounded
+        // transcript capture overflow makes transcript-derived process
+        // interpretation unavailable, but must not replace a confirmed grade.
+        // Do not relax any other operational error, and do not apply this to
+        // pending, unknown, or failed evaluation outcomes.
+        let evaluator_authoritative_despite_capture = facts.capture_incomplete
+            && matches!(
+                facts.evaluation,
+                EvaluationOutcome::Completed {
+                    resolution: Some(_),
+                    ..
+                }
+            );
         let failure = facts
             .run_error
             .map(|reason| RunFailure::new(FailureKind::RunError, reason))
@@ -125,12 +142,16 @@ impl RunDisposition {
                 })
             })
             .or_else(|| {
-                facts
-                    .agent_failure
-                    .map(|reason| RunFailure::new(FailureKind::AgentFailure, reason))
+                (!evaluator_authoritative_despite_capture)
+                    .then_some(())
+                    .and_then(|()| {
+                        facts
+                            .agent_failure
+                            .map(|reason| RunFailure::new(FailureKind::AgentFailure, reason))
+                    })
             })
             .or_else(|| {
-                (!facts.process_success).then(|| {
+                (!evaluator_authoritative_despite_capture && !facts.process_success).then(|| {
                     RunFailure::new(FailureKind::AgentFailure, "agent execution did not succeed")
                 })
             })
@@ -197,6 +218,7 @@ mod tests {
             evaluation_kind: crate::workloads::KnownEvaluationKind::BundledFixture,
             process_success: true,
             agent_failure: None,
+            capture_incomplete: false,
             run_error: None,
             collector_error: None,
             output_error: None,
@@ -245,6 +267,43 @@ mod tests {
             );
             assert_eq!(evaluation, original);
         }
+    }
+
+    #[test]
+    fn completed_evaluator_grade_outranks_only_capture_derived_process_failure() {
+        let resolved_outcome = EvaluationOutcome::binary(true);
+        let mut resolved = facts(&resolved_outcome);
+        resolved.capture_incomplete = true;
+        resolved.process_success = false;
+        resolved.agent_failure = Some("agent output capture incomplete");
+        let decision = RunDisposition::from_facts(resolved);
+        assert_eq!(decision.status, RunStatus::Completed);
+        assert!(decision.success);
+        assert!(decision.failure.is_none());
+
+        let unresolved_outcome = EvaluationOutcome::Pending {
+            reason: "grade unavailable".into(),
+        };
+        let mut unresolved = facts(&unresolved_outcome);
+        unresolved.capture_incomplete = true;
+        unresolved.process_success = false;
+        unresolved.agent_failure = Some("agent output capture incomplete");
+        let decision = RunDisposition::from_facts(unresolved);
+        assert_eq!(
+            decision.failure.as_ref().map(|failure| failure.kind),
+            Some(FailureKind::AgentFailure)
+        );
+
+        let failed_outcome = EvaluationOutcome::binary(false);
+        let mut failed = facts(&failed_outcome);
+        failed.capture_incomplete = true;
+        failed.process_success = false;
+        failed.agent_failure = Some("agent output capture incomplete");
+        let decision = RunDisposition::from_facts(failed);
+        assert_eq!(
+            decision.failure.as_ref().map(|failure| failure.kind),
+            Some(FailureKind::WorkloadCheckFailed)
+        );
     }
 
     #[test]
