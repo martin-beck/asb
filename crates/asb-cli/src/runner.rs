@@ -167,6 +167,25 @@ pub(crate) fn run_with_diagnostics(
         .map_err(|error| Error::Input(format!("cannot parse {path}: {error}")))?;
     let disk_policy = crate::planning::resolve(&config)?;
     let output_directory = config_path.parent().unwrap_or_else(|| Path::new("."));
+    if (options.track.is_some() || options.replay_seed.is_some())
+        && options.mode != Some(tape::Mode::Replay)
+    {
+        return Err(Error::Input("--track and --seed require --replay".into()));
+    }
+    if options.announce_trial {
+        write_trial_start(output, &config)?;
+    }
+    let bundled_replay = if options.mode == Some(tape::Mode::Replay) {
+        let source = replay_cassette(config_path, &config, options.cassette)?;
+        crate::tape::require_replay_cassette(&source)?;
+        crate::cassette::Source::is_bundle(&source)
+            .map_err(|error| Error::Input(error.to_string()))?
+    } else {
+        false
+    };
+    // Reject an invalid replay request before asking about capacity for work
+    // which cannot start.  Every executable run remains subject to the
+    // conservative capacity preflight before any repetition or execution.
     crate::disk_space::confirm_capacity(
         output_directory,
         crate::disk_space::benchmark(
@@ -178,21 +197,6 @@ pub(crate) fn run_with_diagnostics(
         options.interactive && !options.json,
         output,
     )?;
-    if (options.track.is_some() || options.replay_seed.is_some())
-        && options.mode != Some(tape::Mode::Replay)
-    {
-        return Err(Error::Input("--track and --seed require --replay".into()));
-    }
-    if options.announce_trial {
-        write_trial_start(output, &config)?;
-    }
-    let bundled_replay = if options.mode == Some(tape::Mode::Replay) {
-        let source = replay_cassette(config_path, &config, options.cassette)?;
-        crate::cassette::Source::is_bundle(&source)
-            .map_err(|error| Error::Input(error.to_string()))?
-    } else {
-        false
-    };
     if let Some(repeat) = options.repeat.or((bundled_replay
         || options.track.is_some()
         || options.replay_seed.is_some())
@@ -2111,12 +2115,9 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("replay cassette"), "{message}");
         assert!(!message.contains("unsupported provider"), "{message}");
-        assert_eq!(
-            std::fs::read_dir(root.join(".asb/execution-plans"))
-                .unwrap()
-                .count(),
-            8,
-            "each admitted replica must keep its policy in the isolated fixture project"
+        assert!(
+            !root.join(".asb/execution-plans").exists(),
+            "an absent replay cassette must fail before replica plans are admitted"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

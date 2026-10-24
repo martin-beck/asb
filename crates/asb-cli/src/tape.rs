@@ -33,12 +33,8 @@ impl Session {
         respect_record_timings: bool,
         workspace: &Path,
     ) -> Result<Self, Error> {
-        if mode == Mode::Replay && !cassette.is_file() {
-            return Err(Error::Input(format!(
-                "replay cassette {} does not exist; run `asb run CONFIG --record --cassette {}` first",
-                cassette.display(),
-                cassette.display()
-            )));
+        if mode == Mode::Replay {
+            require_replay_cassette(cassette)?;
         }
         let settings = proxy::adapters::llmtape::Settings {
             mode,
@@ -63,5 +59,18 @@ impl Session {
 
     pub(crate) fn finish(self) -> proxy::Completion {
         self.0.finish()
+    }
+}
+
+/// Validate a replay input before allocating run resources or starting a proxy.
+pub(crate) fn require_replay_cassette(cassette: &Path) -> Result<(), Error> {
+    if cassette.is_file() {
+        Ok(())
+    } else {
+        Err(Error::Input(format!(
+            "replay cassette {} does not exist; run `asb run CONFIG --record --cassette {}` first",
+            cassette.display(),
+            cassette.display()
+        )))
     }
 }
