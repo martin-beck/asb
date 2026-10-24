@@ -147,6 +147,12 @@ pub(super) trait WorkloadAdapter: Sync {
     ) -> crate::install::InstallResult<bool> {
         Ok(false)
     }
+    /// Complete an installation performed by the generic pinned-source
+    /// installer.  Catalog-backed source bundles use this hook to derive their
+    /// selectable task population before the default trial-set is written.
+    fn finalize_install(&self, _directory: &Path) -> Result<(), String> {
+        Ok(())
+    }
     fn installed_available(&self, _directory: &Path) -> Option<bool> {
         None
     }

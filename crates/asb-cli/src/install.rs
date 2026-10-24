@@ -683,6 +683,7 @@ fn install_bundle_in(
         workloads::materialize_external_adapter(name, directory).map_err(|error| {
             Error::Io(format!("cannot materialize {name} adapter trial: {error}"))
         })?;
+        workloads::finalize_install(name, directory).map_err(Error::Input)?;
         workloads::write_default_trial_set(name, directory)
             .map_err(|error| Error::Io(format!("cannot write {name} trial set: {error}")))?;
         writeln!(
@@ -777,6 +778,7 @@ fn install_bundle_in(
     }
     workloads::materialize_external_adapter(name, directory)
         .map_err(|error| Error::Io(format!("cannot materialize {name} adapter trial: {error}")))?;
+    workloads::finalize_install(name, directory).map_err(Error::Input)?;
     workloads::write_default_trial_set(name, directory)
         .map_err(|error| Error::Io(format!("cannot write {name} trial set: {error}")))?;
     let _ = fs::remove_file(&archive);
@@ -1809,6 +1811,7 @@ mod tests {
         );
         assert!(workloads::source_bundle("swe-bench").is_none());
         assert!(workloads::source_bundle("terminal-bench").is_some());
+        assert!(workloads::source_bundle("tau-bench").is_some());
         assert!(external_workload("methodology-only").is_none());
         assert!(workloads::source_bundle("methodology-only").is_none());
         assert!(external_workload("bug-fix").is_none());
@@ -1816,7 +1819,7 @@ mod tests {
         for (name, _) in &sources {
             assert_eq!(
                 workloads::source_bundle(name).is_some(),
-                *name == "terminal-bench"
+                matches!(*name, "terminal-bench" | "tau-bench")
             );
         }
         let installed = external_workload_names().collect::<std::collections::BTreeSet<_>>();

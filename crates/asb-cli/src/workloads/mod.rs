@@ -148,6 +148,12 @@ pub(crate) fn install_registered(
     })
 }
 
+/// Let an adapter derive bounded, installed-source metadata before generic
+/// installation publishes its default trial set.
+pub(crate) fn finalize_install(name: &str, directory: &Path) -> Result<(), String> {
+    adapters::find(name).map_or(Ok(()), |adapter| adapter.finalize_install(directory))
+}
+
 pub(crate) fn installed_available(name: &str, directory: &Path) -> Option<bool> {
     adapters::find(name).and_then(|adapter| adapter.installed_available(directory))
 }
