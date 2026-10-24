@@ -311,6 +311,26 @@ fn prepare_missing_installables(
             )?;
         }
     }
+    // Some providers own a project-local runtime in addition to their endpoint
+    // metadata.  Treat those runtimes exactly like selected agents: setup must
+    // leave its generated configuration runnable without a second manual
+    // `asb tool install` step.  Providers without a registered tool remain
+    // endpoint-only and require no installation.
+    for provider in unique(&options.provider) {
+        if crate::tools::find(provider).is_some()
+            && !crate::install::tool_installed_locally(provider, &tools)
+        {
+            crate::install::tool(
+                crate::install::ToolInstallOptions {
+                    name: provider.clone(),
+                    source: None,
+                    dir: None,
+                    dry_run: false,
+                },
+                output,
+            )?;
+        }
+    }
     for workload in unique(&options.workload) {
         if crate::install::external_workload_names().any(|name| name == workload)
             && !crate::install::workload_available(workload, &workloads)
