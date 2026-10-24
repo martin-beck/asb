@@ -1536,6 +1536,11 @@ fn isolated_full_entry_cases(cases: &[&str]) {
             .args(["--exact", "runner::phases::tests::full_runner_entry_keeps_real_fixture_grade_and_primary_error_after_lifecycle_failure", "--nocapture"])
             .isolated_env()
             .env("ASB_RUNNER_ENTRY_TEST_CASE", case)
+            // The child is a separately executed test binary, so it cannot
+            // inherit the parent test thread's capacity fixture. Keep this
+            // premise explicit rather than letting host free space decide an
+            // unrelated lifecycle qualification.
+            .env("ASB_TEST_AVAILABLE_MIB", "100000")
             .env("PATH", std::env::var_os("PATH").unwrap())
             .env("ASB_RUNTIME_EXECUTABLE", &runtime)
             .output().unwrap();

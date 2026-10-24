@@ -24,6 +24,9 @@ thread_local! {
 }
 
 #[cfg(test)]
+const TEST_AVAILABLE_MIB_ENV: &str = "ASB_TEST_AVAILABLE_MIB";
+
+#[cfg(test)]
 pub(crate) struct TestAvailableMib(Option<u64>);
 
 #[cfg(test)]
@@ -225,6 +228,15 @@ fn existing_ancestor(path: &Path) -> PathBuf {
 fn available_mib(path: &Path) -> Option<u64> {
     #[cfg(test)]
     if let Some(available) = TEST_AVAILABLE_MIB.with(Cell::get) {
+        return Some(available);
+    }
+    // Subprocess-backed test fixtures cannot inherit thread-local state. This
+    // test-only premise is explicit at the child launch site and never exists
+    // in a production build.
+    #[cfg(test)]
+    if let Some(available) = std::env::var_os(TEST_AVAILABLE_MIB_ENV)
+        .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
+    {
         return Some(available);
     }
     let path = existing_ancestor(path);
