@@ -351,85 +351,6 @@ function requestKey(request) {
   return JSON.stringify([request.method, request.url, normalizeCassetteBody(request.body)]);
 }
 
-function sameEndpoint(actual, expected) {
-  if (actual.method !== expected.method) return false;
-  try {
-    return new URL(actual.url, "http://asb-tape.invalid").pathname
-      === new URL(expected.url, "http://asb-tape.invalid").pathname;
-  } catch {
-    return actual.url === expected.url;
-  }
-}
-
-function requestPrefixMatches(actual, expected) {
-  if (!sameEndpoint(actual, expected)) return false;
-  try {
-    const a = JSON.parse(actual.body || "null");
-    const e = JSON.parse(expected.body || "null");
-    if (!a || !e) return false;
-    const field = Array.isArray(a.messages) && Array.isArray(e.messages) ? "messages"
-      : Array.isArray(a.input) && Array.isArray(e.input) ? "input" : null;
-    if (!field || a[field].length > e[field].length) return false;
-    const comparable = (value) => {
-      if (Array.isArray(value)) return value.map(comparable);
-      if (value && typeof value === "object") {
-        return Object.fromEntries(Object.entries(value)
-          .filter(([key]) => key !== "cache_control")
-          .map(([key, item]) => [key, comparable(item)]));
-      }
-      return value;
-    };
-    const withoutMessages = (value) => {
-      const copy = comparable(value);
-      delete copy[field];
-      return copy;
-    };
-    if (JSON.stringify(withoutMessages(a)) !== JSON.stringify(withoutMessages(e))) return false;
-    return a[field].every((message, index) => JSON.stringify(comparable(message)) === JSON.stringify(comparable(e[field][index])));
-  } catch {
-    return false;
-  }
-}
-
-// Some clients omit tool-result turns when retrying a streamed response. Keep
-// replay deterministic by accepting only the same endpoint, model, and user
-// prompt for the next recorded interaction; arbitrary prompts still reject.
-function requestReplayCompatible(actual, expected) {
-  if (!sameEndpoint(actual, expected)) return false;
-  try {
-    const a = JSON.parse(actual.body || "null");
-    const e = JSON.parse(expected.body || "null");
-    if (!a || !e || a.model !== e.model) return false;
-    const comparable = (value) => {
-      if (Array.isArray(value)) return value.map(comparable);
-      if (value && typeof value === "object") {
-        return Object.fromEntries(Object.entries(value)
-          .filter(([key]) => key !== "cache_control")
-          .map(([key, item]) => [key, comparable(item)]));
-      }
-      return value;
-    };
-    // Chat-completions clients expose the initial prompt in `messages`, while
-    // Responses clients (Codex, Cline, Pi, Qwen and WorkBuddy) use `input`.
-    // Compare only the first user item; tool-result turns and generated IDs
-    // may legitimately differ between record and replay, but a changed user
-    // prompt must remain a hard mismatch.
-    const firstUser = (value) => {
-      const items = Array.isArray(value?.messages) ? value.messages
-        : Array.isArray(value?.input) ? value.input : [];
-      return items.find((item) => item?.role === "user"
-        || (typeof item?.type === "string" && item.type === "message" && item.role === "user"))
-        || items[0];
-    };
-    const actualPrompt = firstUser(a);
-    const expectedPrompt = firstUser(e);
-    if (!actualPrompt || !expectedPrompt) return false;
-    return JSON.stringify(comparable(actualPrompt)) === JSON.stringify(comparable(expectedPrompt));
-  } catch {
-    return false;
-  }
-}
-
 const interactions = mode === "replay"
   ? readFileSync(cassette, "utf8")
       .split(/\r?\n/)
@@ -518,7 +439,9 @@ async function handle(request, response, recording) {
     // instead of comparing the probe with the first workload request.
     if (isReplayProbe(recordedRequest)
       && interactions[cursor]?.request
-      && isReplayProbe(interactions[cursor].request)) {
+      // Probe classes alone are not interchangeable: an embedding probe must
+      // never be served to a vision-capability probe (or vice versa).
+      && requestKey(recordedRequest) === requestKey(interactions[cursor].request)) {
       const probe = interactions[cursor];
       cursor += 1;
       writeProgress();
@@ -530,7 +453,11 @@ async function handle(request, response, recording) {
     // next request carries an LLM body; arbitrary mismatches stay fail-closed.
     while (interactions[cursor]?.request
       && body.length > 0
-      && isReplayProbe(interactions[cursor].request)) {
+      && isReplayProbe(interactions[cursor].request)
+      // If this client did issue the next probe, it must consume its own
+      // recorded exchange. Only probes absent from the client request may be
+      // skipped.
+      && requestKey(recordedRequest) !== requestKey(interactions[cursor].request)) {
       cursor += 1;
       writeProgress();
     }
@@ -542,9 +469,7 @@ async function handle(request, response, recording) {
       response.end(JSON.stringify({ error: "cassette has no more recorded requests" }));
       return;
     }
-    if (requestKey(recordedRequest) !== requestKey(interaction.request)
-      && !requestPrefixMatches(recordedRequest, interaction.request)
-      && !requestReplayCompatible(recordedRequest, interaction.request)) {
+    if (requestKey(recordedRequest) !== requestKey(interaction.request)) {
       // A client may retry a request after receiving a valid streamed
       // response (for example when it loses the final SSE marker). Replaying
       // the already-consumed exact request is safe and keeps the cursor on
@@ -562,30 +487,8 @@ async function handle(request, response, recording) {
       }
       rejected += 1;
       writeProgress();
-      if (process.env.ASB_TAPE_DEBUG === "1") {
-        writeFileSync("/tmp/asb-tape-expected.json", interaction.request.body || "");
-        writeFileSync("/tmp/asb-tape-actual.json", recordedRequest.body || "");
-      }
       response.writeHead(409, { "content-type": "application/json" });
-      response.end(JSON.stringify({
-        error: "request does not match cassette",
-        ...(process.env.ASB_TAPE_DEBUG === "1"
-          ? {
-              expected: {
-                method: interaction.request.method,
-                url: interaction.request.url,
-                body_length: interaction.request.body?.length ?? 0,
-                body_prefix: interaction.request.body?.slice(0, 500) ?? null,
-              },
-              actual: {
-                method: recordedRequest.method,
-                url: recordedRequest.url,
-                body_length: recordedRequest.body?.length ?? 0,
-                body_prefix: recordedRequest.body?.slice(0, 500) ?? null,
-              },
-            }
-          : {}),
-      }));
+      response.end(JSON.stringify({ error: "request does not match cassette" }));
       return;
     }
     cursor += 1;
