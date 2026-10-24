@@ -5,6 +5,7 @@
 
 mod adapters;
 mod artifacts;
+mod tool_replay;
 pub(crate) use artifacts::{ArtifactOwner, ArtifactSpec, FrozenArtifacts};
 pub(crate) mod driver;
 use adapters::REGISTRY;
