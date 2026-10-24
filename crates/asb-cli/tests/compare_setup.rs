@@ -203,6 +203,10 @@ fn actual_setup_in_non_utf8_project_refuses_unrepresentable_runtime_paths_before
         !project.0.join("not-created").exists(),
         "a rejected setup must not publish its requested configuration"
     );
+    assert!(
+        !project.0.join("tools").exists(),
+        "path preflight must run before automatic tool installation"
+    );
 }
 
 #[cfg(unix)]

@@ -44,6 +44,7 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
     if !filter_incompatible {
         validate_before_install(&options)?;
     }
+    validate_runtime_paths_before_install(&options)?;
     prepare_missing_installables(&options, output)?;
     let repeated = requested_repeats || repeated(&options);
     for measure in &options.measure {
@@ -229,6 +230,30 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
             .map_err(|error| publication::confirmation(path, error))?;
         } else {
             output.write_all(text.as_bytes()).map_err(crate::io_error)?;
+        }
+    }
+    Ok(())
+}
+
+/// Generated benchmark TOML stores project-local runtime paths as UTF-8.  Do
+/// this check before automatic installation so an invalid project pathname
+/// cannot download tools or create a partial local tool tree first.
+fn validate_runtime_paths_before_install(options: &SetupOptions) -> Result<(), Error> {
+    let (root, settings) = project::load(Path::new("."))?;
+    let mut paths = vec![
+        root.clone(),
+        project::resolve(&root, &settings.tools_dir),
+        project::resolve(&root, &settings.workloads_dir),
+        project::resolve(&root, &settings.workspace_dir),
+    ];
+    if let Some(output) = &options.output {
+        paths.push(PathBuf::from(output));
+    }
+    for path in paths {
+        if path.to_str().is_none() {
+            return Err(Error::Input(format!(
+                "setup output path {path:?} cannot be represented as UTF-8 in generated configuration; choose UTF-8 project/output directories; no setup files were written"
+            )));
         }
     }
     Ok(())
