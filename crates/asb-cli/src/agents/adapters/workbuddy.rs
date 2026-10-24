@@ -12,6 +12,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_tool_replay(prepare_tool_replay)
 .with_replay_credential_vars(&["CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"])
 .with_state_environment_vars(&["CODEBUDDY_CONFIG_DIR"])
 .with_output_usage(output_usage)
@@ -72,6 +73,21 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         .env("CODEBUDDY_MODEL", context.model)
         .env("CODEBUDDY_CONFIG_DIR", &directory)
         .env("CODEBUDDY_API_KEY_HELPER_DISABLED", "1");
+    Ok(())
+}
+
+fn prepare_tool_replay(
+    context: &mut PreparationContext<'_>,
+    tape: super::super::TapeContext<'_>,
+) -> Result<(), Error> {
+    let mode = match tape.mode {
+        crate::tape::Mode::Record => "record",
+        crate::tape::Mode::Replay => "replay",
+    };
+    context
+        .command
+        .env("ASB_TOOL_REPLAY_MODE", mode)
+        .env("ASB_TOOL_REPLAY_CASSETTE", tape.cassette);
     Ok(())
 }
 
@@ -161,5 +177,49 @@ mod tests {
                 .map(|pair| pair[1].as_str()),
             Some("1m")
         );
+    }
+
+    #[test]
+    fn tape_backed_preparation_exposes_only_explicit_tool_replay_context() {
+        let root =
+            std::env::temp_dir().join(format!("asb-workbuddy-tool-replay-{}", std::process::id()));
+        let mut command = std::process::Command::new("codebuddy");
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiResponses,
+            base_url: "http://127.0.0.1:4321/v1".into(),
+            credential: Some("asb-replay".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let cassette = std::path::Path::new("/private/run/cassette.asb.zip");
+        ADAPTER
+            .prepare(&mut PreparationContext {
+                command: &mut command,
+                model: "test-model",
+                connection: &connection,
+                runtime_dir: &root,
+                run_dir: &root,
+                tape: Some(crate::agents::TapeContext {
+                    mode: crate::tape::Mode::Record,
+                    cassette,
+                }),
+            })
+            .unwrap();
+        let env = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(env["ASB_TOOL_REPLAY_MODE"], "record");
+        assert_eq!(
+            env["ASB_TOOL_REPLAY_CASSETTE"],
+            cassette.display().to_string()
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

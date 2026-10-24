@@ -19,6 +19,7 @@ impl Fixture {
         GuestRequest {
             owned_instrumentation: None,
             task_identity: None,
+            tape_cassette: None,
             inherit_working_directory: false,
             process_lifetime: Default::default(),
             workload_owner: None,
@@ -229,6 +230,7 @@ fn selected_adapter_replaces_removed_parent_alias_with_its_fresh_configuration()
             connection: &request.connection,
             runtime_dir: &request.runtime_dir,
             run_dir: &request.run_dir,
+            tape: None,
         })
         .unwrap();
     let values: std::collections::BTreeMap<_, _> = command

@@ -7,6 +7,7 @@ pub(super) struct NativeRoute<'a> {
     pub provider_credentials: Option<(&'a str, &'a str)>,
     pub tape_url: Option<&'a str>,
     pub tape_mode: Option<tape::Mode>,
+    pub tape_cassette: Option<&'a Path>,
 }
 
 /// Immutable intent, not shared mutable runtime state.
@@ -50,6 +51,7 @@ impl NativePlan<'_> {
             provider_credentials,
             tape_url,
             tape_mode,
+            tape_cassette,
         } = route;
         let workspace = &invocation.workspace;
         invocation
@@ -179,6 +181,9 @@ impl NativePlan<'_> {
                         connection,
                         runtime_dir: &runtime_path,
                         run_dir: &run_dir,
+                        tape: tape_mode
+                            .zip(tape_cassette)
+                            .map(|(mode, cassette)| agents::TapeContext { mode, cassette }),
                     },
                 )?;
             }
@@ -307,6 +312,7 @@ mod tests {
                     provider_credentials: None,
                     tape_url: Some("http://127.0.0.1:1"),
                     tape_mode: Some(tape::Mode::Replay),
+                    tape_cassette: None,
                 },
             }
             .prepare(None)
@@ -419,6 +425,7 @@ mod tests {
                 provider_credentials: None,
                 tape_url: Some("http://127.0.0.1:1"),
                 tape_mode: Some(tape::Mode::Replay),
+                tape_cassette: None,
             },
         }
         .prepare(None)

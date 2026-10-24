@@ -678,6 +678,9 @@ impl<'a> ReadyAttempt<'a> {
                     project_root,
                     project_config,
                     replay: tape_mode == Some(tape::Mode::Replay),
+                    tape_cassette: tape_cassette
+                        .as_ref()
+                        .map(|(_, cassette)| cassette.as_path()),
                     measurements: prepared.measurements.as_mut(),
                     show_output,
                     progress: isolated_progress
@@ -728,6 +731,9 @@ impl<'a> ReadyAttempt<'a> {
                         provider_credentials,
                         tape_url,
                         tape_mode,
+                        tape_cassette: tape_cassette
+                            .as_ref()
+                            .map(|(_, cassette)| cassette.as_path()),
                     },
                 }
                 .prepare(prepared.measurements.as_mut())?;

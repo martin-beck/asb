@@ -222,6 +222,7 @@ mod tests {
             connection: &connection,
             runtime_dir: &root,
             run_dir: &run,
+            tape: None,
         })
         .unwrap();
         let env = environment(&command);

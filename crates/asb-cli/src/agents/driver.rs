@@ -63,6 +63,11 @@ pub(crate) struct GuestRequest {
     pub run_dir: PathBuf,
     #[serde(default)]
     pub replay: bool,
+    /// Exact provider-tape path forwarded by the owning runner.  It is never
+    /// inferred from the provider endpoint because record and replay are both
+    /// routed through loopback services.
+    #[serde(default)]
+    pub tape_cassette: Option<PathBuf>,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: f64,
     #[serde(default)]
@@ -457,6 +462,17 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         connection: &request.connection,
         runtime_dir: &state_root,
         run_dir: &request.run_dir,
+        tape: request
+            .tape_cassette
+            .as_deref()
+            .map(|cassette| super::TapeContext {
+                mode: if request.replay {
+                    crate::tape::Mode::Replay
+                } else {
+                    crate::tape::Mode::Record
+                },
+                cassette,
+            }),
     })?;
     configure_execution_identity(
         &mut command,

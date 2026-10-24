@@ -2436,6 +2436,7 @@ mod tests {
                 connection: &connection,
                 runtime_dir: std::path::Path::new("fixture-private"),
                 run_dir: run,
+                tape: None,
             })
             .unwrap();
         let args: Vec<_> = prepared.get_args().collect();

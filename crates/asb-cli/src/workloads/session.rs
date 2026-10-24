@@ -276,6 +276,10 @@ pub(crate) struct ExecutionContext<'a> {
     pub project_root: &'a Path,
     pub project_config: &'a crate::project::ProjectConfig,
     pub replay: bool,
+    /// Exact provider cassette identity when this execution is tape-backed.
+    /// This is forwarded to guest agent preparation so adapter-owned tool
+    /// replay never guesses from the loopback endpoint.
+    pub tape_cassette: Option<&'a Path>,
     pub measurements: Option<&'a mut crate::measurements::Session>,
     pub show_output: bool,
     /// Presentation is best-effort and deliberately cannot influence workload
