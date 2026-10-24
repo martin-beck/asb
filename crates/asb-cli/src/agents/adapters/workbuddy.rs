@@ -49,6 +49,10 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             "json".into(),
             "--model".into(),
             context.config.model.clone(),
+            // Keep record and replay histories aligned. CodeBuddy's automatic
+            // compaction point otherwise depends on local execution timing.
+            "--autocompact".into(),
+            "1m".into(),
             "-y".into(),
         ],
         append_prompt: true,
@@ -127,5 +131,35 @@ mod tests {
             std::fs::read_to_string(directory.join("models.json")).expect("configuration exists");
         assert!(text.contains("test-model"));
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn adapter_pins_the_documented_compaction_ceiling_for_replay_stability() {
+        let config = crate::benchmark::BenchmarkConfig {
+            planning: None,
+            agent: "workbuddy".into(),
+            workload: "bug-fix".into(),
+            provider: "openrouter".into(),
+            model: "test-model".into(),
+            concurrency: 1,
+            trial_set: None,
+            trial: None,
+            workspace: "workspace".into(),
+            log_file: "run.log".into(),
+            measurements: None,
+        };
+        let spec = command(&CommandContext {
+            config: &config,
+            endpoint: Some("http://127.0.0.1:3000/v1"),
+            interface: Some(crate::endpoint::Interface::OpenAiResponses),
+            prompt: "repair",
+        });
+        assert_eq!(
+            spec.args
+                .windows(2)
+                .find(|pair| pair[0] == "--autocompact")
+                .map(|pair| pair[1].as_str()),
+            Some("1m")
+        );
     }
 }
