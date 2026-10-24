@@ -1006,6 +1006,7 @@ impl ResultFacts {
             evaluation_kind,
             process_success,
             agent_failure: agent_failure.as_deref(),
+            capture_incomplete: !capture_complete,
             run_error: run_error.as_deref(),
             collector_error: collector_error.as_deref(),
             output_error: output_error.as_deref(),
