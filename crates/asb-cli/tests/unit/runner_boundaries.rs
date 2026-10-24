@@ -29,6 +29,7 @@ impl Drop for Fixture {
 
 #[test]
 fn admission_rejects_bad_replica_reuse_and_cohort_before_any_execution() {
+    let _disk = crate::disk_space::test_available_mib(100_000);
     let root = Fixture::new();
     let path = root.config();
     let options = RunOptions {
@@ -84,6 +85,7 @@ fn admission_rejects_bad_replica_reuse_and_cohort_before_any_execution() {
 
 #[test]
 fn single_reused_result_renders_without_provider_project_or_agent_startup() {
+    let _disk = crate::disk_space::test_available_mib(100_000);
     let root = Fixture::new();
     let path = root.config();
     let summary = serde_json::json!({"task":{"task_id":"retained"},"process_success":true,"workload_success":true,"token_usage":{"total_tokens":123}});

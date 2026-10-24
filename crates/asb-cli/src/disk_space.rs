@@ -5,6 +5,8 @@
 //! retained workspaces, captures, recordings and reports so an operator gets a
 //! useful warning before ASB creates a new result generation.
 use crate::{Error, benchmark::BenchmarkConfig, planning::ResolvedPlan, tape};
+#[cfg(test)]
+use std::cell::Cell;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -12,6 +14,29 @@ const BASE_PER_ATTEMPT_MIB: u64 = 512;
 const PROVIDER_SESSION_MIB: u64 = 256;
 const REPORT_OVERHEAD_MIB: u64 = 512;
 const SAFETY_NUMERATOR: u64 = 2;
+
+// Unit fixtures exercise later admission boundaries with deliberately tiny
+// temporary filesystems. Keep their capacity premise explicit and scoped to
+// the calling test thread; production always probes the target filesystem.
+#[cfg(test)]
+thread_local! {
+    static TEST_AVAILABLE_MIB: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct TestAvailableMib(Option<u64>);
+
+#[cfg(test)]
+pub(crate) fn test_available_mib(mib: u64) -> TestAvailableMib {
+    TestAvailableMib(TEST_AVAILABLE_MIB.with(|available| available.replace(Some(mib))))
+}
+
+#[cfg(test)]
+impl Drop for TestAvailableMib {
+    fn drop(&mut self) {
+        TEST_AVAILABLE_MIB.with(|available| available.set(self.0));
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Estimate {
@@ -193,6 +218,10 @@ fn existing_ancestor(path: &Path) -> PathBuf {
 
 #[cfg(unix)]
 fn available_mib(path: &Path) -> Option<u64> {
+    #[cfg(test)]
+    if let Some(available) = TEST_AVAILABLE_MIB.with(Cell::get) {
+        return Some(available);
+    }
     let path = existing_ancestor(path);
     // ASB forbids unsafe FFI. POSIX `df -Pk` gives a portable, fixed unit
     // capacity probe without accepting shell text or invoking a shell.
