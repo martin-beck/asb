@@ -528,11 +528,25 @@ impl Recorder {
                     )
                     .map_err(recording_error)?;
             }
+            // commit_with_artifacts constructs the immutable artifact list
+            // itself; obtain that committed track before asking for evidence.
+            // Supplying an already-populated list would be rejected by the
+            // journal, while retaining the pre-commit track would fail its
+            // strict immutable-metadata comparison.
+            let committed_track = journal
+                .snapshot()
+                .map_err(recording_error)?
+                .tracks
+                .into_iter()
+                .find(|candidate| candidate.id == track.id)
+                .ok_or_else(|| Error::Io("recording lost its committed track".into()))?;
             let evidence = Evidence {
                 campaign_root: self.root.clone(),
                 producer: output,
                 attempt_id: result.task.attempt_id.clone(),
-                track: journal.track_evidence(&track).map_err(recording_error)?,
+                track: journal
+                    .track_evidence(&committed_track)
+                    .map_err(recording_error)?,
                 generation: self.binding.clone(),
             };
             let evidence_bytes =

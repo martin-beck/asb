@@ -327,7 +327,7 @@ pub(super) fn stage_selected(
             crate::benchmark_paths::replica_path(&base, slot.replica)
         };
         fs::hard_link(root.join(&input.private), &destination).map_err(crate::io_error)?;
-        stage_local_tools(root, input, &destination, slot.replica)?;
+        stage_local_tools(root, input, &destination, slot.replica, concurrency)?;
     }
     fs::File::open(base.parent().expect("batch parent"))
         .and_then(|file| file.sync_all())
@@ -340,6 +340,7 @@ fn stage_local_tools(
     input: &ReplayInput,
     destination: &Path,
     replica: usize,
+    concurrency: usize,
 ) -> Result<(), Error> {
     let Some(local_tools) = &input.local_tools else {
         return Ok(());
@@ -347,7 +348,11 @@ fn stage_local_tools(
     let destination = destination
         .parent()
         .expect("replay destination has parent")
-        .join(format!("local-tools-{replica}.jsonl"));
+        .join(if concurrency == 1 {
+            "local-tools.jsonl".into()
+        } else {
+            format!("local-tools-{replica}.jsonl")
+        });
     fs::hard_link(root.join(local_tools), destination).map_err(crate::io_error)
 }
 
@@ -419,10 +424,36 @@ mod tests {
             sha256: "a".repeat(64),
         };
         let destination = root.join("batch/replay.jsonl");
-        stage_local_tools(&root, &input, &destination, 3).unwrap();
+        stage_local_tools(&root, &input, &destination, 3, 4).unwrap();
         assert_eq!(
             fs::read(root.join("batch/local-tools-3.jsonl")).unwrap(),
             b"{\"sequence\":1}\n"
+        );
+        assert!(!root.join("batch/local-tools-1.jsonl").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn singleton_local_tool_payload_uses_the_provider_basename() {
+        let root =
+            std::env::temp_dir().join(format!("asb-replay-local-tools-one-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("inputs")).unwrap();
+        fs::create_dir_all(root.join("batch")).unwrap();
+        fs::write(root.join("inputs/local-tools-1.jsonl"), b"{}\n").unwrap();
+        let input = ReplayInput {
+            complete: Some(true),
+            track: Some(1),
+            source: root.join("source"),
+            private: PathBuf::from("inputs/track-1.jsonl"),
+            local_tools: Some(PathBuf::from("inputs/local-tools-1.jsonl")),
+            bytes: 3,
+            sha256: crate::cassette::digest(b"{}\n"),
+        };
+        stage_local_tools(&root, &input, &root.join("batch/replay.jsonl"), 1, 1).unwrap();
+        assert_eq!(
+            fs::read(root.join("batch/local-tools.jsonl")).unwrap(),
+            b"{}\n"
         );
         assert!(!root.join("batch/local-tools-1.jsonl").exists());
         let _ = fs::remove_dir_all(root);

@@ -147,9 +147,25 @@ if (process.env.ASB_TAPE_MODE === 'replay' &&
     (process.env.OPENROUTER_API_KEY !== 'asb-replay' || process.env.ANTHROPIC_API_KEY !== 'asb-replay')) {
   console.error('replay exposed a live credential'); process.exit(9);
 }
+if (process.env.ASB_TAPE_MODE) {
+  const extensionIndex = process.argv.indexOf('--with-extension');
+  if (extensionIndex < 0 || !process.argv.includes('--no-profile')) {
+    console.error('Goose did not receive the private ASB extension'); process.exit(10);
+  }
+  const extension = process.argv[extensionIndex + 1];
+  const localTool = require('child_process').spawnSync('/bin/sh', ['-c', extension], {
+    input: JSON.stringify({jsonrpc:'2.0', id:1, method:'tools/call', params:{name:'write_file', arguments:{path:'src/parser.py', content:"def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n"}}}) + '\n',
+    encoding: 'utf8',
+  });
+  if (localTool.status !== 0 || !localTool.stdout.includes('"content"')) {
+    console.error('private local tool failed: ' + localTool.stderr); process.exit(11);
+  }
+} else {
+  require('fs').writeFileSync('src/parser.py', "def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n");
+}
 const body = {model:'test-model', messages:[{role:'user', content:process.env.ASB_TEST_CHANGED ? 'changed' : 'test'}], tools:[{type:'function'}]};
 fetch(host + process.env.OPENAI_BASE_PATH, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})
-  .then(async r => { if (!r.ok) throw new Error(await r.text()); require('fs').writeFileSync('src/parser.py', "def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n"); console.log('{"status":"ok"}'); })
+  .then(async r => { if (!r.ok) throw new Error(await r.text()); console.log('{"status":"ok"}'); })
   .catch(e => { console.error(e); process.exitCode = 1; });
 "##).unwrap();
     std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
