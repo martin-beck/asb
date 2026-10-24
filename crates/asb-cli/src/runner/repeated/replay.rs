@@ -327,18 +327,28 @@ pub(super) fn stage_selected(
             crate::benchmark_paths::replica_path(&base, slot.replica)
         };
         fs::hard_link(root.join(&input.private), &destination).map_err(crate::io_error)?;
-        if let Some(local_tools) = &input.local_tools {
-            let destination = destination
-                .parent()
-                .expect("replay destination has parent")
-                .join(format!("local-tools-{}.jsonl", slot.replica));
-            fs::hard_link(root.join(local_tools), destination).map_err(crate::io_error)?;
-        }
+        stage_local_tools(root, input, &destination, slot.replica)?;
     }
     fs::File::open(base.parent().expect("batch parent"))
         .and_then(|file| file.sync_all())
         .map_err(crate::io_error)?;
     path_text(&base)
+}
+
+fn stage_local_tools(
+    root: &Path,
+    input: &ReplayInput,
+    destination: &Path,
+    replica: usize,
+) -> Result<(), Error> {
+    let Some(local_tools) = &input.local_tools else {
+        return Ok(());
+    };
+    let destination = destination
+        .parent()
+        .expect("replay destination has parent")
+        .join(format!("local-tools-{replica}.jsonl"));
+    fs::hard_link(root.join(local_tools), destination).map_err(crate::io_error)
 }
 
 fn generated_seed() -> u64 {
@@ -381,4 +391,40 @@ pub(super) fn disclose_incomplete<'a>(
 
 fn input_error(error: crate::cassette::Error) -> Error {
     Error::Input(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_local_tool_payload_is_linked_only_into_its_replica_batch() {
+        let root =
+            std::env::temp_dir().join(format!("asb-replay-local-tools-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("inputs")).unwrap();
+        fs::create_dir_all(root.join("batch")).unwrap();
+        fs::write(
+            root.join("inputs/local-tools-7.jsonl"),
+            b"{\"sequence\":1}\n",
+        )
+        .unwrap();
+        let input = ReplayInput {
+            complete: Some(true),
+            track: Some(7),
+            source: PathBuf::from("sealed.asb.zip"),
+            private: PathBuf::from("inputs/track-7.jsonl"),
+            local_tools: Some(PathBuf::from("inputs/local-tools-7.jsonl")),
+            bytes: 2,
+            sha256: "a".repeat(64),
+        };
+        let destination = root.join("batch/replay.jsonl");
+        stage_local_tools(&root, &input, &destination, 3).unwrap();
+        assert_eq!(
+            fs::read(root.join("batch/local-tools-3.jsonl")).unwrap(),
+            b"{\"sequence\":1}\n"
+        );
+        assert!(!root.join("batch/local-tools-1.jsonl").exists());
+        let _ = fs::remove_dir_all(root);
+    }
 }
