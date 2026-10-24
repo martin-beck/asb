@@ -66,7 +66,7 @@ fn distinct_tasks_and_replicas_overlap_with_isolated_replay_outputs_and_failures
     std::fs::write(&agent, r##"#!/usr/bin/env node
 const fs=require('fs'); const home=process.env.HOME;
 const first=process.cwd().includes('000-first');
-const replica=process.cwd().match(/concurrency-(\d+)/)?.[1];
+const replica=process.cwd().match(/concurrency-(\d+)/)?.[1] ?? '1';
 const name=first?'first-'+replica:'second';
 fs.writeFileSync(home+'/started-'+name,'started');
 const expected=['first-1','first-2','second'];
