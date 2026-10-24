@@ -289,3 +289,103 @@ fetch(host + process.env.OPENAI_BASE_PATH, {method:'POST',headers:{'content-type
     drop(requests);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn workbuddy_routes_record_and_replay_through_inline_private_mcp() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("asb-workbuddy-tape-{}-{stamp}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let provider = MockProvider::start();
+    let init = run(&root, &provider.endpoint, &["init"]);
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    std::fs::create_dir_all(root.join("asb-workspace/src")).unwrap();
+    std::fs::write(
+        root.join("asb-workspace/src/parser.py"),
+        "def parse_path(value: str) -> list[str]:\n    return []\n",
+    )
+    .unwrap();
+    let agent_dir = root.join(".asb-tools/workbuddy/node_modules/.bin");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let agent = agent_dir.join("codebuddy");
+    std::fs::write(&agent, r##"#!/usr/bin/env node
+const base = process.env.CODEBUDDY_BASE_URL;
+if (!/^http:\/\/127\.0\.0\.1:\d+\/v1$/.test(base || '')) { console.error('unexpected WorkBuddy endpoint'); process.exit(7); }
+const taped = Boolean(process.env.ASB_TAPE_MODE);
+if (taped && (process.env.CODEBUDDY_API_KEY !== 'asb-replay' && process.env.CODEBUDDY_API_KEY !== 'fixture-key')) { console.error('incorrect replay key'); process.exit(8); }
+if (taped) {
+  if (!process.argv.includes('--strict-mcp-config') || process.argv[process.argv.indexOf('--tools') + 1] !== '') { console.error('strict tool configuration missing'); process.exit(9); }
+  const config = JSON.parse(process.argv[process.argv.indexOf('--mcp-config') + 1]);
+  const server = config.mcpServers && config.mcpServers['asb-local-tools'];
+  if (!server || server.type !== 'stdio' || !server.command || !Array.isArray(server.args)) { console.error('private MCP configuration missing'); process.exit(10); }
+  const localTool = require('child_process').spawnSync(server.command, server.args, {
+    input: JSON.stringify({jsonrpc:'2.0', id:1, method:'tools/call', params:{name:'write_file', arguments:{path:'src/parser.py', content:"def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n"}}}) + '\n',
+    encoding: 'utf8',
+  });
+  if (localTool.status !== 0 || !localTool.stdout.includes('"content"')) { console.error('private MCP tool failed'); process.exit(11); }
+} else {
+  require('fs').writeFileSync('src/parser.py', "def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n");
+}
+fetch(base + '/responses', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({model:'test-model',input:'fixture',tools:[{type:'function'}]})})
+  .then(async r => { if (!r.ok) throw new Error(await r.text()); console.log('{"type":"result","num_turns":1,"usage":{"input_tokens":1,"output_tokens":1}}'); })
+  .catch(error => { console.error(error); process.exitCode = 1; });
+"##)
+    .unwrap();
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(root.join("benchmark.toml"), "agent='workbuddy'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='test-model'\nconcurrency=1\n").unwrap();
+    let record = run(
+        &root,
+        &provider.endpoint,
+        &[
+            "run",
+            "benchmark.toml",
+            "--record",
+            "--cassette",
+            "tape.jsonl",
+        ],
+    );
+    assert!(
+        record.status.success(),
+        "record: {}",
+        String::from_utf8_lossy(&record.stderr)
+    );
+    let mut archive = asb_cli::cassette::Archive::open(
+        &root.join("tape.jsonl"),
+        asb_cli::cassette::Limits::default(),
+    )
+    .unwrap();
+    assert!(!archive.read_artifact(1, "local-tools").unwrap().is_empty());
+    let before_replay = provider.requests.lock().unwrap().clone();
+    let replay = run(
+        &root,
+        &provider.endpoint,
+        &[
+            "run",
+            "benchmark.toml",
+            "--replay",
+            "--cassette",
+            "tape.jsonl",
+        ],
+    );
+    assert!(
+        replay.status.success(),
+        "replay: {}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert_eq!(*provider.requests.lock().unwrap(), before_replay);
+    let live = run(&root, &provider.endpoint, &["run", "benchmark.toml"]);
+    assert!(
+        live.status.success(),
+        "live: {}",
+        String::from_utf8_lossy(&live.stderr)
+    );
+    assert!(provider.requests.lock().unwrap().len() > before_replay.len());
+    std::fs::remove_dir_all(root).unwrap();
+}
