@@ -14,7 +14,7 @@ mod source;
 
 pub use archive::{Archive, Limits};
 pub use journal::{
-    ProofLimits, Publication, RecordingJournal, RecordingReservation, TrackEvidence,
+    ArtifactInput, ProofLimits, Publication, RecordingJournal, RecordingReservation, TrackEvidence,
 };
 pub use provenance::{ImportedTrack, OriginPlan, RecordingSource, track_metadata_digest};
 pub use selection::{Metric, SelectionPlan, Selector};
@@ -146,6 +146,11 @@ pub struct Track {
     pub sha256: String,
     /// Optional normalized observations for selectors and presentation.
     pub statistics: Statistics,
+    /// Additional run-private evidence tied to this exact execution.  These
+    /// payloads are deliberately catalogued with the provider transcript so a
+    /// replay can never silently consume an unsealed sidecar.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
 }
 
 impl Track {
@@ -154,11 +159,54 @@ impl Track {
         format!("tracks/{}.jsonl", self.id)
     }
 
+    /// Canonical archive entry for a named, sealed auxiliary payload.
+    pub fn artifact_entry_name(&self, kind: &str) -> String {
+        format!("artifacts/{}/{}.jsonl", self.id, kind)
+    }
+
     /// Complete failed attempts remain eligible, but known probe-only captures do
     /// not supply inference traces. Missing legacy request statistics stay unknown.
     pub fn automatically_selectable(&self) -> bool {
         self.complete && self.bytes > 0 && self.statistics.requests != Some(0)
     }
+}
+
+/// A bounded auxiliary JSONL payload that belongs to one execution track.
+///
+/// Artifact kinds are a small, canonical namespace controlled by ASB.  The
+/// payload is never exposed as a generic archive path, preventing a recording
+/// from smuggling arbitrary files into a replay workspace.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Artifact {
+    /// Stable lowercase ASCII kind (for example `local-tools`).
+    pub kind: String,
+    /// Uncompressed JSONL length.
+    pub bytes: u64,
+    /// Digest of the exact uncompressed bytes.
+    pub sha256: String,
+}
+
+impl Artifact {
+    fn validate(&self, limits: Limits) -> Result<(), Error> {
+        if !valid_artifact_kind(&self.kind)
+            || self.bytes > limits.max_track_bytes
+            || !valid_digest(&self.sha256)
+        {
+            return Err(Error(
+                "invalid cassette auxiliary artifact identity, digest or size".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn valid_artifact_kind(kind: &str) -> bool {
+    !kind.is_empty()
+        && kind.len() <= 64
+        && kind
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 /// Versioned recording identity and immutable track catalogue.
@@ -213,6 +261,7 @@ impl Manifest {
         }
         let mut prior = 0;
         let mut bytes = 0u64;
+        let mut payload_entries = self.tracks.len();
         for track in &self.tracks {
             let expected = track
                 .batch
@@ -237,6 +286,29 @@ impl Manifest {
                 return Err(Error(
                     "cassette exceeds total uncompressed size limit".into(),
                 ));
+            }
+            let mut artifact_kinds = std::collections::BTreeSet::new();
+            for artifact in &track.artifacts {
+                artifact.validate(limits)?;
+                if !artifact_kinds.insert(&artifact.kind) {
+                    return Err(Error(
+                        "cassette track contains duplicate auxiliary artifact kinds".into(),
+                    ));
+                }
+                payload_entries = payload_entries
+                    .checked_add(1)
+                    .ok_or_else(|| Error("cassette payload entry count overflow".into()))?;
+                if payload_entries > limits.max_tracks {
+                    return Err(Error("cassette exceeds payload entry limit".into()));
+                }
+                bytes = bytes
+                    .checked_add(artifact.bytes)
+                    .ok_or_else(|| Error("cassette total length overflow".into()))?;
+                if bytes > limits.max_total_bytes {
+                    return Err(Error(
+                        "cassette exceeds total uncompressed size limit".into(),
+                    ));
+                }
             }
             prior = track.id;
             if self

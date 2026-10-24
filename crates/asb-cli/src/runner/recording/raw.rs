@@ -335,6 +335,7 @@ mod tests {
                 bytes: 3,
                 sha256: crate::cassette::digest(b"{}\n"),
                 statistics: Default::default(),
+                artifacts: Vec::new(),
             }
         }
         fn custody(&self, parent: &str) -> PathBuf {

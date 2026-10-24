@@ -390,9 +390,104 @@ fn manifest(count: u64) -> Manifest {
                     requests: Some(id),
                     steps: None,
                 },
+                artifacts: Vec::new(),
             })
             .collect(),
     }
+}
+
+#[test]
+fn auxiliary_artifacts_are_sealed_and_read_by_catalogue_identity() {
+    let fixture = Fixture::new();
+    let mut manifest = manifest(1);
+    manifest.tracks[0].artifacts.push(Artifact {
+        kind: "local-tools".into(),
+        bytes: 16,
+        sha256: digest(b"{\"tool\":\"read\"}\n"),
+    });
+    let archive_path = fixture.zip(
+        &manifest,
+        &[
+            ("tracks/1.jsonl", b"{}\n".as_slice()),
+            (
+                "artifacts/1/local-tools.jsonl",
+                b"{\"tool\":\"read\"}\n".as_slice(),
+            ),
+        ],
+    );
+    let mut archive = Archive::open(&archive_path, Limits::default()).unwrap();
+    assert_eq!(
+        archive.read_artifact(1, "local-tools").unwrap(),
+        b"{\"tool\":\"read\"}\n"
+    );
+    assert!(archive.read_artifact(1, "missing").is_err());
+}
+
+#[test]
+fn auxiliary_artifacts_reject_unlisted_or_duplicate_paths() {
+    let fixture = Fixture::new();
+    let mut manifest = manifest(1);
+    manifest.tracks[0].artifacts.push(Artifact {
+        kind: "local-tools".into(),
+        bytes: 3,
+        sha256: digest(b"{}\n"),
+    });
+    let unlisted = fixture.zip(
+        &manifest,
+        &[
+            ("tracks/1.jsonl", b"{}\n".as_slice()),
+            ("artifacts/1/local-tools.jsonl", b"{}\n".as_slice()),
+            ("artifacts/1/foreign.jsonl", b"{}\n".as_slice()),
+        ],
+    );
+    assert!(Archive::open(&unlisted, Limits::default()).is_err());
+    manifest.tracks[0].artifacts.push(Artifact {
+        kind: "local-tools".into(),
+        bytes: 3,
+        sha256: digest(b"{}\n"),
+    });
+    assert!(manifest.validate(Limits::default()).is_err());
+    let mut one_artifact = manifest.clone();
+    one_artifact.tracks[0].artifacts.truncate(1);
+    assert!(
+        one_artifact
+            .validate(Limits {
+                max_tracks: 1,
+                ..Limits::default()
+            })
+            .is_err()
+    );
+}
+
+#[test]
+fn journal_publishes_auxiliary_artifacts_with_the_track() {
+    let fixture = Fixture::new();
+    let destination = fixture.0.join("recording.zip");
+    let mut journal =
+        RecordingJournal::create(&destination, manifest(0), 1, Limits::default()).unwrap();
+    journal.begin(1, 1).unwrap();
+    let mut provider = b"{}\n".as_slice();
+    let mut tools = b"{\"tool\":\"read\"}\n".as_slice();
+    journal
+        .commit_with_artifacts(
+            manifest(1).tracks.remove(0),
+            &mut provider,
+            vec![ArtifactInput {
+                artifact: Artifact {
+                    kind: "local-tools".into(),
+                    bytes: 16,
+                    sha256: digest(b"{\"tool\":\"read\"}\n"),
+                },
+                source: &mut tools,
+            }],
+        )
+        .unwrap();
+    journal.finalize().unwrap();
+    let mut archive = Archive::open(&destination, Limits::default()).unwrap();
+    assert_eq!(
+        archive.read_artifact(1, "local-tools").unwrap(),
+        b"{\"tool\":\"read\"}\n"
+    );
 }
 
 #[test]

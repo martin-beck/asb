@@ -2,7 +2,7 @@
 mod evidence;
 mod publication;
 mod reservation;
-use super::{Error, Limits, Manifest, Statistics, Track, digest};
+use super::{Artifact, Error, Limits, Manifest, Statistics, Track, digest};
 use crate::output_lock::OutputLock;
 #[cfg(test)]
 pub(super) use evidence::observed;
@@ -21,6 +21,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
+
+/// Bytes for one named auxiliary payload, staged atomically with its provider
+/// transcript.  It is intentionally journal-owned: callers cannot attach a
+/// loose sidecar after a track is committed.
+pub struct ArtifactInput<'a> {
+    /// Immutable catalogue metadata for this payload.
+    pub artifact: Artifact,
+    /// Exact bytes to stage and verify against [`Self::artifact`].
+    pub source: &'a mut dyn Read,
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -256,7 +266,14 @@ impl RecordingJournal {
             .snapshot()?
             .tracks
             .iter()
-            .try_fold(0u64, |total, track| total.checked_add(track.bytes))
+            .try_fold(0u64, |total, track| {
+                track
+                    .artifacts
+                    .iter()
+                    .try_fold(total.checked_add(track.bytes)?, |total, artifact| {
+                        total.checked_add(artifact.bytes)
+                    })
+            })
             .ok_or_else(|| Error("recording staged byte count overflow".into()))?;
         Ok(journal)
     }
@@ -305,6 +322,17 @@ impl RecordingJournal {
     /// never process exit alone. Failed staging retains its uncommitted payload
     /// for inspection; another commit cannot overwrite it.
     pub fn commit(&mut self, track: Track, source: &mut dyn Read) -> Result<(), Error> {
+        self.commit_with_artifacts(track, source, Vec::new())
+    }
+
+    /// Stage a provider transcript and every catalogue-declared auxiliary
+    /// payload before publishing one immutable track commit.
+    pub fn commit_with_artifacts(
+        &mut self,
+        mut track: Track,
+        source: &mut dyn Read,
+        artifacts: Vec<ArtifactInput<'_>>,
+    ) -> Result<(), Error> {
         if self
             .intent
             .manifest
@@ -315,7 +343,16 @@ impl RecordingJournal {
         {
             return Err(Error("imported slots require the artifact-copy API".into()));
         }
-        self.commit_payload(track, source)
+        if !track.artifacts.is_empty() {
+            return Err(Error(
+                "caller must supply auxiliary payloads through the journal bundle API".into(),
+            ));
+        }
+        track.artifacts = artifacts
+            .iter()
+            .map(|input| input.artifact.clone())
+            .collect();
+        self.commit_bundle(track, source, artifacts)
     }
 
     /// Import a reserved original track without manufacturing an execution,
@@ -353,7 +390,7 @@ impl RecordingJournal {
             &serde_json::to_vec(&started).map_err(json_error)?,
         )?;
         self.starts.insert(track.id, started);
-        self.commit_payload(track, source)
+        self.commit_bundle(track, source, Vec::new())
     }
 
     /// Explicitly finish an artifact import after interruption. This never
@@ -394,6 +431,11 @@ impl RecordingJournal {
                 "import is already committed; refusing duplicate recovery".into(),
             ));
         }
+        if !track.artifacts.is_empty() {
+            return Err(Error(
+                "artifact-bearing imports require an auxiliary artifact-copy API".into(),
+            ));
+        }
         // commit_payload's create-new open is authoritative even if a foreign
         // pathname appears after this check. No retained bytes are truncated.
         if exists(&self.payload_path(track.id))? {
@@ -412,28 +454,77 @@ impl RecordingJournal {
             file.sync_all().map_err(io_error)?;
             return self.publish_commit(track);
         }
-        self.commit_payload(track, source)
+        self.commit_bundle(track, source, Vec::new())
     }
 
-    fn commit_payload(&mut self, track: Track, source: &mut dyn Read) -> Result<(), Error> {
+    fn commit_bundle(
+        &mut self,
+        track: Track,
+        source: &mut dyn Read,
+        artifacts: Vec<ArtifactInput<'_>>,
+    ) -> Result<(), Error> {
         self.check_root()?;
         self.ensure_recording()?;
         self.validate_track(&track)?;
+        if track.artifacts.len() != artifacts.len()
+            || track
+                .artifacts
+                .iter()
+                .zip(&artifacts)
+                .any(|(declared, supplied)| declared != &supplied.artifact)
+        {
+            return Err(Error(
+                "track auxiliary artifact catalogue differs from supplied payloads".into(),
+            ));
+        }
         if self.commits.contains_key(&track.id) {
             return Err(Error(format!(
                 "recording track {} is already committed",
                 track.id
             )));
         }
+        self.ensure_commit_metadata_capacity(&track)?;
+        let bundle_bytes = track
+            .artifacts
+            .iter()
+            .try_fold(track.bytes, |total, artifact| {
+                total.checked_add(artifact.bytes)
+            })
+            .ok_or_else(|| Error("recording payload length overflow".into()))?;
         if self
             .staged_bytes
-            .checked_add(track.bytes)
+            .checked_add(bundle_bytes)
             .is_none_or(|total| total > self.limits.max_total_bytes)
         {
             return Err(Error("recording exceeds total staged byte limit".into()));
         }
-        let path = self.payload_path(track.id);
-        let mut file = create_private(&path)?;
+        self.stage_payload(
+            &self.payload_path(track.id),
+            track.bytes,
+            &track.sha256,
+            source,
+        )?;
+        for input in artifacts {
+            self.stage_payload(
+                &self.artifact_path(track.id, &input.artifact.kind),
+                input.artifact.bytes,
+                &input.artifact.sha256,
+                input.source,
+            )?;
+        }
+        #[cfg(test)]
+        self.publication_fault.check("before-payload-commit")?;
+        self.publish_commit(track)
+    }
+
+    fn stage_payload(
+        &mut self,
+        path: &Path,
+        expected_bytes: u64,
+        expected_sha256: &str,
+        source: &mut dyn Read,
+    ) -> Result<(), Error> {
+        let mut file = create_private(path)?;
         let mut hash = Sha256::new();
         let mut length = 0u64;
         let mut buffer = [0; 16 * 1024];
@@ -445,7 +536,7 @@ impl RecordingJournal {
             length = length
                 .checked_add(read as u64)
                 .ok_or_else(|| Error("recording payload length overflow".into()))?;
-            if length > track.bytes {
+            if length > expected_bytes {
                 return Err(Error(
                     "recording payload exceeds declared length; incomplete payload retained".into(),
                 ));
@@ -458,14 +549,40 @@ impl RecordingJournal {
             file.write_all(&buffer[..read]).map_err(io_error)?;
         }
         file.sync_all().map_err(io_error)?;
-        if length != track.bytes || format!("{:x}", hash.finalize()) != track.sha256 {
+        if length != expected_bytes || format!("{:x}", hash.finalize()) != expected_sha256 {
             return Err(Error(
                 "recording payload length/checksum mismatch; incomplete payload retained".into(),
             ));
         }
-        #[cfg(test)]
-        self.publication_fault.check("before-payload-commit")?;
-        self.publish_commit(track)
+        Ok(())
+    }
+
+    /// Reject an auxiliary catalogue that would make either the immutable
+    /// commit record or eventual manifest unparsable before any payload file
+    /// is created.  A failed record must retain no ambiguous sidecar bytes.
+    fn ensure_commit_metadata_capacity(&self, track: &Track) -> Result<(), Error> {
+        let committed = Committed {
+            recording_id: self.intent.manifest.recording_id.clone(),
+            track: track.clone(),
+        };
+        if serde_json::to_vec(&committed).map_err(json_error)?.len() as u64 > MAX_RECORD_BYTES {
+            return Err(Error(
+                "recording auxiliary metadata exceeds commit record bound".into(),
+            ));
+        }
+        let mut manifest = self.intent.manifest.clone();
+        manifest.tracks = self.commits.values().cloned().collect();
+        manifest.tracks.push(track.clone());
+        manifest.tracks.sort_by_key(|candidate| candidate.id);
+        manifest.validate(self.limits)?;
+        if serde_json::to_vec(&manifest).map_err(json_error)?.len() as u64
+            > self.limits.max_manifest_bytes
+        {
+            return Err(Error(
+                "recording auxiliary metadata exceeds manifest bound".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn publish_commit(&mut self, track: Track) -> Result<(), Error> {
@@ -544,6 +661,7 @@ impl RecordingJournal {
     /// started but uncommitted slots are incomplete with unknown outcomes.
     pub fn snapshot(&self) -> Result<Manifest, Error> {
         self.check_root()?;
+        self.verify_auxiliary_staging_names()?;
         if let Some(manifest) = &self.finalization {
             self.verify_finalization(manifest)?;
             return Ok(manifest.clone());
@@ -551,7 +669,14 @@ impl RecordingJournal {
         let declared = self
             .commits
             .values()
-            .try_fold(0u64, |total, track| total.checked_add(track.bytes))
+            .try_fold(0u64, |total, track| {
+                track
+                    .artifacts
+                    .iter()
+                    .try_fold(total.checked_add(track.bytes)?, |total, artifact| {
+                        total.checked_add(artifact.bytes)
+                    })
+            })
             .ok_or_else(|| Error("recording committed length overflow".into()))?;
         if declared > self.limits.max_total_bytes {
             return Err(Error(
@@ -578,6 +703,21 @@ impl RecordingJournal {
                 .checked_add(length)
                 .filter(|total| *total <= self.limits.max_total_bytes)
                 .ok_or_else(|| Error("recording payloads exceed aggregate byte limit".into()))?;
+            if let Some(track) = self.commits.get(&started.id) {
+                for artifact in &track.artifacts {
+                    let path = self.artifact_path(track.id, &artifact.kind);
+                    let length = open_regular(&path, self.limits.max_track_bytes)?
+                        .metadata()
+                        .map_err(io_error)?
+                        .len();
+                    total = total
+                        .checked_add(length)
+                        .filter(|total| *total <= self.limits.max_total_bytes)
+                        .ok_or_else(|| {
+                            Error("recording payloads exceed aggregate byte limit".into())
+                        })?;
+                }
+            }
         }
         let mut remaining = self.limits.max_total_bytes;
         let mut manifest = self.intent.manifest.clone();
@@ -589,6 +729,24 @@ impl RecordingJournal {
                         "recording track {} payload differs from its commit",
                         track.id
                     )));
+                }
+                let mut artifact_remaining = remaining
+                    .checked_sub(track.bytes)
+                    .ok_or_else(|| Error("recording aggregate byte limit exceeded".into()))?;
+                for artifact in &track.artifacts {
+                    if hash_file(
+                        &self.artifact_path(track.id, &artifact.kind),
+                        artifact.bytes.min(artifact_remaining),
+                    )? != (artifact.bytes, artifact.sha256.clone())
+                    {
+                        return Err(Error(format!(
+                            "recording track {} auxiliary artifact {} differs from its commit",
+                            track.id, artifact.kind
+                        )));
+                    }
+                    artifact_remaining = artifact_remaining
+                        .checked_sub(artifact.bytes)
+                        .ok_or_else(|| Error("recording aggregate byte limit exceeded".into()))?;
                 }
                 track.clone()
             } else {
@@ -610,10 +768,18 @@ impl RecordingJournal {
                     bytes,
                     sha256,
                     statistics: Statistics::default(),
+                    artifacts: Vec::new(),
                 }
             };
+            let payload_bytes = track
+                .artifacts
+                .iter()
+                .try_fold(track.bytes, |total, artifact| {
+                    total.checked_add(artifact.bytes)
+                })
+                .ok_or_else(|| Error("recording aggregate byte limit exceeded".into()))?;
             remaining = remaining
-                .checked_sub(track.bytes)
+                .checked_sub(payload_bytes)
                 .ok_or_else(|| Error("recording aggregate byte limit exceeded".into()))?;
             manifest.tracks.push(track);
         }
@@ -633,6 +799,37 @@ impl RecordingJournal {
 
     fn payload_path(&self, id: u64) -> PathBuf {
         self.root.join(format!("track-{id}.jsonl"))
+    }
+
+    fn artifact_path(&self, id: u64, kind: &str) -> PathBuf {
+        self.root.join(format!("artifact-{id}-{kind}.jsonl"))
+    }
+
+    /// Auxiliary payloads are never diagnostic sidecars: every such filename
+    /// must be named by a committed track or finalization refuses publication.
+    fn verify_auxiliary_staging_names(&self) -> Result<(), Error> {
+        let expected =
+            self.commits
+                .values()
+                .flat_map(|track| {
+                    track.artifacts.iter().map(move |artifact| {
+                        format!("artifact-{}-{}.jsonl", track.id, artifact.kind)
+                    })
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+        for entry in fs::read_dir(&self.root).map_err(io_error)? {
+            let name = entry
+                .map_err(io_error)?
+                .file_name()
+                .to_string_lossy()
+                .into_owned();
+            if name.starts_with("artifact-") && !expected.contains(&name) {
+                return Err(Error(
+                    "recording contains an uncommitted or foreign auxiliary artifact".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn slot(&self, batch: u64, replica: u64) -> Result<u64, Error> {

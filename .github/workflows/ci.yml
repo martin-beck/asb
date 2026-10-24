@@ -24,6 +24,13 @@ jobs:
         with:
           # The selector compares the PR's immutable base and head commits.
           fetch-depth: 0
+      - name: Prepare runner fixture directory
+        # Rust's test fixtures use std::env::temp_dir(). Keep them on the
+        # provisioned runner volume rather than the host's shared /tmp, whose
+        # capacity is deliberately not an ASB test prerequisite.
+        run: |
+          mkdir -p "$RUNNER_TEMP/asb-fixtures"
+          echo "TMPDIR=$RUNNER_TEMP/asb-fixtures" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -68,6 +75,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Prepare runner fixture directory
+        # Keep fixture-heavy serial tests off the shared host /tmp filesystem.
+        run: |
+          mkdir -p "$RUNNER_TEMP/asb-fixtures"
+          echo "TMPDIR=$RUNNER_TEMP/asb-fixtures" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
