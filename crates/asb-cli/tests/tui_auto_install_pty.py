@@ -68,7 +68,9 @@ try:
         os.write(master, b"\x1b[B")
     os.write(master, b" ")
     if mode in ("failure", "no-executable", "not-runnable"):
-        wait_for(b"Cannot install" if mode == "failure" else b"finished but it is not ready")
+        # The installer validates the expected executable before returning, so
+        # a missing/non-runnable executable is a concrete install failure.
+        wait_for(b"Cannot install")
         os.write(master, b"\r")
         wait_for(b"Select at least one item before continuing")
     else:

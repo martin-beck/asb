@@ -315,7 +315,7 @@ fn tui_selection_installs_locally_before_enabling_agent_or_workload() {
     ] {
         let project = Project::new();
         project.init();
-        project.write("fake-bin/npm", "#!/bin/sh\ncase \"$ASB_TEST_INSTALL_MODE\" in failure) exit 1;; no-executable) exit 0;; esac\nmkdir -p \"$3/node_modules/.bin\"\nprintf '#!/bin/sh\\nexit 0\\n' > \"$3/node_modules/.bin/codex\"\n[ \"$ASB_TEST_INSTALL_MODE\" = not-runnable ] || chmod +x \"$3/node_modules/.bin/codex\"\nexit 0\n");
+        project.write("fake-bin/npm", "#!/bin/sh\ncase \"$ASB_TEST_INSTALL_MODE\" in failure) exit 1;; no-executable) exit 0;; esac\nprefix=\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --prefix ]; then shift; prefix=$1; fi\n  shift\ndone\n[ -n \"$prefix\" ] || exit 2\nmkdir -p \"$prefix/node_modules/.bin\"\nprintf '#!/bin/sh\\nexit 0\\n' > \"$prefix/node_modules/.bin/codex\"\n[ \"$ASB_TEST_INSTALL_MODE\" = not-runnable ] || chmod +x \"$prefix/node_modules/.bin/codex\"\nexit 0\n");
         project.write("fake-bin/curl", "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output ]; then shift; printf '#!/bin/sh\\nexit 0\\n' > \"$1\"; exit 0; fi; shift; done\nexit 1\n");
         project.write("fake-bin/perf", "#!/bin/sh\nexit 0\n");
         for name in ["npm", "curl", "perf"] {
@@ -2817,7 +2817,9 @@ fn concurrent_bpftrace_sudo_help_and_sweep_failures_are_reported_once() {
     project.write("first.toml", &config);
     project.write("second.toml", &config);
     project.write("suite.toml", "configs=['first.toml','second.toml']\n");
-    let result = project.command_with_env(&["sweep", "suite.toml", "--replay"], &[("PATH", &path)]);
+    // A missing replay cassette is validated before collector admission. This
+    // fixture exercises the collector preflight, so execute its normal path.
+    let result = project.command_with_env(&["sweep", "suite.toml"], &[("PATH", &path)]);
     let error = stderr(&result);
     expect_failure(&result, "2 failed benchmark(s)");
     assert_eq!(
