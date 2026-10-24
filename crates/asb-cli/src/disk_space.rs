@@ -120,16 +120,21 @@ pub(crate) fn confirm_capacity(
     output_directory: &Path,
     estimate: Estimate,
     interactive: bool,
+    json: bool,
     output: &mut dyn Write,
 ) -> Result<(), Error> {
     let Some(available_mib) = available_mib(output_directory) else {
-        writeln!(output, "Disk-space estimate: at least {} MiB for {} benchmark attempt(s); available space could not be determined for {}.", estimate.required_mib, estimate.attempts, output_directory.display()).map_err(crate::io_error)?;
+        if !json {
+            writeln!(output, "Disk-space estimate: at least {} MiB for {} benchmark attempt(s); available space could not be determined for {}.", estimate.required_mib, estimate.attempts, output_directory.display()).map_err(crate::io_error)?;
+        }
         return Ok(());
     };
     if !needs_confirmation(available_mib, estimate) {
         return Ok(());
     }
-    writeln!(output, "Disk-space warning: ASB estimates at least {} MiB for {} benchmark attempt(s), including selected workload, agent, provider session, collectors, concurrency, repetitions, retained evidence and a 2x safety margin. Only {} MiB is available on {}.", estimate.required_mib, estimate.attempts, available_mib, existing_ancestor(output_directory).display()).map_err(crate::io_error)?;
+    if !json {
+        writeln!(output, "Disk-space warning: ASB estimates at least {} MiB for {} benchmark attempt(s), including selected workload, agent, provider session, collectors, concurrency, repetitions, retained evidence and a 2x safety margin. Only {} MiB is available on {}.", estimate.required_mib, estimate.attempts, available_mib, existing_ancestor(output_directory).display()).map_err(crate::io_error)?;
+    }
     if !interactive || !std::io::stdin().is_terminal() {
         return Err(Error::Input("insufficient estimated disk space; free space or rerun from an interactive terminal to explicitly confirm the risk".into()));
     }

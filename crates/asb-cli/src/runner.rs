@@ -195,6 +195,7 @@ pub(crate) fn run_with_diagnostics(
             options.mode,
         ),
         options.interactive && !options.json,
+        options.json,
         output,
     )?;
     if let Some(repeat) = options.repeat.or((bundled_replay
