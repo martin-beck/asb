@@ -156,7 +156,8 @@ impl Prepared {
             let index = if let Some(index) = seen.get(id) {
                 *index
             } else {
-                let (path, bytes, sha256, complete) = if let Some(manifest) = self.source.manifest()
+                let (path, bytes, sha256, complete, local_tools) = if let Some(manifest) =
+                    self.source.manifest()
                 {
                     let track = manifest.track(*id).map_err(input_error)?;
                     (
@@ -164,6 +165,11 @@ impl Prepared {
                         track.bytes,
                         track.sha256.clone(),
                         Some(track.complete),
+                        track
+                            .artifacts
+                            .iter()
+                            .any(|artifact| artifact.kind == "local-tools")
+                            .then(|| PathBuf::from(format!("inputs/local-tools-{id}.jsonl"))),
                     )
                 } else {
                     let track = self
@@ -172,7 +178,13 @@ impl Prepared {
                         .iter()
                         .find(|track| track.id == *id)
                         .ok_or_else(|| Error::Input("selected legacy track disappeared".into()))?;
-                    (track.path.clone(), track.bytes, track.sha256.clone(), None)
+                    (
+                        track.path.clone(),
+                        track.bytes,
+                        track.sha256.clone(),
+                        None,
+                        None,
+                    )
                 };
                 total = total
                     .checked_add(bytes)
@@ -186,6 +198,7 @@ impl Prepared {
                     track: Some(*id),
                     source: path,
                     private: PathBuf::from(format!("inputs/track-{id}.jsonl")),
+                    local_tools,
                     bytes,
                     sha256,
                 });
@@ -213,6 +226,13 @@ impl Prepared {
                 ));
             }
             publish_bytes(&root.join(&input.private), &bytes)?;
+            if let Some(local_tools) = &input.local_tools {
+                let bytes = self
+                    .source
+                    .read_artifact(input.track.expect("selected bundle track"), "local-tools")
+                    .map_err(input_error)?;
+                publish_bytes(&root.join(local_tools), &bytes)?;
+            }
         }
         Ok(())
     }
@@ -306,7 +326,14 @@ pub(super) fn stage_selected(
         } else {
             crate::benchmark_paths::replica_path(&base, slot.replica)
         };
-        fs::hard_link(root.join(&input.private), destination).map_err(crate::io_error)?;
+        fs::hard_link(root.join(&input.private), &destination).map_err(crate::io_error)?;
+        if let Some(local_tools) = &input.local_tools {
+            let destination = destination
+                .parent()
+                .expect("replay destination has parent")
+                .join(format!("local-tools-{}.jsonl", slot.replica));
+            fs::hard_link(root.join(local_tools), destination).map_err(crate::io_error)?;
+        }
     }
     fs::File::open(base.parent().expect("batch parent"))
         .and_then(|file| file.sync_all())

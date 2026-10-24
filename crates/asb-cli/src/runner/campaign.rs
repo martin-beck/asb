@@ -85,6 +85,10 @@ pub(crate) struct ReplayInput {
     pub track: Option<u64>,
     pub source: PathBuf,
     pub private: PathBuf,
+    /// A verified, private staging location for the causal local-tool payload.
+    /// Historical or provider-only recordings legitimately omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_tools: Option<PathBuf>,
     pub bytes: u64,
     pub sha256: String,
 }

@@ -123,6 +123,7 @@ impl Inspection {
                 track: None,
                 source: input.source,
                 private: format!("inputs/recording-{}.jsonl", index + 1).into(),
+                local_tools: None,
                 bytes,
                 sha256,
             });
