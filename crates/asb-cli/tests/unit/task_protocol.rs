@@ -303,7 +303,7 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
     assert_eq!(
         agent,
         json!({"op":"agent","binary":"fixture-asb","project_root":"fixture-project","preparation_seconds":1800.0,"timeout":1.0,
-        "tools_root":"fixture-tools","bootstrap":{"runtime_tools":[],"assets":[],"public_package_cache":false},
+        "tools_root":"fixture-tools","bootstrap":{"runtime_tools":[],"assets":[],"public_package_cache":false,"npm_package_tree":null},
         "measure_target":false,"project_configuration":"fixture","environment":{},"network":null,"request":{"replay":true}})
     );
     let output = std::process::Command::new("python3")

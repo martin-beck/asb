@@ -57,7 +57,7 @@ assert request['request']['config']['concurrency']==1
 assert request['request']['config']['workspace']=='/fixture-task'
 assert request['timeout']==1
 assert request['request']['timeout_seconds']==1
-assert request['bootstrap']==dict(runtime_tools=[],assets=[],public_package_cache=False)
+assert request['bootstrap']==dict(runtime_tools=[],assets=[],public_package_cache=False,npm_package_tree=None)
 for event in events:
  print(json.dumps(event),flush=True)
  if event['event']=='paused':
