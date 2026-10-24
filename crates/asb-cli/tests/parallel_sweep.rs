@@ -66,14 +66,18 @@ fn distinct_tasks_and_replicas_overlap_with_isolated_replay_outputs_and_failures
     std::fs::write(&agent, r##"#!/usr/bin/env node
 const fs=require('fs'); const home=process.env.HOME;
 const first=process.cwd().includes('000-first');
-const replica=process.cwd().match(/concurrency-(\d+)/)?.[1];
+const replica=process.cwd().match(/concurrency-(\d+)/)?.[1] ?? '1';
 const name=first?'first-'+replica:'second';
 fs.writeFileSync(home+'/started-'+name,'started');
 const expected=['first-1','first-2','second'];
 (async()=>{
   const streaming=fs.existsSync(home+'/stream-test');
   if(streaming) console.log('fixture streaming ready');
-  const deadline=Date.now()+5000;
+  // CI runners can spend several seconds scheduling the three isolated
+  // replicas.  This is a coordination deadline, not benchmark behaviour:
+  // leave enough headroom to observe the intended overlap without making a
+  // loaded runner turn a valid test into a false replay failure.
+  const deadline=Date.now()+30000;
   while(streaming ? !fs.existsSync(home+'/stream-ack') : !expected.every(x=>fs.existsSync(home+'/started-'+x))) {
     if(Date.now()>deadline) throw new Error('distinct tasks and replicas did not overlap');
     await new Promise(resolve=>setTimeout(resolve,10));
