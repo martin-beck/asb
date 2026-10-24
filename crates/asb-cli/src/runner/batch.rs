@@ -982,6 +982,7 @@ mod tests {
     fn runner_single_unsupported_and_multi_mismatch_stop_before_proxy_or_agent_launch() {
         use std::fs;
         use std::os::unix::fs::symlink;
+        let _disk = crate::disk_space::test_available_mib(100_000);
         for concurrency in [1, 2] {
             let root = std::env::temp_dir()
                 .join(crate::workloads::TaskIdentity::local("batch-runner", None).attempt_id);

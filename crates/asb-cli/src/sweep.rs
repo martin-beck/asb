@@ -675,6 +675,7 @@ mod tests {
 
     #[test]
     fn regenerates_comparison_after_a_partial_sweep() {
+        let _disk = crate::disk_space::test_available_mib(100_000);
         let path = temp_file("sweep.toml", "configs = [\"benchmark.toml\"]\n");
         let root = path.parent().unwrap();
         std::fs::create_dir(root.join(".asb")).unwrap();

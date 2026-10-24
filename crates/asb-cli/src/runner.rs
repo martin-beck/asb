@@ -1519,6 +1519,7 @@ mod tests {
 
     #[test]
     fn intent_publication_failure_stops_before_provider_workload_or_measurement_startup() {
+        let _disk = crate::disk_space::test_available_mib(100_000);
         struct FailedIntent;
         impl super::replica::CompletionObserver for FailedIntent {
             fn starting(
