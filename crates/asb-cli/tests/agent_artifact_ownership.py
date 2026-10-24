@@ -66,12 +66,16 @@ const index=process.argv.indexOf('--output');
 if (index<0 || !process.argv[index+1]) throw Error('missing private artifact output');
 const destination=path.resolve(process.argv[index+1]);
 const home=path.resolve(process.env.HOME);
-if (!destination.startsWith(home+path.sep) || !destination.endsWith(path.sep+path.join('mini-swe','trajectory.json')))
- throw Error('artifact output outside fixture home');
-const marker=path.join(process.env.HOME,'executions');
+const fixtureRoot=path.resolve(process.env.ASB_FIXTURE_ROOT);
+const outputRoot=process.env.ASB_ARTIFACT_NATIVE
+ ? path.join(fixtureRoot,'results','benchmark-runs')
+ : path.join(fixtureRoot,'private');
+if (!destination.startsWith(outputRoot+path.sep) || !destination.endsWith(path.sep+path.join('mini-swe','trajectory.json')))
+ throw Error('artifact output outside fixture-owned output root');
+const marker=path.join(fixtureRoot,'executions');
 function permissionFault(directory,mode) {
  const before=fs.statSync(directory,{bigint:true});
- fs.appendFileSync(path.join(home,'permission-faults.jsonl'),JSON.stringify({
+ fs.appendFileSync(path.join(fixtureRoot,'permission-faults.jsonl'),JSON.stringify({
   path:directory,dev:String(before.dev),ino:String(before.ino),mode:Number(before.mode & 0o777n)
  })+'\n',{mode:0o600});
  fs.chmodSync(directory,mode);
@@ -114,7 +118,7 @@ if (process.env.ASB_ARTIFACT_NATIVE) {
 
 def environment(root, scenario="normal"):
     return {"HOME": str(root), "PATH": os.environ["PATH"], "LANG": "C.UTF-8",
-        "ASB_ARTIFACT_SCENARIO":scenario}
+        "ASB_ARTIFACT_SCENARIO":scenario, "ASB_FIXTURE_ROOT":str(root)}
 
 
 def native_result_directory(root, index):
@@ -167,11 +171,12 @@ def guest(scenario="normal"):
     records = []
     for index in range(2):
         (root / "workspace").chmod(0o755)
-        run = root / "private" / f"attempt-{index}"
+        runtime = root / "private" / f"runtime-{index}"
+        run = runtime / "attempt"
         request = {"config":config,"connection":{"interface":"open_ai_chat",
             "authentication":"bearer","base_url":"http://127.0.0.1:1/v1",
             "credential":"fixture"},"prompt":"offline task","project_root":str(root),
-            "runtime_dir":str(root / "private"),"run_dir":str(run)}
+            "runtime_dir":str(runtime),"run_dir":str(run)}
         if scenario == "publication" and index == 0:
             (run / "agent-result.json").mkdir(parents=True)
         env = environment(root,scenario)
@@ -205,8 +210,8 @@ def guest(scenario="normal"):
         assert records[0]["final_response"] is None
         assert records[0]["token_usage"]["total_tokens"] is None
         if scenario == "symlink":
-            assert (root / "foreign.json").read_text() == '{"answer":"foreign bytes"}'
-            assert (root / "private/attempt-0/mini-swe/trajectory.json").is_symlink()
+            assert (root / "private/runtime-0/agent-state/home/foreign.json").read_text() == '{"answer":"foreign bytes"}'
+            assert (root / "private/runtime-0/attempt/mini-swe/trajectory.json").is_symlink()
         return
     assert records[0]["final_response"] == "src/cli.py src/registry.py lookup", records[0]
     assert records[0]["token_usage"]["total_tokens"] == 34, records[0]
@@ -217,7 +222,7 @@ def guest(scenario="normal"):
     if scenario == "cleanup":
         assert "scratch settlement failed" in records[0]["artifact_error"]
         assert records[0]["tree_quiesced"] is True
-        assert (root / "private/attempt-0/mini-swe/trajectory.json").is_file()
+        assert (root / "private/runtime-0/attempt/mini-swe/trajectory.json").is_file()
     assert (root / "executions").read_text().splitlines() == ["called","called"]
     assert (root / "workspace/.asb-mini-swe.traj.json").read_text() == "foreign legacy workspace file"
 
