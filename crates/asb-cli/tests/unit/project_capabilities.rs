@@ -202,6 +202,7 @@ exit 0
     if case == "invalid" {
         assert!(
             text.contains("no valid y/n answer")
+                || text.contains("No answer received; defaulting to no.")
                 || (text.matches("already enabled").count() == HOST_SETTINGS.len()
                     && text.contains("no delegated project cgroup was created"))
         );
