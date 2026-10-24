@@ -79,7 +79,11 @@ def public_cli(binary, root, sibling):
                         output.extend(chunk)
                     raise AssertionError(output.decode(errors="replace"))
                 return (case / "principal").exists() and (case / "helper").exists()
-            until(started, "public CLI did not start native client")
+            # The PTY-confirmed capacity admission can add a scheduling turn
+            # before the native client is launched. Keep this owner-loss
+            # qualification bounded, but leave enough room for a loaded CI
+            # runner to publish the two process markers.
+            until(started, "public CLI did not start native client", seconds=30)
             ready_files = list(case.glob(".asb-tape-*/ready.json"))
             assert len(ready_files) == 1
             proxy = json.loads(ready_files[0].read_text())["pid"]
