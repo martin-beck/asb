@@ -19,6 +19,11 @@ jobs:
     # `asb-main-ci` is assigned only to the provisioned ASB runner, so an
     # unrelated generic self-hosted runner cannot claim this toolchain gate.
     runs-on: [self-hosted, Linux, X64, asb-main-ci]
+    env:
+      # Rust's test fixtures use std::env::temp_dir().  Keep them on the
+      # provisioned runner volume rather than the host's shared /tmp, whose
+      # capacity is deliberately not an ASB test prerequisite.
+      TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,6 +65,9 @@ jobs:
     # isolated runner and explicitly enables the repository variable.
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && vars.ASB_LOCAL_CI_ENABLED == 'true'
     runs-on: [self-hosted, linux, x64, asb-local-ci]
+    env:
+      # Keep fixture-heavy serial tests off the shared host /tmp filesystem.
+      TMPDIR: ${{ runner.temp }}
     # Serial execution preserves isolation for real host fixtures; allow the
     # complete suite to finish rather than cancelling it at the old parallel
     # suite budget.
