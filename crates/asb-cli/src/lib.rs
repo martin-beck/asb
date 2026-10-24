@@ -255,8 +255,15 @@ mod adapter_layout_tests {
             CategoryLayout {
                 category: "agents",
                 ids: super::agents::names().collect(),
-                // Attempt artifact ownership is generic adapter infrastructure.
-                root_modules: &["mod.rs", "driver.rs", "artifacts.rs"],
+                // Attempt artifact ownership and the sealed causal local-tool
+                // replay transport are generic adapter infrastructure.
+                root_modules: &[
+                    "mod.rs",
+                    "driver.rs",
+                    "artifacts.rs",
+                    "tool_replay.rs",
+                    "tool_replay_mcp.rs",
+                ],
                 root_directories: &[],
             },
             CategoryLayout {
