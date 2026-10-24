@@ -1,9 +1,11 @@
 .DEFAULT_GOAL := build
 
-.PHONY: update build test install clean rust-doc uml flows interactive
+.PHONY: update build test install clean rust-doc uml flows interactive completions
 
-BASH_COMPLETION := target/asb.bash
-ZSH_COMPLETION := target/_asb
+CARGO_TARGET_DIR ?= target
+BASH_COMPLETION := $(CARGO_TARGET_DIR)/asb.bash
+ZSH_COMPLETION := $(CARGO_TARGET_DIR)/_asb
+ASB_BIN := $(CARGO_TARGET_DIR)/debug/asb
 AUTO_UML_VERSION := 0.7.2
 AUTO_UML_ROOT := target/tools/auto-uml
 AUTO_UML := $(AUTO_UML_ROOT)/bin/auto-uml
@@ -35,8 +37,16 @@ build:
 		DATAFLOW_DOT=target/asb-dataflow.dot DATAFLOW_SVG=target/asb-dataflow.svg \
 		DATAFLOW_HTML=target/asb-dataflow.html CONTROLFLOW_DOT=target/asb-control-flow.dot \
 		CONTROLFLOW_SVG=target/asb-control-flow.svg CONTROLFLOW_HTML=target/asb-control-flow.html
-	target/debug/asb --__generate-completion bash > "$(BASH_COMPLETION)"
-	target/debug/asb --__generate-completion zsh > "$(ZSH_COMPLETION)"
+	$(MAKE) completions
+
+# The generated shells are deliberately produced from the same Clap command
+# tree as `asb --help`, after every build.  Keep this target separate so CI
+# and package builders can verify the install artifacts without regenerating
+# unrelated documentation.
+completions:
+	cargo build --locked -p asb-cli
+	$(ASB_BIN) --__generate-completion bash > "$(BASH_COMPLETION)"
+	$(ASB_BIN) --__generate-completion zsh > "$(ZSH_COMPLETION)"
 
 rust-doc:
 	cargo doc --locked --workspace --no-deps --document-private-items

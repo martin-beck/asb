@@ -208,8 +208,43 @@ _asb_catalog_complete() {
     return 0
 }
 
+_asb_config_file_complete() {
+    # clap_complete's Bash backend completes option values with ValueHint but
+    # treats a first positional as a command-token slot.  These are ASB's
+    # positional config-file commands; preserve normal option completion once
+    # a config was supplied.
+    local cur="${COMP_WORDS[COMP_CWORD]}" command="${COMP_WORDS[1]}" word i skip_value=0
+    case "$command" in
+        run|sweep|compare) ;;
+        *) return 1 ;;
+    esac
+    [[ "$cur" != -* ]] || return 1
+    for ((i=2; i<COMP_CWORD; i++)); do
+        word="${COMP_WORDS[i]}"
+        if ((skip_value)); then
+            skip_value=0
+            continue
+        fi
+        case "$word" in
+            --*=*) continue ;;
+            --repeat|--track|--seed|--cassette|--measurements|--cassette-root|--jobs|--max-active-attempts)
+                skip_value=1
+                continue
+                ;;
+            -*) continue ;;
+            *) return 1 ;;
+        esac
+    done
+    COMPREPLY=($(compgen -f -- "$cur"))
+    if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then
+        compopt -o filenames
+    fi
+    return 0
+}
+
 _asb() {
     _asb_catalog_complete && return
+    _asb_config_file_complete && return
     _asb_static "$@"
 }
 complete -F _asb asb
@@ -377,6 +412,73 @@ mod tests {
         }
         assert!(bash(&mut Broken).is_err());
         assert!(zsh(&mut Broken).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_completes_positional_config_files_for_run_sweep_and_compare() {
+        let fixture = std::env::temp_dir().join(format!(
+            "asb-completion-fixture-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&fixture).unwrap();
+        fs::write(fixture.join("selected.toml"), "# fixture\n").unwrap();
+        let script =
+            String::from_utf8(generate(Shell::Bash, crate::parser::completion_command())).unwrap();
+
+        for words in [
+            &["run", "sel"][..],
+            &["run", "--record", "sel"],
+            &["sweep", "sel"],
+            &["sweep", "--jobs", "1", "sel"],
+            &["compare", "sel"],
+        ] {
+            let command = words[0];
+            let result = std::process::Command::new("bash")
+                .args(["--noprofile", "--norc", "-c"])
+                .arg(format!(
+                    "{script}\ncd \"$1\"; shift; COMP_WORDS=(asb \"$@\"); COMP_CWORD=$#; _asb; printf '%s\\n' \"${{COMPREPLY[@]}}\""
+                ))
+                .arg("completion-fixture")
+                .arg(&fixture)
+                .args(words)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{command}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(
+                String::from_utf8(result.stdout)
+                    .unwrap()
+                    .lines()
+                    .any(|candidate| candidate == "selected.toml"),
+                "{command} did not complete the config file"
+            );
+        }
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn zsh_emits_native_path_completion_for_every_path_position() {
+        let script =
+            String::from_utf8(generate(Shell::Zsh, crate::parser::completion_command())).unwrap();
+        // Zsh's backend honours Clap ValueHint directly.  Keep the assertions
+        // on generated output so a future parser change cannot silently turn
+        // path positions back into generic string completion.
+        for label in ["run", "sweep", "compare"] {
+            let start = script.find(&format!("({label})")).unwrap();
+            let section = &script[start..script[start..].find(";;").unwrap() + start];
+            assert!(section.contains(":path:_files"), "{label}: {section}");
+        }
+        let recover = script.find("(recover)").unwrap();
+        let section = &script[recover..script[recover..].find(";;").unwrap() + recover];
+        assert!(section.contains(":reference:_files"), "{section}");
     }
 
     #[cfg(unix)]
