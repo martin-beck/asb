@@ -188,6 +188,8 @@ fn respond(
             json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"asb-local-tools","version":"1"}})
         }
         "tools/list" => json!({"tools":[
+            {"name":"list_directory","description":"List direct non-symlink entries inside the benchmark workspace.","inputSchema":{"type":"object","properties":{"path":{"type":"string"}}}},
+            {"name":"search_text","description":"Search bounded UTF-8 source text inside the benchmark workspace.","inputSchema":{"type":"object","required":["query"],"properties":{"path":{"type":"string"},"query":{"type":"string"}}}},
             {"name":"read_file","description":"Read a UTF-8 file inside the benchmark workspace.","inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}},
             {"name":"write_file","description":"Create or replace a UTF-8 file inside the benchmark workspace.","inputSchema":{"type":"object","required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}}},
             {"name":"create_directory","description":"Create a directory inside the benchmark workspace.","inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}},
@@ -237,18 +239,34 @@ fn call(options: &Options, transcript: &mut Transcript, params: Value) -> Result
 }
 
 fn execute(root: &Path, tool: &str, request: &Value) -> Result<(Value, Vec<Effect>), Error> {
-    let path = request
-        .get("path")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::Run("local-tool request needs a path".into()))?;
     match tool {
+        "list_directory" => {
+            let path = request.get("path").and_then(Value::as_str).unwrap_or(".");
+            let entries = tool_replay::list_directory(root, path)?
+                .into_iter()
+                .map(|(name, directory)| json!({"name":name,"directory":directory}))
+                .collect::<Vec<_>>();
+            Ok((json!({"entries":entries}), Vec::new()))
+        }
+        "search_text" => {
+            let path = request.get("path").and_then(Value::as_str).unwrap_or(".");
+            let query = request
+                .get("query")
+                .and_then(Value::as_str)
+                .ok_or_else(|| Error::Run("local-tool search needs a query".into()))?;
+            let matches = tool_replay::search_text(root, path, query)?
+                .into_iter()
+                .map(|(path, line, text)| json!({"path":path,"line":line,"text":text}))
+                .collect::<Vec<_>>();
+            Ok((json!({"matches":matches}), Vec::new()))
+        }
         "read_file" => Ok((
-            json!({"text":tool_replay::read_text(root, path)?}),
+            json!({"text":tool_replay::read_text(root, required_path(request)?)?}),
             Vec::new(),
         )),
         "write_file" => {
             let effects = vec![Effect::WriteText {
-                path: path.into(),
+                path: required_path(request)?.into(),
                 content: request
                     .get("content")
                     .and_then(Value::as_str)
@@ -261,14 +279,18 @@ fn execute(root: &Path, tool: &str, request: &Value) -> Result<(Value, Vec<Effec
             Ok((json!({"ok":true}), effects))
         }
         "create_directory" => {
-            let effects = vec![Effect::CreateDirectory { path: path.into() }];
+            let effects = vec![Effect::CreateDirectory {
+                path: required_path(request)?.into(),
+            }];
             for effect in &effects {
                 tool_replay::apply(root, effect)?;
             }
             Ok((json!({"ok":true}), effects))
         }
         "remove_file" => {
-            let effects = vec![Effect::RemoveFile { path: path.into() }];
+            let effects = vec![Effect::RemoveFile {
+                path: required_path(request)?.into(),
+            }];
             for effect in &effects {
                 tool_replay::apply(root, effect)?;
             }
@@ -276,6 +298,13 @@ fn execute(root: &Path, tool: &str, request: &Value) -> Result<(Value, Vec<Effec
         }
         _ => Err(Error::Run("local-tool is unsupported".into())),
     }
+}
+
+fn required_path(request: &Value) -> Result<&str, Error> {
+    request
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Run("local-tool request needs a path".into()))
 }
 
 #[cfg(test)]
@@ -313,6 +342,30 @@ mod tests {
     fn options_refuse_unknown_or_partial_arguments() {
         assert!(options(&[OsString::from("--mode"), OsString::from("record")]).is_err());
         assert!(options(&[OsString::from("--unknown"), OsString::from("value")]).is_err());
+    }
+
+    #[test]
+    fn directory_listing_is_recorded_as_an_observation() {
+        let root = std::env::temp_dir().join(format!("asb-mcp-directory-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("answer.txt"), "answer").unwrap();
+        let (result, effects) = execute(&root, "list_directory", &json!({})).unwrap();
+        assert_eq!(effects, Vec::<Effect>::new());
+        assert_eq!(result["entries"][0]["name"], "answer.txt");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn text_search_is_recorded_as_an_observation() {
+        let root = std::env::temp_dir().join(format!("asb-mcp-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("answer.txt"), "answer\n").unwrap();
+        let (result, effects) = execute(&root, "search_text", &json!({"query":"answer"})).unwrap();
+        assert_eq!(effects, Vec::<Effect>::new());
+        assert_eq!(result["matches"][0]["path"], "answer.txt");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

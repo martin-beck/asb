@@ -13,6 +13,10 @@ use std::path::{Component, Path, PathBuf};
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 const MAX_EVENTS: usize = 16_384;
 const MAX_LINE_BYTES: usize = 1024 * 1024;
+const MAX_TEXT_BYTES: u64 = 1024 * 1024;
+const MAX_SEARCH_FILES: usize = 512;
+const MAX_SEARCH_MATCHES: usize = 128;
+const MAX_SEARCH_DEPTH: usize = 16;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -251,7 +255,137 @@ pub(crate) fn read_text(root: &Path, value: &str) -> Result<String, Error> {
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(Error::Run("cannot read local-tool file".into()));
     }
+    if metadata.len() > MAX_TEXT_BYTES {
+        return Err(Error::Run("local-tool file exceeds read bound".into()));
+    }
     std::fs::read_to_string(path).map_err(|_| Error::Run("cannot read local-tool file".into()))
+}
+
+/// Enumerate a single confined directory without ever following a symlink.
+/// The caller records this observation, so replay does not inspect the host
+/// workspace at all.
+pub(crate) fn list_directory(root: &Path, value: &str) -> Result<Vec<(String, bool)>, Error> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| Error::Run("local-tool workspace is unavailable".into()))?;
+    let path = if value.is_empty() || value == "." {
+        root.clone()
+    } else {
+        confined(&root, value)?
+    };
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|_| Error::Run("cannot list local-tool directory".into()))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(Error::Run("cannot list local-tool directory".into()));
+    }
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&path)
+        .map_err(|_| Error::Run("cannot list local-tool directory".into()))?
+    {
+        if entries.len() >= 256 {
+            return Err(Error::Run(
+                "local-tool directory listing exceeds bound".into(),
+            ));
+        }
+        let entry = entry.map_err(|_| Error::Run("cannot list local-tool directory".into()))?;
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .filter(|name| !name.is_empty() && name.len() <= 255)
+            .ok_or_else(|| Error::Run("local-tool directory has an invalid name".into()))?;
+        let metadata = std::fs::symlink_metadata(entry.path())
+            .map_err(|_| Error::Run("cannot inspect local-tool directory entry".into()))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        entries.push((name.to_owned(), metadata.is_dir()));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(entries)
+}
+
+/// Search bounded UTF-8 source text through the confined workspace.  Results
+/// are an observation captured in the transcript; a replay does not rescan a
+/// changed checkout.  Build/vendor trees are skipped to retain a predictable
+/// cost and keep agent reasoning focused on task material.
+pub(crate) fn search_text(
+    root: &Path,
+    value: &str,
+    query: &str,
+) -> Result<Vec<(String, u64, String)>, Error> {
+    if query.is_empty() || query.len() > 1024 {
+        return Err(Error::Run("local-tool search query is invalid".into()));
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|_| Error::Run("local-tool workspace is unavailable".into()))?;
+    let start = if value.is_empty() || value == "." {
+        String::new()
+    } else {
+        // Validate the requested subtree before traversal.
+        let _ = confined(&root, value)?;
+        value.into()
+    };
+    let mut files = 0usize;
+    let mut matches = Vec::new();
+    search_directory(&root, &start, query, 0, &mut files, &mut matches)?;
+    Ok(matches)
+}
+
+fn search_directory(
+    root: &Path,
+    relative: &str,
+    query: &str,
+    depth: usize,
+    files: &mut usize,
+    matches: &mut Vec<(String, u64, String)>,
+) -> Result<(), Error> {
+    if depth > MAX_SEARCH_DEPTH {
+        return Err(Error::Run(
+            "local-tool search exceeds directory-depth bound".into(),
+        ));
+    }
+    if matches.len() >= MAX_SEARCH_MATCHES {
+        return Ok(());
+    }
+    for (name, directory) in list_directory(root, relative)? {
+        if matches.len() >= MAX_SEARCH_MATCHES {
+            break;
+        }
+        if matches!(name.as_str(), ".git" | "target" | "node_modules" | ".venv") {
+            continue;
+        }
+        let child = if relative.is_empty() {
+            name
+        } else {
+            format!("{relative}/{name}")
+        };
+        if directory {
+            search_directory(root, &child, query, depth + 1, files, matches)?;
+            continue;
+        }
+        *files += 1;
+        if *files > MAX_SEARCH_FILES {
+            return Err(Error::Run("local-tool search exceeds file bound".into()));
+        }
+        let Ok(text) = read_text(root, &child) else {
+            // Binary and oversized files are outside this deliberately text
+            // only observation surface; they cannot change replay behavior.
+            continue;
+        };
+        for (index, line) in text.lines().enumerate() {
+            if line.contains(query) {
+                if line.len() > 4096 {
+                    return Err(Error::Run("local-tool search line exceeds bound".into()));
+                }
+                matches.push((child.clone(), index as u64 + 1, line.into()));
+                if matches.len() >= MAX_SEARCH_MATCHES {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -360,5 +494,44 @@ mod tests {
         assert!(!outside.join("escape.txt").exists());
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn directory_listing_is_confined_sorted_and_skips_symlinks() {
+        let root = std::env::temp_dir().join(format!("asb-local-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("directory")).unwrap();
+        std::fs::write(root.join("z.txt"), "z").unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/tmp", root.join("outside")).unwrap();
+        let entries = list_directory(&root, ".").unwrap();
+        assert_eq!(entries[0], ("a.txt".into(), false));
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry == &("directory".into(), true))
+        );
+        #[cfg(unix)]
+        assert!(!entries.iter().any(|entry| entry.0 == "outside"));
+        assert!(list_directory(&root, "../outside").is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn text_search_is_bounded_confined_and_skips_vendor_trees() {
+        let root = std::env::temp_dir().join(format!("asb-local-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn found() {}\n").unwrap();
+        std::fs::write(root.join("target/ignored.rs"), "fn found() {}\n").unwrap();
+        let matches = search_text(&root, ".", "found").unwrap();
+        assert_eq!(
+            matches,
+            vec![("src/lib.rs".into(), 1, "fn found() {}".into())]
+        );
+        assert!(search_text(&root, "../outside", "found").is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
