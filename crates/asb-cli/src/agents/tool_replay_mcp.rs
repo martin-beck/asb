@@ -11,8 +11,15 @@ use super::{
 use crate::Error;
 use serde_json::{Value, json};
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+const MAX_COMMAND_ARGUMENTS: usize = 32;
+const MAX_COMMAND_ARGUMENT_BYTES: usize = 4096;
+const MAX_COMMAND_OUTPUT: usize = 1024 * 1024;
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub(crate) fn entry(args: &[OsString]) -> std::process::ExitCode {
     match run(args) {
@@ -190,6 +197,7 @@ fn respond(
         "tools/list" => json!({"tools":[
             {"name":"list_directory","description":"List direct non-symlink entries inside the benchmark workspace.","inputSchema":{"type":"object","properties":{"path":{"type":"string"}}}},
             {"name":"search_text","description":"Search bounded UTF-8 source text inside the benchmark workspace.","inputSchema":{"type":"object","required":["query"],"properties":{"path":{"type":"string"},"query":{"type":"string"}}}},
+            {"name":"run_command","description":"Run an allowlisted read-only workspace command without a shell. Results are sealed for replay.","inputSchema":{"type":"object","required":["argv"],"properties":{"argv":{"type":"array","items":{"type":"string"}}}}},
             {"name":"read_file","description":"Read a UTF-8 file inside the benchmark workspace.","inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}},
             {"name":"write_file","description":"Create or replace a UTF-8 file inside the benchmark workspace.","inputSchema":{"type":"object","required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}}},
             {"name":"create_directory","description":"Create a directory inside the benchmark workspace.","inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}},
@@ -260,6 +268,7 @@ fn execute(root: &Path, tool: &str, request: &Value) -> Result<(Value, Vec<Effec
                 .collect::<Vec<_>>();
             Ok((json!({"matches":matches}), Vec::new()))
         }
+        "run_command" => Ok((run_command(root, request)?, Vec::new())),
         "read_file" => Ok((
             json!({"text":tool_replay::read_text(root, required_path(request)?)?}),
             Vec::new(),
@@ -298,6 +307,130 @@ fn execute(root: &Path, tool: &str, request: &Value) -> Result<(Value, Vec<Effec
         }
         _ => Err(Error::Run("local-tool is unsupported".into())),
     }
+}
+
+fn run_command(root: &Path, request: &Value) -> Result<Value, Error> {
+    let argv = request
+        .get("argv")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::Run("local-tool command needs argv".into()))?;
+    if argv.is_empty() || argv.len() > MAX_COMMAND_ARGUMENTS {
+        return Err(Error::Run(
+            "local-tool command argument count is invalid".into(),
+        ));
+    }
+    let argv = argv
+        .iter()
+        .map(|value| {
+            value.as_str().filter(|value| {
+                !value.is_empty()
+                    && value.len() <= MAX_COMMAND_ARGUMENT_BYTES
+                    && !value.as_bytes().contains(&0)
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| Error::Run("local-tool command arguments are invalid".into()))?;
+    validate_command(&argv)?;
+    let workspace = root
+        .canonicalize()
+        .map_err(|_| Error::Run("local-tool workspace is unavailable".into()))?;
+    let mut command = Command::new(argv[0]);
+    command
+        .args(&argv[1..])
+        .current_dir(workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_remove("HTTP_PROXY")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("ALL_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("https_proxy")
+        .env_remove("all_proxy")
+        .env("CARGO_NET_OFFLINE", "true");
+    let mut child = command
+        .spawn()
+        .map_err(|_| Error::Run("cannot start local-tool command".into()))?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let read = |mut reader: std::process::ChildStdout| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            reader
+                .by_ref()
+                .take((MAX_COMMAND_OUTPUT + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map(|_| bytes)
+        })
+    };
+    let stdout_reader = read(stdout);
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        BufReader::new(stderr)
+            .by_ref()
+            .take((MAX_COMMAND_OUTPUT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let deadline = Instant::now() + COMMAND_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::Run(
+                    "local-tool command exceeded its time bound".into(),
+                ));
+            }
+        }
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| Error::Run("cannot capture local-tool command output".into()))?
+        .map_err(crate::io_error)?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| Error::Run("cannot capture local-tool command output".into()))?
+        .map_err(crate::io_error)?;
+    if stdout.len() > MAX_COMMAND_OUTPUT || stderr.len() > MAX_COMMAND_OUTPUT {
+        return Err(Error::Run("local-tool command output exceeds bound".into()));
+    }
+    Ok(json!({
+        "exit_code": status.code(),
+        "success": status.success(),
+        "stdout": String::from_utf8_lossy(&stdout),
+        "stderr": String::from_utf8_lossy(&stderr),
+    }))
+}
+
+fn validate_command(argv: &[&str]) -> Result<(), Error> {
+    if argv.iter().skip(1).any(|argument| {
+        Path::new(argument).is_absolute()
+            || Path::new(argument)
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+    }) {
+        return Err(Error::Run(
+            "local-tool command argument escapes the workspace".into(),
+        ));
+    }
+    let first = argv.get(1).copied().unwrap_or_default();
+    let allowed = match argv[0] {
+        "git" => matches!(
+            first,
+            "status" | "diff" | "show" | "log" | "grep" | "ls-files" | "rev-parse"
+        ),
+        "rg" | "grep" | "find" | "ls" | "cat" | "sed" | "head" | "tail" | "pwd" => true,
+        "cargo" => matches!(first, "test" | "check" | "fmt"),
+        "pytest" => true,
+        "python" | "python3" => argv.get(1) == Some(&"-m") && argv.get(2) == Some(&"pytest"),
+        _ => false,
+    };
+    allowed
+        .then_some(())
+        .ok_or_else(|| Error::Run("local-tool command is not allowlisted".into()))
 }
 
 fn required_path(request: &Value) -> Result<&str, Error> {
@@ -365,6 +498,50 @@ mod tests {
         let (result, effects) = execute(&root, "search_text", &json!({"query":"answer"})).unwrap();
         assert_eq!(effects, Vec::<Effect>::new());
         assert_eq!(result["matches"][0]["path"], "answer.txt");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_only_commands_are_bounded_and_reject_escape_or_mutation() {
+        let root = std::env::temp_dir().join(format!("asb-mcp-command-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let result = run_command(&root, &json!({"argv":["pwd"]})).unwrap();
+        assert!(result["success"].as_bool().unwrap());
+        assert!(
+            result["stdout"]
+                .as_str()
+                .unwrap()
+                .contains(root.to_str().unwrap())
+        );
+        assert!(run_command(&root, &json!({"argv":["cat","/etc/passwd"]})).is_err());
+        assert!(run_command(&root, &json!({"argv":["git","commit"]})).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_returns_a_recorded_command_result_without_starting_a_process() {
+        let root =
+            std::env::temp_dir().join(format!("asb-mcp-command-replay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let request = json!({"name":"run_command","arguments":{"argv":["pwd"]}});
+        let record = Options {
+            mode: Mode::Record,
+            workspace: root.clone(),
+            transcript: root.join("record.jsonl"),
+        };
+        let mut transcript = Transcript::default();
+        let recorded = call(&record, &mut transcript, request.clone()).unwrap();
+        let mut replay = Transcript::decode(&transcript.encode().unwrap()).unwrap();
+        let replay_options = Options {
+            mode: Mode::Replay,
+            workspace: root.join("removed-workspace"),
+            transcript: root.join("replay.jsonl"),
+        };
+        let replayed = call(&replay_options, &mut replay, request).unwrap();
+        assert_eq!(recorded, replayed);
+        replay.finish().unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 
