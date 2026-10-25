@@ -315,6 +315,17 @@ impl measurements::Session {
                 "the stack collapse script timed out after 300 seconds or exited unsuccessfully; inspect flamegraph.folded",
             );
         }
+        if folded_path
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() == 0)
+        {
+            return write_flamegraph_status(
+                &self.dir,
+                "unavailable",
+                None,
+                "perf produced no stack samples for this execution; flamegraph rendering was skipped",
+            );
+        }
         let mut render = Command::new(render);
         render
             .stdin(Stdio::from(File::open(&folded_path).map_err(|e| {
