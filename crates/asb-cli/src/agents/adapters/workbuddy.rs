@@ -8,7 +8,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
         executable: "codebuddy",
         manifest: None,
     },
-    &[crate::endpoint::RESPONSES],
+    &[crate::endpoint::CHAT],
     command,
     prepare_adapter,
 )
@@ -134,7 +134,7 @@ fn configure(directory: &std::path::Path, model: &str, base_url: &str) -> Result
         ))
     })?;
     let configuration = serde_json::json!([{
-        "id": model, "name": model, "url": base_url, "api": "openai-responses"
+        "id": model, "name": model, "url": base_url, "api": "openai"
     }]);
     let content = serde_json::to_vec_pretty(&configuration).map_err(|error| {
         Error::Run(format!(
@@ -182,6 +182,7 @@ mod tests {
         let text =
             std::fs::read_to_string(directory.join("models.json")).expect("configuration exists");
         assert!(text.contains("test-model"));
+        assert!(text.contains("\"api\": \"openai\""));
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -221,7 +222,7 @@ mod tests {
             std::env::temp_dir().join(format!("asb-workbuddy-tool-replay-{}", std::process::id()));
         let mut command = std::process::Command::new("codebuddy");
         let connection = crate::endpoint::Connection {
-            interface: crate::endpoint::Interface::OpenAiResponses,
+            interface: crate::endpoint::Interface::OpenAiChat,
             base_url: "http://127.0.0.1:4321/v1".into(),
             credential: Some("asb-replay".into()),
             authentication: crate::endpoint::Authentication::Bearer,

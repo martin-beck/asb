@@ -23,6 +23,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 // session lifetime, so our concurrent sessions select different free ports.
 static STARTUP: Mutex<()> = Mutex::new(());
 const BUILTIN_COMPAT_PROXY: &str = include_str!("../../../../assets/scripts/cli2key-proxy.mjs");
+const CHAT_COMPAT: &str = include_str!("../../../../assets/scripts/cli2key-chat-compat.mjs");
 const NETWORK_FETCH: &str = include_str!("../../../../assets/scripts/network-fetch.mjs");
 
 pub(in crate::providers) fn prepare(
@@ -161,6 +162,13 @@ impl Bridge {
                 |error| {
                     Error::Run(format!(
                         "cannot materialize cli2key network client: {error}"
+                    ))
+                },
+            )?;
+            std::fs::write(proxy_root.join("cli2key-chat-compat.mjs"), CHAT_COMPAT).map_err(
+                |error| {
+                    Error::Run(format!(
+                        "cannot materialize cli2key chat compatibility module: {error}"
                     ))
                 },
             )?;
