@@ -1,6 +1,6 @@
 use super::*;
 use crate::process_cleanup::test_support;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Stdio;
@@ -391,6 +391,34 @@ fn actual_gate_confirms_nonzero_status_and_hides_its_proof_descriptor() {
     stderr.read_to_string(&mut err).unwrap();
     assert_eq!(out, "captured");
     assert_eq!(err, "diagnostic");
+    drop(gate);
+    scope.wait_finished();
+}
+
+#[test]
+fn gate_forwards_controlled_stdin_and_eof_to_the_target() {
+    let scope = test_support::Scope::new();
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    let args = vec![
+        "-c".into(),
+        "IFS= read -r prompt; test \"$prompt\" = controlled-input; test -z \"$(cat)\"".into(),
+    ];
+    let (mut command, route) = command(&binary, "/bin/sh", &args);
+    command.stdin(Stdio::piped());
+    let admission = Admission::new(route.validate_gate(&mut command).unwrap()).unwrap();
+    let mut gate = admission.spawn().unwrap();
+    gate.take_stdin()
+        .unwrap()
+        .write_all(b"controlled-input\n")
+        .unwrap();
+    gate.resume().unwrap();
+    assert!(gate.wait().unwrap().success());
     drop(gate);
     scope.wait_finished();
 }

@@ -325,6 +325,7 @@ fn grant_unprivileged_traverse(_: &Path) -> Result<(), Error> {
 
 struct PreparedGuest {
     command: Command,
+    stdin_prompt: Option<Vec<u8>>,
     artifact_owner: super::ArtifactOwner,
     instrumentation: Option<crate::workloads::staging::Guard>,
     execution_identity: crate::agents::ExecutionIdentity,
@@ -442,12 +443,21 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
     });
     let mut command = adapter.process(&program)?.direct();
     command.args(specification.args);
-    if specification.append_prompt {
-        command.arg(&request.prompt);
-    }
+    let stdin_prompt = match specification.prompt_delivery {
+        super::PromptDelivery::Argument => {
+            command.arg(&request.prompt);
+            None
+        }
+        super::PromptDelivery::Embedded => None,
+        super::PromptDelivery::Stdin => Some(request.prompt.as_bytes().to_vec()),
+    };
     command
         .current_dir(&workspace)
-        .stdin(Stdio::null())
+        .stdin(if stdin_prompt.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     isolate_parent_state(&mut command);
@@ -490,6 +500,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
     )?;
     Ok(PreparedGuest {
         command,
+        stdin_prompt,
         artifact_owner,
         instrumentation,
         execution_identity: adapter.execution_identity(),
@@ -521,6 +532,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     }
     let PreparedGuest {
         mut command,
+        stdin_prompt,
         mut artifact_owner,
         instrumentation,
         execution_identity,
@@ -568,6 +580,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     let held = if retained {
         Some(crate::runner::workload_process::start_with_spawn(
             &mut command,
+            stdin_prompt.as_deref(),
             &mut std::io::stdout(),
             &mut std::io::stderr(),
             std::time::Duration::from_secs_f64(request.timeout_seconds),
@@ -617,6 +630,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             .map_err(crate::io_error)?;
         crate::runner::run_guest_process(
             &mut command,
+            stdin_prompt.as_deref(),
             #[cfg(unix)]
             &mut transport_out,
             #[cfg(not(unix))]

@@ -459,5 +459,8 @@ fn unknown_agent_command_retains_generic_contract_without_adapter_guessing() {
     let command = command_for_with_interface(&config, None, "prompt", None).unwrap();
     assert_eq!(command.program, config.agent);
     assert!(command.args.is_empty());
-    assert!(command.append_prompt);
+    assert_eq!(
+        command.prompt_delivery,
+        crate::agents::PromptDelivery::Argument
+    );
 }

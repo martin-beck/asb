@@ -58,7 +58,7 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             context.config.model.clone(),
             context.prompt.into(),
         ],
-        append_prompt: false,
+        prompt_delivery: super::PromptDelivery::Embedded,
     }
 }
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {

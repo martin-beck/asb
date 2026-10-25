@@ -5,7 +5,7 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
         program: "fixture".into(),
         args: vec![context.prompt.into()],
-        append_prompt: false,
+        prompt_delivery: PromptDelivery::Embedded,
     }
 }
 fn prepare(context: &mut PreparationContext<'_>) -> Result<(), Error> {
@@ -58,7 +58,7 @@ fn static_adapter_defaults_are_empty_and_preparation_command_hooks_are_called() 
     });
     assert_eq!(command.program, "fixture");
     assert_eq!(command.args, ["fixture prompt"]);
-    assert!(!command.append_prompt);
+    assert_eq!(command.prompt_delivery, PromptDelivery::Embedded);
     let mut process = adapter.process("not-executed").unwrap().direct();
     let connection = crate::endpoint::Connection {
         interface: Interface::OpenAiChat,
