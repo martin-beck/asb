@@ -235,10 +235,10 @@ impl StaticExternalAdapter {
 
 impl WorkloadAdapter for StaticExternalAdapter {
     fn setup_extension(&self) -> Option<SetupExtension> {
-        // The compatibility Terminal-Bench alias has a small bundled trial
-        // catalog. Keep its selection adapter-owned just like the official
-        // catalog-backed Terminal-Bench variants.
-        (self.id == "terminal-bench").then(SetupExtension::trials)
+        // Static external adapters own a bounded trial catalogue. Expose it
+        // through the same adapter-owned selection extension as catalog-backed
+        // workloads so both setup frontends can select an individual trial.
+        Some(SetupExtension::trials())
     }
     fn source(&self) -> Option<&'static str> {
         Some(self.source)
@@ -374,4 +374,31 @@ pub(super) fn names() -> impl Iterator<Item = &'static str> {
         .iter()
         .map(|adapter| adapter.id())
         .filter(|id| *id != "prompt")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_swe_family_adapters_expose_the_trial_extension() {
+        for name in [
+            "swe-bench-pro",
+            "swe-efficiency",
+            "swe-lancer",
+            "swe-perf",
+            "swe-rebench",
+        ] {
+            let adapter = find(name).expect("registered static SWE-family adapter");
+            let extension = adapter.setup_extension().expect("trial extension");
+            assert_eq!(extension, SetupExtension::trials(), "{name}");
+            assert!(
+                !adapter
+                    .setup_extension_values(&extension, Path::new("."))
+                    .expect("static trial values")
+                    .is_empty(),
+                "{name} has selectable static trials"
+            );
+        }
+    }
 }
