@@ -107,13 +107,16 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual((self.client / "docs/asb-dataflow.dot").read_text(), "upstream diagram\n")
 
-    def test_build_routes_every_diagram_out_of_docs(self):
+    def test_build_keeps_diagram_generation_explicit(self):
         output = run(ROOT, "make", "-n", "build", "AUTO_UML=/bin/true").stdout
+        self.assertIn("cargo build --locked", output)
+        self.assertIn("cargo doc --locked", output)
+        self.assertIn("--__generate-completion bash", output)
         for name in ("asb-type-diagram.dot", "asb-type-diagram.svg", "asb-type-diagram.mmd",
                      "asb-type-diagram.html", "asb-dataflow.dot", "asb-dataflow.svg",
                      "asb-dataflow.html", "asb-control-flow.dot", "asb-control-flow.svg",
                      "asb-control-flow.html"):
-            self.assertIn(f"target/{name}", output)
+            self.assertNotIn(f"target/{name}", output)
             self.assertNotIn(f"docs/{name}", output)
 
 

@@ -31,12 +31,7 @@ update:
 
 build:
 	cargo build --locked
-	$(MAKE) rust-doc uml interactive \
-		UML_DOT=target/asb-type-diagram.dot UML_SVG=target/asb-type-diagram.svg \
-		UML_MERMAID=target/asb-type-diagram.mmd TYPE_HTML=target/asb-type-diagram.html \
-		DATAFLOW_DOT=target/asb-dataflow.dot DATAFLOW_SVG=target/asb-dataflow.svg \
-		DATAFLOW_HTML=target/asb-dataflow.html CONTROLFLOW_DOT=target/asb-control-flow.dot \
-		CONTROLFLOW_SVG=target/asb-control-flow.svg CONTROLFLOW_HTML=target/asb-control-flow.html
+	$(MAKE) rust-doc
 	$(MAKE) completions
 
 # The generated shells are deliberately produced from the same Clap command
