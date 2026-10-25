@@ -1242,6 +1242,31 @@ mod tests {
     }
 
     #[test]
+    fn replay_ignores_only_opaque_codex_input_call_id() {
+        let root = test_root();
+        let cassette = root.join("codex-input-call-id.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","call_id":"recorded-call","output":"fixed tool result"},{"role":"user","content":"work"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let replayed = r#"{"model":"m","input":[{"type":"function_call_output","call_id":"replayed-generated-call-id-with-a-different-shape","output":"fixed tool result"},{"role":"user","content":"work"}]}"#;
+        assert!(request_to(&session, "/v1/responses", replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let changed_tool_result = replayed.replace("fixed tool result", "changed tool result");
+        assert!(
+            request_to(&session, "/v1/responses", &changed_tool_result).contains("409 Conflict")
+        );
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_can_honor_recorded_response_delay() {
         let root = test_root();
         let cassette = cassette(&root);
