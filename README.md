@@ -656,12 +656,10 @@ make install
 ```
 
 `make build` regenerates `target/asb.bash` and `target/_asb` from ASB's command
-and option catalog, generates Rust API documentation under `target/doc/`, and
-generates the AutoUML Mermaid diagram plus SVG locally under `docs/`; the
-diagram, flow graphs, and interactive HTML are derived files ignored by Git.
-It installs the pinned AutoUML generator project-locally under `target/tools/`.
-Use `make uml`, `make flows`, or `make interactive` when you want those local
-artifacts. `make install` installs Bash completion at
+and option catalog, and generates Rust API documentation under `target/doc/`.
+Type diagrams, dataflow/control-flow graphs, and interactive HTML are generated
+only when explicitly requested with `make uml`, `make flows`, or `make
+interactive`; those derived files are ignored by Git. `make install` installs Bash completion at
 `~/.local/share/bash-completion/completions/asb` and Zsh completion at
 `~/.local/share/zsh/site-functions/_asb`, alongside the binary.
 

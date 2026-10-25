@@ -215,9 +215,10 @@ The trait/UML renderer remains unchanged. Diagram regressions verify all node,
 edge and label counts against the complete current source and normalize paths
 so absolute-path tests exercise the same graph as relative-path build commands.
 
-`make build` writes its generated diagrams and interactive views under `target/`,
-leaving the tracked documentation unchanged. Run `make uml` and
-`make interactive` explicitly when updating the published diagrams in `docs/`.
+`make build` does not generate diagrams or interactive views. Run `make uml`,
+`make flows`, or `make interactive` explicitly when updating the local or
+published diagram artifacts in `docs/`; generated files leave the tracked
+documentation unchanged unless deliberately copied there.
 `make update` saves changes to legacy generated diagram paths in a Git stash
 before pulling; it reports the stash and does not touch unrelated changes.
 The backup may contain manual edits: inspect it with `git stash show -p` and
