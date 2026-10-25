@@ -23,12 +23,15 @@ assert.equal(request.instructions, 'rules');
 assert.equal(request.input.some((item) => item.role === 'system'), false);
 const normalized = compat.normalizeResponseInstructions({ instructions: 'existing', input: [
   { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'policy' }] },
-  { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'repair' }] },
+  { type: 'message', role: 'user', content: [{ type: 'text', text: 'repair' }] },
+  { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'prior work' }] },
   { type: 'function_call_output', call_id: 'call_1', output: 'result' },
 ] });
 assert.equal(normalized.instructions, 'existing\n\npolicy');
-assert.deepEqual(normalized.input.map((item) => item.type), ['message', 'function_call_output']);
+assert.deepEqual(normalized.input.map((item) => item.type), ['message', 'message', 'function_call_output']);
 assert.equal(normalized.input[0].role, 'user');
+assert.deepEqual(normalized.input[0].content, [{ type: 'input_text', text: 'repair' }]);
+assert.deepEqual(normalized.input[1].content, [{ type: 'input_text', text: 'prior work' }]);
 const chunk = compat.responseEventToChatChunk({ type: 'response.output_text.delta', response: { id: 'r1', model: 'gpt-6.1-sol' }, output_index: 0, delta: 'done' }, 'gpt-6.1-sol');
 assert.equal(chunk.choices[0].delta.content, 'done');
 const terminal = compat.responseEventToChatChunk({ type: 'response.completed', response: { id: 'r1', model: 'gpt-6.1-sol', output: [{ type: 'message', content: [{ type: 'output_text', text: 'done' }] }], usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 } } }, 'gpt-6.1-sol');
