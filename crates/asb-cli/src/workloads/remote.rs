@@ -117,7 +117,9 @@ fn replay_private_inputs(path: Option<&Path>, replay: bool) -> Result<Vec<Privat
     if !replay {
         return Ok(Vec::new());
     }
-    let path = path.ok_or_else(|| "replay has no sealed provider cassette path".to_owned())?;
+    let Some(path) = path else {
+        return Ok(Vec::new());
+    };
     let source = local_tool_sidecar(path)?;
     let metadata = std::fs::symlink_metadata(&source)
         .map_err(|_| "sealed local-tool replay transcript is unavailable".to_owned())?;
