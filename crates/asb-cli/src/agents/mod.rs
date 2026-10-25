@@ -78,6 +78,12 @@ pub(crate) trait AgentAdapter: Sync {
     fn state_environment_vars(&self) -> &'static [&'static str] {
         &[]
     }
+    /// Non-secret invocation settings that must cross an isolated workload
+    /// boundary. Adapters opt in one name at a time; the workload transport
+    /// never copies an arbitrary host environment into a benchmark guest.
+    fn forwarded_invocation_environment_vars(&self) -> &'static [&'static str] {
+        &[]
+    }
     fn collect(&self, _context: &CollectionContext<'_>) -> AgentArtifacts {
         AgentArtifacts::default()
     }
@@ -292,6 +298,7 @@ pub(super) struct StaticAdapter {
     response_failure: Option<ResponseFailureHook>,
     replay_credential_vars: &'static [&'static str],
     state_environment_vars: &'static [&'static str],
+    forwarded_invocation_environment_vars: &'static [&'static str],
     preferred_executables: Option<PreferredExecutablesHook>,
     execution_identity: ExecutionIdentity,
 }
@@ -322,6 +329,7 @@ impl StaticAdapter {
             response_failure: None,
             replay_credential_vars: &[],
             state_environment_vars: &[],
+            forwarded_invocation_environment_vars: &[],
             preferred_executables: None,
             execution_identity: ExecutionIdentity::WorkloadDefault,
         }
@@ -398,6 +406,14 @@ impl StaticAdapter {
         self
     }
 
+    pub(super) const fn with_forwarded_invocation_environment_vars(
+        mut self,
+        vars: &'static [&'static str],
+    ) -> Self {
+        self.forwarded_invocation_environment_vars = vars;
+        self
+    }
+
     pub(super) const fn with_unprivileged_execution(mut self) -> Self {
         self.execution_identity = ExecutionIdentity::Unprivileged;
         self
@@ -454,6 +470,9 @@ impl AgentAdapter for StaticAdapter {
     }
     fn replay_credential_vars(&self) -> &'static [&'static str] {
         self.replay_credential_vars
+    }
+    fn forwarded_invocation_environment_vars(&self) -> &'static [&'static str] {
+        self.forwarded_invocation_environment_vars
     }
     fn collect(&self, context: &CollectionContext<'_>) -> AgentArtifacts {
         let mut artifacts = self

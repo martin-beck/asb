@@ -27,6 +27,39 @@ const WORKLOAD_READY_TIMEOUT: Duration =
 const PROGRESS_POLL: Duration = Duration::from_millis(250);
 const PROGRESS_TRANSCRIPT_LIMIT: usize = 8 * 1024 * 1024;
 
+const GUEST_ENVIRONMENT_VARS: &[&str] = &[
+    "http_proxy",
+    "HTTP_PROXY",
+    "https_proxy",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+    "socks_proxy",
+    "SOCKS_PROXY",
+    "no_proxy",
+    "NO_PROXY",
+    "NPM_CONFIG_OFFLINE",
+    "ASB_MEASURE_INTERVAL_MS",
+];
+
+/// Build the intentionally small environment projection for a workload guest.
+/// Adapter declarations add only non-secret invocation controls; credentials
+/// continue to travel exclusively in the negotiated connection.
+fn guest_environment(
+    agent: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> serde_json::Map<String, Value> {
+    let adapter_vars = crate::agents::find(agent)
+        .map(|adapter| adapter.forwarded_invocation_environment_vars())
+        .unwrap_or_default();
+    GUEST_ENVIRONMENT_VARS
+        .iter()
+        .copied()
+        .chain(adapter_vars.iter().copied())
+        .filter_map(|name| lookup(name).map(|value| (name.into(), Value::String(value))))
+        .collect()
+}
+
 fn append_progress_transcript(transcript: &mut Vec<u8>, bytes: &[u8]) {
     let remaining = PROGRESS_TRANSCRIPT_LIMIT.saturating_sub(transcript.len());
     transcript.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
@@ -718,30 +751,12 @@ impl Session {
         let mut config = context.config.clone();
         config.workspace = self.guest_workspace.clone();
         config.concurrency = 1;
-        let mut environment = serde_json::Map::new();
         let namespace_collectors = context
             .measurements
             .as_deref_mut()
             .map(|session| session.execution_namespace_collectors())
             .unwrap_or_default();
-        for name in [
-            "http_proxy",
-            "HTTP_PROXY",
-            "https_proxy",
-            "HTTPS_PROXY",
-            "all_proxy",
-            "ALL_PROXY",
-            "socks_proxy",
-            "SOCKS_PROXY",
-            "no_proxy",
-            "NO_PROXY",
-            "NPM_CONFIG_OFFLINE",
-            "ASB_MEASURE_INTERVAL_MS",
-        ] {
-            if let Ok(value) = std::env::var(name) {
-                environment.insert(name.into(), Value::String(value));
-            }
-        }
+        let environment = guest_environment(&context.config.agent, |name| std::env::var(name).ok());
         let payload = AgentRequest {
             binary: &binary,
             project_root: context.project_root,
@@ -1203,6 +1218,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn guest_environment_forwards_only_selected_adapter_invocation_settings() {
+        let values = std::collections::BTreeMap::from([
+            ("ASB_CODEX_SANDBOX_MODE", "danger-full-access"),
+            ("HTTPS_PROXY", "http://proxy.invalid:8443"),
+            ("UNRELATED_HOST_VALUE", "must-not-cross"),
+        ]);
+        let lookup = |name: &str| values.get(name).map(|value| value.to_string());
+        let codex = guest_environment("codex", lookup);
+        assert_eq!(
+            codex["ASB_CODEX_SANDBOX_MODE"],
+            Value::String("danger-full-access".into())
+        );
+        assert_eq!(
+            codex["HTTPS_PROXY"],
+            Value::String("http://proxy.invalid:8443".into())
+        );
+        assert!(codex.get("UNRELATED_HOST_VALUE").is_none());
+
+        let opencode = guest_environment("opencode", lookup);
+        assert!(opencode.get("ASB_CODEX_SANDBOX_MODE").is_none());
+        assert_eq!(opencode["HTTPS_PROXY"], codex["HTTPS_PROXY"]);
+    }
 
     #[test]
     fn guest_project_projection_excludes_host_capabilities_and_survives_proxy_rewrite() {
