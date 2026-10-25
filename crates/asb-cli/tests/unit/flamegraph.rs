@@ -25,6 +25,7 @@ fn isolated_flamegraph_missing_inputs_pipeline_failures_and_owned_timeout() {
             "missing-tools",
             "perf-failed",
             "collapse-failed",
+            "empty-folded",
             "render-failed",
             "completed",
             "timeout",
@@ -70,12 +71,25 @@ fn isolated_flamegraph_missing_inputs_pipeline_failures_and_owned_timeout() {
             "stackcollapse-perf.pl",
             case == "collapse-failed",
         ),
-        ("flamegraph", "flamegraph", case == "render-failed"),
+        (
+            "flamegraph",
+            "flamegraph",
+            case == "render-failed" || case == "empty-folded",
+        ),
     ] {
         let path = tools.join(tool).join("bin").join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         if case != "missing-tools" || tool == "perf" {
-            symlink(if failing { "/bin/false" } else { "/bin/true" }, path).unwrap();
+            let target = if failing {
+                "/bin/false"
+            } else if name == "stackcollapse-perf.pl" && case != "empty-folded" {
+                // Normal pipeline cases need an actual folded frame. The
+                // dedicated empty-folded case deliberately uses /bin/true.
+                "/bin/echo"
+            } else {
+                "/bin/true"
+            };
+            symlink(target, path).unwrap();
         }
     }
     let mut session = measurements::Session::start_in_execution_namespace(
@@ -137,6 +151,7 @@ fn isolated_flamegraph_missing_inputs_pipeline_failures_and_owned_timeout() {
             "missing-tools" => "install stackcollapse-perf.pl",
             "perf-failed" => "perf script timed out",
             "collapse-failed" => "stack collapse script timed out",
+            "empty-folded" => "no stack samples",
             "render-failed" => "renderer timed out",
             _ => unreachable!(),
         };
