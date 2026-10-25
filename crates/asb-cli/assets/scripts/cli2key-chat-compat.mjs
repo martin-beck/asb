@@ -31,14 +31,18 @@ function instructionText(content) {
 // to /responses.  Normalize it at the provider edge before forwarding to the
 // bridge; do not make individual agent adapters carry bridge syntax.
 function normalizeInputContent(content, role) {
-  if (!Array.isArray(content)) return content;
-  return content.map((raw) => {
-    const part = object(raw);
-    if (part.type === "text" || part.type === "input_text" || part.type === "output_text") {
-      return { ...part, type: role === "assistant" ? "output_text" : "input_text" };
-    }
-    return part;
-  });
+  if (Array.isArray(content)) return content.map((part) => normalizeInputContent(part, role));
+  const part = object(content);
+  if (!Object.keys(part).length) return content;
+  const normalizedRole = typeof part.role === "string" ? part.role : role;
+  const normalized = Object.fromEntries(Object.entries(part).map(([key, value]) => [
+    key,
+    key === "type" && (value === "text" || value === "input_text" || value === "output_text") &&
+      typeof part.text === "string"
+      ? (normalizedRole === "assistant" ? "output_text" : "input_text")
+      : normalizeInputContent(value, normalizedRole),
+  ]));
+  return normalized;
 }
 
 // Codex Bridge carries system policy through the Responses `instructions`
@@ -62,9 +66,8 @@ export function normalizeResponseInstructions(body) {
         continue;
       }
     }
-    if ((message.type === undefined || message.type === "message") &&
-        Array.isArray(message.content)) {
-      input.push({ ...message, content: normalizeInputContent(message.content, message.role) });
+    if (message.type === undefined || message.type === "message") {
+      input.push(normalizeInputContent(message, message.role));
     } else {
       input.push(item);
     }
