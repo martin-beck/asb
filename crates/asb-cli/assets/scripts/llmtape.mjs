@@ -260,6 +260,21 @@ function normalizeCassetteBody(body) {
       if (path.length === 2 && path[0] === "metadata" && path[1] === "user_id" && key === "user_id") {
         return "<asb-user-id>";
       }
+      // Codex sends process-local turn/session telemetry in client_metadata.
+      // It is neither a prompt nor tool input; normalize only this fixed,
+      // provider-defined metadata vocabulary so arbitrary client metadata
+      // remains request-significant.
+      if (path.length === 2 && path[0] === "client_metadata" && [
+        "root_turn_id",
+        "session_id",
+        "thread_id",
+        "turn_id",
+        "x-codex-installation-id",
+        "x-codex-turn-metadata",
+        "x-codex-window-id",
+      ].includes(path[1]) && key === path[1]) {
+        return "<asb-codex-client-metadata>";
+      }
       if (typeof value === "string") {
         const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
         const cleaned = value.replace(/\n?\.\.\/.*AGENTS\.md\n?/gm, "");

@@ -1100,6 +1100,28 @@ mod tests {
     }
 
     #[test]
+    fn replay_ignores_only_known_volatile_codex_client_metadata() {
+        let root = test_root();
+        let cassette = root.join("codex-client-metadata.jsonl");
+        let recorded = r#"{"model":"m","client_metadata":{"root_turn_id":"recorded-root","session_id":"recorded-session","thread_id":"recorded-thread","turn_id":"recorded-turn","x-codex-installation-id":"recorded-install","x-codex-turn-metadata":"recorded-telemetry","x-codex-window-id":"recorded-window"},"input":[{"role":"user","content":"work"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let replayed = r#"{"model":"m","client_metadata":{"root_turn_id":"replayed-root","session_id":"replayed-session","thread_id":"replayed-thread","turn_id":"replayed-turn","x-codex-installation-id":"replayed-install","x-codex-turn-metadata":"replayed-telemetry","x-codex-window-id":"replayed-window"},"input":[{"role":"user","content":"work"}]}"#;
+        assert!(request_to(&session, "/v1/responses", replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let changed_content = replayed.replace("\"work\"", "\"changed\"");
+        assert!(request_to(&session, "/v1/responses", &changed_content).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_can_honor_recorded_response_delay() {
         let root = test_root();
         let cassette = cassette(&root);
