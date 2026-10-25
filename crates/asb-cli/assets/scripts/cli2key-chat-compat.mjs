@@ -1,0 +1,114 @@
+// OpenAI Chat Completions <-> Responses compatibility for cli2key.  The
+// bridge intentionally implements Responses, while several valid ASB agents
+// use the older Chat Completions wire protocol.
+
+function object(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function textContent(content, type) {
+  if (typeof content === "string") return [{ type, text: content }];
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((part) => {
+    const item = object(part);
+    if (item.type === "text" || item.type === "input_text" || item.type === "output_text") {
+      return typeof item.text === "string" ? [{ type, text: item.text }] : [];
+    }
+    if (item.type === "image_url" && item.image_url?.url) return [{ type: "input_image", image_url: item.image_url.url }];
+    return [];
+  });
+}
+
+function inputItems(messages) {
+  const input = [];
+  for (const raw of Array.isArray(messages) ? messages : []) {
+    const message = object(raw);
+    const role = message.role;
+    if (role === "tool" && typeof message.tool_call_id === "string") {
+      input.push({ type: "function_call_output", call_id: message.tool_call_id, output: message.content ?? "" });
+      continue;
+    }
+    if (!["system", "developer", "user", "assistant"].includes(role)) continue;
+    const content = textContent(message.content, role === "assistant" ? "output_text" : "input_text");
+    if (content.length) input.push({ type: "message", role, content });
+    for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
+      const functionCall = object(call).function;
+      if (call?.type === "function" && typeof call.id === "string" && functionCall && typeof functionCall.name === "string") {
+        input.push({ type: "function_call", call_id: call.id, name: functionCall.name, arguments: typeof functionCall.arguments === "string" ? functionCall.arguments : "{}" });
+      }
+    }
+  }
+  return input;
+}
+
+export function chatToResponses(body) {
+  const chat = object(body);
+  const result = {
+    model: chat.model,
+    input: inputItems(chat.messages),
+    stream: Boolean(chat.stream),
+    store: false,
+  };
+  if (!result.input.length) result.input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "" }] }];
+  if (Array.isArray(chat.tools)) {
+    result.tools = chat.tools.flatMap((tool) => {
+      const fn = object(tool).function;
+      return tool?.type === "function" && typeof fn.name === "string"
+        ? [{ type: "function", name: fn.name, description: typeof fn.description === "string" ? fn.description : "", parameters: object(fn.parameters) }]
+        : [];
+    });
+  }
+  if (typeof chat.max_tokens === "number") result.max_output_tokens = chat.max_tokens;
+  if (typeof chat.temperature === "number") result.temperature = chat.temperature;
+  if (typeof chat.reasoning_effort === "string") result.reasoning = { effort: chat.reasoning_effort };
+  return result;
+}
+
+function usage(response) {
+  const source = object(response.usage);
+  return {
+    prompt_tokens: source.input_tokens ?? 0,
+    completion_tokens: source.output_tokens ?? 0,
+    total_tokens: source.total_tokens ?? ((source.input_tokens ?? 0) + (source.output_tokens ?? 0)),
+  };
+}
+
+function message(response) {
+  const output = Array.isArray(response.output) ? response.output : [];
+  const content = output.flatMap((item) => Array.isArray(item?.content) ? item.content : [])
+    .filter((part) => part?.type === "output_text")
+    .map((part) => part.text ?? "")
+    .join("");
+  const tool_calls = output.filter((item) => item?.type === "function_call")
+    .map((item, index) => ({ id: item.call_id ?? item.id ?? `call_${index}`, type: "function", function: { name: item.name, arguments: item.arguments ?? "{}" } }));
+  return { role: "assistant", content: content || null, ...(tool_calls.length ? { tool_calls } : {}) };
+}
+
+export function responseToChatCompletion(response) {
+  const value = object(response);
+  const choiceMessage = message(value);
+  return {
+    id: value.id ?? "chatcmpl-cli2key",
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model: value.model ?? "cli2key",
+    choices: [{ index: 0, message: choiceMessage, finish_reason: choiceMessage.tool_calls ? "tool_calls" : "stop" }],
+    usage: usage(value),
+  };
+}
+
+export function responseEventToChatChunk(event, model) {
+  const value = object(event);
+  const response = object(value.response);
+  const base = { id: response.id ?? value.response_id ?? "chatcmpl-cli2key", object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: response.model ?? model ?? "cli2key" };
+  if (value.type === "response.output_text.delta") return { ...base, choices: [{ index: value.output_index ?? 0, delta: { content: value.delta ?? "" }, finish_reason: null }] };
+  if (value.type === "response.output_item.done" && value.item?.type === "function_call") {
+    const item = value.item;
+    return { ...base, choices: [{ index: value.output_index ?? 0, delta: { tool_calls: [{ index: 0, id: item.call_id ?? item.id, type: "function", function: { name: item.name, arguments: item.arguments ?? "{}" } }] }, finish_reason: null }] };
+  }
+  if (value.type === "response.completed") {
+    const completed = responseToChatCompletion(response);
+    return { ...base, choices: [{ index: 0, delta: {}, finish_reason: completed.choices[0].finish_reason }], usage: completed.usage };
+  }
+  return null;
+}

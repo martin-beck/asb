@@ -3,6 +3,36 @@ use super::*;
 use std::fs;
 use std::path::Path;
 
+#[test]
+fn chat_compatibility_translates_requests_and_response_events_offline() {
+    let node = crate::tools::host_executable(Path::new("node")).expect("node is available");
+    let module = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/scripts/cli2key-chat-compat.mjs");
+    let script = r#"
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const compat = await import(pathToFileURL(process.argv[1]).href);
+const request = compat.chatToResponses({ model: 'gpt-6.1-sol', stream: true,
+  messages: [{ role: 'system', content: 'rules' }, { role: 'user', content: 'repair' }],
+  tools: [{ type: 'function', function: { name: 'read_file', parameters: { type: 'object' } } }] });
+assert.equal(request.model, 'gpt-6.1-sol');
+assert.equal(request.stream, true);
+assert.deepEqual(request.input[1], { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'repair' }] });
+assert.equal(request.tools[0].name, 'read_file');
+const chunk = compat.responseEventToChatChunk({ type: 'response.output_text.delta', response: { id: 'r1', model: 'gpt-6.1-sol' }, output_index: 0, delta: 'done' }, 'gpt-6.1-sol');
+assert.equal(chunk.choices[0].delta.content, 'done');
+const terminal = compat.responseEventToChatChunk({ type: 'response.completed', response: { id: 'r1', model: 'gpt-6.1-sol', output: [{ type: 'message', content: [{ type: 'output_text', text: 'done' }] }], usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 } } }, 'gpt-6.1-sol');
+assert.equal(terminal.choices[0].finish_reason, 'stop');
+assert.equal(terminal.usage.total_tokens, 5);
+"#;
+    let output = Command::new(node)
+        .args(["--input-type=module", "-e", script])
+        .arg(module)
+        .output()
+        .expect("run node compatibility test");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
 #[cfg(unix)]
 #[test]
 fn bridge_configuration_and_startup_failures_are_isolated_and_owned() {

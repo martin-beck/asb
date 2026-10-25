@@ -9,6 +9,7 @@ import http from "node:http";
 import { Readable } from "node:stream";
 import { fstatSync } from "node:fs";
 import { cancelNetworkRequests, networkFetch, quiesceNetworkRequests } from "./network-fetch.mjs";
+import { chatToResponses, responseEventToChatChunk, responseToChatCompletion } from "./cli2key-chat-compat.mjs";
 
 function usage(message) {
   if (message) console.error(`asb cli2key proxy: ${message}`);
@@ -79,8 +80,11 @@ const server = http.createServer(async (request, response) => {
     if (closing || request.aborted || response.destroyed) return;
     const raw = Buffer.concat(chunks);
     const path = request.url || "/";
-    const body = normalizeBody(path, raw.length ? raw.toString("utf8") : "");
-    const target = new URL(path, `${upstream}/`);
+    const chat = path === "/v1/chat/completions";
+    const parsed = raw.length ? JSON.parse(raw.toString("utf8")) : {};
+    const translated = chat ? chatToResponses(parsed) : null;
+    const body = chat ? JSON.stringify(translated) : normalizeBody(path, raw.length ? raw.toString("utf8") : "");
+    const target = new URL(chat ? "/v1/responses" : path, `${upstream}/`);
     const headers = { ...request.headers };
     delete headers.host;
     delete headers.connection;
@@ -90,6 +94,30 @@ const server = http.createServer(async (request, response) => {
       headers,
       body: body || undefined,
     }, 0, outboundLaunch);
+    if (chat && result.status >= 200 && result.status < 300) {
+      if (translated.stream) {
+        response.writeHead(result.status, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" });
+        let pending = "";
+        for await (const chunk of Readable.fromWeb(result.body)) {
+          pending += Buffer.from(chunk).toString("utf8");
+          let separator;
+          while ((separator = pending.indexOf("\n\n")) >= 0) {
+            const frame = pending.slice(0, separator);
+            pending = pending.slice(separator + 2);
+            const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+            if (!data || data === "[DONE]") continue;
+            const chunkValue = responseEventToChatChunk(JSON.parse(data), translated.model);
+            if (chunkValue) response.write(`data: ${JSON.stringify(chunkValue)}\n\n`);
+          }
+        }
+        response.end("data: [DONE]\n\n");
+        return;
+      }
+      const responseBody = await new Response(result.body).json();
+      response.writeHead(result.status, { "content-type": "application/json" });
+      response.end(JSON.stringify(responseToChatCompletion(responseBody)));
+      return;
+    }
     response.writeHead(result.status, Object.fromEntries(result.headers));
     if (result.body) {
       const bodyStream = Readable.fromWeb(result.body);
