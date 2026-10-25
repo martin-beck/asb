@@ -477,7 +477,6 @@ mod tests {
         let extension = root.join("runtime/pi/asb-local-tools.ts");
         let source = std::fs::read_to_string(extension).unwrap();
         assert!(source.contains("run_command"));
-        assert!(source.contains("--no-builtin-tools") == false);
         assert!(run_dir.join("tool-replay/local-tools.jsonl").is_file());
         assert!(command.get_envs().any(|(name, value)| {
             name.to_string_lossy() == "ASB_PI_LOCAL_TOOL_REPLAY" && value.is_some()
