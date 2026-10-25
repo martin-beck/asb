@@ -53,7 +53,24 @@ pub(crate) fn launch(
     tape: TapeContext<'_>,
 ) -> Result<Launch, Error> {
     let transcript = match tape.mode {
-        crate::tape::Mode::Record => context.run_dir.join("tool-replay/local-tools.jsonl"),
+        crate::tape::Mode::Record => {
+            let transcript = context.run_dir.join("tool-replay/local-tools.jsonl");
+            let parent = transcript
+                .parent()
+                .expect("local-tool transcript has a parent");
+            std::fs::create_dir_all(parent).map_err(|error| {
+                Error::Run(format!(
+                    "cannot create local-tool transcript directory: {error}"
+                ))
+            })?;
+            // Some clients launch a configured MCP server lazily. Publish a
+            // valid empty transcript before the client starts so an otherwise
+            // tool-free recording has sealed replay evidence too.
+            std::fs::write(&transcript, Transcript::default().encode()?).map_err(|error| {
+                Error::Run(format!("cannot initialize local-tool transcript: {error}"))
+            })?;
+            transcript
+        }
         crate::tape::Mode::Replay => replay_transcript(tape.cassette)?,
     };
     if tape.mode == crate::tape::Mode::Replay && !transcript.is_file() {
@@ -127,24 +144,36 @@ fn run(args: &[OsString]) -> Result<(), Error> {
     match options.mode {
         Mode::Record => {
             let bytes = transcript.encode()?;
-            let parent = options.transcript.parent().ok_or_else(|| {
-                Error::Run("local-tool transcript has no private namespace".into())
-            })?;
-            if !parent.is_dir() {
-                return Err(Error::Run(
-                    "local-tool transcript namespace is unavailable".into(),
-                ));
-            }
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&options.transcript)
-                .map_err(|_| Error::Run("cannot publish local-tool transcript".into()))?;
-            file.write_all(&bytes).map_err(crate::io_error)?;
-            file.sync_all().map_err(crate::io_error)?;
+            publish_record_transcript(&options.transcript, &bytes)?;
         }
         Mode::Replay => transcript.finish()?,
     }
+    Ok(())
+}
+
+fn publish_record_transcript(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::Run("local-tool transcript has no private namespace".into()))?;
+    if !parent.is_dir() {
+        return Err(Error::Run(
+            "local-tool transcript namespace is unavailable".into(),
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| Error::Run("local-tool transcript was not initialized".into()))?;
+    if !metadata.file_type().is_file() {
+        return Err(Error::Run(
+            "local-tool transcript is not a regular file".into(),
+        ));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|_| Error::Run("cannot publish local-tool transcript".into()))?;
+    file.write_all(bytes).map_err(crate::io_error)?;
+    file.sync_all().map_err(crate::io_error)?;
     Ok(())
 }
 
@@ -542,6 +571,77 @@ mod tests {
         let replayed = call(&replay_options, &mut replay, request).unwrap();
         assert_eq!(recorded, replayed);
         replay.finish().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn record_launch_publishes_a_valid_empty_local_tool_transcript() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-empty-transcript-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cassette = root.join("recording.jsonl");
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiChat,
+            base_url: "http://127.0.0.1:1/v1".into(),
+            credential: None,
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let mut command = std::process::Command::new("unused");
+        let launch = launch(
+            &PreparationContext {
+                command: &mut command,
+                model: "fixture",
+                connection: &connection,
+                workspace: &workspace,
+                runtime_dir: &root,
+                run_dir: &root,
+                tape: None,
+            },
+            TapeContext {
+                mode: crate::tape::Mode::Record,
+                cassette: &cassette,
+            },
+        )
+        .unwrap();
+        let transcript = root.join("tool-replay/local-tools.jsonl");
+        assert!(transcript.is_file());
+        assert!(std::fs::read(&transcript).unwrap().is_empty());
+        Transcript::decode(&std::fs::read(&transcript).unwrap()).unwrap();
+        assert!(launch.args.iter().any(|argument| argument == "record"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn record_publication_replaces_the_initialized_local_tool_transcript() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-record-publication-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let transcript = root.join("local-tools.jsonl");
+        std::fs::write(&transcript, Transcript::default().encode().unwrap()).unwrap();
+        let mut expected_transcript = Transcript::default();
+        expected_transcript
+            .record(Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                tool: "read_file".into(),
+                request: json!({"name":"read_file","arguments":{"path":"answer.txt"}}),
+                result: json!({"content":"recorded"}),
+                effects: Vec::new(),
+            })
+            .unwrap();
+        let expected = expected_transcript.encode().unwrap();
+        publish_record_transcript(&transcript, &expected).unwrap();
+        assert_eq!(std::fs::read(&transcript).unwrap(), expected);
+        let link = root.join("link.jsonl");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&transcript, &link).unwrap();
+        #[cfg(unix)]
+        assert!(publish_record_transcript(&link, b"unexpected").is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 

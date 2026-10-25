@@ -12,6 +12,12 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_tool_replay(prepare_tool_replay)
+.with_artifact_specs(&[super::super::ArtifactSpec {
+    namespace: "tool-replay",
+    filename: "local-tools.jsonl",
+    format: super::super::ArtifactFormat::JsonLines,
+}])
 .with_state_environment_vars(&["CODEX_HOME"])
 .with_forwarded_invocation_environment_vars(&["ASB_CODEX_SANDBOX_MODE"])
 .with_preferred_executables(preferred_executables);
@@ -83,6 +89,53 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+fn prepare_tool_replay(
+    context: &mut PreparationContext<'_>,
+    tape: super::super::TapeContext<'_>,
+) -> Result<(), Error> {
+    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    let directory = context.runtime_dir.join("codex/config");
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        Error::Run(format!(
+            "cannot create Codex local-tool replay configuration directory: {error}"
+        ))
+    })?;
+    let mut server = toml::map::Map::new();
+    server.insert(
+        "command".into(),
+        toml::Value::String(launch.program.to_string_lossy().into_owned()),
+    );
+    server.insert(
+        "args".into(),
+        toml::Value::Array(
+            launch
+                .args
+                .iter()
+                .map(|argument| toml::Value::String(argument.to_string_lossy().into_owned()))
+                .collect(),
+        ),
+    );
+    let mut servers = toml::map::Map::new();
+    servers.insert("asb_tool_replay".into(), toml::Value::Table(server));
+    let mut root = toml::map::Map::new();
+    root.insert("mcp_servers".into(), toml::Value::Table(servers));
+    let contents = toml::to_string(&toml::Value::Table(root)).map_err(|error| {
+        Error::Run(format!(
+            "cannot serialize Codex local-tool replay configuration: {error}"
+        ))
+    })?;
+    std::fs::write(directory.join("asb-tool-replay.toml"), contents).map_err(|error| {
+        Error::Run(format!(
+            "cannot write Codex local-tool replay configuration: {error}"
+        ))
+    })?;
+    // Codex otherwise exposes its built-in shell tool alongside MCP. That tool
+    // executes live host commands, while the adapter-owned MCP server records
+    // and replays its effects through the sealed transcript.
+    context.command.args(["--disable", "shell_tool"]);
+    Ok(())
+}
+
 fn sandbox_args(value: Option<String>) -> Result<&'static [&'static str], Error> {
     match value.as_deref() {
         // `--approve-for-me` is Codex's documented noninteractive
@@ -119,8 +172,10 @@ fn configure(
     } else {
         ""
     };
+    let replay_configuration =
+        std::fs::read_to_string(directory.join("asb-tool-replay.toml")).unwrap_or_default();
     let configuration = format!(
-        "model = {model}\nmodel_provider = \"asb_provider\"\nweb_search = \"disabled\"\n\n[features]\napps = false\nplugins = false\nenable_mcp_apps = false\n\n[model_providers.asb_provider]\nname = \"ASB provider\"\nbase_url = {base_url}\n{key}wire_api = \"responses\"\nrequires_openai_auth = false\n"
+        "model = {model}\nmodel_provider = \"asb_provider\"\nweb_search = \"disabled\"\n\n[features]\napps = false\nplugins = false\nenable_mcp_apps = false\n\n[model_providers.asb_provider]\nname = \"ASB provider\"\nbase_url = {base_url}\n{key}wire_api = \"responses\"\nrequires_openai_auth = false\n\n{replay_configuration}"
     );
     std::fs::write(directory.join("config.toml"), configuration).map_err(|error| {
         Error::Run(format!(
@@ -132,6 +187,7 @@ fn configure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentAdapter;
     #[cfg(unix)]
     #[test]
     fn native_package_preference_is_owned_here_and_explicit_source_still_wins() {
@@ -235,5 +291,60 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "private fixture prompt")
         );
+    }
+
+    #[test]
+    fn tape_backed_preparation_uses_the_private_mcp_replay_server() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-codex-tool-replay-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cassette = root.join("recording.jsonl");
+        let mut command = std::process::Command::new("codex");
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiResponses,
+            base_url: "http://127.0.0.1:4321/v1".into(),
+            credential: Some("fixture-key".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        ADAPTER
+            .prepare(&mut PreparationContext {
+                command: &mut command,
+                model: "fixture-model",
+                connection: &connection,
+                workspace: &workspace,
+                runtime_dir: &root,
+                run_dir: &root,
+                tape: Some(crate::agents::TapeContext {
+                    mode: crate::tape::Mode::Record,
+                    cassette: &cassette,
+                }),
+            })
+            .unwrap();
+        let args = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--disable", "shell_tool"])
+        );
+        let config: toml::Value = toml::from_str(
+            &std::fs::read_to_string(root.join("codex/config/config.toml")).unwrap(),
+        )
+        .unwrap();
+        let server = &config["mcp_servers"]["asb_tool_replay"];
+        assert!(server["command"].as_str().is_some());
+        assert!(
+            server["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value.as_str() == Some("__asb-tool-replay"))
+        );
+        assert_eq!(config["model"].as_str(), Some("fixture-model"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

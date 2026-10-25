@@ -68,7 +68,18 @@ pub(super) struct AgentRequest<'a> {
     pub project_configuration: String,
     pub environment: serde_json::Map<String, Value>,
     pub network: Option<String>,
+    pub private_inputs: Vec<PrivateInput>,
     pub request: Value,
+}
+
+/// A runner-sealed, bounded host file staged only into the owned guest-private
+/// directory.  The controller verifies both length and digest before upload.
+#[derive(Serialize)]
+pub(super) struct PrivateInput {
+    pub source: std::path::PathBuf,
+    pub target: String,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 impl Request<'_> {

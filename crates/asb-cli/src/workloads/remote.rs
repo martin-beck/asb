@@ -1,6 +1,6 @@
 //! Common execution/evaluation protocol for workload-owned official engines.
 use super::task_protocol::{
-    AgentRequest, CompletedExecution, CompletedGrade, EventKind, ReadyTask, Request,
+    AgentRequest, CompletedExecution, CompletedGrade, EventKind, PrivateInput, ReadyTask, Request,
 };
 use crate::workloads::controller::{Controller, ControllerCommand, decode_base64};
 use crate::workloads::session::{
@@ -9,7 +9,7 @@ use crate::workloads::session::{
 };
 use crate::workloads::{Evaluation, TaskIdentity, WorkloadSession};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -26,6 +26,7 @@ const WORKLOAD_READY_TIMEOUT: Duration =
     Duration::from_secs(crate::planning::DEFAULT_ENVIRONMENT_PREPARATION_SECONDS);
 const PROGRESS_POLL: Duration = Duration::from_millis(250);
 const PROGRESS_TRANSCRIPT_LIMIT: usize = 8 * 1024 * 1024;
+const MAX_PRIVATE_REPLAY_INPUT: u64 = 64 * 1024 * 1024;
 
 const GUEST_ENVIRONMENT_VARS: &[&str] = &[
     "http_proxy",
@@ -81,6 +82,68 @@ fn guest_project_configuration(project: &crate::project::ProjectConfig) -> Resul
         proxy: &project.proxy,
     })
     .map_err(|_| "cannot encode guest project configuration".into())
+}
+
+/// A workload guest cannot dereference host campaign paths.  Replay aliases
+/// are mounted directly beneath this private directory, including each
+/// replica's `replay-N.jsonl` and its adjacent local-tool transcript.
+fn guest_tape_cassette(path: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let name = path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "tape cassette has no filename for workload guest".to_owned())?;
+    Ok(Some(Path::new("/opt/asb-private").join(name)))
+}
+
+fn local_tool_sidecar(path: &Path) -> Result<PathBuf, String> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "replay cassette has no valid private filename".to_owned())?;
+    let suffix = name
+        .strip_prefix("replay")
+        .and_then(|suffix| suffix.strip_suffix(".jsonl"))
+        .ok_or_else(|| "replay cassette has an unexpected private filename".to_owned())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "replay cassette has no private directory".to_owned())?;
+    Ok(parent.join(format!("local-tools{suffix}.jsonl")))
+}
+
+fn replay_private_inputs(path: Option<&Path>, replay: bool) -> Result<Vec<PrivateInput>, String> {
+    if !replay {
+        return Ok(Vec::new());
+    }
+    let Some(path) = path else {
+        return Ok(Vec::new());
+    };
+    let source = local_tool_sidecar(path)?;
+    let metadata = std::fs::symlink_metadata(&source)
+        .map_err(|_| "sealed local-tool replay transcript is unavailable".to_owned())?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_PRIVATE_REPLAY_INPUT {
+        return Err("sealed local-tool replay transcript is invalid or exceeds 64 MiB".into());
+    }
+    let bytes = std::fs::read(&source)
+        .map_err(|_| "sealed local-tool replay transcript is unavailable".to_owned())?;
+    if bytes.len() as u64 != metadata.len() {
+        return Err(
+            "sealed local-tool replay transcript changed while preparing guest input".into(),
+        );
+    }
+    let target = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "sealed local-tool replay transcript has no filename".to_owned())?
+        .to_owned();
+    Ok(vec![PrivateInput {
+        source,
+        target,
+        bytes: bytes.len() as u64,
+        sha256: crate::cassette::digest(&bytes),
+    }])
 }
 
 pub(crate) fn prefetch(context: &super::PreflightContext<'_>) -> Result<(), crate::Error> {
@@ -757,6 +820,8 @@ impl Session {
             .map(|session| session.execution_namespace_collectors())
             .unwrap_or_default();
         let environment = guest_environment(&context.config.agent, |name| std::env::var(name).ok());
+        let tape_cassette = guest_tape_cassette(context.tape_cassette)?;
+        let private_inputs = replay_private_inputs(context.tape_cassette, context.replay)?;
         let payload = AgentRequest {
             binary: &binary,
             project_root: context.project_root,
@@ -771,9 +836,10 @@ impl Session {
             project_configuration: guest_project_configuration(context.project_config)?,
             environment,
             network: std::env::var("ASB_BENCHMARK_NETWORK").ok(),
+            private_inputs,
             request: json!({"process_lifetime":self.process_lifetime,"config":config,"connection":connection,"prompt":self.invocation.input.instructions,"timeout_seconds":self.agent_timeout.as_secs_f64(),
                 "project_root":"/opt/asb-project","runtime_dir":"/opt/asb-private","run_dir":"/opt/asb-private/attempt","replay":context.replay,
-                "tape_cassette":context.tape_cassette,
+                "tape_cassette":tape_cassette,
                 "namespace_collectors":namespace_collectors}),
         };
         self.controller
@@ -1218,6 +1284,43 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn guest_tape_projection_uses_private_alias_and_preserves_replica_suffix() {
+        assert_eq!(
+            guest_tape_cassette(Some(Path::new("/host/campaign/batch-1/replay.jsonl"))).unwrap(),
+            Some(PathBuf::from("/opt/asb-private/replay.jsonl"))
+        );
+        assert_eq!(
+            guest_tape_cassette(Some(Path::new("/host/campaign/batch-1/replay-3.jsonl"))).unwrap(),
+            Some(PathBuf::from("/opt/asb-private/replay-3.jsonl"))
+        );
+        assert_eq!(guest_tape_cassette(None).unwrap(), None);
+        assert!(guest_tape_cassette(Some(Path::new("/"))).is_err());
+    }
+
+    #[test]
+    fn replay_private_input_preserves_the_replica_sidecar_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-replay-private-input-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let batch = root.join("batch-1");
+        std::fs::create_dir_all(&batch).unwrap();
+        std::fs::write(batch.join("replay-2.jsonl"), b"provider tape\n").unwrap();
+        std::fs::write(batch.join("local-tools-2.jsonl"), b"{}\n").unwrap();
+        let inputs = replay_private_inputs(Some(&batch.join("replay-2.jsonl")), true).unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].target, "local-tools-2.jsonl");
+        assert_eq!(inputs[0].bytes, 3);
+        assert_eq!(inputs[0].sha256, crate::cassette::digest(b"{}\n"));
+        assert!(
+            replay_private_inputs(Some(&batch.join("replay-2.jsonl")), false)
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn guest_environment_forwards_only_selected_adapter_invocation_settings() {
