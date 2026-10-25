@@ -66,11 +66,9 @@ export function normalizeResponseInstructions(body) {
         continue;
       }
     }
-    if (message.type === undefined || message.type === "message") {
-      input.push(normalizeInputContent(message, message.role));
-    } else {
-      input.push(item);
-    }
+    // Some clients use non-message Responses input item wrappers around text
+    // content.  Normalize every retained input item, not only messages.
+    input.push(normalizeInputContent(message, message.role));
   }
   return {
     ...response,
