@@ -285,6 +285,14 @@ function normalizeCassetteBody(body) {
           && path[2] === "encrypted_content" && key === "encrypted_content") {
         return "<asb-codex-encrypted-content>";
       }
+      // The same Responses input-item vocabulary carries Codex's generated
+      // tool-call identity. It is an opaque continuation reference, not a
+      // workload-supplied call ID. Scope this to input items so user JSON and
+      // nested tool arguments named call_id remain cassette-significant.
+      if (path.length === 3 && path[0] === "input" && /^\d+$/.test(path[1])
+          && path[2] === "call_id" && key === "call_id") {
+        return "<asb-codex-input-call-id>";
+      }
       if (typeof value === "string") {
         const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
         const cleaned = value.replace(/\n?\.\.\/.*AGENTS\.md\n?/gm, "");
