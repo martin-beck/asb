@@ -363,6 +363,7 @@ fn every_repeatable_selection_triggers_sweep_even_for_duplicate_values() {
         ("--measure", "system"),
     ] {
         let project = Project::new();
+        project.seed_agent_installations(&[("pi", "pi")]);
         let mut args = setup_args();
         if flag == "--measure" {
             args.extend([flag, value]);
@@ -379,6 +380,7 @@ fn every_repeatable_selection_triggers_sweep_even_for_duplicate_values() {
 #[test]
 fn trial_sets_expand_enabled_trials_and_explicit_scopes_select_subsets() {
     let project = Project::new();
+    project.seed_agent_installations(&[("pi", "pi")]);
     project.write(
         "catalogs/agentbench.workload.toml",
         "workload='agentbench'\n[[trials]]\nid='one'\n[[trials]]\nid='two'\n",
@@ -572,6 +574,7 @@ fn repeated_trial_and_trial_set_also_generate_sweeps() {
         vec!["--trial-set", "selected.toml"],
     ] {
         let project = Project::new();
+        project.seed_agent_installations(&[("pi", "pi")]);
         project.write(
             "catalogs/selected.toml",
             "workload='agentbench'\n[[trials]]\nid='one'\n",
