@@ -93,7 +93,7 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
         .into_iter()
         .map(str::to_owned)
         .collect(),
-        append_prompt: false,
+        prompt_delivery: super::PromptDelivery::Embedded,
     }
 }
 

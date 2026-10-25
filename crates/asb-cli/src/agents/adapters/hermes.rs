@@ -48,7 +48,7 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             "--model".into(),
             context.config.model.clone(),
         ],
-        append_prompt: false,
+        prompt_delivery: super::PromptDelivery::Embedded,
     }
 }
 
@@ -204,7 +204,10 @@ mod tests {
         assert_eq!(spec.program, "hermes");
         assert_eq!(spec.args[0], "-z");
         assert!(spec.args.contains(&"openai-api".into()));
-        assert!(!spec.append_prompt);
+        assert_eq!(
+            spec.prompt_delivery,
+            crate::agents::PromptDelivery::Embedded
+        );
     }
 
     #[test]

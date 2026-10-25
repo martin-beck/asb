@@ -1,4 +1,4 @@
-use super::{CommandContext, CommandSpec, PreparationContext, StaticAdapter};
+use super::{CommandContext, CommandSpec, PreparationContext, PromptDelivery, StaticAdapter};
 use crate::{Error, install::Recipe};
 use std::path::Path;
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
@@ -188,7 +188,7 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             "json".into(),
             "--print".into(),
         ],
-        append_prompt: true,
+        prompt_delivery: PromptDelivery::Argument,
     }
 }
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {

@@ -169,7 +169,21 @@ pub(crate) struct CommandContext<'a> {
 pub(crate) struct CommandSpec {
     pub program: String,
     pub args: Vec<String>,
-    pub append_prompt: bool,
+    pub prompt_delivery: PromptDelivery,
+}
+
+/// How the runner supplies a workload's canonical instruction document.
+///
+/// This belongs to the adapter contract: runners must never infer it from an
+/// agent name or from incidental command-line syntax.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromptDelivery {
+    /// The runner appends the document as one argv argument.
+    Argument,
+    /// The adapter has already embedded the document in its own arguments.
+    Embedded,
+    /// The runner writes the exact document to stdin and closes the pipe.
+    Stdin,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

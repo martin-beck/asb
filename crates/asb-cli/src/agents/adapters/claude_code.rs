@@ -63,7 +63,7 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             "--dangerously-skip-permissions".into(),
             context.prompt.into(),
         ],
-        append_prompt: false,
+        prompt_delivery: super::PromptDelivery::Embedded,
     }
 }
 

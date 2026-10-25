@@ -174,6 +174,13 @@ impl OwnedChild {
             Self::Gated(child) => child.take_stdout(),
         }
     }
+    pub fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        match self {
+            Self::Direct(child) => child.child.as_mut()?.stdin.take(),
+            #[cfg(target_os = "linux")]
+            Self::Gated(child) => child.take_stdin(),
+        }
+    }
     pub fn take_stderr(&mut self) -> Option<ChildStderr> {
         match self {
             Self::Direct(child) => child.child.as_mut()?.stderr.take(),

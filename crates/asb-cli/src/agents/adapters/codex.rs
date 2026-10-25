@@ -1,4 +1,4 @@
-use super::{CommandContext, CommandSpec, PreparationContext, StaticAdapter};
+use super::{CommandContext, CommandSpec, PreparationContext, PromptDelivery, StaticAdapter};
 use crate::{Error, install::Recipe};
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "codex",
@@ -53,8 +53,9 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             "--json".into(),
             "--model".into(),
             context.config.model.clone(),
+            "-".into(),
         ],
-        append_prompt: true,
+        prompt_delivery: PromptDelivery::Stdin,
     }
 }
 
@@ -212,5 +213,27 @@ mod tests {
         );
         assert!(sandbox_args(Some("read-only".into())).is_err());
         assert!(sandbox_args(Some("unsafe".into())).is_err());
+    }
+
+    #[test]
+    fn command_delivers_the_workload_prompt_only_through_controlled_stdin() {
+        let config: crate::benchmark::BenchmarkConfig = toml::from_str(
+            "agent='codex'\nprovider='fixture'\nmodel='fixture'\nworkload='fixture'\n",
+        )
+        .unwrap();
+        let spec = command(&CommandContext {
+            config: &config,
+            endpoint: None,
+            interface: None,
+            prompt: "private fixture prompt",
+        });
+        assert_eq!(spec.prompt_delivery, PromptDelivery::Stdin);
+        assert_eq!(spec.args.last().map(String::as_str), Some("-"));
+        assert!(
+            !spec
+                .args
+                .iter()
+                .any(|argument| argument == "private fixture prompt")
+        );
     }
 }

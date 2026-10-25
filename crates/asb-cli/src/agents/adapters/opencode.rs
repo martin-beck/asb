@@ -1,4 +1,4 @@
-use super::{CommandContext, CommandSpec, PreparationContext, StaticAdapter};
+use super::{CommandContext, CommandSpec, PreparationContext, PromptDelivery, StaticAdapter};
 use crate::{Error, install::Recipe};
 
 // OpenCode's Bedrock integration currently resolves two AWS SDK entries whose
@@ -106,7 +106,7 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             "--format".into(),
             "json".into(),
         ],
-        append_prompt: true,
+        prompt_delivery: PromptDelivery::Argument,
     }
 }
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
