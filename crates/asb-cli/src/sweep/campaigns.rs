@@ -42,6 +42,26 @@ fn error(reason: &str) -> Error {
     Error::Input(format!("sweep campaign: {reason}"))
 }
 
+/// Resolve the immutable ZIP publication layouts accepted for an explicit
+/// replay root.  Fresh sweep recording publishes at
+/// `ROOT/ENTRY/recording.asb.zip`; the older campaign layout placed the same
+/// archive below `ROOT/ENTRY/cassettes/`.  Check the publisher's current
+/// layout first so an explicit root never silently falls through to a legacy
+/// JSONL name when a valid ZIP was supplied.
+fn replay_bundle(root: &Path, entry: &str) -> Result<Option<PathBuf>, Error> {
+    for candidate in [
+        root.join(entry).join("recording.asb.zip"),
+        root.join(entry).join("cassettes/recording.asb.zip"),
+    ] {
+        if crate::cassette::Source::is_present(&candidate)
+            .map_err(|failure| error(&failure.to_string()))?
+        {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
 /// Resume consumes original private inputs; an explicit source-root argument
 /// may confirm, but never redirect, their persisted source identity. This does
 /// not reopen the archive or require the original public source to still exist.
@@ -153,6 +173,11 @@ pub(super) fn prepare(
             let source = current.or(layout.plan.recording).or(layout.plan.replay_source).or_else(|| layout.plan.replay_inputs.first().map(|input| input.source.clone()))
                 .ok_or_else(|| error("previous campaign has no recording/replay source"))?;
             return Ok(Some(source));
+        }
+        if let Some(root) = options.cassette_root
+            && let Some(bundle) = replay_bundle(root, &name)?
+        {
+            return Ok(Some(bundle));
         }
         let root = options.cassette_root.unwrap_or(results).join(name).join("cassettes");
         let bundle = root.join("recording.asb.zip");
