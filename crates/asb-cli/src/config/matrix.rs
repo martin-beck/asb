@@ -345,9 +345,27 @@ fn prepare_missing_installables(
             )?;
         }
     }
-    let mut progress = |_percent, _stage| {};
-    let known_collectors = options
-        .measure
+    for tool in collector_installables(&options.measure) {
+        if !crate::install::tool_installed_locally(&tool, &tools) {
+            crate::install::tool(
+                crate::install::ToolInstallOptions {
+                    name: tool,
+                    source: None,
+                    dir: None,
+                    dry_run: false,
+                },
+                output,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Setup owns the whole selected collector capability, not just its indirect
+/// tools.  Some collectors (for example Perfetto) are themselves installable
+/// tools, while others only contribute dependencies such as `perf`.
+fn collector_installables(selected: &[String]) -> Vec<String> {
+    let selected = selected
         .iter()
         .filter_map(|name| {
             measurements::available_collectors()
@@ -356,14 +374,19 @@ fn prepare_missing_installables(
                 .or_else(|| name.starts_with("bpftrace:").then(|| "bpftrace".into()))
         })
         .collect::<Vec<_>>();
-    crate::install::ensure_collector_dependencies(
-        &known_collectors,
-        &root,
-        &tools,
-        output,
-        &mut progress,
-        false,
-    )
+    let mut result = Vec::new();
+    for id in crate::collectors::expand_dependencies(&selected) {
+        if crate::tools::find(&id).is_some() && !result.contains(&id) {
+            result.push(id);
+        }
+    }
+    for id in crate::collectors::dependency_tools(&selected) {
+        let id = id.to_owned();
+        if !result.contains(&id) {
+            result.push(id);
+        }
+    }
+    result
 }
 
 fn repeated(options: &SetupOptions) -> bool {
@@ -464,4 +487,23 @@ pub(crate) fn publish_sweep(
         path.display()
     )
     .map_err(|error| publication::confirmation(path, error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collector_installables;
+
+    #[test]
+    fn selected_collector_tools_are_installed_alongside_dependencies() {
+        let selected = vec![
+            "perfetto".to_owned(),
+            "flamegraph".to_owned(),
+            "bpftrace:sched-latency".to_owned(),
+        ];
+        let tools = collector_installables(&selected);
+        assert!(tools.contains(&"perfetto".to_owned()));
+        assert!(tools.contains(&"flamegraph".to_owned()));
+        assert!(tools.contains(&"bpftrace".to_owned()));
+        assert!(tools.contains(&"perf".to_owned()));
+    }
 }
