@@ -100,10 +100,11 @@ const server = http.createServer(async (request, response) => {
         let pending = "";
         for await (const chunk of Readable.fromWeb(result.body)) {
           pending += Buffer.from(chunk).toString("utf8");
-          let separator;
-          while ((separator = pending.indexOf("\n\n")) >= 0) {
+          let boundary;
+          while ((boundary = pending.match(/\r?\n\r?\n/))) {
+            const separator = boundary.index;
             const frame = pending.slice(0, separator);
-            pending = pending.slice(separator + 2);
+            pending = pending.slice(separator + boundary[0].length);
             const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
             if (!data || data === "[DONE]") continue;
             const chunkValue = responseEventToChatChunk(JSON.parse(data), translated.model);
