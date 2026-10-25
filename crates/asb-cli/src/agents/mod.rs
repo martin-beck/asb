@@ -90,6 +90,13 @@ pub(crate) trait AgentAdapter: Sync {
     fn artifact_specs(&self) -> &'static [ArtifactSpec] {
         &[]
     }
+    /// Whether this adapter can confine, record, and deterministically replay
+    /// its client-local tool effects alongside a provider tape.  A provider
+    /// cassette alone is not sufficient for a coding workload: subsequent
+    /// model requests depend on filesystem and command results.
+    fn supports_deterministic_tool_replay(&self) -> bool {
+        false
+    }
     /// `Some` means the adapter owns parsing of its output, even if usage is unavailable.
     fn output_usage(
         &self,
@@ -504,6 +511,9 @@ impl AgentAdapter for StaticAdapter {
     fn artifact_specs(&self) -> &'static [ArtifactSpec] {
         self.artifact_specs
     }
+    fn supports_deterministic_tool_replay(&self) -> bool {
+        self.tool_replay.is_some()
+    }
     fn output_usage(
         &self,
         stdout: &str,
@@ -854,6 +864,19 @@ mod tests {
         assert_eq!(ids.len(), all().len());
         assert!(ids.contains("codex"));
         assert!(ids.contains("continue"));
+    }
+
+    #[test]
+    fn deterministic_tool_replay_is_an_explicit_adapter_capability() {
+        let supported = all()
+            .into_iter()
+            .filter(|adapter| adapter.supports_deterministic_tool_replay())
+            .map(|adapter| adapter.id())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            supported,
+            std::collections::BTreeSet::from(["codex", "goose", "workbuddy"])
+        );
     }
 
     #[test]

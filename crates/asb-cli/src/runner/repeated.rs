@@ -212,6 +212,15 @@ impl Inspection {
                     "repeat must be positive and its concurrency product at most 65533".into(),
                 )
             })?;
+        if options.mode == Some(crate::tape::Mode::Replay)
+            && let Some(adapter) = crate::agents::find(&config.agent)
+            && !adapter.supports_deterministic_tool_replay()
+        {
+            return Err(Error::Input(format!(
+                "agent `{}` does not yet support deterministic local-tool replay; choose an adapter with sealed local-tool replay support or run without --replay",
+                config.agent
+            )));
+        }
         if options.on_completion.is_some()
             || options.replica.index != 1
             || options.replica.total != 1
@@ -1037,6 +1046,27 @@ mod tests {
         let config_path = root.join("benchmark.toml");
         fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
         (root, config, config_path)
+    }
+
+    #[test]
+    fn replay_rejects_an_adapter_without_sealed_local_tool_support_before_io() {
+        let (root, config, path) = planning_fixture();
+        let result = Prepared::prepare(
+            &path,
+            config,
+            1,
+            RunOptions {
+                mode: Some(crate::tape::Mode::Replay),
+                ..Default::default()
+            },
+            Some(&root.join("campaigns")),
+        );
+        let Err(error) = result else {
+            panic!("Pi replay must be rejected before planning");
+        };
+        assert!(error.to_string().contains("agent `pi`"));
+        assert!(error.to_string().contains("local-tool replay"));
+        assert!(!root.join("campaigns").exists());
     }
 
     #[test]
