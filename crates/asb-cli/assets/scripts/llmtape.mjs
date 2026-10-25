@@ -275,6 +275,16 @@ function normalizeCassetteBody(body) {
       ].includes(path[1]) && key === path[1]) {
         return "<asb-codex-client-metadata>";
       }
+      // Codex returns an opaque encrypted continuation token with each tool
+      // turn. The next client request reflects that token, but its encoding
+      // (including JSON type) is intentionally process-local. It carries no
+      // benchmark instruction or tool result, so normalize only this exact
+      // Responses input-item field; every neighboring input field remains
+      // cassette-significant.
+      if (path.length === 3 && path[0] === "input" && /^\d+$/.test(path[1])
+          && path[2] === "encrypted_content" && key === "encrypted_content") {
+        return "<asb-codex-encrypted-content>";
+      }
       if (typeof value === "string") {
         const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
         const cleaned = value.replace(/\n?\.\.\/.*AGENTS\.md\n?/gm, "");
@@ -295,7 +305,7 @@ function normalizeCassetteBody(body) {
         }
         return withoutGuidance;
       }
-      if (Array.isArray(value)) return value.map((item) => sort(item));
+      if (Array.isArray(value)) return value.map((item, index) => sort(item, String(index), [...path, String(index)]));
       if (value && typeof value === "object") {
         return Object.fromEntries(Object.keys(value).sort().map((child) => [child, sort(value[child], child, [...path, child])]));
       }
