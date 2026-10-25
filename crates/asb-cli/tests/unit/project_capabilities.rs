@@ -69,9 +69,17 @@ fn isolated_host_capability_consent_and_execution_diagnostics() {
     let Ok(case) = std::env::var(CASE) else {
         use std::os::unix::fs::PermissionsExt;
         use std::process::Stdio;
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/project-capability-fixtures")
-            .join(crate::workloads::TaskIdentity::local("fixture", None).attempt_id);
+        // This test recursively launches itself.  Keep its fake sudo and
+        // scripted-input files outside the shared Cargo target tree: a
+        // previous interrupted child must not influence a later CI retry.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "asb-project-capability-fixtures-{}-{nonce}",
+            std::process::id()
+        ));
         fs::create_dir_all(&root).unwrap();
         let root = root.canonicalize().unwrap();
         let sudo = root.join("sudo");
