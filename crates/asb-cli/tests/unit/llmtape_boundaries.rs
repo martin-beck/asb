@@ -367,6 +367,41 @@ fn replay_finish_reports_absent_and_malformed_progress_then_is_idempotent() {
 }
 
 #[test]
+fn replay_finish_reports_only_validated_structural_mismatch_context() {
+    let root = Fixture::new();
+    for (contents, expected) in [
+        (
+            r#"{"consumed":0,"total":1,"rejected":1,"first_mismatch":{"sequence":1,"category":"json_value","path":"$.messages[0].content"}}"#,
+            "first mismatch: request 1, json_value at $.messages[0].content",
+        ),
+        (
+            r#"{"consumed":0,"total":1,"rejected":1,"first_mismatch":{"sequence":1,"category":"secret-value","path":"$.token"}}"#,
+            "normalized request or sequence differs",
+        ),
+    ] {
+        let mut child = Command::new("/bin/true").spawn().unwrap();
+        child.wait().unwrap();
+        let progress = root.0.join(crate::tools::runtime::unique_id());
+        fs::write(&progress, contents).unwrap();
+        let mut session = RunningLlmtape {
+            child: Some(child),
+            builtin: false,
+            url: "http://127.0.0.1:1/v1".into(),
+            progress: Some(progress),
+            cassette: root.0.join("tape.jsonl"),
+            mode: Mode::Replay,
+            cleanup_confirmed: false,
+            capture_request: None,
+            capture: None,
+            _scratch: Scratch::create(&root.0).unwrap(),
+        };
+        let error = session.finish().unwrap_err().to_string();
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("secret-value"), "{error}");
+    }
+}
+
+#[test]
 fn materializing_builtin_script_failure_does_not_silently_use_an_incomplete_proxy() {
     // Explicitly isolate environment so a developer override cannot hide this path.
     const CHILD: &str = "ASB_TEST_TAPE_MATERIALIZE";

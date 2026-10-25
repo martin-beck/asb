@@ -403,9 +403,12 @@ impl ProxySession for RunningLlmtape {
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0);
             if rejected != 0 {
+                let mismatch = replay_mismatch_context(&value)
+                    .map(|context| format!("; first mismatch: {context}"))
+                    .unwrap_or_default();
                 return Err(Error::Run(format!(
-                    "replay rejected {rejected} request(s) for {}; the normalized request or sequence differs from the recording",
-                    self.cassette.display()
+                    "replay rejected {rejected} request(s) for {}{mismatch}; the normalized request or sequence differs from the recording",
+                    self.cassette.display(),
                 )));
             }
             if consumed != total {
@@ -424,6 +427,33 @@ impl ProxySession for RunningLlmtape {
             self._scratch.retain |= !self.cleanup_confirmed;
         }
     }
+}
+
+fn replay_mismatch_context(progress: &serde_json::Value) -> Option<String> {
+    let mismatch = progress.get("first_mismatch")?.as_object()?;
+    let sequence = mismatch.get("sequence")?.as_u64()?;
+    let category = mismatch.get("category")?.as_str()?;
+    let path = mismatch.get("path")?.as_str()?;
+    let safe_category = matches!(
+        category,
+        "request"
+            | "method"
+            | "url"
+            | "body"
+            | "json_type"
+            | "array_length"
+            | "object_keys"
+            | "json_value"
+            | "body_size_limit"
+            | "cassette_exhausted"
+    );
+    let safe_path = !path.is_empty()
+        && path.len() <= 256
+        && path.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'$' | b'.' | b'[' | b']' | b'<' | b'>' | b'_' | b'-')
+        });
+    (safe_category && safe_path).then(|| format!("request {sequence}, {category} at {path}"))
 }
 
 fn stop_proxy(child: &mut Child, builtin: bool) -> std::io::Result<()> {
@@ -827,7 +857,12 @@ mod tests {
         let changed =
             r#"{"model":"m","messages":[{"content":"different"}],"tools":[{"type":"function"}]}"#;
         assert!(request(&session, changed).contains("409 Conflict"));
-        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        let error = session.stop().unwrap_err().to_string();
+        assert!(error.contains("rejected"), "{error}");
+        assert!(
+            error.contains("json_value at $.messages[0].content"),
+            "{error}"
+        );
         let session = Session::start(Mode::Replay, &cassette, None, false, workspace).unwrap();
         let valid = r#"{"model":"m","messages":[{"content":"work in /tmp/replay-workspace"}],"tools":[{"type":"function"}]}"#;
         assert!(request(&session, valid).contains("200 OK"));

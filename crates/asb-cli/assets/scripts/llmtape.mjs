@@ -369,11 +369,76 @@ const interactions = mode === "replay"
   : [];
 let cursor = 0;
 let rejected = 0;
+let firstMismatch = null;
 const progressPath = `${cassette}.progress.json`;
 function writeProgress() {
   if (mode === "replay") {
-    writeFileSync(progressPath, JSON.stringify({ schema_version: 1, consumed: cursor, total: interactions.length, rejected }));
+    writeFileSync(progressPath, JSON.stringify({
+      schema_version: 2,
+      consumed: cursor,
+      total: interactions.length,
+      rejected,
+      ...(firstMismatch ? { first_mismatch: firstMismatch } : {}),
+    }));
   }
+}
+
+function safePathSegment(key) {
+  // Diagnostic paths are deliberately structural: never write request values
+  // or arbitrary/sensitive object keys into progress evidence.
+  if (/token|secret|password|authorization|credential|api[_-]?key/i.test(key)) {
+    return ".<redacted>";
+  }
+  return /^[a-z][a-z0-9_]*$/i.test(key) && key.length <= 48
+    ? `.${key}`
+    : ".<field>";
+}
+
+function jsonDifference(expected, actual, path = "$") {
+  const expectedArray = Array.isArray(expected);
+  const actualArray = Array.isArray(actual);
+  if (expectedArray !== actualArray || typeof expected !== typeof actual || expected === null || actual === null) {
+    return { category: "json_type", path };
+  }
+  if (expectedArray) {
+    if (expected.length !== actual.length) return { category: "array_length", path };
+    for (let index = 0; index < expected.length; index += 1) {
+      const difference = jsonDifference(expected[index], actual[index], `${path}[${index}]`);
+      if (difference) return difference;
+    }
+    return null;
+  }
+  if (typeof expected === "object") {
+    const expectedKeys = Object.keys(expected).sort();
+    const actualKeys = Object.keys(actual).sort();
+    if (expectedKeys.length !== actualKeys.length || expectedKeys.some((key, index) => key !== actualKeys[index])) {
+      return { category: "object_keys", path };
+    }
+    for (const key of expectedKeys) {
+      const difference = jsonDifference(expected[key], actual[key], `${path}${safePathSegment(key)}`);
+      if (difference) return difference;
+    }
+    return null;
+  }
+  return expected === actual ? null : { category: "json_value", path };
+}
+
+function requestMismatch(expected, actual, sequence) {
+  const mismatch = { sequence, category: "request", path: "$" };
+  if (expected.method !== actual.method) return { ...mismatch, category: "method" };
+  if (expected.url !== actual.url) return { ...mismatch, category: "url" };
+  try {
+    const difference = jsonDifference(JSON.parse(expected.body ?? "null"), JSON.parse(actual.body ?? "null"));
+    return difference ? { ...mismatch, ...difference } : mismatch;
+  } catch {
+    return { ...mismatch, category: "body" };
+  }
+}
+
+function reject(mismatch) {
+  rejected += 1;
+  firstMismatch ??= mismatch;
+  writeProgress();
 }
 
 function isReplayProbe(request) {
@@ -409,8 +474,7 @@ async function handle(request, response, recording) {
     bodySize += bytes.length;
     if (bodySize > MAX_BODY) {
       if (mode === "replay") {
-        rejected += 1;
-        writeProgress();
+        reject({ sequence: cursor + 1, category: "body_size_limit", path: "$" });
       }
       request.resume();
       response.writeHead(413, { "content-type": "application/json", connection: "close" });
@@ -463,8 +527,7 @@ async function handle(request, response, recording) {
     }
     const interaction = interactions[cursor];
     if (!interaction) {
-      rejected += 1;
-      writeProgress();
+      reject({ sequence: cursor + 1, category: "cassette_exhausted", path: "$" });
       response.writeHead(409, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: "cassette has no more recorded requests" }));
       return;
@@ -485,8 +548,7 @@ async function handle(request, response, recording) {
         await replayResponse(response, retry);
         return;
       }
-      rejected += 1;
-      writeProgress();
+      reject(requestMismatch(interaction.request, recordedRequest, cursor + 1));
       response.writeHead(409, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: "request does not match cassette" }));
       return;
