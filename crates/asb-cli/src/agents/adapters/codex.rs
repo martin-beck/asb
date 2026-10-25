@@ -50,7 +50,6 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             "apps".into(),
             "--disable".into(),
             "plugins".into(),
-            "--approve-for-me".into(),
             "--json".into(),
             "--model".into(),
             context.config.model.clone(),
@@ -74,23 +73,29 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     } else {
         context.command.env_remove("ASB_AGENT_API_KEY");
     }
-    if let Some(mode) = sandbox_mode(std::env::var("ASB_CODEX_SANDBOX_MODE").ok())? {
-        // This is deliberately opt-in.  The normal Codex workspace-write
-        // sandbox remains the default; a benchmark must visibly choose a
-        // different policy when its host cannot run that sandbox.
-        context.command.arg("--sandbox").arg(mode);
-    }
+    // Codex rejects `--approve-for-me` combined with `--sandbox`.  Its
+    // approval policy also already selects the normal workspace-write mode,
+    // so emit exactly one compatible noninteractive policy flag here.
+    context
+        .command
+        .args(sandbox_args(std::env::var("ASB_CODEX_SANDBOX_MODE").ok())?);
     Ok(())
 }
 
-fn sandbox_mode(value: Option<String>) -> Result<Option<&'static str>, Error> {
+fn sandbox_args(value: Option<String>) -> Result<&'static [&'static str], Error> {
     match value.as_deref() {
-        None => Ok(None),
-        Some("read-only") => Ok(Some("read-only")),
-        Some("workspace-write") => Ok(Some("workspace-write")),
-        Some("danger-full-access") => Ok(Some("danger-full-access")),
+        // `--approve-for-me` is Codex's documented noninteractive
+        // workspace-write policy. Do not redundantly add `--sandbox`.
+        None | Some("workspace-write") => Ok(&["--approve-for-me"]),
+        // The workload adapter already provides the external container
+        // boundary. Codex's explicit bypass is the only noninteractive form
+        // compatible with danger-full-access.
+        Some("danger-full-access") => Ok(&["--dangerously-bypass-approvals-and-sandbox"]),
+        Some("read-only") => Err(Error::Input(
+            "ASB_CODEX_SANDBOX_MODE=read-only is incompatible with an unattended coding benchmark; use workspace-write, danger-full-access, or leave it unset".into(),
+        )),
         Some(value) => Err(Error::Input(format!(
-            "invalid ASB_CODEX_SANDBOX_MODE `{value}`; use read-only, workspace-write, danger-full-access, or leave it unset"
+            "invalid ASB_CODEX_SANDBOX_MODE `{value}`; use workspace-write, danger-full-access, or leave it unset"
         ))),
     }
 }
@@ -195,16 +200,17 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_override_is_explicit_and_validated() {
-        assert_eq!(sandbox_mode(None).unwrap(), None);
+    fn sandbox_override_selects_one_compatible_noninteractive_policy() {
+        assert_eq!(sandbox_args(None).unwrap(), ["--approve-for-me"]);
         assert_eq!(
-            sandbox_mode(Some("workspace-write".into())).unwrap(),
-            Some("workspace-write")
+            sandbox_args(Some("workspace-write".into())).unwrap(),
+            ["--approve-for-me"]
         );
         assert_eq!(
-            sandbox_mode(Some("danger-full-access".into())).unwrap(),
-            Some("danger-full-access")
+            sandbox_args(Some("danger-full-access".into())).unwrap(),
+            ["--dangerously-bypass-approvals-and-sandbox"]
         );
-        assert!(sandbox_mode(Some("unsafe".into())).is_err());
+        assert!(sandbox_args(Some("read-only".into())).is_err());
+        assert!(sandbox_args(Some("unsafe".into())).is_err());
     }
 }
