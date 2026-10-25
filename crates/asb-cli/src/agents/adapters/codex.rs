@@ -13,6 +13,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_state_environment_vars(&["CODEX_HOME"])
+.with_forwarded_invocation_environment_vars(&["ASB_CODEX_SANDBOX_MODE"])
 .with_preferred_executables(preferred_executables);
 
 fn preferred_executables(root: &std::path::Path) -> Vec<std::path::PathBuf> {
