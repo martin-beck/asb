@@ -335,6 +335,8 @@ mod tests {
         assert!(codex_home.join("config.toml").is_file());
         assert!(!codex_home.starts_with(&invocation.workspace));
         assert_eq!(vars[std::ffi::OsStr::new("CODEX_SESSION_ID")], None);
+        assert_eq!(vars[std::ffi::OsStr::new("CODEX_TOOL_CALL_ID")], None);
+        assert_eq!(vars[std::ffi::OsStr::new("CODEX_VERSION")], None);
         let explicit = root.join("tools/codex/bin/codex");
         std::fs::create_dir_all(explicit.parent().unwrap()).unwrap();
         std::fs::write(&explicit, "#!/bin/sh\nexit 98\n").unwrap();

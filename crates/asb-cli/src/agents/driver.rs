@@ -119,6 +119,8 @@ pub(crate) fn isolate_parent_state(command: &mut Command) {
         "CODEX_REMOTE_PAYLOAD",
         "CODEX_SESSION_ID",
         "CODEX_THREAD_ID",
+        "CODEX_TOOL_CALL_ID",
+        "CODEX_VERSION",
         "CODEX_PERMISSION_PROFILE",
         "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
         "CODEX_MANAGED_PACKAGE_ROOT",
