@@ -409,6 +409,16 @@ function safePathSegment(key) {
     : ".<field>";
 }
 
+function stringFeatures(value) {
+  return {
+    lines: value.split("\n").length,
+    has_agents_guidance: value.includes("AGENTS.md"),
+    has_parent_path: value.includes("../"),
+    has_workspace_path: value.includes("<asb-workspace>") || /workspace(?:-concurrency-\d+)?/.test(value),
+    has_additional_input: /additional input/i.test(value),
+  };
+}
+
 function jsonDifference(expected, actual, path = "$") {
   const expectedArray = Array.isArray(expected);
   const actualArray = Array.isArray(actual);
@@ -435,7 +445,23 @@ function jsonDifference(expected, actual, path = "$") {
     }
     return null;
   }
-  return expected === actual ? null : { category: "json_value", path };
+  if (expected === actual) return null;
+  if (typeof expected === "string" && typeof actual === "string") {
+    let offset = 0;
+    while (offset < expected.length && offset < actual.length && expected[offset] === actual[offset]) {
+      offset += 1;
+    }
+    // Values remain private: lengths and the first differing offset are
+    // sufficient to distinguish generated suffixes from a changed prompt.
+    return {
+      category: "json_value",
+      path,
+      string_lengths: { expected: expected.length, actual: actual.length },
+      first_difference_offset: offset,
+      string_features: { expected: stringFeatures(expected), actual: stringFeatures(actual) },
+    };
+  }
+  return { category: "json_value", path };
 }
 
 function requestMismatch(expected, actual, sequence) {
