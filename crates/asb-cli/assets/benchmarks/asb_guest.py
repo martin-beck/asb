@@ -125,6 +125,33 @@ def stage_bootstrap(task, plan, tools, owner=None):
     return runtimes
 
 
+def stage_private_inputs(task, inputs, owner=None):
+    """Stage runner-sealed replay inputs only into the owned private mount."""
+    if not isinstance(inputs,list) or len(inputs) > 16:
+        raise ExecutionError("guest private replay inputs exceed their limit")
+    staged,targets,total = [],set(),0
+    for item in inputs:
+        if not isinstance(item,dict) or set(item) != {"source","target","bytes","sha256"}:
+            raise ExecutionError("guest private replay input is invalid")
+        source,target = item["source"],item["target"]
+        if (not isinstance(source,str) or not isinstance(target,str) or not isinstance(item["bytes"],int)
+                or not isinstance(item["sha256"],str) or not Path(source).is_absolute()
+                or Path(source).is_symlink() or not Path(source).is_file()
+                or not re.fullmatch(r"[A-Za-z0-9+_.-]{1,256}",target)
+                or len(item["sha256"]) != 64 or not re.fullmatch(r"[0-9a-f]{64}",item["sha256"])
+                or target in targets or item["bytes"] < 0 or item["bytes"] > 64 * 1024**2):
+            raise ExecutionError("guest private replay input is invalid")
+        content = Path(source).read_bytes()
+        total += len(content)
+        if (len(content) != item["bytes"] or hashlib.sha256(content).hexdigest() != item["sha256"]
+                or total > 64 * 1024**2):
+            raise ExecutionError("sealed local-tool replay transcript changed before guest staging")
+        targets.add(target)
+        staged.append((target,content,0o600))
+    if staged:
+        upload(task.workspace.container,"/opt/asb-private",staged,temporary_dir=task.artifacts,owner=owner)
+
+
 def stage_npm_package_tree(task, tree, tools, selected, owner=None):
     """Stage a declared, bounded npm tree without exposing a host mount.
 
@@ -231,6 +258,7 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
     guest = request["request"]
     guest = dict(guest,task_identity=task_identity,owned_instrumentation=ownership)
     upload(container, "/opt/asb-project/.asb", [("project.toml", configuration.encode(), 0o600)],temporary_dir=task.artifacts,owner=owner)
+    stage_private_inputs(task,request.get("private_inputs",[]),owner=owner)
     runtimes = stage_bootstrap(task,request.get("bootstrap"),tools,owner=owner)
     package_tree = request["bootstrap"].get("npm_package_tree")
     if package_tree is not None:

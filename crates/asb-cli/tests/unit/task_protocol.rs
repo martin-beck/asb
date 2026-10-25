@@ -295,6 +295,7 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
             project_configuration: "fixture".into(),
             environment: serde_json::Map::new(),
             network: None,
+            private_inputs: Vec::new(),
             request: json!({"replay":true}),
         },
     }
@@ -304,7 +305,7 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
         agent,
         json!({"op":"agent","binary":"fixture-asb","project_root":"fixture-project","preparation_seconds":1800.0,"timeout":1.0,
         "tools_root":"fixture-tools","bootstrap":{"runtime_tools":[],"assets":[],"public_package_cache":false,"npm_package_tree":null},
-        "measure_target":false,"project_configuration":"fixture","environment":{},"network":null,"request":{"replay":true}})
+        "measure_target":false,"project_configuration":"fixture","environment":{},"network":null,"private_inputs":[],"request":{"replay":true}})
     );
     let output = std::process::Command::new("python3")
         .args(["-I","-S","-B","-c", "import json,sys;sys.path.insert(0,sys.argv[1]);from asb_task_server import Event,Operation;print(json.dumps(dict(events=[e.value for e in Event],operations=[o.value for o in Operation])))"])
