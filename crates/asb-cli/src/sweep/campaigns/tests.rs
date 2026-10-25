@@ -100,6 +100,21 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn explicit_replay_root_prefers_fresh_published_zip_layout() {
+    let fixture = Fixture::new(1, 1, 1);
+    let entry = execution::result_name(0, Path::new("benchmark-0.toml"));
+    let root = fixture.0.join("cassettes/sweep-fresh-recording");
+    let bundle = root.join(&entry).join("recording.asb.zip");
+    fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+    // Presence is deliberately separate from archive validation.  A later
+    // admission step validates this selected ZIP; this test only locks the
+    // record/replay layout resolution contract.
+    fs::write(&bundle, b"PK").unwrap();
+
+    assert_eq!(super::replay_bundle(&root, &entry).unwrap(), Some(bundle));
+}
+
+#[test]
 fn whole_sweep_admission_bounds_legacy_hash_work_and_real_descriptors() {
     for selector in [false, true] {
         // Sparse files consume metadata only: a regression would actually hash
