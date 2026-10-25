@@ -13,6 +13,12 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_tool_replay(prepare_tool_replay)
+.with_artifact_specs(&[super::super::ArtifactSpec {
+    namespace: "tool-replay",
+    filename: "local-tools.jsonl",
+    format: super::super::ArtifactFormat::JsonLines,
+}])
 .with_output_usage(output_usage)
 .with_state_environment_vars(&["PI_CODING_AGENT_DIR"])
 .with_execution_failure(execution_failure)
@@ -214,6 +220,98 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     )
 }
 
+/// Pi's extension API can register tools but cannot substitute a result for a
+/// built-in tool after it has run.  Tape-backed executions therefore disable
+/// every built-in tool and load a run-private extension which calls the ASB
+/// sealed local-tool service instead.
+fn prepare_tool_replay(
+    context: &mut PreparationContext<'_>,
+    tape: super::super::TapeContext<'_>,
+) -> Result<(), Error> {
+    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    let extension = context.runtime_dir.join("pi/asb-local-tools.ts");
+    let parent = extension.parent().expect("Pi extension has a parent");
+    std::fs::create_dir_all(parent).map_err(|error| {
+        Error::Run(format!(
+            "cannot create Pi local-tool extension directory: {error}"
+        ))
+    })?;
+    std::fs::write(&extension, TOOL_REPLAY_EXTENSION)
+        .map_err(|error| Error::Run(format!("cannot write Pi local-tool extension: {error}")))?;
+    let launch = serde_json::json!({
+        "program": launch.program,
+        "args": launch.args,
+    });
+    context.command.args([
+        "--no-builtin-tools",
+        "--no-extensions",
+        "--extension",
+        extension
+            .to_str()
+            .ok_or_else(|| Error::Run("Pi extension path is not valid UTF-8".into()))?,
+    ]);
+    context.command.env(
+        "ASB_PI_LOCAL_TOOL_REPLAY",
+        serde_json::to_string(&launch)
+            .map_err(|error| Error::Run(format!("cannot render Pi tool launch: {error}")))?,
+    );
+    Ok(())
+}
+
+// Kept independent of the agent prompt: the selected model receives these
+// schemas from Pi, and every execution is routed through the same confined
+// record/replay service.  The extension intentionally accepts argv rather
+// than a shell program, so it cannot introduce an unrecorded shell parser.
+const TOOL_REPLAY_EXTENSION: &str = r#"
+import { Type } from "typebox";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
+
+const spec = JSON.parse(process.env.ASB_PI_LOCAL_TOOL_REPLAY ?? "");
+if (!spec.program || !Array.isArray(spec.args)) throw new Error("ASB local tool service is unavailable");
+const child = spawn(spec.program, spec.args, { stdio: ["pipe", "pipe", "ignore"] });
+let nextId = 1;
+const pending = new Map();
+createInterface({ input: child.stdout }).on("line", (line) => {
+  let response;
+  try { response = JSON.parse(line); } catch { return; }
+  const entry = pending.get(response.id);
+  if (!entry) return;
+  pending.delete(response.id);
+  if (response.error) entry.reject(new Error("ASB local tool request failed"));
+  else entry.resolve(response.result);
+});
+child.once("error", () => {
+  for (const entry of pending.values()) entry.reject(new Error("ASB local tool service stopped"));
+  pending.clear();
+});
+function call(name, args) {
+  return new Promise((resolve, reject) => {
+    const id = nextId++;
+    pending.set(id, { resolve, reject });
+    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) + "\\n");
+  }).then((result) => JSON.parse(result.content?.[0]?.text ?? "{}"));
+}
+function result(value) { return { content: [{ type: "text", text: JSON.stringify(value) }], details: {} }; }
+function path(value) { return typeof value === "string" ? value.replace(/^@/, "") : value; }
+function tool(name, label, description, parameters, handler) {
+  return { name, label, description, parameters, executionMode: "sequential", async execute(_id, params) { return result(await handler(params)); } };
+}
+export default function(pi) {
+  pi.registerTool(tool("read", "Read", "Read a UTF-8 workspace file.", Type.Object({ path: Type.String() }), (p) => call("read_file", { path: path(p.path) })));
+  pi.registerTool(tool("write", "Write", "Create or replace a UTF-8 workspace file.", Type.Object({ path: Type.String(), content: Type.String() }), (p) => call("write_file", { path: path(p.path), content: p.content })));
+  pi.registerTool(tool("edit", "Edit", "Replace exactly one matching text fragment in a workspace file.", Type.Object({ path: Type.String(), oldText: Type.String(), newText: Type.String() }), async (p) => {
+    const file = path(p.path); const current = await call("read_file", { path: file });
+    if (typeof current.text !== "string" || !current.text.includes(p.oldText)) throw new Error("edit target text was not found");
+    return call("write_file", { path: file, content: current.text.replace(p.oldText, p.newText) });
+  }));
+  pi.registerTool(tool("bash", "Command", "Run an allowlisted workspace command. Supply argv, never a shell string.", Type.Object({ argv: Type.Array(Type.String(), { minItems: 1, maxItems: 32 }) }), (p) => call("run_command", { argv: p.argv })));
+  pi.registerTool(tool("grep", "Search", "Search bounded UTF-8 workspace text.", Type.Object({ query: Type.String(), path: Type.Optional(Type.String()) }), (p) => call("search_text", { query: p.query, ...(p.path ? { path: path(p.path) } : {}) })));
+  pi.registerTool(tool("ls", "List", "List direct non-symlink workspace entries.", Type.Object({ path: Type.Optional(Type.String()) }), (p) => call("list_directory", p.path ? { path: path(p.path) } : {})));
+  pi.registerTool(tool("find", "Find", "List direct non-symlink workspace entries at a path.", Type.Object({ path: Type.Optional(Type.String()) }), (p) => call("list_directory", p.path ? { path: path(p.path) } : {})));
+}
+"#;
+
 fn configure_provider(
     command: &mut std::process::Command,
     directory: &Path,
@@ -335,5 +433,54 @@ mod tests {
             std::fs::read_to_string(directory.join("models.json")).expect("configuration exists");
         assert!(text.contains("test-model"));
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn tape_backed_preparation_replaces_pi_builtin_tools_with_private_extension() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-pi-tool-replay-{}-{}",
+            std::process::id(),
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiResponses,
+            base_url: "http://127.0.0.1:4321/v1".into(),
+            credential: Some("asb-replay".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let mut command = std::process::Command::new("pi");
+        prepare_tool_replay(
+            &mut PreparationContext {
+                command: &mut command,
+                model: "test-model",
+                connection: &connection,
+                workspace: &workspace,
+                runtime_dir: &root.join("runtime"),
+                run_dir: &run_dir,
+                tape: None,
+            },
+            super::super::TapeContext {
+                mode: crate::tape::Mode::Record,
+                cassette: &root.join("recording.asb.zip"),
+            },
+        )
+        .unwrap();
+        let arguments = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(arguments.contains(&"--no-builtin-tools".into()));
+        assert!(arguments.contains(&"--no-extensions".into()));
+        let extension = root.join("runtime/pi/asb-local-tools.ts");
+        let source = std::fs::read_to_string(extension).unwrap();
+        assert!(source.contains("run_command"));
+        assert!(run_dir.join("tool-replay/local-tools.jsonl").is_file());
+        assert!(command.get_envs().any(|(name, value)| {
+            name.to_string_lossy() == "ASB_PI_LOCAL_TOOL_REPLAY" && value.is_some()
+        }));
+        let _ = std::fs::remove_dir_all(root);
     }
 }
