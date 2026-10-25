@@ -26,6 +26,21 @@ function instructionText(content) {
     .join("\n");
 }
 
+// Responses accepts input_text (and input_image) in request input.  Some
+// OpenAI-compatible clients use the older generic "text" label when talking
+// to /responses.  Normalize it at the provider edge before forwarding to the
+// bridge; do not make individual agent adapters carry bridge syntax.
+function normalizeInputContent(content) {
+  if (!Array.isArray(content)) return content;
+  return content.map((raw) => {
+    const part = object(raw);
+    if (part.type === "text" || part.type === "output_text") {
+      return { ...part, type: "input_text" };
+    }
+    return part;
+  });
+}
+
 // Codex Bridge carries system policy through the Responses `instructions`
 // field. It deliberately rejects system/developer messages in `input`.
 // Normalize that bridge-specific restriction at the cli2key provider edge so
@@ -47,7 +62,12 @@ export function normalizeResponseInstructions(body) {
         continue;
       }
     }
-    input.push(item);
+    if ((message.type === undefined || message.type === "message") &&
+        Array.isArray(message.content)) {
+      input.push({ ...message, content: normalizeInputContent(message.content) });
+    } else {
+      input.push(item);
+    }
   }
   return {
     ...response,
