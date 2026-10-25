@@ -222,14 +222,7 @@ fn validate_record(
     let mut launch = crate::launch::ProcessLaunch::new(executable);
     launch.arg("script").arg("-i").arg(&artifact);
     let (mut command, route) = measurements::producer_command(&mut launch)?;
-    command
-        .env_clear()
-        .env("DEBUGINFOD_URLS", "")
-        .env("PERF_CONFIG_NOSYSTEM", "1")
-        .env("PERF_CONFIG_NOGLOBAL", "1")
-        .env("PERF_PAGER", "cat")
-        .env("LC_ALL", "C")
-        .current_dir(&session.dir);
+    configure_offline_decoder_environment(&mut command, &session.dir);
     let mut captures = [
         crate::evidence::Capture::create(&session.dir.join("perf-validation.stdout"))?,
         crate::evidence::Capture::create(&session.dir.join("perf-validation.stderr"))?,
@@ -275,6 +268,21 @@ fn validate_record(
         capture.consume()?;
     }
     Ok(())
+}
+
+/// Keep offline decoding independent from perf configuration without clearing
+/// the process environment. The supported project-local perf build can
+/// dereference host-home resources during `perf script` initialization and
+/// crashes if its ambient home is replaced with an empty private directory.
+fn configure_offline_decoder_environment(command: &mut Command, home: &std::path::Path) {
+    command
+        .env_remove("LD_PRELOAD")
+        .env("DEBUGINFOD_URLS", "")
+        .env("PERF_CONFIG_NOSYSTEM", "1")
+        .env("PERF_CONFIG_NOGLOBAL", "1")
+        .env("PERF_PAGER", "cat")
+        .env("LC_ALL", "C")
+        .current_dir(home);
 }
 
 fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
@@ -933,6 +941,26 @@ mod tests {
                 "42"
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn offline_decoder_environment_preserves_home_but_removes_loader_injection() {
+        let home =
+            std::env::temp_dir().join(format!("asb-perf-decoder-home-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let mut command = std::process::Command::new("sh");
+        command.args([
+            "-c",
+            "test \"$HOME\" = \"$1\" && test -z \"${LD_PRELOAD+x}\"",
+            "sh",
+            home.to_str().unwrap(),
+        ]);
+        command.env("HOME", &home);
+        command.env("LD_PRELOAD", "must-not-leak");
+        super::configure_offline_decoder_environment(&mut command, &home);
+        assert!(command.status().unwrap().success());
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

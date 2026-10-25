@@ -132,7 +132,7 @@ fn installed_offline_decoder_runs_once_with_closed_environment_and_retains_faile
             _ => ":",
         };
         let script = format!(
-            "#!/bin/sh\n[ \"$#\" = 3 ] && [ \"$1\" = script ] && [ \"$2\" = -i ] && [ \"$3\" = {artifact:?} ] || exit 81\n[ \"${{DEBUGINFOD_URLS-unset}}\" = '' ] && [ \"$PERF_CONFIG_NOSYSTEM\" = 1 ] && [ \"$PERF_CONFIG_NOGLOBAL\" = 1 ] || exit 82\n[ -z \"${{HOME-}}${{LD_PRELOAD-}}\" ] || exit 83\nprintf 'once\\n' >> {count:?}\n{action}\n"
+            "#!/bin/sh\n[ \"$#\" = 3 ] && [ \"$1\" = script ] && [ \"$2\" = -i ] && [ \"$3\" = {artifact:?} ] || exit 81\n[ \"${{DEBUGINFOD_URLS-unset}}\" = '' ] && [ \"$PERF_CONFIG_NOSYSTEM\" = 1 ] && [ \"$PERF_CONFIG_NOGLOBAL\" = 1 ] || exit 82\n[ -n \"${{HOME-}}\" ] && [ -z \"${{LD_PRELOAD-}}\" ] || exit 83\nprintf 'once\\n' >> {count:?}\n{action}\n"
         );
         let executable = bin.join("perf");
         crate::write_test_file(&fixture.0, &executable, script).unwrap();
