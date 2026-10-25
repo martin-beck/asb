@@ -430,6 +430,11 @@ fn embedded_proxy_finish_fixture(high_descriptor: bool) {
     std::fs::create_dir_all(&root).unwrap();
     let root = root.canonicalize().unwrap();
     std::fs::write(root.join("proxy.mjs"), super::super::BUILTIN_COMPAT_PROXY).unwrap();
+    std::fs::write(
+        root.join("cli2key-chat-compat.mjs"),
+        super::super::CHAT_COMPAT,
+    )
+    .unwrap();
     std::fs::write(root.join("network-fetch.mjs"), super::super::NETWORK_FETCH).unwrap();
     std::fs::write(root.join("observe.mjs"), r#"import http from 'node:http';
 import childProcess from 'node:child_process';
@@ -795,6 +800,11 @@ fn owned_proxy_sessions_are_parallel_distinct_and_release_every_parent_reference
         .join(crate::workloads::TaskIdentity::local("parallel", None).attempt_id);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("proxy.mjs"), super::super::BUILTIN_COMPAT_PROXY).unwrap();
+    std::fs::write(
+        root.join("cli2key-chat-compat.mjs"),
+        super::super::CHAT_COMPAT,
+    )
+    .unwrap();
     std::fs::write(root.join("network-fetch.mjs"), super::super::NETWORK_FETCH).unwrap();
     let root = root.canonicalize().unwrap();
     let node = crate::tools::host_executable(std::path::Path::new("node")).unwrap();
@@ -988,6 +998,11 @@ fn builtin_proxy_rejects_invalid_or_nonsocket_fd_without_rebinding_a_foreign_lis
         .join(crate::workloads::TaskIdentity::local("invalid", None).attempt_id);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("proxy.mjs"), super::super::BUILTIN_COMPAT_PROXY).unwrap();
+    std::fs::write(
+        root.join("cli2key-chat-compat.mjs"),
+        super::super::CHAT_COMPAT,
+    )
+    .unwrap();
     std::fs::write(root.join("network-fetch.mjs"), super::super::NETWORK_FETCH).unwrap();
     std::fs::write(root.join("not-a-socket"), "preserve owned file bytes").unwrap();
     let root = root.canonicalize().unwrap();
