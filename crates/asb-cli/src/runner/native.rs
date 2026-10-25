@@ -29,6 +29,7 @@ pub(super) struct PreparedNative {
     run_dir: PathBuf,
     runtime_path: PathBuf,
     execution_budget: Duration,
+    stdin_prompt: Option<Vec<u8>>,
 }
 
 impl NativePlan<'_> {
@@ -124,12 +125,21 @@ impl NativePlan<'_> {
         // local Codex CLI can advertise the host's tools as an
         // `additional_tools` request that cli2key does not support.
         agents::driver::isolate_parent_state(&mut command);
-        if specification.append_prompt {
-            command.arg(prompt);
-        }
+        let stdin_prompt = match specification.prompt_delivery {
+            agents::PromptDelivery::Argument => {
+                command.arg(prompt);
+                None
+            }
+            agents::PromptDelivery::Embedded => None,
+            agents::PromptDelivery::Stdin => Some(prompt.as_bytes().to_vec()),
+        };
         command
             .current_dir(workspace)
-            .stdin(Stdio::null())
+            .stdin(if stdin_prompt.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         providers::configure(
@@ -211,6 +221,7 @@ impl NativePlan<'_> {
             run_dir,
             runtime_path,
             execution_budget,
+            stdin_prompt,
         })
     }
 }
@@ -238,6 +249,7 @@ impl PreparedNative {
             show_output,
             output,
             progress,
+            self.stdin_prompt.as_deref(),
             NativeLaunch {
                 readiness: launch,
                 runtime: self.execution_budget,

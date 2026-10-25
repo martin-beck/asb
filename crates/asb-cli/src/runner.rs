@@ -826,6 +826,7 @@ fn run_measured_agent_with_launch(
         show_output,
         output,
         progress::Context::default(),
+        None,
         control,
     )
 }
@@ -841,6 +842,7 @@ fn run_measured_agent_with_launch_progress(
     show_output: bool,
     output: &mut dyn Write,
     progress: progress::Context,
+    stdin_prompt: Option<&[u8]>,
     control: NativeLaunch<'_>,
 ) -> Result<MeasuredOutput, Error> {
     let interactive_progress = progress.enabled();
@@ -920,6 +922,25 @@ fn run_measured_agent_with_launch_progress(
         }
     };
     let _launch_failure = workloads::session::LaunchFailureGuard(launch);
+    if let Some(prompt) = stdin_prompt {
+        let Some(mut stdin) = child.take_stdin() else {
+            return Err(native_launch_failure(
+                &mut child,
+                launch,
+                "agent adapter requested stdin prompt delivery but stdin is unavailable",
+            ));
+        };
+        if let Err(error) = stdin.write_all(prompt) {
+            return Err(native_launch_failure(
+                &mut child,
+                launch,
+                format!("could not deliver the agent prompt through stdin: {error}"),
+            ));
+        }
+        // EOF is part of the adapter contract: clients must not wait for
+        // inherited terminal input after receiving ASB's instruction document.
+        drop(stdin);
+    }
     if let Some(session) = session.as_deref_mut()
         && let Err(error) = session.event(LifecycleEvent::AgentStarted)
     {
@@ -1349,6 +1370,7 @@ fn wait_with_output(
 
 pub(crate) fn run_guest_process(
     command: &mut Command,
+    stdin_prompt: Option<&[u8]>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     runtime: Duration,
@@ -1357,8 +1379,16 @@ pub(crate) fn run_guest_process(
     #[cfg(target_os = "linux")]
     let mut descendants = crate::process_gate::DescendantScope::new()
         .map_err(|error| Error::Run(format!("cannot retain guest agent descendants: {error}")))?;
-    let child = OwnedChild::spawn_direct(command)
+    let mut child = OwnedChild::spawn_direct(command)
         .map_err(|error| Error::Run(format!("cannot start guest agent: {error}")))?;
+    if let Some(prompt) = stdin_prompt {
+        let Some(mut stdin) = child.take_stdin() else {
+            return Err(Error::Run(
+                "guest agent requested stdin prompt delivery but stdin is unavailable".into(),
+            ));
+        };
+        stdin.write_all(prompt).map_err(crate::io_error)?;
+    }
     on_spawn(child.id())?;
     wait_with_output_streams(child, true, stdout, Some(stderr), runtime, &mut || {
         #[cfg(target_os = "linux")]
@@ -1434,7 +1464,7 @@ fn command_for_with_interface(
     Ok(CommandSpec {
         program: config.agent.clone(),
         args: Vec::new(),
-        append_prompt: true,
+        prompt_delivery: agents::PromptDelivery::Argument,
     })
 }
 
@@ -2405,7 +2435,10 @@ mod tests {
         let command = command_for(&config, Some("http://127.0.0.1:3456/v1"), "prompt")
             .expect("known agent has a command");
         assert_eq!(command.program, "openhands");
-        assert!(!command.append_prompt);
+        assert_eq!(
+            command.prompt_delivery,
+            crate::agents::PromptDelivery::Embedded
+        );
         assert!(command.args.contains(&"--json".into()));
         assert_eq!(command.args.last().map(String::as_str), Some("prompt"));
     }
@@ -2494,7 +2527,11 @@ mod tests {
                 command.args.iter().any(|value| value == marker),
                 "{agent} marker"
             );
-            assert!(!command.append_prompt, "{agent} embeds prompt exactly once");
+            assert_eq!(
+                command.prompt_delivery,
+                crate::agents::PromptDelivery::Embedded,
+                "{agent} embeds prompt exactly once"
+            );
         }
     }
 
@@ -2521,7 +2558,10 @@ mod tests {
         assert!(command.args.contains(&"--print".into()));
         assert!(command.args.contains(&"--mode".into()));
         assert!(command.args.contains(&"json".into()));
-        assert!(command.append_prompt);
+        assert_eq!(
+            command.prompt_delivery,
+            crate::agents::PromptDelivery::Argument
+        );
     }
 
     #[test]

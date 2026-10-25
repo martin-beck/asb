@@ -1,4 +1,4 @@
-use super::{CommandContext, CommandSpec, PreparationContext, StaticAdapter};
+use super::{CommandContext, CommandSpec, PreparationContext, PromptDelivery, StaticAdapter};
 use crate::{Error, install::Recipe};
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "qwen-code",
@@ -75,7 +75,7 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             "json".into(),
             "--yolo".into(),
         ],
-        append_prompt: true,
+        prompt_delivery: PromptDelivery::Argument,
     }
 }
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {

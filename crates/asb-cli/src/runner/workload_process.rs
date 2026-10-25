@@ -123,11 +123,20 @@ pub(crate) fn start<'a>(
     runtime: Duration,
     after_exit: impl FnMut(std::process::ExitStatus, u64, bool) -> Result<(), Error>,
 ) -> Result<HeldProcess, Error> {
-    start_with_spawn(command, stdout, stderr, runtime, |_| Ok(()), after_exit)
+    start_with_spawn(
+        command,
+        None,
+        stdout,
+        stderr,
+        runtime,
+        |_| Ok(()),
+        after_exit,
+    )
 }
 
 pub(crate) fn start_with_spawn<'a>(
     command: &mut Command,
+    stdin_prompt: Option<&[u8]>,
     stdout: &'a mut dyn Write,
     stderr: &'a mut dyn Write,
     runtime: Duration,
@@ -139,6 +148,14 @@ pub(crate) fn start_with_spawn<'a>(
     let started = Instant::now();
     let mut child = OwnedChild::spawn_direct(command)
         .map_err(|error| Error::Run(format!("cannot start workload client: {error}")))?;
+    if let Some(prompt) = stdin_prompt {
+        let Some(mut stdin) = child.take_stdin() else {
+            return Err(Error::Run(
+                "workload client requested stdin prompt delivery but stdin is unavailable".into(),
+            ));
+        };
+        stdin.write_all(prompt).map_err(crate::io_error)?;
+    }
     on_spawn(child.id())?;
     let out = child
         .take_stdout()
