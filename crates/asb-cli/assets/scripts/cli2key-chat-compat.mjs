@@ -19,6 +19,43 @@ function textContent(content, type) {
   });
 }
 
+function instructionText(content) {
+  return textContent(content, "input_text")
+    .filter((part) => typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+// Codex Bridge carries system policy through the Responses `instructions`
+// field. It deliberately rejects system/developer messages in `input`.
+// Normalize that bridge-specific restriction at the cli2key provider edge so
+// adapters remain independent of the selected provider.
+export function normalizeResponseInstructions(body) {
+  const response = object(body);
+  if (!Array.isArray(response.input)) return response;
+  const instructions = typeof response.instructions === "string" && response.instructions.trim()
+    ? [response.instructions]
+    : [];
+  const input = [];
+  for (const item of response.input) {
+    const message = object(item);
+    if ((message.type === undefined || message.type === "message") &&
+        (message.role === "system" || message.role === "developer")) {
+      const text = instructionText(message.content);
+      if (text) {
+        instructions.push(text);
+        continue;
+      }
+    }
+    input.push(item);
+  }
+  return {
+    ...response,
+    input,
+    ...(instructions.length ? { instructions: instructions.join("\n\n") } : {}),
+  };
+}
+
 function inputItems(messages) {
   const input = [];
   for (const raw of Array.isArray(messages) ? messages : []) {
@@ -61,7 +98,7 @@ export function chatToResponses(body) {
   if (typeof chat.max_tokens === "number") result.max_output_tokens = chat.max_tokens;
   if (typeof chat.temperature === "number") result.temperature = chat.temperature;
   if (typeof chat.reasoning_effort === "string") result.reasoning = { effort: chat.reasoning_effort };
-  return result;
+  return normalizeResponseInstructions(result);
 }
 
 function usage(response) {

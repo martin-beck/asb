@@ -9,7 +9,7 @@ import http from "node:http";
 import { Readable } from "node:stream";
 import { fstatSync } from "node:fs";
 import { cancelNetworkRequests, networkFetch, quiesceNetworkRequests } from "./network-fetch.mjs";
-import { chatToResponses, responseEventToChatChunk, responseToChatCompletion } from "./cli2key-chat-compat.mjs";
+import { chatToResponses, normalizeResponseInstructions, responseEventToChatChunk, responseToChatCompletion } from "./cli2key-chat-compat.mjs";
 
 function usage(message) {
   if (message) console.error(`asb cli2key proxy: ${message}`);
@@ -81,9 +81,21 @@ const server = http.createServer(async (request, response) => {
     const raw = Buffer.concat(chunks);
     const path = request.url || "/";
     const chat = path === "/v1/chat/completions";
-    const parsed = raw.length ? JSON.parse(raw.toString("utf8")) : {};
-    const translated = chat ? chatToResponses(parsed) : null;
-    const body = chat ? JSON.stringify(translated) : normalizeBody(path, raw.length ? raw.toString("utf8") : "");
+    const rawBody = raw.length ? raw.toString("utf8") : "";
+    const normalized = normalizeBody(path, rawBody);
+    let translated = null;
+    let body = normalized;
+    if (chat) {
+      translated = chatToResponses(JSON.parse(rawBody));
+      body = JSON.stringify(translated);
+    } else if (path.includes("/responses") && normalized) {
+      try {
+        body = JSON.stringify(normalizeResponseInstructions(JSON.parse(normalized)));
+      } catch {
+        // Preserve malformed input for the upstream bridge to classify as a
+        // client request error instead of converting it into a proxy failure.
+      }
+    }
     const target = new URL(chat ? "/v1/responses" : path, `${upstream}/`);
     const headers = { ...request.headers };
     delete headers.host;
