@@ -453,7 +453,76 @@ fn replay_mismatch_context(progress: &serde_json::Value) -> Option<String> {
             byte.is_ascii_alphanumeric()
                 || matches!(byte, b'$' | b'.' | b'[' | b']' | b'<' | b'>' | b'_' | b'-')
         });
-    (safe_category && safe_path).then(|| format!("request {sequence}, {category} at {path}"))
+    if !(safe_category && safe_path) {
+        return None;
+    }
+    let string_detail = mismatch
+        .get("string_lengths")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|lengths| {
+            Some((
+                lengths.get("expected")?.as_u64()?,
+                lengths.get("actual")?.as_u64()?,
+                mismatch.get("first_difference_offset")?.as_u64()?,
+            ))
+        })
+        .filter(|(expected, actual, offset)| {
+            *expected <= 16 * 1024 * 1024
+                && *actual <= 16 * 1024 * 1024
+                && *offset <= (*expected).min(*actual)
+        })
+        .map(|(expected, actual, offset)| {
+            format!("; string lengths {expected}→{actual}, first differing byte {offset}")
+        })
+        .unwrap_or_default();
+    let feature_detail = replay_string_feature_context(mismatch).unwrap_or_default();
+    Some(format!(
+        "request {sequence}, {category} at {path}{string_detail}{feature_detail}"
+    ))
+}
+
+fn replay_string_feature_context(
+    mismatch: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    let features = mismatch.get("string_features")?.as_object()?;
+    let expected = features.get("expected")?.as_object()?;
+    let actual = features.get("actual")?.as_object()?;
+    let lines = |value: &serde_json::Map<String, serde_json::Value>| {
+        value
+            .get("lines")?
+            .as_u64()
+            .filter(|lines| *lines <= 65_536)
+    };
+    let flags = [
+        ("has_agents_guidance", "AGENTS guidance"),
+        ("has_parent_path", "parent paths"),
+        ("has_workspace_path", "workspace paths"),
+        ("has_additional_input", "additional-input marker"),
+    ];
+    let changed = flags
+        .iter()
+        .filter_map(|(key, label)| {
+            let expected = expected.get(*key)?.as_bool()?;
+            let actual = actual.get(*key)?.as_bool()?;
+            (expected != actual && actual).then_some(*label)
+        })
+        .collect::<Vec<_>>();
+    let line_detail = match (lines(expected), lines(actual)) {
+        (Some(expected), Some(actual)) if expected != actual => {
+            format!("; lines {expected}→{actual}")
+        }
+        _ => String::new(),
+    };
+    (!line_detail.is_empty() || !changed.is_empty()).then(|| {
+        format!(
+            "{line_detail}{}",
+            if changed.is_empty() {
+                String::new()
+            } else {
+                format!("; replay adds {}", changed.join(", "))
+            }
+        )
+    })
 }
 
 fn stop_proxy(child: &mut Child, builtin: bool) -> std::io::Result<()> {
@@ -872,6 +941,34 @@ mod tests {
     }
 
     #[test]
+    fn replay_progress_redacts_string_values_but_reports_shape() {
+        let root = test_root();
+        let cassette = cassette(&root);
+        let workspace = Path::new("/tmp/replay-workspace");
+        let session = Session::start(Mode::Replay, &cassette, None, false, workspace).unwrap();
+        let changed =
+            r#"{"model":"m","messages":[{"content":"different"}],"tools":[{"type":"function"}]}"#;
+        assert!(request(&session, changed).contains("409 Conflict"));
+        let progress = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("cassette.jsonl.progress.json"))
+            .find(|path| path.is_file())
+            .unwrap();
+        let text = std::fs::read_to_string(progress).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            value["first_mismatch"]["string_lengths"],
+            serde_json::json!({"expected": 23, "actual": 9})
+        );
+        assert_eq!(value["first_mismatch"]["first_difference_offset"], 0);
+        assert!(!text.contains("different"));
+        assert!(!text.contains("work in /tmp/replay-workspace"));
+        assert!(session.stop().is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_preserves_distinct_tool_call_ids_in_a_response() {
         let root = test_root();
         let cassette = root.join("tool-calls.jsonl");
@@ -1095,6 +1192,28 @@ mod tests {
         let changed_outside_metadata = r#"{"model":"m","metadata":{"user_id":"{\"device_id\":\"replayed-again\",\"session_id\":\"<asb-uuid>\"}"},"messages":[{"content":{"device_id":"changed","text":"work"}}]}"#;
         let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
         assert!(request(&session, changed_outside_metadata).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_ignores_only_known_volatile_codex_client_metadata() {
+        let root = test_root();
+        let cassette = root.join("codex-client-metadata.jsonl");
+        let recorded = r#"{"model":"m","client_metadata":{"root_turn_id":"recorded-root","session_id":"recorded-session","thread_id":"recorded-thread","turn_id":"recorded-turn","x-codex-installation-id":"recorded-install","x-codex-turn-metadata":"recorded-telemetry","x-codex-window-id":"recorded-window"},"input":[{"role":"user","content":"work"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let replayed = r#"{"model":"m","client_metadata":{"root_turn_id":"replayed-root","session_id":"replayed-session","thread_id":"replayed-thread","turn_id":"replayed-turn","x-codex-installation-id":"replayed-install","x-codex-turn-metadata":"replayed-telemetry","x-codex-window-id":"replayed-window"},"input":[{"role":"user","content":"work"}]}"#;
+        assert!(request_to(&session, "/v1/responses", replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let changed_content = replayed.replace("\"work\"", "\"changed\"");
+        assert!(request_to(&session, "/v1/responses", &changed_content).contains("409 Conflict"));
         assert!(session.stop().unwrap_err().to_string().contains("rejected"));
         std::fs::remove_dir_all(root).unwrap();
     }

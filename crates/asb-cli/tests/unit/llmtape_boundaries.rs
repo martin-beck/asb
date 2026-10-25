@@ -371,8 +371,8 @@ fn replay_finish_reports_only_validated_structural_mismatch_context() {
     let root = Fixture::new();
     for (contents, expected) in [
         (
-            r#"{"consumed":0,"total":1,"rejected":1,"first_mismatch":{"sequence":1,"category":"json_value","path":"$.messages[0].content"}}"#,
-            "first mismatch: request 1, json_value at $.messages[0].content",
+            r#"{"consumed":0,"total":1,"rejected":1,"first_mismatch":{"sequence":1,"category":"json_value","path":"$.messages[0].content","string_lengths":{"expected":23,"actual":9},"first_difference_offset":0,"string_features":{"expected":{"lines":1,"has_agents_guidance":false,"has_parent_path":false,"has_workspace_path":false,"has_additional_input":false},"actual":{"lines":3,"has_agents_guidance":true,"has_parent_path":true,"has_workspace_path":false,"has_additional_input":false}}}}"#,
+            "first mismatch: request 1, json_value at $.messages[0].content; string lengths 23→9, first differing byte 0; lines 1→3; replay adds AGENTS guidance, parent paths",
         ),
         (
             r#"{"consumed":0,"total":1,"rejected":1,"first_mismatch":{"sequence":1,"category":"secret-value","path":"$.token"}}"#,

@@ -121,7 +121,7 @@ impl NativePlan<'_> {
         command.args(specification.args);
         // Do not leak an enclosing Codex session into the benchmark agent. These
         // variables are host-runner integration state; if inherited, a project
-        // local Codex CLI can advertise the coordinator's tools as an
+        // local Codex CLI can advertise the host's tools as an
         // `additional_tools` request that cli2key does not support.
         agents::driver::isolate_parent_state(&mut command);
         if specification.append_prompt {
