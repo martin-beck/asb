@@ -6,8 +6,8 @@ use std::path::Path;
 #[test]
 fn chat_compatibility_translates_requests_and_response_events_offline() {
     let node = crate::tools::host_executable(Path::new("node")).expect("node is available");
-    let module = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets/scripts/cli2key-chat-compat.mjs");
+    let module =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts/cli2key-chat-compat.mjs");
     let script = r#"
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
@@ -30,7 +30,11 @@ assert.equal(terminal.usage.total_tokens, 5);
         .arg(module)
         .output()
         .expect("run node compatibility test");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[cfg(unix)]

@@ -5,7 +5,12 @@ use super::*;
 fn cli2key_offers(_: &str) -> Vec<Offer> {
     offers(
         Address::Bridge,
-        &[(Responses, Bearer), (Chat, Bearer), (Messages, ApiKey), (Messages, Bearer)],
+        &[
+            (Responses, Bearer),
+            (Chat, Bearer),
+            (Messages, ApiKey),
+            (Messages, Bearer),
+        ],
     )
 }
 
