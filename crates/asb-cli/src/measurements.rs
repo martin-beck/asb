@@ -1183,6 +1183,20 @@ impl Session {
         producer::command(&mut launch)
     }
 
+    /// A collector adapter may retry its own target-specific probe through an
+    /// already configured passwordless sudo route. Generic orchestration never
+    /// decides which collector needs elevation.
+    pub(crate) fn enable_passwordless_sudo_collector(&mut self, name: &str) -> bool {
+        if self.sudo_collectors.contains(name) {
+            return true;
+        }
+        if !passwordless_sudo_available() {
+            return false;
+        }
+        self.sudo_collectors.insert(name.into());
+        true
+    }
+
     fn executable(&self, name: &str) -> PathBuf {
         if let Some(tool_dir) = &self.tool_dir {
             let binary = tool_binary_name(name);
@@ -1323,8 +1337,9 @@ pub(crate) fn env_true(name: &str) -> bool {
 
 /// Probe privileged collectors before the benchmark starts. A direct probe is
 /// preferred; only collectors that actually fail the probe are retried with
-/// non-interactive sudo. Perf is intentionally not granted a sudoers rule:
-/// its kernel policy has a narrower, user-applied repair path below.
+/// existing non-interactive sudo. ASB never creates or modifies a sudoers
+/// rule; perf still reports an explicit host-policy remediation if neither
+/// route can use its required events.
 fn preflight_collectors(
     project_root: Option<&Path>,
     measurement_dir: &Path,

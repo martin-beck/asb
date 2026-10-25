@@ -51,6 +51,7 @@ fn stat_args(pid: u32, interval_ms: u64) -> Vec<String> {
         pid.to_string(),
     ]
 }
+
 pub(super) struct PerfCollector;
 pub(super) static ADAPTER: PerfCollector = PerfCollector;
 
@@ -114,6 +115,18 @@ impl CollectorAdapter for PerfCollector {
         process(session, context)
     }
     fn attach_pid(&self, session: &mut measurements::Session, pid: u32) -> Result<(), String> {
+        session.start_perf(pid)
+    }
+    fn attach_isolated_pid(
+        &self,
+        session: &mut measurements::Session,
+        pid: u32,
+    ) -> Result<(), String> {
+        // The target is a verified daemon-host PID, but rootless Docker may
+        // still reject unprivileged perf_event_open across its user namespace.
+        // Prefer an existing non-interactive sudo route before the launch gate
+        // resumes; never probe the deliberately stopped target.
+        let _ = session.enable_passwordless_sudo_collector("perf");
         session.start_perf(pid)
     }
 }
@@ -269,7 +282,7 @@ fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
         return Ok(());
     }
     let executable = measurements::resolve_executable(context.tool_dir, "perf");
-    for (name, args) in [
+    let probes = [
         (
             "stat",
             &[
@@ -287,17 +300,16 @@ fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
             "record",
             &["record", "-g", "-F", "19", "-o", "-", "--", "sleep", "0.01"][..],
         ),
-    ] {
-        let output = Command::new(&executable)
-            .args(args)
-            .stdout(Stdio::null())
-            .output();
+    ];
+    let mut needs_sudo = false;
+    for (name, args) in probes {
+        let output = perf_probe(&executable, args, false);
         match output {
             Ok(output) if output.status.success() => {}
             Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-                if stderr.contains("permission") || stderr.contains("perf_event_paranoid") || stderr.contains("access to performance monitoring") || stderr.contains("operation not permitted") {
-                    return Err(perf_permission_error());
+                if perf_access_denied(&output.stderr) {
+                    needs_sudo = true;
+                    continue;
                 }
                 return Err(format!("perf {name} preflight failed ({}). Inspect the host configuration with `perf {name} -- sleep 0.01` and retry.", output.status));
             }
@@ -306,6 +318,71 @@ fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
             Err(error) => return Err(format!("cannot probe perf collector: {error}; check with `perf --version`")),
         }
     }
+    if !needs_sudo {
+        return Ok(());
+    }
+    if !measurements::passwordless_sudo_available() {
+        return Err(perf_permission_error());
+    }
+    for (name, args) in probes {
+        match perf_probe(&executable, args, true) {
+            Ok(output) if output.status.success() => {}
+            Ok(output) if perf_access_denied(&output.stderr) => {
+                return Err(format!(
+                    "perf is denied even through passwordless sudo during its {name} preflight. The host or container policy does not permit performance monitoring for this execution boundary; inspect `sudo -n {} {}` and retry.",
+                    executable.display(),
+                    args.join(" ")
+                ));
+            }
+            Ok(output) => {
+                return Err(format!(
+                    "privileged perf {name} preflight failed ({}). Inspect the host configuration with `sudo -n {} {}` and retry.",
+                    output.status,
+                    executable.display(),
+                    args.join(" ")
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "cannot execute privileged perf at {}: {error}",
+                    executable.display()
+                ));
+            }
+        }
+    }
+    context.sudo_collectors.insert("perf".into());
+    Ok(())
+}
+
+fn perf_probe(
+    executable: &std::path::Path,
+    args: &[&str],
+    sudo: bool,
+) -> std::io::Result<std::process::Output> {
+    let mut command = if sudo {
+        let mut command = Command::new("sudo");
+        command.args(["-n", "--"]).arg(executable);
+        command
+    } else {
+        Command::new(executable)
+    };
+    command.args(args).stdout(Stdio::null()).output()
+}
+
+fn perf_access_denied(stderr: &[u8]) -> bool {
+    let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    stderr.contains("permission")
+        || stderr.contains("perf_event_paranoid")
+        || stderr.contains("access to performance monitoring")
+        || stderr.contains("operation not permitted")
+}
+
+fn reserve_recording_artifact(path: &std::path::Path) -> Result<(), String> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| format!("cannot reserve perf recording artifact: {error}"))?;
     Ok(())
 }
 
@@ -324,6 +401,11 @@ impl measurements::Session {
             return Ok(());
         }
         let data = self.dir.join("perf.data");
+        // A passwordless-sudo fallback may be needed for rootless isolated
+        // process trees. Pre-creating the destination keeps its ownership
+        // with the benchmark user so later `perf script`/Flamegraph processing
+        // can read it without expanding privileged access.
+        reserve_recording_artifact(&data)?;
         let stderr_path = self.dir.join("perf.stderr");
         let stdout_path = self.dir.join("perf.stdout");
         let captures = [
@@ -628,6 +710,33 @@ mod tests {
         assert!(message.contains("/etc/sysctl.d/99-asb-perf.conf"));
         assert!(message.contains("does not create sudoers rules"));
         assert!(!message.contains("sudoers.d"));
+    }
+
+    #[test]
+    fn access_denial_detection_covers_perf_and_kernel_diagnostics() {
+        assert!(super::perf_access_denied(
+            b"Failure to open event 'cpu-clock': Operation not permitted"
+        ));
+        assert!(super::perf_access_denied(
+            b"Access to performance monitoring is limited; perf_event_paranoid setting is 2"
+        ));
+        assert!(!super::perf_access_denied(
+            b"event is not supported by this PMU"
+        ));
+    }
+
+    #[test]
+    fn recording_artifact_is_reserved_once_by_the_benchmark_user() {
+        let directory = std::env::temp_dir().join(format!(
+            "asb-perf-reservation-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let artifact = directory.join("perf.data");
+        super::reserve_recording_artifact(&artifact).unwrap();
+        assert!(artifact.is_file());
+        assert!(super::reserve_recording_artifact(&artifact).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
