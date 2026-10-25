@@ -53,7 +53,24 @@ pub(crate) fn launch(
     tape: TapeContext<'_>,
 ) -> Result<Launch, Error> {
     let transcript = match tape.mode {
-        crate::tape::Mode::Record => context.run_dir.join("tool-replay/local-tools.jsonl"),
+        crate::tape::Mode::Record => {
+            let transcript = context.run_dir.join("tool-replay/local-tools.jsonl");
+            let parent = transcript
+                .parent()
+                .expect("local-tool transcript has a parent");
+            std::fs::create_dir_all(parent).map_err(|error| {
+                Error::Run(format!(
+                    "cannot create local-tool transcript directory: {error}"
+                ))
+            })?;
+            // Some clients launch a configured MCP server lazily. Publish a
+            // valid empty transcript before the client starts so an otherwise
+            // tool-free recording has sealed replay evidence too.
+            std::fs::write(&transcript, Transcript::default().encode()?).map_err(|error| {
+                Error::Run(format!("cannot initialize local-tool transcript: {error}"))
+            })?;
+            transcript
+        }
         crate::tape::Mode::Replay => replay_transcript(tape.cassette)?,
     };
     if tape.mode == crate::tape::Mode::Replay && !transcript.is_file() {
@@ -542,6 +559,46 @@ mod tests {
         let replayed = call(&replay_options, &mut replay, request).unwrap();
         assert_eq!(recorded, replayed);
         replay.finish().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn record_launch_publishes_a_valid_empty_local_tool_transcript() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-empty-transcript-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cassette = root.join("recording.jsonl");
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiChat,
+            base_url: "http://127.0.0.1:1/v1".into(),
+            credential: None,
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let mut command = std::process::Command::new("unused");
+        let launch = launch(
+            &PreparationContext {
+                command: &mut command,
+                model: "fixture",
+                connection: &connection,
+                workspace: &workspace,
+                runtime_dir: &root,
+                run_dir: &root,
+                tape: None,
+            },
+            TapeContext {
+                mode: crate::tape::Mode::Record,
+                cassette: &cassette,
+            },
+        )
+        .unwrap();
+        let transcript = root.join("tool-replay/local-tools.jsonl");
+        assert!(transcript.is_file());
+        assert!(std::fs::read(&transcript).unwrap().is_empty());
+        Transcript::decode(&std::fs::read(&transcript).unwrap()).unwrap();
+        assert!(launch.args.iter().any(|argument| argument == "record"));
         let _ = std::fs::remove_dir_all(root);
     }
 
