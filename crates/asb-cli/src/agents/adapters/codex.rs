@@ -73,7 +73,25 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     } else {
         context.command.env_remove("ASB_AGENT_API_KEY");
     }
+    if let Some(mode) = sandbox_mode(std::env::var("ASB_CODEX_SANDBOX_MODE").ok())? {
+        // This is deliberately opt-in.  The normal Codex workspace-write
+        // sandbox remains the default; a benchmark must visibly choose a
+        // different policy when its host cannot run that sandbox.
+        context.command.arg("--sandbox").arg(mode);
+    }
     Ok(())
+}
+
+fn sandbox_mode(value: Option<String>) -> Result<Option<&'static str>, Error> {
+    match value.as_deref() {
+        None => Ok(None),
+        Some("read-only") => Ok(Some("read-only")),
+        Some("workspace-write") => Ok(Some("workspace-write")),
+        Some("danger-full-access") => Ok(Some("danger-full-access")),
+        Some(value) => Err(Error::Input(format!(
+            "invalid ASB_CODEX_SANDBOX_MODE `{value}`; use read-only, workspace-write, danger-full-access, or leave it unset"
+        ))),
+    }
 }
 
 fn configure(
@@ -173,5 +191,19 @@ mod tests {
             Some("ASB_AGENT_API_KEY")
         );
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn sandbox_override_is_explicit_and_validated() {
+        assert_eq!(sandbox_mode(None).unwrap(), None);
+        assert_eq!(
+            sandbox_mode(Some("workspace-write".into())).unwrap(),
+            Some("workspace-write")
+        );
+        assert_eq!(
+            sandbox_mode(Some("danger-full-access".into())).unwrap(),
+            Some("danger-full-access")
+        );
+        assert!(sandbox_mode(Some("unsafe".into())).is_err());
     }
 }
