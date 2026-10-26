@@ -1165,6 +1165,7 @@ impl ResultFacts {
             token_usage,
             steps,
             tool_calls,
+            tool_calls_available: cassette_usage_verified,
             local_tool_transcript,
             deterministic_manifest,
             cassette: tape_cassette

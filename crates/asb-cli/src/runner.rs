@@ -102,6 +102,7 @@ struct RunResult<'a> {
     token_usage: measurements::TokenUsage,
     steps: Option<u64>,
     tool_calls: Vec<crate::proxy::tool_calls::ToolCall>,
+    tool_calls_available: bool,
     /// Private, validated input for cassette publication. This is never put
     /// in user-facing run JSON or logs; the recorder seals it as an auxiliary
     /// `local-tools` cassette payload.
@@ -1972,7 +1973,7 @@ mod tests {
                 exit_code: output.status.code(),
                 token_usage: crate::measurements::TokenUsage::default(),
                 steps: Some(1),
-                tool_call_count: 0,
+                tool_call_count: Some(0),
                 tool_calls: &[],
                 started_unix_ms: 0,
             })
@@ -2317,6 +2318,7 @@ mod tests {
             },
             steps: Some(2),
             tool_calls: Vec::new(),
+            tool_calls_available: true,
             local_tool_transcript: None,
             deterministic_manifest: None,
             cassette: None,

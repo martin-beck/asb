@@ -217,7 +217,12 @@ pub struct RunMeasurement<'a> {
     pub token_usage: TokenUsage,
     pub steps: Option<u64>,
     /// Number of structured tool-call events retained in tool-calls.json.
-    pub tool_call_count: usize,
+    ///
+    /// A replay that did not validate cannot establish which prefix of the
+    /// cassette was served, so it must remain unavailable rather than being
+    /// presented as zero calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_count: Option<usize>,
     #[serde(skip)]
     pub(crate) tool_calls: &'a [crate::proxy::tool_calls::ToolCall],
     pub started_unix_ms: u128,
@@ -226,7 +231,9 @@ pub struct RunMeasurement<'a> {
 #[derive(Serialize)]
 struct ToolCallMeasurements<'a> {
     schema_version: u32,
-    count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    count: Option<usize>,
+    availability: &'static str,
     calls: &'a [crate::proxy::tool_calls::ToolCall],
 }
 
@@ -894,6 +901,11 @@ impl Session {
             &ToolCallMeasurements {
                 schema_version: 1,
                 count: measurement.tool_call_count,
+                availability: if measurement.tool_call_count.is_some() {
+                    "observed"
+                } else {
+                    "unavailable"
+                },
                 calls: measurement.tool_calls,
             },
         ));
@@ -1566,6 +1578,20 @@ mod tests {
         drop(session);
         fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn unavailable_tool_calls_are_not_serialized_as_zero() {
+        let document = serde_json::to_value(ToolCallMeasurements {
+            schema_version: 1,
+            count: None,
+            availability: "unavailable",
+            calls: &[],
+        })
+        .expect("tool-call evidence serializes");
+        assert!(document.get("count").is_none());
+        assert_eq!(document["availability"], "unavailable");
+        assert_eq!(document["calls"], serde_json::json!([]));
+    }
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1841,7 +1867,7 @@ mod tests {
             exit_code: Some(0),
             token_usage: TokenUsage::default(),
             steps: Some(1),
-            tool_call_count: tool_calls.len(),
+            tool_call_count: Some(tool_calls.len()),
             tool_calls: &tool_calls,
             started_unix_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1867,6 +1893,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(dir.join("tool-calls.json")).unwrap())
                 .unwrap();
         assert_eq!(tool_calls["count"], 1);
+        assert_eq!(tool_calls["availability"], "observed");
         assert_eq!(tool_calls["calls"][0]["name"], "read_file");
         let components: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("components.json")).unwrap())
