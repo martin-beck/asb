@@ -107,6 +107,8 @@ struct RunResult<'a> {
     /// `local-tools` cassette payload.
     #[serde(skip)]
     local_tool_transcript: Option<Vec<u8>>,
+    #[serde(skip)]
+    deterministic_manifest: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cassette: Option<String>,
     /// Actual capture directory, including a CLI --measurements override.
@@ -2327,6 +2329,7 @@ mod tests {
             steps: Some(2),
             tool_calls: Vec::new(),
             local_tool_transcript: None,
+            deterministic_manifest: None,
             cassette: None,
             measurement_directory: None,
             stdout: "done".into(),

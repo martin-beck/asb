@@ -105,6 +105,8 @@ pub(crate) struct GuestResult {
     /// reports and command output never render its contents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_tool_transcript: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deterministic_manifest: Option<Vec<u8>>,
     pub execution_failure: Option<String>,
     #[serde(default)]
     pub tree_quiesced: bool,
@@ -706,6 +708,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             .steps
             .or_else(|| adapter.step_count(&stdout, &stderr)),
         local_tool_transcript: artifacts.local_tool_transcript,
+        deterministic_manifest: artifacts.deterministic_manifest,
         execution_failure: {
             #[cfg(target_os = "linux")]
             let timed_out = held.as_ref().is_some_and(|held| held.timed_out);
@@ -858,6 +861,7 @@ mod artifact_publication_tests {
                 },
                 steps: Some(4),
                 local_tool_transcript: None,
+                deterministic_manifest: None,
                 execution_failure: None,
                 tree_quiesced: true,
                 namespace_collectors: Default::default(),

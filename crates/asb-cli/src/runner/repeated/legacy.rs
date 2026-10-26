@@ -124,6 +124,7 @@ impl Inspection {
                 source: input.source,
                 private: format!("inputs/recording-{}.jsonl", index + 1).into(),
                 local_tools: None,
+                deterministic_manifest: None,
                 bytes,
                 sha256,
             });

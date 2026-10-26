@@ -1083,6 +1083,7 @@ fn result() -> RunResult<'static> {
         steps: Some(3),
         tool_calls: Vec::new(),
         local_tool_transcript: None,
+        deterministic_manifest: None,
         cassette: None,
         measurement_directory: None,
         stdout: "submission".into(),
@@ -1873,6 +1874,7 @@ fn full_entry_child(case: &str) {
     .unwrap();
     std::fs::create_dir(root.join("workloads")).unwrap();
     workloads::populate(&root.join("workloads")).unwrap();
+    // These lifecycle fixtures exercise runner state, not a client protocol.
     let mini_swe_case = case == "capture-mini-swe-read-failure";
     let agent_id = if mini_swe_case || artifact_case || (phase_case && !phase_continuation) {
         "mini-swe"
