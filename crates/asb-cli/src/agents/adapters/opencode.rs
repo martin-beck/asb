@@ -31,7 +31,6 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_output_usage(output_usage)
 .with_step_count(step_count)
-.with_deterministic_extension()
 .with_state_environment_vars(&[
     "OPENCODE_CONFIG_CONTENT",
     "OPENCODE_CONFIG",
@@ -134,6 +133,11 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     // result and breaks strict replay history matching.  Keep this policy in
     // the owning adapter and use a private runtime file, never a host-wide
     // ripgrep configuration.
+    std::fs::create_dir_all(context.runtime_dir).map_err(|error| {
+        Error::Run(format!(
+            "cannot create deterministic OpenCode runtime directory: {error}"
+        ))
+    })?;
     let ripgrep_config = context.runtime_dir.join("opencode-ripgrep.conf");
     std::fs::write(&ripgrep_config, "--sort=path\n").map_err(|error| {
         Error::Run(format!(
