@@ -12,7 +12,7 @@ use std::time::Duration;
 pub(super) struct AgentProcesses<const MEMORY: bool>;
 
 #[derive(Default)]
-struct State {
+struct State<const MEMORY: bool> {
     selected: bool,
     memory: bool,
     workers: bool,
@@ -90,7 +90,7 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
     }
 
     fn execution_namespace_requested(&self, session: &mut Session) -> bool {
-        let state = session.state::<State>();
+        let state = session.state::<State<MEMORY>>();
         let state = state.borrow();
         if MEMORY { state.memory } else { state.workers }
     }
@@ -99,7 +99,7 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
         &self,
         session: &mut Session,
     ) -> Result<serde_json::Value, String> {
-        let state = session.state::<State>();
+        let state = session.state::<State<MEMORY>>();
         let state = state.borrow();
         serde_json::to_value(NamespaceSample {
             schema_version: 1,
@@ -128,14 +128,14 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
         {
             return Err("inconsistent execution-namespace agent-process observations".into());
         }
-        session.state::<State>().borrow_mut().imported = Some(sample);
+        session.state::<State<MEMORY>>().borrow_mut().imported = Some(sample);
         Ok(())
     }
 
     fn attach_isolated_pid(&self, session: &mut Session, _pid: u32) -> Result<(), String> {
         // The execution namespace owns entry-point resolution and proc access.
         // Do not guess container paths or escalate host /proc permissions.
-        session.state::<State>().borrow_mut().isolated = true;
+        session.state::<State<MEMORY>>().borrow_mut().isolated = true;
         Ok(())
     }
     fn id(&self) -> &'static str {
@@ -158,7 +158,7 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
 
     fn configure(&self, session: &mut Session, selected: &[String]) -> Result<(), String> {
         if crate::collectors::selected_or_environment(self.id(), selected) {
-            let state = session.state::<State>();
+            let state = session.state::<State<MEMORY>>();
             let mut state = state.borrow_mut();
             state.selected = true;
             if MEMORY {
@@ -171,7 +171,7 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
     }
 
     fn agent_launch(&self, session: &mut Session, program: &str, args: &[String]) {
-        let state = session.state::<State>();
+        let state = session.state::<State<MEMORY>>();
         let mut state = state.borrow_mut();
         if state.selected {
             state.identity = Identity::resolve(program, args);
@@ -179,7 +179,7 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
     }
 
     fn agent_launch_prepared(&self, session: &mut Session, target: &crate::launch::TargetLaunch) {
-        let state = session.state::<State>();
+        let state = session.state::<State<MEMORY>>();
         let mut state = state.borrow_mut();
         if state.selected {
             // env_clear is intentionally opaque in std::Command. A bare
@@ -208,7 +208,7 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
         let root = session
             .measurement_target()
             .or_else(|| measurements::ProcessIdentity::read(pid));
-        let state = session.state::<State>();
+        let state = session.state::<State<MEMORY>>();
         let mut state = state.borrow_mut();
         if state.selected
             && state.sampler.is_none()
@@ -246,7 +246,7 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
     fn agent_process_spawned(&self, session: &mut Session, pid: u32) -> Result<(), String> {
         let process = measurements::ProcessIdentity::read(pid)
             .ok_or_else(|| "cannot identify the direct agent process".to_owned())?;
-        let state = session.state::<State>();
+        let state = session.state::<State<MEMORY>>();
         let state = state.borrow();
         if state.selected
             && state.identity.is_some()
@@ -269,7 +269,7 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
             event,
             LifecycleEvent::AgentExecuteEnd | LifecycleEvent::RunFailed
         ) {
-            let state = session.state::<State>();
+            let state = session.state::<State<MEMORY>>();
             let mut state = state.borrow_mut();
             if let Some(sampler) = state.sampler.take() {
                 state.totals = sampler.finish();
@@ -280,7 +280,7 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
 
     fn finish(&self, session: &mut Session) -> Result<(), String> {
         self.lifecycle_event(session, LifecycleEvent::AgentExecuteEnd)?;
-        let state = session.state::<State>();
+        let state = session.state::<State<MEMORY>>();
         let state = state.borrow();
         if (MEMORY && !state.memory) || (!MEMORY && !state.workers) {
             return Ok(());
@@ -783,12 +783,12 @@ mod tests {
         let (mut command, route) = launch.native(Some(Path::new("/not-the-client-asb-gate")));
         command.env_clear();
         session.agent_launch_prepared(&route.target(&command));
-        assert!(session.state::<State>().borrow().identity.is_none());
+        assert!(session.state::<State<false>>().borrow().identity.is_none());
         command.env("PATH", root.join("bin"));
         session.agent_launch_prepared(&route.target(&command));
         assert_eq!(
             session
-                .state::<State>()
+                .state::<State<false>>()
                 .borrow()
                 .identity
                 .as_ref()

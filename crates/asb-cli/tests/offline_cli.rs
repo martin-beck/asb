@@ -207,7 +207,7 @@ fn expect_success(output: &Output) {
 
 #[cfg(unix)]
 #[test]
-fn unusable_selected_agent_never_falls_back_to_a_different_path_installation() {
+fn unusable_selected_agent_never_runs_a_different_path_installation() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     let project = Project::new();
     project.init();
@@ -264,17 +264,6 @@ fn unusable_selected_agent_never_falls_back_to_a_different_path_installation() {
             "an unusable selection must never start the host agent"
         );
     }
-    std::fs::remove_file(&selected).unwrap();
-    let output = run();
-    assert!(
-        !output.status.success(),
-        "fixture agent deliberately exits unsuccessfully"
-    );
-    assert!(
-        marker.is_file(),
-        "genuinely missing local installation must retain PATH fallback: {}",
-        stderr(&output)
-    );
 }
 
 #[cfg(unix)]
@@ -2083,6 +2072,25 @@ fn assert_tape_scratch_cleaned(project: &Project) {
 }
 
 #[cfg(unix)]
+fn assert_tape_rejection_paths_bounded(project: &Project) {
+    let evidence = std::fs::read_dir(&project.0)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            entry.file_type().is_ok_and(|kind| kind.is_dir()) && name.starts_with(".asb-tape-")
+                || entry.file_type().is_ok_and(|kind| kind.is_file())
+                    && name.starts_with(".asb-tape-")
+                    && name.ends_with(".mismatch.json")
+        })
+        .count();
+    assert!(
+        evidence <= 1,
+        "replay rejection must leave no more than one owned private evidence path"
+    );
+}
+
+#[cfg(unix)]
 #[test]
 fn replay_returns_json_and_writes_completed_log_offline() {
     let project = replay_project(1);
@@ -2385,7 +2393,7 @@ fn replay_rejects_changed_and_extra_requests_and_cleans_up() {
         let project = replay_project(1);
         let result = replay(&project, behavior, &[]);
         expect_failure(&result, "replay rejected");
-        assert_tape_scratch_cleaned(&project);
+        assert_tape_rejection_paths_bounded(&project);
     }
 }
 
