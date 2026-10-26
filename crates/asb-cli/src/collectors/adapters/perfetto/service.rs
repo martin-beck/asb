@@ -22,6 +22,11 @@ pub(super) struct Service {
     consumer: String,
     children: Arc<Mutex<Vec<Child>>>,
     owner: Option<Owner>,
+    // The probe sidecar is launched in a separate namespace and can outlive
+    // the caller which started it.  Keep an execution-pinned copy rather than
+    // referring to Cargo's mutable target executable: a rebuild must never
+    // turn an active benchmark into ".../asb (deleted)".
+    namespace_helper: Option<PathBuf>,
     _lease: File,
 }
 
@@ -148,6 +153,9 @@ impl Service {
             .as_nanos();
         let producer = format!("@asb-perfetto-p-{}-{nonce:x}", std::process::id());
         let consumer = format!("@asb-perfetto-c-{}-{nonce:x}", std::process::id());
+        let namespace_helper = namespace_helper
+            .map(|helper| pin_namespace_helper(helper, directory, &instance, nonce))
+            .transpose()?;
         let mut service = Self {
             instance,
             marker,
@@ -156,11 +164,12 @@ impl Service {
             consumer,
             children: Arc::new(Mutex::new(Vec::new())),
             owner: None,
+            namespace_helper,
             _lease: lease,
         };
         let mut traced = service.command("traced");
         let mut probes = service.command("traced_probes");
-        if let Some(helper) = namespace_helper {
+        if let Some(helper) = &service.namespace_helper {
             use std::os::fd::AsRawFd;
             probes = Command::new("unshare");
             probes
@@ -344,7 +353,54 @@ impl Drop for Service {
             // uncertain cleanup must not optimistically unlock a live service.
             let _ = self._lease.unlock();
         }
+        if let Some(helper) = self.namespace_helper.take() {
+            let _ = fs::remove_file(helper);
+        }
     }
+}
+
+fn pin_namespace_helper(
+    helper: &Path,
+    directory: &Path,
+    instance: &str,
+    nonce: u128,
+) -> Result<PathBuf, String> {
+    use std::io::copy;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let pinned = directory.join(format!(".{instance}-{nonce:x}-probes-helper"));
+    let mut source = File::open(helper).map_err(|e| {
+        format!(
+            "cannot open the Perfetto probe helper {}: {e}",
+            helper.display()
+        )
+    })?;
+    let mut destination = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .open(&pinned)
+        .map_err(|e| {
+            format!(
+                "cannot pin the Perfetto probe helper {}: {e}",
+                pinned.display()
+            )
+        })?;
+    if let Err(error) = copy(&mut source, &mut destination) {
+        let _ = fs::remove_file(&pinned);
+        return Err(format!(
+            "cannot copy the Perfetto probe helper to {}: {error}",
+            pinned.display()
+        ));
+    }
+    if let Err(error) = fs::set_permissions(&pinned, fs::Permissions::from_mode(0o700)) {
+        let _ = fs::remove_file(&pinned);
+        return Err(format!(
+            "cannot secure the pinned Perfetto probe helper {}: {error}",
+            pinned.display()
+        ));
+    }
+    Ok(pinned)
 }
 
 impl Daemons {
@@ -715,6 +771,7 @@ else:
                 consumer: String::new(),
                 children,
                 owner,
+                namespace_helper: None,
                 _lease: lease,
             };
             drop(service);
@@ -735,6 +792,33 @@ else:
             other.try_lock().unwrap();
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn pinned_probe_helper_survives_removal_of_the_build_executable() {
+        let root = std::env::temp_dir()
+            .join(crate::workloads::TaskIdentity::local("perfetto-pinned-helper", None).attempt_id);
+        fs::create_dir(&root).unwrap();
+        let build_executable = root.join("asb-build-output");
+        crate::write_test_file(
+            &root,
+            &build_executable,
+            "#!/bin/sh\nprintf 'pinned-helper\\n'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&build_executable, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let pinned = pin_namespace_helper(&build_executable, &root, "fixture", 42).unwrap();
+        fs::remove_file(&build_executable).unwrap();
+        let output = Command::new(&pinned).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "pinned-helper\n");
+        assert_eq!(
+            fs::metadata(&pinned).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
