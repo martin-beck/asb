@@ -69,7 +69,11 @@ const first=process.cwd().includes('000-first');
 const replica=process.cwd().match(/concurrency-(\d+)/)?.[1] ?? '1';
 const name=first?'first-'+replica:'second';
 fs.writeFileSync(home+'/started-'+name,'started');
-const expected=['first-1','first-2','second'];
+// `jobs=2` does not promise that another configuration starts before both
+// replicas of the first configuration.  Keep the replica-overlap barrier
+// local to that configuration so an independently admitted task cannot turn
+// scheduling fairness into a false replay failure.
+const expected=first?['first-1','first-2']:['second'];
 (async()=>{
   const streaming=fs.existsSync(home+'/stream-test');
   if(streaming) console.log('fixture streaming ready');
@@ -112,6 +116,10 @@ const expected=['first-1','first-2','second'];
 })().catch(error=>{console.error(error.message);process.exitCode=1;});
 "##).unwrap();
     std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let bridge = root.join(".asb-tools/cli2key/node_modules/.bin/codex-bridge");
+    std::fs::create_dir_all(bridge.parent().unwrap()).unwrap();
+    std::fs::write(&bridge, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&bridge, std::fs::Permissions::from_mode(0o755)).unwrap();
     for (name, workload, replicas, index) in [
         ("first", "bug-fix", 2, 0),
         ("second", "feature-addition", 1, 1),
