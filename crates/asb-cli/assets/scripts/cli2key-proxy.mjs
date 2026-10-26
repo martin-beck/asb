@@ -2,8 +2,10 @@
 
 // Provider-neutral compatibility hop for the project-local cli2key bridge.
 // Codex can include host-only `additional_tools` input items which the bridge
-// intentionally does not expose.  Strip only that metadata before forwarding;
-// all actual prompts and function tools remain unchanged.
+// intentionally does not expose. Codex also emits a host-managed `namespace`
+// Responses tool which the bridge does not implement. Strip only those
+// bridge-incompatible host-tool declarations before forwarding; function tools
+// and all prompt content remain unchanged.
 
 import http from "node:http";
 import { Readable } from "node:stream";
@@ -59,6 +61,11 @@ function normalizeBody(path, body) {
       const filtered = parsed.input.filter((item) => item?.type !== "additional_tools");
       changed = filtered.length !== parsed.input.length;
       parsed.input = filtered;
+    }
+    if (Array.isArray(parsed.tools)) {
+      const filtered = parsed.tools.filter((tool) => tool?.type !== "namespace");
+      changed = changed || filtered.length !== parsed.tools.length;
+      parsed.tools = filtered;
     }
     if (parsed.reasoning && typeof parsed.reasoning === "object" &&
         Object.hasOwn(parsed.reasoning, "context")) {
