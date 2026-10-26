@@ -91,6 +91,9 @@ impl PreparedReport {
         let mut names = GraphNames::default();
         let mut graphs = Vec::new();
         for (name, rows) in metrics {
+            if !graphable_metric(&name) {
+                continue;
+            }
             graphs.push(GraphSpec {
                 filename: names.allocate("metric", &name),
                 kind: GraphKind::Metric(name),
@@ -166,5 +169,26 @@ impl PreparedReport {
             .iter()
             .map(|graph| graph.filename.clone())
             .collect()
+    }
+}
+
+fn graphable_metric(name: &str) -> bool {
+    // Per-destination CPU migration counters are useful retained evidence but
+    // produce one low-value chart per core. Keep the aggregate migration plot.
+    !name.contains("cpu_migration_destination[")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::graphable_metric;
+
+    #[test]
+    fn per_core_cpu_migration_destinations_do_not_create_graphs() {
+        assert!(!graphable_metric(
+            "bpftrace-cpu-migrations.bpftrace.cpu-migrations.cpu_migration_destination[12]"
+        ));
+        assert!(graphable_metric(
+            "bpftrace-cpu-migrations.bpftrace.cpu-migrations.cpu_migrations"
+        ));
     }
 }
