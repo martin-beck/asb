@@ -31,6 +31,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_output_usage(output_usage)
 .with_step_count(step_count)
+.with_deterministic_extension()
 .with_state_environment_vars(&[
     "OPENCODE_CONFIG_CONTENT",
     "OPENCODE_CONFIG",
@@ -127,6 +128,19 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
             "OPENCODE_CONFIG_CONTENT",
             config(context.model, &connection.base_url, npm)?,
         );
+    // OpenCode's repository-search tool invokes ripgrep.  Fresh workload
+    // materialization can give the same files a different directory-entry
+    // order, which otherwise changes only the ordering of an identical tool
+    // result and breaks strict replay history matching.  Keep this policy in
+    // the owning adapter and use a private runtime file, never a host-wide
+    // ripgrep configuration.
+    let ripgrep_config = context.runtime_dir.join("opencode-ripgrep.conf");
+    std::fs::write(&ripgrep_config, "--sort=path\n").map_err(|error| {
+        Error::Run(format!(
+            "cannot write deterministic OpenCode search configuration: {error}"
+        ))
+    })?;
+    context.command.env("RIPGREP_CONFIG_PATH", ripgrep_config);
     Ok(())
 }
 
@@ -158,6 +172,36 @@ mod tests {
         .expect("configuration succeeds");
         assert!(config.contains("test-model"));
         assert!(config.contains("ASB_AGENT_API_KEY"));
+    }
+
+    #[test]
+    fn preparation_pins_private_path_sorted_searches() {
+        let root = std::env::temp_dir().join(format!("asb-opencode-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("runtime")).unwrap();
+        let mut command = std::process::Command::new("opencode");
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiChat,
+            base_url: "http://127.0.0.1:3456/v1".into(),
+            credential: None,
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let mut context = PreparationContext {
+            command: &mut command,
+            model: "fixture",
+            connection: &connection,
+            workspace: &root,
+            runtime_dir: &root.join("runtime"),
+            run_dir: &root.join("run"),
+            tape: None,
+        };
+        prepare_adapter(&mut context).unwrap();
+        let config = root.join("runtime/opencode-ripgrep.conf");
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "--sort=path\n");
+        assert!(command.get_envs().any(|(name, value)| {
+            name == "RIPGREP_CONFIG_PATH" && value.is_some_and(|value| value == config)
+        }));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
