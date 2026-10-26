@@ -187,6 +187,8 @@ impl Execution<'_> {
                 interactive: self.options.live_progress(),
                 measurement_dir: None,
                 mode: self.options.mode,
+                tool_mode: self.options.tool_mode,
+                tool_mode_explicit: self.options.tool_mode_explicit,
                 cassette: cassette.as_deref().and_then(Path::to_str),
                 respect_record_timings: self.options.respect_record_timings,
                 on_completion: observer

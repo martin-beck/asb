@@ -280,6 +280,10 @@ pub(crate) struct ExecutionContext<'a> {
     /// This is forwarded to guest agent preparation so adapter-owned tool
     /// replay never guesses from the loopback endpoint.
     pub tape_cassette: Option<&'a Path>,
+    /// Whether agent-local tool effects must be served from the recording.
+    pub tool_replay: bool,
+    /// Exact cassette identity for the adapter-owned local-tool sidecar.
+    pub tool_tape_cassette: Option<&'a Path>,
     pub measurements: Option<&'a mut crate::measurements::Session>,
     pub show_output: bool,
     /// Presentation is best-effort and deliberately cannot influence workload

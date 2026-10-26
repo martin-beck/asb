@@ -13,8 +13,8 @@ asb workload tui
 asb provider models [PROVIDER] [--free]
 asb setup tui
 asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--trial INSTANCE] [--trial-set FILE] [--workspace DIR] [--output FILE]
-asb run CONFIG [--record|--replay] [--cassette FILE] [--json] [--measurements DIR]
-asb sweep SWEEP.toml [--record|--replay] [--cassette-root DIR] [--respect-record-timings] [--resume] [--json]
+asb run CONFIG [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette FILE] [--json] [--measurements DIR]
+asb sweep SWEEP.toml [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette-root DIR] [--respect-record-timings] [--resume] [--json]
 asb compare BENCHMARK_OR_SWEEP.toml [--report]
 ```
 
@@ -420,7 +420,7 @@ registered external and locally defined workloads; it does not install missing
 workloads or bypass their trial-selection requirements. Paths (`--output`,
 `--workspace`) and the single numeric `--concurrency` are not selection options.
 
-`asb run CONFIG --record` runs fresh isolated workload executions through ASB's
+`asb run CONFIG --llm-record` runs fresh isolated workload executions through ASB's
 built-in local tape proxy and publishes a versioned ZIP cassette (by default
 `cassettes/*.asb.zip` next to the configuration). `--repeat N` runs N sequential
 batches at the configured concurrency: repeat 5 at concurrency 4 records 20
@@ -429,10 +429,11 @@ checked before clients launch. ASB materializes its small proxy in a private
 temporary session directory beside the cassette; no external recorder package is required.
 It does not search the host `PATH` implicitly. To deliberately use another
 compatible executable, set `ASB_LLM_TAPE`. Use `--cassette FILE` to choose an
-explicit path. `asb run CONFIG --replay` starts the tape server and routes
+explicit path. `asb run CONFIG --llmreplay` (or the readable alias
+`--llm-replay`) starts the tape server and routes
 all supported provider endpoints to it; it refuses a missing cassette and does
 not start cli2key or connect to any live provider. Add
-`--respect-record-timings` to `run --replay` or `sweep --replay` to reproduce
+`--respect-record-timings` to `run --llmreplay` or `sweep --llmreplay` to reproduce
 the bounded response delays recorded in each cassette entry. Cassettes are local test
 artifacts and should not be committed when they contain provider responses.
 
@@ -441,6 +442,13 @@ asb run benchmark.toml --record --repeat 5 --cassette trials.asb.zip
 asb run benchmark.toml --replay --repeat 10 --cassette trials.asb.zip --seed 42
 asb run benchmark.toml --replay --cassette trials.asb.zip --track max:tokens
 ```
+
+`--tool-record` and `--tool-replay` enable ASB's sealed
+adapter-local tool transport. A replay serves the exact recorded result and
+declared workspace effects without executing the original tool. `--record`
+selects both LLM and tool recording; `--replay` selects both replay layers.
+ASB refuses a requested tool layer for an adapter that has not declared a
+complete interception transport, rather than permitting unrecorded tool calls.
 
 Bundle replay chooses whole complete nonempty tracks uniformly with replacement;
 failed client/workload outcomes do not exclude a complete trace. Choices are

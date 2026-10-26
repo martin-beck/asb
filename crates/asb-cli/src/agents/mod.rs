@@ -75,6 +75,12 @@ pub(crate) trait AgentAdapter: Sync {
     fn replay_credential_vars(&self) -> &'static [&'static str] {
         &[]
     }
+    /// Whether this adapter can route every benchmark-exposed local tool
+    /// through ASB's sealed recorder.  Callers must reject a requested tool
+    /// replay rather than silently allowing a client-owned tool to escape.
+    fn supports_tool_replay(&self) -> bool {
+        false
+    }
     /// Mutable client-state overrides, distinct from provider credentials.
     fn state_environment_vars(&self) -> &'static [&'static str] {
         &[]
@@ -306,6 +312,7 @@ pub(super) struct StaticAdapter {
     command: CommandBuilder,
     prepare: PreparationHook,
     tool_replay: Option<ToolReplayHook>,
+    complete_tool_replay: bool,
     collect: Option<CollectionHook>,
     artifact_specs: &'static [ArtifactSpec],
     deterministic_extension: bool,
@@ -338,6 +345,7 @@ impl StaticAdapter {
             command,
             prepare,
             tool_replay: None,
+            complete_tool_replay: false,
             collect: None,
             artifact_specs: &[],
             deterministic_extension: false,
@@ -365,6 +373,16 @@ impl StaticAdapter {
     /// the adapter owns the client protocol and tool semantics.
     pub(super) const fn with_tool_replay(mut self, hook: ToolReplayHook) -> Self {
         self.tool_replay = Some(hook);
+        self
+    }
+
+    /// Declares that the hook disables every client-owned tool path and routes
+    /// each benchmark-exposed tool through the sealed ASB transport.  A hook
+    /// which merely adds an MCP server must not opt in here: callers then fail
+    /// closed instead of recording only a subset of tool activity.
+    pub(super) const fn with_complete_tool_replay(mut self, hook: ToolReplayHook) -> Self {
+        self.tool_replay = Some(hook);
+        self.complete_tool_replay = true;
         self
     }
 
@@ -501,6 +519,9 @@ impl AgentAdapter for StaticAdapter {
     }
     fn replay_credential_vars(&self) -> &'static [&'static str] {
         self.replay_credential_vars
+    }
+    fn supports_tool_replay(&self) -> bool {
+        self.complete_tool_replay
     }
     fn forwarded_invocation_environment_vars(&self) -> &'static [&'static str] {
         self.forwarded_invocation_environment_vars
@@ -875,6 +896,19 @@ mod tests {
         assert_eq!(ids.len(), all().len());
         assert!(ids.contains("codex"));
         assert!(ids.contains("continue"));
+    }
+
+    #[test]
+    fn complete_tool_replay_is_not_inferred_from_an_added_mcp_server() {
+        // Adding an ASB MCP server is not sufficient: a client can still have
+        // an enabled native shell or another local tool path.  Only adapters
+        // which explicitly replace every exposed tool can accept the public
+        // tool-record/replay selectors.
+        assert!(find("pi").unwrap().supports_tool_replay());
+        assert!(find("workbuddy").unwrap().supports_tool_replay());
+        assert!(!find("codex").unwrap().supports_tool_replay());
+        assert!(!find("goose").unwrap().supports_tool_replay());
+        assert!(!find("opencode").unwrap().supports_tool_replay());
     }
 
     #[test]

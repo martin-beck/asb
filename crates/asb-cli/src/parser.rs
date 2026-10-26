@@ -177,20 +177,28 @@ pub(crate) fn run_with_interactive(
             None => config::setup(options.into(), stdout),
         },
         Some(CommandLine::Run(options)) => {
-            let mode = match tape_mode(options.record, options.replay) {
-                Ok(mode) => mode,
+            let tape = match tape_selection(TapeFlags::from_run(&options)) {
+                Ok(selection) => selection,
                 Err(error) => return fail(stderr, &error.to_string()),
             };
-            if options.cassette.is_some() && mode.is_none() {
+            if (options.track.is_some() || options.seed.is_some())
+                && tape.llm != Some(tape::Mode::Replay)
+            {
                 return fail(
                     stderr,
-                    "--cassette requires --record or --replay; choose a tape mode first",
+                    "--track and --seed require --llm-replay or --replay",
                 );
             }
-            if options.respect_record_timings && mode != Some(tape::Mode::Replay) {
+            if options.cassette.is_some() && tape.carrier.is_none() {
                 return fail(
                     stderr,
-                    "--respect-record-timings requires --replay; recording always stores response delays",
+                    "--cassette requires --record, --replay, --llm-record, --llm-replay, --tool-record, or --tool-replay",
+                );
+            }
+            if options.respect_record_timings && tape.llm != Some(tape::Mode::Replay) {
+                return fail(
+                    stderr,
+                    "--respect-record-timings requires --replay or --llm-replay; recording always stores response delays",
                 );
             }
             let report_path = options.path.clone();
@@ -205,7 +213,9 @@ pub(crate) fn run_with_interactive(
                     show_output: options.show_output,
                     announce_trial: !options.json,
                     measurement_dir: options.measurements.as_deref(),
-                    mode,
+                    mode: tape.carrier,
+                    tool_mode: tape.tool,
+                    tool_mode_explicit: true,
                     cassette: options.cassette.as_deref(),
                     respect_record_timings: options.respect_record_timings,
                     interactive: interactive && !options.json,
@@ -222,14 +232,22 @@ pub(crate) fn run_with_interactive(
             })
         }
         Some(CommandLine::Sweep(options)) => {
-            let mode = match tape_mode(options.record, options.replay) {
-                Ok(mode) => mode,
+            let tape = match tape_selection(TapeFlags::from_sweep(&options)) {
+                Ok(selection) => selection,
                 Err(error) => return fail(stderr, &error.to_string()),
             };
-            if options.respect_record_timings && mode != Some(tape::Mode::Replay) {
+            if (options.track.is_some() || options.seed.is_some())
+                && tape.llm != Some(tape::Mode::Replay)
+            {
                 return fail(
                     stderr,
-                    "--respect-record-timings requires --replay; recording always stores response delays",
+                    "--track and --seed require --llm-replay or --replay",
+                );
+            }
+            if options.respect_record_timings && tape.llm != Some(tape::Mode::Replay) {
+                return fail(
+                    stderr,
+                    "--respect-record-timings requires --replay or --llm-replay; recording always stores response delays",
                 );
             }
             sweep::run_with_options(
@@ -241,7 +259,9 @@ pub(crate) fn run_with_interactive(
                     json: options.json,
                     show_output: options.show_output,
                     interactive: interactive && !options.json,
-                    mode,
+                    mode: tape.carrier,
+                    tool_mode: tape.tool,
+                    tool_mode_explicit: true,
                     respect_record_timings: options.respect_record_timings,
                     cassette_root: options.cassette_root.as_deref().map(std::path::Path::new),
                     jobs: usize::from(options.jobs),
@@ -332,15 +352,85 @@ fn close_command(args: &[OsString]) -> Option<&'static str> {
     super::suggestions::closest(value, choices)
 }
 
-fn tape_mode(record: bool, replay: bool) -> Result<Option<tape::Mode>, CliError> {
-    match (record, replay) {
+#[derive(Clone, Copy)]
+struct TapeFlags {
+    record: bool,
+    replay: bool,
+    legacy_record: bool,
+    legacy_replay: bool,
+    llm_record: bool,
+    llm_replay: bool,
+    tool_record: bool,
+    tool_replay: bool,
+}
+
+impl TapeFlags {
+    fn from_run(args: &RunArgs) -> Self {
+        Self {
+            // The concise selectors deliberately enable both recording layers.
+            // The current sealed cassette has one lifecycle, so selecting an
+            // explicit layer still reserves the same private carrier. This
+            // preserves a causal tool transcript beside its provider tape.
+            record: args.record || args.llm_record || args.tool_record,
+            replay: args.replay || args.llm_replay || args.tool_replay,
+            legacy_record: args.record,
+            legacy_replay: args.replay,
+            llm_record: args.llm_record,
+            llm_replay: args.llm_replay,
+            tool_record: args.tool_record,
+            tool_replay: args.tool_replay,
+        }
+    }
+
+    fn from_sweep(args: &SweepArgs) -> Self {
+        Self {
+            record: args.record || args.llm_record || args.tool_record,
+            replay: args.replay || args.llm_replay || args.tool_replay,
+            legacy_record: args.record,
+            legacy_replay: args.replay,
+            llm_record: args.llm_record,
+            llm_replay: args.llm_replay,
+            tool_record: args.tool_record,
+            tool_replay: args.tool_replay,
+        }
+    }
+}
+
+fn tape_mode(flags: TapeFlags) -> Result<Option<tape::Mode>, CliError> {
+    match (flags.record, flags.replay) {
         (true, true) => Err(CliError::Input(
-            "--record and --replay are mutually exclusive; choose one".into(),
+            "record and replay selections are mutually exclusive; choose one direction".into(),
         )),
         (true, false) => Ok(Some(tape::Mode::Record)),
         (false, true) => Ok(Some(tape::Mode::Replay)),
         (false, false) => Ok(None),
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TapeSelection {
+    /// The cassette lifecycle. Tool-only traffic still needs the sealed
+    /// carrier because local-tool evidence is a private cassette sidecar.
+    carrier: Option<tape::Mode>,
+    llm: Option<tape::Mode>,
+    tool: Option<tape::Mode>,
+}
+
+fn tape_selection(flags: TapeFlags) -> Result<TapeSelection, CliError> {
+    let carrier = tape_mode(flags)?;
+    let direction = carrier;
+    Ok(TapeSelection {
+        carrier,
+        llm: (flags.legacy_record || flags.legacy_replay || flags.llm_record || flags.llm_replay)
+            .then_some(direction)
+            .flatten(),
+        tool: (flags.legacy_record
+            || flags.legacy_replay
+            || flags.tool_record
+            || flags.tool_replay)
+            .then_some(direction)
+            .flatten(),
+    })
 }
 
 fn fail(stderr: &mut dyn Write, message: &str) -> u8 {
@@ -383,6 +473,60 @@ fn list_workload_trials(name: &str, output: &mut dyn Write) -> Result<(), Error>
         writeln!(output, "{}", trial.id).map_err(|error| Error::Io(error.to_string()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tape_flag_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_llm_and_tool_flags_select_the_sealed_tape_direction() {
+        let cli = Cli::try_parse_from([
+            "asb",
+            "run",
+            "benchmark.toml",
+            "--llm-record",
+            "--tool-record",
+        ])
+        .unwrap();
+        let Some(CommandLine::Run(args)) = cli.command else {
+            panic!("expected run arguments");
+        };
+        let selection = tape_selection(TapeFlags::from_run(&args)).unwrap();
+        assert_eq!(selection.llm, Some(tape::Mode::Record));
+        assert_eq!(selection.tool, Some(tape::Mode::Record));
+
+        let cli =
+            Cli::try_parse_from(["asb", "sweep", "sweep.toml", "--llmreplay", "--tool-replay"])
+                .unwrap();
+        let Some(CommandLine::Sweep(args)) = cli.command else {
+            panic!("expected sweep arguments");
+        };
+        let selection = tape_selection(TapeFlags::from_sweep(&args)).unwrap();
+        assert_eq!(selection.llm, Some(tape::Mode::Replay));
+        assert_eq!(selection.tool, Some(tape::Mode::Replay));
+
+        let cli = Cli::try_parse_from(["asb", "run", "benchmark.toml", "--llm-record"]).unwrap();
+        let Some(CommandLine::Run(args)) = cli.command else {
+            panic!("expected run arguments");
+        };
+        let selection = tape_selection(TapeFlags::from_run(&args)).unwrap();
+        assert_eq!(selection.llm, Some(tape::Mode::Record));
+        assert_eq!(selection.tool, None);
+    }
+
+    #[test]
+    fn record_and_replay_directions_conflict_across_layers() {
+        let error = Cli::try_parse_from([
+            "asb",
+            "run",
+            "benchmark.toml",
+            "--llm-record",
+            "--tool-replay",
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot be used with"));
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -489,7 +633,10 @@ impl From<SetupArgs> for config::SetupOptions {
 }
 
 #[derive(Debug, Args)]
-#[command(group(ArgGroup::new("tape-mode").args(["record", "replay"]).multiple(false)))]
+#[command(
+    group(ArgGroup::new("record-direction").args(["record", "llm_record", "tool_record"]).multiple(true).conflicts_with("replay-direction")),
+    group(ArgGroup::new("replay-direction").args(["replay", "llm_replay", "tool_replay"]).multiple(true))
+)]
 struct RunArgs {
     #[arg(value_name = "CONFIG", value_hint = clap::ValueHint::FilePath)]
     path: String,
@@ -497,15 +644,27 @@ struct RunArgs {
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=65533))]
     repeat: Option<u64>,
     /// Replay one track ID, or min|max|median:tokens|duration|requests.
-    #[arg(long, requires = "replay")]
+    #[arg(long)]
     track: Option<crate::cassette::Selector>,
     /// Reproducible whole-track sampling with replacement (ZIP bundles only).
-    #[arg(long, requires = "replay")]
+    #[arg(long)]
     seed: Option<u64>,
     #[arg(long)]
     record: bool,
     #[arg(long)]
     replay: bool,
+    /// Record provider requests and responses.
+    #[arg(long)]
+    llm_record: bool,
+    /// Replay provider requests and responses.
+    #[arg(long = "llmreplay", visible_alias = "llm-replay")]
+    llm_replay: bool,
+    /// Record adapter-supported local tool calls and their agent-visible results.
+    #[arg(long)]
+    tool_record: bool,
+    /// Replay recorded adapter-supported local tool results without executing tools.
+    #[arg(long)]
+    tool_replay: bool,
     #[arg(long, help = "replay each response after its recorded response delay")]
     respect_record_timings: bool,
     #[arg(long, value_hint = clap::ValueHint::FilePath)]
@@ -519,7 +678,10 @@ struct RunArgs {
 }
 
 #[derive(Debug, Args)]
-#[command(group(ArgGroup::new("tape-mode").args(["record", "replay"]).multiple(false)))]
+#[command(
+    group(ArgGroup::new("record-direction").args(["record", "llm_record", "tool_record"]).multiple(true).conflicts_with("replay-direction")),
+    group(ArgGroup::new("replay-direction").args(["replay", "llm_replay", "tool_replay"]).multiple(true))
+)]
 struct SweepArgs {
     #[arg(value_name = "SWEEP", value_hint = clap::ValueHint::FilePath)]
     path: String,
@@ -527,10 +689,10 @@ struct SweepArgs {
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=65533))]
     repeat: Option<u64>,
     /// Replay one track ID, or min|max|median:tokens|duration|requests.
-    #[arg(long, requires = "replay")]
+    #[arg(long)]
     track: Option<crate::cassette::Selector>,
     /// Shared reproducible seed for configuration-ordered bundled selections.
-    #[arg(long, requires = "replay")]
+    #[arg(long)]
     seed: Option<u64>,
     /// Import existing official grades for reporting only; never run an agent or evaluator.
     #[arg(long, conflicts_with_all = ["resume", "reconcile_completed", "record", "replay", "show_output", "respect_record_timings", "cassette_root", "max_active_attempts"])]
@@ -554,6 +716,18 @@ struct SweepArgs {
     record: bool,
     #[arg(long)]
     replay: bool,
+    /// Record provider requests and responses.
+    #[arg(long)]
+    llm_record: bool,
+    /// Replay provider requests and responses.
+    #[arg(long = "llmreplay", visible_alias = "llm-replay")]
+    llm_replay: bool,
+    /// Record adapter-supported local tool calls and their agent-visible results.
+    #[arg(long)]
+    tool_record: bool,
+    /// Replay recorded adapter-supported local tool results without executing tools.
+    #[arg(long)]
+    tool_replay: bool,
     #[arg(long, help = "replay each response after its recorded response delay")]
     respect_record_timings: bool,
     #[arg(long)]

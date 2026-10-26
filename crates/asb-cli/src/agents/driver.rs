@@ -68,6 +68,12 @@ pub(crate) struct GuestRequest {
     /// routed through loopback services.
     #[serde(default)]
     pub tape_cassette: Option<PathBuf>,
+    /// Tool replay is independent of provider replay.  A recorded local-tool
+    /// response remains authoritative even if the provider is live.
+    #[serde(default)]
+    pub tool_replay: bool,
+    #[serde(default)]
+    pub tool_tape_cassette: Option<PathBuf>,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: f64,
     #[serde(default)]
@@ -483,10 +489,10 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         runtime_dir: &state_root,
         run_dir: &request.run_dir,
         tape: request
-            .tape_cassette
+            .tool_tape_cassette
             .as_deref()
             .map(|cassette| super::TapeContext {
-                mode: if request.replay {
+                mode: if request.tool_replay {
                     crate::tape::Mode::Replay
                 } else {
                     crate::tape::Mode::Record

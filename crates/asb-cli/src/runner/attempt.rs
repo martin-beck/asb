@@ -12,6 +12,7 @@ struct Context<'a> {
     policy: crate::planning::ResolvedPlan,
     measurement_path: Option<PathBuf>,
     tape_cassette: Option<(tape::Mode, PathBuf)>,
+    tool_tape_cassette: Option<(tape::Mode, PathBuf)>,
     network: Option<project::NetworkProjectGuard>,
 }
 
@@ -61,6 +62,20 @@ impl<'a> ConfiguredAttempt<'a> {
                     .unwrap_or_else(|| default_cassette(config_path, &config)),
             )
         });
+        let tool_mode = if options.tool_mode_explicit {
+            options.tool_mode
+        } else {
+            options.mode
+        };
+        let tool_tape_cassette = tool_mode.map(|mode| {
+            (
+                mode,
+                options
+                    .cassette
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| default_cassette(config_path, &config)),
+            )
+        });
         let network = project::network_project(&project_root);
         let context = Context {
             config_path: config_path.into(),
@@ -72,6 +87,7 @@ impl<'a> ConfiguredAttempt<'a> {
             policy,
             measurement_path,
             tape_cassette,
+            tool_tape_cassette,
             network: Some(network),
         };
         let config = &context.config;
@@ -80,6 +96,7 @@ impl<'a> ConfiguredAttempt<'a> {
         let project_config = &context.project_config;
         let policy = &context.policy;
         let tape_cassette = &context.tape_cassette;
+        let tool_tape_cassette = &context.tool_tape_cassette;
         let json = options.json;
         let _initial_policy = crate::planning::persist(project_root, policy, None, None)?;
         let measurement_path = &context.measurement_path;
@@ -141,6 +158,16 @@ impl<'a> ConfiguredAttempt<'a> {
         }
         if let Some((tape::Mode::Replay, cassette)) = tape_cassette.as_ref() {
             models::ensure_replay_model_recorded(cassette, &config.model)?;
+        }
+        if options.tool_mode_explicit
+            && tool_tape_cassette.is_some()
+            && let Some(adapter) = agents::find(&config.agent)
+            && !adapter.supports_tool_replay()
+        {
+            return Err(Error::Input(format!(
+                "agent `{}` does not yet provide an ASB tool interception transport; use --llm-record/--llm-replay or choose an adapter with sealed tool replay",
+                config.agent
+            )));
         }
         let mut discovered_tool_support = None;
         let selected_offer = instrument_phase(
@@ -635,6 +662,7 @@ impl<'a> ReadyAttempt<'a> {
         let project_root = &context.project_root;
         let project_config = &context.project_config;
         let tape_cassette = &context.tape_cassette;
+        let tool_tape_cassette = &context.tool_tape_cassette;
         let tape_mode = options.mode;
         let show_output = options.show_output;
         let launch = launch
@@ -679,6 +707,12 @@ impl<'a> ReadyAttempt<'a> {
                     project_config,
                     replay: tape_mode == Some(tape::Mode::Replay),
                     tape_cassette: tape_cassette
+                        .as_ref()
+                        .map(|(_, cassette)| cassette.as_path()),
+                    tool_replay: tool_tape_cassette
+                        .as_ref()
+                        .is_some_and(|(mode, _)| *mode == tape::Mode::Replay),
+                    tool_tape_cassette: tool_tape_cassette
                         .as_ref()
                         .map(|(_, cassette)| cassette.as_path()),
                     measurements: prepared.measurements.as_mut(),
@@ -731,7 +765,8 @@ impl<'a> ReadyAttempt<'a> {
                         provider_credentials,
                         tape_url,
                         tape_mode,
-                        tape_cassette: tape_cassette
+                        tool_tape_mode: tool_tape_cassette.as_ref().map(|(mode, _)| *mode),
+                        tool_tape_cassette: tool_tape_cassette
                             .as_ref()
                             .map(|(_, cassette)| cassette.as_path()),
                     },

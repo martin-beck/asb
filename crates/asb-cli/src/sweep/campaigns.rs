@@ -248,6 +248,8 @@ pub(super) fn prepare(
                 json: options.json,
                 show_output: options.show_output,
                 mode: options.mode,
+                tool_mode: options.tool_mode,
+                tool_mode_explicit: options.tool_mode_explicit,
                 cassette: source.as_deref().and_then(Path::to_str),
                 track: options.track,
                 replay_seed: if *bundle { seed } else { options.seed },
