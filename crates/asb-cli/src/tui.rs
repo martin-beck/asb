@@ -1818,6 +1818,9 @@ fn run_loop(
                     }
                     app.sync_collector_dependencies();
                 }
+                if app.next_step().is_none() && !install_selected_provider_tools(terminal, app)? {
+                    continue;
+                }
                 if let Some(generated) = app.advance()? {
                     return Ok(generated);
                 }
@@ -2388,6 +2391,71 @@ fn install_setup_selection(
     Ok(ready)
 }
 
+/// The TUI publishes its selected matrix directly instead of routing through
+/// `asb setup`, so it must materialize provider-owned local runtimes itself.
+/// Keep this alongside the interactive installer so progress, cancellation and
+/// log custody remain identical to Ctrl-I installation.
+fn install_selected_provider_tools(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+) -> Result<bool, Error> {
+    let tools_root = project::resolve(&app.root, &app.project.tools_dir);
+    for provider in selected_missing_provider_tools(app, &tools_root) {
+        set_message(
+            &mut app.message,
+            &mut app.message_color,
+            &mut app.message_until,
+            format!("Installing required provider runtime `{provider}`..."),
+            Color::Cyan,
+            false,
+        );
+        let result = drive_install(
+            app.root.clone(),
+            install::operation::Request::Tool {
+                name: provider.clone(),
+                directory: tools_root.clone(),
+            },
+            |status| {
+                set_message(
+                    &mut app.message,
+                    &mut app.message_color,
+                    &mut app.message_until,
+                    status,
+                    Color::Cyan,
+                    false,
+                );
+                terminal.draw(|frame| draw(frame, app)).map_err(|error| {
+                    Error::Io(format!("cannot draw provider install status: {error}"))
+                })?;
+                Ok(())
+            },
+        )?;
+        if let Err(error) = result {
+            set_message(
+                &mut app.message,
+                &mut app.message_color,
+                &mut app.message_until,
+                format!("Cannot install required provider runtime `{provider}`: {error}"),
+                Color::Red,
+                false,
+            );
+            return Ok(false);
+        }
+    }
+    app.refresh_availability();
+    Ok(true)
+}
+
+fn selected_missing_provider_tools(app: &App, tools_root: &Path) -> Vec<String> {
+    app.panes[PaneKind::Providers.index()]
+        .selected_choices()
+        .filter_map(|choice| choice.key.provider())
+        .filter(|provider| crate::tools::find(provider).is_some())
+        .filter(|provider| !install::tool_installed_locally(provider, tools_root))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Installation uses the typed domain identity, never its rendered annotation.
 fn setup_install_request(app: &App, choice: &Choice) -> Option<install::operation::Request> {
     if !app.step.installable() {
@@ -2723,10 +2791,10 @@ mod tests {
     use super::{
         App, Availability, Choice, ChoiceKey, Generated, Pane, PaneKind, default_model,
         generate_configs, generated_summary, install_status_message, last_setup_tui_config,
-        record_last_setup_tui,
+        record_last_setup_tui, selected_missing_provider_tools,
     };
     use crate::install;
-    use crate::project::ProjectConfig;
+    use crate::project::{self, ProjectConfig};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::style::{Color, Style};
     use std::collections::BTreeSet;
@@ -3573,6 +3641,24 @@ mod tests {
         assert_eq!(default_model("cli2key"), "gpt-6.1-sol");
         assert_eq!(default_model("opencode-zen"), "mimo-v2.6-flash-free");
         assert_eq!(default_model("unknown"), "test-model");
+    }
+
+    #[test]
+    fn final_tui_setup_prepares_selected_provider_owned_tools() {
+        let root =
+            std::env::temp_dir().join(format!("asb-tui-provider-install-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let project = ProjectConfig::default();
+        let mut app = App::new(root.clone(), project.clone());
+        app.panes[PaneKind::Providers.index()] = Pane::new(vec![provider_choice("cli2key")]);
+        app.panes[PaneKind::Providers.index()].selected[0] = true;
+        let tools = project::resolve(&root, &project.tools_dir);
+        assert_eq!(selected_missing_provider_tools(&app, &tools), ["cli2key"]);
+
+        app.panes[PaneKind::Providers.index()] = Pane::new(vec![provider_choice("openrouter")]);
+        app.panes[PaneKind::Providers.index()].selected[0] = true;
+        assert!(selected_missing_provider_tools(&app, &tools).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
