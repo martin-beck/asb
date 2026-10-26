@@ -326,7 +326,7 @@ function normalizeCassetteBody(body) {
           && /^\d+$/.test(path[3])
           && path[4] === "id"
           && key === "id") {
-        return canonicalContentBlockIdentifier(value);
+        return canonicalToolCallIdentifier(value);
       }
       if (typeof value === "string"
           && path.length === 5
@@ -358,7 +358,7 @@ function normalizeCassetteBody(body) {
           && /^\d+$/.test(path[3])
           && path[4] === "id"
           && key === "id") {
-        return canonicalToolCallIdentifier(value);
+        return canonicalContentBlockIdentifier(value);
       }
       // WorkBuddy carries a process-local conversation request identifier in
       // each OpenAI-compatible history item.  It is not a model-visible
