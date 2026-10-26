@@ -107,6 +107,10 @@ fn prepare_tool_replay(
                 "type": "stdio",
                 "command": program,
                 "args": args,
+                // CodeBuddy defers MCP discovery by default.  A benchmark's
+                // first model turn must see the sealed tool set, rather than
+                // completing before the server is advertised.
+                "alwaysLoad": true,
             }
         }
     });
@@ -262,6 +266,10 @@ mod tests {
             .map(|pair| serde_json::from_str::<serde_json::Value>(&pair[1]).unwrap())
             .expect("inline MCP configuration");
         assert_eq!(mcp["mcpServers"]["asb-local-tools"]["type"], "stdio");
+        assert_eq!(
+            mcp["mcpServers"]["asb-local-tools"]["alwaysLoad"], true,
+            "the first headless turn must wait for the sealed MCP server"
+        );
         assert_eq!(
             mcp["mcpServers"]["asb-local-tools"]["args"][0],
             "__asb-tool-replay"
