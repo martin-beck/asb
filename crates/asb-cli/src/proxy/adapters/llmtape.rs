@@ -952,6 +952,120 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_opencode_tool_output_rendering_volatility() {
+        let root = test_root();
+        let cassette = root.join("opencode-tool-output.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"content":"Full output saved to: /opt/asb-private/agent-state/data/opencode/tool-output/tool_177aa249e001DOifK3c9XKyBvu\nfunction = <function concatenate at 0x72bd0ba330b0>\n14 failed, 30 passed, 7 skipped in 1.22s"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = r#"{"model":"m","messages":[{"content":"Full output saved to: /opt/asb-private/agent-state/data/opencode/tool-output/tool_178bfad560010MLrjXm7utidgk\nfunction = <function concatenate at 0x748aa3afbe30>\n14 failed, 30 passed, 7 skipped in 1.59s"}]}"#;
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let response = request(&session, replayed);
+        assert!(response.contains("200 OK"), "{response}");
+        session.stop().unwrap();
+
+        let changed_result = replayed.replace("14 failed, 30 passed", "13 failed, 31 passed");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_result).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_complete_testbed_search_block_ordering() {
+        let root = test_root();
+        let cassette = root.join("opencode-search-order.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"content":"Found 2 matches\n/testbed/alpha.py:\n  Line 1: first\n\n\n/testbed/beta.py:\n  Line 2: second\n"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let reordered = r#"{"model":"m","messages":[{"content":"Found 2 matches\n/testbed/beta.py:\n  Line 2: second\n\n\n/testbed/alpha.py:\n  Line 1: first\n"}]}"#;
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let response = request(&session, reordered);
+        assert!(response.contains("200 OK"), "{response}");
+        session.stop().unwrap();
+
+        let changed_match = reordered.replace("Line 2: second", "Line 2: changed");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_match).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_pip_download_transport_progress() {
+        let root = test_root();
+        let cassette = root.join("pip-progress.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"content":"Downloading numpy-1.22.4.whl (16.8 MB)\n   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 16.8/16.8 MB 17.6 MB/s eta 0:00:00"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = r#"{"model":"m","messages":[{"content":"Downloading numpy-1.22.4.whl (16.8 MB)\n   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 16.8/16.8 MB 23.0 MB/s eta 0:00:00"}]}"#;
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_artifact = replayed.replace("16.8/16.8 MB", "17.0/17.0 MB");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_artifact).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_ls_stderr_interleaving() {
+        let root = test_root();
+        let cassette = root.join("ls-stderr.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"content":"ls: cannot access '/opt/venv': No such file or directory\n/opt:\n asb-private\n/testbed:\n wcs.py\n"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = r#"{"model":"m","messages":[{"content":"/opt:\n asb-private\n/testbed:\n wcs.py\nls: cannot access '/opt/venv': No such file or directory\n"}]}"#;
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_diagnostic = replayed.replace("No such file or directory", "Permission denied");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_diagnostic).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_pytest_elapsed_time_with_all_count_categories() {
+        let root = test_root();
+        let cassette = root.join("pytest-summary.jsonl");
+        let recorded =
+            r#"{"model":"m","messages":[{"content":"120 passed, 7 skipped, 6 errors in 1.44s"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed =
+            r#"{"model":"m","messages":[{"content":"120 passed, 7 skipped, 6 errors in 1.65s"}]}"#;
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_counts = replayed.replace("6 errors", "7 errors");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_counts).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_rejects_changed_body_and_extra_requests() {
         let root = test_root();
         let cassette = cassette(&root);
