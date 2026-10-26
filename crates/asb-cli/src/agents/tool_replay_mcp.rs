@@ -19,6 +19,11 @@ use std::time::{Duration, Instant};
 const MAX_COMMAND_ARGUMENTS: usize = 32;
 const MAX_COMMAND_ARGUMENT_BYTES: usize = 4096;
 const MAX_COMMAND_OUTPUT: usize = 1024 * 1024;
+// Pi records every tool result in several structured output events.  Keep one
+// confined file read comfortably below the outer agent-output capture bound,
+// while exposing truncation to the model so it can use search or a narrower
+// command instead of silently reasoning from partial source.
+const MAX_MCP_READ_BYTES: usize = 48 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
 const STAGED_RUNTIME_EXECUTABLE: &str = "/opt/asb-runtime/asb";
 
@@ -326,7 +331,7 @@ fn execute(root: &Path, tool: &str, request: &Value) -> Result<(Value, Vec<Effec
         }
         "run_command" => Ok((run_command(root, request)?, Vec::new())),
         "read_file" => Ok((
-            json!({"text":tool_replay::read_text(root, required_path(request)?)?}),
+            bounded_read_result(tool_replay::read_text(root, required_path(request)?)?),
             Vec::new(),
         )),
         "write_file" => {
@@ -363,6 +368,21 @@ fn execute(root: &Path, tool: &str, request: &Value) -> Result<(Value, Vec<Effec
         }
         _ => Err(Error::Run("local-tool is unsupported".into())),
     }
+}
+
+fn bounded_read_result(text: String) -> Value {
+    if text.len() <= MAX_MCP_READ_BYTES {
+        return json!({"text": text, "truncated": false});
+    }
+    let mut end = MAX_MCP_READ_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    json!({
+        "text": &text[..end],
+        "truncated": true,
+        "limit_bytes": MAX_MCP_READ_BYTES,
+    })
 }
 
 fn run_command(root: &Path, request: &Value) -> Result<Value, Error> {
@@ -506,6 +526,19 @@ mod tests {
             runtime_program(Some(STAGED_RUNTIME_EXECUTABLE.into())).unwrap(),
             PathBuf::from(STAGED_RUNTIME_EXECUTABLE)
         );
+    }
+
+    #[test]
+    fn private_file_reads_are_utf8_safe_bounded_and_explicitly_marked() {
+        let source = format!("{}é", "x".repeat(MAX_MCP_READ_BYTES));
+        let result = bounded_read_result(source);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(result["limit_bytes"], MAX_MCP_READ_BYTES);
+        assert_eq!(result["text"].as_str().unwrap().len(), MAX_MCP_READ_BYTES);
+        assert!(std::str::from_utf8(result["text"].as_str().unwrap().as_bytes()).is_ok());
+
+        let complete = bounded_read_result("small source".into());
+        assert_eq!(complete, json!({"text":"small source","truncated":false}));
     }
 
     #[test]
