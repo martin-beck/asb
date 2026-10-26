@@ -183,10 +183,39 @@ pub(super) fn metric_html(
             .rewards
             .get(&group.policy.reward)
             .map_or("unknown", |spec| spec.unit.as_str());
-        html.push_str(&format!("<tr><td>{}</td><td>{} v{} / {} ({})<br>{}</td><td>{}/{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", super::escape(key), super::escape(&group.policy.id), group.policy.version, super::escape(&group.policy.reward), super::escape(unit), missing, group.rewarded_attempts, group.selected_attempts, group.unique_tasks, group.estimate.map_or_else(|| "Unavailable".into(), |v| format!("{v:.6}")), group.task_cluster_standard_error.map_or_else(|| "Unavailable".into(), |v| format!("{v:.6}"))));
+        html.push_str(&format!("<tr><td>{}</td><td>{} v{} / {} ({})<br>{}</td><td>{}/{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", super::escape(&metric_group_label(key)), super::escape(&group.policy.id), group.policy.version, super::escape(&group.policy.reward), super::escape(unit), missing, group.rewarded_attempts, group.selected_attempts, group.unique_tasks, group.estimate.map_or_else(|| "Unavailable".into(), |v| format!("{v:.6}")), group.task_cluster_standard_error.map_or_else(|| "Unavailable".into(), |v| format!("{v:.6}"))));
     }
     html.push_str("</table></section>");
     html
+}
+
+/// Keep the machine-readable metric key in `comparison.json`, but never make
+/// readers decode its nested JSON identity in the HTML report.
+fn metric_group_label(key: &str) -> String {
+    let Ok((scope, _policy)) = serde_json::from_str::<(String, serde_json::Value)>(key) else {
+        return key.to_owned();
+    };
+    let Ok(scope) = serde_json::from_str::<serde_json::Value>(&scope) else {
+        return key.to_owned();
+    };
+    let Some(values) = scope.as_array() else {
+        return key.to_owned();
+    };
+    let string = |index| values.get(index).and_then(serde_json::Value::as_str);
+    let (Some(agent), Some(provider), Some(model), Some(workload), Some(kind)) =
+        (string(0), string(1), string(2), string(3), string(7))
+    else {
+        return key.to_owned();
+    };
+    let mut label = format!("{agent} / {provider} / {model} / {workload} · {kind}");
+    if let Some(module) = string(5) {
+        label.push_str(&format!(" · module {module}"));
+    }
+    if let Some(fingerprint) = string(6) {
+        let short = &fingerprint[..fingerprint.len().min(12)];
+        label.push_str(&format!(" · plan {short}"));
+    }
+    label
 }
 
 pub(super) fn group_kind(benchmark: &BenchmarkData) -> &str {
@@ -512,6 +541,14 @@ mod tests {
             serde_json::to_value(&rows[1].execution_cohort).unwrap(),
             before
         );
+    }
+
+    #[test]
+    fn metric_group_html_uses_a_readable_identity_label() {
+        let groups = metric_groups(&[row(false)]).unwrap();
+        let html = metric_html(&groups);
+        assert!(html.contains("fixture / fixture / fixture / bug-fix · bundled-fixture"));
+        assert!(!html.contains("[&quot;fixture&quot;"));
     }
 
     #[test]
