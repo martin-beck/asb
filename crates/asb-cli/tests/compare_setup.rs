@@ -34,6 +34,18 @@ impl Project {
             );
         }
     }
+    /// Setup matrix tests validate selection expansion and generated files,
+    /// not package-manager or source-build recipes.  Keep the fixture wholly
+    /// offline by providing the project-local collector executables that the
+    /// selected matrix requires.
+    fn seed_collector_installations(&self, collectors: &[(&str, &str)]) {
+        for (collector, executable) in collectors {
+            self.write_executable(
+                &format!("tools/{collector}/bin/{executable}"),
+                "#!/bin/sh\nexit 0\n",
+            );
+        }
+    }
     #[cfg(unix)]
     fn write_executable(&self, path: &str, text: &str) {
         let path = self.0.join(path);
@@ -283,6 +295,7 @@ fn compare_rejects_fifo_manifest_benchmark_and_plan_without_waiting_for_a_writer
 #[test]
 fn repeated_selections_generate_scoped_matrix_and_dependencies_without_downloads() {
     let project = Project::new();
+    project.seed_collector_installations(&[("perf", "perf")]);
     let args = [
         "setup",
         "--agent",
@@ -643,6 +656,13 @@ fn all_agents_providers_and_measures_generate_a_matrix_without_literal_all() {
         ("hermes", "hermes"),
         ("cline", "cline"),
         ("continue", "cn"),
+    ]);
+    project.seed_collector_installations(&[
+        ("mpstat", "mpstat"),
+        ("iostat", "iostat"),
+        ("perf", "perf"),
+        ("perfetto", "tracebox"),
+        ("bpftrace", "bpftrace"),
     ]);
     success(project.command(&[
         "setup",
