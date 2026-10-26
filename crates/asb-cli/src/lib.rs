@@ -255,12 +255,14 @@ mod adapter_layout_tests {
             CategoryLayout {
                 category: "agents",
                 ids: super::agents::names().collect(),
-                // Attempt artifact ownership and the sealed causal local-tool
-                // replay transport are generic adapter infrastructure.
+                // Attempt artifact ownership, the sealed causal local-tool replay
+                // transport, and deterministic-execution manifests are generic
+                // adapter infrastructure. Individual adapters only opt in.
                 root_modules: &[
                     "mod.rs",
                     "driver.rs",
                     "artifacts.rs",
+                    "determinism.rs",
                     "tool_replay.rs",
                     "tool_replay_mcp.rs",
                 ],
