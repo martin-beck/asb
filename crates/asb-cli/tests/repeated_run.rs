@@ -96,10 +96,23 @@ sys.exit(7 if (root/'fail-first').exists() and batch == 1 and replica == 1 else 
         self.run_extra(repeat, &[])
     }
     fn run_extra(&self, repeat: &str, extra: &[&str]) -> Output {
+        // This fixture intentionally gives the child a private HOME.  The
+        // bundled workload preflight probes Cargo, whose rustup shim otherwise
+        // interprets that private HOME as a fresh installation and starts a
+        // network toolchain bootstrap.  Preserve only the already-installed
+        // Rust homes from the test runner; all application state remains
+        // isolated by `isolated_env` below.
+        let host_home = std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into());
+        let rustup_home = std::env::var_os("RUSTUP_HOME")
+            .unwrap_or_else(|| PathBuf::from(&host_home).join(".rustup").into_os_string());
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .unwrap_or_else(|| PathBuf::from(&host_home).join(".cargo").into_os_string());
         Command::new(env!("CARGO_BIN_EXE_asb"))
             .current_dir(&self.0)
             .isolated_env()
             .env("HOME", &self.0)
+            .env("RUSTUP_HOME", rustup_home)
+            .env("CARGO_HOME", cargo_home)
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .args([
                 "run",
