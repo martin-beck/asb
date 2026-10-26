@@ -237,7 +237,7 @@ fn unusable_selected_agent_never_runs_a_different_path_installation() {
             &[
                 "run",
                 "benchmark.toml",
-                "--replay",
+                "--llm-replay",
                 "--cassette",
                 "input.jsonl",
             ],
@@ -1357,7 +1357,7 @@ fn replay(project: &Project, behavior: &str, additional: &[&str]) -> Output {
     let mut args = vec![
         "run",
         "benchmark.toml",
-        "--replay",
+        "--llm-replay",
         "--cassette",
         "tape.jsonl",
     ];
@@ -1996,7 +1996,7 @@ fetch(endpoint.replace(/\/$/, '') + (isContinue ? '/chat/completions' : '/v1/cha
                 &[
                     "run",
                     "benchmark.toml",
-                    "--replay",
+                    "--llm-replay",
                     "--cassette",
                     "tape.jsonl",
                     "--json",
