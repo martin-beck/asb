@@ -5,6 +5,7 @@
 
 mod adapters;
 mod artifacts;
+pub(crate) mod determinism;
 pub(crate) mod tool_replay;
 pub(crate) mod tool_replay_mcp;
 pub(crate) use artifacts::{ArtifactFormat, ArtifactOwner, ArtifactSpec, FrozenArtifacts};
