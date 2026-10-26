@@ -198,6 +198,7 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
     }
 }
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
+    super::super::determinism::prepare("pi", context)?;
     let connection = context.connection;
     let directory = context.runtime_dir.join("pi/config");
     let api = match connection.interface {
