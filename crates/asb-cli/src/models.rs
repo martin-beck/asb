@@ -173,8 +173,9 @@ pub fn ensure_tool_capable(
 }
 
 /// Validate replay without contacting a provider: the cassette must contain a
-/// request for the selected model that actually includes tool definitions.
-pub fn ensure_replay_tool_capable(cassette: &Path, model: &str) -> Result<(), Error> {
+/// request for the selected model.  Tool usage is an adapter/runtime property,
+/// not a requirement of every valid provider recording.
+pub fn ensure_replay_model_recorded(cassette: &Path, model: &str) -> Result<(), Error> {
     let metadata = std::fs::metadata(cassette).map_err(|error| {
         Error::Input(format!(
             "cannot inspect replay cassette {}: {error}",
@@ -190,7 +191,6 @@ pub fn ensure_replay_tool_capable(cassette: &Path, model: &str) -> Result<(), Er
             cassette.display()
         ))
     })?;
-    let mut saw_model = false;
     for line in text.lines() {
         let value: Value = serde_json::from_str(line)
             .map_err(|_| Error::Input("replay cassette contains invalid JSONL".into()))?;
@@ -213,29 +213,11 @@ pub fn ensure_replay_tool_capable(cassette: &Path, model: &str) -> Result<(), Er
         if !models_match(recorded_model, model) {
             continue;
         }
-        saw_model = true;
-        let has_tools = body
-            .get("tools")
-            .and_then(Value::as_array)
-            .is_some_and(|tools| !tools.is_empty())
-            || body.get("tool_choice").is_some()
-            || body
-                .get("functions")
-                .and_then(Value::as_array)
-                .is_some_and(|items| !items.is_empty());
-        if has_tools {
-            return Ok(());
-        }
+        return Ok(());
     }
-    if saw_model {
-        Err(Error::Input(format!(
-            "replay cassette has model `{model}` but no tool-calling request; record a workload run with a tool-capable model"
-        )))
-    } else {
-        Err(Error::Input(format!(
-            "replay cassette has no request for model `{model}`; record the same configuration before replay"
-        )))
-    }
+    Err(Error::Input(format!(
+        "replay cassette has no request for model `{model}`; record the same configuration before replay"
+    )))
 }
 
 /// Infer the recorded wire interface without contacting any provider.
@@ -1022,7 +1004,7 @@ mod tests {
                 "{\"request\":{\"method\":\"GET\",\"body\":null}}\n",
                 "{\"request\":{\"body\":{\"model\":\"test-model\",\"tools\":[{}]}}}\n"
             ),
-            |path| ensure_replay_tool_capable(path, "test-model").unwrap(),
+            |path| ensure_replay_model_recorded(path, "test-model").unwrap(),
         );
     }
 
@@ -1037,7 +1019,7 @@ mod tests {
         ] {
             replay_fixture(fixture, |path| {
                 assert!(
-                    ensure_replay_tool_capable(path, "test-model")
+                    ensure_replay_model_recorded(path, "test-model")
                         .unwrap_err()
                         .to_string()
                         .contains(message)
@@ -1047,16 +1029,11 @@ mod tests {
     }
 
     #[test]
-    fn replay_rejects_matching_models_without_a_tool_request() {
+    fn replay_accepts_matching_models_without_a_tool_request() {
         replay_fixture(
             "{\"request\":{\"body\":{\"model\":\"test-model\",\"tools\":[]}}}\n",
             |path| {
-                assert!(
-                    ensure_replay_tool_capable(path, "test-model")
-                        .unwrap_err()
-                        .to_string()
-                        .contains("no tool-calling request")
-                );
+                ensure_replay_model_recorded(path, "test-model").unwrap();
             },
         );
     }
@@ -1068,7 +1045,7 @@ mod tests {
             r#"{"model":"test-model","functions":[{}]}"#,
         ] {
             replay_fixture(&format!("{{\"request\":{{\"body\":{body}}}}}\n"), |path| {
-                ensure_replay_tool_capable(path, "test-model").unwrap();
+                ensure_replay_model_recorded(path, "test-model").unwrap();
             });
         }
     }
@@ -1083,7 +1060,7 @@ mod tests {
                 .set_len(MAX_CASSETTE_BYTES + 1)
                 .unwrap();
             assert!(
-                ensure_replay_tool_capable(path, "test-model")
+                ensure_replay_model_recorded(path, "test-model")
                     .unwrap_err()
                     .to_string()
                     .contains("64 MiB")
@@ -1243,9 +1220,9 @@ mod tests {
 "#,
         )
         .expect("cassette writes");
-        ensure_replay_tool_capable(&path, "tool-model").expect("tool cassette accepted");
+        ensure_replay_model_recorded(&path, "tool-model").expect("model cassette accepted");
         let error =
-            ensure_replay_tool_capable(&path, "other-model").expect_err("wrong model rejected");
+            ensure_replay_model_recorded(&path, "other-model").expect_err("wrong model rejected");
         assert!(error.to_string().contains("no request for model"));
         let _ = std::fs::remove_file(path);
     }
@@ -1260,7 +1237,7 @@ mod tests {
 "#,
         )
         .expect("cassette writes");
-        ensure_replay_tool_capable(&path, "tool-model").expect("namespaced model accepted");
+        ensure_replay_model_recorded(&path, "tool-model").expect("namespaced model accepted");
         let _ = std::fs::remove_file(path);
     }
 
