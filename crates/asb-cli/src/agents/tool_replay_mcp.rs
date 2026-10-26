@@ -20,6 +20,7 @@ const MAX_COMMAND_ARGUMENTS: usize = 32;
 const MAX_COMMAND_ARGUMENT_BYTES: usize = 4096;
 const MAX_COMMAND_OUTPUT: usize = 1024 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
+const STAGED_RUNTIME_EXECUTABLE: &str = "/opt/asb-runtime/asb";
 
 pub(crate) fn entry(args: &[OsString]) -> std::process::ExitCode {
     match run(args) {
@@ -78,11 +79,7 @@ pub(crate) fn launch(
             "this replay requires its sealed local-tool transcript; record the benchmark again before replaying it".into(),
         ));
     }
-    let program = std::env::current_exe().map_err(|error| {
-        Error::Run(format!(
-            "cannot locate the ASB local-tool replay executable: {error}"
-        ))
-    })?;
+    let program = runtime_program(std::env::var_os("ASB_RUNTIME_EXECUTABLE"))?;
     Ok(Launch {
         program,
         args: vec![
@@ -97,6 +94,21 @@ pub(crate) fn launch(
             "--transcript".into(),
             transcript.into_os_string(),
         ],
+    })
+}
+
+/// Guest workloads stage an executable launcher with its matching dynamic
+/// loader under `/opt/asb-runtime`. Child tool servers must use that launcher
+/// rather than the raw executable path: the latter can lack its staged loader
+/// and never answer the client's stdio request.
+fn runtime_program(staged: Option<std::ffi::OsString>) -> Result<PathBuf, Error> {
+    if staged.as_deref() == Some(std::ffi::OsStr::new(STAGED_RUNTIME_EXECUTABLE)) {
+        return Ok(PathBuf::from(STAGED_RUNTIME_EXECUTABLE));
+    }
+    std::env::current_exe().map_err(|error| {
+        Error::Run(format!(
+            "cannot locate the ASB local-tool replay executable: {error}"
+        ))
     })
 }
 
@@ -480,6 +492,14 @@ fn required_path(request: &Value) -> Result<&str, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_tool_service_uses_the_staged_runtime_launcher() {
+        assert_eq!(
+            runtime_program(Some(STAGED_RUNTIME_EXECUTABLE.into())).unwrap(),
+            PathBuf::from(STAGED_RUNTIME_EXECUTABLE)
+        );
+    }
 
     #[test]
     fn record_tools_apply_only_confined_declared_effects() {
