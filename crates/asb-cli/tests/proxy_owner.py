@@ -1,5 +1,6 @@
 """Offline tape owner-loss and outbound-child cleanup qualification."""
 import ctypes
+import errno
 import http.client
 import json
 import os
@@ -74,6 +75,14 @@ def public_cli(binary, root, sibling):
                             chunk = os.read(terminal, 8192)
                         except BlockingIOError:
                             break
+                        except OSError as error:
+                            # Linux reports EIO rather than an empty read when
+                            # the last process attached to a PTY exits. Treat it
+                            # as EOF so the assertion below preserves the child
+                            # output instead of masking the actual launch error.
+                            if error.errno == errno.EIO:
+                                break
+                            raise
                         if not chunk:
                             break
                         output.extend(chunk)
