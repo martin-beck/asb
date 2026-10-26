@@ -131,10 +131,10 @@ fn replay_private_inputs(path: Option<&Path>, replay: bool) -> Result<Vec<Privat
     let local_tools = local_tool_sidecar(path)?;
     let manifest = deterministic_manifest_sidecar(path)?;
     let mut inputs = Vec::new();
-    // Every recorded adapter supplies a local-tool transcript (possibly
-    // empty), but the portable deterministic extension is adapter-owned.  A
-    // record without that extension therefore has no determinism sidecar and
-    // must remain replayable from its sealed tape and tool transcript.
+    // Both replay extensions are adapter-owned.  A sealed record only stages
+    // the sidecars it actually published, so a provider-tape-only adapter
+    // remains replayable without pretending it supports local-tool or
+    // deterministic execution replay.
     let mut stage = |source: PathBuf, description: &str| -> Result<(), String> {
         let metadata = std::fs::symlink_metadata(&source)
             .map_err(|_| format!("{description} is unavailable"))?;
@@ -158,11 +158,15 @@ fn replay_private_inputs(path: Option<&Path>, replay: bool) -> Result<Vec<Privat
         });
         Ok(())
     };
-    stage(local_tools, "sealed local-tool replay transcript")?;
-    match std::fs::symlink_metadata(&manifest) {
-        Ok(_) => stage(manifest, "sealed deterministic replay manifest")?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err("sealed deterministic replay manifest is unavailable".into()),
+    for (source, description) in [
+        (local_tools, "sealed local-tool replay transcript"),
+        (manifest, "sealed deterministic replay manifest"),
+    ] {
+        match std::fs::symlink_metadata(&source) {
+            Ok(_) => stage(source, description)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(format!("{description} is unavailable")),
+        }
     }
     Ok(inputs)
 }
@@ -1361,6 +1365,24 @@ mod tests {
         assert_eq!(inputs[0].target, "local-tools.jsonl");
         assert!(
             replay_private_inputs(Some(&batch.join("replay.jsonl")), false)
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_private_input_allows_provider_tape_only_recordings() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-replay-private-input-tape-only-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let batch = root.join("batch-1");
+        std::fs::create_dir_all(&batch).unwrap();
+        std::fs::write(batch.join("replay.jsonl"), b"provider tape\n").unwrap();
+
+        assert!(
+            replay_private_inputs(Some(&batch.join("replay.jsonl")), true)
                 .unwrap()
                 .is_empty()
         );
