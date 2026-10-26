@@ -1082,6 +1082,7 @@ fn result() -> RunResult<'static> {
         token_usage: Default::default(),
         steps: Some(3),
         tool_calls: Vec::new(),
+        tool_calls_available: true,
         local_tool_transcript: None,
         deterministic_manifest: None,
         cassette: None,
@@ -1214,6 +1215,23 @@ fn final_measurement_errors_preserve_grade_and_disallow_completion_receipts() {
             assert_eq!(measured["workload_artifacts"], serde_json::json!([]));
         }
     }
+}
+
+#[test]
+fn unverified_replay_does_not_publish_a_zero_tool_call_metric() {
+    let fixture = Fixture::new();
+    let dir = fixture.0.join("measurements");
+    let session = measurements::Session::start_with_collectors(&dir, &[], None).unwrap();
+    let mut result = result();
+    result.tool_calls_available = false;
+    assert!(finish_measurements(Some(session), &result).confirmed());
+    let run: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("run.json")).unwrap()).unwrap();
+    assert!(run.get("tool_call_count").is_none());
+    let calls: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("tool-calls.json")).unwrap()).unwrap();
+    assert_eq!(calls["availability"], "unavailable");
+    assert!(calls.get("count").is_none());
 }
 
 #[test]
