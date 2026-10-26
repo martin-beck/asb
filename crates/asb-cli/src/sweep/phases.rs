@@ -138,13 +138,31 @@ impl<'a> PreparedSweep<'a> {
             options.json,
             output,
         )?;
-        // Warm selected workload dependencies before moving old output or taking
-        // input snapshots. This is execution preflight, never optional metadata
-        // discovery. Deduplicate over the full population, not once per task.
-        let mut prepared = BTreeSet::new();
+        // Warm every selected execution dependency before moving old output or
+        // taking input snapshots. This is execution preflight, never optional
+        // metadata discovery: an automatic project-local install after the
+        // initial seal would make ASB's own installation look like an external
+        // input mutation. Deduplicate over the full population, not once per
+        // task.
+        let mut prepared_execution = BTreeSet::new();
+        let mut prepared_workloads = BTreeSet::new();
         for entry in plan.entries.iter().filter(|_| !options.resume) {
             let (root, project) = crate::project::load(&parent.join(&entry.reference))?;
-            if prepared.insert((
+            let preparation_key = toml::to_string(&entry.configuration).map_err(|error| {
+                Error::Input(format!("cannot encode benchmark preparation: {error}"))
+            })?;
+            if prepared_execution.insert((root.clone(), preparation_key)) {
+                let mut messages = Vec::new();
+                crate::install::ensure_execution_requirements(
+                    &entry.configuration,
+                    &parent.join(&entry.reference),
+                    &mut messages,
+                )?;
+                if !options.json {
+                    output.write_all(&messages).map_err(crate::io_error)?;
+                }
+            }
+            if prepared_workloads.insert((
                 root.clone(),
                 entry.configuration.workload.clone(),
                 entry.configuration.agent.clone(),
