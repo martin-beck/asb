@@ -326,6 +326,31 @@ function normalizeCassetteBody(body) {
           && key === "tool_call_id") {
         return canonicalToolCallIdentifier(value);
       }
+      // Anthropic-compatible clients assign a fresh opaque ID to each
+      // assistant content block.  It identifies the provider protocol turn,
+      // not user input or a tool argument; canonicalize the fixed wire path
+      // while retaining all neighboring block fields for strict matching.
+      if (typeof value === "string"
+          && path.length === 5
+          && path[0] === "messages"
+          && /^\d+$/.test(path[1])
+          && path[2] === "content"
+          && /^\d+$/.test(path[3])
+          && path[4] === "id"
+          && key === "id") {
+        return canonicalToolCallIdentifier(value);
+      }
+      // WorkBuddy carries a process-local conversation request identifier in
+      // each OpenAI-compatible history item.  It is not a model-visible
+      // instruction or result and naturally changes for every replay.
+      if (typeof value === "string"
+          && path.length === 3
+          && path[0] === "messages"
+          && /^\d+$/.test(path[1])
+          && path[2] === "conversationRequestId"
+          && key === "conversationRequestId") {
+        return "<asb-workbuddy-conversation-request>";
+      }
       if (typeof value === "string") {
         const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
         const cleaned = value.replace(/\n?\.\.\/.*AGENTS\.md\n?/gm, "");

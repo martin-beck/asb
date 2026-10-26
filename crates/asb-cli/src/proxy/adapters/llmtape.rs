@@ -1011,6 +1011,27 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_anthropic_content_and_workbuddy_conversation_ids() {
+        let root = test_root();
+        let cassette = root.join("adapter-volatile-ids.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"role":"assistant","conversationRequestId":"0123456789abcdef0123456789abcdef","content":[{"type":"tool_use","id":"toolu_01ARecord","name":"read_file","input":{"path":"src/lib.rs"}}]}],"temperature":0}"#;
+        let replayed = r#"{"model":"m","messages":[{"role":"assistant","conversationRequestId":"abcdef0123456789abcdef0123456789","content":[{"type":"tool_use","id":"toolu_01BReplay","name":"read_file","input":{"path":"src/lib.rs"}}]}],"temperature":0}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/messages", "body":recorded},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let response = request_to(&session, "/v1/messages", replayed);
+        if !response.contains("200 OK") {
+            let error = session.stop().unwrap_err();
+            panic!("{response}\n{error}");
+        }
+        session.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_rejects_oversized_request_during_streaming() {
         let root = test_root();
         let cassette = cassette(&root);
