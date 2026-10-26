@@ -360,20 +360,13 @@ fn stage_determinism_manifest(
     root: &Path,
     input: &ReplayInput,
     destination: &Path,
-    replica: usize,
-    concurrency: usize,
+    _replica: usize,
+    _concurrency: usize,
 ) -> Result<(), Error> {
     let Some(manifest) = &input.deterministic_manifest else {
         return Ok(());
     };
-    let destination = destination
-        .parent()
-        .expect("replay destination has parent")
-        .join(if concurrency == 1 {
-            "determinism-manifest.json".into()
-        } else {
-            format!("determinism-manifest-{replica}.json")
-        });
+    let destination = replay_sidecar(destination, "determinism-manifest", "json")?;
     fs::hard_link(root.join(manifest), destination).map_err(crate::io_error)
 }
 
@@ -381,21 +374,36 @@ fn stage_local_tools(
     root: &Path,
     input: &ReplayInput,
     destination: &Path,
-    replica: usize,
-    concurrency: usize,
+    _replica: usize,
+    _concurrency: usize,
 ) -> Result<(), Error> {
     let Some(local_tools) = &input.local_tools else {
         return Ok(());
     };
-    let destination = destination
-        .parent()
-        .expect("replay destination has parent")
-        .join(if concurrency == 1 {
-            "local-tools.jsonl".into()
-        } else {
-            format!("local-tools-{replica}.jsonl")
-        });
+    let destination = replay_sidecar(destination, "local-tools", "jsonl")?;
     fs::hard_link(root.join(local_tools), destination).map_err(crate::io_error)
+}
+
+/// Keep sidecar names coupled to the precise replay payload they describe.
+///
+/// In particular, concurrent replay payloads use the legacy
+/// `replay-concurrency-N.jsonl` shape.  Adapters derive their sealed
+/// transcripts and deterministic manifests from that exact name, so deriving
+/// sidecars from a replica number would leave a valid recorded artifact
+/// invisible at replay time.
+fn replay_sidecar(destination: &Path, prefix: &str, extension: &str) -> Result<PathBuf, Error> {
+    let name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::Input("replay destination has no valid filename".into()))?;
+    let suffix = name
+        .strip_prefix("replay")
+        .and_then(|suffix| suffix.strip_suffix(".jsonl"))
+        .ok_or_else(|| Error::Input("replay destination has an invalid filename".into()))?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| Error::Input("replay destination has no parent directory".into()))?;
+    Ok(parent.join(format!("{prefix}{suffix}.{extension}")))
 }
 
 fn generated_seed() -> u64 {
@@ -466,13 +474,13 @@ mod tests {
             bytes: 2,
             sha256: "a".repeat(64),
         };
-        let destination = root.join("batch/replay.jsonl");
+        let destination = root.join("batch/replay-concurrency-3.jsonl");
         stage_local_tools(&root, &input, &destination, 3, 4).unwrap();
         assert_eq!(
-            fs::read(root.join("batch/local-tools-3.jsonl")).unwrap(),
+            fs::read(root.join("batch/local-tools-concurrency-3.jsonl")).unwrap(),
             b"{\"sequence\":1}\n"
         );
-        assert!(!root.join("batch/local-tools-1.jsonl").exists());
+        assert!(!root.join("batch/local-tools-concurrency-1.jsonl").exists());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -521,12 +529,23 @@ mod tests {
             bytes: 2,
             sha256: "a".repeat(64),
         };
-        stage_determinism_manifest(&root, &input, &root.join("batch/replay.jsonl"), 3, 4).unwrap();
+        stage_determinism_manifest(
+            &root,
+            &input,
+            &root.join("batch/replay-concurrency-3.jsonl"),
+            3,
+            4,
+        )
+        .unwrap();
         assert_eq!(
-            fs::read(root.join("batch/determinism-manifest-3.json")).unwrap(),
+            fs::read(root.join("batch/determinism-manifest-concurrency-3.json")).unwrap(),
             b"{}\n"
         );
-        assert!(!root.join("batch/determinism-manifest-1.json").exists());
+        assert!(
+            !root
+                .join("batch/determinism-manifest-concurrency-1.json")
+                .exists()
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

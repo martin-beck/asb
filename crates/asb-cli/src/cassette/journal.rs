@@ -364,6 +364,20 @@ impl RecordingJournal {
         source_index: usize,
         source: &mut dyn Read,
     ) -> Result<(), Error> {
+        self.import_track_with_artifacts(track, source_index, source, Vec::new())
+    }
+
+    /// Import a reserved original track together with every sealed auxiliary
+    /// payload it declares.  A continuation must preserve local-tool and
+    /// deterministic sidecars exactly; publishing only the provider body
+    /// would produce a cassette that cannot safely replay.
+    pub fn import_track_with_artifacts(
+        &mut self,
+        track: Track,
+        source_index: usize,
+        source: &mut dyn Read,
+        artifacts: Vec<ArtifactInput<'_>>,
+    ) -> Result<(), Error> {
         self.check_root()?;
         self.ensure_recording()?;
         self.intent
@@ -390,7 +404,7 @@ impl RecordingJournal {
             &serde_json::to_vec(&started).map_err(json_error)?,
         )?;
         self.starts.insert(track.id, started);
-        self.commit_bundle(track, source, Vec::new())
+        self.commit_bundle(track, source, artifacts)
     }
 
     /// Explicitly finish an artifact import after interruption. This never

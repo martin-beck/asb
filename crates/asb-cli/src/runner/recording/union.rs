@@ -308,8 +308,31 @@ impl Descriptor {
                     .map_err(recording_error)?
                     .clone();
                 let payload = archive.read_track(imported.slot).map_err(recording_error)?;
+                let mut artifact_payloads = Vec::new();
+                for artifact in &track.artifacts {
+                    artifact_payloads.push((
+                        artifact.clone(),
+                        std::io::Cursor::new(
+                            archive
+                                .read_artifact(imported.slot, &artifact.kind)
+                                .map_err(recording_error)?,
+                        ),
+                    ));
+                }
+                let artifact_inputs = artifact_payloads
+                    .iter_mut()
+                    .map(|(artifact, bytes)| crate::cassette::ArtifactInput {
+                        artifact: artifact.clone(),
+                        source: bytes,
+                    })
+                    .collect();
                 journal
-                    .import_track(track, index, &mut payload.as_slice())
+                    .import_track_with_artifacts(
+                        track,
+                        index,
+                        &mut payload.as_slice(),
+                        artifact_inputs,
+                    )
                     .map_err(recording_error)?;
             }
         }
