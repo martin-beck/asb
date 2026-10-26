@@ -217,6 +217,37 @@ function normalizeRequestBody(url, body) {
 // Result workspaces are intentionally different for record and replay.  Keep
 // absolute project paths out of cassette keys while forwarding the normalized
 // request body unchanged to the live provider during recording.
+function normalizeToolSearchOrdering(value) {
+  // OpenCode's built-in repository search can return identical match blocks in
+  // filesystem enumeration order. Fresh workload materialization is allowed
+  // to change that order, but not the observed paths or lines. Restrict the
+  // canonicalization to its fully formed /testbed match report so prompts,
+  // commands, and arbitrary tool output remain cassette-significant.
+  const header = value.match(/^(Found \d+ matches\n)/);
+  if (!header) return value;
+  const body = value.slice(header[0].length);
+  const trailingNewline = body.endsWith("\n");
+  const blocks = body.split(/\n{2,}(?=\/testbed\/)/).map((block) => block.replace(/\n+$/, ""));
+  if (blocks.length < 2 || blocks.some((block) => !block.startsWith("/testbed/"))) {
+    return value;
+  }
+  return header[0] + blocks.sort((left, right) => left.localeCompare(right)).join("\n\n")
+    + (trailingNewline ? "\n" : "");
+}
+
+function normalizeLsDiagnosticOrdering(value) {
+  // A single `ls` invocation can write directory entries to stdout while a
+  // missing operand diagnostic goes to stderr. OpenCode captures both streams
+  // in one tool result, but their relative scheduling is not stable. Retain
+  // every diagnostic and every listing line; only place these fixed `ls`
+  // diagnostics before the corresponding stdout rendering for comparison.
+  const lines = value.split("\n");
+  const diagnostics = lines.filter((line) => /^ls: cannot access '.+': /.test(line));
+  if (diagnostics.length === 0) return value;
+  const ordinary = lines.filter((line) => !/^ls: cannot access '.+': /.test(line));
+  return [...diagnostics.sort(), ...ordinary].join("\n");
+}
+
 function normalizeCassetteBody(body) {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
@@ -262,7 +293,20 @@ function normalizeCassetteBody(body) {
     // value markers.
     .replace(/"call_<asb-call>":/g, '"call_id":')
     .replace(/\bmsg_resp_[A-Za-z0-9_-]+/g, "msg_resp_<asb-response>")
-    .replace(/Chunk ID: [0-9a-f]+/gi, "Chunk ID: <asb-chunk>");
+    .replace(/Chunk ID: [0-9a-f]+/gi, "Chunk ID: <asb-chunk>")
+    // OpenCode persists truncated command output beneath a timestamp-derived
+    // private filename.  Python tracebacks in that output also contain ASLR
+    // addresses and pytest's terminal summary reports elapsed time.  They are
+    // observations of the same tool result, not provider input semantics;
+    // retain all file contents, failure counts, and commands while replacing
+    // only those run-local rendering details before cassette comparison.
+    .replace(/\/opt\/asb-private\/agent-state\/data\/opencode\/tool-output\/tool_[A-Za-z0-9_-]+/g, "<asb-opencode-tool-output>")
+    .replace(/(<function [^\n>]+ at )0x[0-9a-f]+>/gi, "$1<asb-address>>")
+    .replace(/((?:\b\d+ (?:failed|passed|skipped|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1<asb-elapsed>")
+    // pip's download progress embeds live transfer throughput and ETA after
+    // the already-significant artifact size. Keep the package and byte count
+    // strict while removing only transport timing from tool history.
+    .replace(/(\b\d+(?:\.\d+)?\/\d+(?:\.\d+)? (?:kB|MB|GB) )\d+(?:\.\d+)? (?:kB|MB|GB)\/s eta \d+:\d+:\d+/g, "$1<asb-transfer-rate> eta <asb-transfer-eta>");
   try {
     const structuredToolCallIdentifiers = new Map();
     const structuredContentBlockIdentifiers = new Map();
@@ -395,6 +439,8 @@ function normalizeCassetteBody(body) {
         return "<asb-workbuddy-conversation-request>";
       }
       if (typeof value === "string") {
+        value = normalizeToolSearchOrdering(value);
+        value = normalizeLsDiagnosticOrdering(value);
         const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
         const cleaned = value.replace(/\n?\.\.\/.*AGENTS\.md\n?/gm, "");
         const withoutGuidance = hadParentGuidance ? cleaned.replace(/\n+$/g, "") : cleaned;
