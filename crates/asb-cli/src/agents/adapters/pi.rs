@@ -200,7 +200,6 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             context.config.model.clone(),
             "--mode".into(),
             "json".into(),
-            "--print".into(),
         ],
         prompt_delivery: PromptDelivery::Argument,
     }
@@ -247,9 +246,24 @@ fn prepare_tool_replay(
     })?;
     std::fs::write(&extension, TOOL_REPLAY_EXTENSION)
         .map_err(|error| Error::Run(format!("cannot write Pi local-tool extension: {error}")))?;
+    // `OsString` has a platform-specific structured serde representation.
+    // Pi's Node extension needs a JSON command line, so render the already
+    // validated private paths/arguments as plain strings before serializing.
+    let program = launch.program.to_str().ok_or_else(|| {
+        Error::Run("ASB local-tool replay executable path is not valid UTF-8".into())
+    })?;
+    let args = launch
+        .args
+        .iter()
+        .map(|argument| {
+            argument.to_str().map(str::to_owned).ok_or_else(|| {
+                Error::Run("ASB local-tool replay arguments are not valid UTF-8".into())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let launch = serde_json::json!({
-        "program": launch.program,
-        "args": launch.args,
+        "program": program,
+        "args": args,
     });
     context.command.args([
         "--no-builtin-tools",
@@ -278,9 +292,16 @@ import { createInterface } from "node:readline";
 
 const spec = JSON.parse(process.env.ASB_PI_LOCAL_TOOL_REPLAY ?? "");
 if (!spec.program || !Array.isArray(spec.args)) throw new Error("ASB local tool service is unavailable");
-const child = spawn(spec.program, spec.args, { stdio: ["pipe", "pipe", "ignore"] });
+const child = spawn(spec.program, spec.args, { stdio: ["pipe", "pipe", "pipe"] });
 let nextId = 1;
 const pending = new Map();
+let terminalError = "";
+child.stderr.setEncoding("utf8");
+child.stderr.on("data", (chunk) => { terminalError = (terminalError + chunk).slice(-2048); });
+function serviceError(detail) {
+  const suffix = terminalError.trim();
+  return new Error(`ASB local tool service ${detail}${suffix ? `: ${suffix}` : ""}`);
+}
 createInterface({ input: child.stdout }).on("line", (line) => {
   let response;
   try { response = JSON.parse(line); } catch { return; }
@@ -291,14 +312,24 @@ createInterface({ input: child.stdout }).on("line", (line) => {
   else entry.resolve(response.result);
 });
 child.once("error", () => {
-  for (const entry of pending.values()) entry.reject(new Error("ASB local tool service stopped"));
+  for (const entry of pending.values()) entry.reject(serviceError("failed to start"));
+  pending.clear();
+});
+child.once("exit", (code, signal) => {
+  if (pending.size === 0) return;
+  const status = signal ? `stopped by ${signal}` : `exited with status ${code ?? "unknown"}`;
+  for (const entry of pending.values()) entry.reject(serviceError(status));
   pending.clear();
 });
 function call(name, args) {
   return new Promise((resolve, reject) => {
     const id = nextId++;
     pending.set(id, { resolve, reject });
-    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) + "\\n");
+    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) + "\\n", (error) => {
+      if (!error || !pending.has(id)) return;
+      pending.delete(id);
+      reject(serviceError("could not receive a request"));
+    });
   }).then((result) => JSON.parse(result.content?.[0]?.text ?? "{}"));
 }
 function result(value) { return { content: [{ type: "text", text: JSON.stringify(value) }], details: {} }; }
@@ -486,10 +517,24 @@ mod tests {
         let extension = root.join("runtime/pi/asb-local-tools.ts");
         let source = std::fs::read_to_string(extension).unwrap();
         assert!(source.contains("run_command"));
+        assert!(source.contains("stdio: [\"pipe\", \"pipe\", \"pipe\"]"));
+        assert!(source.contains("child.once(\"exit\""));
+        assert!(source.contains("terminalError"));
         assert!(run_dir.join("tool-replay/local-tools.jsonl").is_file());
-        assert!(command.get_envs().any(|(name, value)| {
-            name.to_string_lossy() == "ASB_PI_LOCAL_TOOL_REPLAY" && value.is_some()
-        }));
+        let launch = command
+            .get_envs()
+            .find(|(name, _)| name.to_string_lossy() == "ASB_PI_LOCAL_TOOL_REPLAY")
+            .and_then(|(_, value)| value)
+            .expect("Pi local-tool launch specification");
+        let launch = serde_json::from_str::<serde_json::Value>(&launch.to_string_lossy()).unwrap();
+        assert_eq!(launch["args"][0], "__asb-tool-replay");
+        assert!(
+            launch["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|value| value.is_string())
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

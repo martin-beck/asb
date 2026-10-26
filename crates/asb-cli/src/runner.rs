@@ -2530,7 +2530,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_cli2key_uses_openai_bridge_and_print_mode() {
+    fn pi_cli2key_uses_json_event_mode_without_single_response_exit() {
         let config = BenchmarkConfig {
             planning: None,
             agent: "pi".into(),
@@ -2549,9 +2549,12 @@ mod tests {
         assert_eq!(command.program, "pi");
         assert_eq!(command.args[0], "--provider");
         assert_eq!(command.args[1], "asb");
-        assert!(command.args.contains(&"--print".into()));
         assert!(command.args.contains(&"--mode".into()));
         assert!(command.args.contains(&"json".into()));
+        assert!(
+            !command.args.contains(&"--print".into()),
+            "Pi JSON mode must retain the agent loop after tool calls"
+        );
         assert_eq!(
             command.prompt_delivery,
             crate::agents::PromptDelivery::Argument
