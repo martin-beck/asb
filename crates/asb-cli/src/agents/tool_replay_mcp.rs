@@ -25,7 +25,14 @@ const STAGED_RUNTIME_EXECUTABLE: &str = "/opt/asb-runtime/asb";
 pub(crate) fn entry(args: &[OsString]) -> std::process::ExitCode {
     match run(args) {
         Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(_) => std::process::ExitCode::from(2),
+        Err(error) => {
+            // This process is an adapter-private stdio server.  Its stdout is
+            // reserved exclusively for JSON-RPC, but stderr is inherited by
+            // the adapter and is the only safe way to explain a nonzero exit
+            // to clients such as Pi.
+            eprintln!("ASB local-tool service: {error}");
+            std::process::ExitCode::from(2)
+        }
     }
 }
 

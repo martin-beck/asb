@@ -297,7 +297,7 @@ function call(name, args) {
   // MCP request per tool invocation instead: stdin reaches EOF, the service
   // atomically publishes its transcript, and any launcher/stdio failure is
   // returned to Pi rather than leaving the agent turn pending indefinitely.
-  const request = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) + "\\n";
+  const request = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) + "\n";
   const child = spawnSync(spec.program, spec.args, {
     input: request,
     encoding: "utf8",
@@ -310,7 +310,7 @@ function call(name, args) {
     const status = child.signal ? `stopped by ${child.signal}` : `exited with status ${child.status ?? "unknown"}`;
     throw new Error(`ASB local tool service ${status}${stderr ? `: ${stderr}` : ""}`);
   }
-  const response = String(child.stdout ?? "").trim().split(/\\r?\\n/).map((line) => JSON.parse(line)).find((value) => value.id === 1);
+  const response = String(child.stdout ?? "").trim().split(/\r?\n/).map((line) => JSON.parse(line)).find((value) => value.id === 1);
   if (!response) throw new Error(`ASB local tool service returned no response${stderr ? `: ${stderr}` : ""}`);
   if (response.error) throw new Error("ASB local tool request failed");
   return JSON.parse(response.result?.content?.[0]?.text ?? "{}");
@@ -503,6 +503,11 @@ mod tests {
         assert!(source.contains("spawnSync(spec.program, spec.args"));
         assert!(source.contains("timeout: 45000"));
         assert!(source.contains("returned no response"));
+        // The generated TypeScript must send a real line delimiter, not the
+        // two literal bytes backslash+n that make the Rust JSONL server see
+        // one malformed request.
+        assert!(source.contains(r#"}) + "\n";"#));
+        assert!(!source.contains(r#"}) + "\\n";"#));
         assert!(!source.contains("const pending = new Map()"));
         assert!(run_dir.join("tool-replay/local-tools.jsonl").is_file());
         let launch = command
