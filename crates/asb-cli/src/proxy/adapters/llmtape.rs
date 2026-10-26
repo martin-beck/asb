@@ -994,6 +994,23 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_opaque_openai_tool_call_ids_in_message_history() {
+        let root = test_root();
+        let cassette = root.join("opaque-tool-calls.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"call_11111111-1111-1111-1111-111111111111","type":"function","function":{"name":"read_file","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_11111111-1111-1111-1111-111111111111","content":"done"}]}"#;
+        let replayed = r#"{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"22222222-2222-2222-2222-222222222222","type":"function","function":{"name":"read_file","arguments":"{}"}}]},{"role":"tool","tool_call_id":"22222222-2222-2222-2222-222222222222","content":"done"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body":recorded},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, replayed).contains("200 OK"));
+        session.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_rejects_oversized_request_during_streaming() {
         let root = test_root();
         let cassette = cassette(&root);
