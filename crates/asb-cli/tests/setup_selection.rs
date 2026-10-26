@@ -199,6 +199,7 @@ fn all_five_catalogs_accept_explicit_instances_and_reject_missing_or_unknown_bef
 #[test]
 fn enabled_trial_sets_round_trip_and_invalid_selections_preserve_existing_config() {
     let project = Project::new();
+    project.seed_pi();
     project.write(
         "catalogs/selected.workload.toml",
         "workload='agentbench'\n[[trials]]\nid='one'\ndescription='enabled fixture'\n",
