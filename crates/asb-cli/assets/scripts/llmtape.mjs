@@ -116,7 +116,7 @@ async function replayResponse(response, interaction) {
   // but Claude requires IDs to be unique across turns. Give each replayed
   // response a fresh local ID without changing the cassette evidence.
   const replayToolIds = new Map();
-  const replayBody = body.replace(/<asb-call(?:-\d+)?>/g, (marker) => {
+  const replayBody = body.replace(/<asb-(?:call(?:-\d+)?|tool-call-\d+|content-block-\d+)>/g, (marker) => {
     if (!replayToolIds.has(marker)) {
       replayToolIds.set(marker, `asb-replay-${process.pid}-${Date.now()}-${replayToolIds.size + 1}`);
     }

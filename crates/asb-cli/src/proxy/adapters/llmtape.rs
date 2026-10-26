@@ -994,11 +994,48 @@ mod tests {
     }
 
     #[test]
+    fn replay_materializes_structured_identity_markers_in_responses() {
+        let root = test_root();
+        let cassette = root.join("structured-identity-response.jsonl");
+        let request_body = r#"{"model":"m","messages":[{"role":"user","content":"work"}]}"#;
+        let response_body = r#"{"tool_calls":[{"id":"<asb-tool-call-1>"}],"content":[{"id":"<asb-content-block-1>"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body":request_body},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":response_body}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let response = request(&session, request_body);
+        assert!(response.contains("asb-replay-"), "{response}");
+        assert!(!response.contains("<asb-tool-call-1>"), "{response}");
+        assert!(!response.contains("<asb-content-block-1>"), "{response}");
+        session.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_opaque_openai_tool_call_ids_in_message_history() {
         let root = test_root();
         let cassette = root.join("opaque-tool-calls.jsonl");
         let recorded = r#"{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"call_11111111-1111-1111-1111-111111111111","type":"function","function":{"name":"read_file","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_11111111-1111-1111-1111-111111111111","content":"done"}]}"#;
         let replayed = r#"{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"22222222-2222-2222-2222-222222222222","type":"function","function":{"name":"read_file","arguments":"{}"}}]},{"role":"tool","tool_call_id":"22222222-2222-2222-2222-222222222222","content":"done"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body":recorded},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, replayed).contains("200 OK"));
+        session.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_legacy_tape_tool_call_markers_structurally() {
+        let root = test_root();
+        let cassette = root.join("legacy-tool-call-marker.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"<asb-call-2>","type":"function","function":{"name":"read_file","arguments":"{}"}}]},{"role":"tool","tool_call_id":"<asb-call-2>","content":"done"}]}"#;
+        let replayed = r#"{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"call_33333333-3333-3333-3333-333333333333","type":"function","function":{"name":"read_file","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_33333333-3333-3333-3333-333333333333","content":"done"}]}"#;
         let line = serde_json::json!({
             "request": {"method":"POST", "url":"/v1/chat/completions", "body":recorded},
             "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
