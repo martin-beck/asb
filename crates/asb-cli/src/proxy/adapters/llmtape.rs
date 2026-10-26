@@ -34,6 +34,7 @@ struct RunningLlmtape {
     builtin: bool,
     url: String,
     progress: Option<PathBuf>,
+    mismatch_evidence: Option<PathBuf>,
     cassette: PathBuf,
     mode: Mode,
     cleanup_confirmed: bool,
@@ -118,6 +119,7 @@ impl ProxyAdapter for LlmtapeAdapter {
         command.env_remove("ASB_TAPE_OWNER_PIPE");
         command.env_remove("ASB_TAPE_CAPTURE_RECEIPT");
         command.env_remove("ASB_TAPE_CAPTURE_NONCE");
+        command.env_remove("ASB_TAPE_MISMATCH_EVIDENCE");
         let capture = (builtin && request.mode == Mode::Record).then(|| {
             (
                 scratch.path.join("capture.json"),
@@ -155,6 +157,10 @@ impl ProxyAdapter for LlmtapeAdapter {
             Mode::Replay => {
                 command.args(["--cassette"]);
                 command.arg(&replay_cassette);
+                command.env(
+                    "ASB_TAPE_MISMATCH_EVIDENCE",
+                    scratch.path.join("mismatch.json"),
+                );
                 if request.respect_record_timings {
                     command.arg("--respect-record-timings");
                 }
@@ -204,6 +210,8 @@ impl ProxyAdapter for LlmtapeAdapter {
             url: format!("http://127.0.0.1:{port}/v1"),
             progress: (request.mode == Mode::Replay)
                 .then(|| replay_cassette.with_extension("jsonl.progress.json")),
+            mismatch_evidence: (request.mode == Mode::Replay)
+                .then(|| scratch.path.join("mismatch.json")),
             cassette: cassette.clone(),
             mode: request.mode,
             cleanup_confirmed: false,
@@ -406,8 +414,17 @@ impl ProxySession for RunningLlmtape {
                 let mismatch = replay_mismatch_context(&value)
                     .map(|context| format!("; first mismatch: {context}"))
                     .unwrap_or_default();
+                let evidence = self
+                    .mismatch_evidence
+                    .as_deref()
+                    .filter(|path| path.is_file())
+                    .and_then(|path| self._scratch.retain_mismatch_evidence(path).ok())
+                    .map(|path| {
+                        format!("; private mismatch evidence retained at {}", path.display())
+                    })
+                    .unwrap_or_default();
                 return Err(Error::Run(format!(
-                    "replay rejected {rejected} request(s) for {}{mismatch}; the normalized request or sequence differs from the recording",
+                    "replay rejected {rejected} request(s) for {}{mismatch}{evidence}; the normalized request or sequence differs from the recording",
                     self.cassette.display(),
                 )));
             }
@@ -652,6 +669,22 @@ impl Scratch {
             "cannot allocate a unique tape session directory".into(),
         ))
     }
+
+    fn retain_mismatch_evidence(&mut self, evidence: &Path) -> Result<PathBuf, Error> {
+        let name = self.path.file_name().ok_or_else(|| {
+            Error::Run("cannot derive private replay mismatch evidence name".into())
+        })?;
+        let destination = self
+            .path
+            .with_file_name(format!("{}.mismatch.json", name.to_string_lossy()));
+        std::fs::rename(evidence, &destination).map_err(|error| {
+            Error::Run(format!(
+                "cannot retain private replay mismatch evidence at {}: {error}",
+                destination.display()
+            ))
+        })?;
+        Ok(destination)
+    }
 }
 
 fn shell_quote(path: &Path) -> String {
@@ -702,6 +735,7 @@ mod tests {
                 builtin: true,
                 url: String::new(),
                 progress: None,
+                mismatch_evidence: None,
                 cassette: root.join("tape"),
                 mode: Mode::Record,
                 cleanup_confirmed: false,

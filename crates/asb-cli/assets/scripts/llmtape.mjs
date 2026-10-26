@@ -48,6 +48,7 @@ const readyFile = process.env.ASB_TAPE_READY_FILE;
 if (!Number.isInteger(port) || port < (readyFile ? 0 : 1) || port > 65535) usage("--port must be a valid TCP port");
 const cassette = mode === "record" ? option(args, "--out") : option(args, "--cassette");
 const upstream = mode === "record" ? option(args, "--upstream") : undefined;
+const mismatchEvidence = process.env.ASB_TAPE_MISMATCH_EVIDENCE;
 const respectRecordTimings = args.includes("--respect-record-timings");
 const captureReceipt = process.env.ASB_TAPE_CAPTURE_RECEIPT;
 const captureNonce = process.env.ASB_TAPE_CAPTURE_NONCE;
@@ -63,6 +64,9 @@ const capture = captureReceipt
 const activeCaptures = new Set();
 if (respectRecordTimings && mode !== "replay") {
   usage("--respect-record-timings is only valid with replay");
+}
+if (mismatchEvidence && (mode !== "replay" || !isAbsolute(mismatchEvidence))) {
+  usage("invalid private mismatch evidence destination");
 }
 
 function headersObject(headers) {
@@ -591,6 +595,47 @@ function requestMismatch(expected, actual, sequence) {
   }
 }
 
+function redactMismatchValue(value, key = "") {
+  if (/token|secret|password|authorization|credential|api[_-]?key/i.test(key)) {
+    return "[redacted]";
+  }
+  if (Array.isArray(value)) return value.map((item) => redactMismatchValue(item));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([child, item]) => [child, redactMismatchValue(item, child)]));
+  }
+  return value;
+}
+
+function diagnosticRequest(request) {
+  const body = request.body ?? "";
+  try {
+    return { method: request.method, url: request.url, body: redactMismatchValue(JSON.parse(body)) };
+  } catch {
+    const redacted = body.replace(
+      /((?:token|secret|password|authorization|credential|api[_-]?key)\s*[=:]\s*)([^\s,;]+)/gi,
+      "$1[redacted]",
+    );
+    return { method: request.method, url: request.url, body: redacted.length <= MAX_BODY ? redacted : "[omitted: body exceeds limit]" };
+  }
+}
+
+function retainMismatchEvidence(expected, actual, mismatch) {
+  if (!mismatchEvidence || existsSync(mismatchEvidence)) return;
+  const evidence = JSON.stringify({
+    schema_version: 1,
+    mismatch,
+    expected: diagnosticRequest(expected),
+    actual: diagnosticRequest(actual),
+  });
+  if (Buffer.byteLength(evidence, "utf8") > 2 * MAX_BODY) return;
+  // A diagnostic artifact is best-effort: inability to retain it must never
+  // convert the original strict replay mismatch into a misleading transport
+  // failure.
+  try {
+    writeFileSync(mismatchEvidence, evidence, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  } catch {}
+}
+
 function reject(mismatch) {
   rejected += 1;
   firstMismatch ??= mismatch;
@@ -704,7 +749,9 @@ async function handle(request, response, recording) {
         await replayResponse(response, retry);
         return;
       }
-      reject(requestMismatch(interaction.request, recordedRequest, cursor + 1));
+      const mismatch = requestMismatch(interaction.request, recordedRequest, cursor + 1);
+      retainMismatchEvidence(interaction.request, recordedRequest, mismatch);
+      reject(mismatch);
       response.writeHead(409, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: "request does not match cassette" }));
       return;
