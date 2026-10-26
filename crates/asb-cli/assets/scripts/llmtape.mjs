@@ -251,6 +251,16 @@ function normalizeCassetteBody(body) {
     .replace(/\bmsg_resp_[A-Za-z0-9_-]+/g, "msg_resp_<asb-response>")
     .replace(/Chunk ID: [0-9a-f]+/gi, "Chunk ID: <asb-chunk>");
   try {
+    const structuredToolCallIdentifiers = new Map();
+    const canonicalToolCallIdentifier = (identifier) => {
+      if (!structuredToolCallIdentifiers.has(identifier)) {
+        structuredToolCallIdentifiers.set(
+          identifier,
+          `<asb-tool-call-${structuredToolCallIdentifiers.size + 1}>`,
+        );
+      }
+      return structuredToolCallIdentifiers.get(identifier);
+    };
     const sort = (value, key = "", path = []) => {
       // Claude Code embeds a fresh device identifier in metadata.user_id on
       // every process. It is client telemetry, not provider input, and must
@@ -292,6 +302,29 @@ function normalizeCassetteBody(body) {
       if (path.length === 3 && path[0] === "input" && /^\d+$/.test(path[1])
           && path[2] === "call_id" && key === "call_id") {
         return "<asb-codex-input-call-id>";
+      }
+      // OpenAI-compatible agents can generate a fresh opaque identifier for
+      // an otherwise identical tool turn.  Normalize only the protocol's
+      // explicit tool-call identity fields, retaining their relationship
+      // within this request.  Do not touch similarly named prompt data or
+      // function arguments, which remain replay-significant.
+      if (typeof value === "string"
+          && path.length === 5
+          && path[0] === "messages"
+          && /^\d+$/.test(path[1])
+          && path[2] === "tool_calls"
+          && /^\d+$/.test(path[3])
+          && path[4] === "id"
+          && key === "id") {
+        return canonicalToolCallIdentifier(value);
+      }
+      if (typeof value === "string"
+          && path.length === 3
+          && path[0] === "messages"
+          && /^\d+$/.test(path[1])
+          && path[2] === "tool_call_id"
+          && key === "tool_call_id") {
+        return canonicalToolCallIdentifier(value);
       }
       if (typeof value === "string") {
         const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
