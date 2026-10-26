@@ -1014,6 +1014,38 @@ mod tests {
     }
 
     #[test]
+    fn replay_preserves_materialized_protocol_ids_in_later_history() {
+        let root = test_root();
+        let cassette = root.join("materialized-history.jsonl");
+        let initial = r#"{"model":"m","messages":[{"role":"user","content":"work"}]}"#;
+        let history = r#"{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"<asb-tool-call-1>","type":"function","function":{"name":"read","arguments":"{}"}},{"id":"<asb-tool-call-2>","type":"function","function":{"name":"write","arguments":"{}"}}]},{"role":"tool","tool_call_id":"<asb-tool-call-2>","content":"done"}]}"#;
+        let first = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body":initial},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"tool_calls\":[{\"id\":\"<asb-tool-call-1>\"},{\"id\":\"<asb-tool-call-2>\"}]}"}
+        });
+        let second = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body":history},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{first}\n{second}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let response = request(&session, initial);
+        let ids = response
+            .split("asb-replay-")
+            .skip(1)
+            .map(|suffix| format!("asb-replay-{}", suffix.split('"').next().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2, "{response}");
+        assert_ne!(ids[0], ids[1], "{response}");
+        let replayed_history = history
+            .replace("<asb-tool-call-1>", &ids[0])
+            .replace("<asb-tool-call-2>", &ids[1]);
+        assert!(request(&session, &replayed_history).contains("200 OK"));
+        session.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_opaque_openai_tool_call_ids_in_message_history() {
         let root = test_root();
         let cassette = root.join("opaque-tool-calls.jsonl");
