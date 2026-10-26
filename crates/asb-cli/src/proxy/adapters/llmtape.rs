@@ -1014,8 +1014,8 @@ mod tests {
     fn replay_normalizes_anthropic_content_and_workbuddy_conversation_ids() {
         let root = test_root();
         let cassette = root.join("adapter-volatile-ids.jsonl");
-        let recorded = r#"{"model":"m","messages":[{"role":"assistant","conversationRequestId":"0123456789abcdef0123456789abcdef","content":[{"type":"tool_use","id":"toolu_01ARecord","name":"read_file","input":{"path":"src/lib.rs"}}]}],"temperature":0}"#;
-        let replayed = r#"{"model":"m","messages":[{"role":"assistant","conversationRequestId":"abcdef0123456789abcdef0123456789","content":[{"type":"tool_use","id":"toolu_01BReplay","name":"read_file","input":{"path":"src/lib.rs"}}]}],"temperature":0}"#;
+        let recorded = r#"{"model":"m","messages":[{"role":"assistant","conversationRequestId":"0123456789abcdef0123456789abcdef","content":[{"type":"tool_use","id":"toolu_01ARecord","name":"read_file","input":{"path":"src/lib.rs"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01ARecord","content":"done"}]}],"temperature":0}"#;
+        let replayed = r#"{"model":"m","messages":[{"role":"assistant","conversationRequestId":"abcdef0123456789abcdef0123456789","content":[{"type":"tool_use","id":"toolu_01BReplay","name":"read_file","input":{"path":"src/lib.rs"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01BReplay","content":"done"}]}],"temperature":0}"#;
         let line = serde_json::json!({
             "request": {"method":"POST", "url":"/v1/messages", "body":recorded},
             "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
