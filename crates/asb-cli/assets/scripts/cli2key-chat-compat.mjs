@@ -26,6 +26,18 @@ function instructionText(content) {
     .join("\n");
 }
 
+// A continued Responses conversation may contain an opaque reasoning item.
+// Codex Bridge accepts that item only when the provider-issued identity and
+// encrypted continuation payload travel together.  Some OpenAI-compatible
+// clients replay a display-only reasoning shell instead; forwarding that
+// shell makes the bridge reject the complete request.  It carries no tool
+// call or user-visible content, so drop only the incomplete form while
+// preserving a provider-issued opaque continuation verbatim.
+function supportedReasoningItem(item) {
+  return item?.type !== "reasoning" ||
+    (typeof item.id === "string" && typeof item.encrypted_content === "string");
+}
+
 // Responses accepts input_text (and input_image) in request input.  Some
 // OpenAI-compatible clients use the older generic "text" label when talking
 // to /responses.  Normalize it at the provider edge before forwarding to the
@@ -58,6 +70,7 @@ export function normalizeResponseInstructions(body) {
   const input = [];
   for (const item of response.input) {
     const message = object(item);
+    if (!supportedReasoningItem(message)) continue;
     if ((message.type === undefined || message.type === "message") &&
         (message.role === "system" || message.role === "developer")) {
       const text = instructionText(message.content);
