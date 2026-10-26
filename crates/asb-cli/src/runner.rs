@@ -451,27 +451,16 @@ fn run_dispatched(
     output: &mut dyn Write,
     warnings: &Mutex<BTreeSet<String>>,
 ) -> Result<(), Error> {
-    if let Some(measures) = config.measurements.as_ref().filter(|value| value.enabled) {
-        // Parallel sweep configurations can share project-local tool paths.
-        // Serialize dependency publication, not benchmark execution.
-        static TOOL_PREPARATION: Mutex<()> = Mutex::new(());
-        let _preparation = TOOL_PREPARATION
-            .lock()
-            .map_err(|_| Error::Run("shared tool preparation failed; retry the sweep".into()))?;
-        let (root, project_config) = project::load(config_path)?;
-        let tools_root = project::resolve(&root, &project_config.tools_dir);
-        let mut messages = Vec::new();
-        crate::install::ensure_collector_dependencies(
-            &measures.collectors,
-            &root,
-            &tools_root,
-            &mut messages,
-            &mut |_, _| {},
-            false,
-        )?;
-        if !options.json {
-            output.write_all(&messages).map_err(io_error)?;
-        }
+    // Parallel sweep configurations can share project-local tool paths.
+    // Serialize readiness publication, not benchmark execution.
+    static RUNTIME_PREPARATION: Mutex<()> = Mutex::new(());
+    let _preparation = RUNTIME_PREPARATION
+        .lock()
+        .map_err(|_| Error::Run("shared runtime preparation failed; retry the sweep".into()))?;
+    let mut messages = Vec::new();
+    crate::install::ensure_execution_requirements(&config, config_path, &mut messages)?;
+    if !options.json {
+        output.write_all(&messages).map_err(io_error)?;
     }
     let gate = (options.verify_initial_material && options.preparation_gate.is_none())
         .then(|| batch::Gate::new(config.concurrency, None, Duration::from_secs(1800)))

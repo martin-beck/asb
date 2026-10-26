@@ -2,10 +2,12 @@
 
 use crate::Error;
 use crate::agents;
+use crate::benchmark::BenchmarkConfig;
 use crate::project;
 use crate::suggestions;
 use crate::tools;
 use crate::workloads;
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -455,6 +457,81 @@ pub(crate) fn ensure_collector_dependencies(
     let diagnostic = context.report_diagnostics(output);
     result.map_err(InstallFailure::into_public)?;
     diagnostic
+}
+
+/// Prepare every project-local installable selected by an executable benchmark.
+/// This is deliberately shared by direct runs and sweeps: record/replay alters
+/// transport only, never the tool, provider, workload or collector runtime
+/// requirements of the selected benchmark.
+pub(crate) fn ensure_execution_requirements(
+    config: &BenchmarkConfig,
+    config_path: &Path,
+    output: &mut dyn std::io::Write,
+) -> Result<(), Error> {
+    let (root, project_config) = project::load(config_path)?;
+    let tools_root = project::resolve(&root, &project_config.tools_dir);
+    let workloads_root = project::resolve(&root, &project_config.workloads_dir);
+    let context =
+        OperationContext::new(&root, &project_config).map_err(InstallFailure::into_public)?;
+    let mut progress = |_percent: u8, _stage: ProgressStage| {};
+    let result = (|| -> InstallResult<()> {
+        for id in execution_tool_ids(config) {
+            if !tool_installed_locally(&id, &tools_root) {
+                tool_in(
+                    &context,
+                    ToolInstallOptions {
+                        name: id,
+                        source: None,
+                        dir: Some(tools_root.clone()),
+                        dry_run: false,
+                    },
+                    output,
+                    &mut progress,
+                )?;
+            }
+        }
+        if external_workload(&config.workload).is_some()
+            && !workload_available(&config.workload, &workloads_root)
+        {
+            let source = workload_source_in(&config.workload, &root, &project_config)?;
+            workload_in(
+                &context,
+                WorkloadInstallOptions {
+                    source: config.workload.clone(),
+                    name: None,
+                    dir: Some(workloads_root.clone()),
+                },
+                source,
+                output,
+                &mut progress,
+            )?;
+        }
+        if let Some(measures) = config.measurements.as_ref().filter(|value| value.enabled) {
+            ensure_collector_dependencies_in(
+                &context,
+                &measures.collectors,
+                &root,
+                &tools_root,
+                output,
+                &mut progress,
+                false,
+            )?;
+        }
+        Ok(())
+    })();
+    let diagnostic = context.report_diagnostics(output);
+    result.map_err(InstallFailure::into_public)?;
+    diagnostic
+}
+
+fn execution_tool_ids(config: &BenchmarkConfig) -> Vec<String> {
+    [&config.agent, &config.provider]
+        .into_iter()
+        .filter(|id| agents::find(id).is_some() || tools::find(id).is_some())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn ensure_collector_dependencies_in(
@@ -1450,9 +1527,6 @@ struct ResolvedWorkloadSource {
     project_config: project::ProjectConfig,
 }
 fn workload_source(requested: &str) -> Result<ResolvedWorkloadSource, Error> {
-    let source = external_workload(requested)
-        .map(|workload| workload.source.to_owned())
-        .unwrap_or_else(|| requested.to_owned());
     if external_workload(requested).is_none()
         && valid_name(requested)
         && !Path::new(requested).is_file()
@@ -1464,28 +1538,40 @@ fn workload_source(requested: &str) -> Result<ResolvedWorkloadSource, Error> {
             )));
         }
     }
+    let (project_root, project_config) = project::load(Path::new("."))?;
+    workload_source_in(requested, &project_root, &project_config)
+}
+
+fn workload_source_in(
+    requested: &str,
+    project_root: &Path,
+    project_config: &project::ProjectConfig,
+) -> Result<ResolvedWorkloadSource, Error> {
+    let source = external_workload(requested)
+        .map(|workload| workload.source.to_owned())
+        .unwrap_or_else(|| requested.to_owned());
     let filename = source
         .split('?')
         .next()
         .and_then(|value| value.rsplit('/').next())
         .unwrap_or(&source);
-    let default_name = Path::new(filename)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| valid_name(value))
+    let default_name = external_workload(requested)
+        .map(|workload| workload.name.to_owned())
+        .or_else(|| {
+            Path::new(filename)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .filter(|value| valid_name(value))
+                .map(str::to_owned)
+        })
         .ok_or(Error::Input(
             "workload source must have a simple file name".into(),
-        ))?
-        .to_owned();
-    let name = external_workload(requested)
-        .map(|workload| workload.name.to_owned())
-        .unwrap_or(default_name);
-    let (project_root, project_config) = project::load(Path::new("."))?;
+        ))?;
     Ok(ResolvedWorkloadSource {
         source: source::Input::from_os(source.as_ref()),
-        default_name: name,
-        project_root,
-        project_config,
+        default_name,
+        project_root: project_root.to_path_buf(),
+        project_config: project_config.clone(),
     })
 }
 
@@ -1580,6 +1666,20 @@ mod coverage_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_requirements_select_agent_and_provider_owned_tools_once() {
+        let config: BenchmarkConfig =
+            toml::from_str("agent='pi'\nprovider='cli2key'\nmodel='fixture'\nworkload='bug-fix'\n")
+                .unwrap();
+        assert_eq!(execution_tool_ids(&config), ["cli2key", "pi"]);
+
+        let endpoint_only: BenchmarkConfig = toml::from_str(
+            "agent='pi'\nprovider='openrouter'\nmodel='fixture'\nworkload='bug-fix'\n",
+        )
+        .unwrap();
+        assert_eq!(execution_tool_ids(&endpoint_only), ["pi"]);
+    }
 
     #[test]
     fn guest_runtime_requirements_come_from_every_registered_agent_recipe() {
