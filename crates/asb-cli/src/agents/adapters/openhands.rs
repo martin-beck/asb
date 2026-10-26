@@ -76,10 +76,12 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
         return AgentArtifacts::default();
     };
     AgentArtifacts {
+        // OpenHands/LiteLLM reports cache reads alongside an inclusive input
+        // total for providers such as cli2key. This accounting rule is owned
+        // by the provider, not by the particular transport selected here.
         token_usage: Some(conversation_usage(
             &value,
-            context.interface == Some(crate::endpoint::Interface::AnthropicMessages)
-                && context.anthropic_input_includes_cache,
+            context.anthropic_input_includes_cache,
         )),
         steps: None,
         final_response: None,
