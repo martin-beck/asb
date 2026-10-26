@@ -53,6 +53,14 @@ struct Options {
     transcript: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StdioFraming {
+    JsonLines,
+    ContentLength,
+}
+
+const MAX_MCP_MESSAGE_BYTES: usize = 1024 * 1024;
+
 /// The adapter-facing, private stdio command for a single tape-backed run.
 /// It is deliberately constructed here so every adapter gets the same sealed
 /// transcript naming and replay fail-closed behavior.
@@ -159,18 +167,10 @@ fn run(args: &[OsString]) -> Result<(), Error> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
-    for line in BufReader::new(stdin.lock()).lines() {
-        let line = line.map_err(crate::io_error)?;
-        if line.len() > 1024 * 1024 {
-            return Err(Error::Run("local-tool MCP request exceeds bound".into()));
-        }
-        let request: Value = serde_json::from_str(&line)
-            .map_err(|_| Error::Run("local-tool MCP request is malformed".into()))?;
+    let mut input = BufReader::new(stdin.lock());
+    while let Some((request, framing)) = read_request(&mut input)? {
         if let Some(response) = respond(&options, &mut transcript, &request)? {
-            serde_json::to_writer(&mut output, &response)
-                .map_err(|_| Error::Run("cannot encode local-tool MCP response".into()))?;
-            output.write_all(b"\n").map_err(crate::io_error)?;
-            output.flush().map_err(crate::io_error)?;
+            write_response(&mut output, &response, framing)?;
         }
     }
     match options.mode {
@@ -181,6 +181,68 @@ fn run(args: &[OsString]) -> Result<(), Error> {
         Mode::Replay => transcript.finish()?,
     }
     Ok(())
+}
+
+fn read_request(input: &mut impl BufRead) -> Result<Option<(Value, StdioFraming)>, Error> {
+    let mut first = String::new();
+    let read = input.read_line(&mut first).map_err(crate::io_error)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if read > MAX_MCP_MESSAGE_BYTES {
+        return Err(Error::Run("local-tool MCP request exceeds bound".into()));
+    }
+    let first = first.trim_end_matches(['\r', '\n']);
+    if !first.eq_ignore_ascii_case("content-length:")
+        && !first.to_ascii_lowercase().starts_with("content-length:")
+    {
+        return serde_json::from_str(first)
+            .map(|request| Some((request, StdioFraming::JsonLines)))
+            .map_err(|_| Error::Run("local-tool MCP request is malformed".into()));
+    }
+    let length = first
+        .split_once(':')
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .filter(|length| *length <= MAX_MCP_MESSAGE_BYTES)
+        .ok_or_else(|| Error::Run("local-tool MCP Content-Length is invalid".into()))?;
+    loop {
+        let mut header = String::new();
+        let read = input.read_line(&mut header).map_err(crate::io_error)?;
+        if read == 0 {
+            return Err(Error::Run("local-tool MCP header is incomplete".into()));
+        }
+        if header == "\n" || header == "\r\n" {
+            break;
+        }
+        if header.len() > MAX_MCP_MESSAGE_BYTES {
+            return Err(Error::Run("local-tool MCP header exceeds bound".into()));
+        }
+    }
+    let mut body = vec![0; length];
+    input.read_exact(&mut body).map_err(crate::io_error)?;
+    serde_json::from_slice(&body)
+        .map(|request| Some((request, StdioFraming::ContentLength)))
+        .map_err(|_| Error::Run("local-tool MCP request is malformed".into()))
+}
+
+fn write_response(
+    output: &mut impl Write,
+    response: &Value,
+    framing: StdioFraming,
+) -> Result<(), Error> {
+    let bytes = serde_json::to_vec(response)
+        .map_err(|_| Error::Run("cannot encode local-tool MCP response".into()))?;
+    match framing {
+        StdioFraming::JsonLines => output.write_all(&bytes).map_err(crate::io_error)?,
+        StdioFraming::ContentLength => {
+            write!(output, "Content-Length: {}\r\n\r\n", bytes.len()).map_err(crate::io_error)?;
+            output.write_all(&bytes).map_err(crate::io_error)?;
+        }
+    }
+    if framing == StdioFraming::JsonLines {
+        output.write_all(b"\n").map_err(crate::io_error)?;
+    }
+    output.flush().map_err(crate::io_error)
 }
 
 fn publish_record_transcript(path: &Path, bytes: &[u8]) -> Result<(), Error> {
@@ -519,6 +581,49 @@ fn required_path(request: &Value) -> Result<&str, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_mcp_accepts_and_answers_content_length_jsonrpc() {
+        let body = br#"{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}"#;
+        let request = [
+            format!("Content-Length: {}\r\nX-Trace: fixture\r\n\r\n", body.len()).into_bytes(),
+            body.to_vec(),
+        ]
+        .concat();
+        let mut input = BufReader::new(&request[..]);
+        let (request, framing) = read_request(&mut input).unwrap().unwrap();
+        assert_eq!(framing, StdioFraming::ContentLength);
+        assert_eq!(request["method"], "initialize");
+
+        let mut output = Vec::new();
+        write_response(
+            &mut output,
+            &json!({"jsonrpc":"2.0","id":7,"result":{}}),
+            framing,
+        )
+        .unwrap();
+        let divider = output
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap();
+        assert_eq!(&output[..divider], b"Content-Length: 36");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output[divider + 4..]).unwrap()["id"],
+            7
+        );
+    }
+
+    #[test]
+    fn private_mcp_keeps_json_line_framing_for_existing_clients() {
+        let mut input =
+            BufReader::new(&b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n"[..]);
+        let (request, framing) = read_request(&mut input).unwrap().unwrap();
+        assert_eq!(framing, StdioFraming::JsonLines);
+        assert_eq!(request["id"], 1);
+        let mut output = Vec::new();
+        write_response(&mut output, &json!({"id":1}), framing).unwrap();
+        assert_eq!(&output, b"{\"id\":1}\n");
+    }
 
     #[test]
     fn guest_tool_service_uses_the_staged_runtime_launcher() {
