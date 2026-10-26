@@ -131,10 +131,11 @@ fn replay_private_inputs(path: Option<&Path>, replay: bool) -> Result<Vec<Privat
     let local_tools = local_tool_sidecar(path)?;
     let manifest = deterministic_manifest_sidecar(path)?;
     let mut inputs = Vec::new();
-    for (source, description) in [
-        (local_tools, "sealed local-tool replay transcript"),
-        (manifest, "sealed deterministic replay manifest"),
-    ] {
+    // Every recorded adapter supplies a local-tool transcript (possibly
+    // empty), but the portable deterministic extension is adapter-owned.  A
+    // record without that extension therefore has no determinism sidecar and
+    // must remain replayable from its sealed tape and tool transcript.
+    let mut stage = |source: PathBuf, description: &str| -> Result<(), String> {
         let metadata = std::fs::symlink_metadata(&source)
             .map_err(|_| format!("{description} is unavailable"))?;
         if !metadata.file_type().is_file() || metadata.len() > MAX_PRIVATE_REPLAY_INPUT {
@@ -155,6 +156,13 @@ fn replay_private_inputs(path: Option<&Path>, replay: bool) -> Result<Vec<Privat
             bytes: bytes.len() as u64,
             sha256: crate::cassette::digest(&bytes),
         });
+        Ok(())
+    };
+    stage(local_tools, "sealed local-tool replay transcript")?;
+    match std::fs::symlink_metadata(&manifest) {
+        Ok(_) => stage(manifest, "sealed deterministic replay manifest")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("sealed deterministic replay manifest is unavailable".into()),
     }
     Ok(inputs)
 }
@@ -1331,6 +1339,28 @@ mod tests {
         assert_eq!(inputs[1].target, "determinism-manifest-2.json");
         assert!(
             replay_private_inputs(Some(&batch.join("replay-2.jsonl")), false)
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_private_input_allows_recordings_without_determinism_extension() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-replay-private-input-no-determinism-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let batch = root.join("batch-1");
+        std::fs::create_dir_all(&batch).unwrap();
+        std::fs::write(batch.join("replay.jsonl"), b"provider tape\n").unwrap();
+        std::fs::write(batch.join("local-tools.jsonl"), b"{}\n").unwrap();
+
+        let inputs = replay_private_inputs(Some(&batch.join("replay.jsonl")), true).unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].target, "local-tools.jsonl");
+        assert!(
+            replay_private_inputs(Some(&batch.join("replay.jsonl")), false)
                 .unwrap()
                 .is_empty()
         );
