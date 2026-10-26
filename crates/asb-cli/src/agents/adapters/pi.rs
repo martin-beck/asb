@@ -287,50 +287,33 @@ fn prepare_tool_replay(
 // than a shell program, so it cannot introduce an unrecorded shell parser.
 const TOOL_REPLAY_EXTENSION: &str = r#"
 import { Type } from "typebox";
-import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
+import { spawnSync } from "node:child_process";
 
 const spec = JSON.parse(process.env.ASB_PI_LOCAL_TOOL_REPLAY ?? "");
 if (!spec.program || !Array.isArray(spec.args)) throw new Error("ASB local tool service is unavailable");
-const child = spawn(spec.program, spec.args, { stdio: ["pipe", "pipe", "pipe"] });
-let nextId = 1;
-const pending = new Map();
-let terminalError = "";
-child.stderr.setEncoding("utf8");
-child.stderr.on("data", (chunk) => { terminalError = (terminalError + chunk).slice(-2048); });
-function serviceError(detail) {
-  const suffix = terminalError.trim();
-  return new Error(`ASB local tool service ${detail}${suffix ? `: ${suffix}` : ""}`);
-}
-createInterface({ input: child.stdout }).on("line", (line) => {
-  let response;
-  try { response = JSON.parse(line); } catch { return; }
-  const entry = pending.get(response.id);
-  if (!entry) return;
-  pending.delete(response.id);
-  if (response.error) entry.reject(new Error("ASB local tool request failed"));
-  else entry.resolve(response.result);
-});
-child.once("error", () => {
-  for (const entry of pending.values()) entry.reject(serviceError("failed to start"));
-  pending.clear();
-});
-child.once("exit", (code, signal) => {
-  if (pending.size === 0) return;
-  const status = signal ? `stopped by ${signal}` : `exited with status ${code ?? "unknown"}`;
-  for (const entry of pending.values()) entry.reject(serviceError(status));
-  pending.clear();
-});
 function call(name, args) {
-  return new Promise((resolve, reject) => {
-    const id = nextId++;
-    pending.set(id, { resolve, reject });
-    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) + "\\n", (error) => {
-      if (!error || !pending.has(id)) return;
-      pending.delete(id);
-      reject(serviceError("could not receive a request"));
-    });
-  }).then((result) => JSON.parse(result.content?.[0]?.text ?? "{}"));
+  // Pi 0.73 can leave an asynchronously spawned extension child unread after
+  // the first tool result in the isolated guest runtime. Execute one sealed
+  // MCP request per tool invocation instead: stdin reaches EOF, the service
+  // atomically publishes its transcript, and any launcher/stdio failure is
+  // returned to Pi rather than leaving the agent turn pending indefinitely.
+  const request = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) + "\\n";
+  const child = spawnSync(spec.program, spec.args, {
+    input: request,
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024,
+    timeout: 45000,
+  });
+  const stderr = String(child.stderr ?? "").trim();
+  if (child.error) throw new Error(`ASB local tool service failed to start: ${child.error.message}`);
+  if (child.signal || child.status !== 0) {
+    const status = child.signal ? `stopped by ${child.signal}` : `exited with status ${child.status ?? "unknown"}`;
+    throw new Error(`ASB local tool service ${status}${stderr ? `: ${stderr}` : ""}`);
+  }
+  const response = String(child.stdout ?? "").trim().split(/\\r?\\n/).map((line) => JSON.parse(line)).find((value) => value.id === 1);
+  if (!response) throw new Error(`ASB local tool service returned no response${stderr ? `: ${stderr}` : ""}`);
+  if (response.error) throw new Error("ASB local tool request failed");
+  return JSON.parse(response.result?.content?.[0]?.text ?? "{}");
 }
 function result(value) { return { content: [{ type: "text", text: JSON.stringify(value) }], details: {} }; }
 function path(value) { return typeof value === "string" ? value.replace(/^@/, "") : value; }
@@ -517,9 +500,10 @@ mod tests {
         let extension = root.join("runtime/pi/asb-local-tools.ts");
         let source = std::fs::read_to_string(extension).unwrap();
         assert!(source.contains("run_command"));
-        assert!(source.contains("stdio: [\"pipe\", \"pipe\", \"pipe\"]"));
-        assert!(source.contains("child.once(\"exit\""));
-        assert!(source.contains("terminalError"));
+        assert!(source.contains("spawnSync(spec.program, spec.args"));
+        assert!(source.contains("timeout: 45000"));
+        assert!(source.contains("returned no response"));
+        assert!(!source.contains("const pending = new Map()"));
         assert!(run_dir.join("tool-replay/local-tools.jsonl").is_file());
         let launch = command
             .get_envs()
