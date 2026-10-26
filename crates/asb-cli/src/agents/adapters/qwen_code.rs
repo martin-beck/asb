@@ -12,6 +12,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_complete_tool_replay(prepare_tool_replay)
 .with_output_usage(output_usage)
 .with_step_count(step_count)
 .with_final_response(final_response);
@@ -112,8 +113,102 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Qwen Code accepts a per-invocation MCP document.  Its explicit exclusion
+/// list removes every native workspace/shell action while retaining the ASB
+/// MCP server, whose responses are the sole local-tool observations during a
+/// tape-backed attempt.
+fn prepare_tool_replay(
+    context: &mut PreparationContext<'_>,
+    tape: super::super::TapeContext<'_>,
+) -> Result<(), Error> {
+    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    let directory = context.runtime_dir.join("qwen-code");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| Error::Run(format!("cannot create Qwen local-tool directory: {error}")))?;
+    let path = directory.join("asb-local-tools.json");
+    let document = serde_json::json!({
+        "mcpServers": {"asb_local_tools": {
+            "command": launch.program.to_string_lossy(),
+            "args": launch.args.iter().map(|argument| argument.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+            "trust": true,
+            "includeTools": ["list_directory", "search_text", "run_command", "read_file", "write_file", "create_directory", "remove_file"],
+        }}
+    });
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&document)
+            .map_err(|error| Error::Run(format!("cannot encode Qwen local tools: {error}")))?,
+    )
+    .map_err(|error| Error::Run(format!("cannot write Qwen local tools: {error}")))?;
+    context.command.args([
+        "--mcp-config",
+        path.to_str().ok_or_else(|| Error::Run("Qwen local-tool path is not valid UTF-8".into()))?,
+        "--allowed-mcp-server-names",
+        "asb_local_tools",
+        "--exclude-tools",
+        "read_file,write_file,list_directory,run_shell_command,search_files,search_codebase,replace,apply_patch,web_fetch,web_search,computer_use,agent",
+    ]);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::agents::AgentAdapter;
+
+    #[test]
+    fn tape_backed_preparation_uses_only_the_private_mcp_transport() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-qwen-tool-replay-{}-{}",
+            std::process::id(),
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiChat,
+            base_url: "http://127.0.0.1:4321/v1".into(),
+            credential: Some("asb-replay".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let mut command = std::process::Command::new("qwen");
+        ADAPTER
+            .prepare(&mut PreparationContext {
+                command: &mut command,
+                model: "test-model",
+                connection: &connection,
+                workspace: &workspace,
+                runtime_dir: &root.join("runtime"),
+                run_dir: &run_dir,
+                tape: Some(super::super::TapeContext {
+                    mode: crate::tape::Mode::Record,
+                    cassette: &root.join("recording.asb.zip"),
+                }),
+            })
+            .unwrap();
+        let arguments = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(arguments.contains(&"--mcp-config".into()));
+        assert!(
+            arguments
+                .iter()
+                .any(|value| value.contains("run_shell_command"))
+        );
+        let config: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("runtime/qwen-code/asb-local-tools.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            config["mcpServers"]["asb_local_tools"]["args"][0],
+            "__asb-tool-replay"
+        );
+        assert!(run_dir.join("tool-replay/local-tools.jsonl").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn selects_final_cumulative_usage_not_intermediate_messages_or_nested_stats() {
         let output = r#"[
