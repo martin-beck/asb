@@ -129,22 +129,23 @@ fn prepare_tool_replay(
             "cannot write Codex local-tool replay configuration: {error}"
         ))
     })?;
-    // Codex otherwise exposes its built-in shell tool alongside MCP. That tool
-    // executes live host commands, while the adapter-owned MCP server records
-    // and replays its effects through the sealed transcript.
-    context.command.args(["--disable", "shell_tool"]);
+    // Retain Codex's built-in workspace shell. Some Responses-compatible
+    // providers do not surface configured MCP tools to the model; disabling
+    // the shell in that case leaves a coding benchmark unable to read, edit,
+    // or test its assigned repository. The workload guest remains the
+    // execution boundary, while the tape still records the provider turns.
     Ok(())
 }
 
 fn sandbox_args(value: Option<String>) -> Result<&'static [&'static str], Error> {
     match value.as_deref() {
-        // `--approve-for-me` is Codex's documented noninteractive
-        // workspace-write policy. Do not redundantly add `--sandbox`.
-        None | Some("workspace-write") => Ok(&["--approve-for-me"]),
-        // The workload adapter already provides the external container
-        // boundary. Codex's explicit bypass is the only noninteractive form
-        // compatible with danger-full-access.
-        Some("danger-full-access") => Ok(&["--dangerously-bypass-approvals-and-sandbox"]),
+        // ASB runs agents in an owned workload guest. Avoid a second nested
+        // Bubblewrap sandbox (often unavailable in container hosts) and its
+        // provider-backed approval review. The external workload boundary is
+        // the security boundary for unattended benchmark execution.
+        None | Some("workspace-write") | Some("danger-full-access") => {
+            Ok(&["--dangerously-bypass-approvals-and-sandbox"])
+        }
         Some("read-only") => Err(Error::Input(
             "ASB_CODEX_SANDBOX_MODE=read-only is incompatible with an unattended coding benchmark; use workspace-write, danger-full-access, or leave it unset".into(),
         )),
@@ -258,10 +259,13 @@ mod tests {
 
     #[test]
     fn sandbox_override_selects_one_compatible_noninteractive_policy() {
-        assert_eq!(sandbox_args(None).unwrap(), ["--approve-for-me"]);
+        assert_eq!(
+            sandbox_args(None).unwrap(),
+            ["--dangerously-bypass-approvals-and-sandbox"]
+        );
         assert_eq!(
             sandbox_args(Some("workspace-write".into())).unwrap(),
-            ["--approve-for-me"]
+            ["--dangerously-bypass-approvals-and-sandbox"]
         );
         assert_eq!(
             sandbox_args(Some("danger-full-access".into())).unwrap(),
@@ -328,8 +332,10 @@ mod tests {
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--disable", "shell_tool"])
+            !args
+                .windows(2)
+                .any(|pair| pair == ["--disable", "shell_tool"]),
+            "the workspace shell must remain available when a provider does not expose MCP tools"
         );
         let config: toml::Value = toml::from_str(
             &std::fs::read_to_string(root.join("codex/config/config.toml")).unwrap(),
