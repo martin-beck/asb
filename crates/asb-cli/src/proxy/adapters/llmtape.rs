@@ -90,7 +90,17 @@ impl ProxyAdapter for LlmtapeAdapter {
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        let scratch = Scratch::create(parent)?;
+        // The embedded proxy accepts private receipt and mismatch paths only
+        // when they are absolute. Relative cassette paths are valid CLI input,
+        // so resolve their existing parent before allocating the owned scratch
+        // directory used for those capabilities.
+        let parent = std::fs::canonicalize(parent).map_err(|error| {
+            Error::Run(format!(
+                "cannot resolve tape session directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+        let scratch = Scratch::create(&parent)?;
         // Every replay has its own copy and progress file. Sharing the source
         // directly would race on the proxy's cassette progress sidecar.
         let replay_cassette = scratch.path.join("cassette.jsonl");
@@ -258,12 +268,13 @@ fn wait_for_ready(
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         let process = child.0.as_mut().expect("startup child is present");
-        if process
+        if let Some(status) = process
             .try_wait()
             .map_err(|error| Error::Run(format!("cannot inspect tape proxy: {error}")))?
-            .is_some()
         {
-            return Err(Error::Run("ASB's tape proxy exited before becoming ready; verify Node.js and the cassette format".into()));
+            return Err(Error::Run(format!(
+                "ASB's tape proxy exited before becoming ready with {status}; verify Node.js and the cassette format"
+            )));
         }
         let port = if let Some(path) = ready_file {
             read_ready_port(path, process.id())?
