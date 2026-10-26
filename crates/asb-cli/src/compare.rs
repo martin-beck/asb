@@ -435,6 +435,25 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             let text = serde_json::to_string_pretty(execution).unwrap_or_else(|_| "{}".into());
             format!("<details><summary>Execution / replay identity</summary><pre class=\"json-details\">{}</pre></details>", escape(&text))
         });
+        let perfetto_details = benchmark
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.ends_with(".perfetto-trace"))
+            .flat_map(|artifact| {
+                benchmark
+                    .artifact_sources
+                    .get(artifact)
+                    .map(|path| crate::collectors::report_artifact_links(artifact, path))
+                    .unwrap_or_default()
+            })
+            .filter(|link| link.label == "Perfetto UI")
+            .map(|link| {
+                format!(
+                    "<p class=\"perfetto-link\"><strong>Perfetto trace</strong><a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open in Perfetto UI</a></p>",
+                    escape(&link.href),
+                )
+            })
+            .collect::<String>();
         let artifacts = if benchmark.artifacts.is_empty() {
             String::new()
         } else {
@@ -448,6 +467,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                         .map(|path| crate::collectors::report_artifact_links(artifact, path))
                         .unwrap_or_default()
                         .into_iter()
+                        .filter(|link| link.label != "Perfetto UI")
                         .map(|link| {
                             format!(
                                 " <a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open in {}</a>",
@@ -514,7 +534,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             escape(&benchmark.label), escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload),
             escape(&benchmark.label), escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload),
             runtime, success, tokens,
-            format_args!("{}{}<p>{dispatch_details}</p>", evaluation_details, if benchmark.reconciled { "<p>Reconciled retained local outcome: current artifact consistency checked; no agent rerun or historical attestation.</p>" } else { "" }),
+            format_args!("{perfetto_details}{}{}<p>{dispatch_details}</p>", evaluation_details, if benchmark.reconciled { "<p>Reconciled retained local outcome: current artifact consistency checked; no agent rerun or historical attestation.</p>" } else { "" }),
             format_args!("{execution_details}{component_details}"),
             host_details,
             metrics_details,
@@ -1202,6 +1222,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
+            root.join("sweep-results/000-one/measurements/perfetto-scheduling.perfetto-trace"),
+            b"trace",
+        )
+        .unwrap();
+        std::fs::write(
             root.join("sweep-results/000-one/measurements/perfetto-metric-scheduler_events.svg"),
             "<svg><title>Perfetto scheduler events</title></svg>",
         )
@@ -1342,6 +1367,12 @@ mod tests {
         );
         assert!(!report.contains("run.json"));
         assert!(report.contains("Perfetto metric SVG"));
+        assert!(report.contains("<p class=\"perfetto-link\"><strong>Perfetto trace</strong>"));
+        assert_eq!(report.matches("Open in Perfetto UI").count(), 1);
+        assert!(
+            report.find("Perfetto trace").unwrap() < report.find("Run artifacts").unwrap(),
+            "the dedicated Perfetto link precedes the generic artifact disclosure"
+        );
         assert!(report.contains("perfetto-metric-scheduler_events.svg"));
         assert!(report.contains("perfetto-state-timeline.svg"));
         assert!(report.contains("<div class=\"embedded-svg perfetto-metric\""));
