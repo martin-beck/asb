@@ -140,7 +140,7 @@ impl<'a> ConfiguredAttempt<'a> {
             );
         }
         if let Some((tape::Mode::Replay, cassette)) = tape_cassette.as_ref() {
-            models::ensure_replay_tool_capable(cassette, &config.model)?;
+            models::ensure_replay_model_recorded(cassette, &config.model)?;
         }
         let mut discovered_tool_support = None;
         let selected_offer = instrument_phase(
