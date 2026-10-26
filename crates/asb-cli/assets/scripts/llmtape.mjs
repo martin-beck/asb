@@ -14,6 +14,13 @@ import { normalizeWorkspacePaths } from "./tape-normalization.mjs";
 const MAX_BODY = 16 * 1024 * 1024;
 const MAX_DELAY_MS = 60 * 60 * 1000;
 let stopping = false;
+// A replay response must give clients fresh protocol identifiers, yet later
+// client history requests legitimately refer to those identifiers.  Keep the
+// relationship private to this proxy session so request normalization can
+// recover the cassette marker without treating arbitrary opaque user values as
+// volatile.  The request and body limits bound this map for a session.
+const replayMaterializedIdentifiers = new Map();
+let replayMaterializedIdentifierSequence = 0;
 
 function usage(message) {
   if (message) console.error(`llmtape: ${message}`);
@@ -118,7 +125,9 @@ async function replayResponse(response, interaction) {
   const replayToolIds = new Map();
   const replayBody = body.replace(/<asb-(?:call(?:-\d+)?|tool-call-\d+|content-block-\d+)>/g, (marker) => {
     if (!replayToolIds.has(marker)) {
-      replayToolIds.set(marker, `asb-replay-${process.pid}-${Date.now()}-${replayToolIds.size + 1}`);
+      const identifier = `asb-replay-${process.pid}-${Date.now()}-${++replayMaterializedIdentifierSequence}`;
+      replayToolIds.set(marker, identifier);
+      replayMaterializedIdentifiers.set(identifier, marker);
     }
     return replayToolIds.get(marker);
   });
@@ -254,6 +263,13 @@ function normalizeCassetteBody(body) {
     const structuredToolCallIdentifiers = new Map();
     const structuredContentBlockIdentifiers = new Map();
     const canonicalToolCallIdentifier = (identifier) => {
+      const materialized = replayMaterializedIdentifiers.get(identifier);
+      // A replay response has already assigned this exact identifier to a
+      // cassette tool-call marker.  Retain that relationship instead of
+      // re-numbering it by whichever history fields this client happens to
+      // retain on its next request.
+      if (/^<asb-tool-call-\d+>$/.test(materialized || "")) return materialized;
+      identifier = materialized || identifier;
       if (!structuredToolCallIdentifiers.has(identifier)) {
         structuredToolCallIdentifiers.set(
           identifier,
@@ -263,6 +279,9 @@ function normalizeCassetteBody(body) {
       return structuredToolCallIdentifiers.get(identifier);
     };
     const canonicalContentBlockIdentifier = (identifier) => {
+      const materialized = replayMaterializedIdentifiers.get(identifier);
+      if (/^<asb-content-block-\d+>$/.test(materialized || "")) return materialized;
+      identifier = materialized || identifier;
       if (!structuredContentBlockIdentifiers.has(identifier)) {
         structuredContentBlockIdentifiers.set(
           identifier,
