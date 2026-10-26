@@ -203,6 +203,9 @@ pub(crate) struct AgentArtifacts {
     /// runner treats this only as a sealed auxiliary cassette payload; tool
     /// semantics remain in the adapter-owned replay transport.
     pub local_tool_transcript: Option<Vec<u8>>,
+    /// Private extension evidence sealed beside provider and local-tool
+    /// recordings. It is not rendered in reports or command output.
+    pub deterministic_manifest: Option<Vec<u8>>,
 }
 
 pub(crate) struct CollectionContext<'a> {
@@ -305,6 +308,7 @@ pub(super) struct StaticAdapter {
     tool_replay: Option<ToolReplayHook>,
     collect: Option<CollectionHook>,
     artifact_specs: &'static [ArtifactSpec],
+    deterministic_extension: bool,
     output_usage: Option<UsageHook>,
     final_response: Option<FinalResponseHook>,
     process: Option<ProcessHook>,
@@ -336,6 +340,7 @@ impl StaticAdapter {
             tool_replay: None,
             collect: None,
             artifact_specs: &[],
+            deterministic_extension: false,
             output_usage: None,
             final_response: None,
             process: None,
@@ -387,6 +392,14 @@ impl StaticAdapter {
     }
     pub(super) const fn with_artifact_specs(mut self, specs: &'static [ArtifactSpec]) -> Self {
         self.artifact_specs = specs;
+        self
+    }
+
+    /// Select ASB's portable deterministic execution extension for this adapter.
+    /// The adapter owns this choice; the runner remains unaware of individual
+    /// client names and records the resulting manifest as sealed evidence.
+    pub(super) const fn with_deterministic_extension(mut self) -> Self {
+        self.deterministic_extension = true;
         self
     }
 
@@ -472,6 +485,9 @@ impl AgentAdapter for StaticAdapter {
         if let (Some(hook), Some(tape)) = (self.tool_replay, context.tape) {
             hook(context, tape)?;
         }
+        if self.deterministic_extension {
+            determinism::prepare(self.id, context)?;
+        }
         (self.prepare)(context)
     }
     fn process(&self, executable: &str) -> Result<crate::launch::ProcessLaunch, Error> {
@@ -499,6 +515,10 @@ impl AgentAdapter for StaticAdapter {
                 .frozen
                 .bytes("local-tools.jsonl")
                 .map(ToOwned::to_owned);
+        }
+        if self.deterministic_extension {
+            artifacts.deterministic_manifest =
+                context.frozen.bytes("manifest.json").map(ToOwned::to_owned);
         }
         artifacts
     }

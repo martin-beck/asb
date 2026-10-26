@@ -1078,6 +1078,10 @@ impl ResultFacts {
             .as_ref()
             .and_then(|metadata| metadata.local_tool_transcript.clone())
             .or(adapter_artifacts.local_tool_transcript.clone());
+        let deterministic_manifest = guest
+            .as_ref()
+            .and_then(|metadata| metadata.deterministic_manifest.clone())
+            .or(adapter_artifacts.deterministic_manifest.clone());
         let mut stderr = bounded(&child.stderr);
         if let Some(error) = provider_cleanup_error.as_ref() {
             stderr.push_str("\nASB provider cleanup error: ");
@@ -1162,6 +1166,7 @@ impl ResultFacts {
             steps,
             tool_calls,
             local_tool_transcript,
+            deterministic_manifest,
             cassette: tape_cassette
                 .as_ref()
                 .map(|(_, cassette)| cassette.display().to_string()),

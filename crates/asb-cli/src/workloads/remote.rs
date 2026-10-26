@@ -99,6 +99,14 @@ fn guest_tape_cassette(path: Option<&Path>) -> Result<Option<PathBuf>, String> {
 }
 
 fn local_tool_sidecar(path: &Path) -> Result<PathBuf, String> {
+    replay_sidecar(path, "local-tools", "jsonl")
+}
+
+fn deterministic_manifest_sidecar(path: &Path) -> Result<PathBuf, String> {
+    replay_sidecar(path, "determinism-manifest", "json")
+}
+
+fn replay_sidecar(path: &Path, stem: &str, extension: &str) -> Result<PathBuf, String> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -110,7 +118,7 @@ fn local_tool_sidecar(path: &Path) -> Result<PathBuf, String> {
     let parent = path
         .parent()
         .ok_or_else(|| "replay cassette has no private directory".to_owned())?;
-    Ok(parent.join(format!("local-tools{suffix}.jsonl")))
+    Ok(parent.join(format!("{stem}{suffix}.{extension}")))
 }
 
 fn replay_private_inputs(path: Option<&Path>, replay: bool) -> Result<Vec<PrivateInput>, String> {
@@ -120,30 +128,35 @@ fn replay_private_inputs(path: Option<&Path>, replay: bool) -> Result<Vec<Privat
     let Some(path) = path else {
         return Ok(Vec::new());
     };
-    let source = local_tool_sidecar(path)?;
-    let metadata = std::fs::symlink_metadata(&source)
-        .map_err(|_| "sealed local-tool replay transcript is unavailable".to_owned())?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_PRIVATE_REPLAY_INPUT {
-        return Err("sealed local-tool replay transcript is invalid or exceeds 64 MiB".into());
+    let local_tools = local_tool_sidecar(path)?;
+    let manifest = deterministic_manifest_sidecar(path)?;
+    let mut inputs = Vec::new();
+    for (source, description) in [
+        (local_tools, "sealed local-tool replay transcript"),
+        (manifest, "sealed deterministic replay manifest"),
+    ] {
+        let metadata = std::fs::symlink_metadata(&source)
+            .map_err(|_| format!("{description} is unavailable"))?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_PRIVATE_REPLAY_INPUT {
+            return Err(format!("{description} is invalid or exceeds 64 MiB"));
+        }
+        let bytes = std::fs::read(&source).map_err(|_| format!("{description} is unavailable"))?;
+        if bytes.len() as u64 != metadata.len() {
+            return Err(format!("{description} changed while preparing guest input"));
+        }
+        let target = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("{description} has no filename"))?
+            .to_owned();
+        inputs.push(PrivateInput {
+            source,
+            target,
+            bytes: bytes.len() as u64,
+            sha256: crate::cassette::digest(&bytes),
+        });
     }
-    let bytes = std::fs::read(&source)
-        .map_err(|_| "sealed local-tool replay transcript is unavailable".to_owned())?;
-    if bytes.len() as u64 != metadata.len() {
-        return Err(
-            "sealed local-tool replay transcript changed while preparing guest input".into(),
-        );
-    }
-    let target = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "sealed local-tool replay transcript has no filename".to_owned())?
-        .to_owned();
-    Ok(vec![PrivateInput {
-        source,
-        target,
-        bytes: bytes.len() as u64,
-        sha256: crate::cassette::digest(&bytes),
-    }])
+    Ok(inputs)
 }
 
 pub(crate) fn prefetch(context: &super::PreflightContext<'_>) -> Result<(), crate::Error> {
@@ -1309,11 +1322,13 @@ mod tests {
         std::fs::create_dir_all(&batch).unwrap();
         std::fs::write(batch.join("replay-2.jsonl"), b"provider tape\n").unwrap();
         std::fs::write(batch.join("local-tools-2.jsonl"), b"{}\n").unwrap();
+        std::fs::write(batch.join("determinism-manifest-2.json"), b"{}\n").unwrap();
         let inputs = replay_private_inputs(Some(&batch.join("replay-2.jsonl")), true).unwrap();
-        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs.len(), 2);
         assert_eq!(inputs[0].target, "local-tools-2.jsonl");
         assert_eq!(inputs[0].bytes, 3);
         assert_eq!(inputs[0].sha256, crate::cassette::digest(b"{}\n"));
+        assert_eq!(inputs[1].target, "determinism-manifest-2.json");
         assert!(
             replay_private_inputs(Some(&batch.join("replay-2.jsonl")), false)
                 .unwrap()

@@ -71,7 +71,7 @@ pub(crate) fn launch(
             })?;
             transcript
         }
-        crate::tape::Mode::Replay => replay_transcript(tape.cassette)?,
+        crate::tape::Mode::Replay => replay_transcript(context, tape.cassette)?,
     };
     if tape.mode == crate::tape::Mode::Replay && !transcript.is_file() {
         return Err(Error::Run(
@@ -100,15 +100,23 @@ pub(crate) fn launch(
     })
 }
 
-fn replay_transcript(cassette: &Path) -> Result<PathBuf, Error> {
+fn replay_transcript(context: &PreparationContext<'_>, cassette: &Path) -> Result<PathBuf, Error> {
     let name = cassette
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| Error::Run("replay cassette has no valid private filename".into()))?;
     let suffix = name
         .strip_prefix("replay")
-        .and_then(|suffix| suffix.strip_suffix(".jsonl"))
-        .ok_or_else(|| Error::Run("replay cassette has an unexpected private filename".into()))?;
+        .and_then(|suffix| suffix.strip_suffix(".jsonl"));
+    if suffix.is_none() {
+        // Historical provider-only JSONL input has no local-tool evidence.
+        // Keep it usable only with an explicit empty transcript: any tool call
+        // then fails causally instead of escaping to the host.
+        let transcript = context.runtime_dir.join("legacy-empty-local-tools.jsonl");
+        std::fs::write(&transcript, Transcript::default().encode()?).map_err(crate::io_error)?;
+        return Ok(transcript);
+    }
+    let suffix = suffix.expect("checked above");
     let parent = cassette
         .parent()
         .ok_or_else(|| Error::Run("replay cassette has no private directory".into()))?;

@@ -309,8 +309,9 @@ impl ArtifactOwner {
                         .to_string_lossy()
                         .into_owned();
                     if let Some(document) = document {
-                        frozen.documents.insert(name, document);
-                    } else if let Some(snapshot) = owned.snapshot.as_ref() {
+                        frozen.documents.insert(name.clone(), document);
+                    }
+                    if let Some(snapshot) = owned.snapshot.as_ref() {
                         frozen.bytes.insert(name, snapshot.clone());
                     }
                 }

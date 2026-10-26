@@ -501,31 +501,36 @@ impl Recorder {
                 bytes: bytes.get_ref().len() as u64,
                 sha256: crate::cassette::digest(bytes.get_ref()),
             });
+            let mut deterministic_manifest = result
+                .deterministic_manifest
+                .as_deref()
+                .map(std::io::Cursor::new);
+            let deterministic_manifest_artifact =
+                deterministic_manifest.as_ref().map(|bytes| Artifact {
+                    kind: "determinism-manifest".into(),
+                    bytes: bytes.get_ref().len() as u64,
+                    sha256: crate::cassette::digest(bytes.get_ref()),
+                });
+            let mut artifact_inputs = Vec::new();
+            if let (Some(artifact), Some(source)) =
+                (local_tools_artifact.clone(), local_tools.as_mut())
+            {
+                artifact_inputs.push(ArtifactInput { artifact, source });
+            }
+            if let (Some(artifact), Some(source)) = (
+                deterministic_manifest_artifact.clone(),
+                deterministic_manifest.as_mut(),
+            ) {
+                artifact_inputs.push(ArtifactInput { artifact, source });
+            }
             if let Some(file) = &mut file {
                 file.seek(SeekFrom::Start(0)).map_err(io_error)?;
                 journal
-                    .commit_with_artifacts(
-                        track.clone(),
-                        file,
-                        local_tools_artifact
-                            .clone()
-                            .zip(local_tools.as_mut())
-                            .map(|(artifact, source)| ArtifactInput { artifact, source })
-                            .into_iter()
-                            .collect(),
-                    )
+                    .commit_with_artifacts(track.clone(), file, artifact_inputs)
                     .map_err(recording_error)?;
             } else {
                 journal
-                    .commit_with_artifacts(
-                        track.clone(),
-                        &mut std::io::empty(),
-                        local_tools_artifact
-                            .zip(local_tools.as_mut())
-                            .map(|(artifact, source)| ArtifactInput { artifact, source })
-                            .into_iter()
-                            .collect(),
-                    )
+                    .commit_with_artifacts(track.clone(), &mut std::io::empty(), artifact_inputs)
                     .map_err(recording_error)?;
             }
             // commit_with_artifacts constructs the immutable artifact list

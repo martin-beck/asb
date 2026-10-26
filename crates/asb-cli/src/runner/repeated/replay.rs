@@ -156,36 +156,45 @@ impl Prepared {
             let index = if let Some(index) = seen.get(id) {
                 *index
             } else {
-                let (path, bytes, sha256, complete, local_tools) = if let Some(manifest) =
-                    self.source.manifest()
-                {
-                    let track = manifest.track(*id).map_err(input_error)?;
-                    (
-                        self.path.clone(),
-                        track.bytes,
-                        track.sha256.clone(),
-                        Some(track.complete),
-                        track
-                            .artifacts
+                let (path, bytes, sha256, complete, local_tools, deterministic_manifest) =
+                    if let Some(manifest) = self.source.manifest() {
+                        let track = manifest.track(*id).map_err(input_error)?;
+                        (
+                            self.path.clone(),
+                            track.bytes,
+                            track.sha256.clone(),
+                            Some(track.complete),
+                            track
+                                .artifacts
+                                .iter()
+                                .any(|artifact| artifact.kind == "local-tools")
+                                .then(|| PathBuf::from(format!("inputs/local-tools-{id}.jsonl"))),
+                            track
+                                .artifacts
+                                .iter()
+                                .any(|artifact| artifact.kind == "determinism-manifest")
+                                .then(|| {
+                                    PathBuf::from(format!("inputs/determinism-manifest-{id}.json"))
+                                }),
+                        )
+                    } else {
+                        let track = self
+                            .source
+                            .legacy_tracks()
                             .iter()
-                            .any(|artifact| artifact.kind == "local-tools")
-                            .then(|| PathBuf::from(format!("inputs/local-tools-{id}.jsonl"))),
-                    )
-                } else {
-                    let track = self
-                        .source
-                        .legacy_tracks()
-                        .iter()
-                        .find(|track| track.id == *id)
-                        .ok_or_else(|| Error::Input("selected legacy track disappeared".into()))?;
-                    (
-                        track.path.clone(),
-                        track.bytes,
-                        track.sha256.clone(),
-                        None,
-                        None,
-                    )
-                };
+                            .find(|track| track.id == *id)
+                            .ok_or_else(|| {
+                                Error::Input("selected legacy track disappeared".into())
+                            })?;
+                        (
+                            track.path.clone(),
+                            track.bytes,
+                            track.sha256.clone(),
+                            None,
+                            None,
+                            None,
+                        )
+                    };
                 total = total
                     .checked_add(bytes)
                     .filter(|bytes| *bytes <= Limits::default().max_total_bytes)
@@ -199,6 +208,7 @@ impl Prepared {
                     source: path,
                     private: PathBuf::from(format!("inputs/track-{id}.jsonl")),
                     local_tools,
+                    deterministic_manifest,
                     bytes,
                     sha256,
                 });
@@ -232,6 +242,16 @@ impl Prepared {
                     .read_artifact(input.track.expect("selected bundle track"), "local-tools")
                     .map_err(input_error)?;
                 publish_bytes(&root.join(local_tools), &bytes)?;
+            }
+            if let Some(manifest) = &input.deterministic_manifest {
+                let bytes = self
+                    .source
+                    .read_artifact(
+                        input.track.expect("selected bundle track"),
+                        "determinism-manifest",
+                    )
+                    .map_err(input_error)?;
+                publish_bytes(&root.join(manifest), &bytes)?;
             }
         }
         Ok(())
@@ -328,11 +348,33 @@ pub(super) fn stage_selected(
         };
         fs::hard_link(root.join(&input.private), &destination).map_err(crate::io_error)?;
         stage_local_tools(root, input, &destination, slot.replica, concurrency)?;
+        stage_determinism_manifest(root, input, &destination, slot.replica, concurrency)?;
     }
     fs::File::open(base.parent().expect("batch parent"))
         .and_then(|file| file.sync_all())
         .map_err(crate::io_error)?;
     path_text(&base)
+}
+
+fn stage_determinism_manifest(
+    root: &Path,
+    input: &ReplayInput,
+    destination: &Path,
+    replica: usize,
+    concurrency: usize,
+) -> Result<(), Error> {
+    let Some(manifest) = &input.deterministic_manifest else {
+        return Ok(());
+    };
+    let destination = destination
+        .parent()
+        .expect("replay destination has parent")
+        .join(if concurrency == 1 {
+            "determinism-manifest.json".into()
+        } else {
+            format!("determinism-manifest-{replica}.json")
+        });
+    fs::hard_link(root.join(manifest), destination).map_err(crate::io_error)
 }
 
 fn stage_local_tools(
@@ -420,6 +462,7 @@ mod tests {
             source: PathBuf::from("sealed.asb.zip"),
             private: PathBuf::from("inputs/track-7.jsonl"),
             local_tools: Some(PathBuf::from("inputs/local-tools-7.jsonl")),
+            deterministic_manifest: None,
             bytes: 2,
             sha256: "a".repeat(64),
         };
@@ -447,6 +490,7 @@ mod tests {
             source: root.join("source"),
             private: PathBuf::from("inputs/track-1.jsonl"),
             local_tools: Some(PathBuf::from("inputs/local-tools-1.jsonl")),
+            deterministic_manifest: None,
             bytes: 3,
             sha256: crate::cassette::digest(b"{}\n"),
         };
@@ -456,6 +500,33 @@ mod tests {
             b"{}\n"
         );
         assert!(!root.join("batch/local-tools-1.jsonl").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn deterministic_manifest_is_linked_beside_its_selected_replay_track() {
+        let root =
+            std::env::temp_dir().join(format!("asb-replay-determinism-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("inputs")).unwrap();
+        fs::create_dir_all(root.join("batch")).unwrap();
+        fs::write(root.join("inputs/determinism-manifest-7.json"), b"{}\n").unwrap();
+        let input = ReplayInput {
+            complete: Some(true),
+            track: Some(7),
+            source: PathBuf::from("sealed.asb.zip"),
+            private: PathBuf::from("inputs/track-7.jsonl"),
+            local_tools: None,
+            deterministic_manifest: Some(PathBuf::from("inputs/determinism-manifest-7.json")),
+            bytes: 2,
+            sha256: "a".repeat(64),
+        };
+        stage_determinism_manifest(&root, &input, &root.join("batch/replay.jsonl"), 3, 4).unwrap();
+        assert_eq!(
+            fs::read(root.join("batch/determinism-manifest-3.json")).unwrap(),
+            b"{}\n"
+        );
+        assert!(!root.join("batch/determinism-manifest-1.json").exists());
         let _ = fs::remove_dir_all(root);
     }
 }
