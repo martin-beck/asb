@@ -395,8 +395,12 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
                                     transport_factory=transport,
                                     **lifetime_options)
     finish_execution(result)
-    for relay in relays:
-        relay.check()
+    # A timed-out/cancelled owned guest is torn down together with its private
+    # relay.  Preserve the primary execution outcome for evaluation instead
+    # of reporting that expected teardown as a relay-disconnect failure.
+    if not result.get("timed_out") and not result.get("cancelled"):
+        for relay in relays:
+            relay.check()
     observation = {key: result.get(key) for key in ["exit_code", "timed_out", "cancelled",
                    "output_truncated", "elapsed_seconds", "preparation_seconds", "target"]}
     try:
