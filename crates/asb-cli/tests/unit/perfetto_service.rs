@@ -31,6 +31,7 @@ impl Fixture {
             consumer: "@fixture-consumer".into(),
             children,
             owner: None,
+            namespace_helper: None,
             _lease: lease,
         }
     }

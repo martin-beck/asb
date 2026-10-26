@@ -86,6 +86,7 @@ esac
         consumer: "@fixture-consumer".into(),
         children: Arc::new(Mutex::new(Vec::new())),
         owner: None,
+        namespace_helper: None,
         _lease: File::create(root.join("unused-lease")).unwrap(),
     };
     let blocked = match case.as_str() {
