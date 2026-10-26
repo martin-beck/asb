@@ -252,6 +252,7 @@ function normalizeCassetteBody(body) {
     .replace(/Chunk ID: [0-9a-f]+/gi, "Chunk ID: <asb-chunk>");
   try {
     const structuredToolCallIdentifiers = new Map();
+    const structuredContentBlockIdentifiers = new Map();
     const canonicalToolCallIdentifier = (identifier) => {
       if (!structuredToolCallIdentifiers.has(identifier)) {
         structuredToolCallIdentifiers.set(
@@ -260,6 +261,15 @@ function normalizeCassetteBody(body) {
         );
       }
       return structuredToolCallIdentifiers.get(identifier);
+    };
+    const canonicalContentBlockIdentifier = (identifier) => {
+      if (!structuredContentBlockIdentifiers.has(identifier)) {
+        structuredContentBlockIdentifiers.set(
+          identifier,
+          `<asb-content-block-${structuredContentBlockIdentifiers.size + 1}>`,
+        );
+      }
+      return structuredContentBlockIdentifiers.get(identifier);
     };
     const sort = (value, key = "", path = []) => {
       // Claude Code embeds a fresh device identifier in metadata.user_id on
@@ -316,7 +326,17 @@ function normalizeCassetteBody(body) {
           && /^\d+$/.test(path[3])
           && path[4] === "id"
           && key === "id") {
-        return canonicalToolCallIdentifier(value);
+        return canonicalContentBlockIdentifier(value);
+      }
+      if (typeof value === "string"
+          && path.length === 5
+          && path[0] === "messages"
+          && /^\d+$/.test(path[1])
+          && path[2] === "content"
+          && /^\d+$/.test(path[3])
+          && path[4] === "tool_use_id"
+          && key === "tool_use_id") {
+        return canonicalContentBlockIdentifier(value);
       }
       if (typeof value === "string"
           && path.length === 3
