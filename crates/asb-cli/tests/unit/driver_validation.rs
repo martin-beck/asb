@@ -20,6 +20,8 @@ impl Fixture {
             owned_instrumentation: None,
             task_identity: None,
             tape_cassette: None,
+            tool_replay: false,
+            tool_tape_cassette: None,
             inherit_working_directory: false,
             process_lifetime: Default::default(),
             workload_owner: None,

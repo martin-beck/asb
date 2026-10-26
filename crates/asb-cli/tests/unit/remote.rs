@@ -384,6 +384,8 @@ fn launch_validates_preparation_before_exposing_a_session_and_preserves_on_failu
         project_config: &fixture.project,
         replay: true,
         tape_cassette: None,
+        tool_replay: false,
+        tool_tape_cassette: None,
         measurements: Some(&mut measurements),
         show_output: false,
         progress: None,

@@ -13,7 +13,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
-.with_tool_replay(prepare_tool_replay)
+.with_complete_tool_replay(prepare_tool_replay)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
         namespace: "tool-replay",

@@ -140,6 +140,12 @@ pub(crate) struct RunOptions<'a> {
     pub interactive: bool,
     pub measurement_dir: Option<&'a str>,
     pub mode: Option<tape::Mode>,
+    /// Adapter-local tool recording/replay is independently selectable from
+    /// provider recording/replay, while sharing the sealed cassette carrier.
+    pub tool_mode: Option<tape::Mode>,
+    /// Internal callers predating the split options retain the historical
+    /// combined behavior unless they opt into an explicit tool selection.
+    pub tool_mode_explicit: bool,
     pub cassette: Option<&'a str>,
     pub respect_record_timings: bool,
     pub replica: replica::Identity,

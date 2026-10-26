@@ -148,7 +148,7 @@ def native(scenario="normal"):
         # PTY instead of bypassing the guard in this native artifact fixture.
         # `--json` intentionally disables prompts, so omit it here: this
         # fixture validates retained artifacts rather than CLI JSON output.
-        invocation = [str(ASB), "run", str(config_path), "--replay",
+        invocation = [str(ASB), "run", str(config_path), "--llm-replay",
                       "--cassette", str(tape)]
         result = subprocess.run(
             ["script", "--quiet", "--return", "--flush", "--command",

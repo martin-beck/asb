@@ -846,7 +846,9 @@ impl Session {
             .unwrap_or_default();
         let environment = guest_environment(&context.config.agent, |name| std::env::var(name).ok());
         let tape_cassette = guest_tape_cassette(context.tape_cassette)?;
-        let private_inputs = replay_private_inputs(context.tape_cassette, context.replay)?;
+        let tool_tape_cassette = guest_tape_cassette(context.tool_tape_cassette)?;
+        let private_inputs =
+            replay_private_inputs(context.tool_tape_cassette, context.tool_replay)?;
         let payload = AgentRequest {
             binary: &binary,
             project_root: context.project_root,
@@ -865,6 +867,8 @@ impl Session {
             request: json!({"process_lifetime":self.process_lifetime,"config":config,"connection":connection,"prompt":self.invocation.input.instructions,"timeout_seconds":self.agent_timeout.as_secs_f64(),
                 "project_root":"/opt/asb-project","runtime_dir":"/opt/asb-private","run_dir":"/opt/asb-private/attempt","replay":context.replay,
                 "tape_cassette":tape_cassette,
+                "tool_replay":context.tool_replay,
+                "tool_tape_cassette":tool_tape_cassette,
                 "namespace_collectors":namespace_collectors}),
         };
         self.controller

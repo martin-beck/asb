@@ -55,6 +55,8 @@ pub(crate) struct Options<'a> {
     /// make the terminal unreadable.
     pub interactive: bool,
     pub mode: Option<crate::tape::Mode>,
+    pub tool_mode: Option<crate::tape::Mode>,
+    pub tool_mode_explicit: bool,
     pub respect_record_timings: bool,
     pub cassette_root: Option<&'a Path>,
     pub jobs: usize,
@@ -76,6 +78,8 @@ impl Default for Options<'_> {
             show_output: false,
             interactive: false,
             mode: None,
+            tool_mode: None,
+            tool_mode_explicit: false,
             respect_record_timings: false,
             cassette_root: None,
             jobs: 1,
