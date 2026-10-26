@@ -926,10 +926,17 @@ fn check_interrupted_generations(source_kind: &str, measured: bool, successive: 
         fs::remove_file(orphan.join("admitted.json")).unwrap();
         fs::remove_dir(orphan).unwrap();
     }
-    for iteration in 0..2 {
+    // Provider-only legacy input is intentionally retained but not reusable
+    // once its unsealed pending slots require recovery.
+    for iteration in 0..if source_kind == "legacy" { 1 } else { 2 } {
         let resumed = sweep(&project, provider.as_ref(), arguments);
-        // The genuine false grade remains an overall failure, not a reason to
-        // retry its client or suppress the four new batch-two attempts.
+        // A historical provider-only JSONL cassette has no sealed local-tool
+        // transcript. It may retain its already graded first batch, but it
+        // must not admit a fresh batch that could escape the sealed replay
+        // contract. Modern recordings continue with their four batch-two
+        // attempts despite the genuine false grade.
+        let legacy_provider_only = source_kind == "legacy";
+        let expected_total = if legacy_provider_only { 4 } else { total };
         assert!(!resumed.status.success());
         let rows = records(&resumed.stdout)
             .into_iter()
@@ -937,7 +944,7 @@ fn check_interrupted_generations(source_kind: &str, measured: bool, successive: 
             .collect::<Vec<_>>();
         assert_eq!(
             rows.len(),
-            total,
+            expected_total,
             "iteration {iteration}: {}\n{}",
             String::from_utf8_lossy(&resumed.stdout),
             String::from_utf8_lossy(&resumed.stderr)
@@ -974,16 +981,20 @@ fn check_interrupted_generations(source_kind: &str, measured: bool, successive: 
         );
         assert_eq!(
             rows.iter().filter(|row| row["reused"] == true).count(),
-            if iteration == 0 { total - 4 } else { total }
+            if legacy_provider_only || iteration > 0 {
+                expected_total
+            } else {
+                expected_total - 4
+            }
         );
         let attempts = records(&fs::read(project.0.join("attempts.jsonl")).unwrap());
-        assert_eq!(attempts.len(), total);
+        assert_eq!(attempts.len(), expected_total);
         assert_eq!(
             attempts
                 .iter()
                 .filter(|attempt| attempt["batch"] == 2)
                 .count(),
-            4
+            if legacy_provider_only { 0 } else { 4 }
         );
         if matches!(source_kind, "zip" | "incomplete") {
             for attempt in &attempts {
@@ -1007,9 +1018,17 @@ fn check_interrupted_generations(source_kind: &str, measured: bool, successive: 
         )
         .unwrap();
         let reported = report["benchmarks"].as_array().unwrap();
+        // The report retains the complete admitted campaign, including its
+        // untouched pending slots, even when a provider-only legacy cassette
+        // is not eligible to admit those slots for sealed replay.
         assert_eq!(reported.len(), total);
         let mut ids = std::collections::BTreeSet::new();
         for row in reported {
+            if legacy_provider_only && row["execution"].is_null() {
+                assert_eq!(row["id"]["batch"], 2);
+                assert_eq!(row["result_source"], "missing");
+                continue;
+            }
             let slot = row["execution"]["slot"].as_u64().unwrap_or_else(|| {
                 panic!(
                     "missing report execution: {row}\nresume stderr: {}",
@@ -1042,15 +1061,17 @@ fn check_interrupted_generations(source_kind: &str, measured: bool, successive: 
                 path.display()
             );
         }
-        for id in 5..=total {
-            let receipt = checkpoint.join(format!("campaign-completed/000000/{id:06}.json"));
-            assert!(
-                receipt.is_file(),
-                "missing new receipt {id}: {}",
-                String::from_utf8_lossy(&resumed.stderr)
-            );
-            if iteration == 0 {
-                frozen.push((receipt.clone(), fs::read(receipt).unwrap()));
+        if !legacy_provider_only {
+            for id in 5..=total {
+                let receipt = checkpoint.join(format!("campaign-completed/000000/{id:06}.json"));
+                assert!(
+                    receipt.is_file(),
+                    "missing new receipt {id}: {}",
+                    String::from_utf8_lossy(&resumed.stderr)
+                );
+                if iteration == 0 {
+                    frozen.push((receipt.clone(), fs::read(receipt).unwrap()));
+                }
             }
         }
         if let Some(provider) = &provider {

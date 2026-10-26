@@ -574,7 +574,21 @@ fn rewrite_bundle(
         .tracks
         .iter()
         .map(|track| (track.id, archive.read_track(track.id).unwrap()))
-        .collect();
+        .collect::<std::collections::BTreeMap<_, _>>();
+    // Rewriters model a changed manifest/track, not an older recording
+    // format.  Preserve every sealed sidecar (local-tool transcripts and
+    // deterministic manifests included), otherwise the test fixture ceases to
+    // describe the archive it writes and replay quite correctly refuses it.
+    let mut artifacts = Vec::new();
+    for track in &manifest.tracks {
+        for artifact in &track.artifacts {
+            artifacts.push((
+                track.id,
+                artifact.kind.clone(),
+                archive.read_artifact(track.id, &artifact.kind).unwrap(),
+            ));
+        }
+    }
     edit(&mut manifest, &mut payloads);
     let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
     let options = zip::write::SimpleFileOptions::default()
@@ -586,6 +600,11 @@ fn rewrite_bundle(
         zip.start_file(format!("tracks/{id}.jsonl"), options)
             .unwrap();
         zip.write_all(&payload).unwrap();
+    }
+    for (id, kind, bytes) in artifacts {
+        zip.start_file(format!("artifacts/{id}/{kind}.jsonl"), options)
+            .unwrap();
+        zip.write_all(&bytes).unwrap();
     }
     zip.finish().unwrap();
 }
