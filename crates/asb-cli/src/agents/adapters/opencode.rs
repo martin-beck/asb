@@ -29,6 +29,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_complete_tool_replay(prepare_tool_replay)
 .with_output_usage(output_usage)
 .with_step_count(step_count)
 .with_state_environment_vars(&[
@@ -117,6 +118,13 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         crate::endpoint::Interface::OpenAiResponses => "@ai-sdk/openai",
         _ => return Err(context.unsupported_endpoint("opencode")),
     };
+    // The tool hook runs before the adapter hook.  Consume its private launch
+    // description before mutating the command, then remove the bridge
+    // variable so it is never exposed to OpenCode or the benchmark process.
+    let tool_command = tool_replay(context)?;
+    context
+        .command
+        .env_remove("ASB_OPENCODE_TOOL_REPLAY_COMMAND");
     context
         .command
         .env(
@@ -125,7 +133,7 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         )
         .env(
             "OPENCODE_CONFIG_CONTENT",
-            config(context.model, &connection.base_url, npm)?,
+            config(context.model, &connection.base_url, npm, tool_command)?,
         );
     // OpenCode's repository-search tool invokes ripgrep.  Fresh workload
     // materialization can give the same files a different directory-entry
@@ -148,18 +156,74 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-fn config(model: &str, base_url: &str, npm: &str) -> Result<String, Error> {
+fn prepare_tool_replay(
+    context: &mut PreparationContext<'_>,
+    tape: super::super::TapeContext<'_>,
+) -> Result<(), Error> {
+    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    let command = std::iter::once(launch.program)
+        .chain(launch.args.into_iter().map(std::path::PathBuf::from))
+        .map(|value| {
+            value
+                .into_os_string()
+                .into_string()
+                .map_err(|_| Error::Run("ASB local-tool replay argument is not valid UTF-8".into()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    context.command.env(
+        "ASB_OPENCODE_TOOL_REPLAY_COMMAND",
+        serde_json::to_string(&command)
+            .map_err(|_| Error::Run("cannot encode OpenCode local-tool command".into()))?,
+    );
+    Ok(())
+}
+
+fn tool_replay(context: &PreparationContext<'_>) -> Result<Option<Vec<String>>, Error> {
+    let Some(command) = context
+        .command
+        .get_envs()
+        .find_map(|(name, value)| (name == "ASB_OPENCODE_TOOL_REPLAY_COMMAND").then_some(value))
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    serde_json::from_slice(command.as_encoded_bytes())
+        .map(Some)
+        .map_err(|_| Error::Run("OpenCode local-tool command is malformed".into()))
+}
+
+fn config(
+    model: &str,
+    base_url: &str,
+    npm: &str,
+    tool_command: Option<Vec<String>>,
+) -> Result<String, Error> {
     let mut models = serde_json::Map::new();
     models.insert(model.to_owned(), serde_json::json!({"name": model}));
-    serde_json::to_string(&serde_json::json!({
+    let mut configuration = serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
         "provider": {"asb": {
             "npm": npm, "name": "ASB provider",
             "options": {"baseURL": base_url, "apiKey": "{env:ASB_AGENT_API_KEY}"},
             "models": models
         }}
-    }))
-    .map_err(|error| Error::Run(format!("cannot configure OpenCode provider: {error}")))
+    });
+    if let Some(command) = tool_command {
+        configuration["mcp"] = serde_json::json!({
+            "asb_local_tools": {"type":"local", "command":command}
+        });
+        // The public OpenCode configuration exposes these as every built-in
+        // executable/action tool.  Denying them leaves the sealed ASB MCP
+        // service as the sole benchmark-visible local-tool authority.
+        configuration["permission"] = serde_json::json!({
+            "bash":"deny", "edit":"deny", "read":"deny", "grep":"deny",
+            "glob":"deny", "lsp":"deny", "apply_patch":"deny", "skill":"deny",
+            "todowrite":"deny", "webfetch":"deny", "websearch":"deny", "question":"deny",
+            "asb_local_tools_*":"allow"
+        });
+    }
+    serde_json::to_string(&configuration)
+        .map_err(|error| Error::Run(format!("cannot configure OpenCode provider: {error}")))
 }
 
 #[cfg(test)]
@@ -172,10 +236,29 @@ mod tests {
             "test-model",
             "http://127.0.0.1:3456/v1",
             "@ai-sdk/anthropic",
+            None,
         )
         .expect("configuration succeeds");
         assert!(config.contains("test-model"));
         assert!(config.contains("ASB_AGENT_API_KEY"));
+    }
+
+    #[test]
+    fn tool_configuration_seals_native_tools_behind_the_asb_mcp_service() {
+        let config = config(
+            "test-model",
+            "http://127.0.0.1:3456/v1",
+            "@ai-sdk/openai-compatible",
+            Some(vec!["asb-tool-replay-mcp".into(), "--tape".into()]),
+        )
+        .expect("configuration succeeds");
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+        assert_eq!(
+            config["mcp"]["asb_local_tools"]["command"],
+            serde_json::json!(["asb-tool-replay-mcp", "--tape"])
+        );
+        assert_eq!(config["permission"]["bash"], "deny");
+        assert_eq!(config["permission"]["asb_local_tools_*"], "allow");
     }
 
     #[test]
