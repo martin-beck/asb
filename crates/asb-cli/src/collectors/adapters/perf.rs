@@ -337,7 +337,7 @@ fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
             Ok(output) if output.status.success() => {}
             Ok(output) if perf_access_denied(&output.stderr) => {
                 return Err(format!(
-                    "perf is denied even through passwordless sudo during its {name} preflight. The host or container policy does not permit performance monitoring for this execution boundary; inspect `sudo -n {} {}` and retry.",
+                    "perf is denied even through passwordless sudo during its {name} preflight. The host or container policy does not permit performance monitoring for this execution boundary. If the host policy permits it, run `sudo sysctl -w kernel.perf_event_paranoid=-1`; containers or other security policy can still deny perf. Inspect `sudo -n {} {}` and retry.",
                     executable.display(),
                     args.join(" ")
                 ));
