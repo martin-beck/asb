@@ -13,6 +13,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_complete_tool_replay(prepare_tool_replay)
 .with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"])
 .with_state_environment_vars(&["CLAUDE_CONFIG_DIR"])
 .with_unprivileged_execution()
@@ -113,6 +114,49 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Claude Code only exposes MCP tools in print mode when they are explicitly
+/// allow-listed.  Couple that allow-list with a deny-list for every native
+/// local-action tool, so a taped execution cannot fall back to a shell or
+/// workspace mutation outside the ASB transcript.
+fn prepare_tool_replay(
+    context: &mut PreparationContext<'_>,
+    tape: super::super::TapeContext<'_>,
+) -> Result<(), Error> {
+    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    let configuration = serde_json::json!({
+        "mcpServers": {"asb_local_tools": {
+            "command": launch.program.to_string_lossy(),
+            "args": launch.args.iter()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+        }}
+    });
+    let directory = context.runtime_dir.join("claude-code");
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        Error::Run(format!(
+            "cannot create Claude Code local-tool directory: {error}"
+        ))
+    })?;
+    let path = directory.join("asb-local-tools.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&configuration).map_err(|error| {
+            Error::Run(format!("cannot encode Claude Code local tools: {error}"))
+        })?,
+    )
+    .map_err(|error| Error::Run(format!("cannot write Claude Code local tools: {error}")))?;
+    context.command.args([
+        "--mcp-config",
+        path.to_str()
+            .ok_or_else(|| Error::Run("Claude Code local-tool path is not valid UTF-8".into()))?,
+        "--allowedTools",
+        "mcp__asb_local_tools",
+        "--disallowedTools",
+        "Bash,Edit,Write,Read,Glob,Grep,WebFetch,WebSearch,Task,Skill,NotebookEdit",
+    ]);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +203,67 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "--dangerously-skip-permissions")
         );
+    }
+
+    #[test]
+    fn tool_replay_is_declared_complete_only_with_a_sealed_mcp_transport() {
+        assert!(ADAPTER.supports_tool_replay());
+    }
+
+    #[test]
+    fn tape_backed_preparation_allows_only_the_private_mcp_tools() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-claude-tool-replay-{}-{}",
+            std::process::id(),
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::AnthropicMessages,
+            base_url: "http://127.0.0.1:4321/v1".into(),
+            credential: Some("asb-replay".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let mut command = std::process::Command::new("claude");
+        prepare_tool_replay(
+            &mut PreparationContext {
+                command: &mut command,
+                model: "test-model",
+                connection: &connection,
+                workspace: &workspace,
+                runtime_dir: &root.join("runtime"),
+                run_dir: &run_dir,
+                tape: None,
+            },
+            super::super::TapeContext {
+                mode: crate::tape::Mode::Record,
+                cassette: &root.join("recording.asb.zip"),
+            },
+        )
+        .unwrap();
+        let arguments = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(arguments.contains(&"--mcp-config".into()));
+        assert!(arguments.contains(&"mcp__asb_local_tools".into()));
+        assert!(
+            arguments
+                .iter()
+                .any(|value| value.contains("Bash,Edit,Write"))
+        );
+        let configuration: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("runtime/claude-code/asb-local-tools.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            configuration["mcpServers"]["asb_local_tools"]["args"][0],
+            "__asb-tool-replay"
+        );
+        assert!(run_dir.join("tool-replay/local-tools.jsonl").is_file());
+        let _ = std::fs::remove_dir_all(root);
     }
     #[test]
     fn uses_negotiated_authentication_without_conflicting_credentials() {

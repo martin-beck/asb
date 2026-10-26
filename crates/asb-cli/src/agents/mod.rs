@@ -907,6 +907,7 @@ mod tests {
         assert!(find("pi").unwrap().supports_tool_replay());
         assert!(find("workbuddy").unwrap().supports_tool_replay());
         assert!(find("opencode").unwrap().supports_tool_replay());
+        assert!(find("claude-code").unwrap().supports_tool_replay());
         assert!(!find("codex").unwrap().supports_tool_replay());
         assert!(!find("goose").unwrap().supports_tool_replay());
     }
