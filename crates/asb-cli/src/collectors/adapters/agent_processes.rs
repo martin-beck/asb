@@ -226,7 +226,7 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
                         if !root.matches() {
                             return totals;
                         }
-                        totals.sample(root, &identity);
+                        totals.sample(root, &identity, MEMORY);
                         match receiver.recv_timeout(interval) {
                             Err(mpsc::RecvTimeoutError::Timeout) => (),
                             Ok(Control::Admit(process)) => {
@@ -333,10 +333,10 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
                 "schema_version": 1, "collector": self.id(),
                 "status": if incomplete { "incomplete" } else if available { "observed" } else { "unavailable" },
                 "reason": reason,
-                "source": if state.isolated { "execution-namespace-linux-proc-sampling" } else { "linux-proc-sampling" }, "scope": "selected-agent-entry-point-only",
+                "source": if state.isolated { "execution-namespace-linux-proc-sampling" } else { "linux-proc-sampling" }, "scope": if MEMORY { "selected-agent-process-tree" } else { "selected-agent-entry-point-only" },
                 "sampling_interval_ms": state.imported.as_ref().map_or_else(measurements::measurement_interval_ms, |sample| sample.sampling_interval_ms),
                 "samples": samples,
-                "limitations": "Sampled lower bound: short-lived processes can be missed. New process identities require an observed exec; fork-without-exec workers are unclassified because inherited agent identity cannot distinguish them from pending tool launches. Workers are additional OS processes with the same executable or script entry point, not logical subagents within one process. Tools and the ASB gate are excluded. RSS includes shared pages per matching process, not unique physical memory. Different wrapper entry points are not inferred.",
+                "limitations": if MEMORY { "Sampled lower bound over the verified selected-agent process tree: short-lived processes can be missed. RSS includes shared pages per matching process, not unique physical memory. ASB's outer gate and unrelated host tasks are excluded." } else { "Sampled lower bound: short-lived processes can be missed. New process identities require an observed exec; fork-without-exec workers are unclassified because inherited agent identity cannot distinguish them from pending tool launches. Workers are additional OS processes with the same executable or script entry point, not logical subagents within one process. Tools and the ASB gate are excluded. RSS includes shared pages per matching process, not unique physical memory. Different wrapper entry points are not inferred." },
                 "metrics": metrics
             }),
         )
@@ -502,7 +502,12 @@ impl Totals {
         }
     }
 
-    fn sample(&mut self, root: measurements::ProcessIdentity, identity: &Identity) {
+    fn sample(
+        &mut self,
+        root: measurements::ProcessIdentity,
+        identity: &Identity,
+        process_tree_memory: bool,
+    ) {
         if !root.matches() {
             self.admitted.clear();
             return;
@@ -518,7 +523,7 @@ impl Totals {
             }
             let proc = PathBuf::from(format!("/proc/{pid}"));
             let key = (pid, generation.start_time_ticks);
-            if !self.matches_process(&proc, key, identity) {
+            if !process_tree_memory && !self.matches_process(&proc, key, identity) {
                 continue;
             }
             let Some((start, resident)) = process_memory(&proc) else {
@@ -532,7 +537,7 @@ impl Totals {
             };
             if generation.start_time_ticks != start
                 || !generation.in_tree(root)
-                || !self.matches_process(&proc, key, identity)
+                || (!process_tree_memory && !self.matches_process(&proc, key, identity))
             {
                 continue;
             }
@@ -674,7 +679,7 @@ mod tests {
                 "fixture must expose matching inherited identity"
             );
             for _ in 0..5 {
-                totals.sample(root, &inherited);
+                totals.sample(root, &inherited, false);
             }
             assert!(totals.seen.is_empty());
             assert!(totals.admitted.is_empty());
@@ -683,13 +688,13 @@ mod tests {
         release_writer.write_all(&[1]).unwrap();
         let mut child = spawning.join().unwrap().unwrap();
         let after = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            totals.sample(root, &inherited);
+            totals.sample(root, &inherited, false);
             assert!(
                 totals.seen.is_empty(),
                 "tool exec must not retain inherited admission"
             );
             let actual = Identity::resolve("/bin/cat", &[]).unwrap();
-            totals.sample(root, &actual);
+            totals.sample(root, &actual, false);
             assert_eq!(
                 totals.seen.len(),
                 1,
@@ -700,6 +705,20 @@ mod tests {
         child.wait().unwrap();
         before.unwrap();
         after.unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn memory_scope_accounts_for_the_verified_execution_tree() {
+        let root = measurements::ProcessIdentity::read(std::process::id()).unwrap();
+        let unrelated = Identity::resolve("/bin/false", &[]).unwrap();
+        let mut totals = Totals::default();
+
+        totals.sample(root, &unrelated, true);
+
+        assert_eq!(totals.samples, 1);
+        assert_eq!(totals.seen.len(), 1);
+        assert!(totals.peak_rss_kib > 0);
     }
 
     #[test]
@@ -1008,11 +1027,11 @@ mod tests {
         totals
             .declared
             .insert((generation.pid, generation.start_time_ticks));
-        totals.sample(generation, &identity);
+        totals.sample(generation, &identity, false);
         assert_eq!(totals.samples, 1);
         for _ in 0..20 {
             thread::sleep(Duration::from_millis(100));
-            totals.sample(generation, &identity);
+            totals.sample(generation, &identity, false);
         }
         assert_eq!(
             totals.samples, 21,
@@ -1029,7 +1048,7 @@ mod tests {
                 .unwrap(),
         );
         let other_generation = measurements::ProcessIdentity::read(other.0.id()).unwrap();
-        totals.sample(other_generation, &identity);
+        totals.sample(other_generation, &identity, false);
         assert_eq!(
             totals.samples, 21,
             "same interpreter is not sufficient for initial admission"
@@ -1037,7 +1056,7 @@ mod tests {
         assert_eq!(totals.seen.len(), 1);
         agent.0.kill().unwrap();
         agent.0.wait().unwrap();
-        totals.sample(generation, &identity);
+        totals.sample(generation, &identity, false);
         assert_eq!(
             totals.samples, 21,
             "an exited PID lifetime cannot add observations"
