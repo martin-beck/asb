@@ -12,12 +12,14 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_complete_tool_replay(prepare_tool_replay)
 .with_replay_credential_vars(&["CLINE_API_KEY"])
 .with_state_environment_vars(&[
     "CLINE_DIR",
     "CLINE_DATA_DIR",
     "CLINE_PROVIDER_SETTINGS_PATH",
     "CLINE_GLOBAL_SETTINGS_PATH",
+    "CLINE_MCP_SETTINGS_PATH",
 ])
 .with_output_usage(output_usage)
 .with_step_count(step_count);
@@ -78,6 +80,16 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         key,
         protocol,
     )?;
+    let sealed_tools = context
+        .command
+        .get_envs()
+        .find_map(|(name, value)| (name == "ASB_CLINE_SEALED_TOOLS").then_some(value))
+        .flatten()
+        .is_some_and(|value| value == "1");
+    context.command.env_remove("ASB_CLINE_SEALED_TOOLS");
+    if sealed_tools {
+        write_sealed_tool_settings(&directory)?;
+    }
     context
         .command
         .env("OPENAI_API_KEY", key)
@@ -97,6 +109,62 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
             "CLINE_GLOBAL_SETTINGS_PATH",
             directory.join("data/settings/global-settings.json"),
         );
+    Ok(())
+}
+
+/// Cline's headless configuration exposes every native coding action under a
+/// stable tool identifier.  Disable that complete set for tape-backed runs
+/// and publish the ASB stdio MCP endpoint as the only remaining local-action
+/// authority.  MCP tools are deliberately not part of `disabledTools`.
+fn prepare_tool_replay(
+    context: &mut PreparationContext<'_>,
+    tape: super::super::TapeContext<'_>,
+) -> Result<(), Error> {
+    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    let directory = context.runtime_dir.join("cline/config/data/settings");
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        Error::Run(format!(
+            "cannot create Cline local-tool configuration directory: {error}"
+        ))
+    })?;
+    let mcp_path = directory.join("cline_mcp_settings.json");
+    let mcp = serde_json::json!({
+        "mcpServers": {"asb_local_tools": {
+            "command": launch.program.to_string_lossy(),
+            "args": launch.args.iter()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            "disabled": false,
+            "autoApprove": ["list_directory", "search_text", "run_command", "read_file", "write_file", "create_directory", "remove_file"],
+        }}
+    });
+    std::fs::write(
+        &mcp_path,
+        serde_json::to_vec(&mcp)
+            .map_err(|error| Error::Run(format!("cannot encode Cline local tools: {error}")))?,
+    )
+    .map_err(|error| Error::Run(format!("cannot write Cline local tools: {error}")))?;
+    context.command.env("CLINE_MCP_SETTINGS_PATH", mcp_path);
+
+    context.command.env("ASB_CLINE_SEALED_TOOLS", "1");
+    Ok(())
+}
+
+fn write_sealed_tool_settings(directory: &std::path::Path) -> Result<(), Error> {
+    let global_path = directory.join("data/settings/global-settings.json");
+    let global = serde_json::json!({
+        "disabledTools": [
+            "read_files", "search_codebase", "run_commands", "editor",
+            "fetch_web_content", "skills", "ask_question", "spawn_agent", "teams"
+        ],
+        "tools": {"web_search": {"enabled": false}, "image_generation": {"enabled": false}}
+    });
+    std::fs::write(
+        global_path,
+        serde_json::to_vec(&global)
+            .map_err(|error| Error::Run(format!("cannot encode sealed Cline tools: {error}")))?,
+    )
+    .map_err(|error| Error::Run(format!("cannot write sealed Cline tools: {error}")))?;
     Ok(())
 }
 
@@ -153,6 +221,71 @@ fn configure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentAdapter;
+
+    #[test]
+    fn tape_backed_preparation_seals_native_tools_behind_the_private_mcp() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-cline-tool-replay-{}-{}",
+            std::process::id(),
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiChat,
+            base_url: "http://127.0.0.1:4321/v1".into(),
+            credential: Some("asb-replay".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let mut command = std::process::Command::new("cline");
+        ADAPTER
+            .prepare(&mut PreparationContext {
+                command: &mut command,
+                model: "test-model",
+                connection: &connection,
+                workspace: &workspace,
+                runtime_dir: &root.join("runtime"),
+                run_dir: &run_dir,
+                tape: Some(super::super::TapeContext {
+                    mode: crate::tape::Mode::Record,
+                    cassette: &root.join("recording.asb.zip"),
+                }),
+            })
+            .unwrap();
+        let settings = root.join("runtime/cline/config/data/settings");
+        let mcp: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(settings.join("cline_mcp_settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            mcp["mcpServers"]["asb_local_tools"]["args"][0],
+            "__asb-tool-replay"
+        );
+        let global: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(settings.join("global-settings.json")).unwrap())
+                .unwrap();
+        assert!(
+            global["disabledTools"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("run_commands"))
+        );
+        assert!(
+            global["disabledTools"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("editor"))
+        );
+        assert!(
+            command
+                .get_envs()
+                .any(|(name, value)| { name == "ASB_CLINE_SEALED_TOOLS" && value.is_none() })
+        );
+        assert!(run_dir.join("tool-replay/local-tools.jsonl").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn provider_configuration_is_owned_by_the_cline_adapter() {
