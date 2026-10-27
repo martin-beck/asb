@@ -82,6 +82,49 @@ impl Store {
         })
     }
 
+    /// Open only a complete, canonical capsule. A directory without a valid
+    /// final manifest is an interrupted capture, never replay input.
+    pub(crate) fn open(root: &Path) -> Result<(Self, Manifest), Error> {
+        ensure_directory(root, "native capsule destination")?;
+        let objects = root.join(OBJECTS_DIRECTORY);
+        ensure_directory(&objects, "native capsule object store")?;
+        let path = root.join(MANIFEST_FILENAME);
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|_| Error::Run("native capsule manifest is unavailable".into()))?;
+        if !metadata.file_type().is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() > MAX_BYTES as u64
+        {
+            return Err(Error::Run("native capsule manifest is invalid".into()));
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        open_read_no_follow(&path)
+            .map_err(crate::io_error)?
+            .take(MAX_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(crate::io_error)?;
+        if bytes.len() as u64 != metadata.len() {
+            return Err(Error::Run(
+                "native capsule manifest changed during read".into(),
+            ));
+        }
+        let canonical = canonicalize(&bytes)?;
+        if canonical != bytes {
+            return Err(Error::Run(
+                "native capsule manifest is not canonical".into(),
+            ));
+        }
+        let manifest = serde_json::from_slice(&canonical)
+            .map_err(|_| Error::Run("native capsule manifest is malformed".into()))?;
+        Ok((
+            Self {
+                root: root.to_path_buf(),
+                objects,
+            },
+            manifest,
+        ))
+    }
+
     pub(crate) fn objects(&self) -> &Path {
         &self.objects
     }
@@ -1167,8 +1210,19 @@ mod tests {
             serde_json::from_slice::<Manifest>(&published).unwrap(),
             manifest
         );
+        let (opened, reopened) = Store::open(&destination).unwrap();
+        assert_eq!(opened.root(), destination);
+        assert_eq!(reopened, manifest);
         assert!(store.publish(&manifest).is_err());
         assert!(Store::create(&destination).is_err());
+    }
+
+    #[test]
+    fn store_refuses_an_interrupted_capture_without_manifest() {
+        let root = test_root("incomplete-store");
+        let destination = root.0.join("capsule");
+        let _store = Store::create(&destination).unwrap();
+        assert!(Store::open(&destination).is_err());
     }
 
     #[test]
