@@ -128,7 +128,9 @@ fn launcher_selection_validates_explicit_override_in_a_private_subprocess() {
 
 #[test]
 fn root_executable_identity_skips_path_names_and_oversized_files_without_reading_them() {
-    assert!(root_executable_identity(OsStr::new("fixture-client")).is_none());
+    assert!(
+        crate::agents::native_trace::executable_identity(OsStr::new("fixture-client")).is_none()
+    );
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/gate-fixtures")
         .join(crate::workloads::TaskIdentity::local("identity", None).attempt_id);
@@ -136,8 +138,8 @@ fn root_executable_identity_skips_path_names_and_oversized_files_without_reading
     let oversized = root.join("oversized-client");
     std::fs::File::create(&oversized)
         .unwrap()
-        .set_len(MAX_ROOT_EXECUTABLE_IDENTITY_BYTES + 1)
+        .set_len(crate::agents::native_trace::MAX_EXECUTABLE_IDENTITY_BYTES + 1)
         .unwrap();
-    assert!(root_executable_identity(oversized.as_os_str()).is_none());
+    assert!(crate::agents::native_trace::executable_identity(oversized.as_os_str()).is_none());
     fs::remove_dir_all(root).unwrap();
 }

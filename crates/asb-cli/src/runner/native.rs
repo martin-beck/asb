@@ -7,6 +7,9 @@ pub(super) struct NativeRoute<'a> {
     pub provider_credentials: Option<(&'a str, &'a str)>,
     pub tape_url: Option<&'a str>,
     pub tape_mode: Option<tape::Mode>,
+    /// The selected provider-tape path. A sibling native-trace sidecar, when
+    /// present, binds replay to the recorded direct executable.
+    pub native_trace_cassette: Option<&'a Path>,
     pub tool_tape_mode: Option<tape::Mode>,
     pub tool_tape_cassette: Option<&'a Path>,
 }
@@ -57,6 +60,7 @@ impl NativePlan<'_> {
             provider_credentials,
             tape_url,
             tape_mode,
+            native_trace_cassette,
             tool_tape_mode,
             tool_tape_cassette,
         } = route;
@@ -110,6 +114,12 @@ impl NativePlan<'_> {
             || Ok(crate::launch::ProcessLaunch::new(&program)),
             |adapter| adapter.process(&program),
         )?;
+        #[cfg(target_os = "linux")]
+        if tape_mode == Some(tape::Mode::Replay)
+            && let Some(cassette) = native_trace_cassette
+        {
+            agents::native_trace::verify_replay_root_identity(cassette, &launch.program)?;
+        }
         #[cfg(unix)]
         let gate =
             if (measurements.is_some() || cfg!(target_os = "linux"))
@@ -350,6 +360,7 @@ mod tests {
                     provider_credentials: None,
                     tape_url: Some("http://127.0.0.1:1"),
                     tape_mode: Some(tape::Mode::Replay),
+                    native_trace_cassette: None,
                     tool_tape_mode: None,
                     tool_tape_cassette: None,
                 },
@@ -466,6 +477,7 @@ mod tests {
                 provider_credentials: None,
                 tape_url: Some("http://127.0.0.1:1"),
                 tape_mode: Some(tape::Mode::Replay),
+                native_trace_cassette: None,
                 tool_tape_mode: None,
                 tool_tape_cassette: None,
             },

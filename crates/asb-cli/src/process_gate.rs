@@ -3,29 +3,13 @@
 //! Internal process start gate used to close the collector attachment race.
 
 use std::ffi::OsString;
-#[cfg(target_os = "linux")]
-use std::fs::File;
 use std::io;
 #[cfg(target_os = "linux")]
-use std::io::Read;
-#[cfg(target_os = "linux")]
 use std::os::fd::{FromRawFd, OwnedFd};
-#[cfg(target_os = "linux")]
-use std::path::Path;
 use std::process::Command;
 
 #[cfg(target_os = "linux")]
-use sha2::{Digest, Sha256};
-
-#[cfg(target_os = "linux")]
 const TRACE_READY_FD: &str = "ASB_NATIVE_TRACE_READY_FD";
-
-/// A root executable identity is provenance for a later replay capsule, not
-/// executable capture.  Reading no more than this amount keeps lifecycle
-/// tracing lightweight and never adds a second copy of a large client binary
-/// to the run directory.
-#[cfg(target_os = "linux")]
-const MAX_ROOT_EXECUTABLE_IDENTITY_BYTES: u64 = 8 * 1024 * 1024;
 
 #[cfg(target_os = "linux")]
 mod control;
@@ -244,7 +228,7 @@ pub(crate) fn run_gate(args: &[OsString]) -> std::process::ExitCode {
         // target pathname or executable bytes.
         let root_executable = trace
             .as_ref()
-            .and_then(|_| root_executable_identity(program));
+            .and_then(|_| crate::agents::native_trace::executable_identity(program));
         let mut command = target_command(program, target_args, arg0, trace.is_some())?;
         let trace_ready = trace
             .is_some()
@@ -299,50 +283,6 @@ pub(crate) fn run_gate(args: &[OsString]) -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     }
     std::process::ExitCode::from(code)
-}
-
-/// Return an opaque content identity for a direct regular-file launch target.
-///
-/// Bare names intentionally remain unavailable: resolving them through a
-/// possibly mutable PATH would make the evidence claim stronger than what this
-/// gate observed.  The execution itself retains normal PATH behavior.
-#[cfg(target_os = "linux")]
-fn root_executable_identity(
-    program: &std::ffi::OsStr,
-) -> Option<crate::agents::native_trace::Blob> {
-    let path = Path::new(program);
-    if !path.is_absolute() {
-        return None;
-    }
-    let metadata = std::fs::metadata(path).ok()?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_ROOT_EXECUTABLE_IDENTITY_BYTES {
-        return None;
-    }
-    let mut file = File::open(path).ok()?;
-    let mut digest = Sha256::new();
-    let mut bytes = 0_u64;
-    let mut buffer = [0_u8; 16 * 1024];
-    loop {
-        let read = file.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
-        }
-        bytes = bytes.checked_add(read as u64)?;
-        if bytes > MAX_ROOT_EXECUTABLE_IDENTITY_BYTES {
-            return None;
-        }
-        digest.update(&buffer[..read]);
-    }
-    // Do not claim an identity if the target changed while it was being read.
-    // This is an observational hint only, but rejecting an unstable target
-    // avoids attaching an incorrect digest to a later replay capsule.
-    if bytes != metadata.len() || std::fs::metadata(path).ok()?.len() != metadata.len() {
-        return None;
-    }
-    Some(crate::agents::native_trace::Blob {
-        sha256: format!("{:x}", digest.finalize()),
-        bytes,
-    })
 }
 
 #[cfg(unix)]

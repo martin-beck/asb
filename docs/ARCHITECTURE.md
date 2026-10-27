@@ -416,6 +416,10 @@ Each later native-replay increment must keep these boundaries distinct:
   they have no native-trace artifact.  When a selected recording does contain
   one, ASB validates its bounded schema immediately before staging that replay
   batch; malformed trace evidence stops replay before the agent is launched.
+  For a direct absolute root executable with a recorded digest, replay also
+  performs one bounded pre-launch digest comparison. A changed executable is
+  rejected; PATH-resolved and older digest-less recordings retain their normal
+  compatibility behavior.
 - A private execution capsule supplies replayable filesystem and executable
   state.  It is a transparent runtime mechanism, not an agent security policy:
   the agent still uses ordinary paths, binaries, subprocesses, and direct APIs.

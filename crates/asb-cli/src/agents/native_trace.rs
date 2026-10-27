@@ -11,6 +11,8 @@
 
 use crate::Error;
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
+use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::fs::{File, OpenOptions};
 #[cfg(unix)]
@@ -22,6 +24,10 @@ pub(crate) const SCHEMA_VERSION: u32 = 1;
 const MAX_EVENTS: usize = 65_536;
 const MAX_BLOBS_PER_EVENT: usize = 8;
 const SHA256_HEX_BYTES: usize = 64;
+/// Keep direct executable identity observation bounded.  The trace stores a
+/// digest only; it never retains a copy of the executable.
+#[cfg(target_os = "linux")]
+pub(crate) const MAX_EXECUTABLE_IDENTITY_BYTES: u64 = 8 * 1024 * 1024;
 /// Trace-local identity for the directly launched agent process.
 ///
 /// Kernel PIDs are host metadata and are deliberately never serialized into a
@@ -60,6 +66,106 @@ pub(crate) enum Operation {
     Filesystem,
     Network,
     Host,
+}
+
+/// Return an opaque identity for a direct, absolute regular executable.
+///
+/// A bare program name deliberately has no identity: resolving it through a
+/// mutable PATH would claim more than the process gate observed.  The caller
+/// can still execute it normally; this is replay provenance, not a launch
+/// restriction.
+#[cfg(target_os = "linux")]
+pub(crate) fn executable_identity(program: &std::ffi::OsStr) -> Option<Blob> {
+    use std::io::Read;
+    use std::path::Path;
+
+    let path = Path::new(program);
+    if !path.is_absolute() {
+        return None;
+    }
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_EXECUTABLE_IDENTITY_BYTES {
+        return None;
+    }
+    let mut file = File::open(path).ok()?;
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        bytes = bytes.checked_add(read as u64)?;
+        if bytes > MAX_EXECUTABLE_IDENTITY_BYTES {
+            return None;
+        }
+        digest.update(&buffer[..read]);
+    }
+    // Refuse to bind a digest to a target that changed while it was read.
+    if bytes != metadata.len() || std::fs::metadata(path).ok()?.len() != metadata.len() {
+        return None;
+    }
+    Some(Blob {
+        sha256: format!("{:x}", digest.finalize()),
+        bytes,
+    })
+}
+
+/// Validate a staged native-trace sidecar against the exact direct executable
+/// that a Linux replay is about to launch.  Absence of a sidecar or root
+/// identity remains compatible with recordings made before lifecycle capture.
+///
+/// This is deliberately one bounded digest at preparation time. It does not
+/// capture binaries, alter namespaces, trace syscalls, or add collector work.
+#[cfg(target_os = "linux")]
+pub(crate) fn verify_replay_root_identity(
+    cassette: &std::path::Path,
+    program: &std::ffi::OsStr,
+) -> Result<(), Error> {
+    let Some(trace) = replay_sidecar(cassette) else {
+        return Ok(());
+    };
+    let bytes = match std::fs::read(&trace) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => {
+            return Err(Error::Run(
+                "sealed native replay trace is unavailable".into(),
+            ));
+        }
+    };
+    let transcript = Transcript::decode(&bytes)?;
+    let expected = transcript.events.iter().find_map(|event| {
+        (event.process == ROOT_PROCESS && event.operation == Operation::ProcessStart)
+            .then(|| event.request.clone())
+            .flatten()
+    });
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let Some(observed) = executable_identity(program) else {
+        return Err(Error::Run(
+            "recorded native root executable cannot be verified for this replay".into(),
+        ));
+    };
+    if observed != expected {
+        return Err(Error::Run(
+            "recorded native root executable differs from this replay; reinstall the recorded agent or record a new benchmark".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn replay_sidecar(cassette: &std::path::Path) -> Option<std::path::PathBuf> {
+    let name = cassette.file_name()?.to_str()?;
+    let suffix = name.strip_prefix("replay")?.strip_suffix(".jsonl")?;
+    Some(
+        cassette
+            .parent()?
+            .join(format!("native-trace{suffix}.jsonl")),
+    )
 }
 
 /// Write the native root lifecycle captured by ASB's existing process gate.
@@ -448,6 +554,47 @@ mod tests {
         assert!(canonicalize(br#"{"schema_version":1,"sequence":1,"process":1,"operation":"process","unknown":true}
 "#).is_err());
         assert!(Transcript::decode(&vec![b'x'; MAX_EVENTS * 2_048 + 1]).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replay_root_identity_requires_the_recorded_direct_executable() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-native-trace-replay-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let executable = root.join("agent");
+        std::fs::write(&executable, b"recorded executable").unwrap();
+        let identity = executable_identity(executable.as_os_str()).unwrap();
+        let mut trace = Transcript::default();
+        trace
+            .record(Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                process: ROOT_PROCESS,
+                operation: Operation::ProcessStart,
+                parent_process: None,
+                request: Some(identity),
+                response: None,
+                effects: Vec::new(),
+            })
+            .unwrap();
+        let cassette = root.join("replay.jsonl");
+        std::fs::write(&cassette, b"{}\n").unwrap();
+        // Older provider-only recordings have no native sidecar and remain
+        // replayable even when the current launch is PATH-resolved.
+        verify_replay_root_identity(&cassette, std::ffi::OsStr::new("agent")).unwrap();
+        std::fs::write(root.join("native-trace.jsonl"), trace.encode().unwrap()).unwrap();
+
+        verify_replay_root_identity(&cassette, executable.as_os_str()).unwrap();
+        std::fs::write(&executable, b"different executable").unwrap();
+        let error = verify_replay_root_identity(&cassette, executable.as_os_str())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("recorded native root executable differs"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

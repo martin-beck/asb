@@ -765,6 +765,9 @@ impl<'a> ReadyAttempt<'a> {
                         provider_credentials,
                         tape_url,
                         tape_mode,
+                        native_trace_cassette: tape_cassette
+                            .as_ref()
+                            .map(|(_, cassette)| cassette.as_path()),
                         tool_tape_mode: tool_tape_cassette.as_ref().map(|(mode, _)| *mode),
                         tool_tape_cassette: tool_tape_cassette
                             .as_ref()
