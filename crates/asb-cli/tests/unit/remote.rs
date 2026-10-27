@@ -386,6 +386,8 @@ fn launch_validates_preparation_before_exposing_a_session_and_preserves_on_failu
         tape_cassette: None,
         tool_replay: false,
         tool_tape_cassette: None,
+        mcp_mode: None,
+        mcp_tape_cassette: None,
         measurements: Some(&mut measurements),
         show_output: false,
         progress: None,

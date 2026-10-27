@@ -88,6 +88,13 @@ pub(crate) struct GuestRequest {
     pub tool_replay: bool,
     #[serde(default)]
     pub tool_tape_cassette: Option<PathBuf>,
+    /// Transparent relay direction for ordinary declared MCP servers.
+    #[serde(default)]
+    pub mcp_mode: Option<crate::tape::Mode>,
+    /// Guest-private selected provider-tape alias with adjacent sealed MCP
+    /// relay sidecars. It is never inferred from a loopback provider endpoint.
+    #[serde(default)]
+    pub mcp_tape_cassette: Option<PathBuf>,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: f64,
     #[serde(default)]
@@ -138,6 +145,8 @@ pub(crate) struct GuestResult {
     /// private host artifact directory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exported_artifacts: Vec<GuestArtifactReceipt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adapter_errors: Vec<String>,
     pub execution_failure: Option<String>,
     #[serde(default)]
     pub tree_quiesced: bool,
@@ -514,7 +523,10 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         runtime_dir: &state_root,
         run_dir: &request.run_dir,
         mcp_servers: &request.config.mcp_servers,
-        mcp_tape: None,
+        mcp_tape: request.mcp_mode.map(|mode| super::McpTapeContext {
+            mode,
+            cassette: request.mcp_tape_cassette.as_deref(),
+        }),
         tape: request
             .tool_tape_cassette
             .as_deref()
@@ -705,7 +717,10 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             &request.config.provider,
         ),
         mcp_servers: &request.config.mcp_servers,
-        mcp_tape: None,
+        mcp_tape: request.mcp_mode.map(|mode| super::McpTapeContext {
+            mode,
+            cassette: request.mcp_tape_cassette.as_deref(),
+        }),
     });
     let usage = crate::usage::from_sources(
         &request.config.provider,
@@ -749,6 +764,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         native_trace: artifacts.native_trace,
         sealed_artifacts: Vec::new(),
         exported_artifacts,
+        adapter_errors: artifacts.errors,
         execution_failure: {
             #[cfg(target_os = "linux")]
             let timed_out = held.as_ref().is_some_and(|held| held.timed_out);
@@ -970,6 +986,7 @@ mod artifact_publication_tests {
                 native_trace: None,
                 sealed_artifacts: Vec::new(),
                 exported_artifacts: Vec::new(),
+                adapter_errors: Vec::new(),
                 execution_failure: None,
                 tree_quiesced: true,
                 namespace_collectors: Default::default(),

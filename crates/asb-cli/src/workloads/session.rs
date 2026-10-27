@@ -284,6 +284,11 @@ pub(crate) struct ExecutionContext<'a> {
     pub tool_replay: bool,
     /// Exact cassette identity for the adapter-owned local-tool sidecar.
     pub tool_tape_cassette: Option<&'a Path>,
+    /// Explicit transparent MCP relay direction for declared MCP servers.
+    pub mcp_mode: Option<crate::tape::Mode>,
+    /// Exact selected provider-tape alias whose adjacent sealed MCP sidecars
+    /// must be staged inside an isolated workload guest.
+    pub mcp_tape_cassette: Option<&'a Path>,
     pub measurements: Option<&'a mut crate::measurements::Session>,
     pub show_output: bool,
     /// Presentation is best-effort and deliberately cannot influence workload

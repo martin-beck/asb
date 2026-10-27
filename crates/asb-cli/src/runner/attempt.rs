@@ -182,7 +182,7 @@ impl<'a> ConfiguredAttempt<'a> {
             )));
         }
         validate_mcp_server_capability(config)?;
-        validate_mcp_relay_capability(config, mcp_tape_mode, &policy.backend)?;
+        validate_mcp_relay_capability(config, mcp_tape_mode)?;
         let mut discovered_tool_support = None;
         let selected_offer = instrument_phase(
             measurement_session.as_mut(),
@@ -249,7 +249,6 @@ fn validate_mcp_server_capability(config: &BenchmarkConfig) -> Result<(), Error>
 fn validate_mcp_relay_capability(
     config: &BenchmarkConfig,
     mcp_tape_mode: Option<tape::Mode>,
-    backend: &str,
 ) -> Result<(), Error> {
     if mcp_tape_mode.is_none() {
         return Ok(());
@@ -257,11 +256,6 @@ fn validate_mcp_relay_capability(
     if config.mcp_servers.is_empty() {
         return Err(Error::Input(
             "MCP record/replay requires at least one [[mcp_servers]] declaration".into(),
-        ));
-    }
-    if backend != "native" {
-        return Err(Error::Input(
-            "MCP record/replay currently requires the native backend; guest relay staging is not implemented and cannot fall back to a live MCP server".into(),
         ));
     }
     let adapter = agents::find(&config.agent)
@@ -791,6 +785,10 @@ impl<'a> ReadyAttempt<'a> {
                     tool_tape_cassette: tool_tape_cassette
                         .as_ref()
                         .map(|(_, cassette)| cassette.as_path()),
+                    mcp_mode: mcp_tape_cassette.as_ref().map(|(mode, _)| *mode),
+                    mcp_tape_cassette: mcp_tape_cassette
+                        .as_ref()
+                        .map(|(_, cassette)| cassette.as_path()),
                     measurements: prepared.measurements.as_mut(),
                     show_output,
                     progress: isolated_progress
@@ -991,7 +989,16 @@ impl<'a> CompletedAttempt<'a> {
                 })
                 .unwrap_or_default()
         } else {
-            Default::default()
+            settled
+                .evidence
+                .guest
+                .as_ref()
+                .map(|guest| agents::AgentArtifacts {
+                    sealed_artifacts: guest.sealed_artifacts.clone(),
+                    errors: guest.adapter_errors.clone(),
+                    ..Default::default()
+                })
+                .unwrap_or_default()
         };
         for error in &adapter_artifacts.errors {
             settled.issues.run_error(error.clone());
@@ -1587,29 +1594,20 @@ mod tests {
 
     #[test]
     fn mcp_recording_requires_a_relay_capable_adapter() {
-        validate_mcp_relay_capability(&config("codex"), Some(crate::tape::Mode::Record), "native")
+        validate_mcp_relay_capability(&config("codex"), Some(crate::tape::Mode::Record))
             .expect("Codex has the transparent relay route");
-        let error =
-            validate_mcp_relay_capability(&config("pi"), Some(crate::tape::Mode::Record), "native")
-                .expect_err("Pi must not launch an unrecorded MCP server");
+        let error = validate_mcp_relay_capability(&config("pi"), Some(crate::tape::Mode::Record))
+            .expect_err("Pi must not launch an unrecorded MCP server");
         assert!(error.to_string().contains("transparent MCP relay route"));
         let mut no_servers = config("codex");
         no_servers.mcp_servers.clear();
         assert!(
-            validate_mcp_relay_capability(&no_servers, Some(crate::tape::Mode::Record), "native")
+            validate_mcp_relay_capability(&no_servers, Some(crate::tape::Mode::Record))
                 .unwrap_err()
                 .to_string()
                 .contains("requires at least one")
         );
-        assert!(
-            validate_mcp_relay_capability(
-                &config("codex"),
-                Some(crate::tape::Mode::Replay),
-                "guest",
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("cannot fall back to a live MCP server")
-        );
+        validate_mcp_relay_capability(&config("codex"), Some(crate::tape::Mode::Replay))
+            .expect("guest execution stages only the selected sealed relay bundle");
     }
 }

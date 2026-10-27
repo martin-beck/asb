@@ -651,8 +651,13 @@ without changing the setup file.
 For Codex, a benchmark may declare up to four ordinary stdio MCP servers. ASB
 validates their stable lowercase identifiers and passes the command arrays to
 Codex's project-private configuration without a shell. Other adapters reject
-these declarations rather than silently dropping them. This is normal live MCP
-configuration; MCP relay recording and offline replay are introduced separately.
+these declarations rather than silently dropping them. `--mcp-record` replaces
+each declared server with ASB's transparent relay and seals its bounded
+protocol sidecar. `--mcp-replay` restores those sidecars and starts no declared
+upstream server. The same route is used inside isolated workload guests; their
+sidecars cross the guest boundary as verified, bounded artifacts rather than
+in the controller JSON record. Combine these flags with `--llm-record` or
+`--llm-replay` when the provider layer is also to be recorded or replayed.
 
 ```toml
 [[mcp_servers]]
