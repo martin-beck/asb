@@ -225,6 +225,15 @@ impl Manifest {
         )
     }
 
+    /// Replace only an existing isolated workspace's contents with the
+    /// verified base snapshot. The workspace directory itself remains owned by
+    /// the workload session, preserving its lifecycle and mount identity.
+    pub(crate) fn restore_base(&self, objects: &Path, workspace: &Path) -> Result<(), Error> {
+        validate(self)?;
+        clear_workspace(workspace)?;
+        self.stage_base(objects, workspace)
+    }
+
     /// Bind final workspace changes without applying them during base staging.
     pub(crate) fn set_effects(&mut self, final_snapshot: &Snapshot) -> Result<(), Error> {
         let effects = diff_snapshots(
@@ -576,6 +585,21 @@ pub(crate) fn stage_snapshot(
     }
     for file in &snapshot.files {
         stage_object(objects, file, workspace)?;
+    }
+    Ok(())
+}
+
+fn clear_workspace(workspace: &Path) -> Result<(), Error> {
+    ensure_workspace(workspace)?;
+    for entry in fs::read_dir(workspace).map_err(crate::io_error)? {
+        let entry = entry.map_err(crate::io_error)?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(crate::io_error)?;
+        if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+            fs::remove_dir_all(path).map_err(crate::io_error)?;
+        } else {
+            fs::remove_file(path).map_err(crate::io_error)?;
+        }
     }
     Ok(())
 }
@@ -1049,6 +1073,30 @@ mod tests {
             b"capsule input"
         );
         assert!(!workspace.join("output.txt").exists());
+    }
+
+    #[test]
+    fn restore_base_replaces_only_workspace_contents() {
+        let root = test_root("restore-base");
+        let source = root.0.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(source.join("nested")).unwrap();
+        fs::write(source.join("nested/input.txt"), b"capsule input").unwrap();
+        let objects = root.0.join("objects");
+        let manifest = Manifest::from_snapshot(None, capture_tree(&objects, &source).unwrap());
+        let workspace = root.0.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("stale.txt"), b"stale").unwrap();
+        fs::create_dir(workspace.join("stale")).unwrap();
+        fs::write(workspace.join("stale/data.txt"), b"stale").unwrap();
+        manifest.restore_base(&objects, &workspace).unwrap();
+        assert!(!workspace.join("stale.txt").exists());
+        assert!(!workspace.join("stale").exists());
+        assert_eq!(
+            fs::read(workspace.join("nested/input.txt")).unwrap(),
+            b"capsule input"
+        );
+        assert!(workspace.is_dir());
     }
 
     #[test]
