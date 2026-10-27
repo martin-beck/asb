@@ -160,9 +160,9 @@ fn run(args: &[OsString]) -> Result<(), Error> {
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
     let mut input = BufReader::new(stdin.lock());
-    while let Some((request, framing)) = mcp_framing::read(&mut input, "local-tool MCP")? {
-        if let Some(response) = respond(&options, &mut transcript, &request)? {
-            mcp_framing::write(&mut output, &response, framing, "local-tool MCP")?;
+    while let Some(request) = mcp_framing::read(&mut input, "local-tool MCP")? {
+        if let Some(response) = respond(&options, &mut transcript, &request.value)? {
+            mcp_framing::write(&mut output, &response, request.framing, "local-tool MCP")?;
         }
     }
     match options.mode {
@@ -521,17 +521,17 @@ mod tests {
         ]
         .concat();
         let mut input = BufReader::new(&request[..]);
-        let (request, framing) = mcp_framing::read(&mut input, "local-tool MCP")
+        let request = mcp_framing::read(&mut input, "local-tool MCP")
             .unwrap()
             .unwrap();
-        assert_eq!(framing, mcp_framing::Framing::ContentLength);
-        assert_eq!(request["method"], "initialize");
+        assert_eq!(request.framing, mcp_framing::Framing::ContentLength);
+        assert_eq!(request.value["method"], "initialize");
 
         let mut output = Vec::new();
         mcp_framing::write(
             &mut output,
             &json!({"jsonrpc":"2.0","id":7,"result":{}}),
-            framing,
+            request.framing,
             "local-tool MCP",
         )
         .unwrap();
@@ -550,13 +550,19 @@ mod tests {
     fn private_mcp_keeps_json_line_framing_for_existing_clients() {
         let mut input =
             BufReader::new(&b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n"[..]);
-        let (request, framing) = mcp_framing::read(&mut input, "local-tool MCP")
+        let request = mcp_framing::read(&mut input, "local-tool MCP")
             .unwrap()
             .unwrap();
-        assert_eq!(framing, mcp_framing::Framing::JsonLines);
-        assert_eq!(request["id"], 1);
+        assert_eq!(request.framing, mcp_framing::Framing::JsonLines);
+        assert_eq!(request.value["id"], 1);
         let mut output = Vec::new();
-        mcp_framing::write(&mut output, &json!({"id":1}), framing, "local-tool MCP").unwrap();
+        mcp_framing::write(
+            &mut output,
+            &json!({"id":1}),
+            request.framing,
+            "local-tool MCP",
+        )
+        .unwrap();
         assert_eq!(&output, b"{\"id\":1}\n");
     }
 

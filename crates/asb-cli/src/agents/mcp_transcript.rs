@@ -90,7 +90,7 @@ impl Transcript {
             direction,
             relative_millis,
             kind,
-            message: blob(payload),
+            message: payload_ref(payload),
             id,
         })
     }
@@ -174,7 +174,7 @@ fn classify(value: &Value) -> Result<(MessageKind, Option<Blob>), Error> {
     }
 }
 
-fn blob(bytes: &[u8]) -> Blob {
+pub(crate) fn payload_ref(bytes: &[u8]) -> Blob {
     Blob {
         sha256: format!("{:x}", Sha256::digest(bytes)),
         bytes: bytes.len() as u64,
@@ -185,7 +185,7 @@ fn json_blob(value: &Value) -> Blob {
     // JSON-RPC permits string and number IDs. Canonical JSON also prevents a
     // formatting difference in a numeric ID from appearing as a different
     // response correlation in the durable index.
-    blob(&serde_json::to_vec(value).expect("JSON value encodes"))
+    payload_ref(&serde_json::to_vec(value).expect("JSON value encodes"))
 }
 
 fn valid_blob(blob: &Blob) -> bool {
