@@ -97,8 +97,20 @@ pub(crate) struct ReplayInput {
     /// Older recordings omit it until a native capture backend is selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_trace: Option<PathBuf>,
+    /// Sealed generic MCP relay bundles, addressed only by their declared
+    /// stable server id. A replay adapter must reject a requested server whose
+    /// bundle is absent rather than launch its original program.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_relays: Vec<McpRelayInput>,
     pub bytes: u64,
     pub sha256: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct McpRelayInput {
+    pub id: String,
+    pub bundle: PathBuf,
 }
 
 /// Whether measurements move with their owned campaign or remain at an explicit

@@ -1,6 +1,7 @@
 //! Run-owned whole-track selection and private JSONL staging; no proxy changes.
 use super::{Plan, ReplayInput, Slot, path_text, private_directory, publish_bytes};
 use crate::cassette::{Compatibility, Limits, SelectionPlan, Selector, Source, SourceInspection};
+use crate::runner::campaign::McpRelayInput;
 use crate::{Error, benchmark::BenchmarkConfig, runner::RunOptions};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -164,8 +165,29 @@ impl Prepared {
                     local_tools,
                     deterministic_manifest,
                     native_trace,
+                    mcp_relays,
                 ) = if let Some(manifest) = self.source.manifest() {
                     let track = manifest.track(*id).map_err(input_error)?;
+                    let mut mcp_relays = Vec::new();
+                    for artifact in &track.artifacts {
+                        let Some(server) = artifact.kind.strip_prefix("mcp-relay-") else {
+                            continue;
+                        };
+                        if server.is_empty()
+                            || mcp_relays
+                                .iter()
+                                .any(|relay: &McpRelayInput| relay.id == server)
+                        {
+                            return Err(Error::Input(
+                                "selected cassette has an invalid MCP relay artifact identity"
+                                    .into(),
+                            ));
+                        }
+                        mcp_relays.push(McpRelayInput {
+                            id: server.into(),
+                            bundle: PathBuf::from(format!("inputs/mcp-relay-{server}-{id}.jsonl")),
+                        });
+                    }
                     (
                         self.path.clone(),
                         track.bytes,
@@ -188,6 +210,7 @@ impl Prepared {
                             .iter()
                             .any(|artifact| artifact.kind == "native-trace")
                             .then(|| PathBuf::from(format!("inputs/native-trace-{id}.jsonl"))),
+                        mcp_relays,
                     )
                 } else {
                     let track = self
@@ -204,6 +227,7 @@ impl Prepared {
                         None,
                         None,
                         None,
+                        Vec::new(),
                     )
                 };
                 total = total
@@ -221,6 +245,7 @@ impl Prepared {
                     local_tools,
                     deterministic_manifest,
                     native_trace,
+                    mcp_relays,
                     bytes,
                     sha256,
                 });
@@ -271,6 +296,16 @@ impl Prepared {
                     .read_artifact(input.track.expect("selected bundle track"), "native-trace")
                     .map_err(input_error)?;
                 publish_bytes(&root.join(native_trace), &bytes)?;
+            }
+            for relay in &input.mcp_relays {
+                let bytes = self
+                    .source
+                    .read_artifact(
+                        input.track.expect("selected bundle track"),
+                        &format!("mcp-relay-{}", relay.id),
+                    )
+                    .map_err(input_error)?;
+                publish_bytes(&root.join(&relay.bundle), &bytes)?;
             }
         }
         Ok(())
@@ -369,11 +404,20 @@ pub(super) fn stage_selected(
         stage_local_tools(root, input, &destination, slot.replica, concurrency)?;
         stage_determinism_manifest(root, input, &destination, slot.replica, concurrency)?;
         stage_native_trace(root, input, &destination, slot.replica, concurrency)?;
+        stage_mcp_relays(root, input, &destination)?;
     }
     fs::File::open(base.parent().expect("batch parent"))
         .and_then(|file| file.sync_all())
         .map_err(crate::io_error)?;
     path_text(&base)
+}
+
+fn stage_mcp_relays(root: &Path, input: &ReplayInput, destination: &Path) -> Result<(), Error> {
+    for relay in &input.mcp_relays {
+        let destination = replay_sidecar(destination, &format!("mcp-relay-{}", relay.id), "jsonl")?;
+        fs::hard_link(root.join(&relay.bundle), destination).map_err(crate::io_error)?;
+    }
+    Ok(())
 }
 
 fn stage_native_trace(
@@ -517,6 +561,7 @@ mod tests {
             local_tools: Some(PathBuf::from("inputs/local-tools-7.jsonl")),
             deterministic_manifest: None,
             native_trace: None,
+            mcp_relays: Vec::new(),
             bytes: 2,
             sha256: "a".repeat(64),
         };
@@ -546,6 +591,7 @@ mod tests {
             local_tools: Some(PathBuf::from("inputs/local-tools-1.jsonl")),
             deterministic_manifest: None,
             native_trace: None,
+            mcp_relays: Vec::new(),
             bytes: 3,
             sha256: crate::cassette::digest(b"{}\n"),
         };
@@ -574,6 +620,7 @@ mod tests {
             local_tools: None,
             deterministic_manifest: Some(PathBuf::from("inputs/determinism-manifest-7.json")),
             native_trace: None,
+            mcp_relays: Vec::new(),
             bytes: 2,
             sha256: "a".repeat(64),
         };
@@ -616,6 +663,7 @@ mod tests {
             local_tools: None,
             deterministic_manifest: None,
             native_trace: Some(PathBuf::from("inputs/native-trace-7.jsonl")),
+            mcp_relays: Vec::new(),
             bytes: 2,
             sha256: "a".repeat(64),
         };
@@ -652,6 +700,7 @@ mod tests {
             local_tools: None,
             deterministic_manifest: None,
             native_trace: Some(PathBuf::from("inputs/native-trace-7.jsonl")),
+            mcp_relays: Vec::new(),
             bytes: 2,
             sha256: "a".repeat(64),
         };
@@ -660,6 +709,47 @@ mod tests {
             .to_string();
         assert!(error.contains("selected native replay trace is invalid"));
         assert!(!root.join("batch/native-trace.jsonl").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_relay_bundles_stage_with_the_selected_replay_alias() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-replay-mcp-relay-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        fs::create_dir_all(root.join("inputs")).unwrap();
+        fs::create_dir_all(root.join("batch")).unwrap();
+        fs::write(
+            root.join("inputs/mcp-relay-filesystem-7.jsonl"),
+            b"sealed\n",
+        )
+        .unwrap();
+        let input = ReplayInput {
+            complete: Some(true),
+            track: Some(7),
+            source: PathBuf::from("sealed.asb.zip"),
+            private: PathBuf::from("inputs/track-7.jsonl"),
+            local_tools: None,
+            deterministic_manifest: None,
+            native_trace: None,
+            mcp_relays: vec![McpRelayInput {
+                id: "filesystem".into(),
+                bundle: PathBuf::from("inputs/mcp-relay-filesystem-7.jsonl"),
+            }],
+            bytes: 2,
+            sha256: "a".repeat(64),
+        };
+        stage_mcp_relays(
+            &root,
+            &input,
+            &root.join("batch/replay-concurrency-2.jsonl"),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(root.join("batch/mcp-relay-filesystem-concurrency-2.jsonl")).unwrap(),
+            b"sealed\n"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -10,6 +10,7 @@ pub(super) struct NativeRoute<'a> {
     pub tool_tape_mode: Option<tape::Mode>,
     pub tool_tape_cassette: Option<&'a Path>,
     pub mcp_tape_mode: Option<tape::Mode>,
+    pub mcp_tape_cassette: Option<&'a Path>,
 }
 
 /// Immutable intent, not shared mutable runtime state.
@@ -61,6 +62,7 @@ impl NativePlan<'_> {
             tool_tape_mode,
             tool_tape_cassette,
             mcp_tape_mode,
+            mcp_tape_cassette,
         } = route;
         let workspace = &invocation.workspace;
         invocation
@@ -205,7 +207,10 @@ impl NativePlan<'_> {
                         runtime_dir: &runtime_path,
                         run_dir: &run_dir,
                         mcp_servers: &config.mcp_servers,
-                        mcp_tape: mcp_tape_mode.map(|mode| agents::McpTapeContext { mode }),
+                        mcp_tape: mcp_tape_mode.map(|mode| agents::McpTapeContext {
+                            mode,
+                            cassette: mcp_tape_cassette,
+                        }),
                         tape: tool_tape_mode
                             .zip(tool_tape_cassette)
                             .map(|(mode, cassette)| agents::TapeContext { mode, cassette }),
@@ -363,6 +368,7 @@ mod tests {
                     tool_tape_mode: None,
                     tool_tape_cassette: None,
                     mcp_tape_mode: None,
+                    mcp_tape_cassette: None,
                 },
             }
             .prepare(None)
@@ -486,6 +492,7 @@ mod tests {
                 tool_tape_mode: None,
                 tool_tape_cassette: None,
                 mcp_tape_mode: None,
+                mcp_tape_cassette: None,
             },
         }
         .prepare(None)

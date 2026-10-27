@@ -88,6 +88,59 @@ pub(crate) fn record_launch(
     Ok(super::tool_replay_mcp::Launch { program, args })
 }
 
+/// Adapter-facing command which serves a sealed relay bundle without starting
+/// the declared upstream program.  The selected bundle is staged beside the
+/// chosen provider replay payload, then materialized beneath this attempt's
+/// private run directory.
+pub(crate) fn replay_launch(
+    run_dir: &Path,
+    declaration: &crate::benchmark::McpServerConfig,
+    cassette: &Path,
+) -> Result<super::tool_replay_mcp::Launch, Error> {
+    let bundle = replay_bundle_path(cassette, &declaration.id)?;
+    let bytes = read_bundle(&bundle)?;
+    let recording = run_dir.join("mcp-replay").join(&declaration.id);
+    let parent = recording
+        .parent()
+        .expect("MCP replay recording has a parent");
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::Run(format!(
+            "cannot create MCP replay recording directory: {error}"
+        ))
+    })?;
+    materialize_bundle(&bytes, &recording).map_err(|error| {
+        Error::Run(format!(
+            "cannot stage sealed MCP relay recording for `{}`: {error}",
+            declaration.id
+        ))
+    })?;
+    let program =
+        super::tool_replay_mcp::runtime_program(std::env::var_os("ASB_RUNTIME_EXECUTABLE"))?;
+    Ok(super::tool_replay_mcp::Launch {
+        program,
+        args: vec![
+            "__asb-mcp-relay".into(),
+            "--replay-dir".into(),
+            recording.into_os_string(),
+        ],
+    })
+}
+
+fn replay_bundle_path(cassette: &Path, id: &str) -> Result<PathBuf, Error> {
+    let name = cassette
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::Run("MCP replay cassette has no valid filename".into()))?;
+    let suffix = name
+        .strip_prefix("replay")
+        .and_then(|suffix| suffix.strip_suffix(".jsonl"))
+        .ok_or_else(|| Error::Run("MCP replay cassette has an invalid filename".into()))?;
+    let parent = cassette
+        .parent()
+        .ok_or_else(|| Error::Run("MCP replay cassette has no private directory".into()))?;
+    Ok(parent.join(format!("mcp-relay-{id}{suffix}.jsonl")))
+}
+
 pub(crate) fn entry(args: &[OsString]) -> std::process::ExitCode {
     match run(args) {
         Ok(()) => std::process::ExitCode::SUCCESS,

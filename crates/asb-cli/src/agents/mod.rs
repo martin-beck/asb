@@ -163,7 +163,7 @@ pub(crate) struct PreparationContext<'a> {
     pub mcp_servers: &'a [crate::benchmark::McpServerConfig],
     /// Explicit transparent MCP recording/replay intent.  This remains
     /// separate from adapter-local semantic tool replay.
-    pub mcp_tape: Option<McpTapeContext>,
+    pub mcp_tape: Option<McpTapeContext<'a>>,
     /// Provider-tape identity for an execution whose agent-local tools must
     /// share the same record/replay boundary.  This is explicit rather than
     /// inferred from the provider URL: record and replay both use loopback
@@ -186,8 +186,11 @@ pub(crate) struct TapeContext<'a> {
 /// Mode for the protocol-level MCP relay.  The relay has no tool semantics;
 /// adapter configuration supplies it in place of an ordinary stdio server.
 #[derive(Clone, Copy)]
-pub(crate) struct McpTapeContext {
+pub(crate) struct McpTapeContext<'a> {
     pub mode: crate::tape::Mode,
+    /// Selected replay payload. Recording owns a new private relay directory;
+    /// replay needs the exact staged sidecar that supplied its sealed bundle.
+    pub cassette: Option<&'a Path>,
 }
 
 impl PreparationContext<'_> {
@@ -274,7 +277,7 @@ pub(crate) struct CollectionContext<'a> {
     pub interface: Option<Interface>,
     pub anthropic_input_includes_cache: bool,
     pub mcp_servers: &'a [crate::benchmark::McpServerConfig],
-    pub mcp_tape: Option<McpTapeContext>,
+    pub mcp_tape: Option<McpTapeContext<'a>>,
 }
 
 /// Read exactly one bounded agent-owned JSON artifact; ambiguous or malformed

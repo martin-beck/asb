@@ -192,7 +192,7 @@ pub(crate) fn run_with_interactive(
             if options.cassette.is_some() && tape.carrier.is_none() {
                 return fail(
                     stderr,
-                    "--cassette requires --record, --replay, --llm-record, --llm-replay, --tool-record, --tool-replay, or --mcp-record",
+                    "--cassette requires --record, --replay, --llm-record, --llm-replay, --tool-record, --tool-replay, --mcp-record, or --mcp-replay",
                 );
             }
             if options.respect_record_timings && tape.llm != Some(tape::Mode::Replay) {
@@ -367,6 +367,7 @@ struct TapeFlags {
     tool_record: bool,
     tool_replay: bool,
     mcp_record: bool,
+    mcp_replay: bool,
 }
 
 impl TapeFlags {
@@ -377,7 +378,7 @@ impl TapeFlags {
             // explicit layer still reserves the same private carrier. This
             // preserves a causal tool transcript beside its provider tape.
             record: args.record || args.llm_record || args.tool_record || args.mcp_record,
-            replay: args.replay || args.llm_replay || args.tool_replay,
+            replay: args.replay || args.llm_replay || args.tool_replay || args.mcp_replay,
             legacy_record: args.record,
             legacy_replay: args.replay,
             llm_record: args.llm_record,
@@ -385,13 +386,14 @@ impl TapeFlags {
             tool_record: args.tool_record,
             tool_replay: args.tool_replay,
             mcp_record: args.mcp_record,
+            mcp_replay: args.mcp_replay,
         }
     }
 
     fn from_sweep(args: &SweepArgs) -> Self {
         Self {
             record: args.record || args.llm_record || args.tool_record || args.mcp_record,
-            replay: args.replay || args.llm_replay || args.tool_replay,
+            replay: args.replay || args.llm_replay || args.tool_replay || args.mcp_replay,
             legacy_record: args.record,
             legacy_replay: args.replay,
             llm_record: args.llm_record,
@@ -399,6 +401,7 @@ impl TapeFlags {
             tool_record: args.tool_record,
             tool_replay: args.tool_replay,
             mcp_record: args.mcp_record,
+            mcp_replay: args.mcp_replay,
         }
     }
 }
@@ -438,7 +441,9 @@ fn tape_selection(flags: TapeFlags) -> Result<TapeSelection, CliError> {
             || flags.tool_replay)
             .then_some(direction)
             .flatten(),
-        mcp: flags.mcp_record.then_some(direction).flatten(),
+        mcp: (flags.mcp_record || flags.mcp_replay)
+            .then_some(direction)
+            .flatten(),
     })
 }
 
@@ -515,6 +520,14 @@ mod tape_flag_tests {
         assert_eq!(selection.llm, None);
         assert_eq!(selection.tool, None);
         assert_eq!(selection.mcp, Some(tape::Mode::Record));
+
+        let cli = Cli::try_parse_from(["asb", "run", "benchmark.toml", "--mcp-replay"]).unwrap();
+        let Some(CommandLine::Run(args)) = cli.command else {
+            panic!("expected run arguments");
+        };
+        let selection = tape_selection(TapeFlags::from_run(&args)).unwrap();
+        assert_eq!(selection.carrier, Some(tape::Mode::Replay));
+        assert_eq!(selection.mcp, Some(tape::Mode::Replay));
 
         let cli =
             Cli::try_parse_from(["asb", "sweep", "sweep.toml", "--llmreplay", "--tool-replay"])
@@ -709,7 +722,7 @@ impl From<SetupArgs> for config::SetupOptions {
 #[derive(Debug, Args)]
 #[command(
     group(ArgGroup::new("record-direction").args(["record", "llm_record", "tool_record", "mcp_record"]).multiple(true).conflicts_with("replay-direction")),
-    group(ArgGroup::new("replay-direction").args(["replay", "llm_replay", "tool_replay"]).multiple(true))
+    group(ArgGroup::new("replay-direction").args(["replay", "llm_replay", "tool_replay", "mcp_replay"]).multiple(true))
 )]
 struct RunArgs {
     #[arg(value_name = "CONFIG", value_hint = clap::ValueHint::FilePath)]
@@ -742,6 +755,9 @@ struct RunArgs {
     /// Transparently record traffic to declared ordinary MCP servers.
     #[arg(long)]
     mcp_record: bool,
+    /// Replay declared ordinary MCP servers only from sealed relay evidence.
+    #[arg(long)]
+    mcp_replay: bool,
     #[arg(long, help = "replay each response after its recorded response delay")]
     respect_record_timings: bool,
     #[arg(long, value_hint = clap::ValueHint::FilePath)]
@@ -763,7 +779,7 @@ struct RunArgs {
 #[derive(Debug, Args)]
 #[command(
     group(ArgGroup::new("record-direction").args(["record", "llm_record", "tool_record", "mcp_record"]).multiple(true).conflicts_with("replay-direction")),
-    group(ArgGroup::new("replay-direction").args(["replay", "llm_replay", "tool_replay"]).multiple(true))
+    group(ArgGroup::new("replay-direction").args(["replay", "llm_replay", "tool_replay", "mcp_replay"]).multiple(true))
 )]
 struct SweepArgs {
     #[arg(value_name = "SWEEP", value_hint = clap::ValueHint::FilePath)]
@@ -814,6 +830,9 @@ struct SweepArgs {
     /// Transparently record traffic to declared ordinary MCP servers.
     #[arg(long)]
     mcp_record: bool,
+    /// Replay declared ordinary MCP servers only from sealed relay evidence.
+    #[arg(long)]
+    mcp_replay: bool,
     #[arg(long, help = "replay each response after its recorded response delay")]
     respect_record_timings: bool,
     #[arg(long)]
