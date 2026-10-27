@@ -27,6 +27,9 @@ fn post_install(
     step.command_mut()
         .args(["key", "refresh"])
         .stdin(std::process::Stdio::null());
+    // The upstream bridge prints the freshly generated key. Keep only the
+    // bounded status result; installer diagnostic logs must never retain it.
+    step.suppress_diagnostics();
     let result = scope.run(step)?;
     let status = result.status;
     owner.consume(scope.finish()?)?;

@@ -290,6 +290,7 @@ fn log_fault_phases_distinguish_namespace_open_start_and_flush() {
         Arc::new(LogBudget::default()),
         None,
         Some(io::ErrorKind::Other),
+        true,
     );
     missing_worker.push(b"inert-not-written");
     let missing_worker = missing_worker.finish();
@@ -369,6 +370,7 @@ fn operation_writer_budget_survives_snapshots_until_actual_held_writers_exit() {
                 })
             })),
             None,
+            true,
         );
         sink.push(b"x");
         let end = Instant::now() + Duration::from_secs(5);
@@ -387,7 +389,7 @@ fn operation_writer_budget_survives_snapshots_until_actual_held_writers_exit() {
     }
     assert_eq!(budget.active.load(Ordering::Acquire), 4);
     let entries = fs::read_dir(&root).unwrap().count();
-    let denied = LogSink::new_inner(&root, Arc::clone(&budget), None, None).finish();
+    let denied = LogSink::new_inner(&root, Arc::clone(&budget), None, None, true).finish();
     assert!(denied.settled);
     assert_eq!(
         denied.fault,
@@ -410,7 +412,7 @@ fn operation_writer_budget_survives_snapshots_until_actual_held_writers_exit() {
         assert_eq!(report.fault, None);
     }
     assert_eq!(budget.active.load(Ordering::Acquire), 0);
-    let next = LogSink::new_inner(&root, Arc::clone(&budget), None, None);
+    let next = LogSink::new_inner(&root, Arc::clone(&budget), None, None, true);
     let report = Arc::clone(&next.report);
     next.push(b"y");
     next.finish();
@@ -423,7 +425,7 @@ fn operation_writer_budget_survives_snapshots_until_actual_held_writers_exit() {
 fn operation_byte_budget_keeps_only_accepted_prefix_and_never_resets_on_writer_exit() {
     let root = root();
     let budget = Arc::new(LogBudget::with_limits(1, 5));
-    let first = LogSink::new_inner(&root, Arc::clone(&budget), None, None);
+    let first = LogSink::new_inner(&root, Arc::clone(&budget), None, None, true);
     let report = Arc::clone(&first.report);
     first.push(b"1234567");
     first.finish();
@@ -433,7 +435,7 @@ fn operation_byte_budget_keeps_only_accepted_prefix_and_never_resets_on_writer_e
     assert_eq!(first.fault.unwrap().phase, LogPhase::Budget);
     assert_eq!(budget.remaining.load(Ordering::Acquire), 0);
     assert_eq!(budget.active.load(Ordering::Acquire), 0);
-    let next = LogSink::new_inner(&root, Arc::clone(&budget), None, None);
+    let next = LogSink::new_inner(&root, Arc::clone(&budget), None, None, true);
     let report = Arc::clone(&next.report);
     next.push(b"later");
     next.finish();

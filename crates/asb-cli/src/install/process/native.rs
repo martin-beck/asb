@@ -107,6 +107,7 @@ impl LogSink {
             factory,
             #[cfg(test)]
             None,
+            true,
         )
     }
     fn new_inner(
@@ -114,8 +115,17 @@ impl LogSink {
         budget: Arc<LogBudget>,
         #[cfg(test)] factory: Option<WriterFactory>,
         #[cfg(test)] worker_start_error: Option<io::ErrorKind>,
+        retain: bool,
     ) -> Self {
         let report = Arc::new(Mutex::new(LogReport::default()));
+        if !retain {
+            report.lock().unwrap().settled = true;
+            return Self {
+                queue: None,
+                report,
+                budget,
+            };
+        }
         // Admit a bounded ancillary writer BEFORE any namespace or thread IO.
         let Some(permit) = budget.acquire() else {
             report.lock().unwrap().fault = Some(LogFault {
@@ -592,6 +602,7 @@ fn supervise(
         step.log_writer.take(),
         #[cfg(test)]
         None,
+        step.retain_diagnostics,
     );
     #[cfg(test)]
     let replacement = step.observation.take();
