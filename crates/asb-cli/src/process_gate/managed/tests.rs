@@ -124,6 +124,124 @@ fn actual_observation_distinguishes_codes_from_signals_without_interruption() {
 }
 
 #[test]
+fn actual_gate_writes_only_opaque_root_lifecycle_to_its_sealed_trace_channel() {
+    let root = root().join(format!(
+        "native-trace-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("native-trace")).unwrap();
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    let (mut command, route) = command(&binary, "/bin/true", &[]);
+    let _channel = crate::agents::native_trace::prepare_gate_channel(&mut command, &root).unwrap();
+    let mut gate = Admission::new(route.validate_gate(&mut command).unwrap())
+        .unwrap()
+        .spawn()
+        .unwrap();
+    gate.resume().unwrap();
+    assert!(gate.wait().unwrap().success());
+    let trace = crate::agents::native_trace::Transcript::decode(
+        &std::fs::read(root.join("native-trace/native-trace.jsonl")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(trace.events().len(), 2);
+    assert!(
+        trace
+            .events()
+            .iter()
+            .all(|event| { event.process == crate::agents::native_trace::ROOT_PROCESS })
+    );
+    assert_eq!(
+        trace
+            .events()
+            .iter()
+            .map(|event| &event.operation)
+            .collect::<Vec<_>>(),
+        vec![
+            &crate::agents::native_trace::Operation::ProcessStart,
+            &crate::agents::native_trace::Operation::ProcessExit,
+        ]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn actual_gate_appends_after_a_deterministic_host_trace_event() {
+    let root = root().join(format!(
+        "native-trace-host-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let trace_directory = root.join("native-trace");
+    std::fs::create_dir_all(&trace_directory).unwrap();
+    let mut initial = crate::agents::native_trace::Transcript::default();
+    initial
+        .record(crate::agents::native_trace::Event {
+            schema_version: crate::agents::native_trace::SCHEMA_VERSION,
+            sequence: 1,
+            process: crate::agents::native_trace::ROOT_PROCESS,
+            operation: crate::agents::native_trace::Operation::Host,
+            request: None,
+            response: Some(crate::agents::native_trace::Blob {
+                sha256: "0".repeat(64),
+                bytes: 1,
+            }),
+            effects: Vec::new(),
+        })
+        .unwrap();
+    std::fs::write(
+        trace_directory.join("native-trace.jsonl"),
+        initial.encode().unwrap(),
+    )
+    .unwrap();
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    let (mut command, route) = command(&binary, "/bin/true", &[]);
+    let _channel = crate::agents::native_trace::prepare_gate_channel(&mut command, &root).unwrap();
+    let mut gate = Admission::new(route.validate_gate(&mut command).unwrap())
+        .unwrap()
+        .spawn()
+        .unwrap();
+    gate.resume().unwrap();
+    assert!(gate.wait().unwrap().success());
+    let trace = crate::agents::native_trace::Transcript::decode(
+        &std::fs::read(trace_directory.join("native-trace.jsonl")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(trace.events().len(), 3);
+    assert_eq!(
+        trace
+            .events()
+            .iter()
+            .map(|event| &event.operation)
+            .collect::<Vec<_>>(),
+        vec![
+            &crate::agents::native_trace::Operation::Host,
+            &crate::agents::native_trace::Operation::ProcessStart,
+            &crate::agents::native_trace::Operation::ProcessExit,
+        ]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn completed_gates_do_not_accumulate_idle_custody_threads() {
     let scope = test_support::Scope::new();
     let binary = std::env::current_exe()

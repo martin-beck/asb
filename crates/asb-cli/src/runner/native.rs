@@ -31,6 +31,10 @@ pub(super) struct PreparedNative {
     runtime_path: PathBuf,
     execution_budget: Duration,
     stdin_prompt: Option<Vec<u8>>,
+    /// Held by the spawning runner until the gated child has inherited it.
+    /// The gate turns the descriptor close-on-exec before starting the client.
+    #[cfg(unix)]
+    gate_trace: Option<std::fs::File>,
 }
 
 impl NativePlan<'_> {
@@ -206,6 +210,14 @@ impl NativePlan<'_> {
             }
             Ok(())
         })?;
+        // Adapter preparation may contribute a deterministic host event to the
+        // same trace.  Open the append-only gate channel only after it has
+        // finished, so a descriptor never races a truncating adapter write.
+        #[cfg(unix)]
+        let gate_trace = gate
+            .is_some()
+            .then(|| agents::native_trace::prepare_gate_channel(&mut command, &run_dir))
+            .transpose()?;
         if let Some(url) = tape_url {
             providers::configure_tape(
                 &mut command,
@@ -228,6 +240,8 @@ impl NativePlan<'_> {
             runtime_path,
             execution_budget,
             stdin_prompt,
+            #[cfg(unix)]
+            gate_trace,
         })
     }
 }
@@ -246,6 +260,10 @@ impl PreparedNative {
         // install a process wrapper that carries compatibility and output fixes;
         // bypassing it at the gate would silently undo those fixes while still
         // appearing to attach collectors correctly.
+        // Keep the parent descriptor alive across spawn.  The gate receives a
+        // duplicate during exec, then seals it before launching the client.
+        #[cfg(unix)]
+        let _gate_trace = self.gate_trace.as_ref();
         let target = self.route.target(&self.command);
         let child = run_measured_agent_with_launch_progress(
             &mut self.command,
