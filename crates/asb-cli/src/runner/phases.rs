@@ -190,7 +190,8 @@ pub(super) struct PreparedAttempt {
     pub workload: Box<dyn workloads::WorkloadSession>,
     pub measurements: Option<measurements::Session>,
     pub tape: Option<tape::Session>,
-    pub capsule: Option<agents::capsule::Capture>,
+    pub capsule_record: Option<agents::capsule::Capture>,
+    pub capsule_replay: Option<agents::capsule::Replay>,
 }
 
 pub(super) struct ExecutedAttempt {
@@ -256,22 +257,27 @@ impl ExecutedAttempt {
 }
 
 impl SettledAttempt {
-    /// Finalize a requested native capsule before evaluator and workload
-    /// cleanup can alter the agent's workspace.
-    pub fn finish_capsule(
+    /// Finalize the requested native capsule before evaluator and workload
+    /// cleanup can alter the agent's workspace. Capture publishes immutable
+    /// effects; replay applies only the recorded declared effects.
+    pub fn finish_native_capsule(
         &mut self,
         workspace: &std::path::Path,
     ) -> Result<Option<PathBuf>, Error> {
+        if let Some(capture) = self.prepared.capsule_record.take() {
+            return capture.finish(workspace).map(Some);
+        }
         self.prepared
-            .capsule
+            .capsule_replay
             .take()
-            .map(|capture| capture.finish(workspace))
+            .map(|replay| replay.finish(workspace).map(|()| None))
             .transpose()
+            .map(Option::flatten)
     }
 
-    pub fn recording_failure(&mut self, error: Error) {
+    pub fn native_capsule_failure(&mut self, error: Error) {
         self.issues
-            .run_error(format!("native capsule capture failed: {error}"));
+            .run_error(format!("native capsule finalization failed: {error}"));
     }
 }
 
