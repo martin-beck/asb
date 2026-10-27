@@ -2845,6 +2845,7 @@ fn prepare_configs(app: &App) -> Result<(usize, PathBuf, Vec<BenchmarkConfig>), 
                                 directory: "measurements".into(),
                                 collectors: measures.clone(),
                             }),
+                            mcp_servers: Vec::new(),
                         };
                         configs.push(config)?;
                         index += 1;

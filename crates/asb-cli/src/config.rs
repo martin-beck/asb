@@ -101,6 +101,7 @@ fn configuration(options: SetupOptions) -> Result<BenchmarkConfig, Error> {
                 crate::collectors::expand_dependencies(&measure)
             },
         }),
+        mcp_servers: Vec::new(),
     };
     // Reject static endpoint mismatches before publishing a configuration.
     // Live model-catalog tool support is checked before the provider/agent starts.
