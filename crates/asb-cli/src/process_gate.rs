@@ -186,6 +186,14 @@ pub(crate) fn run_gate(args: &[OsString]) -> std::process::ExitCode {
         }
     };
     #[cfg(target_os = "linux")]
+    let mut trace = match crate::agents::native_trace::GateWriter::from_environment() {
+        Ok(trace) => trace,
+        Err(error) => {
+            eprintln!("asb process gate trace setup failed: {error}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    #[cfg(target_os = "linux")]
     if let Some(control) = control.as_mut()
         && let Err(error) = control.ready()
     {
@@ -210,7 +218,18 @@ pub(crate) fn run_gate(args: &[OsString]) -> std::process::ExitCode {
             ));
         }
         let mut child = target_command(program, target_args, arg0).spawn()?;
-        owner.wait(&mut child, control.as_mut())
+        if let Some(trace) = trace.as_mut() {
+            trace
+                .record(crate::agents::native_trace::Operation::ProcessStart)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+        }
+        let status = owner.wait(&mut child, control.as_mut())?;
+        if let Some(trace) = trace.as_mut() {
+            trace
+                .record(crate::agents::native_trace::Operation::ProcessExit)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+        }
+        Ok(status)
     })();
     #[cfg(not(target_os = "linux"))]
     let status = target_command(program, target_args, arg0).status();

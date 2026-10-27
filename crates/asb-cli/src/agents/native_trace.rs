@@ -7,9 +7,16 @@
 //! that binds a causal operation to those blobs.  Keeping the index small lets
 //! ASB measure an agent without retaining an unbounded second copy of its
 //! execution streams.
+#![allow(unsafe_code)] // sealed descriptor inheritance requires Unix `fcntl`/`pre_exec`.
 
 use crate::Error;
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 const MAX_EVENTS: usize = 65_536;
@@ -22,6 +29,13 @@ const SHA256_HEX_BYTES: usize = 64;
 /// its short-lived private state; published native-trace events use these
 /// opaque, per-trace identifiers instead.
 pub(crate) const ROOT_PROCESS: u64 = 1;
+
+/// Inherited only by the private ASB process gate.  The gate immediately marks
+/// it close-on-exec, so the benchmark client cannot retain the trace writer.
+#[cfg(unix)]
+const ENV_FD: &str = "ASB_NATIVE_TRACE_FD";
+#[cfg(unix)]
+const ENV_EVENTS: &str = "ASB_NATIVE_TRACE_EVENTS";
 
 /// A content-addressed private payload.  The trace index only carries the
 /// digest and exact byte count; the payload is staged separately by a capture
@@ -51,10 +65,22 @@ pub(crate) enum Operation {
 /// loop nor per-syscall work to the measured agent.  A later Linux backend can
 /// append descendant fork/exec/exit events to the same trace contract.
 pub(crate) fn write_root_lifecycle(run_dir: &std::path::Path) -> Result<(), Error> {
-    let mut transcript = Transcript::default();
+    let path = run_dir.join("native-trace/native-trace.jsonl");
+    // Linux native execution writes directly through the gate's sealed file
+    // descriptor.  Keep this fallback for non-gated routes while retaining a
+    // pre-existing host/determinism event from an adapter extension.
+    let mut transcript = match std::fs::read(&path) {
+        Ok(bytes) => Transcript::decode(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Transcript::default(),
+        Err(error) => {
+            return Err(Error::Run(format!(
+                "cannot read native process trace fallback: {error}"
+            )));
+        }
+    };
     transcript.record(Event {
         schema_version: SCHEMA_VERSION,
-        sequence: 1,
+        sequence: transcript.len() as u64 + 1,
         process: ROOT_PROCESS,
         operation: Operation::ProcessStart,
         request: None,
@@ -63,18 +89,155 @@ pub(crate) fn write_root_lifecycle(run_dir: &std::path::Path) -> Result<(), Erro
     })?;
     transcript.record(Event {
         schema_version: SCHEMA_VERSION,
-        sequence: 2,
+        sequence: transcript.len() as u64 + 1,
         process: ROOT_PROCESS,
         operation: Operation::ProcessExit,
         request: None,
         response: None,
         effects: Vec::new(),
     })?;
-    std::fs::write(
-        run_dir.join("native-trace/native-trace.jsonl"),
-        transcript.encode()?,
-    )
-    .map_err(|error| Error::Run(format!("cannot write native process trace: {error}")))
+    std::fs::write(path, transcript.encode()?)
+        .map_err(|error| Error::Run(format!("cannot write native process trace: {error}")))
+}
+
+/// Create the sealed output channel before the gate is spawned.  The parent
+/// retains the file until spawn has completed; only the gate receives a usable
+/// inherited descriptor, and it restores close-on-exec before starting the
+/// benchmark client.
+#[cfg(unix)]
+pub(crate) fn prepare_gate_channel(
+    command: &mut std::process::Command,
+    run_dir: &std::path::Path,
+) -> Result<File, Error> {
+    use std::os::unix::process::CommandExt;
+
+    let path = run_dir.join("native-trace/native-trace.jsonl");
+    let (file, prior_events) = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            let bytes = std::fs::read(&path).map_err(|error| {
+                Error::Run(format!("cannot read native process trace: {error}"))
+            })?;
+            let transcript = Transcript::decode(&bytes)?;
+            let file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .map_err(|error| {
+                    Error::Run(format!("cannot append native process trace: {error}"))
+                })?;
+            (file, transcript.len())
+        }
+        Ok(_) => {
+            return Err(Error::Run(
+                "native process trace is not a regular fresh artifact".into(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|error| {
+                    Error::Run(format!("cannot create native process trace: {error}"))
+                })?;
+            (file, 0)
+        }
+        Err(error) => {
+            return Err(Error::Run(format!(
+                "cannot inspect native process trace: {error}"
+            )));
+        }
+    };
+    let descriptor = file.as_raw_fd();
+    command.env(ENV_FD, descriptor.to_string());
+    command.env(ENV_EVENTS, prior_events.to_string());
+    // `File` starts close-on-exec.  Clear that flag only in the gate child;
+    // the gate restores it as its first trace operation, before target spawn.
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(descriptor, libc::F_GETFD);
+            if flags < 0 || libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(file)
+}
+
+/// A bounded, append-only writer owned by the exclusive process gate.
+///
+/// Its only state is the accepted-event count.  It neither observes syscalls
+/// nor buffers benchmark output; a later event backend may call `record` for
+/// fork/exec/exit notifications using the same compact JSONL contract.
+#[cfg(unix)]
+pub(crate) struct GateWriter {
+    file: File,
+    events: usize,
+}
+
+#[cfg(unix)]
+impl GateWriter {
+    /// Take the descriptor passed by `prepare_gate_channel` and make it
+    /// close-on-exec before the client command is constructed.
+    pub(crate) fn from_environment() -> Result<Option<Self>, Error> {
+        let Some(value) = std::env::var_os(ENV_FD) else {
+            return Ok(None);
+        };
+        // The exclusive gate is still single-threaded; remove the inherited
+        // control value before spawning the benchmark client.
+        unsafe {
+            std::env::remove_var(ENV_FD);
+        };
+        let descriptor = value
+            .to_str()
+            .and_then(|value| value.parse::<i32>().ok())
+            .filter(|descriptor| *descriptor >= 3)
+            .ok_or_else(|| Error::Run("invalid native process trace descriptor".into()))?;
+        let events = std::env::var_os(ENV_EVENTS)
+            .and_then(|value| value.to_str().and_then(|value| value.parse::<usize>().ok()))
+            .filter(|events| *events <= MAX_EVENTS)
+            .ok_or_else(|| Error::Run("invalid native process trace event count".into()))?;
+        // See the single-threaded environment note above for ENV_FD.
+        unsafe { std::env::remove_var(ENV_EVENTS) };
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        if flags < 0
+            || unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+        {
+            return Err(Error::Run(format!(
+                "cannot seal native process trace descriptor: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: this descriptor was created by `prepare_gate_channel`, is
+        // transferred exclusively to the gate, and is consumed exactly once.
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        Ok(Some(Self { file, events }))
+    }
+
+    pub(crate) fn record(&mut self, operation: Operation) -> Result<(), Error> {
+        let sequence = self.events as u64 + 1;
+        let event = Event {
+            schema_version: SCHEMA_VERSION,
+            sequence,
+            process: ROOT_PROCESS,
+            operation,
+            request: None,
+            response: None,
+            effects: Vec::new(),
+        };
+        if !valid_event(&event, self.events) {
+            return Err(Error::Run("invalid native trace event".into()));
+        }
+        let bytes = serde_json::to_vec(&event)
+            .map_err(|_| Error::Io("cannot encode native trace index".into()))?;
+        self.file
+            .write_all(&bytes)
+            .and_then(|()| self.file.write_all(b"\n"))
+            .and_then(|()| self.file.flush())
+            .map_err(|error| Error::Run(format!("cannot write native process trace: {error}")))?;
+        self.events += 1;
+        Ok(())
+    }
 }
 
 /// One causal native operation.  `request` and `response` are optional because
@@ -103,19 +266,17 @@ pub(crate) struct Transcript {
 }
 
 impl Transcript {
+    #[cfg(test)]
+    pub(crate) fn events(&self) -> &[Event] {
+        &self.events
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.events.len()
+    }
+
     pub(crate) fn record(&mut self, event: Event) -> Result<(), Error> {
-        if self.events.len() >= MAX_EVENTS
-            || event.schema_version != SCHEMA_VERSION
-            || event.sequence != self.events.len() as u64 + 1
-            || event.process == 0
-            || event.effects.len() > MAX_BLOBS_PER_EVENT
-            || !event
-                .request
-                .iter()
-                .chain(event.response.iter())
-                .chain(event.effects.iter())
-                .all(valid_blob)
-        {
+        if !valid_event(&event, self.events.len()) {
             return Err(Error::Run("invalid native trace event".into()));
         }
         self.events.push(event);
@@ -145,13 +306,29 @@ impl Transcript {
             .map_err(|_| Error::Run("native trace index is not UTF-8 JSONL".into()))?;
         let mut transcript = Self::default();
         for line in text.lines() {
-            transcript.record(
-                serde_json::from_str(line)
-                    .map_err(|_| Error::Run("native trace index is malformed".into()))?,
-            )?;
+            let position = transcript.len() + 1;
+            transcript.record(serde_json::from_str(line).map_err(|error| {
+                Error::Run(format!(
+                    "native trace index event {position} is malformed ({error})"
+                ))
+            })?)?;
         }
         Ok(transcript)
     }
+}
+
+fn valid_event(event: &Event, prior_events: usize) -> bool {
+    prior_events < MAX_EVENTS
+        && event.schema_version == SCHEMA_VERSION
+        && event.sequence == prior_events as u64 + 1
+        && event.process > 0
+        && event.effects.len() <= MAX_BLOBS_PER_EVENT
+        && event
+            .request
+            .iter()
+            .chain(event.response.iter())
+            .chain(event.effects.iter())
+            .all(valid_blob)
 }
 
 /// Reject malformed trace data and return canonical JSONL before publication.
