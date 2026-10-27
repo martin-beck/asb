@@ -396,6 +396,43 @@ on aborted transitions preserves unfinished resources rather than calling
 destructive normal-close from Drop. Provider bridge ownership remains outside
 these transitions until proxy settlement and evaluation have finished.
 
+### Layered replay
+
+Replay has independent protocol, tool, and native-execution layers.  The LLM
+layer is an ordered, provider-neutral loopback proxy chain; agents receive only
+its ingress endpoint.  The MCP layer uses the same adapter-owned session
+lifecycle, but preserves the agent's normal MCP configuration and transport.
+The native layer observes process lifecycle through ASB's existing exclusive
+gate.  It never uses `LD_PRELOAD`: injected libraries are incomplete for
+statically linked binaries, alternate runtimes, and direct kernel APIs, and
+would become part of the measured program.
+
+Each later native-replay increment must keep these boundaries distinct:
+
+- A compact, append-only index records opaque trace-local process identities,
+  causal relationships, content digests, sizes, and relative timing only.
+  It never serializes host PIDs, command lines, paths, prompts, credentials, or
+  unbounded stdout/stderr.
+- A private execution capsule supplies replayable filesystem and executable
+  state.  It is a transparent runtime mechanism, not an agent security policy:
+  the agent still uses ordinary paths, binaries, subprocesses, and direct APIs.
+  Replay reconstitutes only recorded inputs and declared workspace effects.
+- The first lifecycle observer remains deliberately lightweight: it records the
+  root and causal forks, then releases arbitrary helper descendants rather than
+  holding a long-lived syscall tracer.  A capsule backend may add detailed
+  executable and filesystem facts only when it can prove complete cleanup and
+  preserve normal child stdio/MCP shutdown behavior.
+- Record/replay must remain measurement-friendly.  Time and resource
+  collectors attach to the actual agent process tree; replay metadata is
+  bounded, content-addressed, and stored once.  No sampling loop, full syscall
+  log, kernel-wide trace, or duplicate process-output capture is permitted.
+
+This progression permits independently qualified changes: proxy/session
+normalization, compact capsule contracts, filesystem/executable capture,
+offline native replay, then an end-to-end agent qualification.  A replay
+request fails closed when the selected adapter lacks the completed layer; it
+never silently falls back to a live provider or host tool.
+
 After explicit cleanup, private `RunDisposition::from_facts` derives one
 operational status, primary `RunFailure` and success decision from independent
 execution, evaluation, cleanup, collector and presentation facts. `RunStatus`
