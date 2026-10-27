@@ -17,6 +17,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+/// Adapter-owned sidecars share a deliberately small aggregate budget.  Relay
+/// bundles are deduplicated protocol records, not a second copy of an agent
+/// session or its process output.
+const MAX_SEALED_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+
 /// Historical producer association plus immutable track proof. Temporary raw
 /// files are not completion closure inputs after their exact bytes are committed.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -539,6 +544,27 @@ impl Recorder {
             {
                 artifact_inputs.push(ArtifactInput { artifact, source });
             }
+            validate_sealed_artifact_budget(&result.sealed_artifacts)?;
+            let mut sealed_artifacts: Vec<_> = result
+                .sealed_artifacts
+                .iter()
+                .map(|sidecar| {
+                    (
+                        Artifact {
+                            kind: sidecar.kind.clone(),
+                            bytes: sidecar.bytes.len() as u64,
+                            sha256: crate::cassette::digest(&sidecar.bytes),
+                        },
+                        std::io::Cursor::new(sidecar.bytes.as_slice()),
+                    )
+                })
+                .collect();
+            for (artifact, source) in &mut sealed_artifacts {
+                artifact_inputs.push(ArtifactInput {
+                    artifact: artifact.clone(),
+                    source,
+                });
+            }
             if let Some(file) = &mut file {
                 file.seek(SeekFrom::Start(0)).map_err(io_error)?;
                 journal
@@ -680,6 +706,21 @@ impl Recorder {
         }
         result
     }
+}
+
+fn validate_sealed_artifact_budget(
+    artifacts: &[crate::agents::SealedArtifact],
+) -> Result<(), Error> {
+    let bytes = artifacts.iter().try_fold(0usize, |total, artifact| {
+        total.checked_add(artifact.bytes.len())
+    });
+    if bytes.is_none_or(|bytes| bytes > MAX_SEALED_ARTIFACT_BYTES) {
+        return Err(Error::Input(format!(
+            "adapter sealed artifacts exceed the {} MiB aggregate bound",
+            MAX_SEALED_ARTIFACT_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(())
 }
 
 pub(super) fn base(root: &Path, batch: u64) -> PathBuf {
@@ -1118,5 +1159,20 @@ mod tests {
                 assert_eq!(fs::read(root.join("sentinel")).unwrap(), b"{}\n");
             }
         }
+    }
+
+    #[test]
+    fn sealed_sidecars_have_a_small_aggregate_budget() {
+        let within = crate::agents::SealedArtifact {
+            kind: "mcp-relay-filesystem".into(),
+            bytes: vec![0; MAX_SEALED_ARTIFACT_BYTES],
+        };
+        validate_sealed_artifact_budget(&[within]).expect("exact bound is allowed");
+
+        let over = crate::agents::SealedArtifact {
+            kind: "mcp-relay-filesystem".into(),
+            bytes: vec![0; MAX_SEALED_ARTIFACT_BYTES + 1],
+        };
+        assert!(validate_sealed_artifact_budget(&[over]).is_err());
     }
 }

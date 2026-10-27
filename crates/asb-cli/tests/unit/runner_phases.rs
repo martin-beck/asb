@@ -1088,6 +1088,7 @@ fn result() -> RunResult<'static> {
         native_trace: None,
         local_tool_transcript: None,
         deterministic_manifest: None,
+        sealed_artifacts: Vec::new(),
         cassette: None,
         measurement_directory: None,
         stdout: "submission".into(),

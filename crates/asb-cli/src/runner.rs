@@ -112,6 +112,9 @@ struct RunResult<'a> {
     deterministic_manifest: Option<Vec<u8>>,
     #[serde(skip)]
     native_trace: Option<Vec<u8>>,
+    /// Adapter-owned bounded sidecars retained only by the sealed cassette.
+    #[serde(skip)]
+    sealed_artifacts: Vec<agents::SealedArtifact>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cassette: Option<String>,
     /// Actual capture directory, including a CLI --measurements override.
@@ -2423,6 +2426,7 @@ mod tests {
             local_tool_transcript: None,
             deterministic_manifest: None,
             native_trace: None,
+            sealed_artifacts: Vec::new(),
             cassette: None,
             measurement_directory: None,
             stdout: "done".into(),
