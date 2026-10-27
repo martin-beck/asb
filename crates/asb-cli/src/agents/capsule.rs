@@ -18,6 +18,8 @@ const MAX_ENTRIES: usize = 4096;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OBJECT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_OBJECT_STORE_BYTES: u64 = 64 * 1024 * 1024;
+const OBJECTS_DIRECTORY: &str = "objects";
+const MANIFEST_FILENAME: &str = "manifest.json";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +44,55 @@ pub(crate) struct Directory {
 pub(crate) struct Snapshot {
     pub directories: Vec<Directory>,
     pub files: Vec<Entry>,
+}
+
+/// A fresh private on-disk capsule. The manifest is created only after every
+/// referenced object has been stored, so its existence marks a complete,
+/// immutable capsule boundary.
+pub(crate) struct Store {
+    root: std::path::PathBuf,
+    objects: std::path::PathBuf,
+}
+
+impl Store {
+    /// Reserve a new empty capsule directory without replacing prior evidence.
+    pub(crate) fn create(root: &Path) -> Result<Self, Error> {
+        fs::create_dir(root).map_err(|error| match error.kind() {
+            std::io::ErrorKind::AlreadyExists => {
+                Error::Run("native capsule destination already exists".into())
+            }
+            _ => crate::io_error(error),
+        })?;
+        ensure_directory(root, "native capsule destination")?;
+        let objects = root.join(OBJECTS_DIRECTORY);
+        fs::create_dir(&objects).map_err(crate::io_error)?;
+        ensure_directory(&objects, "native capsule object store")?;
+        Ok(Self {
+            root: root.to_path_buf(),
+            objects,
+        })
+    }
+
+    pub(crate) fn objects(&self) -> &Path {
+        &self.objects
+    }
+
+    /// Publish the canonical manifest once. It intentionally has no replace
+    /// operation; callers must make a new capsule if capture changes.
+    pub(crate) fn publish(&self, manifest: &Manifest) -> Result<(), Error> {
+        let bytes = canonicalize(
+            &serde_json::to_vec(manifest)
+                .map_err(|_| Error::Io("cannot encode native capsule manifest".into()))?,
+        )?;
+        let path = self.root.join(MANIFEST_FILENAME);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(crate::io_error)?;
+        file.write_all(&bytes).map_err(crate::io_error)?;
+        file.sync_all().map_err(crate::io_error)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -685,6 +736,27 @@ mod tests {
             b"capsule input"
         );
         assert!(!workspace.join("output.txt").exists());
+    }
+
+    #[test]
+    fn store_publishes_one_complete_immutable_manifest_last() {
+        let root = test_root("store");
+        let source = root.0.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("input.txt"), b"capsule input").unwrap();
+        let destination = root.0.join("capsule");
+        let store = Store::create(&destination).unwrap();
+        let manifest =
+            Manifest::from_snapshot(None, capture_tree(store.objects(), &source).unwrap());
+        assert!(!destination.join(MANIFEST_FILENAME).exists());
+        store.publish(&manifest).unwrap();
+        let published = fs::read(destination.join(MANIFEST_FILENAME)).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Manifest>(&published).unwrap(),
+            manifest
+        );
+        assert!(store.publish(&manifest).is_err());
+        assert!(Store::create(&destination).is_err());
     }
 
     #[cfg(unix)]
