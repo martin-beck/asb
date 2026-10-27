@@ -135,9 +135,9 @@ fn sweep_command(
     arguments: &[&str],
 ) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_asb"));
+    command.current_dir(&project.0).isolated_env();
+    retain_host_rust_toolchain(&mut command);
     command
-        .current_dir(&project.0)
-        .isolated_env()
         .env("HOME", &project.0)
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .args(["sweep", "sweep.toml", "--json"])
@@ -595,9 +595,9 @@ fn check_interrupted_generations(source_kind: &str, measured: bool, successive: 
         None
     };
     let mut command = Command::new(env!("CARGO_BIN_EXE_asb"));
+    command.current_dir(&project.0).isolated_env();
+    retain_host_rust_toolchain(&mut command);
     command
-        .current_dir(&project.0)
-        .isolated_env()
         .env("HOME", &project.0)
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .args([

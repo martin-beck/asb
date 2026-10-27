@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use support::IsolatedEnvironment;
+use support::{IsolatedEnvironment, retain_host_rust_toolchain};
 
 #[path = "support/repeated_sweep.rs"]
 mod sweep_tests;
@@ -102,17 +102,11 @@ sys.exit(7 if (root/'fail-first').exists() and batch == 1 and replica == 1 else 
         // network toolchain bootstrap.  Preserve only the already-installed
         // Rust homes from the test runner; all application state remains
         // isolated by `isolated_env` below.
-        let host_home = std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into());
-        let rustup_home = std::env::var_os("RUSTUP_HOME")
-            .unwrap_or_else(|| PathBuf::from(&host_home).join(".rustup").into_os_string());
-        let cargo_home = std::env::var_os("CARGO_HOME")
-            .unwrap_or_else(|| PathBuf::from(&host_home).join(".cargo").into_os_string());
-        Command::new(env!("CARGO_BIN_EXE_asb"))
-            .current_dir(&self.0)
-            .isolated_env()
+        let mut command = Command::new(env!("CARGO_BIN_EXE_asb"));
+        command.current_dir(&self.0).isolated_env();
+        retain_host_rust_toolchain(&mut command);
+        command
             .env("HOME", &self.0)
-            .env("RUSTUP_HOME", rustup_home)
-            .env("CARGO_HOME", cargo_home)
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .args([
                 "run",
