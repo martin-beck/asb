@@ -646,6 +646,21 @@ execution, and optional measurements are separate modules so recording/replay,
 additional collectors, tool commands, and an external frontend can be added
 without changing the setup file.
 
+### Declared MCP servers
+
+For Codex, a benchmark may declare up to four ordinary stdio MCP servers. ASB
+validates their stable lowercase identifiers and passes the command arrays to
+Codex's project-private configuration without a shell. Other adapters reject
+these declarations rather than silently dropping them. This is normal live MCP
+configuration; MCP relay recording and offline replay are introduced separately.
+
+```toml
+[[mcp_servers]]
+id = "filesystem"
+program = "mcp-server-filesystem"
+args = ["."]
+```
+
 Finite command, tool, workload, provider, and locally enumerated model names
 fail closed on typos and print the closest match as a question; ASB never
 silently substitutes a value.

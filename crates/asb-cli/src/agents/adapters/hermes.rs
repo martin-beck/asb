@@ -229,6 +229,7 @@ mod tests {
             workspace: &root,
             runtime_dir: &root,
             run_dir: &run,
+            mcp_servers: &[],
             tape: None,
         })
         .unwrap();

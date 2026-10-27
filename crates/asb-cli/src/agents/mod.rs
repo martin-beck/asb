@@ -90,6 +90,11 @@ pub(crate) trait AgentAdapter: Sync {
     fn supports_tool_replay(&self) -> bool {
         false
     }
+    /// Whether this adapter can materialize declared ordinary stdio MCP
+    /// servers without treating them as ASB semantic local-tool replay.
+    fn supports_mcp_servers(&self) -> bool {
+        false
+    }
     /// Mutable client-state overrides, distinct from provider credentials.
     fn state_environment_vars(&self) -> &'static [&'static str] {
         &[]
@@ -146,6 +151,10 @@ pub(crate) struct PreparationContext<'a> {
     pub runtime_dir: &'a Path,
     /// A unique path for artifacts belonging to this individual run.
     pub run_dir: &'a Path,
+    /// Declared ordinary stdio MCP servers.  Adapters that support normal MCP
+    /// configuration receive these typed declarations directly; the generic
+    /// runner never interprets tool names or command arguments.
+    pub mcp_servers: &'a [crate::benchmark::McpServerConfig],
     /// Provider-tape identity for an execution whose agent-local tools must
     /// share the same record/replay boundary.  This is explicit rather than
     /// inferred from the provider URL: record and replay both use loopback
@@ -325,6 +334,7 @@ pub(super) struct StaticAdapter {
     prepare: PreparationHook,
     tool_replay: Option<ToolReplayHook>,
     complete_tool_replay: bool,
+    mcp_servers: bool,
     collect: Option<CollectionHook>,
     artifact_specs: &'static [ArtifactSpec],
     deterministic_extension: bool,
@@ -358,6 +368,7 @@ impl StaticAdapter {
             prepare,
             tool_replay: None,
             complete_tool_replay: false,
+            mcp_servers: false,
             collect: None,
             artifact_specs: &[],
             deterministic_extension: false,
@@ -395,6 +406,13 @@ impl StaticAdapter {
     pub(super) const fn with_complete_tool_replay(mut self, hook: ToolReplayHook) -> Self {
         self.tool_replay = Some(hook);
         self.complete_tool_replay = true;
+        self
+    }
+
+    /// Declares that the adapter has a normal stdio MCP configuration ingress.
+    /// This is intentionally distinct from complete ASB local-tool replay.
+    pub(super) const fn with_mcp_servers(mut self) -> Self {
+        self.mcp_servers = true;
         self
     }
 
@@ -534,6 +552,9 @@ impl AgentAdapter for StaticAdapter {
     }
     fn supports_tool_replay(&self) -> bool {
         self.complete_tool_replay
+    }
+    fn supports_mcp_servers(&self) -> bool {
+        self.mcp_servers
     }
     fn forwarded_invocation_environment_vars(&self) -> &'static [&'static str] {
         self.forwarded_invocation_environment_vars
@@ -860,6 +881,7 @@ mod tests {
                     workspace: &runtime,
                     runtime_dir: &runtime,
                     run_dir: &runtime,
+                    mcp_servers: &[],
                     tape: None,
                 },
             )
@@ -929,6 +951,8 @@ mod tests {
         assert!(find("qwen-code").unwrap().supports_tool_replay());
         assert!(!find("codex").unwrap().supports_tool_replay());
         assert!(!find("goose").unwrap().supports_tool_replay());
+        assert!(find("codex").unwrap().supports_mcp_servers());
+        assert!(!find("pi").unwrap().supports_mcp_servers());
     }
 
     #[test]
@@ -1011,6 +1035,7 @@ mod tests {
                             workspace: &root,
                             runtime_dir: &root,
                             run_dir: &root,
+                            mcp_servers: &[],
                             tape: None,
                         })
                         .expect_err("unadvertised pair must fail without panicking")
@@ -1060,6 +1085,7 @@ mod tests {
                             workspace: &runtime,
                             runtime_dir: &runtime,
                             run_dir: &runtime,
+                            mcp_servers: &[],
                             tape: None,
                         })
                         .unwrap_or_else(|error| panic!("{} {interface:?}: {error}", adapter.id()));

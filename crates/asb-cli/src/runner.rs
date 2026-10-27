@@ -2576,6 +2576,7 @@ mod tests {
                 workspace: std::path::Path::new("fixture-workspace"),
                 runtime_dir: std::path::Path::new("fixture-private"),
                 run_dir: run,
+                mcp_servers: &[],
                 tape: None,
             })
             .unwrap();

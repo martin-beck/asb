@@ -13,6 +13,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_tool_replay(prepare_tool_replay)
+.with_mcp_servers()
 .with_artifact_specs(&[super::super::ArtifactSpec {
     namespace: "tool-replay",
     filename: "local-tools.jsonl",
@@ -73,6 +74,7 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         context.model,
         &connection.base_url,
         connection.credential.is_some(),
+        context.mcp_servers,
     )?;
     context.command.env("CODEX_HOME", &directory);
     if let Some(key) = connection.credential.as_deref() {
@@ -160,6 +162,7 @@ fn configure(
     model: &str,
     base_url: &str,
     authenticated: bool,
+    mcp_servers: &[crate::benchmark::McpServerConfig],
 ) -> Result<(), Error> {
     std::fs::create_dir_all(directory).map_err(|error| {
         Error::Run(format!(
@@ -175,14 +178,47 @@ fn configure(
     };
     let replay_configuration =
         std::fs::read_to_string(directory.join("asb-tool-replay.toml")).unwrap_or_default();
+    let mcp_configuration = declared_mcp_configuration(mcp_servers)?;
     let configuration = format!(
-        "model = {model}\nmodel_provider = \"asb_provider\"\nweb_search = \"disabled\"\n\n[features]\napps = false\nplugins = false\nenable_mcp_apps = false\n\n[model_providers.asb_provider]\nname = \"ASB provider\"\nbase_url = {base_url}\n{key}wire_api = \"responses\"\nrequires_openai_auth = false\n\n{replay_configuration}"
+        "model = {model}\nmodel_provider = \"asb_provider\"\nweb_search = \"disabled\"\n\n[features]\napps = false\nplugins = false\nenable_mcp_apps = false\n\n[model_providers.asb_provider]\nname = \"ASB provider\"\nbase_url = {base_url}\n{key}wire_api = \"responses\"\nrequires_openai_auth = false\n\n{mcp_configuration}{replay_configuration}"
     );
     std::fs::write(directory.join("config.toml"), configuration).map_err(|error| {
         Error::Run(format!(
             "cannot write Codex provider configuration: {error}"
         ))
     })
+}
+
+fn declared_mcp_configuration(
+    declarations: &[crate::benchmark::McpServerConfig],
+) -> Result<String, Error> {
+    if declarations.is_empty() {
+        return Ok(String::new());
+    }
+    let mut servers = toml::map::Map::new();
+    for declaration in declarations {
+        let mut server = toml::map::Map::new();
+        server.insert(
+            "command".into(),
+            toml::Value::String(declaration.program.clone()),
+        );
+        server.insert(
+            "args".into(),
+            toml::Value::Array(
+                declaration
+                    .args
+                    .iter()
+                    .cloned()
+                    .map(toml::Value::String)
+                    .collect(),
+            ),
+        );
+        servers.insert(declaration.id.clone(), toml::Value::Table(server));
+    }
+    let mut root = toml::map::Map::new();
+    root.insert("mcp_servers".into(), toml::Value::Table(servers));
+    toml::to_string(&toml::Value::Table(root))
+        .map_err(|error| Error::Run(format!("cannot serialize Codex MCP configuration: {error}")))
 }
 
 #[cfg(test)]
@@ -237,7 +273,19 @@ mod tests {
     fn provider_configuration_uses_safe_values_and_generic_credentials() {
         let directory =
             std::env::temp_dir().join(format!("asb-codex-config-{}", std::process::id()));
-        configure(&directory, "model\"name", "http://127.0.0.1:1234/v1", true).unwrap();
+        let mcp_servers = [crate::benchmark::McpServerConfig {
+            id: "filesystem".into(),
+            program: "mcp-server\"fixture".into(),
+            args: vec!["--workspace".into(), "./fixture workspace".into()],
+        }];
+        configure(
+            &directory,
+            "model\"name",
+            "http://127.0.0.1:1234/v1",
+            true,
+            &mcp_servers,
+        )
+        .unwrap();
         let contents = std::fs::read_to_string(directory.join("config.toml")).unwrap();
         let config: toml::Value = toml::from_str(&contents).unwrap();
         assert_eq!(config["model"].as_str(), Some("model\"name"));
@@ -253,6 +301,19 @@ mod tests {
         assert_eq!(
             config["model_providers"]["asb_provider"]["env_key"].as_str(),
             Some("ASB_AGENT_API_KEY")
+        );
+        assert_eq!(
+            config["mcp_servers"]["filesystem"]["command"].as_str(),
+            Some("mcp-server\"fixture")
+        );
+        assert_eq!(
+            config["mcp_servers"]["filesystem"]["args"]
+                .as_array()
+                .unwrap(),
+            &[
+                toml::Value::String("--workspace".into()),
+                toml::Value::String("./fixture workspace".into())
+            ]
         );
         let _ = std::fs::remove_dir_all(directory);
     }
@@ -306,6 +367,11 @@ mod tests {
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let cassette = root.join("recording.jsonl");
+        let mcp_servers = [crate::benchmark::McpServerConfig {
+            id: "filesystem".into(),
+            program: "mcp-filesystem".into(),
+            args: vec![".".into()],
+        }];
         let mut command = std::process::Command::new("codex");
         let connection = crate::endpoint::Connection {
             interface: crate::endpoint::Interface::OpenAiResponses,
@@ -321,6 +387,7 @@ mod tests {
                 workspace: &workspace,
                 runtime_dir: &root,
                 run_dir: &root,
+                mcp_servers: &mcp_servers,
                 tape: Some(crate::agents::TapeContext {
                     mode: crate::tape::Mode::Record,
                     cassette: &cassette,
@@ -349,6 +416,10 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|value| value.as_str() == Some("__asb-tool-replay"))
+        );
+        assert_eq!(
+            config["mcp_servers"]["filesystem"]["command"].as_str(),
+            Some("mcp-filesystem")
         );
         assert_eq!(config["model"].as_str(), Some("fixture-model"));
         let _ = std::fs::remove_dir_all(root);

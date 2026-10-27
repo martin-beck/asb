@@ -192,6 +192,7 @@ mod tests {
             workspace: Path::new("."),
             runtime_dir: Path::new("."),
             run_dir: Path::new("."),
+            mcp_servers: &[],
             tape: None,
         })
         .unwrap();
@@ -222,6 +223,7 @@ mod tests {
                 workspace: Path::new("."),
                 runtime_dir: Path::new("."),
                 run_dir: Path::new("."),
+                mcp_servers: &[],
                 tape: None,
             })
             .unwrap();
@@ -264,6 +266,7 @@ mod tests {
                 workspace: &workspace,
                 runtime_dir: &root,
                 run_dir: &root,
+                mcp_servers: &[],
                 tape: Some(crate::agents::TapeContext {
                     mode: crate::tape::Mode::Replay,
                     cassette: &replay,
