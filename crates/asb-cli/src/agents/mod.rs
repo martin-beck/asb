@@ -6,6 +6,7 @@
 mod adapters;
 mod artifacts;
 pub(crate) mod determinism;
+pub(crate) mod mcp_framing;
 pub(crate) mod native_trace;
 pub(crate) mod tool_replay;
 pub(crate) mod tool_replay_mcp;
