@@ -7,9 +7,13 @@ use super::session::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 const DEFAULT_AGENT_TIMEOUT_SECONDS: f64 = 900.0;
+const MAX_EXPORTED_ARTIFACTS: usize = 4;
+const MAX_EXPORTED_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,7 +45,7 @@ impl EventKind {
 pub(super) enum Request<'a> {
     Agent {
         #[serde(flatten)]
-        payload: AgentRequest<'a>,
+        payload: Box<AgentRequest<'a>>,
     },
     Resume {
         exec_id: &'a Value,
@@ -68,6 +72,9 @@ pub(super) struct AgentRequest<'a> {
     pub project_configuration: String,
     pub environment: serde_json::Map<String, Value>,
     pub network: Option<String>,
+    /// Controller-owned private host directory for bounded opaque guest
+    /// artifacts. This is transport state, never durable benchmark evidence.
+    pub artifact_output: &'a Path,
     pub private_inputs: Vec<PrivateInput>,
     pub request: Value,
 }
@@ -163,7 +170,16 @@ pub(super) struct CompletedExecution {
 }
 
 impl CompletedExecution {
+    #[cfg(test)]
     pub fn decode(event: &Value, lifetime: ProcessLifetime) -> Result<Self, String> {
+        Self::decode_with_artifacts(event, lifetime, None)
+    }
+
+    pub fn decode_with_artifacts(
+        event: &Value,
+        lifetime: ProcessLifetime,
+        artifact_output: Option<&Path>,
+    ) -> Result<Self, String> {
         if EventKind::of(event) != Some(EventKind::Completed) {
             return Err("unexpected isolated execution event".into());
         }
@@ -171,6 +187,12 @@ impl CompletedExecution {
         let mut metadata: crate::agents::driver::GuestResult =
             serde_json::from_value(result["metadata"].clone())
                 .map_err(|_| "guest returned invalid agent result metadata")?;
+        if !metadata.exported_artifacts.is_empty() {
+            import_guest_artifacts(
+                &mut metadata,
+                artifact_output.ok_or("guest artifact export directory is unavailable")?,
+            )?;
+        }
         if result.get("process_termination").is_some()
             || result.get("process_termination_diagnostic").is_some()
         {
@@ -231,6 +253,73 @@ impl CompletedExecution {
             elapsed_ms: self.elapsed_ms,
         })
     }
+}
+
+/// Restore small, receipt-bound guest sidecars after they have crossed the
+/// Docker archive channel. The controller JSON message carries only these
+/// receipts, never sidecar bytes.
+fn import_guest_artifacts(
+    metadata: &mut crate::agents::driver::GuestResult,
+    output: &Path,
+) -> Result<(), String> {
+    if metadata.exported_artifacts.len() > MAX_EXPORTED_ARTIFACTS {
+        return Err("guest exported artifact count exceeds its bound".into());
+    }
+    let mut kinds = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    let mut total = 0u64;
+    for receipt in &metadata.exported_artifacts {
+        let valid_kind = !receipt.kind.is_empty()
+            && receipt.kind.len() <= 128
+            && receipt
+                .kind
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        let valid_filename = receipt
+            .filename
+            .strip_prefix("artifact-")
+            .is_some_and(|suffix| matches!(suffix, "0" | "1" | "2" | "3"));
+        let valid_digest = receipt.sha256.len() == 64
+            && receipt
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        total = total
+            .checked_add(receipt.bytes)
+            .ok_or("guest exported artifacts exceed their aggregate bound")?;
+        if !valid_kind
+            || !valid_filename
+            || !valid_digest
+            || receipt.bytes > MAX_EXPORTED_ARTIFACT_BYTES
+            || total > MAX_EXPORTED_ARTIFACT_BYTES
+            || !kinds.insert(&receipt.kind)
+            || !names.insert(&receipt.filename)
+        {
+            return Err("guest artifact receipt is invalid".into());
+        }
+        let path = output.join(&receipt.filename);
+        let attributes =
+            std::fs::symlink_metadata(&path).map_err(|_| "guest artifact export is missing")?;
+        if !attributes.file_type().is_file()
+            || attributes.file_type().is_symlink()
+            || attributes.len() != receipt.bytes
+        {
+            return Err("guest artifact export does not match its receipt".into());
+        }
+        let bytes = std::fs::read(&path).map_err(|_| "cannot read guest artifact export")?;
+        if bytes.len() as u64 != receipt.bytes
+            || format!("{:x}", Sha256::digest(&bytes)) != receipt.sha256
+        {
+            return Err("guest artifact export digest differs from its receipt".into());
+        }
+        metadata
+            .sealed_artifacts
+            .push(crate::agents::SealedArtifact {
+                kind: receipt.kind.clone(),
+                bytes,
+            });
+    }
+    Ok(())
 }
 
 /// One matching latest official binary grade permits one normal close. This

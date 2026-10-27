@@ -1,5 +1,6 @@
 """Offline bootstrap contracts; no Docker daemon, installed client or provider."""
 import io
+import hashlib
 import json
 from pathlib import Path
 import struct
@@ -13,8 +14,8 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).parents[1] / "assets/benchmarks"))
 from asb_execution import ExecutionError
-from asb_guest import (execute_agent, stage_npm_package_tree, stage_public_cache,
-                       stage_bootstrap, PreparationBudget)
+from asb_guest import (execute_agent, export_agent_artifacts, stage_npm_package_tree,
+                       stage_public_cache, stage_bootstrap, PreparationBudget)
 from asb_runtime import elf as inspect_elf
 
 
@@ -45,6 +46,26 @@ class Container:
         return True
 
 
+class ArchiveContainer:
+    def __init__(self, name, payload):
+        self.name, self.payload = name, payload
+
+    def get_archive(self, source, chunk_size=65536, encode_stream=False):
+        if source.rsplit("/",1)[-1] != self.name:
+            raise AssertionError("unexpected guest artifact source")
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive,mode="w") as outgoing:
+            member = tarfile.TarInfo(self.name)
+            member.size = len(self.payload)
+            outgoing.addfile(member,io.BytesIO(self.payload))
+        class Chunks:
+            def __init__(self, bytes):self.stream=io.BytesIO(bytes)
+            def __iter__(self):
+                while data := self.stream.read(65536):yield data
+            def close(self):self.stream.close()
+        return Chunks(archive.getvalue()), {"name":self.name,"linkTarget":""}
+
+
 class GuestBootstrapTests(unittest.TestCase):
     def setUp(self):
         # These fixtures exercise bootstrap selection, not the separately
@@ -58,6 +79,30 @@ class GuestBootstrapTests(unittest.TestCase):
             mock = patch(name,**options)
             mock.start()
             self.addCleanup(mock.stop)
+
+    def test_guest_artifact_export_copies_only_receipt_bound_archive_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            payload = b"sealed MCP relay transcript"
+            digest = hashlib.sha256(payload).hexdigest()
+            task = SimpleNamespace(workspace=SimpleNamespace(container=ArchiveContainer("artifact-0",payload)))
+            export_agent_artifacts(task,directory,[{"kind":"mcp-relay-filesystem","filename":"artifact-0",
+                "bytes":len(payload),"sha256":digest}])
+            exported = Path(directory) / "artifact-0"
+            self.assertEqual(exported.read_bytes(),payload)
+            self.assertEqual(exported.stat().st_mode & 0o777,0o600)
+
+    def test_guest_artifact_export_rejects_changed_or_oversized_receipts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            payload = b"x"
+            task = SimpleNamespace(workspace=SimpleNamespace(container=ArchiveContainer("artifact-0",payload)))
+            for receipt in [
+                {"kind":"mcp-relay-filesystem","filename":"artifact-0","bytes":1,"sha256":"a"*64},
+                {"kind":"mcp-relay-filesystem","filename":"../artifact-0","bytes":1,"sha256":"a"*64},
+                {"kind":"mcp-relay-filesystem","filename":"artifact-0","bytes":16*1024*1024+1,"sha256":"a"*64},
+            ]:
+                with self.subTest(receipt=receipt), self.assertRaises(ExecutionError):
+                    export_agent_artifacts(task,directory,[receipt])
+                self.assertFalse(any(path.name.endswith(".part") for path in Path(directory).iterdir()))
     def test_preparation_budget_is_bounded_anchored_and_not_restarted(self):
         for invalid in [True, False, 0, -1, 1801, float("nan"), float("inf"), "900"]:
             with self.subTest(invalid=invalid), self.assertRaises(ExecutionError):

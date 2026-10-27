@@ -35,6 +35,14 @@ the actual agent process tree.  Full syscall traces, kernel-wide tracing,
 sampling loops, FUSE interception, and `LD_PRELOAD` are explicitly out of
 scope.
 
+For isolated workload guests, opaque relay sidecars never travel in the
+one-megabyte controller JSON record. The guest first writes up to four sealed
+sidecars with a 16 MiB aggregate cap, then returns only stable kind, size, and
+SHA-256 receipts. The owning controller copies each matching regular file once
+through the container archive channel into its private attempt artifacts and
+verifies the receipt before cassette publication. This keeps replay capture
+process-scoped and avoids in-band base64 copies or kernel tracing pressure.
+
 ## Delivery steps
 
 ### 1. Shared bounded MCP framing
