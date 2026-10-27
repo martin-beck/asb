@@ -8,6 +8,7 @@ from contextlib import ExitStack
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import posixpath
 import re
@@ -20,6 +21,92 @@ from asb_execution import ExecutionError, principal_observation
 from asb_runtime import bundle
 from asb_staging import upload, stage_runtime, root_execute, prepare_guest_roots
 from asb_relay import HostRelay, ForwardingCancellation, forward_request
+
+
+MAX_EXPORTED_ARTIFACTS = 4
+MAX_EXPORTED_ARTIFACT_BYTES = 16 * 1024 * 1024
+
+
+def export_agent_artifacts(task, output, receipts):
+    """Copy sealed guest files to a controller-owned private directory.
+
+    Receipts travel in the bounded controller JSON message; opaque bytes stay
+    out of that message and cross Docker's archive channel exactly once.
+    """
+    if receipts is None:
+        return
+    if (not isinstance(output,str) or not os.path.isabs(output) or not isinstance(receipts,list)
+            or len(receipts) > MAX_EXPORTED_ARTIFACTS):
+        raise ExecutionError("guest artifact export request is invalid")
+    destination = Path(output)
+    if (not destination.is_dir() or destination.is_symlink()):
+        raise ExecutionError("guest artifact export destination is unavailable")
+    seen, total = set(), 0
+    for receipt in receipts:
+        if (not isinstance(receipt,dict) or set(receipt) != {"kind","filename","bytes","sha256"}
+                or not isinstance(receipt["kind"],str) or not re.fullmatch(r"[a-z0-9-]{1,128}",receipt["kind"])
+                or not isinstance(receipt["filename"],str) or not re.fullmatch(r"artifact-[0-3]",receipt["filename"])
+                or type(receipt["bytes"]) is not int or not 0 <= receipt["bytes"] <= MAX_EXPORTED_ARTIFACT_BYTES
+                or not isinstance(receipt["sha256"],str) or not re.fullmatch(r"[0-9a-f]{64}",receipt["sha256"])
+                or receipt["filename"] in seen):
+            raise ExecutionError("guest artifact receipt is invalid")
+        seen.add(receipt["filename"])
+        total += receipt["bytes"]
+        if total > MAX_EXPORTED_ARTIFACT_BYTES:
+            raise ExecutionError("guest artifact receipts exceed their aggregate bound")
+        source = "/opt/asb-private/attempt/exports/" + receipt["filename"]
+        chunks, metadata = task.workspace.container.get_archive(source,chunk_size=65536,encode_stream=False)
+        temporary = destination / ("." + receipt["filename"] + ".part")
+        final = destination / receipt["filename"]
+        if temporary.exists() or final.exists():
+            raise ExecutionError("guest artifact export destination already exists")
+        try:
+            if metadata.get("name") != receipt["filename"] or metadata.get("linkTarget"):
+                raise ExecutionError("guest artifact archive identity is invalid")
+            with tempfile.TemporaryFile(dir=destination) as archive:
+                wire = 0
+                for chunk in chunks:
+                    if not isinstance(chunk,bytes):
+                        raise ExecutionError("guest artifact archive stream is invalid")
+                    wire += len(chunk)
+                    if wire > MAX_EXPORTED_ARTIFACT_BYTES + 1024 * 1024:
+                        raise ExecutionError("guest artifact archive exceeds its bound")
+                    archive.write(chunk)
+                archive.seek(0)
+                with tarfile.open(fileobj=archive,mode="r:") as incoming:
+                    members = incoming.getmembers()
+                    if len(members) != 1:
+                        raise ExecutionError("guest artifact archive has invalid entries")
+                    member = members[0]
+                    if (member.name != receipt["filename"] or not member.isfile()
+                            or member.size != receipt["bytes"]):
+                        raise ExecutionError("guest artifact archive payload is invalid")
+                    extracted = incoming.extractfile(member)
+                    if extracted is None:
+                        raise ExecutionError("guest artifact archive payload is unavailable")
+                    digest, copied = hashlib.sha256(), 0
+                    fd = os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
+                    with os.fdopen(fd,"wb") as target:
+                        while True:
+                            block = extracted.read(65536)
+                            if not block:
+                                break
+                            copied += len(block)
+                            if copied > receipt["bytes"]:
+                                raise ExecutionError("guest artifact archive payload exceeds its receipt")
+                            digest.update(block)
+                            target.write(block)
+                        target.flush()
+                        os.fsync(target.fileno())
+                    if copied != receipt["bytes"] or digest.hexdigest() != receipt["sha256"]:
+                        raise ExecutionError("guest artifact export digest differs from its receipt")
+                    os.replace(temporary,final)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+            close = getattr(chunks,"close",None)
+            if close is not None:
+                close()
 
 
 class PreparationBudget:
@@ -414,6 +501,8 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
         # Unknown usage is never invented from text or an expected minimum.
         result["metadata"] = {"schema_version": 1, "exit_code": result["exit_code"],
                               "final_response": None, "token_usage": {}, "steps": None}
+    export_agent_artifacts(task,request.get("artifact_output"),
+                           result["metadata"].get("exported_artifacts"))
     if result.get("workload_processes_retained"):
         if (not lifetime_options or result["metadata"].get("workload_owner") != guest["workload_owner"]
                 or result["metadata"].get("tree_quiesced") is not False):

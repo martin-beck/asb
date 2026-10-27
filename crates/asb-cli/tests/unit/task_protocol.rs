@@ -186,6 +186,59 @@ fn delegated_completion_requires_declared_lifetime_retention_and_every_owner_bin
 }
 
 #[test]
+fn guest_sidecars_cross_the_control_boundary_as_receipts_not_json_bytes() {
+    use sha2::{Digest, Sha256};
+    let root = std::env::temp_dir().join(format!(
+        "asb-guest-artifact-{}",
+        crate::workloads::TaskIdentity::local("receipt", None).attempt_id
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let bytes = b"sealed relay bundle";
+    std::fs::write(root.join("artifact-0"), bytes).unwrap();
+    let mut value = completion();
+    value["result"]["metadata"]["exported_artifacts"] = json!([{
+        "kind":"mcp-relay-filesystem",
+        "filename":"artifact-0",
+        "bytes":bytes.len(),
+        "sha256":format!("{:x}", Sha256::digest(bytes))
+    }]);
+    let result =
+        CompletedExecution::decode_with_artifacts(&value, ProcessLifetime::Quiesce, Some(&root))
+            .unwrap()
+            .into_execution()
+            .unwrap();
+    assert_eq!(result.metadata.sealed_artifacts.len(), 1);
+    assert_eq!(result.metadata.sealed_artifacts[0].bytes, bytes);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn guest_sidecar_receipts_fail_closed_for_missing_or_changed_files() {
+    let root = std::env::temp_dir().join(format!(
+        "asb-guest-artifact-invalid-{}",
+        crate::workloads::TaskIdentity::local("receipt", None).attempt_id
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut value = completion();
+    value["result"]["metadata"]["exported_artifacts"] = json!([{
+        "kind":"mcp-relay-filesystem",
+        "filename":"artifact-0",
+        "bytes":1,
+        "sha256":"a".repeat(64)
+    }]);
+    assert!(
+        CompletedExecution::decode_with_artifacts(&value, ProcessLifetime::Quiesce, Some(&root),)
+            .is_err()
+    );
+    std::fs::write(root.join("artifact-0"), b"x").unwrap();
+    assert!(
+        CompletedExecution::decode_with_artifacts(&value, ProcessLifetime::Quiesce, Some(&root),)
+            .is_err()
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn completed_grade_is_not_process_success_or_an_unknown_or_inconsistent_resolution() {
     let expected: TaskIdentity =
         serde_json::from_value(ready()["invocation"]["identity"].clone()).unwrap();
@@ -284,7 +337,7 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
     }
     let bootstrap = crate::install::GuestBootstrap::fixture_empty();
     let agent = Request::Agent {
-        payload: AgentRequest {
+        payload: Box::new(AgentRequest {
             binary: Path::new("fixture-asb"),
             project_root: Path::new("fixture-project"),
             preparation_seconds: Some(1800.0),
@@ -295,9 +348,10 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
             project_configuration: "fixture".into(),
             environment: serde_json::Map::new(),
             network: None,
+            artifact_output: Path::new("fixture-artifacts"),
             private_inputs: Vec::new(),
             request: json!({"replay":true}),
-        },
+        }),
     }
     .value()
     .unwrap();
@@ -305,7 +359,7 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
         agent,
         json!({"op":"agent","binary":"fixture-asb","project_root":"fixture-project","preparation_seconds":1800.0,"timeout":1.0,
         "tools_root":"fixture-tools","bootstrap":{"runtime_tools":[],"assets":[],"public_package_cache":false,"npm_package_tree":null},
-        "measure_target":false,"project_configuration":"fixture","environment":{},"network":null,"private_inputs":[],"request":{"replay":true}})
+        "measure_target":false,"project_configuration":"fixture","environment":{},"network":null,"artifact_output":"fixture-artifacts","private_inputs":[],"request":{"replay":true}})
     );
     let output = std::process::Command::new("python3")
         .args(["-I","-S","-B","-c", "import json,sys;sys.path.insert(0,sys.argv[1]);from asb_task_server import Event,Operation;print(json.dumps(dict(events=[e.value for e in Event],operations=[o.value for o in Operation])))"])

@@ -4,6 +4,7 @@
 //! arrives through a private environment value, never argv or a request file.
 use crate::{Error, benchmark::BenchmarkConfig, endpoint::Connection, project};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -13,6 +14,19 @@ const UNPRIVILEGED_UID: u32 = 65_534;
 const UNPRIVILEGED_GID: u32 = 65_534;
 
 const REQUEST: &str = "ASB_GUEST_AGENT_REQUEST";
+/// Guest artifact bytes are copied by the owning workload controller rather
+/// than embedded in its bounded JSON control message.
+const MAX_EXPORTED_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_EXPORTED_ARTIFACTS: usize = 4;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GuestArtifactReceipt {
+    pub kind: String,
+    pub filename: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
 
 #[cfg(test)]
 #[path = "../../tests/unit/driver_validation.rs"]
@@ -115,6 +129,15 @@ pub(crate) struct GuestResult {
     pub deterministic_manifest: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_trace: Option<Vec<u8>>,
+    /// Host-only sealed sidecars restored from the controller-owned export
+    /// directory after this small result record crosses the guest boundary.
+    #[serde(skip)]
+    pub sealed_artifacts: Vec<super::SealedArtifact>,
+    /// Small receipts for opaque sidecars. Their bytes remain in the guest
+    /// until the workload controller copies each verified file directly to its
+    /// private host artifact directory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exported_artifacts: Vec<GuestArtifactReceipt>,
     pub execution_failure: Option<String>,
     #[serde(default)]
     pub tree_quiesced: bool,
@@ -692,6 +715,8 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         None,
     );
     let usage = crate::usage::with_artifact_usage(usage, artifacts.token_usage);
+    let exported_artifacts =
+        export_sealed_artifacts(&request.run_dir, &artifacts.sealed_artifacts)?;
     // Until the first durable publication transfers the frozen evidence, Drop
     // retains raw artifacts. This interim record never asserts settlement.
     let mut result = GuestResult {
@@ -722,6 +747,8 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         local_tool_transcript: artifacts.local_tool_transcript,
         deterministic_manifest: artifacts.deterministic_manifest,
         native_trace: artifacts.native_trace,
+        sealed_artifacts: Vec::new(),
+        exported_artifacts,
         execution_failure: {
             #[cfg(target_os = "linux")]
             let timed_out = held.as_ref().is_some_and(|held| held.timed_out);
@@ -759,6 +786,71 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         .code()
         .and_then(|code| u8::try_from(code).ok())
         .unwrap_or(1))
+}
+
+/// Keep opaque adapter sidecars out of the one-megabyte guest controller
+/// record. The owning workload controller later transfers each receipt's one
+/// private file directly out of the container and verifies this commitment.
+fn export_sealed_artifacts(
+    run_dir: &Path,
+    artifacts: &[super::SealedArtifact],
+) -> Result<Vec<GuestArtifactReceipt>, Error> {
+    if artifacts.len() > MAX_EXPORTED_ARTIFACTS {
+        return Err(Error::Run(
+            "guest exported artifact count exceeds its bound".into(),
+        ));
+    }
+    let total = artifacts.iter().try_fold(0usize, |total, artifact| {
+        total.checked_add(artifact.bytes.len())
+    });
+    if total.is_none_or(|bytes| bytes > MAX_EXPORTED_ARTIFACT_BYTES) {
+        return Err(Error::Run(
+            "guest exported artifacts exceed their aggregate bound".into(),
+        ));
+    }
+    if artifacts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let directory = run_dir.join("exports");
+    fs::create_dir(&directory).map_err(|error| {
+        Error::Io(format!(
+            "cannot create guest artifact export directory: {error}"
+        ))
+    })?;
+    artifacts
+        .iter()
+        .enumerate()
+        .map(|(index, artifact)| {
+            if artifact.kind.is_empty()
+                || artifact.kind.len() > 128
+                || !artifact
+                    .kind
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            {
+                return Err(Error::Run("guest artifact has an invalid kind".into()));
+            }
+            let filename = format!("artifact-{index}");
+            let path = directory.join(&filename);
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&path).map_err(crate::io_error)?;
+            file.write_all(&artifact.bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(crate::io_error)?;
+            Ok(GuestArtifactReceipt {
+                kind: artifact.kind.clone(),
+                filename,
+                bytes: artifact.bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(&artifact.bytes)),
+            })
+        })
+        .collect()
 }
 
 fn publish_artifacts(
@@ -876,6 +968,8 @@ mod artifact_publication_tests {
                 local_tool_transcript: None,
                 deterministic_manifest: None,
                 native_trace: None,
+                sealed_artifacts: Vec::new(),
+                exported_artifacts: Vec::new(),
                 execution_failure: None,
                 tree_quiesced: true,
                 namespace_collectors: Default::default(),

@@ -865,6 +865,9 @@ impl Session {
         let tool_tape_cassette = guest_tape_cassette(context.tool_tape_cassette)?;
         let private_inputs =
             replay_private_inputs(context.tool_tape_cassette, context.tool_replay)?;
+        let artifact_output = self.artifacts.join("guest-artifacts");
+        std::fs::create_dir_all(&artifact_output)
+            .map_err(|error| format!("cannot allocate guest artifact export directory: {error}"))?;
         let payload = AgentRequest {
             binary: &binary,
             project_root: context.project_root,
@@ -879,6 +882,7 @@ impl Session {
             project_configuration: guest_project_configuration(context.project_config)?,
             environment,
             network: std::env::var("ASB_BENCHMARK_NETWORK").ok(),
+            artifact_output: &artifact_output,
             private_inputs,
             request: json!({"process_lifetime":self.process_lifetime,"config":config,"connection":connection,"prompt":self.invocation.input.instructions,"timeout_seconds":self.agent_timeout.as_secs_f64(),
                 "project_root":"/opt/asb-project","runtime_dir":"/opt/asb-private","run_dir":"/opt/asb-private/attempt","replay":context.replay,
@@ -887,8 +891,13 @@ impl Session {
                 "tool_tape_cassette":tool_tape_cassette,
                 "namespace_collectors":namespace_collectors}),
         };
-        self.controller
-            .send(&Request::Agent { payload }.value()?, deadline)
+        self.controller.send(
+            &Request::Agent {
+                payload: Box::new(payload),
+            }
+            .value()?,
+            deadline,
+        )
     }
 
     fn receive_execution(
@@ -1076,7 +1085,11 @@ impl Session {
         if self.measurement_active {
             return Err("isolated execution omitted its completion boundary".into());
         }
-        let completed = CompletedExecution::decode(event, self.process_lifetime)?;
+        let completed = CompletedExecution::decode_with_artifacts(
+            event,
+            self.process_lifetime,
+            Some(&self.artifacts.join("guest-artifacts")),
+        )?;
         let collector_errors = context
             .measurements
             .as_deref_mut()
