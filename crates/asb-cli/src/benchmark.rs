@@ -14,6 +14,7 @@ pub(crate) const DEFAULT_LOG_DIRECTORY: &str = ".asb-logs";
 
 /// Small, extensible benchmark configuration written by `asb setup`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BenchmarkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) planning: Option<crate::planning::PlanningConfig>,
@@ -39,6 +40,30 @@ pub struct BenchmarkConfig {
     pub log_file: String,
     #[serde(default)]
     pub measurements: Option<MeasurementConfig>,
+    /// Explicit stdio MCP servers made available to an adapter that supports
+    /// ordinary MCP configuration.  The command remains an argument array;
+    /// ASB never routes it through a shell.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_mcp_servers"
+    )]
+    pub(crate) mcp_servers: Vec<McpServerConfig>,
+}
+
+/// A named, bounded stdio MCP server declaration.
+///
+/// The name is a stable configuration identifier, not a display label.  A
+/// later adapter-integration step decides whether it can materialize this
+/// declaration for a particular client.  Keeping this record declarative
+/// means parsing it cannot start a subprocess or contact a provider.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct McpServerConfig {
+    pub(crate) id: String,
+    pub(crate) program: String,
+    #[serde(default)]
+    pub(crate) args: Vec<String>,
 }
 
 /// Measurement modules selected by generated setup files.
@@ -81,9 +106,68 @@ where
     Ok(value)
 }
 
+const MAX_MCP_SERVERS: usize = 16;
+const MAX_MCP_ARGUMENTS: usize = 64;
+const MAX_MCP_IDENTIFIER_BYTES: usize = 64;
+
+fn deserialize_mcp_servers<'de, D>(deserializer: D) -> Result<Vec<McpServerConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let servers = Vec::<McpServerConfig>::deserialize(deserializer)?;
+    validate_mcp_servers(&servers).map_err(serde::de::Error::custom)?;
+    Ok(servers)
+}
+
+fn validate_mcp_servers(servers: &[McpServerConfig]) -> Result<(), String> {
+    if servers.len() > MAX_MCP_SERVERS {
+        return Err(format!(
+            "mcp_servers must not contain more than {MAX_MCP_SERVERS} servers"
+        ));
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for server in servers {
+        if server.id.is_empty()
+            || server.id.len() > MAX_MCP_IDENTIFIER_BYTES
+            || !server.id.bytes().enumerate().all(|(index, byte)| {
+                matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_')
+                    && (index > 0 || byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            })
+        {
+            return Err(format!(
+                "MCP server id `{}` must use 1 to {MAX_MCP_IDENTIFIER_BYTES} lowercase ASCII letters, digits, hyphens, or underscores and cannot start with a hyphen or underscore",
+                server.id
+            ));
+        }
+        crate::selection_names::validate(&server.id, "MCP server")?;
+        if !names.insert(&server.id) {
+            return Err(format!("MCP server id `{}` is duplicated", server.id));
+        }
+        if server.program.trim().is_empty() {
+            return Err(format!(
+                "MCP server `{}` program must not be empty",
+                server.id
+            ));
+        }
+        if server.args.len() > MAX_MCP_ARGUMENTS {
+            return Err(format!(
+                "MCP server `{}` must not have more than {MAX_MCP_ARGUMENTS} arguments",
+                server.id
+            ));
+        }
+        if server.args.iter().any(|argument| argument.is_empty()) {
+            return Err(format!(
+                "MCP server `{}` arguments must not contain empty values",
+                server.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BenchmarkConfig, default_log_path};
+    use super::{BenchmarkConfig, MAX_MCP_ARGUMENTS, MAX_MCP_SERVERS, default_log_path};
 
     #[test]
     fn concurrency_defaults_to_one_and_accepts_positive_values() {
@@ -128,5 +212,66 @@ mod tests {
     #[test]
     fn default_logs_are_collected_under_the_hidden_log_directory() {
         assert_eq!(default_log_path("run.jsonl"), ".asb-logs/run.jsonl");
+    }
+
+    #[test]
+    fn mcp_servers_parse_as_bounded_typed_declarations() {
+        let config: BenchmarkConfig = toml::from_str(
+            "agent='pi'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='tool-model'\n[[mcp_servers]]\nid='filesystem'\nprogram='npx'\nargs=['-y','@modelcontextprotocol/server-filesystem','.']\n",
+        )
+        .expect("valid MCP declaration parses");
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].id, "filesystem");
+        assert_eq!(config.mcp_servers[0].program, "npx");
+        assert_eq!(config.mcp_servers[0].args.len(), 3);
+        let encoded = toml::to_string(&config).expect("configuration serializes");
+        assert!(encoded.contains("[[mcp_servers]]"));
+    }
+
+    #[test]
+    fn mcp_servers_reject_unknown_duplicate_and_unbounded_declarations() {
+        for invalid in [
+            "[[mcp_servers]]\nid='filesystem'\nprogram='server'\nunexpected=true\n",
+            "[[mcp_servers]]\nid='filesystem'\nprogram='server'\n[[mcp_servers]]\nid='filesystem'\nprogram='other'\n",
+            "[[mcp_servers]]\nid='ALL'\nprogram='server'\n",
+            "[[mcp_servers]]\nid='filesystem'\nprogram=' '\n",
+        ] {
+            let text = format!(
+                "agent='pi'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='tool-model'\n{invalid}"
+            );
+            assert!(
+                toml::from_str::<BenchmarkConfig>(&text).is_err(),
+                "{invalid}"
+            );
+        }
+
+        let too_many_servers = (0..=MAX_MCP_SERVERS)
+            .map(|index| format!("[[mcp_servers]]\nid='server-{index}'\nprogram='server'\n"))
+            .collect::<String>();
+        let too_many_arguments = format!(
+            "[[mcp_servers]]\nid='filesystem'\nprogram='server'\nargs=[{}]\n",
+            (0..=MAX_MCP_ARGUMENTS)
+                .map(|_| "'argument'")
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        for invalid in [too_many_servers, too_many_arguments] {
+            let text = format!(
+                "agent='pi'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='tool-model'\n{invalid}"
+            );
+            assert!(
+                toml::from_str::<BenchmarkConfig>(&text).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn benchmark_configuration_rejects_unknown_top_level_fields() {
+        let error = toml::from_str::<BenchmarkConfig>(
+            "agent='pi'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='tool-model'\nunknown=true\n",
+        )
+        .expect_err("unknown top-level field must be rejected");
+        assert!(error.to_string().contains("unknown field"));
     }
 }

@@ -194,6 +194,7 @@ mod tests {
             workspace: "./asb-workspace".into(),
             log_file: "benchmark.log".into(),
             measurements: None,
+            mcp_servers: Vec::new(),
         };
         let spec = command(&CommandContext {
             config: &config,
@@ -256,6 +257,7 @@ mod tests {
             workspace: "./asb-workspace".into(),
             log_file: "benchmark.log".into(),
             measurements: None,
+            mcp_servers: Vec::new(),
         };
         let spec = command(&CommandContext {
             config: &config,

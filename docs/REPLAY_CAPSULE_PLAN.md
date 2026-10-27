@@ -95,6 +95,20 @@ the relay ingress transparently.  The existing local-tool transport is not
 removed until its semantic workspace-effect coverage is reproduced and its
 regressions pass.
 
+The benchmark contract represents each declared stdio server as a bounded
+`[[mcp_servers]]` record with a stable lowercase `id`, `program`, and an
+argument array.  ASB validates the declaration without launching it; adapter
+configuration owns materialization.  This preserves no-shell execution, makes
+the same server declaration usable for record and replay, and prevents an
+unknown or duplicate server from silently changing a benchmark.
+
+```toml
+[[mcp_servers]]
+id = "filesystem"
+program = "mcp-filesystem"
+args = ["."]
+```
+
 **Acceptance:** each opted-in adapter has record, replay, missing-layer, and
 cleanup tests.  An adapter with no completed MCP route rejects the requested
 MCP layer rather than degrading to a live server.

@@ -204,6 +204,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            mcp_servers: Vec::new(),
         };
         let spec = command(&CommandContext {
             config: &config,

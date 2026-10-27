@@ -892,6 +892,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            mcp_servers: Vec::new(),
         };
         for adapter in all() {
             let command = adapter.command(&CommandContext {

@@ -2527,6 +2527,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            mcp_servers: Vec::new(),
         };
         let command = command_for(&config, Some("http://127.0.0.1:3456/v1"), "prompt")
             .expect("known agent has a command");
@@ -2553,6 +2554,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            mcp_servers: Vec::new(),
         };
         let mini = command_for(&base, Some("http://127.0.0.1:3456/v1"), "prompt").unwrap();
         assert!(!mini.args.iter().any(|argument| argument == "--output"));
@@ -2615,6 +2617,7 @@ mod tests {
                 workspace: "workspace".into(),
                 log_file: "run.log".into(),
                 measurements: None,
+                mcp_servers: Vec::new(),
             };
             let command = command_for(&config, Some("http://127.0.0.1:3456/v1"), "prompt")
                 .expect("new agent command");
@@ -2645,6 +2648,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            mcp_servers: Vec::new(),
         };
         let command = command_for(&config, Some("http://127.0.0.1:3456/v1"), "prompt")
             .expect("pi has a command");
@@ -2808,6 +2812,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            mcp_servers: Vec::new(),
         };
         let command = command_for(&config, None, "prompt").expect("known agent");
         assert!(
@@ -2837,6 +2842,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            mcp_servers: Vec::new(),
         };
         let error = match command_for(&config, None, "prompt") {
             Ok(_) => panic!("typo rejected"),

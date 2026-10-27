@@ -27,6 +27,7 @@ pub(super) fn source_bound(config: &BenchmarkConfig) -> Result<(), Error> {
         workspace,
         log_file,
         measurements,
+        mcp_servers,
     } = config;
     let _: &usize = concurrency;
     for value in [agent, workload, provider, model, workspace, log_file] {
@@ -44,6 +45,13 @@ pub(super) fn source_bound(config: &BenchmarkConfig) -> Result<(), Error> {
         let _: &bool = enabled;
         string(directory)?;
         for value in collectors {
+            string(value)?;
+        }
+    }
+    for server in mcp_servers {
+        string(&server.id)?;
+        string(&server.program)?;
+        for value in &server.args {
             string(value)?;
         }
     }
@@ -242,6 +250,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "benchmark.log".into(),
             measurements: None,
+            mcp_servers: Vec::new(),
         }
     }
 
