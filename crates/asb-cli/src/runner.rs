@@ -149,6 +149,8 @@ pub(crate) struct RunOptions<'a> {
     /// combined behavior unless they opt into an explicit tool selection.
     pub tool_mode_explicit: bool,
     pub cassette: Option<&'a str>,
+    /// Explicit fresh destination for a bounded native workspace capsule.
+    pub native_capsule_record: Option<&'a str>,
     pub respect_record_timings: bool,
     pub replica: replica::Identity,
     pub on_completion: Option<&'a dyn replica::CompletionObserver>,
@@ -181,6 +183,16 @@ pub(crate) fn run_with_diagnostics(
     let text = read_config(config_path)?;
     let config: BenchmarkConfig = toml::from_str(&text)
         .map_err(|error| Error::Input(format!("cannot parse {path}: {error}")))?;
+    if options.native_capsule_record.is_some()
+        && (options.mode != Some(tape::Mode::Record)
+            || config.concurrency != 1
+            || options.repeat.is_some())
+    {
+        return Err(Error::Input(
+            "--native-capsule-record requires --llm-record, concurrency = 1, and no --repeat"
+                .into(),
+        ));
+    }
     let disk_policy = crate::planning::resolve(&config)?;
     let output_directory = config_path.parent().unwrap_or_else(|| Path::new("."));
     if (options.track.is_some() || options.replay_seed.is_some())
@@ -2162,6 +2174,41 @@ mod tests {
             !root.join(".asb/execution-plans").exists(),
             "an absent replay cassette must fail before replica plans are admitted"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_capsule_capture_rejects_repeat_or_concurrency_before_execution() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-native-capsule-preflight-{}",
+            crate::workloads::TaskIdentity::local("capsule-preflight", None).attempt_id
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir(root.join(".asb")).unwrap();
+        std::fs::write(
+            root.join(".asb/project.toml"),
+            toml::to_string(&crate::project::ProjectConfig::default()).unwrap(),
+        )
+        .unwrap();
+        let config = root.join("benchmark.toml");
+        std::fs::write(
+            &config,
+            "agent='pi'\nworkload='bug-fix'\nprovider='not-a-provider'\nmodel='model'\nconcurrency=2\n",
+        )
+        .unwrap();
+        let capsule = root.join("capsule");
+        let error = run_with_tape(
+            config.to_str().unwrap(),
+            super::RunOptions {
+                mode: Some(crate::tape::Mode::Record),
+                native_capsule_record: Some(capsule.to_str().unwrap()),
+                ..Default::default()
+            },
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("native-capsule-record"));
+        assert!(!capsule.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -522,6 +522,12 @@ impl<'a> ReadyAttempt<'a> {
                 ));
             }
             let workspace = workload_session.invocation().workspace.clone();
+            let capsule = options
+                .native_capsule_record
+                .map(|destination| {
+                    agents::capsule::Capture::start(Path::new(destination), &workspace)
+                })
+                .transpose()?;
             if let Some(arrival) = arrival.as_mut() {
                 let identity = (|| {
                     let task = &workload_session.invocation().identity;
@@ -624,9 +630,10 @@ impl<'a> ReadyAttempt<'a> {
                 },
                 tape_session,
                 launch,
+                capsule,
             ))
         })();
-        let (metadata, tape, launch) = match prepared {
+        let (metadata, tape, launch, capsule) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => return Err(cancel_prepared(error, arrival, workload_session.as_mut())),
         };
@@ -637,6 +644,7 @@ impl<'a> ReadyAttempt<'a> {
                 workload: workload_session,
                 measurements: measurement_session,
                 tape,
+                capsule,
             },
             selected_offer,
             launch,
@@ -905,6 +913,9 @@ impl<'a> CompletedAttempt<'a> {
         let process_success = agent_outcome.failure.is_none();
         let agent_failure = agent_outcome.failure;
         let final_response = agent_outcome.final_response;
+        if let Err(error) = settled.finish_capsule(workspace) {
+            settled.recording_failure(error);
+        }
         // A usable submission can survive a failed client or proxy teardown.
         // Evaluator errors and process failures are recorded independently.
 
