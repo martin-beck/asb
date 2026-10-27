@@ -36,6 +36,10 @@ document.querySelectorAll('.interactive-chart').forEach(chart=>{
       prefix='Nearest displayed observed sample: ';
     }
     observed.classList.add('hovered');
+    if(observed.dataset.status==='unavailable'){
+      tooltip.textContent=observed.dataset.label+': unavailable';
+      tooltip.classList.add('visible');positionTooltip(event);return;
+    }
     if(observed.classList.contains('series-point')){
       for(const line of svg.querySelectorAll('.series'))if(line.dataset.seriesIndex===observed.dataset.seriesIndex)line.classList.add('hovered');
     }

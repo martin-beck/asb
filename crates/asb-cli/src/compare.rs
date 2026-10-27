@@ -65,8 +65,8 @@ struct BenchmarkData {
     artifact_sources: BTreeMap<String, PathBuf>,
 }
 
-fn chart_label(benchmark: &BenchmarkData) -> String {
-    let trial = benchmark
+fn trial_label(benchmark: &BenchmarkData) -> &str {
+    benchmark
         .task
         .as_ref()
         .map(|task| task.task_id.as_str())
@@ -76,8 +76,29 @@ fn chart_label(benchmark: &BenchmarkData) -> String {
                 .as_ref()
                 .map(|selection| selection.task_id.as_str())
         })
-        .unwrap_or("default");
+        .unwrap_or("default")
+}
+
+fn chart_label(benchmark: &BenchmarkData) -> String {
+    let trial = trial_label(benchmark);
     format!("{}:{trial}", benchmark.workload)
+}
+
+fn attempt_label(benchmark: &BenchmarkData) -> String {
+    let mut parts = vec![format!(
+        "run {}",
+        benchmark.id.configuration.saturating_add(1)
+    )];
+    if let Some(batch) = benchmark.id.batch {
+        parts.push(format!("batch {}", batch.saturating_add(1)));
+    }
+    if benchmark.replica_index.is_some() || benchmark.id.replica != 0 {
+        parts.push(format!(
+            "replica {}",
+            benchmark.id.replica.saturating_add(1)
+        ));
+    }
+    parts.join(" · ")
 }
 
 /// Report a benchmark's recorded results or compare the members of a sweep.
@@ -392,7 +413,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         html.push_str("</fieldset>");
     }
     html.push_str("</div><p class=\"filter-count\" id=\"filter-count\"></p></section>");
-    html.push_str("<section><div class=\"section-title\"><h2>Benchmark results</h2><a class=\"text-link\" href=\"comparison.json\">Download comparison.json</a></div><div class=\"table-wrap\"><table><thead><tr><th>Benchmark</th><th>Agent</th><th>Provider</th><th>Model</th><th>Workload</th><th>Runtime</th><th>Success</th><th>Tokens</th><th>Details</th></tr></thead><tbody id=\"results\">");
+    html.push_str("<section><div class=\"section-title\"><h2>Benchmark results</h2><a class=\"text-link\" href=\"comparison.json\">Download comparison.json</a></div><div class=\"table-wrap\"><table><thead><tr><th>Agent</th><th>Provider</th><th>Model</th><th>Workload</th><th>Trial</th><th>Attempt</th><th>Runtime</th><th>Success</th><th>Tokens</th><th>Details</th></tr></thead><tbody id=\"results\">");
     for benchmark in benchmarks {
         let runtime = benchmark
             .metrics
@@ -406,6 +427,8 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             .metrics
             .get("token_usage.total_tokens")
             .map_or_else(|| "—".into(), |value| format!("{value:.0}"));
+        let trial = trial_label(benchmark);
+        let attempt = attempt_label(benchmark);
         let metrics_details = if benchmark.metrics.is_empty() {
             "<p class=\"muted\">No numeric measurements were written.</p>".to_owned()
         } else {
@@ -545,9 +568,9 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                 format!("Dispatch group {}: {} of {} selected replicas admitted; slots {}. {descriptor} Dispatch membership is not proof of simultaneous execution. Resumed measurements may belong to different cohorts.", dispatch_groups[cohort.id.as_str()], cohort.admitted_slots.len(), cohort.selected_replicas, cohort.admitted_slots.iter().map(usize::to_string).collect::<Vec<_>>().join(", "))
             },
         );
-        html.push_str(&format!("<tr data-dimension-benchmark=\"{}\" data-dimension-agent=\"{}\" data-dimension-provider=\"{}\" data-dimension-model=\"{}\" data-dimension-workload=\"{}\"><td><strong>{}</strong></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"details\">{}{}{}{}{}{}</td></tr>",
+        html.push_str(&format!("<tr data-dimension-benchmark=\"{}\" data-dimension-agent=\"{}\" data-dimension-provider=\"{}\" data-dimension-model=\"{}\" data-dimension-workload=\"{}\"><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"details\">{}{}{}{}{}{}</td></tr>",
             escape(&benchmark.label), escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload),
-            escape(&benchmark.label), escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload),
+            escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload), escape(trial), escape(&attempt),
             runtime, success, tokens,
             format_args!("{perfetto_details}{}{}<p>{dispatch_details}</p>", evaluation_details, if benchmark.reconciled { "<p>Reconciled retained local outcome: current artifact consistency checked; no agent rerun or historical attestation.</p>" } else { "" }),
             format_args!("{execution_details}{component_details}"),
@@ -649,16 +672,16 @@ const HTML_SCRIPT: &str = concat!(
 fn write_bar_svg(
     path: &Path,
     title: &str,
-    values: &[(String, f64)],
+    values: &[(String, Option<f64>)],
     labels: &BTreeMap<String, String>,
 ) -> Result<(), Error> {
     let min = values
         .iter()
-        .map(|(_, value)| *value)
+        .filter_map(|(_, value)| *value)
         .fold(0.0_f64, f64::min);
     let max = values
         .iter()
-        .map(|(_, value)| *value)
+        .filter_map(|(_, value)| *value)
         .fold(0.0_f64, f64::max)
         .max(if min < 0.0 { 0.0 } else { 1.0 });
     let width = 900.0;
@@ -684,22 +707,33 @@ fn write_bar_svg(
         svg.push_str(&format!("<g data-benchmark=\"{}\">", escape(label)));
         let display = labels.get(label).unwrap_or(label);
         let x = left + index as f64 * bar_width + 4.0;
-        let endpoint = bottom - domain_fraction(*value, min, max) * (bottom - PLOT_TOP);
+        let width = (bar_width - 8.0).max(2.0);
+        if value.is_none() {
+            let unavailable_height = 24.0;
+            let unavailable_y = baseline - unavailable_height;
+            svg.push_str(&format!(
+                "<rect class=\"bar bar-unavailable\" data-label=\"{}\" data-status=\"unavailable\" x=\"{x:.1}\" y=\"{unavailable_y:.1}\" width=\"{width:.1}\" height=\"{unavailable_height:.1}\" fill=\"#e3e8ed\" stroke=\"#667788\" stroke-dasharray=\"4 3\"><title>{}: unavailable</title></rect><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" class=\"bar-value bar-unavailable-value\" font-size=\"10\" fill=\"#405466\">unavailable</text><text x=\"{:.1}\" y=\"410\" transform=\"rotate(35 {:.1} 410)\" font-size=\"11\">{}</text>",
+                escape(display), escape(display), x + width / 2.0, unavailable_y + 16.0, x, x, escape(display),
+            ));
+            svg.push_str("</g>");
+            continue;
+        }
+        let value = value.expect("unavailable values are handled above");
+        let endpoint = bottom - domain_fraction(value, min, max) * (bottom - PLOT_TOP);
         let bar_height = (endpoint - baseline).abs();
         let y = endpoint.min(baseline);
-        let width = (bar_width - 8.0).max(2.0);
         svg.push_str(&format!(
             "<rect class=\"bar\" data-label=\"{}\" data-value=\"{value}\" x=\"{x:.1}\" y=\"{y:.1}\" width=\"{width:.1}\" height=\"{bar_height:.1}\" fill=\"#4472c4\"><title>{} [{}]: {value}</title></rect>",
             escape(display),
             escape(display),
             escape(label),
         ));
-        let value_label = format_tick(*value);
+        let value_label = format_tick(value);
         let (label_y, placement, color) = if bar_height >= 24.0 {
             // Keep a small top inset while retaining enough contrast against
             // the bar fill for the value to remain readable.
             (
-                if *value < 0.0 {
+                if value < 0.0 {
                     endpoint - 6.0
                 } else {
                     y + 16.0
@@ -707,7 +741,7 @@ fn write_bar_svg(
                 "inside",
                 "#ffffff",
             )
-        } else if *value < 0.0 {
+        } else if value < 0.0 {
             (endpoint + 14.0, "below", "#18212b")
         } else {
             // Short and zero-height bars cannot contain a label. Place the
@@ -732,13 +766,17 @@ fn write_series_svg(
     title: &str,
     values: &[(String, &TimeSeries)],
 ) -> Result<(), Error> {
-    write_series_svg_with_labels(path, title, values, &BTreeMap::new())
+    let values = values
+        .iter()
+        .map(|(label, series)| (label.clone(), Some(*series)))
+        .collect::<Vec<_>>();
+    write_series_svg_with_labels(path, title, &values, &BTreeMap::new())
 }
 
 fn write_series_svg_with_labels(
     path: &Path,
     title: &str,
-    values: &[(String, &TimeSeries)],
+    values: &[(String, Option<&TimeSeries>)],
     labels: &BTreeMap<String, String>,
 ) -> Result<(), Error> {
     const WIDTH: f64 = 1_200.0;
@@ -752,21 +790,29 @@ fn write_series_svg_with_labels(
     const PLOT_HEIGHT: f64 = 320.0;
     let max = values
         .iter()
-        .flat_map(|(_, points)| points.values.iter().flatten().copied())
+        .flat_map(|(_, points)| {
+            points
+                .iter()
+                .flat_map(|points| points.values.iter().flatten().copied())
+        })
         .fold(0.0_f64, f64::max)
         .max(1.0);
     let min = values
         .iter()
-        .flat_map(|(_, points)| points.values.iter().flatten().copied())
+        .flat_map(|(_, points)| {
+            points
+                .iter()
+                .flat_map(|points| points.values.iter().flatten().copied())
+        })
         .fold(0.0_f64, f64::min);
     let index_length = values
         .iter()
-        .map(|(_, points)| points.values.len())
+        .filter_map(|(_, points)| points.map(|points| points.values.len()))
         .max()
         .unwrap_or(0);
     let timestamp_bounds = values
         .iter()
-        .filter_map(|(_, points)| points.timestamps_ms.as_ref())
+        .filter_map(|(_, points)| points.and_then(|points| points.timestamps_ms.as_ref()))
         .flat_map(|timestamps| timestamps.iter().copied())
         .fold(None, |bounds: Option<(f64, f64)>, timestamp| {
             Some(match bounds {
@@ -778,7 +824,20 @@ fn write_series_svg_with_labels(
     let legend_column_width = (RIGHT - LEFT) / legend_columns as f64;
     let legend_lines = values
         .iter()
-        .map(|(label, _)| wrap_label(label, LEGEND_MAX_CHARS))
+        .map(|(label, points)| {
+            let display = labels.get(label).unwrap_or(label);
+            let available = points
+                .and_then(|points| points.render_indices())
+                .is_some_and(|indices| !indices.is_empty());
+            wrap_label(
+                &if available {
+                    display.to_owned()
+                } else {
+                    format!("{display} — unavailable")
+                },
+                LEGEND_MAX_CHARS,
+            )
+        })
         .collect::<Vec<_>>();
     let legend_rows = values.len().div_ceil(legend_columns);
     let legend_height = (0..legend_rows)
@@ -815,14 +874,23 @@ fn write_series_svg_with_labels(
         let display = labels.get(label).unwrap_or(label);
         svg.push_str(&format!("<g data-benchmark=\"{}\">", escape(label)));
         let color = ["#4472c4", "#ed7d31", "#70ad47", "#a5a5a5", "#ffc000"][series_index % 5];
-        let indices = points.render_indices();
+        let indices = points.and_then(|points| points.render_indices());
         if let Some(indices) = indices {
             if indices.is_empty() {
-                svg.push_str(&format!("<text x=\"{LEFT}\" y=\"{}\" class=\"series-unavailable\">{}: no observed samples; null gaps retained in comparison.json</text>",plot_top+18.0,escape(display)));
+                append_unavailable_series(
+                    &mut svg,
+                    series_index,
+                    display,
+                    color,
+                    LEFT,
+                    RIGHT,
+                    plot_top,
+                );
             }
             let mut segment = Vec::new();
             let mut previous = None;
             for index in indices {
+                let points = points.expect("series exists for rendered index");
                 let Some(value) = points.values[index] else {
                     continue;
                 };
@@ -857,7 +925,15 @@ fn write_series_svg_with_labels(
                 append_polyline(&mut svg, &segment, series_index, display, color);
             }
         } else {
-            svg.push_str(&format!("<text x=\"{LEFT}\" y=\"{}\" class=\"series-unavailable\">{}: graph unavailable—too many missing-data segments; full observations retained in comparison.json</text>",plot_top+18.0,escape(display)));
+            append_unavailable_series(
+                &mut svg,
+                series_index,
+                display,
+                color,
+                LEFT,
+                RIGHT,
+                plot_top,
+            );
         }
         let column = series_index % legend_columns;
         let row = series_index / legend_columns;
@@ -898,6 +974,24 @@ fn write_series_svg_with_labels(
     svg.push_str("</svg>\n");
     fs::write(path, svg)
         .map_err(|error| Error::Run(format!("cannot write {}: {error}", path.display())))
+}
+
+fn append_unavailable_series(
+    svg: &mut String,
+    series_index: usize,
+    display: &str,
+    color: &str,
+    left: f64,
+    right: f64,
+    plot_top: f64,
+) {
+    let y = plot_top + 14.0 + (series_index % 8) as f64 * 10.0;
+    svg.push_str(&format!(
+        "<polyline class=\"series series-unavailable\" data-series-index=\"{series_index}\" data-label=\"{}\" data-status=\"unavailable\" points=\"{left:.1},{y:.1} {right:.1},{y:.1}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2\" stroke-dasharray=\"6 5\"/><text x=\"{left:.1}\" y=\"{:.1}\" class=\"series-unavailable\" fill=\"{color}\">{}: unavailable (graph unavailable)</text>",
+        escape(display),
+        y - 4.0,
+        escape(display),
+    ));
 }
 fn append_polyline(
     svg: &mut String,
@@ -1181,11 +1275,13 @@ mod tests {
             ("metric-agent-workers.spawned_worker_count.svg", "count"),
         ] {
             let svg = std::fs::read_to_string(dir.join(file)).unwrap();
-            assert_eq!(svg.matches("class=\"bar\"").count(), 2, "{svg}");
-            assert!(svg.contains("bug-fix:default"));
-            assert!(svg.contains("data-label=\"bug-fix:default\""));
+            assert_eq!(svg.matches("<rect class=\"bar").count(), 3, "{svg}");
+            assert!(svg.contains("codex / bug-fix:default"));
+            assert!(svg.contains("data-label=\"codex / bug-fix:default\""));
+            assert!(svg.contains("data-status=\"unavailable\""));
+            assert!(svg.contains("opencode / bug-fix:default: unavailable"));
             assert!(svg.contains(&format!("unit: {unit}")));
-            assert!(!svg.contains("opencode"));
+            assert!(svg.contains("opencode / bug-fix:default"));
         }
         let html = std::fs::read_to_string(dir.join("report.html")).unwrap();
         assert!(html.contains("<h2>Agent memory</h2>"));
@@ -1193,6 +1289,10 @@ mod tests {
         assert!(html.contains("Sampled peak aggregate RSS"));
         assert!(html.contains("metric-agent-workers.spawned_worker_count.svg"));
         assert!(html.contains("data-value=\"25.5\""));
+        assert!(html.contains("<th>Trial</th><th>Attempt</th>"));
+        assert!(!html.contains("<th>Benchmark</th>"));
+        assert!(!html.contains("<strong>000-one</strong>"));
+        assert!(html.contains("<td>default</td><td>run 1"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1524,7 +1624,7 @@ mod tests {
         super::write_bar_svg(
             &root.join("values.svg"),
             "elapsed_ms",
-            &[("tall".into(), 100.0), ("short".into(), 1.0)],
+            &[("tall".into(), Some(100.0)), ("short".into(), Some(1.0))],
             &Default::default(),
         )
         .unwrap();
@@ -1536,6 +1636,41 @@ mod tests {
         assert!(!svg.contains("zero-baseline"));
         assert!(svg.contains("y=\"70.0\" width=\"397.0\" height=\"320.0\""));
         assert!(svg.contains("y=\"386.8\" width=\"397.0\" height=\"3.2\""));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unavailable_series_remain_visible_and_named() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-compare-unavailable-series-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let observed = super::TimeSeries {
+            values: vec![Some(1.0), Some(2.0)],
+            timestamps_ms: None,
+        };
+        super::write_series_svg_with_labels(
+            &root.join("values.svg"),
+            "cpu.user_pct",
+            &[
+                ("observed".into(), Some(&observed)),
+                ("missing".into(), None),
+            ],
+            &BTreeMap::from([
+                ("observed".into(), "bug-fix:case-a".into()),
+                ("missing".into(), "bug-fix:case-b".into()),
+            ]),
+        )
+        .unwrap();
+        let svg = std::fs::read_to_string(root.join("values.svg")).unwrap();
+        assert!(svg.contains("class=\"series series-unavailable\""));
+        assert!(svg.contains("data-status=\"unavailable\""));
+        assert!(svg.contains("bug-fix:case-b: unavailable"));
+        assert!(svg.contains("bug-fix:case-b — unavailable"));
         let _ = std::fs::remove_dir_all(root);
     }
 
