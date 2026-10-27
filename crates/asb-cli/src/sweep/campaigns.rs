@@ -250,6 +250,7 @@ pub(super) fn prepare(
                 mode: options.mode,
                 tool_mode: options.tool_mode,
                 tool_mode_explicit: options.tool_mode_explicit,
+                mcp_mode: options.mcp_mode,
                 cassette: source.as_deref().and_then(Path::to_str),
                 track: options.track,
                 replay_seed: if *bundle { seed } else { options.seed },

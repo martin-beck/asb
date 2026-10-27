@@ -230,6 +230,7 @@ mod tests {
             runtime_dir: &root,
             run_dir: &run,
             mcp_servers: &[],
+            mcp_tape: None,
             tape: None,
         })
         .unwrap();
@@ -288,6 +289,8 @@ mod tests {
             run_dir: &root,
             interface: Some(crate::endpoint::Interface::OpenAiResponses),
             anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
         });
         let usage = artifacts.token_usage.unwrap();
         assert_eq!(usage.input_tokens, Some(11));

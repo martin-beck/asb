@@ -257,6 +257,8 @@ fn mini_swe_trajectory_counts_each_response_once() {
                 run_dir: &workspace,
                 interface: None,
                 anthropic_input_includes_cache: false,
+                mcp_servers: &[],
+                mcp_tape: None,
             });
     assert_usage(artifacts.token_usage.unwrap(), 30, 9, Some(12));
     std::fs::remove_file(workspace.join(".asb-mini-swe.traj.json")).unwrap();

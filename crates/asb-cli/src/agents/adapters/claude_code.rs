@@ -236,6 +236,7 @@ mod tests {
                 runtime_dir: &root.join("runtime"),
                 run_dir: &run_dir,
                 mcp_servers: &[],
+                mcp_tape: None,
                 tape: None,
             },
             super::super::TapeContext {
@@ -288,6 +289,7 @@ mod tests {
                 runtime_dir: &root,
                 run_dir: &root,
                 mcp_servers: &[],
+                mcp_tape: None,
                 tape: None,
             })
             .unwrap();

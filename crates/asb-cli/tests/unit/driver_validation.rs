@@ -234,6 +234,7 @@ fn selected_adapter_replaces_removed_parent_alias_with_its_fresh_configuration()
             runtime_dir: &request.runtime_dir,
             run_dir: &request.run_dir,
             mcp_servers: &[],
+            mcp_tape: None,
             tape: None,
         })
         .unwrap();

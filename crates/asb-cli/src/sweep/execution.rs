@@ -189,6 +189,7 @@ impl Execution<'_> {
                 mode: self.options.mode,
                 tool_mode: self.options.tool_mode,
                 tool_mode_explicit: self.options.tool_mode_explicit,
+                mcp_mode: self.options.mcp_mode,
                 cassette: cassette.as_deref().and_then(Path::to_str),
                 respect_record_timings: self.options.respect_record_timings,
                 on_completion: observer

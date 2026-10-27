@@ -13,6 +13,7 @@ struct Context<'a> {
     measurement_path: Option<PathBuf>,
     tape_cassette: Option<(tape::Mode, PathBuf)>,
     tool_tape_cassette: Option<(tape::Mode, PathBuf)>,
+    mcp_tape_mode: Option<tape::Mode>,
     network: Option<project::NetworkProjectGuard>,
 }
 
@@ -76,6 +77,7 @@ impl<'a> ConfiguredAttempt<'a> {
                     .unwrap_or_else(|| default_cassette(config_path, &config)),
             )
         });
+        let mcp_tape_mode = options.mcp_mode;
         let network = project::network_project(&project_root);
         let context = Context {
             config_path: config_path.into(),
@@ -88,6 +90,7 @@ impl<'a> ConfiguredAttempt<'a> {
             measurement_path,
             tape_cassette,
             tool_tape_cassette,
+            mcp_tape_mode,
             network: Some(network),
         };
         let config = &context.config;
@@ -97,6 +100,7 @@ impl<'a> ConfiguredAttempt<'a> {
         let policy = &context.policy;
         let tape_cassette = &context.tape_cassette;
         let tool_tape_cassette = &context.tool_tape_cassette;
+        let mcp_tape_mode = context.mcp_tape_mode;
         let json = options.json;
         let _initial_policy = crate::planning::persist(project_root, policy, None, None)?;
         let measurement_path = &context.measurement_path;
@@ -170,6 +174,7 @@ impl<'a> ConfiguredAttempt<'a> {
             )));
         }
         validate_mcp_server_capability(config)?;
+        validate_mcp_relay_capability(config, mcp_tape_mode)?;
         let mut discovered_tool_support = None;
         let selected_offer = instrument_phase(
             measurement_session.as_mut(),
@@ -227,6 +232,29 @@ fn validate_mcp_server_capability(config: &BenchmarkConfig) -> Result<(), Error>
     {
         return Err(Error::Input(format!(
             "agent `{}` does not support declared MCP servers yet; choose an adapter with ordinary MCP configuration support",
+            config.agent
+        )));
+    }
+    Ok(())
+}
+
+fn validate_mcp_relay_capability(
+    config: &BenchmarkConfig,
+    mcp_tape_mode: Option<tape::Mode>,
+) -> Result<(), Error> {
+    if mcp_tape_mode.is_none() {
+        return Ok(());
+    }
+    if config.mcp_servers.is_empty() {
+        return Err(Error::Input(
+            "--mcp-record requires at least one [[mcp_servers]] declaration".into(),
+        ));
+    }
+    let adapter = agents::find(&config.agent)
+        .ok_or_else(|| Error::Input(format!("unknown agent `{}`", config.agent)))?;
+    if !adapter.supports_mcp_relay() {
+        return Err(Error::Input(format!(
+            "agent `{}` does not yet provide a transparent MCP relay route; choose an adapter with tested MCP recording support",
             config.agent
         )));
     }
@@ -696,6 +724,7 @@ impl<'a> ReadyAttempt<'a> {
         let project_config = &context.project_config;
         let tape_cassette = &context.tape_cassette;
         let tool_tape_cassette = &context.tool_tape_cassette;
+        let mcp_tape_mode = context.mcp_tape_mode;
         let tape_mode = options.mode;
         let show_output = options.show_output;
         let launch = launch
@@ -802,6 +831,7 @@ impl<'a> ReadyAttempt<'a> {
                         tool_tape_cassette: tool_tape_cassette
                             .as_ref()
                             .map(|(_, cassette)| cassette.as_path()),
+                        mcp_tape_mode,
                     },
                 }
                 .prepare(prepared.measurements.as_mut())?;
@@ -933,12 +963,19 @@ impl<'a> CompletedAttempt<'a> {
                         interface,
                         anthropic_input_includes_cache:
                             crate::providers::anthropic_input_includes_cache(&config.provider),
+                        mcp_servers: &config.mcp_servers,
+                        mcp_tape: context
+                            .mcp_tape_mode
+                            .map(|mode| agents::McpTapeContext { mode }),
                     })
                 })
                 .unwrap_or_default()
         } else {
             Default::default()
         };
+        for error in &adapter_artifacts.errors {
+            settled.issues.run_error(error.clone());
+        }
         let agent_outcome = settled.evidence.agent_outcome(
             &config.agent,
             workspace,
@@ -1487,7 +1524,7 @@ impl Publication<'_, '_> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_mcp_server_capability;
+    use super::{validate_mcp_relay_capability, validate_mcp_server_capability};
     use crate::benchmark::{BenchmarkConfig, McpServerConfig};
 
     fn config(agent: &str) -> BenchmarkConfig {
@@ -1526,5 +1563,22 @@ mod tests {
     fn declared_mcp_servers_are_admitted_for_codex() {
         validate_mcp_server_capability(&config("codex"))
             .expect("Codex owns ordinary MCP declaration materialization");
+    }
+
+    #[test]
+    fn mcp_recording_requires_a_relay_capable_adapter() {
+        validate_mcp_relay_capability(&config("codex"), Some(crate::tape::Mode::Record))
+            .expect("Codex has the transparent relay route");
+        let error = validate_mcp_relay_capability(&config("pi"), Some(crate::tape::Mode::Record))
+            .expect_err("Pi must not launch an unrecorded MCP server");
+        assert!(error.to_string().contains("transparent MCP relay route"));
+        let mut no_servers = config("codex");
+        no_servers.mcp_servers.clear();
+        assert!(
+            validate_mcp_relay_capability(&no_servers, Some(crate::tape::Mode::Record))
+                .unwrap_err()
+                .to_string()
+                .contains("requires at least one")
+        );
     }
 }

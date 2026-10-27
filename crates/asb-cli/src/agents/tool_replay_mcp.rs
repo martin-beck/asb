@@ -113,7 +113,7 @@ pub(crate) fn launch(
 /// loader under `/opt/asb-runtime`. Child tool servers must use that launcher
 /// rather than the raw executable path: the latter can lack its staged loader
 /// and never answer the client's stdio request.
-fn runtime_program(staged: Option<std::ffi::OsString>) -> Result<PathBuf, Error> {
+pub(crate) fn runtime_program(staged: Option<std::ffi::OsString>) -> Result<PathBuf, Error> {
     if staged.as_deref() == Some(std::ffi::OsStr::new(STAGED_RUNTIME_EXECUTABLE)) {
         return Ok(PathBuf::from(STAGED_RUNTIME_EXECUTABLE));
     }
@@ -713,6 +713,7 @@ mod tests {
                 runtime_dir: &root,
                 run_dir: &root,
                 mcp_servers: &[],
+                mcp_tape: None,
                 tape: None,
             },
             TapeContext {
@@ -784,6 +785,7 @@ mod tests {
                 runtime_dir: &root,
                 run_dir: &root,
                 mcp_servers: &[],
+                mcp_tape: None,
                 tape: None,
             },
             TapeContext {

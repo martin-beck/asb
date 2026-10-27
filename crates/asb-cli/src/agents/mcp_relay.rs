@@ -53,6 +53,41 @@ struct Bundle {
     payloads: BTreeMap<String, Vec<u8>>,
 }
 
+/// Adapter-facing command which substitutes one ordinary MCP server during a
+/// recording. The target directory remains absent until the relay owns the
+/// upstream process, so an interrupted launch cannot be mistaken for a
+/// completed empty recording.
+pub(crate) fn record_launch(
+    run_dir: &Path,
+    declaration: &crate::benchmark::McpServerConfig,
+) -> Result<super::tool_replay_mcp::Launch, Error> {
+    let recording = run_dir.join("mcp-relay").join(&declaration.id);
+    let parent = recording
+        .parent()
+        .expect("MCP relay recording has a parent");
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::Run(format!(
+            "cannot create MCP relay recording directory: {error}"
+        ))
+    })?;
+    if recording.exists() {
+        return Err(Error::Run(
+            "MCP relay recording destination already exists".into(),
+        ));
+    }
+    let program =
+        super::tool_replay_mcp::runtime_program(std::env::var_os("ASB_RUNTIME_EXECUTABLE"))?;
+    let mut args = vec![
+        "__asb-mcp-relay".into(),
+        "--record-dir".into(),
+        recording.into_os_string(),
+        "--".into(),
+        declaration.program.clone().into(),
+    ];
+    args.extend(declaration.args.iter().cloned().map(Into::into));
+    Ok(super::tool_replay_mcp::Launch { program, args })
+}
+
 pub(crate) fn entry(args: &[OsString]) -> std::process::ExitCode {
     match run(args) {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -312,6 +347,13 @@ pub(crate) fn bundle_recording(root: &Path) -> Result<Vec<u8>, Error> {
             .or_insert(replay.payload(&event.message)?);
     }
     encode_bundle(&replay.transcript, &payloads)
+}
+
+/// Canonical evidence for a declared server which an agent never launched.
+/// Replaying this bundle rejects the first client request rather than allowing
+/// an unrecorded host server to start.
+pub(crate) fn empty_bundle() -> Result<Vec<u8>, Error> {
+    encode_bundle(&mcp_transcript::Transcript::default(), &BTreeMap::new())
 }
 
 /// Validate a bundled relay artifact and reconstruct its private directory.

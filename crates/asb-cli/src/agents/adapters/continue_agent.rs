@@ -206,6 +206,8 @@ mod tests {
             run_dir: &root,
             interface: None,
             anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
         };
         assert_eq!(
             collect(&context).token_usage.unwrap().total_tokens,

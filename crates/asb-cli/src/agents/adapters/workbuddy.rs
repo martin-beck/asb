@@ -247,6 +247,7 @@ mod tests {
                 runtime_dir: &root,
                 run_dir: &root,
                 mcp_servers: &[],
+                mcp_tape: None,
                 tape: Some(crate::agents::TapeContext {
                     mode: crate::tape::Mode::Replay,
                     cassette: &replay,

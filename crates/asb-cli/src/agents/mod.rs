@@ -95,6 +95,12 @@ pub(crate) trait AgentAdapter: Sync {
     fn supports_mcp_servers(&self) -> bool {
         false
     }
+    /// Whether declared MCP servers can be substituted by ASB's transparent
+    /// relay. This is deliberately narrower than ordinary MCP configuration:
+    /// a requested recording must never silently start an unrecorded server.
+    fn supports_mcp_relay(&self) -> bool {
+        false
+    }
     /// Mutable client-state overrides, distinct from provider credentials.
     fn state_environment_vars(&self) -> &'static [&'static str] {
         &[]
@@ -155,6 +161,9 @@ pub(crate) struct PreparationContext<'a> {
     /// configuration receive these typed declarations directly; the generic
     /// runner never interprets tool names or command arguments.
     pub mcp_servers: &'a [crate::benchmark::McpServerConfig],
+    /// Explicit transparent MCP recording/replay intent.  This remains
+    /// separate from adapter-local semantic tool replay.
+    pub mcp_tape: Option<McpTapeContext>,
     /// Provider-tape identity for an execution whose agent-local tools must
     /// share the same record/replay boundary.  This is explicit rather than
     /// inferred from the provider URL: record and replay both use loopback
@@ -172,6 +181,13 @@ pub(crate) struct PreparationContext<'a> {
 pub(crate) struct TapeContext<'a> {
     pub mode: crate::tape::Mode,
     pub cassette: &'a Path,
+}
+
+/// Mode for the protocol-level MCP relay.  The relay has no tool semantics;
+/// adapter configuration supplies it in place of an ordinary stdio server.
+#[derive(Clone, Copy)]
+pub(crate) struct McpTapeContext {
+    pub mode: crate::tape::Mode,
 }
 
 impl PreparationContext<'_> {
@@ -236,6 +252,9 @@ pub(crate) struct AgentArtifacts {
     /// Adapter-owned, bounded private sidecars retained only in the selected
     /// cassette track.  They are never rendered in run output or reports.
     pub sealed_artifacts: Vec<SealedArtifact>,
+    /// Fail-closed adapter collection errors. They are retained only as the
+    /// run diagnostic; an incomplete relay recording is never publishable.
+    pub errors: Vec<String>,
 }
 
 /// A named private sidecar supplied by an adapter after an execution settles.
@@ -254,6 +273,8 @@ pub(crate) struct CollectionContext<'a> {
     pub run_dir: &'a Path,
     pub interface: Option<Interface>,
     pub anthropic_input_includes_cache: bool,
+    pub mcp_servers: &'a [crate::benchmark::McpServerConfig],
+    pub mcp_tape: Option<McpTapeContext>,
 }
 
 /// Read exactly one bounded agent-owned JSON artifact; ambiguous or malformed
@@ -349,6 +370,7 @@ pub(super) struct StaticAdapter {
     tool_replay: Option<ToolReplayHook>,
     complete_tool_replay: bool,
     mcp_servers: bool,
+    mcp_relay: bool,
     collect: Option<CollectionHook>,
     artifact_specs: &'static [ArtifactSpec],
     deterministic_extension: bool,
@@ -383,6 +405,7 @@ impl StaticAdapter {
             tool_replay: None,
             complete_tool_replay: false,
             mcp_servers: false,
+            mcp_relay: false,
             collect: None,
             artifact_specs: &[],
             deterministic_extension: false,
@@ -427,6 +450,13 @@ impl StaticAdapter {
     /// This is intentionally distinct from complete ASB local-tool replay.
     pub(super) const fn with_mcp_servers(mut self) -> Self {
         self.mcp_servers = true;
+        self
+    }
+
+    /// Declares a tested adapter route for substituting each ordinary MCP
+    /// server with ASB's transport-only relay.
+    pub(super) const fn with_mcp_relay(mut self) -> Self {
+        self.mcp_relay = true;
         self
     }
 
@@ -569,6 +599,9 @@ impl AgentAdapter for StaticAdapter {
     }
     fn supports_mcp_servers(&self) -> bool {
         self.mcp_servers
+    }
+    fn supports_mcp_relay(&self) -> bool {
+        self.mcp_relay
     }
     fn forwarded_invocation_environment_vars(&self) -> &'static [&'static str] {
         self.forwarded_invocation_environment_vars
@@ -896,6 +929,7 @@ mod tests {
                     runtime_dir: &runtime,
                     run_dir: &runtime,
                     mcp_servers: &[],
+                    mcp_tape: None,
                     tape: None,
                 },
             )
@@ -1050,6 +1084,7 @@ mod tests {
                             runtime_dir: &root,
                             run_dir: &root,
                             mcp_servers: &[],
+                            mcp_tape: None,
                             tape: None,
                         })
                         .expect_err("unadvertised pair must fail without panicking")
@@ -1100,6 +1135,7 @@ mod tests {
                             runtime_dir: &runtime,
                             run_dir: &runtime,
                             mcp_servers: &[],
+                            mcp_tape: None,
                             tape: None,
                         })
                         .unwrap_or_else(|error| panic!("{} {interface:?}: {error}", adapter.id()));

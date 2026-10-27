@@ -173,6 +173,8 @@ mod tests {
                 run_dir: &workspace,
                 interface: None,
                 anthropic_input_includes_cache: false,
+                mcp_servers: &[],
+                mcp_tape: None,
             });
             assert_eq!(artifacts.steps, expected, "{document}");
         }
@@ -196,6 +198,8 @@ mod tests {
             run_dir: &workspace,
             interface: None,
             anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
         });
 
         assert_eq!(
