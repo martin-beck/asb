@@ -13,7 +13,7 @@ struct Context<'a> {
     measurement_path: Option<PathBuf>,
     tape_cassette: Option<(tape::Mode, PathBuf)>,
     tool_tape_cassette: Option<(tape::Mode, PathBuf)>,
-    mcp_tape_mode: Option<tape::Mode>,
+    mcp_tape_cassette: Option<(tape::Mode, PathBuf)>,
     network: Option<project::NetworkProjectGuard>,
 }
 
@@ -77,7 +77,15 @@ impl<'a> ConfiguredAttempt<'a> {
                     .unwrap_or_else(|| default_cassette(config_path, &config)),
             )
         });
-        let mcp_tape_mode = options.mcp_mode;
+        let mcp_tape_cassette = options.mcp_mode.map(|mode| {
+            (
+                mode,
+                options
+                    .cassette
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| default_cassette(config_path, &config)),
+            )
+        });
         let network = project::network_project(&project_root);
         let context = Context {
             config_path: config_path.into(),
@@ -90,7 +98,7 @@ impl<'a> ConfiguredAttempt<'a> {
             measurement_path,
             tape_cassette,
             tool_tape_cassette,
-            mcp_tape_mode,
+            mcp_tape_cassette,
             network: Some(network),
         };
         let config = &context.config;
@@ -100,7 +108,7 @@ impl<'a> ConfiguredAttempt<'a> {
         let policy = &context.policy;
         let tape_cassette = &context.tape_cassette;
         let tool_tape_cassette = &context.tool_tape_cassette;
-        let mcp_tape_mode = context.mcp_tape_mode;
+        let mcp_tape_mode = context.mcp_tape_cassette.as_ref().map(|(mode, _)| *mode);
         let json = options.json;
         let _initial_policy = crate::planning::persist(project_root, policy, None, None)?;
         let measurement_path = &context.measurement_path;
@@ -174,7 +182,7 @@ impl<'a> ConfiguredAttempt<'a> {
             )));
         }
         validate_mcp_server_capability(config)?;
-        validate_mcp_relay_capability(config, mcp_tape_mode)?;
+        validate_mcp_relay_capability(config, mcp_tape_mode, &policy.backend)?;
         let mut discovered_tool_support = None;
         let selected_offer = instrument_phase(
             measurement_session.as_mut(),
@@ -241,13 +249,19 @@ fn validate_mcp_server_capability(config: &BenchmarkConfig) -> Result<(), Error>
 fn validate_mcp_relay_capability(
     config: &BenchmarkConfig,
     mcp_tape_mode: Option<tape::Mode>,
+    backend: &str,
 ) -> Result<(), Error> {
     if mcp_tape_mode.is_none() {
         return Ok(());
     }
     if config.mcp_servers.is_empty() {
         return Err(Error::Input(
-            "--mcp-record requires at least one [[mcp_servers]] declaration".into(),
+            "MCP record/replay requires at least one [[mcp_servers]] declaration".into(),
+        ));
+    }
+    if backend != "native" {
+        return Err(Error::Input(
+            "MCP record/replay currently requires the native backend; guest relay staging is not implemented and cannot fall back to a live MCP server".into(),
         ));
     }
     let adapter = agents::find(&config.agent)
@@ -724,7 +738,7 @@ impl<'a> ReadyAttempt<'a> {
         let project_config = &context.project_config;
         let tape_cassette = &context.tape_cassette;
         let tool_tape_cassette = &context.tool_tape_cassette;
-        let mcp_tape_mode = context.mcp_tape_mode;
+        let mcp_tape_cassette = &context.mcp_tape_cassette;
         let tape_mode = options.mode;
         let show_output = options.show_output;
         let launch = launch
@@ -831,7 +845,10 @@ impl<'a> ReadyAttempt<'a> {
                         tool_tape_cassette: tool_tape_cassette
                             .as_ref()
                             .map(|(_, cassette)| cassette.as_path()),
-                        mcp_tape_mode,
+                        mcp_tape_mode: mcp_tape_cassette.as_ref().map(|(mode, _)| *mode),
+                        mcp_tape_cassette: mcp_tape_cassette
+                            .as_ref()
+                            .map(|(_, cassette)| cassette.as_path()),
                     },
                 }
                 .prepare(prepared.measurements.as_mut())?;
@@ -964,9 +981,12 @@ impl<'a> CompletedAttempt<'a> {
                         anthropic_input_includes_cache:
                             crate::providers::anthropic_input_includes_cache(&config.provider),
                         mcp_servers: &config.mcp_servers,
-                        mcp_tape: context
-                            .mcp_tape_mode
-                            .map(|mode| agents::McpTapeContext { mode }),
+                        mcp_tape: context.mcp_tape_cassette.as_ref().map(|(mode, cassette)| {
+                            agents::McpTapeContext {
+                                mode: *mode,
+                                cassette: Some(cassette),
+                            }
+                        }),
                     })
                 })
                 .unwrap_or_default()
@@ -1567,18 +1587,29 @@ mod tests {
 
     #[test]
     fn mcp_recording_requires_a_relay_capable_adapter() {
-        validate_mcp_relay_capability(&config("codex"), Some(crate::tape::Mode::Record))
+        validate_mcp_relay_capability(&config("codex"), Some(crate::tape::Mode::Record), "native")
             .expect("Codex has the transparent relay route");
-        let error = validate_mcp_relay_capability(&config("pi"), Some(crate::tape::Mode::Record))
-            .expect_err("Pi must not launch an unrecorded MCP server");
+        let error =
+            validate_mcp_relay_capability(&config("pi"), Some(crate::tape::Mode::Record), "native")
+                .expect_err("Pi must not launch an unrecorded MCP server");
         assert!(error.to_string().contains("transparent MCP relay route"));
         let mut no_servers = config("codex");
         no_servers.mcp_servers.clear();
         assert!(
-            validate_mcp_relay_capability(&no_servers, Some(crate::tape::Mode::Record))
+            validate_mcp_relay_capability(&no_servers, Some(crate::tape::Mode::Record), "native")
                 .unwrap_err()
                 .to_string()
                 .contains("requires at least one")
+        );
+        assert!(
+            validate_mcp_relay_capability(
+                &config("codex"),
+                Some(crate::tape::Mode::Replay),
+                "guest",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("cannot fall back to a live MCP server")
         );
     }
 }

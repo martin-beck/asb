@@ -170,7 +170,7 @@ fn configure(
     base_url: &str,
     authenticated: bool,
     mcp_servers: &[crate::benchmark::McpServerConfig],
-    mcp_tape: Option<McpTapeContext>,
+    mcp_tape: Option<McpTapeContext<'_>>,
     run_dir: &std::path::Path,
 ) -> Result<(), Error> {
     std::fs::create_dir_all(directory).map_err(|error| {
@@ -200,7 +200,7 @@ fn configure(
 
 fn declared_mcp_configuration(
     declarations: &[crate::benchmark::McpServerConfig],
-    mcp_tape: Option<McpTapeContext>,
+    mcp_tape: Option<McpTapeContext<'_>>,
     run_dir: &std::path::Path,
 ) -> Result<String, Error> {
     if declarations.is_empty() {
@@ -211,16 +211,25 @@ fn declared_mcp_configuration(
         let launch = match mcp_tape {
             Some(McpTapeContext {
                 mode: crate::tape::Mode::Record,
+                ..
             }) => Some(super::super::mcp_relay::record_launch(
                 run_dir,
                 declaration,
             )?),
             Some(McpTapeContext {
                 mode: crate::tape::Mode::Replay,
+                cassette: Some(cassette),
+            }) => Some(super::super::mcp_relay::replay_launch(
+                run_dir,
+                declaration,
+                cassette,
+            )?),
+            Some(McpTapeContext {
+                mode: crate::tape::Mode::Replay,
+                cassette: None,
             }) => {
                 return Err(Error::Run(
-                    "Codex MCP replay is not available until its sealed relay input is staged"
-                        .into(),
+                    "MCP replay needs its selected sealed relay bundle".into(),
                 ));
             }
             None => None,
@@ -414,6 +423,7 @@ mod tests {
             &declarations,
             Some(McpTapeContext {
                 mode: crate::tape::Mode::Record,
+                cassette: None,
             }),
             &run_dir,
         )
@@ -437,6 +447,7 @@ mod tests {
             mcp_servers: &declarations,
             mcp_tape: Some(McpTapeContext {
                 mode: crate::tape::Mode::Record,
+                cassette: None,
             }),
         });
         assert!(artifacts.errors.is_empty());
@@ -446,6 +457,85 @@ mod tests {
         super::super::mcp_relay::materialize_bundle(&artifacts.sealed_artifacts[0].bytes, &replay)
             .unwrap();
         super::super::mcp_relay::validate_recording(&replay).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_replay_materializes_only_the_sealed_relay_bundle() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-codex-mcp-replay-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let directory = root.join("config");
+        let run_dir = root.join("run");
+        let batch = root.join("batch");
+        std::fs::create_dir_all(&batch).unwrap();
+        let cassette = batch.join("replay.jsonl");
+        std::fs::write(&cassette, "{}\n").unwrap();
+        std::fs::write(
+            batch.join("mcp-relay-filesystem.jsonl"),
+            super::super::mcp_relay::empty_bundle().unwrap(),
+        )
+        .unwrap();
+        let declarations = [crate::benchmark::McpServerConfig {
+            id: "filesystem".into(),
+            program: "must-not-run".into(),
+            args: vec!["--live".into()],
+        }];
+        configure(
+            &directory,
+            "fixture-model",
+            "http://127.0.0.1:1234/v1",
+            false,
+            &declarations,
+            Some(McpTapeContext {
+                mode: crate::tape::Mode::Replay,
+                cassette: Some(&cassette),
+            }),
+            &run_dir,
+        )
+        .unwrap();
+        let config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(directory.join("config.toml")).unwrap())
+                .unwrap();
+        let server = &config["mcp_servers"]["filesystem"];
+        assert_ne!(server["command"].as_str(), Some("must-not-run"));
+        assert_eq!(server["args"][0].as_str(), Some("__asb-mcp-relay"));
+        assert_eq!(server["args"][1].as_str(), Some("--replay-dir"));
+        super::super::mcp_relay::validate_recording(&run_dir.join("mcp-replay/filesystem"))
+            .unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_replay_refuses_a_missing_selected_relay_bundle() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-codex-mcp-replay-missing-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let batch = root.join("batch");
+        std::fs::create_dir_all(&batch).unwrap();
+        let cassette = batch.join("replay.jsonl");
+        std::fs::write(&cassette, "{}\n").unwrap();
+        let declarations = [crate::benchmark::McpServerConfig {
+            id: "filesystem".into(),
+            program: "must-not-run".into(),
+            args: vec!["--live".into()],
+        }];
+        let error = declared_mcp_configuration(
+            &declarations,
+            Some(McpTapeContext {
+                mode: crate::tape::Mode::Replay,
+                cassette: Some(&cassette),
+            }),
+            &root.join("run"),
+        )
+        .expect_err("missing selected relay bundle must not launch the declared server");
+        assert!(
+            error
+                .to_string()
+                .contains("MCP relay bundle is unavailable")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

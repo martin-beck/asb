@@ -126,6 +126,7 @@ impl Inspection {
                 local_tools: None,
                 deterministic_manifest: None,
                 native_trace: None,
+                mcp_relays: Vec::new(),
                 bytes,
                 sha256,
             });
