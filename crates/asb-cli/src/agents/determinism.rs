@@ -7,6 +7,7 @@
 use super::PreparationContext;
 use crate::Error;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 #[derive(Serialize)]
 struct Manifest<'a> {
@@ -52,7 +53,7 @@ pub(crate) fn prepare(adapter: &str, context: &mut PreparationContext<'_>) -> Re
     };
     let bytes = serde_json::to_vec_pretty(&manifest)
         .map_err(|_| Error::Run("cannot encode deterministic execution manifest".into()))?;
-    std::fs::write(directory.join("manifest.json"), bytes).map_err(|error| {
+    std::fs::write(directory.join("manifest.json"), &bytes).map_err(|error| {
         Error::Run(format!(
             "cannot write deterministic execution manifest: {error}"
         ))
@@ -68,6 +69,18 @@ pub(crate) fn prepare(adapter: &str, context: &mut PreparationContext<'_>) -> Re
         artifact_directory.join("manifest.json"),
     )
     .map_err(|error| Error::Run(format!("cannot publish deterministic manifest: {error}")))?;
+    let native_trace_directory = context.run_dir.join("native-trace");
+    std::fs::create_dir_all(&native_trace_directory).map_err(|error| {
+        Error::Run(format!(
+            "cannot create deterministic native trace state: {error}"
+        ))
+    })?;
+    let trace = native_trace_manifest(&bytes)?;
+    std::fs::write(native_trace_directory.join("native-trace.jsonl"), trace).map_err(|error| {
+        Error::Run(format!(
+            "cannot publish deterministic native trace: {error}"
+        ))
+    })?;
     if let Some(tape) = context
         .tape
         .filter(|tape| tape.mode == crate::tape::Mode::Replay)
@@ -84,6 +97,26 @@ pub(crate) fn prepare(adapter: &str, context: &mut PreparationContext<'_>) -> Re
         .env("ASB_DETERMINISM_SEED", "asb-determinism-v1")
         .env("ASB_DETERMINISM_MANIFEST", directory.join("manifest.json"));
     Ok(())
+}
+
+/// The portable extension is itself a host observation.  Record its manifest
+/// as the first native-trace event so later Linux capture backends can append
+/// process/filesystem/network events without changing cassette shape.
+fn native_trace_manifest(manifest: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut transcript = super::native_trace::Transcript::default();
+    transcript.record(super::native_trace::Event {
+        schema_version: super::native_trace::SCHEMA_VERSION,
+        sequence: 1,
+        process: 1,
+        operation: super::native_trace::Operation::Host,
+        request: None,
+        response: Some(super::native_trace::Blob {
+            sha256: format!("{:x}", Sha256::digest(manifest)),
+            bytes: manifest.len() as u64,
+        }),
+        effects: Vec::new(),
+    })?;
+    transcript.encode()
 }
 
 /// Confirm that replay starts with the immutable controls originally sealed
@@ -179,6 +212,17 @@ mod tests {
         assert_eq!(
             std::fs::read(root.join("run/determinism/manifest.json")).unwrap(),
             std::fs::read(root.join("runtime/determinism/manifest.json")).unwrap()
+        );
+        let trace = super::super::native_trace::Transcript::decode(
+            &std::fs::read(root.join("run/native-trace/native-trace.jsonl")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            trace.encode().unwrap(),
+            native_trace_manifest(
+                &std::fs::read(root.join("run/determinism/manifest.json")).unwrap()
+            )
+            .unwrap()
         );
         std::fs::remove_dir_all(root).unwrap();
     }
