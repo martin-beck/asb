@@ -106,6 +106,10 @@ fn deterministic_manifest_sidecar(path: &Path) -> Result<PathBuf, String> {
     replay_sidecar(path, "determinism-manifest", "json")
 }
 
+fn native_trace_sidecar(path: &Path) -> Result<PathBuf, String> {
+    replay_sidecar(path, "native-trace", "jsonl")
+}
+
 fn replay_sidecar(path: &Path, stem: &str, extension: &str) -> Result<PathBuf, String> {
     let name = path
         .file_name()
@@ -130,11 +134,12 @@ fn replay_private_inputs(path: Option<&Path>, replay: bool) -> Result<Vec<Privat
     };
     let local_tools = local_tool_sidecar(path)?;
     let manifest = deterministic_manifest_sidecar(path)?;
+    let native_trace = native_trace_sidecar(path)?;
     let mut inputs = Vec::new();
-    // Both replay extensions are adapter-owned.  A sealed record only stages
-    // the sidecars it actually published, so a provider-tape-only adapter
-    // remains replayable without pretending it supports local-tool or
-    // deterministic execution replay.
+    // Replay extensions are adapter-owned. A sealed record only stages the
+    // sidecars it actually published, so a provider-tape-only adapter remains
+    // replayable without pretending it supports local-tool, deterministic, or
+    // native execution replay.
     let mut stage = |source: PathBuf, description: &str| -> Result<(), String> {
         let metadata = std::fs::symlink_metadata(&source)
             .map_err(|_| format!("{description} is unavailable"))?;
@@ -167,6 +172,17 @@ fn replay_private_inputs(path: Option<&Path>, replay: bool) -> Result<Vec<Privat
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(format!("{description} is unavailable")),
         }
+    }
+    match std::fs::symlink_metadata(&native_trace) {
+        Ok(_) => {
+            let bytes = std::fs::read(&native_trace)
+                .map_err(|_| "sealed native replay trace is unavailable".to_owned())?;
+            crate::agents::native_trace::canonicalize(&bytes)
+                .map_err(|_| "sealed native replay trace is malformed".to_owned())?;
+            stage(native_trace, "sealed native replay trace")?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("sealed native replay trace is unavailable".into()),
     }
     Ok(inputs)
 }
@@ -1339,12 +1355,15 @@ mod tests {
         std::fs::write(batch.join("replay-2.jsonl"), b"provider tape\n").unwrap();
         std::fs::write(batch.join("local-tools-2.jsonl"), b"{}\n").unwrap();
         std::fs::write(batch.join("determinism-manifest-2.json"), b"{}\n").unwrap();
+        std::fs::write(batch.join("native-trace-2.jsonl"), b"").unwrap();
         let inputs = replay_private_inputs(Some(&batch.join("replay-2.jsonl")), true).unwrap();
-        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs.len(), 3);
         assert_eq!(inputs[0].target, "local-tools-2.jsonl");
         assert_eq!(inputs[0].bytes, 3);
         assert_eq!(inputs[0].sha256, crate::cassette::digest(b"{}\n"));
         assert_eq!(inputs[1].target, "determinism-manifest-2.json");
+        assert_eq!(inputs[2].target, "native-trace-2.jsonl");
+        assert_eq!(inputs[2].bytes, 0);
         assert!(
             replay_private_inputs(Some(&batch.join("replay-2.jsonl")), false)
                 .unwrap()
@@ -1390,6 +1409,25 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_private_input_rejects_malformed_native_trace() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-replay-private-input-malformed-native-trace-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let batch = root.join("batch-1");
+        std::fs::create_dir_all(&batch).unwrap();
+        std::fs::write(batch.join("replay.jsonl"), b"provider tape\n").unwrap();
+        std::fs::write(batch.join("native-trace.jsonl"), b"{}\n").unwrap();
+
+        let error = match replay_private_inputs(Some(&batch.join("replay.jsonl")), true) {
+            Ok(_) => panic!("malformed native trace must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error, "sealed native replay trace is malformed");
         std::fs::remove_dir_all(root).unwrap();
     }
 
