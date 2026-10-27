@@ -19,12 +19,16 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::Instant;
 
 const SERVICE: &str = "MCP relay";
-const MAX_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
+/// One relay records only enough opaque MCP traffic for a bounded benchmark
+/// tool interaction.  Larger captures amplify disk and kernel write pressure
+/// without making replay more representative.
+const MAX_PAYLOAD_BYTES: u64 = 4 * 1024 * 1024;
 const CHANNEL_CAPACITY: usize = 4;
 const BUNDLE_SCHEMA_VERSION: u32 = 1;
-// JSON string escaping can expand a valid 64 MiB JSON payload. Keep the
-// durable representation within the cassette's existing per-artifact cap.
-const MAX_BUNDLE_BYTES: usize = 256 * 1024 * 1024;
+// JSON string escaping can expand an otherwise valid MCP payload.  Keep the
+// durable representation small enough for the existing auxiliary-artifact
+// path rather than allowing a single server to dominate a run's disk budget.
+const MAX_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -1021,6 +1025,43 @@ mod tests {
         assert!(relay.join().unwrap().is_err());
         server_task.join().unwrap();
         assert!(!record.exists());
+        let _ = fs::remove_dir_all(record.parent().unwrap());
+    }
+
+    #[test]
+    fn aggregate_payload_budget_removes_partial_recording() {
+        let record = record_dir("payload-budget");
+        let mut recorder = Recorder::new(&record).unwrap();
+        for index in 0..4 {
+            let payload = format!(
+                "{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{{\"index\":{index},\"detail\":\"{}\"}}}}",
+                "x".repeat(1024 * 1024 - 128)
+            );
+            recorder
+                .record(
+                    mcp_transcript::Direction::ClientToServer,
+                    mcp_framing::Framing::JsonLines,
+                    index,
+                    payload.as_bytes(),
+                )
+                .expect("payload below the aggregate budget is retained");
+        }
+        let payload = format!(
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{{\"detail\":\"{}\"}}}}",
+            "x".repeat(1024 * 1024 - 128)
+        );
+        let error = recorder
+            .record(
+                mcp_transcript::Direction::ClientToServer,
+                mcp_framing::Framing::JsonLines,
+                4,
+                payload.as_bytes(),
+            )
+            .expect_err("payload over the aggregate budget is rejected");
+        assert!(error.to_string().contains("aggregate bound"));
+        drop(recorder);
+        assert!(!record.exists());
+        assert_eq!(fs::read_dir(record.parent().unwrap()).unwrap().count(), 0);
         let _ = fs::remove_dir_all(record.parent().unwrap());
     }
 

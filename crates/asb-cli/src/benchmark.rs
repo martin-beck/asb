@@ -106,7 +106,11 @@ where
     Ok(value)
 }
 
-const MAX_MCP_SERVERS: usize = 16;
+/// Bound aggregate relay storage and process overhead per benchmark.  Four
+/// independent stdio services cover the ordinary filesystem, repository,
+/// issue-tracker and domain-tool split without turning a measurement run into
+/// an MCP service farm.
+const MAX_MCP_SERVERS: usize = 4;
 const MAX_MCP_ARGUMENTS: usize = 64;
 const MAX_MCP_IDENTIFIER_BYTES: usize = 64;
 
