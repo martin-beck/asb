@@ -65,6 +65,21 @@ struct BenchmarkData {
     artifact_sources: BTreeMap<String, PathBuf>,
 }
 
+fn chart_label(benchmark: &BenchmarkData) -> String {
+    let trial = benchmark
+        .task
+        .as_ref()
+        .map(|task| task.task_id.as_str())
+        .or_else(|| {
+            benchmark
+                .selection
+                .as_ref()
+                .map(|selection| selection.task_id.as_str())
+        })
+        .unwrap_or("default");
+    format!("{}:{trial}", benchmark.workload)
+}
+
 /// Report a benchmark's recorded results or compare the members of a sweep.
 pub fn run(path: &str, output: &mut dyn Write) -> Result<(), Error> {
     generate(path, output).map(|_| ())
@@ -675,7 +690,7 @@ fn write_bar_svg(
         let width = (bar_width - 8.0).max(2.0);
         svg.push_str(&format!(
             "<rect class=\"bar\" data-label=\"{}\" data-value=\"{value}\" x=\"{x:.1}\" y=\"{y:.1}\" width=\"{width:.1}\" height=\"{bar_height:.1}\" fill=\"#4472c4\"><title>{} [{}]: {value}</title></rect>",
-            escape(label),
+            escape(display),
             escape(display),
             escape(label),
         ));
@@ -711,10 +726,20 @@ fn write_bar_svg(
         .map_err(|error| Error::Run(format!("cannot write {}: {error}", path.display())))
 }
 
+#[cfg(test)]
 fn write_series_svg(
     path: &Path,
     title: &str,
     values: &[(String, &TimeSeries)],
+) -> Result<(), Error> {
+    write_series_svg_with_labels(path, title, values, &BTreeMap::new())
+}
+
+fn write_series_svg_with_labels(
+    path: &Path,
+    title: &str,
+    values: &[(String, &TimeSeries)],
+    labels: &BTreeMap<String, String>,
 ) -> Result<(), Error> {
     const WIDTH: f64 = 1_200.0;
     const LEFT: f64 = 100.0;
@@ -787,12 +812,13 @@ fn write_series_svg(
         RIGHT,
     );
     for (series_index, (label, points)) in values.iter().enumerate() {
+        let display = labels.get(label).unwrap_or(label);
         svg.push_str(&format!("<g data-benchmark=\"{}\">", escape(label)));
         let color = ["#4472c4", "#ed7d31", "#70ad47", "#a5a5a5", "#ffc000"][series_index % 5];
         let indices = points.render_indices();
         if let Some(indices) = indices {
             if indices.is_empty() {
-                svg.push_str(&format!("<text x=\"{LEFT}\" y=\"{}\" class=\"series-unavailable\">{}: no observed samples; null gaps retained in comparison.json</text>",plot_top+18.0,escape(label)));
+                svg.push_str(&format!("<text x=\"{LEFT}\" y=\"{}\" class=\"series-unavailable\">{}: no observed samples; null gaps retained in comparison.json</text>",plot_top+18.0,escape(display)));
             }
             let mut segment = Vec::new();
             let mut previous = None;
@@ -804,7 +830,7 @@ fn write_series_svg(
                     .is_some_and(|old| points.values[old + 1..index].iter().any(Option::is_none))
                     && !segment.is_empty()
                 {
-                    append_polyline(&mut svg, &segment, series_index, label, color);
+                    append_polyline(&mut svg, &segment, series_index, display, color);
                     segment.clear();
                 }
                 let x = line_x(
@@ -824,14 +850,14 @@ fn write_series_svg(
                     .map_or_else(String::new, |times| {
                         format!(" data-timestamp=\"{}\"", times[index])
                     });
-                svg.push_str(&format!("<circle class=\"series-point\" data-series-index=\"{series_index}\" data-label=\"{}\" data-value=\"{value}\" data-sample-index=\"{index}\"{timestamp} cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"6\" fill=\"transparent\" stroke=\"none\"/>",escape(label)));
+                svg.push_str(&format!("<circle class=\"series-point\" data-series-index=\"{series_index}\" data-label=\"{}\" data-value=\"{value}\" data-sample-index=\"{index}\"{timestamp} cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"6\" fill=\"transparent\" stroke=\"none\"/>",escape(display)));
                 previous = Some(index);
             }
             if !segment.is_empty() {
-                append_polyline(&mut svg, &segment, series_index, label, color);
+                append_polyline(&mut svg, &segment, series_index, display, color);
             }
         } else {
-            svg.push_str(&format!("<text x=\"{LEFT}\" y=\"{}\" class=\"series-unavailable\">{}: graph unavailable—too many missing-data segments; full observations retained in comparison.json</text>",plot_top+18.0,escape(label)));
+            svg.push_str(&format!("<text x=\"{LEFT}\" y=\"{}\" class=\"series-unavailable\">{}: graph unavailable—too many missing-data segments; full observations retained in comparison.json</text>",plot_top+18.0,escape(display)));
         }
         let column = series_index % legend_columns;
         let row = series_index / legend_columns;
@@ -857,7 +883,7 @@ fn write_series_svg(
             legend_y - 10.0,
             legend_x + 16.0,
             legend_y,
-            escape(label)
+            escape(display)
         ));
         for (line_index, line) in lines.iter().enumerate() {
             svg.push_str(&format!(
@@ -877,10 +903,10 @@ fn append_polyline(
     svg: &mut String,
     coordinates: &[String],
     series_index: usize,
-    label: &str,
+    display: &str,
     color: &str,
 ) {
-    svg.push_str(&format!("<polyline class=\"series\" data-series-index=\"{series_index}\" data-label=\"{}\" points=\"{}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2\"/>",escape(label),coordinates.join(" ")));
+    svg.push_str(&format!("<polyline class=\"series\" data-series-index=\"{series_index}\" data-label=\"{}\" points=\"{}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2\"/>",escape(display),coordinates.join(" ")));
 }
 #[cfg(test)]
 fn write_line_svg(path: &Path, title: &str, values: &[(String, TimeSeries)]) -> Result<(), Error> {
@@ -1156,10 +1182,8 @@ mod tests {
         ] {
             let svg = std::fs::read_to_string(dir.join(file)).unwrap();
             assert_eq!(svg.matches("class=\"bar\"").count(), 2, "{svg}");
-            assert!(svg.contains("codex [000-one]"));
-            assert!(svg.contains("pi [001-two]"));
-            assert!(svg.contains(">codex</text>"));
-            assert!(svg.contains("data-label=\"000-one\""));
+            assert!(svg.contains("bug-fix:default"));
+            assert!(svg.contains("data-label=\"bug-fix:default\""));
             assert!(svg.contains(&format!("unit: {unit}")));
             assert!(!svg.contains("opencode"));
         }

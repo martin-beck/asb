@@ -13,9 +13,9 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     let resolution_groups = &prepared.resolution;
     let evaluation_coverage = &prepared.evaluation;
     let population_coverage = &prepared.populations;
-    let agent_labels = benchmark_data
+    let chart_labels = benchmark_data
         .iter()
-        .map(|row| (row.label.clone(), row.agent.clone()))
+        .map(|row| (row.label.clone(), super::chart_label(row)))
         .collect();
     for graph in &prepared.graphs {
         let path = stage.join(&graph.filename);
@@ -29,7 +29,7 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                         (row.label.clone(), row.metrics[name])
                     })
                     .collect::<Vec<_>>();
-                write_bar_svg(&path, name, &values, &agent_labels)?;
+                write_bar_svg(&path, name, &values, &chart_labels)?;
             }
             GraphKind::Series(name) => {
                 let values = graph
@@ -40,7 +40,7 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                         (row.label.clone(), &row.series[name])
                     })
                     .collect::<Vec<_>>();
-                write_series_svg(&path, name, &values)?;
+                write_series_svg_with_labels(&path, name, &values, &chart_labels)?;
             }
             GraphKind::Collector(index) => {
                 let graph = prepared.collector_graphs.get(*index).ok_or_else(|| {

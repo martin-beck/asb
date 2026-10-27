@@ -470,6 +470,18 @@ pub(crate) fn publish_sweep(
     configs: Vec<BenchmarkConfig>,
     output: &mut dyn Write,
 ) -> Result<(), Error> {
+    publish_sweep_with_progress(path, configs, output, &mut |_, _| {})
+}
+
+/// Publish a sweep while reporting each durable benchmark configuration and
+/// the final sweep manifest. Callers may coalesce updates, but `total` always
+/// includes that manifest as the last item.
+pub(crate) fn publish_sweep_with_progress(
+    path: &Path,
+    configs: Vec<BenchmarkConfig>,
+    output: &mut dyn Write,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<(), Error> {
     let prepared = prepared::Sweep::new(path, configs)?;
     if fs::symlink_metadata(path).is_ok() {
         return Err(Error::Input(format!(
@@ -478,7 +490,7 @@ pub(crate) fn publish_sweep(
         )));
     }
     create_parent(path, output)?;
-    publication::sweep(path, &prepared)?;
+    publication::sweep_with_progress(path, &prepared, progress)?;
     writeln!(
         output,
         "Wrote {} benchmarks and sweep {}\nRun it with: asb sweep '{}'",

@@ -21,6 +21,10 @@ MAX_PROMPT = 64 * 1024
 # The pinned release-v6 population includes a 92,836,584-byte private test
 # corpus. Keep enough headroom for its canonical JSON representation without
 # making a row unbounded.
+# Never retain a whole catalog row as a serialized byte string. Large official
+# private tests are encoded directly into a project-local temporary file, with
+# this per-row on-disk limit. `streaming=True` also prevents datasets from
+# materializing the complete population in memory before installation.
 MAX_METADATA = 128 * 1024 * 1024
 MAX_METADATA_TOTAL = 16 * 1024 * 1024 * 1024
 SOURCE_REVISION = "28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24"
@@ -49,17 +53,6 @@ def bounded(value, field):
     if not isinstance(value, str) or not value.strip() or len(value) > MAX_PROMPT:
         raise ValueError(f"LiveCodeBench row has invalid {field}")
     return value.strip()
-
-
-def normalized(value):
-    """Dataset backends may expose timestamps as datetime or pandas objects."""
-    if isinstance(value, dict):
-        return {str(key): normalized(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [normalized(item) for item in value]
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    return value
 
 
 def prompt(scenario, row):
@@ -97,10 +90,58 @@ def task_id(scenario, release, row):
 
 def load(args):
     from datasets import load_dataset
-    kwargs = {"split": "test", "revision": args.revision, "trust_remote_code": True}
+    kwargs = {
+        "split": "test",
+        "revision": args.revision,
+        "trust_remote_code": True,
+        "streaming": True,
+    }
     if args.release:
         kwargs["version_tag"] = args.release
     return load_dataset(args.dataset, **kwargs)
+
+
+def metadata_to_disk(directory, row):
+    """Encode one official row directly to disk and return its content digest."""
+    if not isinstance(row, dict):
+        raise ValueError("LiveCodeBench returned metadata that is not an object")
+    directory = Path(directory)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".asb-livecodebench-metadata-", dir=directory)
+    digest, size = hashlib.sha256(), 0
+    try:
+        with os.fdopen(descriptor, "wb") as target:
+            encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True, default=str)
+            # Stream the row directly: copying it with ``dict(row)`` can double
+            # peak memory precisely when an upstream entry is unexpectedly large.
+            for chunk in encoder.iterencode(row):
+                encoded = chunk.encode("utf-8")
+                size += len(encoded)
+                if size > MAX_METADATA:
+                    raise ValueError("LiveCodeBench task metadata exceeds 128 MiB")
+                digest.update(encoded)
+                target.write(encoded)
+            target.write(b"\n")
+            digest.update(b"\n")
+            target.flush()
+            os.fsync(target.fileno())
+        os.chmod(temporary, 0o600)
+        name = digest.hexdigest()
+        destination = directory / f"{name}.json"
+        if destination.exists():
+            existing = hashlib.sha256()
+            with open(destination, "rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    existing.update(chunk)
+            if existing.hexdigest() != name:
+                raise ValueError("pinned LiveCodeBench task metadata changed")
+            os.unlink(temporary)
+        else:
+            os.replace(temporary, destination)
+        return name
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def install_source(cache):
@@ -155,20 +196,12 @@ def catalog(args):
         if len(text.encode()) > MAX_PROMPT:
             raise ValueError("LiveCodeBench task prompt exceeds 64 KiB")
         description = bounded(row.get("question_title") or row.get("contest_id") or identifier, "description")[:1024]
-        row = normalized(dict(row))
-        payload = (json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n").encode("utf-8")
-        if len(payload) > MAX_METADATA:
-            raise ValueError("LiveCodeBench task metadata exceeds 128 MiB")
-        metadata_total += len(payload)
+        metadata_root = Path(args.output) / "evaluation-data"
+        digest = metadata_to_disk(metadata_root, row)
+        metadata = f"evaluation-data/{digest}.json"
+        metadata_total += (metadata_root / f"{digest}.json").stat().st_size
         if metadata_total > MAX_METADATA_TOTAL:
             raise ValueError("LiveCodeBench task metadata exceeds the 16 GiB catalog budget")
-        digest = hashlib.sha256(payload).hexdigest()
-        metadata = f"evaluation-data/{digest}.json"
-        data_path = Path(args.output) / metadata
-        if data_path.exists() and data_path.read_bytes() != payload:
-            raise ValueError("pinned LiveCodeBench task metadata changed")
-        if not data_path.exists():
-            atomic_write(data_path, row)
         tasks.append({"id": identifier, "description": description, "prompt": text,
                       "metadata": metadata, "metadata_sha256": digest})
         if len(tasks) > MAX_TASKS:
