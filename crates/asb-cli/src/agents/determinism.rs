@@ -109,6 +109,7 @@ fn native_trace_manifest(manifest: &[u8]) -> Result<Vec<u8>, Error> {
         sequence: 1,
         process: 1,
         operation: super::native_trace::Operation::Host,
+        parent_process: None,
         request: None,
         response: Some(super::native_trace::Blob {
             sha256: format!("{:x}", Sha256::digest(manifest)),

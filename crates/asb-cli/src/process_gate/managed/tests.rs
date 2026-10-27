@@ -193,6 +193,7 @@ fn actual_gate_appends_after_a_deterministic_host_trace_event() {
             sequence: 1,
             process: crate::agents::native_trace::ROOT_PROCESS,
             operation: crate::agents::native_trace::Operation::Host,
+            parent_process: None,
             request: None,
             response: Some(crate::agents::native_trace::Blob {
                 sha256: "0".repeat(64),
