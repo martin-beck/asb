@@ -8,6 +8,7 @@
 
 use super::{mcp_framing, mcp_transcript};
 use crate::Error;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{BufReader, Read, Write};
@@ -31,14 +32,25 @@ pub(crate) fn entry(args: &[OsString]) -> std::process::ExitCode {
     }
 }
 
-struct Options {
+struct RecordOptions {
     record_dir: PathBuf,
     program: OsString,
     args: Vec<OsString>,
 }
 
+enum Options {
+    Record(RecordOptions),
+    Replay { directory: PathBuf },
+}
+
 fn run(args: &[OsString]) -> Result<(), Error> {
-    let options = options(args)?;
+    match options(args)? {
+        Options::Record(options) => run_record(options),
+        Options::Replay { directory } => run_replay(&directory),
+    }
+}
+
+fn run_record(options: RecordOptions) -> Result<(), Error> {
     let mut upstream = Command::new(&options.program)
         .args(&options.args)
         .stdin(Stdio::piped())
@@ -75,7 +87,17 @@ fn run(args: &[OsString]) -> Result<(), Error> {
     Ok(())
 }
 
+fn run_replay(directory: &Path) -> Result<(), Error> {
+    let replay = Replayer::load(directory)?;
+    replay_messages(std::io::stdin(), std::io::stdout().lock(), &replay)
+}
+
 fn options(args: &[OsString]) -> Result<Options, Error> {
+    if args.len() == 2 && args[0] == "--replay-dir" {
+        return Ok(Options::Replay {
+            directory: PathBuf::from(&args[1]),
+        });
+    }
     let mut record_dir = None;
     let mut index = 0;
     while index < args.len() {
@@ -94,13 +116,13 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
                     .get(index + 1)
                     .cloned()
                     .ok_or_else(|| Error::Input("MCP relay upstream program is required".into()))?;
-                return Ok(Options {
+                return Ok(Options::Record(RecordOptions {
                     record_dir: record_dir.ok_or_else(|| {
                         Error::Input("MCP relay record directory is required".into())
                     })?,
                     program,
                     args: args[index + 2..].to_vec(),
-                });
+                }));
             }
             _ => return Err(Error::Input("invalid MCP relay arguments".into())),
         }
@@ -109,6 +131,160 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
     Err(Error::Input(
         "MCP relay upstream program is required".into(),
     ))
+}
+
+struct Replayer {
+    root: PathBuf,
+    transcript: mcp_transcript::Transcript,
+}
+
+impl Replayer {
+    fn load(root: &Path) -> Result<Self, Error> {
+        let metadata = fs::symlink_metadata(root)
+            .map_err(|_| Error::Run("MCP replay recording directory is unavailable".into()))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(Error::Run(
+                "MCP replay recording directory is invalid".into(),
+            ));
+        }
+        let index = root.join("index.jsonl");
+        let metadata = fs::symlink_metadata(&index)
+            .map_err(|_| Error::Run("MCP replay transcript is unavailable".into()))?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err(Error::Run("MCP replay transcript is invalid".into()));
+        }
+        Ok(Self {
+            root: root.to_path_buf(),
+            transcript: mcp_transcript::Transcript::decode(
+                &fs::read(index).map_err(crate::io_error)?,
+            )?,
+        })
+    }
+
+    fn payload(&self, reference: &mcp_transcript::Blob) -> Result<Vec<u8>, Error> {
+        let path = self
+            .root
+            .join("payloads")
+            .join(format!("{}.json", reference.sha256));
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|_| Error::Run("MCP replay payload is unavailable".into()))?;
+        if !metadata.file_type().is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() != reference.bytes
+        {
+            return Err(Error::Run("MCP replay payload is invalid".into()));
+        }
+        let bytes = fs::read(path).map_err(crate::io_error)?;
+        if mcp_transcript::payload_ref(&bytes) != *reference {
+            return Err(Error::Run(
+                "MCP replay payload differs from its transcript".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+fn replay_messages<R: Read, W: Write>(
+    reader: R,
+    mut writer: W,
+    replay: &Replayer,
+) -> Result<(), Error> {
+    let mut reader = BufReader::new(reader);
+    let mut ids = BTreeMap::<String, serde_json::Value>::new();
+    for event in replay.transcript.events() {
+        let recorded = replay.payload(&event.message)?;
+        match event.direction {
+            mcp_transcript::Direction::ClientToServer => {
+                let actual = mcp_framing::read(&mut reader, SERVICE)?.ok_or_else(|| {
+                    Error::Run("MCP replay ended before its recorded client message".into())
+                })?;
+                if actual.framing != event.framing {
+                    return Err(Error::Run(
+                        "MCP replay client framing differs from recording".into(),
+                    ));
+                }
+                let expected: serde_json::Value = serde_json::from_slice(&recorded)
+                    .map_err(|_| Error::Run("MCP replay payload is not JSON".into()))?;
+                match event.kind {
+                    mcp_transcript::MessageKind::Request => {
+                        let expected_id = expected.get("id").cloned().ok_or_else(|| {
+                            Error::Run("MCP replay request has no recorded ID".into())
+                        })?;
+                        let actual_id = actual.value.get("id").cloned().ok_or_else(|| {
+                            Error::Run("MCP replay request has no client ID".into())
+                        })?;
+                        if without_id(&expected) != without_id(&actual.value) {
+                            return Err(Error::Run(
+                                "MCP replay request differs from recording".into(),
+                            ));
+                        }
+                        let recorded_id = event.id.as_ref().ok_or_else(|| {
+                            Error::Run("MCP replay request transcript has no ID".into())
+                        })?;
+                        if mcp_transcript::payload_ref(
+                            &serde_json::to_vec(&expected_id).expect("JSON encodes"),
+                        ) != *recorded_id
+                        {
+                            return Err(Error::Run(
+                                "MCP replay request ID differs from transcript".into(),
+                            ));
+                        }
+                        ids.insert(recorded_id.sha256.clone(), actual_id);
+                    }
+                    mcp_transcript::MessageKind::Notification => {
+                        if expected != actual.value {
+                            return Err(Error::Run(
+                                "MCP replay notification differs from recording".into(),
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(Error::Run(
+                            "MCP replay transcript direction is invalid".into(),
+                        ));
+                    }
+                }
+            }
+            mcp_transcript::Direction::ServerToClient => {
+                let bytes = match event.kind {
+                    mcp_transcript::MessageKind::Response | mcp_transcript::MessageKind::Error => {
+                        let recorded_id = event.id.as_ref().ok_or_else(|| {
+                            Error::Run("MCP replay response transcript has no ID".into())
+                        })?;
+                        let actual_id = ids.get(&recorded_id.sha256).ok_or_else(|| {
+                            Error::Run("MCP replay response has no matching client request".into())
+                        })?;
+                        let mut value: serde_json::Value = serde_json::from_slice(&recorded)
+                            .map_err(|_| Error::Run("MCP replay payload is not JSON".into()))?;
+                        value["id"] = actual_id.clone();
+                        serde_json::to_vec(&value)
+                            .map_err(|_| Error::Run("cannot encode MCP replay response".into()))?
+                    }
+                    mcp_transcript::MessageKind::Notification => recorded,
+                    mcp_transcript::MessageKind::Request => {
+                        return Err(Error::Run(
+                            "MCP replay transcript direction is invalid".into(),
+                        ));
+                    }
+                };
+                mcp_framing::write_bytes(&mut writer, &bytes, event.framing)?;
+            }
+        }
+    }
+    if mcp_framing::read(&mut reader, SERVICE)?.is_some() {
+        return Err(Error::Run(
+            "MCP replay received an unrecorded client message".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn without_id(value: &serde_json::Value) -> serde_json::Value {
+    let mut value = value.clone();
+    if let Some(object) = value.as_object_mut() {
+        object.remove("id");
+    }
+    value
 }
 
 enum Incoming {
@@ -213,6 +389,7 @@ fn forward_messages<ClientWrite: Write, ServerWrite: Write>(
                 };
                 recorder.record(
                     direction,
+                    message.framing,
                     started.elapsed().as_millis() as u64,
                     &message.bytes,
                 )?;
@@ -286,11 +463,12 @@ impl Recorder {
     fn record(
         &mut self,
         direction: mcp_transcript::Direction,
+        framing: mcp_framing::Framing,
         relative_millis: u64,
         payload: &[u8],
     ) -> Result<(), Error> {
         self.transcript
-            .record(direction, relative_millis, payload)?;
+            .record(direction, framing, relative_millis, payload)?;
         let reference = mcp_transcript::payload_ref(payload);
         let path = self
             .stage
@@ -357,6 +535,7 @@ impl Drop for Recorder {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
 
@@ -366,6 +545,37 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root.join("recording")
+    }
+
+    fn replay_recording(name: &str) -> PathBuf {
+        let record = record_dir(name);
+        let mut recorder = Recorder::new(&record).unwrap();
+        recorder
+            .record(
+                mcp_transcript::Direction::ClientToServer,
+                mcp_framing::Framing::JsonLines,
+                0,
+                br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            )
+            .unwrap();
+        recorder
+            .record(
+                mcp_transcript::Direction::ServerToClient,
+                mcp_framing::Framing::JsonLines,
+                1,
+                br#"{"jsonrpc":"2.0","method":"notifications/progress","params":{}}"#,
+            )
+            .unwrap();
+        recorder
+            .record(
+                mcp_transcript::Direction::ServerToClient,
+                mcp_framing::Framing::JsonLines,
+                2,
+                br#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#,
+            )
+            .unwrap();
+        recorder.finish().unwrap();
+        record
     }
 
     #[test]
@@ -466,16 +676,74 @@ mod tests {
     fn options_require_a_record_directory_and_direct_program() {
         assert!(options(&[]).is_err());
         assert!(options(&["--record-dir".into(), "out".into()]).is_err());
-        let options = options(&[
+        let Options::Record(options) = options(&[
             "--record-dir".into(),
             "out".into(),
             "--".into(),
             "server".into(),
             "--flag".into(),
         ])
-        .unwrap();
+        .unwrap() else {
+            panic!("record arguments must select record mode");
+        };
         assert_eq!(options.record_dir, PathBuf::from("out"));
         assert_eq!(options.program, OsString::from("server"));
         assert_eq!(options.args, vec![OsString::from("--flag")]);
+    }
+
+    #[test]
+    fn offline_replay_remaps_request_ids_without_an_upstream_server() {
+        let record = replay_recording("replay");
+        let replay = Replayer::load(&record).unwrap();
+        let mut output = Vec::new();
+        replay_messages(
+            Cursor::new(b"{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/list\"}\n"),
+            &mut output,
+            &replay,
+        )
+        .unwrap();
+        let mut output = BufReader::new(&output[..]);
+        let notification = mcp_framing::read(&mut output, SERVICE).unwrap().unwrap();
+        let response = mcp_framing::read(&mut output, SERVICE).unwrap().unwrap();
+        assert_eq!(notification.value["method"], "notifications/progress");
+        assert_eq!(response.value["id"], 42);
+        let _ = fs::remove_dir_all(record.parent().unwrap());
+    }
+
+    #[test]
+    fn offline_replay_rejects_mismatched_extra_and_changed_payload_evidence() {
+        let record = replay_recording("replay-reject");
+        let replay = Replayer::load(&record).unwrap();
+        let mut output = Vec::new();
+        assert!(
+            replay_messages(
+                Cursor::new(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}\n"),
+                &mut output,
+                &replay,
+            )
+            .is_err()
+        );
+        assert!(replay_messages(
+            Cursor::new(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n{\"jsonrpc\":\"2.0\",\"method\":\"extra\"}\n"),
+            Vec::new(),
+            &replay,
+        )
+        .is_err());
+        let payload = fs::read_dir(record.join("payloads"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::write(payload, b"{}\n").unwrap();
+        assert!(
+            replay_messages(
+                Cursor::new(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n"),
+                Vec::new(),
+                &replay,
+            )
+            .is_err()
+        );
+        let _ = fs::remove_dir_all(record.parent().unwrap());
     }
 }

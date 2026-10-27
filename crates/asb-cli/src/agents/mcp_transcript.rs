@@ -51,6 +51,7 @@ pub(crate) struct Event {
     pub schema_version: u32,
     pub sequence: u64,
     pub direction: Direction,
+    pub framing: mcp_framing::Framing,
     pub relative_millis: u64,
     pub kind: MessageKind,
     pub message: Blob,
@@ -65,7 +66,6 @@ pub(crate) struct Transcript {
 }
 
 impl Transcript {
-    #[cfg(test)]
     pub(crate) fn events(&self) -> &[Event] {
         &self.events
     }
@@ -75,6 +75,7 @@ impl Transcript {
     pub(crate) fn record(
         &mut self,
         direction: Direction,
+        framing: mcp_framing::Framing,
         relative_millis: u64,
         payload: &[u8],
     ) -> Result<(), Error> {
@@ -88,6 +89,7 @@ impl Transcript {
             schema_version: SCHEMA_VERSION,
             sequence: self.events.len() as u64 + 1,
             direction,
+            framing,
             relative_millis,
             kind,
             message: payload_ref(payload),
@@ -220,6 +222,7 @@ mod tests {
         transcript
             .record(
                 Direction::ClientToServer,
+                mcp_framing::Framing::JsonLines,
                 1,
                 &message(r#"{"jsonrpc":"2.0","id":"request-a","method":"tools/call","params":{"secret":"hidden"}}"#),
             )
@@ -240,6 +243,7 @@ mod tests {
         transcript
             .record(
                 Direction::ClientToServer,
+                mcp_framing::Framing::JsonLines,
                 0,
                 &message(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#),
             )
@@ -247,6 +251,7 @@ mod tests {
         transcript
             .record(
                 Direction::ClientToServer,
+                mcp_framing::Framing::JsonLines,
                 1,
                 &message(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call"}"#),
             )
@@ -254,6 +259,7 @@ mod tests {
         transcript
             .record(
                 Direction::ServerToClient,
+                mcp_framing::Framing::JsonLines,
                 2,
                 &message(r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{}}"#),
             )
@@ -261,6 +267,7 @@ mod tests {
         transcript
             .record(
                 Direction::ServerToClient,
+                mcp_framing::Framing::JsonLines,
                 3,
                 &message(r#"{"jsonrpc":"2.0","id":2,"result":{}}"#),
             )
@@ -268,6 +275,7 @@ mod tests {
         transcript
             .record(
                 Direction::ServerToClient,
+                mcp_framing::Framing::JsonLines,
                 4,
                 &message(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-1}}"#),
             )
@@ -283,13 +291,19 @@ mod tests {
         let mut transcript = Transcript::default();
         assert!(
             transcript
-                .record(Direction::ClientToServer, 0, br#"{"method":"tools/call"}"#)
+                .record(
+                    Direction::ClientToServer,
+                    mcp_framing::Framing::JsonLines,
+                    0,
+                    br#"{"method":"tools/call"}"#,
+                )
                 .is_err()
         );
         assert!(
             transcript
                 .record(
                     Direction::ClientToServer,
+                    mcp_framing::Framing::JsonLines,
                     0,
                     &vec![b'x'; mcp_framing::MAX_MESSAGE_BYTES + 1],
                 )
@@ -299,6 +313,7 @@ mod tests {
             transcript
                 .record(
                     Direction::ClientToServer,
+                    mcp_framing::Framing::JsonLines,
                     0,
                     br#"{"jsonrpc":"2.0","id":{},"method":"tools/call"}"#,
                 )
