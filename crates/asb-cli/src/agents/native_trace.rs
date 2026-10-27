@@ -32,9 +32,42 @@ pub(crate) struct Blob {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Operation {
     Process,
+    ProcessStart,
+    ProcessExit,
     Filesystem,
     Network,
     Host,
+}
+
+/// Write the native root lifecycle captured by ASB's existing process gate.
+/// This deliberately records only two events, so it adds neither a sampling
+/// loop nor per-syscall work to the measured agent.  A later Linux backend can
+/// append descendant fork/exec/exit events to the same trace contract.
+pub(crate) fn write_root_lifecycle(run_dir: &std::path::Path, process: u64) -> Result<(), Error> {
+    let mut transcript = Transcript::default();
+    transcript.record(Event {
+        schema_version: SCHEMA_VERSION,
+        sequence: 1,
+        process,
+        operation: Operation::ProcessStart,
+        request: None,
+        response: None,
+        effects: Vec::new(),
+    })?;
+    transcript.record(Event {
+        schema_version: SCHEMA_VERSION,
+        sequence: 2,
+        process,
+        operation: Operation::ProcessExit,
+        request: None,
+        response: None,
+        effects: Vec::new(),
+    })?;
+    std::fs::write(
+        run_dir.join("native-trace/native-trace.jsonl"),
+        transcript.encode()?,
+    )
+    .map_err(|error| Error::Run(format!("cannot write native process trace: {error}")))
 }
 
 /// One causal native operation.  `request` and `response` are optional because
@@ -171,5 +204,25 @@ mod tests {
         assert!(canonicalize(br#"{"schema_version":1,"sequence":1,"process":1,"operation":"process","unknown":true}
 "#).is_err());
         assert!(Transcript::decode(&vec![b'x'; MAX_EVENTS * 2_048 + 1]).is_err());
+    }
+
+    #[test]
+    fn root_lifecycle_is_two_bounded_process_events() {
+        let root = std::env::temp_dir().join(format!("asb-native-trace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("native-trace")).unwrap();
+        write_root_lifecycle(&root, 42).unwrap();
+        let trace = Transcript::decode(
+            &std::fs::read(root.join("native-trace/native-trace.jsonl")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&trace.encode().unwrap())
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }
