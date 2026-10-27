@@ -217,6 +217,7 @@ pub(crate) fn run_with_interactive(
                     tool_mode: tape.tool,
                     tool_mode_explicit: true,
                     cassette: options.cassette.as_deref(),
+                    native_capsule_record: options.native_capsule_record.as_deref(),
                     respect_record_timings: options.respect_record_timings,
                     interactive: interactive && !options.json,
                     ..Default::default()
@@ -527,6 +528,33 @@ mod tape_flag_tests {
         .unwrap_err();
         assert!(error.to_string().contains("cannot be used with"));
     }
+
+    #[test]
+    fn native_capsule_record_requires_an_explicit_llm_recording() {
+        let error = Cli::try_parse_from([
+            "asb",
+            "run",
+            "benchmark.toml",
+            "--native-capsule-record",
+            "capsule",
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("--llm-record"));
+
+        let cli = Cli::try_parse_from([
+            "asb",
+            "run",
+            "benchmark.toml",
+            "--llm-record",
+            "--native-capsule-record",
+            "capsule",
+        ])
+        .unwrap();
+        let Some(CommandLine::Run(args)) = cli.command else {
+            panic!("expected run arguments");
+        };
+        assert_eq!(args.native_capsule_record.as_deref(), Some("capsule"));
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -669,6 +697,9 @@ struct RunArgs {
     respect_record_timings: bool,
     #[arg(long, value_hint = clap::ValueHint::FilePath)]
     cassette: Option<String>,
+    /// Capture a bounded native workspace capsule beside an LLM recording.
+    #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath, requires = "llm_record")]
+    native_capsule_record: Option<String>,
     #[arg(long)]
     json: bool,
     #[arg(long = "show-output", conflicts_with = "json")]

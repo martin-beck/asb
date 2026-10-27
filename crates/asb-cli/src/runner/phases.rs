@@ -190,6 +190,7 @@ pub(super) struct PreparedAttempt {
     pub workload: Box<dyn workloads::WorkloadSession>,
     pub measurements: Option<measurements::Session>,
     pub tape: Option<tape::Session>,
+    pub capsule: Option<agents::capsule::Capture>,
 }
 
 pub(super) struct ExecutedAttempt {
@@ -251,6 +252,26 @@ impl ExecutedAttempt {
             cassette_usage_verified,
             issues: self.issues,
         }
+    }
+}
+
+impl SettledAttempt {
+    /// Finalize a requested native capsule before evaluator and workload
+    /// cleanup can alter the agent's workspace.
+    pub fn finish_capsule(
+        &mut self,
+        workspace: &std::path::Path,
+    ) -> Result<Option<PathBuf>, Error> {
+        self.prepared
+            .capsule
+            .take()
+            .map(|capture| capture.finish(workspace))
+            .transpose()
+    }
+
+    pub fn recording_failure(&mut self, error: Error) {
+        self.issues
+            .run_error(format!("native capsule capture failed: {error}"));
     }
 }
 

@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 const MAX_ENTRIES: usize = 4096;
@@ -86,6 +86,10 @@ impl Store {
         &self.objects
     }
 
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Publish the canonical manifest once. It intentionally has no replace
     /// operation; callers must make a new capsule if capture changes.
     pub(crate) fn publish(&self, manifest: &Manifest) -> Result<(), Error> {
@@ -101,6 +105,34 @@ impl Store {
             .map_err(crate::io_error)?;
         file.write_all(&bytes).map_err(crate::io_error)?;
         file.sync_all().map_err(crate::io_error)
+    }
+}
+
+/// In-progress native capsule capture. A failed or abandoned capture has no
+/// manifest, so it cannot be selected as replay evidence.
+pub(crate) struct Capture {
+    store: Store,
+    manifest: Manifest,
+}
+
+impl Capture {
+    /// Snapshot the prepared isolated workspace before agent execution.
+    pub(crate) fn start(destination: &Path, workspace: &Path) -> Result<Self, Error> {
+        let store = Store::create(destination)?;
+        let base = capture_tree(store.objects(), workspace)?;
+        Ok(Self {
+            store,
+            manifest: Manifest::from_snapshot(None, base),
+        })
+    }
+
+    /// Snapshot final state, calculate declared effects, and publish the
+    /// manifest last. No partial capture is replayable.
+    pub(crate) fn finish(mut self, workspace: &Path) -> Result<PathBuf, Error> {
+        self.manifest
+            .set_effects(&capture_tree(self.store.objects(), workspace)?)?;
+        self.store.publish(&self.manifest)?;
+        Ok(self.store.root().to_path_buf())
     }
 }
 
@@ -1137,6 +1169,23 @@ mod tests {
         );
         assert!(store.publish(&manifest).is_err());
         assert!(Store::create(&destination).is_err());
+    }
+
+    #[test]
+    fn capture_publishes_only_after_a_final_effect_snapshot() {
+        let root = test_root("capture");
+        let workspace = root.0.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("input.txt"), b"before").unwrap();
+        let destination = root.0.join("capsule");
+        let capture = Capture::start(&destination, &workspace).unwrap();
+        assert!(!destination.join(MANIFEST_FILENAME).exists());
+        fs::write(workspace.join("input.txt"), b"after").unwrap();
+        let published = capture.finish(&workspace).unwrap();
+        let manifest: Manifest =
+            serde_json::from_slice(&fs::read(published.join(MANIFEST_FILENAME)).unwrap()).unwrap();
+        assert_eq!(manifest.effects.len(), 1);
+        assert_eq!(manifest.effects[0].path, "input.txt");
     }
 
     #[cfg(unix)]
