@@ -58,6 +58,33 @@ pub(crate) struct Manifest {
     pub effects: Vec<Entry>,
 }
 
+impl Manifest {
+    /// Bind one captured base workspace to an optional root executable identity.
+    pub(crate) fn from_snapshot(root_executable: Option<Blob>, snapshot: Snapshot) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            root_executable,
+            base: snapshot.files,
+            base_directories: snapshot.directories,
+            effects: Vec::new(),
+        }
+    }
+
+    /// Reconstruct only the captured base. Declared final effects remain a
+    /// separate replay boundary and are never applied implicitly.
+    pub(crate) fn stage_base(&self, objects: &Path, workspace: &Path) -> Result<(), Error> {
+        validate(self)?;
+        stage_snapshot(
+            objects,
+            &Snapshot {
+                directories: self.base_directories.clone(),
+                files: self.base.clone(),
+            },
+            workspace,
+        )
+    }
+}
+
 /// Reject non-canonical/private-unsafe manifest data before a capsule enters a
 /// recording. Object bytes are staged separately and verified by digest.
 pub(crate) fn canonicalize(bytes: &[u8]) -> Result<Vec<u8>, Error> {
@@ -635,6 +662,29 @@ mod tests {
         fs::create_dir(&source).unwrap();
         fs::write(source.join("input.txt"), b"capsule input").unwrap();
         assert!(capture_tree(&source.join("objects"), &source).is_err());
+    }
+
+    #[test]
+    fn manifest_stages_only_the_captured_base_snapshot() {
+        let root = test_root("manifest-base");
+        let source = root.0.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("input.txt"), b"capsule input").unwrap();
+        let objects = root.0.join("objects");
+        let mut manifest = Manifest::from_snapshot(None, capture_tree(&objects, &source).unwrap());
+        let effect = store_object(&objects, &source.join("input.txt")).unwrap();
+        manifest.effects.push(Entry {
+            path: "output.txt".into(),
+            object: effect,
+            mode: 0o644,
+        });
+        let workspace = root.0.join("workspace");
+        manifest.stage_base(&objects, &workspace).unwrap();
+        assert_eq!(
+            fs::read(workspace.join("input.txt")).unwrap(),
+            b"capsule input"
+        );
+        assert!(!workspace.join("output.txt").exists());
     }
 
     #[cfg(unix)]
