@@ -13,9 +13,45 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     let resolution_groups = &prepared.resolution;
     let evaluation_coverage = &prepared.evaluation;
     let population_coverage = &prepared.populations;
+    let base_labels = benchmark_data
+        .iter()
+        .map(super::chart_label)
+        .collect::<Vec<_>>();
+    let mut base_counts = BTreeMap::new();
+    for label in &base_labels {
+        *base_counts.entry(label.clone()).or_insert(0usize) += 1;
+    }
+    let mut labels = benchmark_data
+        .iter()
+        .zip(&base_labels)
+        .map(|(row, base)| {
+            if base_counts[base] == 1 {
+                base.clone()
+            } else {
+                format!("{} / {base}", row.agent)
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut label_counts = BTreeMap::new();
+    for label in &labels {
+        *label_counts.entry(label.clone()).or_insert(0usize) += 1;
+    }
+    for (index, label) in labels.iter_mut().enumerate() {
+        if label_counts[label] > 1 {
+            let row = &benchmark_data[index];
+            *label = format!(
+                "{} / {} / {} / {}",
+                row.agent,
+                row.provider,
+                row.model,
+                super::attempt_label(row)
+            );
+        }
+    }
     let chart_labels = benchmark_data
         .iter()
-        .map(|row| (row.label.clone(), super::chart_label(row)))
+        .zip(labels)
+        .map(|(row, label)| (row.label.clone(), label))
         .collect();
     for graph in &prepared.graphs {
         let path = stage.join(&graph.filename);
@@ -26,18 +62,23 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                     .iter()
                     .map(|index| {
                         let row = &benchmark_data[*index];
-                        (row.label.clone(), row.metrics[name])
+                        (row.label.clone(), row.metrics.get(name).copied())
                     })
                     .collect::<Vec<_>>();
                 write_bar_svg(&path, name, &values, &chart_labels)?;
             }
-            GraphKind::Series(name) => {
+            GraphKind::Series { name, timed } => {
                 let values = graph
                     .rows
                     .iter()
                     .map(|index| {
                         let row = &benchmark_data[*index];
-                        (row.label.clone(), &row.series[name])
+                        (
+                            row.label.clone(),
+                            row.series
+                                .get(name)
+                                .filter(|series| series.timestamps_ms.is_some() == *timed),
+                        )
                     })
                     .collect::<Vec<_>>();
                 write_series_svg_with_labels(&path, name, &values, &chart_labels)?;

@@ -2,7 +2,7 @@
 use super::*;
 pub(super) enum GraphKind {
     Metric(String),
-    Series(String),
+    Series { name: String, timed: bool },
     Collector(usize),
 }
 pub(super) struct GraphSpec {
@@ -90,14 +90,14 @@ impl PreparedReport {
         }
         let mut names = GraphNames::default();
         let mut graphs = Vec::new();
-        for (name, rows) in metrics {
+        for (name, _rows) in metrics {
             if !graphable_metric(&name) {
                 continue;
             }
             graphs.push(GraphSpec {
                 filename: names.allocate("metric", &name),
                 kind: GraphKind::Metric(name),
-                rows,
+                rows: (0..data.rows.len()).collect(),
             });
         }
         for (name, rows) in series {
@@ -108,15 +108,18 @@ impl PreparedReport {
             if !timed.is_empty() {
                 graphs.push(GraphSpec {
                     filename: names.allocate("series", &name),
-                    kind: GraphKind::Series(name.clone()),
-                    rows: timed,
+                    kind: GraphKind::Series {
+                        name: name.clone(),
+                        timed: true,
+                    },
+                    rows: (0..data.rows.len()).collect(),
                 });
             }
             if !indexed.is_empty() {
                 graphs.push(GraphSpec {
                     filename: names.allocate(if mixed { "series-index" } else { "series" }, &name),
-                    kind: GraphKind::Series(name),
-                    rows: indexed,
+                    kind: GraphKind::Series { name, timed: false },
+                    rows: (0..data.rows.len()).collect(),
                 });
             }
         }
