@@ -218,6 +218,7 @@ pub(crate) fn run_with_interactive(
                     tool_mode_explicit: true,
                     cassette: options.cassette.as_deref(),
                     native_capsule_record: options.native_capsule_record.as_deref(),
+                    native_capsule_replay: options.native_capsule_replay.as_deref(),
                     respect_record_timings: options.respect_record_timings,
                     interactive: interactive && !options.json,
                     ..Default::default()
@@ -555,6 +556,33 @@ mod tape_flag_tests {
         };
         assert_eq!(args.native_capsule_record.as_deref(), Some("capsule"));
     }
+
+    #[test]
+    fn native_capsule_replay_requires_an_explicit_llm_replay() {
+        let error = Cli::try_parse_from([
+            "asb",
+            "run",
+            "benchmark.toml",
+            "--native-capsule-replay",
+            "capsule",
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("--llmreplay"));
+
+        let cli = Cli::try_parse_from([
+            "asb",
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--native-capsule-replay",
+            "capsule",
+        ])
+        .unwrap();
+        let Some(CommandLine::Run(args)) = cli.command else {
+            panic!("expected run arguments");
+        };
+        assert_eq!(args.native_capsule_replay.as_deref(), Some("capsule"));
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -700,6 +728,9 @@ struct RunArgs {
     /// Capture a bounded native workspace capsule beside an LLM recording.
     #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath, requires = "llm_record")]
     native_capsule_record: Option<String>,
+    /// Restore and apply a bounded native workspace capsule beside an LLM replay.
+    #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath, requires = "llm_replay")]
+    native_capsule_replay: Option<String>,
     #[arg(long)]
     json: bool,
     #[arg(long = "show-output", conflicts_with = "json")]

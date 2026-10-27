@@ -162,7 +162,8 @@ fn prepared(
             }),
             measurements,
             tape: None,
-            capsule: None,
+            capsule_record: None,
+            capsule_replay: None,
         },
         operations,
     )

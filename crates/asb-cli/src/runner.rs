@@ -151,6 +151,8 @@ pub(crate) struct RunOptions<'a> {
     pub cassette: Option<&'a str>,
     /// Explicit fresh destination for a bounded native workspace capsule.
     pub native_capsule_record: Option<&'a str>,
+    /// Verified native workspace capsule restored before an LLM replay.
+    pub native_capsule_replay: Option<&'a str>,
     pub respect_record_timings: bool,
     pub replica: replica::Identity,
     pub on_completion: Option<&'a dyn replica::CompletionObserver>,
@@ -190,6 +192,16 @@ pub(crate) fn run_with_diagnostics(
     {
         return Err(Error::Input(
             "--native-capsule-record requires --llm-record, concurrency = 1, and no --repeat"
+                .into(),
+        ));
+    }
+    if options.native_capsule_replay.is_some()
+        && (options.mode != Some(tape::Mode::Replay)
+            || config.concurrency != 1
+            || options.repeat.is_some())
+    {
+        return Err(Error::Input(
+            "--native-capsule-replay requires --llm-replay, concurrency = 1, and no --repeat"
                 .into(),
         ));
     }
@@ -2209,6 +2221,40 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("native-capsule-record"));
         assert!(!capsule.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_capsule_replay_rejects_repeat_or_concurrency_before_execution() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-native-capsule-replay-preflight-{}",
+            crate::workloads::TaskIdentity::local("capsule-replay-preflight", None).attempt_id
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir(root.join(".asb")).unwrap();
+        std::fs::write(
+            root.join(".asb/project.toml"),
+            toml::to_string(&crate::project::ProjectConfig::default()).unwrap(),
+        )
+        .unwrap();
+        let config = root.join("benchmark.toml");
+        std::fs::write(
+            &config,
+            "agent='pi'\nworkload='bug-fix'\nprovider='not-a-provider'\nmodel='model'\nconcurrency=2\n",
+        )
+        .unwrap();
+        let capsule = root.join("capsule");
+        let error = run_with_tape(
+            config.to_str().unwrap(),
+            super::RunOptions {
+                mode: Some(crate::tape::Mode::Replay),
+                native_capsule_replay: Some(capsule.to_str().unwrap()),
+                ..Default::default()
+            },
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("native-capsule-replay"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
