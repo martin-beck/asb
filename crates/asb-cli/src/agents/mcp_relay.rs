@@ -88,6 +88,7 @@ fn run_record(options: RecordOptions) -> Result<(), Error> {
 }
 
 fn run_replay(directory: &Path) -> Result<(), Error> {
+    validate_recording(directory)?;
     let replay = Replayer::load(directory)?;
     replay_messages(std::io::stdin(), std::io::stdout().lock(), &replay)
 }
@@ -182,6 +183,17 @@ impl Replayer {
         }
         Ok(bytes)
     }
+}
+
+/// Verify a completed relay recording before another ASB layer adopts it.
+/// This reads only its bounded transcript and referenced payload objects; it
+/// never starts an upstream MCP server or an agent process.
+pub(crate) fn validate_recording(root: &Path) -> Result<(), Error> {
+    let replay = Replayer::load(root)?;
+    for event in replay.transcript.events() {
+        replay.payload(&event.message)?;
+    }
+    Ok(())
 }
 
 fn replay_messages<R: Read, W: Write>(
@@ -694,6 +706,7 @@ mod tests {
     #[test]
     fn offline_replay_remaps_request_ids_without_an_upstream_server() {
         let record = replay_recording("replay");
+        validate_recording(&record).unwrap();
         let replay = Replayer::load(&record).unwrap();
         let mut output = Vec::new();
         replay_messages(
