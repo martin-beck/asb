@@ -8,6 +8,7 @@
 
 use super::{mcp_framing, mcp_transcript};
 use crate::Error;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -20,6 +21,33 @@ use std::time::Instant;
 const SERVICE: &str = "MCP relay";
 const MAX_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 const CHANNEL_CAPACITY: usize = 4;
+const BUNDLE_SCHEMA_VERSION: u32 = 1;
+// JSON string escaping can expand a valid 64 MiB JSON payload. Keep the
+// durable representation within the cassette's existing per-artifact cap.
+const MAX_BUNDLE_BYTES: usize = 256 * 1024 * 1024;
+
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum BundleRecord {
+    Header {
+        schema_version: u32,
+    },
+    Event {
+        schema_version: u32,
+        event: mcp_transcript::Event,
+    },
+    Payload {
+        schema_version: u32,
+        blob: mcp_transcript::Blob,
+        /// Valid UTF-8 JSON preserved byte-for-byte inside a JSON string.
+        payload: String,
+    },
+}
+
+struct Bundle {
+    transcript: mcp_transcript::Transcript,
+    payloads: BTreeMap<String, Vec<u8>>,
+}
 
 pub(crate) fn entry(args: &[OsString]) -> std::process::ExitCode {
     match run(args) {
@@ -40,13 +68,28 @@ struct RecordOptions {
 
 enum Options {
     Record(RecordOptions),
-    Replay { directory: PathBuf },
+    Replay {
+        directory: PathBuf,
+    },
+    Bundle {
+        directory: PathBuf,
+        output: PathBuf,
+    },
+    Materialize {
+        bundle: PathBuf,
+        destination: PathBuf,
+    },
 }
 
 fn run(args: &[OsString]) -> Result<(), Error> {
     match options(args)? {
         Options::Record(options) => run_record(options),
         Options::Replay { directory } => run_replay(&directory),
+        Options::Bundle { directory, output } => write_bundle(&directory, &output),
+        Options::Materialize {
+            bundle,
+            destination,
+        } => materialize_bundle(&read_bundle(&bundle)?, &destination),
     }
 }
 
@@ -94,6 +137,20 @@ fn run_replay(directory: &Path) -> Result<(), Error> {
 }
 
 fn options(args: &[OsString]) -> Result<Options, Error> {
+    if let [flag, directory, output_flag, output] = args {
+        if flag == "--bundle-dir" && output_flag == "--output" {
+            return Ok(Options::Bundle {
+                directory: PathBuf::from(directory),
+                output: PathBuf::from(output),
+            });
+        }
+        if flag == "--materialize-bundle" && output_flag == "--output" {
+            return Ok(Options::Materialize {
+                bundle: PathBuf::from(directory),
+                destination: PathBuf::from(output),
+            });
+        }
+    }
     if args.len() == 2 && args[0] == "--replay-dir" {
         return Ok(Options::Replay {
             directory: PathBuf::from(&args[1]),
@@ -132,6 +189,48 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
     Err(Error::Input(
         "MCP relay upstream program is required".into(),
     ))
+}
+
+fn write_bundle(directory: &Path, output: &Path) -> Result<(), Error> {
+    if output.exists() {
+        return Err(Error::Run(
+            "MCP relay bundle destination already exists".into(),
+        ));
+    }
+    let parent = output
+        .parent()
+        .filter(|parent| parent.is_dir())
+        .ok_or_else(|| Error::Run("MCP relay bundle parent is unavailable".into()))?;
+    let name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .ok_or_else(|| Error::Run("MCP relay bundle destination is invalid".into()))?;
+    let bytes = bundle_recording(directory)?;
+    let stage = reserve_file(parent, name, "mcp-bundle")?;
+    let result = (|| {
+        write_reserved(&stage, &bytes)?;
+        fs::rename(&stage, output)
+            .map_err(|_| Error::Run("cannot publish MCP relay bundle without overwrite".into()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&stage);
+    }
+    result
+}
+
+fn read_bundle(path: &Path) -> Result<Vec<u8>, Error> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| Error::Run("MCP relay bundle is unavailable".into()))?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_BUNDLE_BYTES as u64
+    {
+        return Err(Error::Run(
+            "MCP relay bundle is invalid or exceeds its bound".into(),
+        ));
+    }
+    fs::read(path).map_err(crate::io_error)
 }
 
 struct Replayer {
@@ -194,6 +293,247 @@ pub(crate) fn validate_recording(root: &Path) -> Result<(), Error> {
         replay.payload(&event.message)?;
     }
     Ok(())
+}
+
+/// Encode a completed relay directory as one bounded, cassette-safe JSONL
+/// payload.  The filesystem layout remains private to the relay; callers get
+/// one canonical byte stream suitable for the existing auxiliary-artifact
+/// cassette contract.
+pub(crate) fn bundle_recording(root: &Path) -> Result<Vec<u8>, Error> {
+    let replay = Replayer::load(root)?;
+    let mut payloads = BTreeMap::new();
+    for event in replay.transcript.events() {
+        payloads
+            .entry(event.message.sha256.clone())
+            .or_insert(replay.payload(&event.message)?);
+    }
+    encode_bundle(&replay.transcript, &payloads)
+}
+
+/// Validate a bundled relay artifact and reconstruct its private directory.
+/// The destination must not already exist, so replay can never overwrite or
+/// merge host MCP evidence with a cassette-selected recording.
+pub(crate) fn materialize_bundle(bytes: &[u8], destination: &Path) -> Result<(), Error> {
+    let bundle = decode_bundle(bytes)?;
+    if destination.exists() {
+        return Err(Error::Run(
+            "MCP replay recording destination already exists".into(),
+        ));
+    }
+    let parent = destination
+        .parent()
+        .filter(|parent| parent.is_dir())
+        .ok_or_else(|| Error::Run("MCP replay recording parent is unavailable".into()))?;
+    let name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .ok_or_else(|| Error::Run("MCP replay recording name is invalid".into()))?;
+    let stage = reserve_stage(parent, name)?;
+    let result = (|| {
+        fs::create_dir(stage.join("payloads")).map_err(crate::io_error)?;
+        let index = mcp_transcript::canonicalize(&bundle.transcript.encode()?)?;
+        write_new(&stage.join("index.jsonl"), &index)?;
+        for (digest, payload) in &bundle.payloads {
+            write_new(
+                &stage.join("payloads").join(format!("{digest}.json")),
+                payload,
+            )?;
+        }
+        fs::rename(&stage, destination).map_err(|_| {
+            Error::Run("cannot publish complete MCP replay recording without overwrite".into())
+        })?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&stage);
+    }
+    result
+}
+
+fn encode_bundle(
+    transcript: &mcp_transcript::Transcript,
+    payloads: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<u8>, Error> {
+    let mut output = Vec::new();
+    append_bundle_record(
+        &mut output,
+        &BundleRecord::Header {
+            schema_version: BUNDLE_SCHEMA_VERSION,
+        },
+    )?;
+    let mut referenced = BTreeMap::new();
+    for event in transcript.events() {
+        referenced.insert(event.message.sha256.clone(), event.message.clone());
+        append_bundle_record(
+            &mut output,
+            &BundleRecord::Event {
+                schema_version: BUNDLE_SCHEMA_VERSION,
+                event: event.clone(),
+            },
+        )?;
+    }
+    if payloads.len() != referenced.len() || !payloads.keys().eq(referenced.keys()) {
+        return Err(Error::Run(
+            "MCP relay bundle payloads do not match its transcript".into(),
+        ));
+    }
+    for (digest, blob) in referenced {
+        let payload = payloads
+            .get(&digest)
+            .expect("payload keys were compared before encoding");
+        if mcp_transcript::payload_ref(payload) != blob {
+            return Err(Error::Run(
+                "MCP relay bundle payload differs from its transcript".into(),
+            ));
+        }
+        let text = std::str::from_utf8(payload)
+            .map_err(|_| Error::Run("MCP relay payload is not UTF-8 JSON".into()))?;
+        append_bundle_record(
+            &mut output,
+            &BundleRecord::Payload {
+                schema_version: BUNDLE_SCHEMA_VERSION,
+                blob,
+                payload: text.into(),
+            },
+        )?;
+    }
+    Ok(output)
+}
+
+fn append_bundle_record(output: &mut Vec<u8>, record: &BundleRecord) -> Result<(), Error> {
+    let line = serde_json::to_vec(record)
+        .map_err(|_| Error::Io("cannot encode MCP relay bundle".into()))?;
+    let next = output
+        .len()
+        .checked_add(line.len() + 1)
+        .filter(|bytes| *bytes <= MAX_BUNDLE_BYTES)
+        .ok_or_else(|| Error::Run("MCP relay bundle exceeds aggregate bound".into()))?;
+    output.reserve(next - output.len());
+    output.extend(line);
+    output.push(b'\n');
+    Ok(())
+}
+
+fn decode_bundle(bytes: &[u8]) -> Result<Bundle, Error> {
+    if bytes.len() > MAX_BUNDLE_BYTES {
+        return Err(Error::Run(
+            "MCP relay bundle exceeds aggregate bound".into(),
+        ));
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| Error::Run("MCP relay bundle is not UTF-8 JSONL".into()))?;
+    let mut records = text.lines();
+    match records.next().map(decode_bundle_record).transpose()? {
+        Some(BundleRecord::Header { schema_version })
+            if schema_version == BUNDLE_SCHEMA_VERSION => {}
+        _ => return Err(Error::Run("MCP relay bundle header is invalid".into())),
+    }
+    let mut transcript = mcp_transcript::Transcript::default();
+    let mut payloads = BTreeMap::new();
+    let mut payload_bytes = 0u64;
+    for line in records {
+        match decode_bundle_record(line)? {
+            BundleRecord::Event {
+                schema_version,
+                event,
+            } if schema_version == BUNDLE_SCHEMA_VERSION => transcript.append(event)?,
+            BundleRecord::Payload {
+                schema_version,
+                blob,
+                payload,
+            } if schema_version == BUNDLE_SCHEMA_VERSION => {
+                let payload = payload.into_bytes();
+                if mcp_transcript::payload_ref(&payload) != blob
+                    || payload_bytes
+                        .checked_add(blob.bytes)
+                        .filter(|total| *total <= MAX_PAYLOAD_BYTES)
+                        .is_none()
+                    || payloads.insert(blob.sha256.clone(), payload).is_some()
+                {
+                    return Err(Error::Run("MCP relay bundle payload is invalid".into()));
+                }
+                payload_bytes += blob.bytes;
+            }
+            _ => return Err(Error::Run("MCP relay bundle record is invalid".into())),
+        }
+    }
+    let expected = transcript
+        .events()
+        .iter()
+        .map(|event| event.message.sha256.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    if payloads.len() != expected.len() || !payloads.keys().cloned().eq(expected) {
+        return Err(Error::Run(
+            "MCP relay bundle payloads do not match its transcript".into(),
+        ));
+    }
+    Ok(Bundle {
+        transcript,
+        payloads,
+    })
+}
+
+fn decode_bundle_record(line: &str) -> Result<BundleRecord, Error> {
+    serde_json::from_str(line)
+        .map_err(|_| Error::Run("MCP relay bundle record is malformed".into()))
+}
+
+fn reserve_stage(parent: &Path, name: &str) -> Result<PathBuf, Error> {
+    for attempt in 0..128_u16 {
+        let stage = parent.join(format!(
+            ".{name}.mcp-replay-{0}-{attempt}",
+            std::process::id()
+        ));
+        match fs::create_dir(&stage) {
+            Ok(()) => return Ok(stage),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(crate::io_error(error)),
+        }
+    }
+    Err(Error::Run(
+        "cannot reserve MCP replay recording destination".into(),
+    ))
+}
+
+fn reserve_file(parent: &Path, name: &str, purpose: &str) -> Result<PathBuf, Error> {
+    for attempt in 0..128_u16 {
+        let stage = parent.join(format!(
+            ".{name}.{purpose}-{0}-{attempt}",
+            std::process::id()
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&stage) {
+            Ok(file) => {
+                drop(file);
+                return Ok(stage);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(crate::io_error(error)),
+        }
+    }
+    Err(Error::Run(
+        "cannot reserve MCP relay bundle destination".into(),
+    ))
+}
+
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(crate::io_error)?;
+    file.write_all(bytes).map_err(crate::io_error)?;
+    file.sync_all().map_err(crate::io_error)
+}
+
+fn write_reserved(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(crate::io_error)?;
+    file.write_all(bytes).map_err(crate::io_error)?;
+    file.sync_all().map_err(crate::io_error)
 }
 
 fn replay_messages<R: Read, W: Write>(
@@ -688,7 +1028,7 @@ mod tests {
     fn options_require_a_record_directory_and_direct_program() {
         assert!(options(&[]).is_err());
         assert!(options(&["--record-dir".into(), "out".into()]).is_err());
-        let Options::Record(options) = options(&[
+        let Options::Record(record_options) = options(&[
             "--record-dir".into(),
             "out".into(),
             "--".into(),
@@ -698,9 +1038,37 @@ mod tests {
         .unwrap() else {
             panic!("record arguments must select record mode");
         };
-        assert_eq!(options.record_dir, PathBuf::from("out"));
-        assert_eq!(options.program, OsString::from("server"));
-        assert_eq!(options.args, vec![OsString::from("--flag")]);
+        assert_eq!(record_options.record_dir, PathBuf::from("out"));
+        assert_eq!(record_options.program, OsString::from("server"));
+        assert_eq!(record_options.args, vec![OsString::from("--flag")]);
+
+        let Options::Bundle { directory, output } = options(&[
+            "--bundle-dir".into(),
+            "recording".into(),
+            "--output".into(),
+            "bundle.jsonl".into(),
+        ])
+        .unwrap() else {
+            panic!("bundle arguments must select bundle mode");
+        };
+        assert_eq!(directory, PathBuf::from("recording"));
+        assert_eq!(output, PathBuf::from("bundle.jsonl"));
+
+        let Options::Materialize {
+            bundle,
+            destination,
+        } = options(&[
+            "--materialize-bundle".into(),
+            "bundle.jsonl".into(),
+            "--output".into(),
+            "recording".into(),
+        ])
+        .unwrap()
+        else {
+            panic!("materialize arguments must select materialize mode");
+        };
+        assert_eq!(bundle, PathBuf::from("bundle.jsonl"));
+        assert_eq!(destination, PathBuf::from("recording"));
     }
 
     #[test]
@@ -757,6 +1125,64 @@ mod tests {
             )
             .is_err()
         );
+        let _ = fs::remove_dir_all(record.parent().unwrap());
+    }
+
+    #[test]
+    fn cassette_bundle_round_trips_private_recording_without_an_upstream() {
+        let record = replay_recording("bundle-round-trip");
+        let bundle_path = record.parent().unwrap().join("recording.mcp.jsonl");
+        write_bundle(&record, &bundle_path).unwrap();
+        let bundle = read_bundle(&bundle_path).unwrap();
+        assert!(bundle.starts_with(br#"{"kind":"header","schema_version":1}"#));
+        assert!(bundle.len() < MAX_BUNDLE_BYTES);
+
+        let destination = record.parent().unwrap().join("staged");
+        materialize_bundle(&bundle, &destination).unwrap();
+        validate_recording(&destination).unwrap();
+        let replay = Replayer::load(&destination).unwrap();
+        let mut output = Vec::new();
+        replay_messages(
+            Cursor::new(b"{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/list\"}\n"),
+            &mut output,
+            &replay,
+        )
+        .unwrap();
+        let mut output = BufReader::new(&output[..]);
+        assert_eq!(
+            mcp_framing::read(&mut output, SERVICE)
+                .unwrap()
+                .unwrap()
+                .value["method"],
+            "notifications/progress"
+        );
+        assert_eq!(
+            mcp_framing::read(&mut output, SERVICE)
+                .unwrap()
+                .unwrap()
+                .value["id"],
+            42
+        );
+        let _ = fs::remove_dir_all(record.parent().unwrap());
+    }
+
+    #[test]
+    fn cassette_bundle_rejects_tampering_and_existing_destinations() {
+        let record = replay_recording("bundle-reject");
+        let bundle = bundle_recording(&record).unwrap();
+        let mut tampered = bundle.clone();
+        let position = tampered
+            .windows(b"tools/list".len())
+            .position(|window| window == b"tools/list")
+            .unwrap();
+        tampered[position] = b'x';
+        let destination = record.parent().unwrap().join("tampered");
+        assert!(materialize_bundle(&tampered, &destination).is_err());
+        assert!(!destination.exists());
+
+        let destination = record.parent().unwrap().join("existing");
+        fs::create_dir(&destination).unwrap();
+        assert!(materialize_bundle(&bundle, &destination).is_err());
         let _ = fs::remove_dir_all(record.parent().unwrap());
     }
 }
