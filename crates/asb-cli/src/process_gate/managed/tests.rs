@@ -1,5 +1,6 @@
 use super::*;
 use crate::process_cleanup::test_support;
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -172,6 +173,14 @@ fn actual_gate_writes_opaque_root_lifecycle_to_its_sealed_trace_channel() {
             &crate::agents::native_trace::Operation::ProcessExit,
         ]
     );
+    let root_start = trace.events().first().unwrap();
+    let request = root_start
+        .request
+        .as_ref()
+        .expect("root start binds the requested executable identity");
+    let bytes = std::fs::read("/bin/true").unwrap();
+    assert_eq!(request.bytes, bytes.len() as u64);
+    assert_eq!(request.sha256, format!("{:x}", Sha256::digest(bytes)));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -249,9 +258,19 @@ fn actual_gate_records_causal_forks_without_retaining_descendant_ptrace_custody(
             crate::agents::native_trace::ROOT_PROCESS,
         ))
     );
-    assert!(events.iter().all(|event| event.request.is_none()
-        && event.response.is_none()
-        && event.effects.is_empty()));
+    assert!(events.iter().all(|event| {
+        event.response.is_none()
+            && event.effects.is_empty()
+            && (event.operation == crate::agents::native_trace::Operation::ProcessStart
+                || event.request.is_none())
+    }));
+    assert!(
+        events
+            .iter()
+            .find(|event| event.operation == crate::agents::native_trace::Operation::ProcessStart)
+            .and_then(|event| event.request.as_ref())
+            .is_some()
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

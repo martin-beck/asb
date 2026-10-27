@@ -783,6 +783,14 @@ The actual native child retains PATH lookup under its final environment. A
 collector cannot infer inheritance versus `env_clear` from `Command` getters;
 bare targets without a provable explicit PATH and unsupported byte-level
 identities remain unavailable instead of being guessed from host PATH.
+When lifecycle tracing is enabled, the gate records a compact, opaque identity
+for a directly named regular-file root executable only: its SHA-256 digest and
+byte count, capped at 8 MiB. It records neither paths, arguments, executable
+bytes, output nor host PIDs. A missing, bare-PATH, changing, non-regular or
+oversized executable simply has no identity; it never blocks a live run. This
+is provenance for the later native replay capsule, not executable capture. The
+gate remains lifecycle-only: ASB does not use `LD_PRELOAD`, per-syscall ptrace,
+kernel-wide tracing or a sampling loop for this evidence.
 Before establishing cleanup custody, the private route verifies the original
 gate executable, exact OS-string target framing and initial adapter arguments.
 A changed carrier, replaced prefix or truncation fails without spawning a child
