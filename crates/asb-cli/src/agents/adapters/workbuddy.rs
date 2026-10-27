@@ -246,6 +246,7 @@ mod tests {
                 workspace: &workspace,
                 runtime_dir: &root,
                 run_dir: &root,
+                mcp_servers: &[],
                 tape: Some(crate::agents::TapeContext {
                     mode: crate::tape::Mode::Replay,
                     cassette: &replay,

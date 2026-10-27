@@ -169,6 +169,7 @@ impl<'a> ConfiguredAttempt<'a> {
                 config.agent
             )));
         }
+        validate_mcp_server_capability(config)?;
         let mut discovered_tool_support = None;
         let selected_offer = instrument_phase(
             measurement_session.as_mut(),
@@ -214,6 +215,22 @@ impl<'a> ConfiguredAttempt<'a> {
     ) -> Result<(), Error> {
         ProviderAttempt::start(self, arrival, output, warnings)?.run(arrival, output, warnings)
     }
+}
+
+/// Reject declarations that an adapter would otherwise ignore.  Ordinary MCP
+/// configuration is adapter-owned, so this check deliberately stays separate
+/// from ASB's semantic local-tool replay capability.
+fn validate_mcp_server_capability(config: &BenchmarkConfig) -> Result<(), Error> {
+    if !config.mcp_servers.is_empty()
+        && let Some(adapter) = agents::find(&config.agent)
+        && !adapter.supports_mcp_servers()
+    {
+        return Err(Error::Input(format!(
+            "agent `{}` does not support declared MCP servers yet; choose an adapter with ordinary MCP configuration support",
+            config.agent
+        )));
+    }
+    Ok(())
 }
 
 /// Provider custody is not threaded through a list of unrelated arguments.
@@ -1463,5 +1480,49 @@ impl Publication<'_, '_> {
         } else {
             outcome
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_mcp_server_capability;
+    use crate::benchmark::{BenchmarkConfig, McpServerConfig};
+
+    fn config(agent: &str) -> BenchmarkConfig {
+        BenchmarkConfig {
+            planning: None,
+            agent: agent.into(),
+            workload: "bug-fix".into(),
+            provider: "openrouter".into(),
+            model: "tool-model".into(),
+            concurrency: 1,
+            trial_set: None,
+            trial: None,
+            workspace: "workspace".into(),
+            log_file: "run.log".into(),
+            measurements: None,
+            mcp_servers: vec![McpServerConfig {
+                id: "filesystem".into(),
+                program: "mcp-filesystem".into(),
+                args: vec!["workspace".into()],
+            }],
+        }
+    }
+
+    #[test]
+    fn declared_mcp_servers_fail_before_an_unsupported_adapter_can_ignore_them() {
+        let error = validate_mcp_server_capability(&config("pi"))
+            .expect_err("Pi must not silently ignore an ordinary MCP declaration");
+        assert!(
+            error
+                .to_string()
+                .contains("agent `pi` does not support declared MCP servers yet")
+        );
+    }
+
+    #[test]
+    fn declared_mcp_servers_are_admitted_for_codex() {
+        validate_mcp_server_capability(&config("codex"))
+            .expect("Codex owns ordinary MCP declaration materialization");
     }
 }

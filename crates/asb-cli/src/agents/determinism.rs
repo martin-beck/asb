@@ -188,6 +188,7 @@ mod tests {
             workspace: &root.join("workspace"),
             runtime_dir: &root.join("runtime"),
             run_dir: &root.join("run"),
+            mcp_servers: &[],
             tape: None,
         };
         prepare("fixture", &mut context).unwrap();

@@ -490,6 +490,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         workspace: &workspace,
         runtime_dir: &state_root,
         run_dir: &request.run_dir,
+        mcp_servers: &request.config.mcp_servers,
         tape: request
             .tool_tape_cassette
             .as_deref()

@@ -712,6 +712,7 @@ mod tests {
                 workspace: &workspace,
                 runtime_dir: &root,
                 run_dir: &root,
+                mcp_servers: &[],
                 tape: None,
             },
             TapeContext {
@@ -782,6 +783,7 @@ mod tests {
                 workspace: &workspace,
                 runtime_dir: &root,
                 run_dir: &root,
+                mcp_servers: &[],
                 tape: None,
             },
             TapeContext {

@@ -202,6 +202,7 @@ impl NativePlan<'_> {
                         workspace,
                         runtime_dir: &runtime_path,
                         run_dir: &run_dir,
+                        mcp_servers: &config.mcp_servers,
                         tape: tool_tape_mode
                             .zip(tool_tape_cassette)
                             .map(|(mode, cassette)| agents::TapeContext { mode, cassette }),

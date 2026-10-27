@@ -113,6 +113,7 @@ where
 const MAX_MCP_SERVERS: usize = 4;
 const MAX_MCP_ARGUMENTS: usize = 64;
 const MAX_MCP_IDENTIFIER_BYTES: usize = 64;
+const RESERVED_MCP_SERVER_ID: &str = "asb_tool_replay";
 
 fn deserialize_mcp_servers<'de, D>(deserializer: D) -> Result<Vec<McpServerConfig>, D::Error>
 where
@@ -144,6 +145,11 @@ fn validate_mcp_servers(servers: &[McpServerConfig]) -> Result<(), String> {
             ));
         }
         crate::selection_names::validate(&server.id, "MCP server")?;
+        if server.id == RESERVED_MCP_SERVER_ID {
+            return Err(format!(
+                "MCP server id `{RESERVED_MCP_SERVER_ID}` is reserved for ASB local-tool replay"
+            ));
+        }
         if !names.insert(&server.id) {
             return Err(format!("MCP server id `{}` is duplicated", server.id));
         }
@@ -238,6 +244,7 @@ mod tests {
             "[[mcp_servers]]\nid='filesystem'\nprogram='server'\nunexpected=true\n",
             "[[mcp_servers]]\nid='filesystem'\nprogram='server'\n[[mcp_servers]]\nid='filesystem'\nprogram='other'\n",
             "[[mcp_servers]]\nid='ALL'\nprogram='server'\n",
+            "[[mcp_servers]]\nid='asb_tool_replay'\nprogram='server'\n",
             "[[mcp_servers]]\nid='filesystem'\nprogram=' '\n",
         ] {
             let text = format!(

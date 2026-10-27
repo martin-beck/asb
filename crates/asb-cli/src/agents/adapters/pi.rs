@@ -483,6 +483,7 @@ mod tests {
                 workspace: &workspace,
                 runtime_dir: &root.join("runtime"),
                 run_dir: &run_dir,
+                mcp_servers: &[],
                 tape: None,
             },
             super::super::TapeContext {

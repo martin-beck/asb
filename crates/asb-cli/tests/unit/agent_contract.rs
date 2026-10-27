@@ -74,6 +74,7 @@ fn static_adapter_defaults_are_empty_and_preparation_command_hooks_are_called() 
             workspace: Path::new("not-created"),
             runtime_dir: Path::new("not-created"),
             run_dir: Path::new("not-created"),
+            mcp_servers: &[],
             tape: None,
         })
         .unwrap();
@@ -243,6 +244,7 @@ fn unknown_preparation_does_not_mutate_command_or_create_directories() {
             workspace: Path::new("not-created"),
             runtime_dir: Path::new("not-created"),
             run_dir: Path::new("not-created"),
+            mcp_servers: &[],
             tape: None,
         },
     )
