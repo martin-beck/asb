@@ -176,7 +176,7 @@ fn actual_gate_writes_opaque_root_lifecycle_to_its_sealed_trace_channel() {
 }
 
 #[test]
-fn actual_gate_records_fork_exec_and_exit_with_trace_local_identities() {
+fn actual_gate_records_causal_forks_without_retaining_descendant_ptrace_custody() {
     let root = root().join(format!(
         "native-trace-tree-{}-{}",
         std::process::id(),
@@ -230,13 +230,17 @@ fn actual_gate_records_fork_exec_and_exit_with_trace_local_identities() {
         Some(crate::agents::native_trace::ROOT_PROCESS)
     );
     assert_ne!(fork.process, crate::agents::native_trace::ROOT_PROCESS);
-    assert!(events.iter().any(|event| {
+    // The lifecycle backend records the causal fork then immediately detaches
+    // the child. Retaining arbitrary helper descendants under ptrace changes
+    // their stdio/MCP shutdown behavior; later capsule tracing owns detailed
+    // descendant syscall and exit capture without that interference.
+    assert!(!events.iter().any(|event| {
         event.process == fork.process
-            && event.operation == crate::agents::native_trace::Operation::ProcessExec
-    }));
-    assert!(events.iter().any(|event| {
-        event.process == fork.process
-            && event.operation == crate::agents::native_trace::Operation::ProcessExit
+            && matches!(
+                event.operation,
+                crate::agents::native_trace::Operation::ProcessExec
+                    | crate::agents::native_trace::Operation::ProcessExit
+            )
     }));
     assert_eq!(
         events.last().map(|event| (&event.operation, event.process)),
