@@ -220,6 +220,16 @@ fn signal_and_reap_owned_child(pid: u32, signal: Option<i32>) -> io::Result<()> 
     if result < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ECHILD) {
         return Err(io::Error::last_os_error());
     }
+    // A lifecycle ptrace handoff can leave an exited direct child waitable by
+    // its original parent even after the pidfd wait path has observed it.
+    // The preceding pidfd + WNOWAIT ownership proof pins this exact child, so
+    // this numeric wait cannot target a reused PID.  Reap that residual zombie
+    // before the supervisor's child-list loop decides it must stay alive.
+    let mut status = 0;
+    let reaped = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+    if reaped < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ECHILD) {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 
