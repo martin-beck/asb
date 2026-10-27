@@ -124,7 +124,7 @@ fn actual_observation_distinguishes_codes_from_signals_without_interruption() {
 }
 
 #[test]
-fn actual_gate_writes_only_opaque_root_lifecycle_to_its_sealed_trace_channel() {
+fn actual_gate_writes_opaque_root_lifecycle_to_its_sealed_trace_channel() {
     let root = root().join(format!(
         "native-trace-{}-{}",
         std::process::id(),
@@ -153,7 +153,7 @@ fn actual_gate_writes_only_opaque_root_lifecycle_to_its_sealed_trace_channel() {
         &std::fs::read(root.join("native-trace/native-trace.jsonl")).unwrap(),
     )
     .unwrap();
-    assert_eq!(trace.events().len(), 2);
+    assert_eq!(trace.events().len(), 3);
     assert!(
         trace
             .events()
@@ -168,9 +168,86 @@ fn actual_gate_writes_only_opaque_root_lifecycle_to_its_sealed_trace_channel() {
             .collect::<Vec<_>>(),
         vec![
             &crate::agents::native_trace::Operation::ProcessStart,
+            &crate::agents::native_trace::Operation::ProcessExec,
             &crate::agents::native_trace::Operation::ProcessExit,
         ]
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn actual_gate_records_fork_exec_and_exit_with_trace_local_identities() {
+    let root = root().join(format!(
+        "native-trace-tree-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("native-trace")).unwrap();
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    // This intentionally uses an external program instead of a shell builtin:
+    // it must create a child and exec it while the gate is the sole tracer.
+    let (mut command, route) = command(
+        &binary,
+        "/bin/sh",
+        &["-c".into(), "/bin/sleep 0.05 & wait".into()],
+    );
+    let _channel = crate::agents::native_trace::prepare_gate_channel(&mut command, &root).unwrap();
+    let mut gate = Admission::new(route.validate_gate(&mut command).unwrap())
+        .unwrap()
+        .spawn()
+        .unwrap();
+    gate.resume().unwrap();
+    assert!(gate.wait().unwrap().success());
+    let trace = crate::agents::native_trace::Transcript::decode(
+        &std::fs::read(root.join("native-trace/native-trace.jsonl")).unwrap(),
+    )
+    .unwrap();
+    let events = trace.events();
+    assert_eq!(
+        events
+            .first()
+            .map(|event| (&event.operation, event.process)),
+        Some((
+            &crate::agents::native_trace::Operation::ProcessStart,
+            crate::agents::native_trace::ROOT_PROCESS,
+        ))
+    );
+    let fork = events
+        .iter()
+        .find(|event| event.operation == crate::agents::native_trace::Operation::ProcessFork)
+        .unwrap_or_else(|| panic!("external shell command must fork: {events:#?}"));
+    assert_eq!(
+        fork.parent_process,
+        Some(crate::agents::native_trace::ROOT_PROCESS)
+    );
+    assert_ne!(fork.process, crate::agents::native_trace::ROOT_PROCESS);
+    assert!(events.iter().any(|event| {
+        event.process == fork.process
+            && event.operation == crate::agents::native_trace::Operation::ProcessExec
+    }));
+    assert!(events.iter().any(|event| {
+        event.process == fork.process
+            && event.operation == crate::agents::native_trace::Operation::ProcessExit
+    }));
+    assert_eq!(
+        events.last().map(|event| (&event.operation, event.process)),
+        Some((
+            &crate::agents::native_trace::Operation::ProcessExit,
+            crate::agents::native_trace::ROOT_PROCESS,
+        ))
+    );
+    assert!(events.iter().all(|event| event.request.is_none()
+        && event.response.is_none()
+        && event.effects.is_empty()));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -226,7 +303,7 @@ fn actual_gate_appends_after_a_deterministic_host_trace_event() {
         &std::fs::read(trace_directory.join("native-trace.jsonl")).unwrap(),
     )
     .unwrap();
-    assert_eq!(trace.events().len(), 3);
+    assert_eq!(trace.events().len(), 4);
     assert_eq!(
         trace
             .events()
@@ -236,6 +313,7 @@ fn actual_gate_appends_after_a_deterministic_host_trace_event() {
         vec![
             &crate::agents::native_trace::Operation::Host,
             &crate::agents::native_trace::Operation::ProcessStart,
+            &crate::agents::native_trace::Operation::ProcessExec,
             &crate::agents::native_trace::Operation::ProcessExit,
         ]
     );
