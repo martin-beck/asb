@@ -386,6 +386,17 @@ fn stage_native_trace(
     let Some(trace) = &input.native_trace else {
         return Ok(());
     };
+    // A native trace is optional for compatibility with provider-only
+    // recordings, but a selected trace must be a valid bounded index before
+    // the replayed agent can start.  The linked sidecar remains byte-for-byte
+    // identical to the sealed bundle artifact; validation never rewrites
+    // recorded evidence.
+    let bytes = fs::read(root.join(trace)).map_err(crate::io_error)?;
+    crate::agents::native_trace::canonicalize(&bytes).map_err(|error| {
+        Error::Input(format!(
+            "selected native replay trace is invalid; record the benchmark again before replaying it ({error})"
+        ))
+    })?;
     let destination = replay_sidecar(destination, "native-trace", "jsonl")?;
     fs::hard_link(root.join(trace), destination).map_err(crate::io_error)
 }
@@ -593,7 +604,10 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("inputs")).unwrap();
         fs::create_dir_all(root.join("batch")).unwrap();
-        fs::write(root.join("inputs/native-trace-7.jsonl"), b"{}\n").unwrap();
+        let trace = crate::agents::native_trace::Transcript::default()
+            .encode()
+            .unwrap();
+        fs::write(root.join("inputs/native-trace-7.jsonl"), &trace).unwrap();
         let input = ReplayInput {
             complete: Some(true),
             track: Some(7),
@@ -615,8 +629,37 @@ mod tests {
         .unwrap();
         assert_eq!(
             fs::read(root.join("batch/native-trace-concurrency-3.jsonl")).unwrap(),
-            b"{}\n"
+            trace
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn malformed_native_trace_stops_replay_before_linking_a_sidecar() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-replay-malformed-native-trace-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("inputs")).unwrap();
+        fs::create_dir_all(root.join("batch")).unwrap();
+        fs::write(root.join("inputs/native-trace-7.jsonl"), b"{}\n").unwrap();
+        let input = ReplayInput {
+            complete: Some(true),
+            track: Some(7),
+            source: PathBuf::from("sealed.asb.zip"),
+            private: PathBuf::from("inputs/track-7.jsonl"),
+            local_tools: None,
+            deterministic_manifest: None,
+            native_trace: Some(PathBuf::from("inputs/native-trace-7.jsonl")),
+            bytes: 2,
+            sha256: "a".repeat(64),
+        };
+        let error = stage_native_trace(&root, &input, &root.join("batch/replay.jsonl"), 1, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("selected native replay trace is invalid"));
+        assert!(!root.join("batch/native-trace.jsonl").exists());
         let _ = fs::remove_dir_all(root);
     }
 }
