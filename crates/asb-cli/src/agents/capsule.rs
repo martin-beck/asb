@@ -164,6 +164,28 @@ impl Manifest {
         self.removed = effects.removed;
         validate(self)
     }
+
+    /// Apply the declared final state after normal replay execution. This is
+    /// intentionally separate from `stage_base`: no recorded effect is made
+    /// visible to the agent before it runs.
+    pub(crate) fn apply_effects(&self, objects: &Path, workspace: &Path) -> Result<(), Error> {
+        validate(self)?;
+        ensure_workspace(workspace)?;
+        let mut removed = self.removed.clone();
+        removed.sort_by_key(|path| std::cmp::Reverse(Path::new(path).components().count()));
+        for path in removed {
+            remove_path(workspace, &path)?;
+        }
+        let mut directories = self.effect_directories.clone();
+        directories.sort_by_key(|directory| Path::new(&directory.path).components().count());
+        for directory in directories {
+            apply_directory(workspace, &directory)?;
+        }
+        for entry in &self.effects {
+            replace_object(objects, entry, workspace)?;
+        }
+        Ok(())
+    }
 }
 
 /// Reject non-canonical/private-unsafe manifest data before a capsule enters a
@@ -320,6 +342,74 @@ pub(crate) fn stage_object(objects: &Path, entry: &Entry, workspace: &Path) -> R
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&target, fs::Permissions::from_mode(entry.mode))
+            .map_err(crate::io_error)?;
+    }
+    Ok(())
+}
+
+fn replace_object(objects: &Path, entry: &Entry, workspace: &Path) -> Result<(), Error> {
+    let mut paths = BTreeSet::new();
+    valid_entry(entry, &mut paths)?;
+    let bytes = read_object(&objects.join(&entry.object.sha256))
+        .map_err(|_| Error::Run("native capsule object is unavailable".into()))?;
+    if payload(&bytes) != entry.object {
+        return Err(Error::Run(
+            "native capsule object differs from manifest".into(),
+        ));
+    }
+    create_parent_directories(workspace, Path::new(&entry.path))?;
+    let target = workspace.join(&entry.path);
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(Error::Run("native capsule effect target is unsafe".into())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return stage_object(objects, entry, workspace);
+        }
+        Err(error) => return Err(crate::io_error(error)),
+    }
+    let mut file = open_write_truncate_no_follow(&target).map_err(crate::io_error)?;
+    file.write_all(&bytes).map_err(crate::io_error)?;
+    file.sync_all().map_err(crate::io_error)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&target, fs::Permissions::from_mode(entry.mode))
+            .map_err(crate::io_error)?;
+    }
+    Ok(())
+}
+
+fn remove_path(workspace: &Path, relative: &str) -> Result<(), Error> {
+    let mut paths = BTreeSet::new();
+    valid_path(relative, &mut paths)?;
+    let target = workspace.join(relative);
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir_all(&target).map_err(crate::io_error)
+        }
+        Ok(_) => fs::remove_file(&target).map_err(crate::io_error),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(crate::io_error(error)),
+    }
+}
+
+fn apply_directory(workspace: &Path, directory: &Directory) -> Result<(), Error> {
+    let mut paths = BTreeSet::new();
+    valid_directory(directory, &mut paths)?;
+    create_parent_directories(workspace, Path::new(&directory.path))?;
+    let target = workspace.join(&directory.path);
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(Error::Run("native capsule effect target is unsafe".into())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&target).map_err(crate::io_error)?;
+        }
+        Err(error) => return Err(crate::io_error(error)),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&target, fs::Permissions::from_mode(directory.mode))
             .map_err(crate::io_error)?;
     }
     Ok(())
@@ -568,6 +658,17 @@ fn file_mode(metadata: &fs::Metadata) -> u32 {
 fn open_read_no_follow(path: &Path) -> std::io::Result<fs::File> {
     let mut options = OpenOptions::new();
     options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+fn open_write_truncate_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).truncate(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -958,6 +1059,63 @@ mod tests {
             files: Vec::new(),
         };
         assert!(diff_snapshots(&base, &final_snapshot).is_err());
+    }
+
+    #[test]
+    fn manifest_applies_declared_effects_only_after_base_staging() {
+        let root = test_root("apply-effects");
+        let source = root.0.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("changed.txt"), b"before").unwrap();
+        fs::write(source.join("removed.txt"), b"remove").unwrap();
+        let objects = root.0.join("objects");
+        let mut manifest = Manifest::from_snapshot(None, capture_tree(&objects, &source).unwrap());
+        fs::write(source.join("changed.txt"), b"after").unwrap();
+        fs::remove_file(source.join("removed.txt")).unwrap();
+        fs::create_dir(source.join("created")).unwrap();
+        fs::write(source.join("created/output.txt"), b"output").unwrap();
+        manifest
+            .set_effects(&capture_tree(&objects, &source).unwrap())
+            .unwrap();
+
+        let workspace = root.0.join("workspace");
+        manifest.stage_base(&objects, &workspace).unwrap();
+        assert_eq!(fs::read(workspace.join("changed.txt")).unwrap(), b"before");
+        assert!(workspace.join("removed.txt").exists());
+        assert!(!workspace.join("created/output.txt").exists());
+
+        manifest.apply_effects(&objects, &workspace).unwrap();
+        assert_eq!(fs::read(workspace.join("changed.txt")).unwrap(), b"after");
+        assert!(!workspace.join("removed.txt").exists());
+        assert_eq!(
+            fs::read(workspace.join("created/output.txt")).unwrap(),
+            b"output"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effect_application_refuses_a_replaced_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("effect-symlink");
+        let source = root.0.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("input.txt"), b"before").unwrap();
+        let objects = root.0.join("objects");
+        let mut manifest = Manifest::from_snapshot(None, capture_tree(&objects, &source).unwrap());
+        fs::write(source.join("input.txt"), b"after").unwrap();
+        manifest
+            .set_effects(&capture_tree(&objects, &source).unwrap())
+            .unwrap();
+        let workspace = root.0.join("workspace");
+        manifest.stage_base(&objects, &workspace).unwrap();
+        let outside = root.0.join("outside.txt");
+        fs::write(&outside, b"outside").unwrap();
+        fs::remove_file(workspace.join("input.txt")).unwrap();
+        symlink(&outside, workspace.join("input.txt")).unwrap();
+        assert!(manifest.apply_effects(&objects, &workspace).is_err());
+        assert_eq!(fs::read(outside).unwrap(), b"outside");
     }
 
     #[test]
