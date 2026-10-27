@@ -218,10 +218,6 @@ impl GateWriter {
         Ok(Some(Self { file, events }))
     }
 
-    pub(crate) fn record(&mut self, operation: Operation) -> Result<(), Error> {
-        self.record_event(ROOT_PROCESS, operation, None)
-    }
-
     /// Append one opaque process-tree event.  Host PID mapping stays entirely
     /// inside the gate; only trace-local IDs are allowed into the sidecar.
     pub(crate) fn record_event(

@@ -4,7 +4,12 @@
 
 use std::ffi::OsString;
 use std::io;
+#[cfg(target_os = "linux")]
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::process::Command;
+
+#[cfg(target_os = "linux")]
+const TRACE_READY_FD: &str = "ASB_NATIVE_TRACE_READY_FD";
 
 #[cfg(target_os = "linux")]
 mod control;
@@ -217,22 +222,29 @@ pub(crate) fn run_gate(args: &[OsString]) -> std::process::ExitCode {
                 "native gate owner exited before client execution",
             ));
         }
-        let mut child = target_command(program, target_args, arg0).spawn()?;
-        if let Some(trace) = trace.as_mut() {
-            trace
-                .record(crate::agents::native_trace::Operation::ProcessStart)
-                .map_err(|error| io::Error::other(error.to_string()))?;
-        }
-        let status = owner.wait(&mut child, control.as_mut())?;
-        if let Some(trace) = trace.as_mut() {
-            trace
-                .record(crate::agents::native_trace::Operation::ProcessExit)
-                .map_err(|error| io::Error::other(error.to_string()))?;
-        }
+        let mut command = target_command(program, target_args, arg0, trace.is_some())?;
+        let trace_ready = trace
+            .is_some()
+            .then(|| prepare_trace_readiness(&mut command))
+            .transpose()?;
+        let mut child = command.spawn()?;
+        let status = if let Some(trace) = trace.as_mut() {
+            owner.wait_traced(
+                &mut child,
+                control.as_mut(),
+                trace,
+                trace_ready
+                    .as_ref()
+                    .expect("trace channel requires readiness"),
+            )?
+        } else {
+            owner.wait(&mut child, control.as_mut())?
+        };
         Ok(status)
     })();
     #[cfg(not(target_os = "linux"))]
-    let status = target_command(program, target_args, arg0).status();
+    let status =
+        target_command(program, target_args, arg0, false).and_then(|mut command| command.status());
     #[cfg(target_os = "linux")]
     owner.stop_waker();
     #[cfg(target_os = "linux")]
@@ -270,7 +282,28 @@ fn target_command(
     program: &std::ffi::OsStr,
     args: &[OsString],
     arg0: Option<&OsString>,
-) -> Command {
+    trace_lifecycle: bool,
+) -> io::Result<Command> {
+    #[cfg(target_os = "linux")]
+    if trace_lifecycle {
+        // The launcher stops before it can execute any client instruction.
+        // That lets the gate seize this exact root with lifecycle options and
+        // avoids a post-exec race or a per-syscall ptrace mode.
+        let mut command = Command::new(executable()?);
+        command
+            .arg("__asb-native-trace-launch")
+            .arg(crate::launch::FORMAT);
+        match arg0 {
+            Some(arg0) => {
+                command.arg("1").arg(arg0);
+            }
+            None => {
+                command.arg("0");
+            }
+        }
+        command.arg(program).args(args);
+        return Ok(command);
+    }
     let mut launch = crate::launch::ProcessLaunch::new(program);
     for arg in args {
         launch.arg(arg);
@@ -278,7 +311,108 @@ fn target_command(
     if let Some(arg0) = arg0 {
         launch.arg0(arg0);
     }
-    launch.direct()
+    #[cfg(not(target_os = "linux"))]
+    let _ = trace_lifecycle;
+    Ok(launch.direct())
+}
+
+/// Stop before replacing this small ASB launcher with the actual client.
+///
+/// This is an execution-order handshake, not a sandbox or policy boundary:
+/// the client receives its original argv, environment and descriptors after
+/// the gate has attached its lifecycle-only tracer.
+#[cfg(unix)]
+pub(crate) fn trace_launch(args: &[OsString]) -> std::process::ExitCode {
+    use std::os::unix::process::CommandExt;
+
+    let (args, arg0) = if args
+        .first()
+        .is_some_and(|value| value == crate::launch::FORMAT)
+    {
+        match args.get(1).and_then(|value| value.to_str()) {
+            Some("0") => (&args[2..], None),
+            Some("1") if args.len() >= 4 => (&args[3..], Some(&args[2])),
+            _ => return std::process::ExitCode::from(2),
+        }
+    } else {
+        return std::process::ExitCode::from(2);
+    };
+    let Some((program, target_args)) = args.split_first() else {
+        return std::process::ExitCode::from(2);
+    };
+    #[cfg(target_os = "linux")]
+    if !wait_for_trace_attachment() {
+        return std::process::ExitCode::from(2);
+    }
+    let mut launch = crate::launch::ProcessLaunch::new(program);
+    for arg in target_args {
+        launch.arg(arg);
+    }
+    if let Some(arg0) = arg0 {
+        launch.arg0(arg0);
+    }
+    let error = launch.direct().exec();
+    eprintln!("asb native trace launcher could not execute client: {error}");
+    std::process::ExitCode::from(127)
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_trace_readiness(command: &mut Command) -> io::Result<OwnedFd> {
+    use std::os::unix::process::CommandExt;
+
+    let descriptor = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let ready = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    command.env(TRACE_READY_FD, descriptor.to_string());
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(descriptor, libc::F_GETFD);
+            if flags < 0 || libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(ready)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_trace_attachment() -> bool {
+    let Some(value) = std::env::var_os(TRACE_READY_FD) else {
+        return false;
+    };
+    unsafe { std::env::remove_var(TRACE_READY_FD) };
+    let Some(descriptor) = value
+        .to_str()
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|descriptor| *descriptor >= 3)
+    else {
+        return false;
+    };
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+    if flags < 0 || unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+    {
+        return false;
+    }
+    let mut value = 0_u64;
+    loop {
+        let result = unsafe {
+            libc::read(
+                descriptor,
+                (&mut value as *mut u64).cast::<libc::c_void>(),
+                std::mem::size_of_val(&value),
+            )
+        };
+        if result == std::mem::size_of_val(&value) as isize {
+            return value == 1;
+        }
+        if result < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        return false;
+    }
 }
 
 /// Keep descendants that daemonize or outlive an intermediate helper attached
