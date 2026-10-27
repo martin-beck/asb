@@ -18,13 +18,20 @@ pub(crate) enum Framing {
     ContentLength,
 }
 
+/// A validated JSON message retaining its original bounded JSON bytes. A relay
+/// forwards `bytes` directly so whitespace/key ordering are not changed merely
+/// because ASB observed the message.
+#[derive(Clone, Debug)]
+pub(crate) struct Message {
+    pub value: Value,
+    pub bytes: Vec<u8>,
+    pub framing: Framing,
+}
+
 /// Read one complete bounded JSON message, retaining the client's framing for
 /// its corresponding response. `service` only scopes diagnostics; it is never
 /// retained in a recording.
-pub(crate) fn read(
-    input: &mut impl BufRead,
-    service: &str,
-) -> Result<Option<(Value, Framing)>, Error> {
+pub(crate) fn read(input: &mut impl BufRead, service: &str) -> Result<Option<Message>, Error> {
     let mut first = String::new();
     let read = input.read_line(&mut first).map_err(crate::io_error)?;
     if read == 0 {
@@ -37,8 +44,15 @@ pub(crate) fn read(
     if !first.eq_ignore_ascii_case("content-length:")
         && !first.to_ascii_lowercase().starts_with("content-length:")
     {
-        return serde_json::from_str(first)
-            .map(|request| Some((request, Framing::JsonLines)))
+        let bytes = first.as_bytes().to_vec();
+        return serde_json::from_slice(&bytes)
+            .map(|value| {
+                Some(Message {
+                    value,
+                    bytes,
+                    framing: Framing::JsonLines,
+                })
+            })
             .map_err(|_| Error::Run(format!("{service} request is malformed")));
     }
     let length = first
@@ -62,24 +76,39 @@ pub(crate) fn read(
     let mut body = vec![0; length];
     input.read_exact(&mut body).map_err(crate::io_error)?;
     serde_json::from_slice(&body)
-        .map(|request| Some((request, Framing::ContentLength)))
+        .map(|value| {
+            Some(Message {
+                value,
+                bytes: body,
+                framing: Framing::ContentLength,
+            })
+        })
         .map_err(|_| Error::Run(format!("{service} request is malformed")))
 }
 
 /// Encode one JSON response with the framing selected by its request.
 pub(crate) fn write(
-    output: &mut impl Write,
+    output: &mut (impl Write + ?Sized),
     response: &Value,
     framing: Framing,
     service: &str,
 ) -> Result<(), Error> {
     let bytes = serde_json::to_vec(response)
         .map_err(|_| Error::Run(format!("cannot encode {service} response")))?;
+    write_bytes(output, &bytes, framing)
+}
+
+/// Forward already validated JSON bytes without changing their representation.
+pub(crate) fn write_bytes(
+    output: &mut (impl Write + ?Sized),
+    bytes: &[u8],
+    framing: Framing,
+) -> Result<(), Error> {
     match framing {
-        Framing::JsonLines => output.write_all(&bytes).map_err(crate::io_error)?,
+        Framing::JsonLines => output.write_all(bytes).map_err(crate::io_error)?,
         Framing::ContentLength => {
             write!(output, "Content-Length: {}\r\n\r\n", bytes.len()).map_err(crate::io_error)?;
-            output.write_all(&bytes).map_err(crate::io_error)?;
+            output.write_all(bytes).map_err(crate::io_error)?;
         }
     }
     if framing == Framing::JsonLines {
@@ -103,17 +132,17 @@ mod tests {
             body.to_vec(),
         ]
         .concat();
-        let (request, framing) = read(&mut BufReader::new(&request[..]), SERVICE)
+        let request = read(&mut BufReader::new(&request[..]), SERVICE)
             .unwrap()
             .unwrap();
-        assert_eq!(framing, Framing::ContentLength);
-        assert_eq!(request["method"], "initialize");
+        assert_eq!(request.framing, Framing::ContentLength);
+        assert_eq!(request.value["method"], "initialize");
 
         let mut output = Vec::new();
         write(
             &mut output,
             &serde_json::json!({"jsonrpc":"2.0","id":7,"result":{}}),
-            framing,
+            request.framing,
             SERVICE,
         )
         .unwrap();
@@ -130,17 +159,34 @@ mod tests {
 
     #[test]
     fn json_lines_round_trip() {
-        let (request, framing) = read(
+        let request = read(
             &mut BufReader::new(&b"{\"jsonrpc\":\"2.0\",\"id\":1}\n"[..]),
             SERVICE,
         )
         .unwrap()
         .unwrap();
-        assert_eq!(framing, Framing::JsonLines);
-        assert_eq!(request["id"], 1);
+        assert_eq!(request.framing, Framing::JsonLines);
+        assert_eq!(request.value["id"], 1);
         let mut output = Vec::new();
-        write(&mut output, &serde_json::json!({"id":1}), framing, SERVICE).unwrap();
+        write(
+            &mut output,
+            &serde_json::json!({"id":1}),
+            request.framing,
+            SERVICE,
+        )
+        .unwrap();
         assert_eq!(&output, b"{\"id\":1}\n");
+    }
+
+    #[test]
+    fn forwards_original_validated_json_bytes() {
+        let raw = b"{ \"jsonrpc\" : \"2.0\", \"id\" : 1 }\n";
+        let message = read(&mut BufReader::new(&raw[..]), SERVICE)
+            .unwrap()
+            .unwrap();
+        let mut output = Vec::new();
+        write_bytes(&mut output, &message.bytes, message.framing).unwrap();
+        assert_eq!(&output, raw);
     }
 
     #[test]

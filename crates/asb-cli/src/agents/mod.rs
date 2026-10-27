@@ -7,9 +7,7 @@ mod adapters;
 mod artifacts;
 pub(crate) mod determinism;
 pub(crate) mod mcp_framing;
-// The next delivery step consumes this bounded contract in the generic relay.
-// Keeping it private prevents an unfinished wire format from becoming public.
-#[allow(dead_code, reason = "the MCP relay is delivered in the following PR")]
+pub(crate) mod mcp_relay;
 pub(crate) mod mcp_transcript;
 pub(crate) mod native_trace;
 pub(crate) mod tool_replay;
