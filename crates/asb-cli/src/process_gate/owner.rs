@@ -390,6 +390,17 @@ impl Owner {
                 release_trace_launcher(ready)?;
                 continue;
             }
+            // The kernel reports the first stop of an inherited tracee with
+            // architecture- and timing-dependent encodings (SIGSTOP,
+            // PTRACE_EVENT_STOP, or a plain SIGTRAP). The lightweight
+            // lifecycle backend intentionally records only the causal fork,
+            // so detach at that first stop before interpreting an event or
+            // forwarding any internal signal to the helper.
+            if state.newborn.remove(&pid) {
+                ptrace_detach(pid)?;
+                state.tracees.remove(&pid);
+                continue;
+            }
             match event {
                 libc::PTRACE_EVENT_FORK | libc::PTRACE_EVENT_VFORK | libc::PTRACE_EVENT_CLONE => {
                     let child = ptrace_event_pid(pid)?;
@@ -428,17 +439,6 @@ impl Owner {
                         )?;
                     }
                     ptrace_continue(pid, 0)?;
-                }
-                _ if state.newborn.remove(&pid)
-                    && (signal == libc::SIGSTOP || event == libc::PTRACE_EVENT_STOP) =>
-                {
-                    // This lightweight backend records the causal fork, then
-                    // releases the newborn. Holding arbitrary nested helper
-                    // processes under ptrace can alter their stdio/MCP
-                    // lifecycle; a later capsule backend owns descendant
-                    // syscall and exit replay without that interference.
-                    ptrace_detach(pid)?;
-                    state.tracees.remove(&pid);
                 }
                 _ => ptrace_continue(pid, signal)?,
             }
