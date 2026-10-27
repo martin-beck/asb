@@ -226,6 +226,20 @@ impl GateWriter {
         operation: Operation,
         parent_process: Option<u64>,
     ) -> Result<(), Error> {
+        self.record_event_with_request(process, operation, parent_process, None)
+    }
+
+    /// Append an opaque operation whose request has a bounded, private content
+    /// reference.  The reference identifies content without putting an
+    /// executable path, command line, prompt, credential, or payload in the
+    /// durable trace index.
+    pub(crate) fn record_event_with_request(
+        &mut self,
+        process: u64,
+        operation: Operation,
+        parent_process: Option<u64>,
+        request: Option<Blob>,
+    ) -> Result<(), Error> {
         let sequence = self.events as u64 + 1;
         let event = Event {
             schema_version: SCHEMA_VERSION,
@@ -233,7 +247,7 @@ impl GateWriter {
             process,
             operation,
             parent_process,
-            request: None,
+            request,
             response: None,
             effects: Vec::new(),
         };

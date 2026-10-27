@@ -235,6 +235,7 @@ impl Owner {
         mut control: Option<&mut super::control::ChildControl>,
         trace: &mut crate::agents::native_trace::GateWriter,
         ready: &OwnedFd,
+        root_executable: Option<crate::agents::native_trace::Blob>,
     ) -> io::Result<std::process::ExitStatus> {
         let root = child.id() as libc::pid_t;
         attach_lifecycle_trace(root)?;
@@ -263,15 +264,15 @@ impl Owner {
         ];
         loop {
             if self.cancelled()? {
-                let _ = self.abort_tracees(&mut state, trace, ready);
+                let _ = self.abort_tracees(&mut state, trace, ready, &root_executable);
                 return Err(io::Error::other(
                     "native gate execution cancelled or owner exited",
                 ));
             }
-            let next = match self.take_trace_events(&mut state, trace, ready) {
+            let next = match self.take_trace_events(&mut state, trace, ready, &root_executable) {
                 Ok(next) => next,
                 Err(error) => {
-                    let _ = self.abort_tracees(&mut state, trace, ready);
+                    let _ = self.abort_tracees(&mut state, trace, ready, &root_executable);
                     return Err(error);
                 }
             };
@@ -320,6 +321,7 @@ impl Owner {
         state: &mut TraceState,
         trace: &mut crate::agents::native_trace::GateWriter,
         ready: &OwnedFd,
+        root_executable: &Option<crate::agents::native_trace::Blob>,
     ) -> io::Result<Option<std::process::ExitStatus>> {
         loop {
             if state.tracees.is_empty() {
@@ -379,11 +381,12 @@ impl Owner {
             let event = status >> 16;
             if !state.started && pid == state.root && signal == libc::SIGSTOP && event == 0 {
                 set_lifecycle_options(pid)?;
-                record(
+                record_with_request(
                     trace,
                     process,
                     crate::agents::native_trace::Operation::ProcessStart,
                     None,
+                    root_executable.clone(),
                 )?;
                 state.started = true;
                 ptrace_continue(pid, 0)?;
@@ -477,6 +480,7 @@ impl Owner {
         state: &mut TraceState,
         trace: &mut crate::agents::native_trace::GateWriter,
         ready: &OwnedFd,
+        root_executable: &Option<crate::agents::native_trace::Blob>,
     ) -> io::Result<()> {
         for pid in state.tracees.keys().copied() {
             // SIGKILL is not a replay policy decision: the gate itself is
@@ -487,7 +491,10 @@ impl Owner {
             }
         }
         while !state.tracees.is_empty() {
-            if self.take_trace_events(state, trace, ready)?.is_some() {
+            if self
+                .take_trace_events(state, trace, ready, root_executable)?
+                .is_some()
+            {
                 break;
             }
             let mut descriptor = libc::pollfd {
@@ -634,6 +641,18 @@ fn record(
 ) -> io::Result<()> {
     trace
         .record_event(process, operation, parent_process)
+        .map_err(|error| io::Error::other(error.to_string()))
+}
+
+fn record_with_request(
+    trace: &mut crate::agents::native_trace::GateWriter,
+    process: u64,
+    operation: crate::agents::native_trace::Operation,
+    parent_process: Option<u64>,
+    request: Option<crate::agents::native_trace::Blob>,
+) -> io::Result<()> {
+    trace
+        .record_event_with_request(process, operation, parent_process, request)
         .map_err(|error| io::Error::other(error.to_string()))
 }
 
