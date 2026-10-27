@@ -1166,6 +1166,7 @@ impl ResultFacts {
             .as_ref()
             .and_then(|metadata| metadata.native_trace.clone())
             .or(adapter_artifacts.native_trace.clone());
+        let sealed_artifacts = adapter_artifacts.sealed_artifacts.clone();
         let mut stderr = bounded(&child.stderr);
         if let Some(error) = provider_cleanup_error.as_ref() {
             stderr.push_str("\nASB provider cleanup error: ");
@@ -1253,6 +1254,7 @@ impl ResultFacts {
             local_tool_transcript,
             deterministic_manifest,
             native_trace,
+            sealed_artifacts,
             cassette: tape_cassette
                 .as_ref()
                 .map(|(_, cassette)| cassette.display().to_string()),
