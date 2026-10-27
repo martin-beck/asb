@@ -1967,7 +1967,21 @@ mod tests {
                 "bigcodebench",
                 "core-bench",
                 "evalplus",
+                "livecodebench-code-generation-v1",
+                "livecodebench-code-generation-v2",
+                "livecodebench-code-generation-v3",
+                "livecodebench-code-generation-v4",
+                "livecodebench-code-generation-v5",
+                "livecodebench-code-generation-v6",
+                "livecodebench-self-repair-v1",
+                "livecodebench-self-repair-v2",
+                "livecodebench-self-repair-v3",
+                "livecodebench-self-repair-v4",
+                "livecodebench-self-repair-v5",
+                "livecodebench-self-repair-v6",
                 "livecodebench",
+                "livecodebench-test-output-prediction",
+                "livecodebench-code-execution",
                 "swe-bench",
                 "swe-bench-lite",
                 "swe-bench-pro",
@@ -1982,14 +1996,13 @@ mod tests {
                 "terminal-bench-2.1",
             ]
         );
-        // Migration snapshot of the complete pre-extraction public alias list:
-        // order and exact URLs (including all five official adapters) stay fixed.
+        // Snapshot the exact public installation inventory and source URLs.
         assert_eq!(
             format!(
                 "{:x}",
                 Sha256::digest(serde_json::to_vec(&sources).unwrap())
             ),
-            "5864cbb271524bb4f72a0f71042e03f2d8307fb49a65dad21c2517ce81ff22b6",
+            "665d97e6d00767fa69a39924e1332f33792cd69c037d0080e8b8f7fd0a8f4629",
             "installation names/order/URLs changed from the original registry"
         );
         let mut names = std::collections::BTreeSet::new();
