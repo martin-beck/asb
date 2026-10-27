@@ -906,6 +906,9 @@ pub(crate) struct PreparedStep {
     purpose: Purpose,
     label: String,
     capture: Capture,
+    /// Some configuration children legitimately emit credentials. Their exit
+    /// status is enough for the installer contract, so never retain output.
+    retain_diagnostics: bool,
     #[cfg(all(test, target_os = "linux"))]
     log_writer: Option<native::WriterFactory>,
     #[cfg(all(test, target_os = "linux"))]
@@ -955,6 +958,7 @@ impl PreparedStep {
             purpose,
             label: label.to_owned(),
             capture: Capture::Status,
+            retain_diagnostics: true,
             #[cfg(all(test, target_os = "linux"))]
             log_writer: None,
             #[cfg(all(test, target_os = "linux"))]
@@ -974,6 +978,11 @@ impl PreparedStep {
     }
     pub(crate) fn capture(&mut self, capture: Capture) {
         self.capture = capture;
+    }
+    /// Keep a sensitive child observable through its exit status while
+    /// preventing stdout/stderr from entering private diagnostic evidence.
+    pub(crate) fn suppress_diagnostics(&mut self) {
+        self.retain_diagnostics = false;
     }
     pub(crate) fn run(self, lease: ProducerLease) -> InstallResult<SettledStep> {
         let ticket = lease.begin(&self.context)?;

@@ -120,6 +120,25 @@ fn actual_prepared_command_preserves_configuration_and_private_logs() {
 }
 
 #[test]
+fn sensitive_prepared_command_does_not_create_a_diagnostic_log() {
+    let root = root();
+    let context = context(&root);
+    let mut step = shell(
+        &context,
+        "printf sensitive-output; printf sensitive-error >&2",
+    );
+    step.suppress_diagnostics();
+    let result = step.run(ProducerLease::default()).unwrap();
+    assert!(result.status().success());
+    assert!(result.stdout().is_empty());
+    assert!(result.stderr().is_empty());
+    assert!(result.log.path.is_none());
+    assert_eq!(result.log.accepted, 0);
+    assert_eq!(result.log.retained, 0);
+    assert!(result.log.settled);
+}
+
+#[test]
 fn actual_inspection_overflow_aborts_without_accepting_a_prefix() {
     let root = root();
     let context = context(&root);
