@@ -94,7 +94,6 @@ impl AttemptIssues {
 }
 
 pub(super) struct MeasuredOutput {
-    pub principal_pid: u32,
     pub observation: crate::process_termination::Observation,
     pub output: Output,
     pub elapsed_ms: u128,

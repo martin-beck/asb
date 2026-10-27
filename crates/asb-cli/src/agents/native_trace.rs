@@ -15,6 +15,13 @@ pub(crate) const SCHEMA_VERSION: u32 = 1;
 const MAX_EVENTS: usize = 65_536;
 const MAX_BLOBS_PER_EVENT: usize = 8;
 const SHA256_HEX_BYTES: usize = 64;
+/// Trace-local identity for the directly launched agent process.
+///
+/// Kernel PIDs are host metadata and are deliberately never serialized into a
+/// recording.  A capture backend retains any PID-to-trace-ID mapping only in
+/// its short-lived private state; published native-trace events use these
+/// opaque, per-trace identifiers instead.
+pub(crate) const ROOT_PROCESS: u64 = 1;
 
 /// A content-addressed private payload.  The trace index only carries the
 /// digest and exact byte count; the payload is staged separately by a capture
@@ -43,12 +50,12 @@ pub(crate) enum Operation {
 /// This deliberately records only two events, so it adds neither a sampling
 /// loop nor per-syscall work to the measured agent.  A later Linux backend can
 /// append descendant fork/exec/exit events to the same trace contract.
-pub(crate) fn write_root_lifecycle(run_dir: &std::path::Path, process: u64) -> Result<(), Error> {
+pub(crate) fn write_root_lifecycle(run_dir: &std::path::Path) -> Result<(), Error> {
     let mut transcript = Transcript::default();
     transcript.record(Event {
         schema_version: SCHEMA_VERSION,
         sequence: 1,
-        process,
+        process: ROOT_PROCESS,
         operation: Operation::ProcessStart,
         request: None,
         response: None,
@@ -57,7 +64,7 @@ pub(crate) fn write_root_lifecycle(run_dir: &std::path::Path, process: u64) -> R
     transcript.record(Event {
         schema_version: SCHEMA_VERSION,
         sequence: 2,
-        process,
+        process: ROOT_PROCESS,
         operation: Operation::ProcessExit,
         request: None,
         response: None,
@@ -78,6 +85,7 @@ pub(crate) fn write_root_lifecycle(run_dir: &std::path::Path, process: u64) -> R
 pub(crate) struct Event {
     pub schema_version: u32,
     pub sequence: u64,
+    /// Opaque, trace-local process identity.  This is never a host PID.
     pub process: u64,
     pub operation: Operation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,7 +219,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("asb-native-trace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("native-trace")).unwrap();
-        write_root_lifecycle(&root, 42).unwrap();
+        write_root_lifecycle(&root).unwrap();
         let trace = Transcript::decode(
             &std::fs::read(root.join("native-trace/native-trace.jsonl")).unwrap(),
         )
@@ -222,6 +230,12 @@ mod tests {
                 .lines()
                 .count(),
             2
+        );
+        assert!(
+            trace
+                .events
+                .iter()
+                .all(|event| event.process == ROOT_PROCESS)
         );
         let _ = std::fs::remove_dir_all(root);
     }

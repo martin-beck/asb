@@ -261,7 +261,7 @@ impl PreparedNative {
                 runtime: self.execution_budget,
             },
         )?;
-        agents::native_trace::write_root_lifecycle(&self.run_dir, child.principal_pid.into())?;
+        agents::native_trace::write_root_lifecycle(&self.run_dir)?;
         Ok((
             ExecutionEvidence {
                 observation: child.observation,
