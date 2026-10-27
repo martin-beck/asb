@@ -8,7 +8,7 @@ use super::native_trace::Blob;
 use crate::Error;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path};
@@ -44,6 +44,15 @@ pub(crate) struct Directory {
 pub(crate) struct Snapshot {
     pub directories: Vec<Directory>,
     pub files: Vec<Entry>,
+}
+
+/// Changes to apply only after a native replay's ordinary agent execution.
+/// Removals are paths, never host handles or command traces.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Effects {
+    pub directories: Vec<Directory>,
+    pub files: Vec<Entry>,
+    pub removed: Vec<String>,
 }
 
 /// A fresh private on-disk capsule. The manifest is created only after every
@@ -107,6 +116,10 @@ pub(crate) struct Manifest {
     pub base_directories: Vec<Directory>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Entry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effect_directories: Vec<Directory>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<String>,
 }
 
 impl Manifest {
@@ -118,6 +131,8 @@ impl Manifest {
             base: snapshot.files,
             base_directories: snapshot.directories,
             effects: Vec::new(),
+            effect_directories: Vec::new(),
+            removed: Vec::new(),
         }
     }
 
@@ -133,6 +148,21 @@ impl Manifest {
             },
             workspace,
         )
+    }
+
+    /// Bind final workspace changes without applying them during base staging.
+    pub(crate) fn set_effects(&mut self, final_snapshot: &Snapshot) -> Result<(), Error> {
+        let effects = diff_snapshots(
+            &Snapshot {
+                directories: self.base_directories.clone(),
+                files: self.base.clone(),
+            },
+            final_snapshot,
+        )?;
+        self.effects = effects.files;
+        self.effect_directories = effects.directories;
+        self.removed = effects.removed;
+        validate(self)
     }
 }
 
@@ -152,7 +182,8 @@ pub(crate) fn canonicalize(bytes: &[u8]) -> Result<Vec<u8>, Error> {
 fn validate(manifest: &Manifest) -> Result<(), Error> {
     if manifest.schema_version != SCHEMA_VERSION
         || manifest.base.len() + manifest.base_directories.len() > MAX_ENTRIES
-        || manifest.effects.len() > MAX_ENTRIES
+        || manifest.effects.len() + manifest.effect_directories.len() + manifest.removed.len()
+            > MAX_ENTRIES
         || !manifest.root_executable.iter().all(valid_blob)
     {
         return Err(Error::Run("native capsule manifest is invalid".into()));
@@ -165,39 +196,41 @@ fn validate(manifest: &Manifest) -> Result<(), Error> {
         valid_entry(entry, &mut base)?;
     }
     let mut effects = BTreeSet::new();
+    for directory in &manifest.effect_directories {
+        valid_directory(directory, &mut effects)?;
+    }
     for entry in &manifest.effects {
         valid_entry(entry, &mut effects)?;
+    }
+    for path in &manifest.removed {
+        valid_path(path, &mut effects)?;
     }
     Ok(())
 }
 
 fn valid_directory(directory: &Directory, paths: &mut BTreeSet<String>) -> Result<(), Error> {
-    let path = Path::new(&directory.path);
-    if directory.path.len() > 1024
-        || path.as_os_str().is_empty()
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_)))
-        || directory.mode > 0o777
-        || !paths.insert(directory.path.clone())
-    {
+    if directory.mode > 0o777 || valid_path(&directory.path, paths).is_err() {
         return Err(Error::Run("native capsule manifest is invalid".into()));
     }
     Ok(())
 }
 
 fn valid_entry(entry: &Entry, paths: &mut BTreeSet<String>) -> Result<(), Error> {
-    let path = Path::new(&entry.path);
-    if entry.path.len() > 1024
+    if entry.mode > 0o777 || !valid_blob(&entry.object) || valid_path(&entry.path, paths).is_err() {
+        return Err(Error::Run("native capsule manifest is invalid".into()));
+    }
+    Ok(())
+}
+
+fn valid_path(value: &str, paths: &mut BTreeSet<String>) -> Result<(), Error> {
+    let path = Path::new(value);
+    if value.len() > 1024
         || path.as_os_str().is_empty()
         || path.is_absolute()
         || path
             .components()
             .any(|part| !matches!(part, Component::Normal(_)))
-        || entry.mode > 0o777
-        || !valid_blob(&entry.object)
-        || !paths.insert(entry.path.clone())
+        || !paths.insert(value.into())
     {
         return Err(Error::Run("native capsule manifest is invalid".into()));
     }
@@ -378,6 +411,106 @@ pub(crate) fn stage_snapshot(
     }
     for file in &snapshot.files {
         stage_object(objects, file, workspace)?;
+    }
+    Ok(())
+}
+
+/// Calculate final workspace effects from two bounded snapshots. The result
+/// holds only changed/new content and minimal root removals, not a duplicate
+/// final tree.
+pub(crate) fn diff_snapshots(base: &Snapshot, final_snapshot: &Snapshot) -> Result<Effects, Error> {
+    validate_snapshot(base)?;
+    validate_snapshot(final_snapshot)?;
+    let base_directories: BTreeMap<_, _> = base
+        .directories
+        .iter()
+        .map(|directory| (directory.path.as_str(), directory))
+        .collect();
+    let base_files: BTreeMap<_, _> = base
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect();
+    let final_directories: BTreeMap<_, _> = final_snapshot
+        .directories
+        .iter()
+        .map(|directory| (directory.path.as_str(), directory))
+        .collect();
+    let final_files: BTreeMap<_, _> = final_snapshot
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect();
+    if final_directories
+        .keys()
+        .any(|path| base_files.contains_key(path))
+        || final_files
+            .keys()
+            .any(|path| base_directories.contains_key(path))
+    {
+        return Err(Error::Run(
+            "native capsule cannot capture a file-kind replacement".into(),
+        ));
+    }
+    let mut effects = Effects::default();
+    for (path, directory) in &final_directories {
+        if base_directories.get(path) != Some(directory) {
+            effects.directories.push((*directory).clone());
+        }
+    }
+    for (path, file) in &final_files {
+        if base_files.get(path) != Some(file) {
+            effects.files.push((*file).clone());
+        }
+    }
+    let mut removed = BTreeSet::new();
+    for path in base_directories.keys() {
+        if !final_directories.contains_key(path) {
+            removed.insert((*path).to_owned());
+        }
+    }
+    for path in base_files.keys() {
+        if !final_files.contains_key(path) {
+            removed.insert((*path).to_owned());
+        }
+    }
+    // Removing a directory removes its descendants. Persist only roots to
+    // minimize the index and avoid repeated filesystem operations in replay.
+    effects.removed = removed
+        .iter()
+        .filter(|path| {
+            Path::new(path)
+                .parent()
+                .and_then(Path::to_str)
+                .is_none_or(|parent| !removed.contains(parent))
+        })
+        .cloned()
+        .collect();
+    effects
+        .directories
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    effects
+        .files
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    validate_effects(&effects)?;
+    Ok(effects)
+}
+
+fn validate_effects(effects: &Effects) -> Result<(), Error> {
+    if effects.files.len() + effects.directories.len() + effects.removed.len() > MAX_ENTRIES {
+        return Err(Error::Run(
+            "native capsule effects exceed entry bound".into(),
+        ));
+    }
+    let mut paths = BTreeSet::new();
+    for directory in &effects.directories {
+        valid_directory(directory, &mut paths)?;
+    }
+    for file in &effects.files {
+        valid_entry(file, &mut paths)?;
+    }
+    for path in &effects.removed {
+        valid_path(path, &mut paths)?;
     }
     Ok(())
 }
@@ -601,6 +734,8 @@ mod tests {
                 object: blob('c'),
                 mode: 0o644,
             }],
+            effect_directories: Vec::new(),
+            removed: Vec::new(),
         };
         let bytes = canonicalize(&serde_json::to_vec(&manifest).unwrap()).unwrap();
         assert_eq!(
@@ -621,6 +756,8 @@ mod tests {
                 mode: 0o644,
             }],
             effects: Vec::new(),
+            effect_directories: Vec::new(),
+            removed: Vec::new(),
         };
         assert!(canonicalize(&serde_json::to_vec(&manifest).unwrap()).is_err());
         manifest.base[0].path = "safe".into();
@@ -736,6 +873,91 @@ mod tests {
             b"capsule input"
         );
         assert!(!workspace.join("output.txt").exists());
+    }
+
+    #[test]
+    fn effects_retain_only_changed_content_and_root_removals() {
+        let base = Snapshot {
+            directories: vec![
+                Directory {
+                    path: "gone".into(),
+                    mode: 0o755,
+                },
+                Directory {
+                    path: "stable".into(),
+                    mode: 0o755,
+                },
+            ],
+            files: vec![
+                Entry {
+                    path: "changed.txt".into(),
+                    object: blob('a'),
+                    mode: 0o644,
+                },
+                Entry {
+                    path: "removed.txt".into(),
+                    object: blob('b'),
+                    mode: 0o644,
+                },
+            ],
+        };
+        let final_snapshot = Snapshot {
+            directories: vec![
+                Directory {
+                    path: "created".into(),
+                    mode: 0o700,
+                },
+                Directory {
+                    path: "stable".into(),
+                    mode: 0o755,
+                },
+            ],
+            files: vec![
+                Entry {
+                    path: "changed.txt".into(),
+                    object: blob('c'),
+                    mode: 0o644,
+                },
+                Entry {
+                    path: "created/new.txt".into(),
+                    object: blob('d'),
+                    mode: 0o600,
+                },
+            ],
+        };
+        let effects = diff_snapshots(&base, &final_snapshot).unwrap();
+        assert_eq!(
+            effects.directories,
+            vec![final_snapshot.directories[0].clone()]
+        );
+        assert_eq!(effects.files, final_snapshot.files);
+        assert_eq!(effects.removed, vec!["gone", "removed.txt"]);
+
+        let mut manifest = Manifest::from_snapshot(None, base);
+        manifest.set_effects(&final_snapshot).unwrap();
+        assert_eq!(manifest.effect_directories, effects.directories);
+        assert_eq!(manifest.effects, effects.files);
+        assert_eq!(manifest.removed, effects.removed);
+    }
+
+    #[test]
+    fn effects_reject_file_directory_replacements() {
+        let base = Snapshot {
+            directories: Vec::new(),
+            files: vec![Entry {
+                path: "entry".into(),
+                object: blob('a'),
+                mode: 0o644,
+            }],
+        };
+        let final_snapshot = Snapshot {
+            directories: vec![Directory {
+                path: "entry".into(),
+                mode: 0o755,
+            }],
+            files: Vec::new(),
+        };
+        assert!(diff_snapshots(&base, &final_snapshot).is_err());
     }
 
     #[test]
