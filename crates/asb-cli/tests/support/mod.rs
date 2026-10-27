@@ -2,27 +2,6 @@
 
 use std::process::Command;
 
-/// Keep Cargo's already-installed toolchain available to a fixture whose
-/// private HOME deliberately excludes all ambient application state.  Rustup
-/// otherwise treats that private HOME as a new installation and may try to
-/// bootstrap a toolchain while a workload only needs to probe `cargo`.
-pub fn retain_host_rust_toolchain(command: &mut Command) -> &mut Command {
-    let host_home = std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into());
-    let rustup_home = std::env::var_os("RUSTUP_HOME").unwrap_or_else(|| {
-        std::path::PathBuf::from(&host_home)
-            .join(".rustup")
-            .into_os_string()
-    });
-    let cargo_home = std::env::var_os("CARGO_HOME").unwrap_or_else(|| {
-        std::path::PathBuf::from(&host_home)
-            .join(".cargo")
-            .into_os_string()
-    });
-    command
-        .env("RUSTUP_HOME", rustup_home)
-        .env("CARGO_HOME", cargo_home)
-}
-
 /// Clear inherited credentials/state without losing subprocess LLVM coverage.
 pub trait IsolatedEnvironment {
     fn isolated_env(&mut self) -> &mut Self;

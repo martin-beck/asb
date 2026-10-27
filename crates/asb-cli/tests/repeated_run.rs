@@ -10,10 +10,25 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use support::{IsolatedEnvironment, retain_host_rust_toolchain};
+use support::IsolatedEnvironment;
 
 #[path = "support/repeated_sweep.rs"]
 mod sweep_tests;
+
+/// Keep Cargo's already-installed toolchain available to a fixture whose
+/// private HOME deliberately excludes all ambient application state. Rustup
+/// otherwise treats that private HOME as a new installation and may try to
+/// bootstrap a toolchain while a workload only needs to probe `cargo`.
+fn retain_host_rust_toolchain(command: &mut Command) -> &mut Command {
+    let host_home = std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into());
+    let rustup_home = std::env::var_os("RUSTUP_HOME")
+        .unwrap_or_else(|| PathBuf::from(&host_home).join(".rustup").into_os_string());
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .unwrap_or_else(|| PathBuf::from(&host_home).join(".cargo").into_os_string());
+    command
+        .env("RUSTUP_HOME", rustup_home)
+        .env("CARGO_HOME", cargo_home)
+}
 
 struct Project(PathBuf);
 impl Project {
