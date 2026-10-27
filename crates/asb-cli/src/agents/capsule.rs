@@ -179,6 +179,25 @@ impl Capture {
     }
 }
 
+/// A selected capsule replay session. It restores the recorded base before
+/// launch and applies only declared final effects after normal execution.
+pub(crate) struct Replay {
+    store: Store,
+    manifest: Manifest,
+}
+
+impl Replay {
+    pub(crate) fn open(source: &Path, workspace: &Path) -> Result<Self, Error> {
+        let (store, manifest) = Store::open(source)?;
+        manifest.restore_base(store.objects(), workspace)?;
+        Ok(Self { store, manifest })
+    }
+
+    pub(crate) fn finish(self, workspace: &Path) -> Result<(), Error> {
+        self.manifest.apply_effects(self.store.objects(), workspace)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Manifest {
@@ -1288,6 +1307,27 @@ mod tests {
             serde_json::from_slice(&fs::read(published.join(MANIFEST_FILENAME)).unwrap()).unwrap();
         assert_eq!(manifest.effects.len(), 1);
         assert_eq!(manifest.effects[0].path, "input.txt");
+    }
+
+    #[test]
+    fn replay_restores_base_then_applies_final_effects() {
+        let root = test_root("replay");
+        let source = root.0.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("input.txt"), b"before").unwrap();
+        let destination = root.0.join("capsule");
+        let capture = Capture::start(&destination, &source).unwrap();
+        fs::write(source.join("input.txt"), b"after").unwrap();
+        capture.finish(&source).unwrap();
+
+        let workspace = root.0.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("stale.txt"), b"stale").unwrap();
+        let replay = Replay::open(&destination, &workspace).unwrap();
+        assert_eq!(fs::read(workspace.join("input.txt")).unwrap(), b"before");
+        assert!(!workspace.join("stale.txt").exists());
+        replay.finish(&workspace).unwrap();
+        assert_eq!(fs::read(workspace.join("input.txt")).unwrap(), b"after");
     }
 
     #[cfg(unix)]
