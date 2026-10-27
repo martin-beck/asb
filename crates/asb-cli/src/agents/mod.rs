@@ -26,6 +26,7 @@ use crate::benchmark::BenchmarkConfig;
 use crate::endpoint::{Interface, Support};
 use crate::install::Recipe;
 use crate::project;
+use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -265,7 +266,7 @@ pub(crate) struct AgentArtifacts {
 /// The recorder seals its digest and bytes atomically with the provider track.
 /// Adapters must use stable lowercase kinds; cassette validation rejects any
 /// malformed, duplicate, or oversized artifact before publication.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SealedArtifact {
     pub kind: String,
     pub bytes: Vec<u8>,

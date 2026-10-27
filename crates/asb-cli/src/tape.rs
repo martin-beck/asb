@@ -1,6 +1,7 @@
 //! Record/replay entry point, backed by the configured proxy chain.
 
 use crate::{Error, proxy};
+use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
 use std::path::Path;
@@ -9,7 +10,7 @@ use std::path::Path;
 /// Bump for incompatible tape matching changes, not scheduling/measurement changes.
 pub(crate) const REPLAY_MATCHING_CONTRACT: &str = "asb-tape-request-matching-v1";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Mode {
     Record,
     Replay,

@@ -126,7 +126,7 @@ pub(crate) fn replay_launch(
     })
 }
 
-fn replay_bundle_path(cassette: &Path, id: &str) -> Result<PathBuf, Error> {
+pub(crate) fn replay_bundle_path(cassette: &Path, id: &str) -> Result<PathBuf, Error> {
     let name = cassette
         .file_name()
         .and_then(|name| name.to_str())

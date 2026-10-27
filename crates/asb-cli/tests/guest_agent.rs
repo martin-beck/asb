@@ -101,6 +101,83 @@ fn guest_uses_registered_adapter_prepares_before_gate_and_preserves_output_usage
 }
 
 #[test]
+fn guest_stages_a_declared_mcp_server_through_the_recording_relay_before_launch() {
+    let project = Project::new();
+    let program = project.0.join(".asb-tools/codex/bin/codex");
+    std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+    fixture_writer::write_file(
+        &project.0,
+        &program,
+        "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"result\",\"result\":\"fixture completed\"}'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut request = project.request();
+    request["config"]["agent"] = "codex".into();
+    request["connection"]["interface"] = "open_ai_responses".into();
+    request["config"]["mcp_servers"] = serde_json::json!([{
+        "id": "fixture",
+        "program": "must-not-be-started-directly",
+        "args": ["--fixture"]
+    }]);
+    request["mcp_mode"] = "Record".into();
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_asb"))
+            .arg("__asb-agent")
+            .isolated_env()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", &project.0)
+            .env("ASB_GUEST_AGENT_REQUEST", request.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
+    let mut ready = String::new();
+    stdout.read_line(&mut ready).unwrap();
+    if ready.trim() != format!("__ASB_GATE__:{}", process.0.id()) {
+        let mut error = String::new();
+        process
+            .0
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut error)
+            .unwrap();
+        panic!("guest did not reach its launch gate: {error}");
+    }
+    let config: toml::Value = toml::from_str(
+        &std::fs::read_to_string(
+            project
+                .0
+                .join("private/agent-state/codex/config/config.toml"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let server = &config["mcp_servers"]["fixture"];
+    assert_ne!(
+        server["command"].as_str(),
+        Some("must-not-be-started-directly")
+    );
+    assert_eq!(server["args"][0].as_str(), Some("__asb-mcp-relay"));
+    assert_eq!(server["args"][1].as_str(), Some("--record-dir"));
+    assert_eq!(server["args"][3].as_str(), Some("--"));
+    assert_eq!(
+        server["args"][4].as_str(),
+        Some("must-not-be-started-directly")
+    );
+    assert!(!project.0.join("private/attempt/mcp-relay/fixture").exists());
+
+    resume_fixture(&mut process);
+    let mut output = String::new();
+    stdout.read_to_string(&mut output).unwrap();
+    assert!(process.0.wait().unwrap().success());
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn actual_guest_metadata_preserves_code_versus_signal_without_changing_carrier() {
     for (script, exact, carrier) in [

@@ -125,7 +125,12 @@ fn replay_sidecar(path: &Path, stem: &str, extension: &str) -> Result<PathBuf, S
     Ok(parent.join(format!("{stem}{suffix}.{extension}")))
 }
 
-fn replay_private_inputs(path: Option<&Path>, replay: bool) -> Result<Vec<PrivateInput>, String> {
+fn replay_private_inputs(
+    path: Option<&Path>,
+    replay: bool,
+    mcp_servers: &[crate::benchmark::McpServerConfig],
+    mcp_replay: bool,
+) -> Result<Vec<PrivateInput>, String> {
     if !replay {
         return Ok(Vec::new());
     }
@@ -183,6 +188,13 @@ fn replay_private_inputs(path: Option<&Path>, replay: bool) -> Result<Vec<Privat
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err("sealed native replay trace is unavailable".into()),
+    }
+    if mcp_replay {
+        for server in mcp_servers {
+            let source = crate::agents::mcp_relay::replay_bundle_path(path, &server.id)
+                .map_err(|error| error.to_string())?;
+            stage(source, "sealed MCP relay sidecar")?;
+        }
     }
     Ok(inputs)
 }
@@ -863,8 +875,13 @@ impl Session {
         let environment = guest_environment(&context.config.agent, |name| std::env::var(name).ok());
         let tape_cassette = guest_tape_cassette(context.tape_cassette)?;
         let tool_tape_cassette = guest_tape_cassette(context.tool_tape_cassette)?;
-        let private_inputs =
-            replay_private_inputs(context.tool_tape_cassette, context.tool_replay)?;
+        let mcp_tape_cassette = guest_tape_cassette(context.mcp_tape_cassette)?;
+        let private_inputs = replay_private_inputs(
+            context.mcp_tape_cassette.or(context.tool_tape_cassette),
+            context.tool_replay || context.mcp_mode == Some(crate::tape::Mode::Replay),
+            &context.config.mcp_servers,
+            context.mcp_mode == Some(crate::tape::Mode::Replay),
+        )?;
         let artifact_output = self.artifacts.join("guest-artifacts");
         std::fs::create_dir_all(&artifact_output)
             .map_err(|error| format!("cannot allocate guest artifact export directory: {error}"))?;
@@ -889,6 +906,8 @@ impl Session {
                 "tape_cassette":tape_cassette,
                 "tool_replay":context.tool_replay,
                 "tool_tape_cassette":tool_tape_cassette,
+                "mcp_mode":context.mcp_mode,
+                "mcp_tape_cassette":mcp_tape_cassette,
                 "namespace_collectors":namespace_collectors}),
         };
         self.controller.send(
@@ -1369,7 +1388,8 @@ mod tests {
         std::fs::write(batch.join("local-tools-2.jsonl"), b"{}\n").unwrap();
         std::fs::write(batch.join("determinism-manifest-2.json"), b"{}\n").unwrap();
         std::fs::write(batch.join("native-trace-2.jsonl"), b"").unwrap();
-        let inputs = replay_private_inputs(Some(&batch.join("replay-2.jsonl")), true).unwrap();
+        let inputs =
+            replay_private_inputs(Some(&batch.join("replay-2.jsonl")), true, &[], false).unwrap();
         assert_eq!(inputs.len(), 3);
         assert_eq!(inputs[0].target, "local-tools-2.jsonl");
         assert_eq!(inputs[0].bytes, 3);
@@ -1378,7 +1398,7 @@ mod tests {
         assert_eq!(inputs[2].target, "native-trace-2.jsonl");
         assert_eq!(inputs[2].bytes, 0);
         assert!(
-            replay_private_inputs(Some(&batch.join("replay-2.jsonl")), false)
+            replay_private_inputs(Some(&batch.join("replay-2.jsonl")), false, &[], false)
                 .unwrap()
                 .is_empty()
         );
@@ -1396,14 +1416,39 @@ mod tests {
         std::fs::write(batch.join("replay.jsonl"), b"provider tape\n").unwrap();
         std::fs::write(batch.join("local-tools.jsonl"), b"{}\n").unwrap();
 
-        let inputs = replay_private_inputs(Some(&batch.join("replay.jsonl")), true).unwrap();
+        let inputs =
+            replay_private_inputs(Some(&batch.join("replay.jsonl")), true, &[], false).unwrap();
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].target, "local-tools.jsonl");
         assert!(
-            replay_private_inputs(Some(&batch.join("replay.jsonl")), false)
+            replay_private_inputs(Some(&batch.join("replay.jsonl")), false, &[], false)
                 .unwrap()
                 .is_empty()
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_private_input_stages_each_declared_mcp_relay_sidecar() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-replay-mcp-input-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let batch = root.join("batch");
+        std::fs::create_dir_all(&batch).unwrap();
+        let replay = batch.join("replay.jsonl");
+        std::fs::write(&replay, b"provider tape\n").unwrap();
+        let relay = crate::agents::mcp_relay::empty_bundle().unwrap();
+        std::fs::write(batch.join("mcp-relay-filesystem.jsonl"), &relay).unwrap();
+        let servers = [crate::benchmark::McpServerConfig {
+            id: "filesystem".into(),
+            program: "fixture-mcp".into(),
+            args: Vec::new(),
+        }];
+        let inputs = replay_private_inputs(Some(&replay), true, &servers, true).unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].target, "mcp-relay-filesystem.jsonl");
+        assert_eq!(inputs[0].sha256, crate::cassette::digest(&relay));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1418,7 +1463,7 @@ mod tests {
         std::fs::write(batch.join("replay.jsonl"), b"provider tape\n").unwrap();
 
         assert!(
-            replay_private_inputs(Some(&batch.join("replay.jsonl")), true)
+            replay_private_inputs(Some(&batch.join("replay.jsonl")), true, &[], false)
                 .unwrap()
                 .is_empty()
         );
@@ -1436,7 +1481,8 @@ mod tests {
         std::fs::write(batch.join("replay.jsonl"), b"provider tape\n").unwrap();
         std::fs::write(batch.join("native-trace.jsonl"), b"{}\n").unwrap();
 
-        let error = match replay_private_inputs(Some(&batch.join("replay.jsonl")), true) {
+        let error = match replay_private_inputs(Some(&batch.join("replay.jsonl")), true, &[], false)
+        {
             Ok(_) => panic!("malformed native trace must be rejected"),
             Err(error) => error,
         };
