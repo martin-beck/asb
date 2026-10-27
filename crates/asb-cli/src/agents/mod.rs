@@ -544,11 +544,11 @@ impl AgentAdapter for StaticAdapter {
         if self.deterministic_extension {
             artifacts.deterministic_manifest =
                 context.frozen.bytes("manifest.json").map(ToOwned::to_owned);
-            artifacts.native_trace = context
-                .frozen
-                .bytes("native-trace.jsonl")
-                .map(ToOwned::to_owned);
         }
+        artifacts.native_trace = context
+            .frozen
+            .bytes("native-trace.jsonl")
+            .map(ToOwned::to_owned);
         artifacts
     }
     fn artifact_specs(&self) -> &'static [ArtifactSpec] {

@@ -989,6 +989,7 @@ fn run_measured_agent_with_launch_progress(
             format!("could not resume measured agent process: {error}"),
         ));
     }
+    let principal_pid = child.id();
     let mut execution_finished = None;
     let mut progress = progress.display();
     let result = capture::capture_with_output_streams_progress(
@@ -1033,6 +1034,7 @@ fn run_measured_agent_with_launch_progress(
                 issues.run_error(error);
             }
             Ok(MeasuredOutput {
+                principal_pid,
                 observation: captured.observation,
                 output: captured.output,
                 elapsed_ms,

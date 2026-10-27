@@ -176,10 +176,14 @@ impl NativePlan<'_> {
                 .as_nanos(),
             RUN_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ));
-        let artifact_owner = agents::ArtifactOwner::prepare(
-            &run_dir,
-            agents::find(&config.agent).map_or(&[], |adapter| adapter.artifact_specs()),
-        )?;
+        let mut artifact_specs = agents::find(&config.agent)
+            .map_or_else(Vec::new, |adapter| adapter.artifact_specs().to_vec());
+        artifact_specs.push(agents::ArtifactSpec {
+            namespace: "native-trace",
+            filename: "native-trace.jsonl",
+            format: agents::ArtifactFormat::JsonLines,
+        });
+        let artifact_owner = agents::ArtifactOwner::prepare(&run_dir, &artifact_specs)?;
         instrument_phase(measurements, LifecyclePhase::AgentPreparation, || {
             if fresh_state {
                 agents::driver::prepare_fresh_state(&mut command, &run_dir.join("state"))?;
@@ -257,6 +261,7 @@ impl PreparedNative {
                 runtime: self.execution_budget,
             },
         )?;
+        agents::native_trace::write_root_lifecycle(&self.run_dir, child.principal_pid.into())?;
         Ok((
             ExecutionEvidence {
                 observation: child.observation,
