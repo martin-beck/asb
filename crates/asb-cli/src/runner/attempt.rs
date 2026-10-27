@@ -1117,6 +1117,10 @@ impl ResultFacts {
             .as_ref()
             .and_then(|metadata| metadata.deterministic_manifest.clone())
             .or(adapter_artifacts.deterministic_manifest.clone());
+        let native_trace = guest
+            .as_ref()
+            .and_then(|metadata| metadata.native_trace.clone())
+            .or(adapter_artifacts.native_trace.clone());
         let mut stderr = bounded(&child.stderr);
         if let Some(error) = provider_cleanup_error.as_ref() {
             stderr.push_str("\nASB provider cleanup error: ");
@@ -1203,6 +1207,7 @@ impl ResultFacts {
             tool_calls_available: cassette_usage_verified,
             local_tool_transcript,
             deterministic_manifest,
+            native_trace,
             cassette: tape_cassette
                 .as_ref()
                 .map(|(_, cassette)| cassette.display().to_string()),

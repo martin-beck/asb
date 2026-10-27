@@ -25,6 +25,11 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
         filename: "manifest.json",
         format: super::super::ArtifactFormat::Json,
     },
+    super::super::ArtifactSpec {
+        namespace: "native-trace",
+        filename: "native-trace.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
 ])
 .with_deterministic_extension()
 .with_output_usage(output_usage)

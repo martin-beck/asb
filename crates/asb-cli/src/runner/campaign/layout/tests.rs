@@ -167,6 +167,7 @@ fn plan(mode: ExecutionMode, concurrency: usize, repeat: u64, measured: bool) ->
                 private: format!("inputs/recording-{}.jsonl", replica + 1).into(),
                 local_tools: None,
                 deterministic_manifest: None,
+                native_trace: None,
                 bytes: 42,
                 sha256: "a".repeat(64),
             });

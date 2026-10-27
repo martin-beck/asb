@@ -511,6 +511,17 @@ impl Recorder {
                     bytes: bytes.get_ref().len() as u64,
                     sha256: crate::cassette::digest(bytes.get_ref()),
                 });
+            let mut native_trace = result
+                .native_trace
+                .as_deref()
+                .map(crate::agents::native_trace::canonicalize)
+                .transpose()?
+                .map(std::io::Cursor::new);
+            let native_trace_artifact = native_trace.as_ref().map(|bytes| Artifact {
+                kind: "native-trace".into(),
+                bytes: bytes.get_ref().len() as u64,
+                sha256: crate::cassette::digest(bytes.get_ref()),
+            });
             let mut artifact_inputs = Vec::new();
             if let (Some(artifact), Some(source)) =
                 (local_tools_artifact.clone(), local_tools.as_mut())
@@ -521,6 +532,11 @@ impl Recorder {
                 deterministic_manifest_artifact.clone(),
                 deterministic_manifest.as_mut(),
             ) {
+                artifact_inputs.push(ArtifactInput { artifact, source });
+            }
+            if let (Some(artifact), Some(source)) =
+                (native_trace_artifact.clone(), native_trace.as_mut())
+            {
                 artifact_inputs.push(ArtifactInput { artifact, source });
             }
             if let Some(file) = &mut file {

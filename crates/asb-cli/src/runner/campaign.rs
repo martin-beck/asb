@@ -93,6 +93,10 @@ pub(crate) struct ReplayInput {
     /// track. Adapters consume it only when they selected that extension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deterministic_manifest: Option<PathBuf>,
+    /// A verified native-trace index staged beside its exact replay track.
+    /// Older recordings omit it until a native capture backend is selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_trace: Option<PathBuf>,
     pub bytes: u64,
     pub sha256: String,
 }

@@ -1083,6 +1083,7 @@ fn result() -> RunResult<'static> {
         steps: Some(3),
         tool_calls: Vec::new(),
         tool_calls_available: true,
+        native_trace: None,
         local_tool_transcript: None,
         deterministic_manifest: None,
         cassette: None,

@@ -6,6 +6,7 @@
 mod adapters;
 mod artifacts;
 pub(crate) mod determinism;
+pub(crate) mod native_trace;
 pub(crate) mod tool_replay;
 pub(crate) mod tool_replay_mcp;
 pub(crate) use artifacts::{ArtifactFormat, ArtifactOwner, ArtifactSpec, FrozenArtifacts};
@@ -212,6 +213,9 @@ pub(crate) struct AgentArtifacts {
     /// Private extension evidence sealed beside provider and local-tool
     /// recordings. It is not rendered in reports or command output.
     pub deterministic_manifest: Option<Vec<u8>>,
+    /// Compact native interaction index.  Referenced payloads remain private
+    /// capture blobs and are never copied into user-facing output.
+    pub native_trace: Option<Vec<u8>>,
 }
 
 pub(crate) struct CollectionContext<'a> {
@@ -540,6 +544,10 @@ impl AgentAdapter for StaticAdapter {
         if self.deterministic_extension {
             artifacts.deterministic_manifest =
                 context.frozen.bytes("manifest.json").map(ToOwned::to_owned);
+            artifacts.native_trace = context
+                .frozen
+                .bytes("native-trace.jsonl")
+                .map(ToOwned::to_owned);
         }
         artifacts
     }

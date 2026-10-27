@@ -263,6 +263,7 @@ mod adapter_layout_tests {
                     "driver.rs",
                     "artifacts.rs",
                     "determinism.rs",
+                    "native_trace.rs",
                     "tool_replay.rs",
                     "tool_replay_mcp.rs",
                 ],

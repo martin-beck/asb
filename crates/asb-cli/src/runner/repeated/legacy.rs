@@ -125,6 +125,7 @@ impl Inspection {
                 private: format!("inputs/recording-{}.jsonl", index + 1).into(),
                 local_tools: None,
                 deterministic_manifest: None,
+                native_trace: None,
                 bytes,
                 sha256,
             });
