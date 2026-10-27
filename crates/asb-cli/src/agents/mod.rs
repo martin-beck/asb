@@ -5,6 +5,11 @@
 
 mod adapters;
 mod artifacts;
+#[allow(
+    dead_code,
+    reason = "capsule staging follows the validated manifest contract"
+)]
+pub(crate) mod capsule;
 pub(crate) mod determinism;
 pub(crate) mod mcp_framing;
 pub(crate) mod mcp_relay;
