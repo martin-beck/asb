@@ -18,6 +18,9 @@ const MAX_ENTRIES: usize = 4096;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OBJECT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_OBJECT_STORE_BYTES: u64 = 64 * 1024 * 1024;
+/// A one-time identity hash may inspect a normal installed agent binary, but
+/// remains bounded so replay setup cannot turn into unbounded host I/O.
+const MAX_EXECUTABLE_IDENTITY_BYTES: u64 = 256 * 1024 * 1024;
 const OBJECTS_DIRECTORY: &str = "objects";
 const MANIFEST_FILENAME: &str = "manifest.json";
 
@@ -177,6 +180,17 @@ impl Capture {
         self.store.publish(&self.manifest)?;
         Ok(self.store.root().to_path_buf())
     }
+
+    /// Bind a native capture to the resolved root executable without retaining
+    /// a private path or a copy of that executable.
+    pub(crate) fn bind_root_executable(&mut self, identity: Blob) -> Result<(), Error> {
+        if self.manifest.root_executable.replace(identity).is_some() {
+            return Err(Error::Run(
+                "native capsule root executable is already bound".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// A selected capsule replay session. It restores the recorded base before
@@ -196,6 +210,75 @@ impl Replay {
     pub(crate) fn finish(self, workspace: &Path) -> Result<(), Error> {
         self.manifest.apply_effects(self.store.objects(), workspace)
     }
+
+    /// Refuse a native replay if the recorded root executable does not match
+    /// the actual resolved launch target. Legacy capsules without an identity
+    /// are intentionally not accepted for this stricter native path.
+    pub(crate) fn verify_root_executable(&self, actual: &Blob) -> Result<(), Error> {
+        match self.manifest.root_executable.as_ref() {
+            Some(expected) if expected == actual => Ok(()),
+            Some(_) => Err(Error::Run(
+                "native capsule root executable differs from the recorded capture".into(),
+            )),
+            None => Err(Error::Run(
+                "native capsule has no recorded root executable identity".into(),
+            )),
+        }
+    }
+}
+
+/// Digest the resolved native launch executable once. The returned digest and
+/// byte count are safe capsule metadata; neither path nor executable contents
+/// enter the manifest.
+pub(crate) fn executable_identity(target: &crate::launch::TargetLaunch) -> Result<Blob, Error> {
+    let resolved = target
+        .resolved_executable()
+        .ok_or_else(|| Error::Run("cannot resolve native capsule root executable".into()))?;
+    let canonical = fs::canonicalize(&resolved)
+        .map_err(|_| Error::Run("cannot resolve native capsule root executable".into()))?;
+    let metadata = fs::symlink_metadata(&canonical).map_err(crate::io_error)?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_EXECUTABLE_IDENTITY_BYTES
+    {
+        return Err(Error::Run(
+            "native capsule root executable is invalid or exceeds identity bound".into(),
+        ));
+    }
+    let mut file = open_read_no_follow(&canonical).map_err(crate::io_error)?;
+    let opened = file.metadata().map_err(crate::io_error)?;
+    if !opened.is_file() || opened.len() != metadata.len() {
+        return Err(Error::Run(
+            "native capsule root executable changed during identity capture".into(),
+        ));
+    }
+    let mut digest = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(crate::io_error)?;
+        if read == 0 {
+            break;
+        }
+        total = total.checked_add(read as u64).ok_or_else(|| {
+            Error::Run("native capsule root executable exceeds identity bound".into())
+        })?;
+        if total > MAX_EXECUTABLE_IDENTITY_BYTES {
+            return Err(Error::Run(
+                "native capsule root executable exceeds identity bound".into(),
+            ));
+        }
+        digest.update(&buffer[..read]);
+    }
+    if total != opened.len() {
+        return Err(Error::Run(
+            "native capsule root executable changed during identity capture".into(),
+        ));
+    }
+    Ok(Blob {
+        sha256: format!("{:x}", digest.finalize()),
+        bytes: total,
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -932,6 +1015,38 @@ mod tests {
             sha256: std::iter::repeat_n(byte, 64).collect(),
             bytes: 3,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_root_identity_binds_capture_and_rejects_a_changed_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = test_root("root-identity");
+        let executable = root.0.join("agent");
+        fs::write(&executable, "#!/bin/sh\nprintf first\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = crate::launch::TargetLaunch {
+            program: executable.as_os_str().into(),
+            args: Vec::new(),
+            cwd: Some(root.0.clone()),
+            path: None,
+        };
+        let identity = executable_identity(&target).unwrap();
+        let workspace = root.0.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("input"), "before").unwrap();
+        let destination = root.0.join("capsule");
+        let mut capture = Capture::start(&destination, &workspace).unwrap();
+        capture.bind_root_executable(identity.clone()).unwrap();
+        capture.finish(&workspace).unwrap();
+
+        let replay = Replay::open(&destination, &workspace).unwrap();
+        replay.verify_root_executable(&identity).unwrap();
+        fs::write(&executable, "#!/bin/sh\nprintf second\n").unwrap();
+        let changed = executable_identity(&target).unwrap();
+        assert_ne!(changed, identity);
+        assert!(replay.verify_root_executable(&changed).is_err());
     }
 
     #[test]

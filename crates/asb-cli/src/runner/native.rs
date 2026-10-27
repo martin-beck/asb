@@ -247,6 +247,12 @@ impl NativePlan<'_> {
 }
 
 impl PreparedNative {
+    /// Hash the frozen native target only when an explicit capsule needs it.
+    /// Ordinary live execution therefore pays no extra executable I/O.
+    pub fn root_executable(&self) -> Result<agents::native_trace::Blob, Error> {
+        agents::capsule::executable_identity(&self.route.target(&self.command))
+    }
+
     pub fn execute(
         mut self,
         measurements: Option<&mut measurements::Session>,
@@ -361,6 +367,11 @@ mod tests {
             prepared.route.target(&prepared.command).program,
             tool.canonicalize().unwrap().as_os_str()
         );
+        let first_identity = prepared.root_executable().unwrap();
+        assert_eq!(
+            first_identity.bytes,
+            std::fs::metadata(&tool).unwrap().len()
+        );
         let vars: std::collections::HashMap<_, _> = prepared.command.get_envs().collect();
         let home = prepared.run_dir.join("state/home");
         let codex_home = prepared.runtime_path.join("codex/config");
@@ -384,6 +395,7 @@ mod tests {
             overridden.route.target(&overridden.command).program,
             explicit.canonicalize().unwrap().as_os_str()
         );
+        assert_ne!(overridden.root_executable().unwrap(), first_identity);
         // A broken explicit override cannot silently choose the valid native package.
         std::fs::set_permissions(&explicit, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(

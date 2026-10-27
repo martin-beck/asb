@@ -215,7 +215,6 @@ fn host_executable_in(
 
 /// Availability lookup at the command's captured cwd, without UTF-8 conversion
 /// or canonicalizing symlink identity. This is not proof of later exec success.
-#[cfg(any(target_os = "linux", all(test, unix)))]
 pub(crate) fn host_executable_in_at(
     program: &Path,
     search: Option<&std::ffi::OsStr>,
