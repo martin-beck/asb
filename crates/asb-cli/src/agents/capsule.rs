@@ -28,6 +28,22 @@ pub(crate) struct Entry {
     pub mode: u32,
 }
 
+/// An empty or permission-significant workspace directory in a capsule base.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Directory {
+    /// A workspace-relative directory path.
+    pub path: String,
+    pub mode: u32,
+}
+
+/// A bounded workspace snapshot. Objects remain separately content addressed.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Snapshot {
+    pub directories: Vec<Directory>,
+    pub files: Vec<Entry>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Manifest {
@@ -36,6 +52,8 @@ pub(crate) struct Manifest {
     pub root_executable: Option<Blob>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base: Vec<Entry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_directories: Vec<Directory>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Entry>,
 }
@@ -55,19 +73,38 @@ pub(crate) fn canonicalize(bytes: &[u8]) -> Result<Vec<u8>, Error> {
 
 fn validate(manifest: &Manifest) -> Result<(), Error> {
     if manifest.schema_version != SCHEMA_VERSION
-        || manifest.base.len() > MAX_ENTRIES
+        || manifest.base.len() + manifest.base_directories.len() > MAX_ENTRIES
         || manifest.effects.len() > MAX_ENTRIES
         || !manifest.root_executable.iter().all(valid_blob)
     {
         return Err(Error::Run("native capsule manifest is invalid".into()));
     }
     let mut base = BTreeSet::new();
+    for directory in &manifest.base_directories {
+        valid_directory(directory, &mut base)?;
+    }
     for entry in &manifest.base {
         valid_entry(entry, &mut base)?;
     }
     let mut effects = BTreeSet::new();
     for entry in &manifest.effects {
         valid_entry(entry, &mut effects)?;
+    }
+    Ok(())
+}
+
+fn valid_directory(directory: &Directory, paths: &mut BTreeSet<String>) -> Result<(), Error> {
+    let path = Path::new(&directory.path);
+    if directory.path.len() > 1024
+        || path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+        || directory.mode > 0o777
+        || !paths.insert(directory.path.clone())
+    {
+        return Err(Error::Run("native capsule manifest is invalid".into()));
     }
     Ok(())
 }
@@ -175,6 +212,146 @@ pub(crate) fn stage_object(objects: &Path, entry: &Entry, workspace: &Path) -> R
             .map_err(crate::io_error)?;
     }
     Ok(())
+}
+
+/// Capture a small, regular-file-only workspace tree at an explicit boundary.
+/// The caller owns the object store and must keep it outside `source`.
+pub(crate) fn capture_tree(objects: &Path, source: &Path) -> Result<Snapshot, Error> {
+    ensure_directory(source, "native capsule source workspace")?;
+    let source = source.canonicalize().map_err(crate::io_error)?;
+    let objects = std::path::absolute(objects).map_err(crate::io_error)?;
+    if objects.starts_with(&source) {
+        return Err(Error::Run(
+            "native capsule object store must be outside source workspace".into(),
+        ));
+    }
+    let mut snapshot = Snapshot::default();
+    let mut pending = vec![(source, Path::new("").to_path_buf())];
+    while let Some((directory, relative)) = pending.pop() {
+        let mut children = fs::read_dir(&directory)
+            .map_err(crate::io_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::io_error)?;
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            let name = child.file_name();
+            let name = name
+                .to_str()
+                .ok_or_else(|| Error::Run("native capsule source has a non-UTF-8 path".into()))?;
+            let child_relative = relative.join(name);
+            let child_path = child.path();
+            let metadata = fs::symlink_metadata(&child_path).map_err(crate::io_error)?;
+            if metadata.file_type().is_symlink() {
+                return Err(Error::Run(
+                    "native capsule source contains a symlink".into(),
+                ));
+            }
+            if metadata.file_type().is_dir() {
+                if snapshot.files.len() + snapshot.directories.len() >= MAX_ENTRIES {
+                    return Err(Error::Run(
+                        "native capsule snapshot exceeds entry bound".into(),
+                    ));
+                }
+                snapshot.directories.push(Directory {
+                    path: relative_string(&child_relative)?,
+                    mode: file_mode(&metadata),
+                });
+                pending.push((child_path, child_relative));
+            } else if metadata.file_type().is_file() {
+                if snapshot.files.len() + snapshot.directories.len() >= MAX_ENTRIES {
+                    return Err(Error::Run(
+                        "native capsule snapshot exceeds entry bound".into(),
+                    ));
+                }
+                snapshot.files.push(Entry {
+                    path: relative_string(&child_relative)?,
+                    object: store_object(&objects, &child_path)?,
+                    mode: file_mode(&metadata),
+                });
+            } else {
+                return Err(Error::Run(
+                    "native capsule source contains an unsupported file".into(),
+                ));
+            }
+        }
+    }
+    snapshot
+        .directories
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    snapshot
+        .files
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    validate_snapshot(&snapshot)?;
+    Ok(snapshot)
+}
+
+/// Reconstruct a snapshot into a fresh workspace without overwrite.
+pub(crate) fn stage_snapshot(
+    objects: &Path,
+    snapshot: &Snapshot,
+    workspace: &Path,
+) -> Result<(), Error> {
+    validate_snapshot(snapshot)?;
+    ensure_workspace(workspace)?;
+    let mut directories = snapshot.directories.clone();
+    directories.sort_by_key(|directory| Path::new(&directory.path).components().count());
+    for directory in directories {
+        create_directory(workspace, &directory)?;
+    }
+    for file in &snapshot.files {
+        stage_object(objects, file, workspace)?;
+    }
+    Ok(())
+}
+
+fn validate_snapshot(snapshot: &Snapshot) -> Result<(), Error> {
+    if snapshot.files.len() + snapshot.directories.len() > MAX_ENTRIES {
+        return Err(Error::Run(
+            "native capsule snapshot exceeds entry bound".into(),
+        ));
+    }
+    let mut paths = BTreeSet::new();
+    for directory in &snapshot.directories {
+        valid_directory(directory, &mut paths)?;
+    }
+    for file in &snapshot.files {
+        valid_entry(file, &mut paths)?;
+    }
+    Ok(())
+}
+
+fn create_directory(workspace: &Path, directory: &Directory) -> Result<(), Error> {
+    let mut paths = BTreeSet::new();
+    valid_directory(directory, &mut paths)?;
+    create_parent_directories(workspace, Path::new(&directory.path))?;
+    let target = workspace.join(&directory.path);
+    fs::create_dir(&target).map_err(crate::io_error)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&target, fs::Permissions::from_mode(directory.mode))
+            .map_err(crate::io_error)?;
+    }
+    Ok(())
+}
+
+fn relative_string(path: &Path) -> Result<String, Error> {
+    path.to_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| Error::Run("native capsule source has a non-UTF-8 path".into()))
+}
+
+fn file_mode(metadata: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o777
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
 }
 
 fn open_read_no_follow(path: &Path) -> std::io::Result<fs::File> {
@@ -332,6 +509,10 @@ mod tests {
         let manifest = Manifest {
             schema_version: SCHEMA_VERSION,
             root_executable: Some(blob('a')),
+            base_directories: vec![Directory {
+                path: "src".into(),
+                mode: 0o755,
+            }],
             base: vec![Entry {
                 path: "src/main.rs".into(),
                 object: blob('b'),
@@ -355,6 +536,7 @@ mod tests {
         let mut manifest = Manifest {
             schema_version: SCHEMA_VERSION,
             root_executable: None,
+            base_directories: Vec::new(),
             base: vec![Entry {
                 path: "../escape".into(),
                 object: blob('a'),
@@ -418,6 +600,43 @@ mod tests {
         assert!(stage_object(&objects, &entry, &root.0.join("workspace")).is_err());
     }
 
+    #[test]
+    fn snapshot_round_trips_regular_files_and_empty_directories() {
+        let root = test_root("snapshot");
+        let source = root.0.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(source.join("nested")).unwrap();
+        fs::create_dir(source.join("empty")).unwrap();
+        fs::write(source.join("nested/input.txt"), b"capsule input").unwrap();
+        let objects = root.0.join("objects");
+        let snapshot = capture_tree(&objects, &source).unwrap();
+        assert_eq!(
+            snapshot
+                .directories
+                .iter()
+                .map(|directory| directory.path.as_str())
+                .collect::<Vec<_>>(),
+            ["empty", "nested"]
+        );
+        assert_eq!(snapshot.files.len(), 1);
+        let workspace = root.0.join("workspace");
+        stage_snapshot(&objects, &snapshot, &workspace).unwrap();
+        assert!(workspace.join("empty").is_dir());
+        assert_eq!(
+            fs::read(workspace.join("nested/input.txt")).unwrap(),
+            b"capsule input"
+        );
+    }
+
+    #[test]
+    fn snapshot_refuses_an_object_store_inside_the_source_workspace() {
+        let root = test_root("source-object-store");
+        let source = root.0.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("input.txt"), b"capsule input").unwrap();
+        assert!(capture_tree(&source.join("objects"), &source).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn object_store_rejects_symlink_sources_and_workspace_parents() {
@@ -444,5 +663,10 @@ mod tests {
         symlink(&outside, workspace.join("nested")).unwrap();
         assert!(stage_object(&objects, &entry, &workspace).is_err());
         assert!(!outside.join("input.txt").exists());
+
+        let symlink_source = root.0.join("tree");
+        fs::create_dir(&symlink_source).unwrap();
+        symlink(&source, symlink_source.join("input.txt")).unwrap();
+        assert!(capture_tree(&root.0.join("tree-objects"), &symlink_source).is_err());
     }
 }
