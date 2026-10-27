@@ -412,7 +412,10 @@ Each later native-replay increment must keep these boundaries distinct:
 - A compact, append-only index records opaque trace-local process identities,
   causal relationships, content digests, sizes, and relative timing only.
   It never serializes host PIDs, command lines, paths, prompts, credentials, or
-  unbounded stdout/stderr.
+  unbounded stdout/stderr.  Provider-only recordings remain compatible when
+  they have no native-trace artifact.  When a selected recording does contain
+  one, ASB validates its bounded schema immediately before staging that replay
+  batch; malformed trace evidence stops replay before the agent is launched.
 - A private execution capsule supplies replayable filesystem and executable
   state.  It is a transparent runtime mechanism, not an agent security policy:
   the agent still uses ordinary paths, binaries, subprocesses, and direct APIs.
