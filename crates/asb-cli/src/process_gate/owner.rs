@@ -429,10 +429,16 @@ impl Owner {
                     }
                     ptrace_continue(pid, 0)?;
                 }
-                _ if state.newborn.remove(&pid) && signal == libc::SIGSTOP => {
-                    // The kernel's initial ptrace stop for a freshly traced
-                    // descendant is not a signal delivered by the client.
-                    ptrace_continue(pid, 0)?;
+                _ if state.newborn.remove(&pid)
+                    && (signal == libc::SIGSTOP || event == libc::PTRACE_EVENT_STOP) =>
+                {
+                    // This lightweight backend records the causal fork, then
+                    // releases the newborn. Holding arbitrary nested helper
+                    // processes under ptrace can alter their stdio/MCP
+                    // lifecycle; a later capsule backend owns descendant
+                    // syscall and exit replay without that interference.
+                    ptrace_detach(pid)?;
+                    state.tracees.remove(&pid);
                 }
                 _ => ptrace_continue(pid, signal)?,
             }
@@ -716,6 +722,22 @@ fn ptrace_continue(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
             pid,
             std::ptr::null_mut::<libc::c_void>(),
             signal as usize as *mut libc::c_void,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn ptrace_detach(pid: libc::pid_t) -> io::Result<()> {
+    let result = unsafe {
+        libc::ptrace(
+            libc::PTRACE_DETACH,
+            pid,
+            std::ptr::null_mut::<libc::c_void>(),
+            std::ptr::null_mut::<libc::c_void>(),
         )
     };
     if result == 0 {
