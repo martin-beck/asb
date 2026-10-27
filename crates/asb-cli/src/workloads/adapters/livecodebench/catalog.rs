@@ -204,8 +204,46 @@ pub(super) fn install(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{CODE_EXECUTION, CODE_GENERATION_V6, WorkloadAdapter};
+    use super::super::{
+        CODE_EXECUTION, CODE_GENERATION_V1, CODE_GENERATION_V2, CODE_GENERATION_V3,
+        CODE_GENERATION_V4, CODE_GENERATION_V5, CODE_GENERATION_V6, LATEST, SELF_REPAIR_V1,
+        SELF_REPAIR_V2, SELF_REPAIR_V3, SELF_REPAIR_V4, SELF_REPAIR_V5, SELF_REPAIR_V6,
+        TEST_OUTPUT_PREDICTION, WorkloadAdapter,
+    };
     use super::*;
+
+    fn fixture_catalog(adapter: &LiveCodeBenchAdapter, root: &Path) {
+        let directory = root.join(adapter.id);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("catalog.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "workload": adapter.id,
+                "scenario": adapter.scenario,
+                "dataset": {
+                    "source": adapter.dataset,
+                    "revision": adapter.revision,
+                    "split": adapter.release.unwrap_or(adapter.scenario),
+                },
+                "tasks": [{
+                    "id": "fixture-1",
+                    "description": "Pinned trial one",
+                    "prompt": "Solve the pinned task.",
+                    "metadata": "evaluation-data/fixture-1.json",
+                    "metadata_sha256": "a".repeat(64),
+                }, {
+                    "id": "fixture-2",
+                    "description": "Pinned trial two",
+                    "prompt": "Solve the other pinned task.",
+                    "metadata": "evaluation-data/fixture-2.json",
+                    "metadata_sha256": "b".repeat(64),
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn pinned_catalog_exposes_bounded_official_trials() {
@@ -285,6 +323,70 @@ mod tests {
         )
         .unwrap();
         assert!(read(&CODE_GENERATION_V6, &root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn every_family_member_exposes_its_installed_catalog_to_trial_selection() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-livecodebench-trial-integration-{}",
+            crate::workloads::TaskIdentity::local("lcb", None).attempt_id
+        ));
+        let adapters: &[&LiveCodeBenchAdapter] = &[
+            &CODE_GENERATION_V1,
+            &CODE_GENERATION_V2,
+            &CODE_GENERATION_V3,
+            &CODE_GENERATION_V4,
+            &CODE_GENERATION_V5,
+            &CODE_GENERATION_V6,
+            &SELF_REPAIR_V1,
+            &SELF_REPAIR_V2,
+            &SELF_REPAIR_V3,
+            &SELF_REPAIR_V4,
+            &SELF_REPAIR_V5,
+            &SELF_REPAIR_V6,
+            &LATEST,
+            &TEST_OUTPUT_PREDICTION,
+            &CODE_EXECUTION,
+        ];
+        for adapter in adapters {
+            fixture_catalog(adapter, &root);
+            let extension = adapter.setup_extension().expect("trial extension");
+            let selected = crate::workloads::setup_extension_values(adapter.id, &extension, &root)
+                .expect("installed catalog is selectable in setup");
+            assert_eq!(
+                selected,
+                vec!["fixture-1".to_owned(), "fixture-2".to_owned()],
+                "{}",
+                adapter.id
+            );
+            let planned = adapter
+                .planning_catalog(&root)
+                .expect("planning catalog")
+                .expect("LiveCodeBench planning catalog");
+            assert_eq!(
+                planned.task_ids,
+                selected.iter().cloned().collect(),
+                "{}",
+                adapter.id
+            );
+            crate::workloads::write_default_trial_set(adapter.id, &root).unwrap();
+            let trial_set = crate::workloads::read_trial_set(
+                &root.join(format!("{}.workload.toml", adapter.id)),
+            )
+            .unwrap();
+            assert_eq!(trial_set.workload, adapter.id, "{}", adapter.id);
+            assert_eq!(
+                trial_set
+                    .trials
+                    .iter()
+                    .map(|trial| trial.id.as_str())
+                    .collect::<Vec<_>>(),
+                selected,
+                "{}",
+                adapter.id
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }
