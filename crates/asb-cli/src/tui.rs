@@ -13,13 +13,14 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, RecvTimeoutError, TrySendError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const LAST_SETUP_TUI_FILE: &str = "setup-tui-last.toml";
 
@@ -1818,8 +1819,11 @@ fn run_loop(
                     }
                     app.sync_collector_dependencies();
                 }
-                if app.next_step().is_none() && !install_selected_provider_tools(terminal, app)? {
-                    continue;
+                if app.next_step().is_none() {
+                    if !install_selected_provider_tools(terminal, app)? {
+                        continue;
+                    }
+                    return generate_configs_with_progress(terminal, app);
                 }
                 if let Some(generated) = app.advance()? {
                     return Ok(generated);
@@ -2590,6 +2594,150 @@ fn default_model(provider: &str) -> &'static str {
 }
 
 fn generate_configs(app: &App) -> Result<Generated, Error> {
+    let (tests, sweep, configs) = prepare_configs(app)?;
+    crate::config::matrix::publish_sweep(&sweep, configs, &mut std::io::sink())?;
+    Ok(Generated { tests, sweep })
+}
+
+struct GenerationProgress {
+    completed: usize,
+    total: usize,
+    started: Instant,
+}
+
+impl GenerationProgress {
+    fn new(total: usize) -> Self {
+        Self {
+            completed: 0,
+            total,
+            started: Instant::now(),
+        }
+    }
+
+    fn update(&mut self, completed: usize, total: usize) {
+        self.total = total.max(1);
+        self.completed = completed.min(self.total);
+    }
+
+    fn percent(&self) -> u8 {
+        (self.completed.saturating_mul(100) / self.total.max(1)) as u8
+    }
+
+    fn eta(&self) -> Option<Duration> {
+        (self.completed > 0).then(|| {
+            let seconds = self.started.elapsed().as_secs_f64()
+                * (self.total.saturating_sub(self.completed)) as f64
+                / self.completed as f64;
+            Duration::from_secs_f64(seconds)
+        })
+    }
+
+    fn label(&self) -> String {
+        let eta = self
+            .eta()
+            .map(format_duration)
+            .unwrap_or_else(|| "estimating".into());
+        format!(
+            "Writing {}/{} files ({}%) · ETA {}",
+            self.completed,
+            self.total,
+            self.percent(),
+            eta
+        )
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+fn draw_generation_progress(frame: &mut ratatui::Frame<'_>, progress: &GenerationProgress) {
+    let area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(40),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Percentage(40),
+        ])
+        .split(frame.area());
+    frame.render_widget(
+        Paragraph::new("Writing benchmark configurations")
+            .block(Block::default().borders(Borders::ALL).title("ASB setup")),
+        area[1],
+    );
+    frame.render_widget(
+        Gauge::default()
+            .block(Block::default().borders(Borders::ALL))
+            .gauge_style(Style::default().fg(Color::Cyan))
+            .ratio(f64::from(progress.percent()) / 100.0)
+            .label(progress.label()),
+        area[2],
+    );
+}
+
+/// Publish the selected configuration matrix without freezing the terminal.
+/// Publication itself retains the normal no-replace and manifest-last contract;
+/// this loop only coalesces its completed-file notifications for a 10 Hz UI.
+fn generate_configs_with_progress(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &App,
+) -> Result<Generated, Error> {
+    let (tests, sweep, configs) = prepare_configs(app)?;
+    let mut progress = GenerationProgress::new(tests.saturating_add(1));
+    let worker_sweep = sweep.clone();
+    let (progress_tx, progress_rx) = mpsc::sync_channel(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let mut output = std::io::sink();
+        let result = crate::config::matrix::publish_sweep_with_progress(
+            &worker_sweep,
+            configs,
+            &mut output,
+            &mut |completed, total| match progress_tx.try_send((completed, total)) {
+                Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
+            },
+        );
+        let _ = result_tx.send(result);
+    });
+    loop {
+        while let Ok((completed, total)) = progress_rx.try_recv() {
+            progress.update(completed, total);
+        }
+        terminal
+            .draw(|frame| draw_generation_progress(frame, &progress))
+            .map_err(|error| {
+                Error::Io(format!("cannot draw setup publication progress: {error}"))
+            })?;
+        match result_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(result) => {
+                worker
+                    .join()
+                    .map_err(|_| Error::Io("setup publication worker panicked".into()))?;
+                result?;
+                progress.update(progress.total, progress.total);
+                terminal
+                    .draw(|frame| draw_generation_progress(frame, &progress))
+                    .map_err(|error| {
+                        Error::Io(format!("cannot draw completed setup publication: {error}"))
+                    })?;
+                return Ok(Generated { tests, sweep });
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                worker
+                    .join()
+                    .map_err(|_| Error::Io("setup publication worker panicked".into()))?;
+                return Err(Error::Io(
+                    "setup publication worker stopped without a result".into(),
+                ));
+            }
+        }
+    }
+}
+
+fn prepare_configs(app: &App) -> Result<(usize, PathBuf, Vec<BenchmarkConfig>), Error> {
     let agents = app.panes[PaneKind::Agents.index()]
         .selected_choices()
         .filter_map(|choice| choice.key.agent().map(str::to_owned))
@@ -2712,11 +2860,7 @@ fn generate_configs(app: &App) -> Result<Generated, Error> {
     }
     let sweep_name = format!("asb-sweep-{stamp}.toml");
     let sweep = app.root.join(&sweep_name);
-    crate::config::matrix::publish_sweep(&sweep, configs.into_configs(), &mut std::io::sink())?;
-    Ok(Generated {
-        tests: index,
-        sweep,
-    })
+    Ok((index, sweep, configs.into_configs()))
 }
 
 type TrialSelection = (String, Option<String>, Vec<Option<String>>);
@@ -2789,9 +2933,9 @@ mod generation_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        App, Availability, Choice, ChoiceKey, Generated, Pane, PaneKind, default_model,
-        generate_configs, generated_summary, install_status_message, last_setup_tui_config,
-        record_last_setup_tui, selected_missing_provider_tools,
+        App, Availability, Choice, ChoiceKey, Generated, GenerationProgress, Pane, PaneKind,
+        default_model, generate_configs, generated_summary, install_status_message,
+        last_setup_tui_config, record_last_setup_tui, selected_missing_provider_tools,
     };
     use crate::install;
     use crate::project::{self, ProjectConfig};
@@ -3805,6 +3949,24 @@ mod tests {
     }
 
     #[test]
+    fn publication_progress_counts_the_sweep_and_reports_percent_and_eta() {
+        let mut progress = GenerationProgress::new(3);
+        assert!(
+            progress
+                .label()
+                .contains("Writing 0/3 files (0%) · ETA estimating")
+        );
+        progress.update(2, 3);
+        assert!(progress.label().contains("Writing 2/3 files (66%) · ETA "));
+        progress.update(3, 3);
+        assert!(
+            progress
+                .label()
+                .contains("Writing 3/3 files (100%) · ETA 00:00")
+        );
+    }
+
+    #[test]
     fn last_setup_tui_record_prefers_the_generated_sweep() {
         let root = std::env::temp_dir().join(format!("asb-tui-last-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -4087,5 +4249,50 @@ mod tests {
         assert_eq!(config.trial.as_deref(), Some("shell"));
         assert!(config.trial_set.is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn every_external_workload_uses_only_its_explicitly_selected_trial() {
+        for workload in install::external_workload_names() {
+            let root = std::env::temp_dir().join(format!(
+                "asb-tui-selected-trial-{workload}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let mut app = App::new(root.clone(), ProjectConfig::default());
+            app.panes[PaneKind::Agents.index()] = Pane::new(vec![agent_choice("pi")]);
+            app.panes[PaneKind::Agents.index()].selected[0] = true;
+            app.panes[PaneKind::Providers.index()] = Pane::new(vec![provider_choice("openai")]);
+            app.panes[PaneKind::Providers.index()].selected[0] = true;
+            app.panes[PaneKind::Models.index()] = Pane::new(vec![Choice {
+                label: "fixture-model".into(),
+                key: ChoiceKey::Model {
+                    provider: "openai".into(),
+                    model: "fixture-model".into(),
+                },
+                availability: Availability::Available,
+            }]);
+            app.panes[PaneKind::Models.index()].selected[0] = true;
+            app.panes[PaneKind::Workloads.index()] = Pane::new(vec![choice(workload)]);
+            app.panes[PaneKind::Workloads.index()].selected[0] = true;
+            let extension = crate::workloads::setup_extension(workload)
+                .unwrap_or_else(|| panic!("{workload} has no selectable trial extension"));
+            // Do not require a downloaded catalog here: the invariant is that
+            // one selected extension value publishes one configuration for
+            // every external family, including catalog-backed LiveCodeBench.
+            app.panes[PaneKind::Extensions.index()] = Pane::new(vec![Choice {
+                label: "fixture-trial".into(),
+                key: ChoiceKey::ExtensionValue {
+                    workload: workload.into(),
+                    extension: extension.id.into(),
+                    value: "fixture-trial".into(),
+                },
+                availability: Availability::Available,
+            }]);
+            app.panes[PaneKind::Extensions.index()].selected[0] = true;
+            assert_eq!(generate_configs(&app).unwrap().tests, 1, "{workload}");
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 }

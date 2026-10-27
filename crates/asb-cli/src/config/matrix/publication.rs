@@ -89,13 +89,28 @@ fn scalar_with(path: &Path, bytes: &[u8], backend: &impl Backend) -> Result<(), 
         .publish(path, false, backend)
         .map_err(|failure| failure.error)
 }
-pub(super) fn sweep(path: &Path, prepared: &prepared::Sweep) -> Result<(), Error> {
-    sweep_with(path, prepared, &System)
+pub(super) fn sweep_with_progress(
+    path: &Path,
+    prepared: &prepared::Sweep,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<(), Error> {
+    sweep_with_progress_with(path, prepared, &System, progress)
 }
+
+#[cfg(test)]
 fn sweep_with(
     path: &Path,
     prepared: &prepared::Sweep,
     backend: &impl Backend,
+) -> Result<(), Error> {
+    sweep_with_progress_with(path, prepared, backend, &mut |_, _| {})
+}
+
+fn sweep_with_progress_with(
+    path: &Path,
+    prepared: &prepared::Sweep,
+    backend: &impl Backend,
+    progress: &mut dyn FnMut(usize, usize),
 ) -> Result<(), Error> {
     let directory = &prepared.directory;
     fs::create_dir(directory).map_err(|error| {
@@ -110,7 +125,9 @@ fn sweep_with(
     let result = (|| {
         let generation_owner = open(directory).map_err(crate::io_error)?;
         let mut identities = Vec::with_capacity(prepared.configurations.len());
-        for (name, bytes) in &prepared.configurations {
+        let total = prepared.configurations.len() + 1;
+        progress(0, total);
+        for (index, (name, bytes)) in prepared.configurations.iter().enumerate() {
             let file_path = directory.join(name);
             let mut file = OpenOptions::new()
                 .write(true)
@@ -137,6 +154,7 @@ fn sweep_with(
                 key(&file).map_err(crate::io_error)?,
                 file.metadata().map_err(crate::io_error)?,
             ));
+            progress(index + 1, total);
         }
         synchronize(directory, backend).map_err(crate::io_error)?;
         synchronize(parent(path), backend).map_err(crate::io_error)?;
@@ -182,7 +200,9 @@ fn sweep_with(
         stage.publish(path, true, backend).map_err(|failure| {
             state = failure.state;
             failure.error
-        })
+        })?;
+        progress(total, total);
+        Ok(())
     })();
     result.map_err(|error| Error::Io(format!("{}{error}; generated configurations (possibly partial) remain in {}; no setup generation is recursively cleaned", if state == CommitState::NotPublished { format!("Sweep manifest was not published at {}: ", path.display()) } else { String::new() }, directory.display())))
 }

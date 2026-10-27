@@ -45,21 +45,21 @@ if(barSvg){
   assert.equal(bars.length,1);
   assert.ok(Number(bars[0].getAttribute('height'))>0,'accepted negative scalar must have visible geometry');
   bars[0].fire('pointerenter',{clientX:100,clientY:100});
-  assert.equal(tooltip.textContent,'000-0: -17.25','hover must preserve the original signed value');
+  assert.equal(tooltip.textContent,'bug-fix:default: -17.25','hover must preserve the original signed value');
   assert.ok(html.includes('data-value="-17.25"'),'actual HTML must embed the signed observation');
 }
 const pointer={clientX:Number(points[1].getAttribute('cx')),clientY:100};
 lines[1].fire('pointerenter',pointer);
-assert.ok(tooltip.textContent.includes('Nearest displayed observed sample: 000-0: 3 @ 200 ms'),tooltip.textContent);
+assert.ok(tooltip.textContent.includes('Nearest displayed observed sample: bug-fix:default: 3 @ 200 ms'),tooltip.textContent);
 assert.ok(!tooltip.textContent.includes('undefined'));
 let matrixUsed=false;
 svg.getScreenCTM=()=>({inverse:()=>({observedX:Number(points[0].getAttribute('cx'))})});
 svg.createSVGPoint=()=>({matrixTransform(matrix){matrixUsed=true;return{x:matrix.observedX};}});
 lines[1].fire('pointermove',pointer);
 assert.ok(matrixUsed,'browser screen matrix must account for letterboxing rather than only bounding-box scale');
-assert.equal(tooltip.textContent,'Nearest displayed observed sample: 000-0: 1 @ 0 ms');
+assert.equal(tooltip.textContent,'Nearest displayed observed sample: bug-fix:default: 1 @ 0 ms');
 points[0].fire('pointerenter',{clientX:100,clientY:100});
-assert.equal(tooltip.textContent,'000-0: 1 @ 0 ms');
+assert.equal(tooltip.textContent,'bug-fix:default: 1 @ 0 ms');
 const original=svg.getAttribute('viewBox');
 svg.fire('wheel',{deltaY:-1,clientX:600,clientY:200,preventDefault(){}});
 assert.notEqual(svg.getAttribute('viewBox'),original);
