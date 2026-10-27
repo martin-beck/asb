@@ -269,12 +269,14 @@ mod adapter_layout_tests {
                 category: "agents",
                 ids: super::agents::names().collect(),
                 // Attempt artifact ownership, the sealed causal local-tool replay
-                // transport, and deterministic-execution manifests are generic
-                // adapter infrastructure. Individual adapters only opt in.
+                // transport, deterministic-execution manifests, and bounded
+                // native workspace capsules are generic adapter infrastructure.
+                // Individual adapters only opt in.
                 root_modules: &[
                     "mod.rs",
                     "driver.rs",
                     "artifacts.rs",
+                    "capsule.rs",
                     "determinism.rs",
                     "mcp_framing.rs",
                     "mcp_relay.rs",
