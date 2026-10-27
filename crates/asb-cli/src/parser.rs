@@ -192,7 +192,7 @@ pub(crate) fn run_with_interactive(
             if options.cassette.is_some() && tape.carrier.is_none() {
                 return fail(
                     stderr,
-                    "--cassette requires --record, --replay, --llm-record, --llm-replay, --tool-record, or --tool-replay",
+                    "--cassette requires --record, --replay, --llm-record, --llm-replay, --tool-record, --tool-replay, or --mcp-record",
                 );
             }
             if options.respect_record_timings && tape.llm != Some(tape::Mode::Replay) {
@@ -216,6 +216,7 @@ pub(crate) fn run_with_interactive(
                     mode: tape.carrier,
                     tool_mode: tape.tool,
                     tool_mode_explicit: true,
+                    mcp_mode: tape.mcp,
                     cassette: options.cassette.as_deref(),
                     native_capsule_record: options.native_capsule_record.as_deref(),
                     native_capsule_replay: options.native_capsule_replay.as_deref(),
@@ -264,6 +265,7 @@ pub(crate) fn run_with_interactive(
                     mode: tape.carrier,
                     tool_mode: tape.tool,
                     tool_mode_explicit: true,
+                    mcp_mode: tape.mcp,
                     respect_record_timings: options.respect_record_timings,
                     cassette_root: options.cassette_root.as_deref().map(std::path::Path::new),
                     jobs: usize::from(options.jobs),
@@ -364,6 +366,7 @@ struct TapeFlags {
     llm_replay: bool,
     tool_record: bool,
     tool_replay: bool,
+    mcp_record: bool,
 }
 
 impl TapeFlags {
@@ -373,7 +376,7 @@ impl TapeFlags {
             // The current sealed cassette has one lifecycle, so selecting an
             // explicit layer still reserves the same private carrier. This
             // preserves a causal tool transcript beside its provider tape.
-            record: args.record || args.llm_record || args.tool_record,
+            record: args.record || args.llm_record || args.tool_record || args.mcp_record,
             replay: args.replay || args.llm_replay || args.tool_replay,
             legacy_record: args.record,
             legacy_replay: args.replay,
@@ -381,12 +384,13 @@ impl TapeFlags {
             llm_replay: args.llm_replay,
             tool_record: args.tool_record,
             tool_replay: args.tool_replay,
+            mcp_record: args.mcp_record,
         }
     }
 
     fn from_sweep(args: &SweepArgs) -> Self {
         Self {
-            record: args.record || args.llm_record || args.tool_record,
+            record: args.record || args.llm_record || args.tool_record || args.mcp_record,
             replay: args.replay || args.llm_replay || args.tool_replay,
             legacy_record: args.record,
             legacy_replay: args.replay,
@@ -394,6 +398,7 @@ impl TapeFlags {
             llm_replay: args.llm_replay,
             tool_record: args.tool_record,
             tool_replay: args.tool_replay,
+            mcp_record: args.mcp_record,
         }
     }
 }
@@ -416,6 +421,7 @@ struct TapeSelection {
     carrier: Option<tape::Mode>,
     llm: Option<tape::Mode>,
     tool: Option<tape::Mode>,
+    mcp: Option<tape::Mode>,
 }
 
 fn tape_selection(flags: TapeFlags) -> Result<TapeSelection, CliError> {
@@ -432,6 +438,7 @@ fn tape_selection(flags: TapeFlags) -> Result<TapeSelection, CliError> {
             || flags.tool_replay)
             .then_some(direction)
             .flatten(),
+        mcp: flags.mcp_record.then_some(direction).flatten(),
     })
 }
 
@@ -497,6 +504,17 @@ mod tape_flag_tests {
         let selection = tape_selection(TapeFlags::from_run(&args)).unwrap();
         assert_eq!(selection.llm, Some(tape::Mode::Record));
         assert_eq!(selection.tool, Some(tape::Mode::Record));
+        assert_eq!(selection.mcp, None);
+
+        let cli = Cli::try_parse_from(["asb", "run", "benchmark.toml", "--mcp-record"]).unwrap();
+        let Some(CommandLine::Run(args)) = cli.command else {
+            panic!("expected run arguments");
+        };
+        let selection = tape_selection(TapeFlags::from_run(&args)).unwrap();
+        assert_eq!(selection.carrier, Some(tape::Mode::Record));
+        assert_eq!(selection.llm, None);
+        assert_eq!(selection.tool, None);
+        assert_eq!(selection.mcp, Some(tape::Mode::Record));
 
         let cli =
             Cli::try_parse_from(["asb", "sweep", "sweep.toml", "--llmreplay", "--tool-replay"])
@@ -690,7 +708,7 @@ impl From<SetupArgs> for config::SetupOptions {
 
 #[derive(Debug, Args)]
 #[command(
-    group(ArgGroup::new("record-direction").args(["record", "llm_record", "tool_record"]).multiple(true).conflicts_with("replay-direction")),
+    group(ArgGroup::new("record-direction").args(["record", "llm_record", "tool_record", "mcp_record"]).multiple(true).conflicts_with("replay-direction")),
     group(ArgGroup::new("replay-direction").args(["replay", "llm_replay", "tool_replay"]).multiple(true))
 )]
 struct RunArgs {
@@ -721,6 +739,9 @@ struct RunArgs {
     /// Replay recorded adapter-supported local tool results without executing tools.
     #[arg(long)]
     tool_replay: bool,
+    /// Transparently record traffic to declared ordinary MCP servers.
+    #[arg(long)]
+    mcp_record: bool,
     #[arg(long, help = "replay each response after its recorded response delay")]
     respect_record_timings: bool,
     #[arg(long, value_hint = clap::ValueHint::FilePath)]
@@ -741,7 +762,7 @@ struct RunArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    group(ArgGroup::new("record-direction").args(["record", "llm_record", "tool_record"]).multiple(true).conflicts_with("replay-direction")),
+    group(ArgGroup::new("record-direction").args(["record", "llm_record", "tool_record", "mcp_record"]).multiple(true).conflicts_with("replay-direction")),
     group(ArgGroup::new("replay-direction").args(["replay", "llm_replay", "tool_replay"]).multiple(true))
 )]
 struct SweepArgs {
@@ -790,6 +811,9 @@ struct SweepArgs {
     /// Replay recorded adapter-supported local tool results without executing tools.
     #[arg(long)]
     tool_replay: bool,
+    /// Transparently record traffic to declared ordinary MCP servers.
+    #[arg(long)]
+    mcp_record: bool,
     #[arg(long, help = "replay each response after its recorded response delay")]
     respect_record_timings: bool,
     #[arg(long)]

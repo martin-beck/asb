@@ -151,6 +151,8 @@ pub(crate) struct RunOptions<'a> {
     /// Internal callers predating the split options retain the historical
     /// combined behavior unless they opt into an explicit tool selection.
     pub tool_mode_explicit: bool,
+    /// Transparent protocol recording for declared ordinary MCP servers.
+    pub mcp_mode: Option<tape::Mode>,
     pub cassette: Option<&'a str>,
     /// Explicit fresh destination for a bounded native workspace capsule.
     pub native_capsule_record: Option<&'a str>,
@@ -2581,6 +2583,7 @@ mod tests {
                 runtime_dir: std::path::Path::new("fixture-private"),
                 run_dir: run,
                 mcp_servers: &[],
+                mcp_tape: None,
                 tape: None,
             })
             .unwrap();

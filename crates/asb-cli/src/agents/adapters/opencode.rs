@@ -281,6 +281,7 @@ mod tests {
             runtime_dir: &root.join("runtime"),
             run_dir: &root.join("run"),
             mcp_servers: &[],
+            mcp_tape: None,
             tape: None,
         };
         prepare_adapter(&mut context).unwrap();

@@ -35,6 +35,8 @@ fn collect_context() -> CollectionContext<'static> {
         run_dir: Path::new("fixture-run"),
         interface: None,
         anthropic_input_includes_cache: false,
+        mcp_servers: &[],
+        mcp_tape: None,
     }
 }
 
@@ -75,6 +77,7 @@ fn static_adapter_defaults_are_empty_and_preparation_command_hooks_are_called() 
             runtime_dir: Path::new("not-created"),
             run_dir: Path::new("not-created"),
             mcp_servers: &[],
+            mcp_tape: None,
             tape: None,
         })
         .unwrap();
@@ -245,6 +248,7 @@ fn unknown_preparation_does_not_mutate_command_or_create_directories() {
             runtime_dir: Path::new("not-created"),
             run_dir: Path::new("not-created"),
             mcp_servers: &[],
+            mcp_tape: None,
             tape: None,
         },
     )

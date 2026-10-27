@@ -484,6 +484,7 @@ mod tests {
                 runtime_dir: &root.join("runtime"),
                 run_dir: &run_dir,
                 mcp_servers: &[],
+                mcp_tape: None,
                 tape: None,
             },
             super::super::TapeContext {

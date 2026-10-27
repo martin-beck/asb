@@ -1,4 +1,7 @@
-use super::{CommandContext, CommandSpec, PreparationContext, PromptDelivery, StaticAdapter};
+use super::{
+    AgentArtifacts, CollectionContext, CommandContext, CommandSpec, McpTapeContext,
+    PreparationContext, PromptDelivery, StaticAdapter,
+};
 use crate::{Error, install::Recipe};
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "codex",
@@ -14,6 +17,8 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_tool_replay(prepare_tool_replay)
 .with_mcp_servers()
+.with_mcp_relay()
+.with_collection(collect)
 .with_artifact_specs(&[super::super::ArtifactSpec {
     namespace: "tool-replay",
     filename: "local-tools.jsonl",
@@ -75,6 +80,8 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         &connection.base_url,
         connection.credential.is_some(),
         context.mcp_servers,
+        context.mcp_tape,
+        context.run_dir,
     )?;
     context.command.env("CODEX_HOME", &directory);
     if let Some(key) = connection.credential.as_deref() {
@@ -163,6 +170,8 @@ fn configure(
     base_url: &str,
     authenticated: bool,
     mcp_servers: &[crate::benchmark::McpServerConfig],
+    mcp_tape: Option<McpTapeContext>,
+    run_dir: &std::path::Path,
 ) -> Result<(), Error> {
     std::fs::create_dir_all(directory).map_err(|error| {
         Error::Run(format!(
@@ -178,7 +187,7 @@ fn configure(
     };
     let replay_configuration =
         std::fs::read_to_string(directory.join("asb-tool-replay.toml")).unwrap_or_default();
-    let mcp_configuration = declared_mcp_configuration(mcp_servers)?;
+    let mcp_configuration = declared_mcp_configuration(mcp_servers, mcp_tape, run_dir)?;
     let configuration = format!(
         "model = {model}\nmodel_provider = \"asb_provider\"\nweb_search = \"disabled\"\n\n[features]\napps = false\nplugins = false\nenable_mcp_apps = false\n\n[model_providers.asb_provider]\nname = \"ASB provider\"\nbase_url = {base_url}\n{key}wire_api = \"responses\"\nrequires_openai_auth = false\n\n{mcp_configuration}{replay_configuration}"
     );
@@ -191,27 +200,62 @@ fn configure(
 
 fn declared_mcp_configuration(
     declarations: &[crate::benchmark::McpServerConfig],
+    mcp_tape: Option<McpTapeContext>,
+    run_dir: &std::path::Path,
 ) -> Result<String, Error> {
     if declarations.is_empty() {
         return Ok(String::new());
     }
     let mut servers = toml::map::Map::new();
     for declaration in declarations {
+        let launch = match mcp_tape {
+            Some(McpTapeContext {
+                mode: crate::tape::Mode::Record,
+            }) => Some(super::super::mcp_relay::record_launch(
+                run_dir,
+                declaration,
+            )?),
+            Some(McpTapeContext {
+                mode: crate::tape::Mode::Replay,
+            }) => {
+                return Err(Error::Run(
+                    "Codex MCP replay is not available until its sealed relay input is staged"
+                        .into(),
+                ));
+            }
+            None => None,
+        };
         let mut server = toml::map::Map::new();
         server.insert(
             "command".into(),
-            toml::Value::String(declaration.program.clone()),
+            toml::Value::String(
+                launch
+                    .as_ref()
+                    .map(|launch| launch.program.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| declaration.program.clone()),
+            ),
         );
         server.insert(
             "args".into(),
-            toml::Value::Array(
-                declaration
-                    .args
-                    .iter()
-                    .cloned()
-                    .map(toml::Value::String)
-                    .collect(),
-            ),
+            toml::Value::Array(launch.map_or_else(
+                || {
+                    declaration
+                        .args
+                        .iter()
+                        .cloned()
+                        .map(toml::Value::String)
+                        .collect()
+                },
+                |launch| {
+                    launch
+                        .args
+                        .into_iter()
+                        .map(|argument| {
+                            toml::Value::String(argument.to_string_lossy().into_owned())
+                        })
+                        .collect()
+                },
+            )),
         );
         servers.insert(declaration.id.clone(), toml::Value::Table(server));
     }
@@ -219,6 +263,34 @@ fn declared_mcp_configuration(
     root.insert("mcp_servers".into(), toml::Value::Table(servers));
     toml::to_string(&toml::Value::Table(root))
         .map_err(|error| Error::Run(format!("cannot serialize Codex MCP configuration: {error}")))
+}
+
+fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
+    let mut artifacts = AgentArtifacts::default();
+    if context.mcp_tape.map(|tape| tape.mode) != Some(crate::tape::Mode::Record) {
+        return artifacts;
+    }
+    for declaration in context.mcp_servers {
+        let recording = context.run_dir.join("mcp-relay").join(&declaration.id);
+        let bundle = if recording.exists() {
+            super::super::mcp_relay::bundle_recording(&recording)
+        } else {
+            super::super::mcp_relay::empty_bundle()
+        };
+        match bundle {
+            Ok(bytes) => artifacts
+                .sealed_artifacts
+                .push(super::super::SealedArtifact {
+                    kind: format!("mcp-relay-{}", declaration.id),
+                    bytes,
+                }),
+            Err(error) => artifacts.errors.push(format!(
+                "cannot seal MCP relay recording for `{}`: {error}",
+                declaration.id
+            )),
+        }
+    }
+    artifacts
 }
 
 #[cfg(test)]
@@ -284,6 +356,8 @@ mod tests {
             "http://127.0.0.1:1234/v1",
             true,
             &mcp_servers,
+            None,
+            &directory,
         )
         .unwrap();
         let contents = std::fs::read_to_string(directory.join("config.toml")).unwrap();
@@ -316,6 +390,63 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn mcp_recording_substitutes_the_relay_and_seals_an_unused_server() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-codex-mcp-record-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let directory = root.join("config");
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let declarations = [crate::benchmark::McpServerConfig {
+            id: "filesystem".into(),
+            program: "mcp-filesystem".into(),
+            args: vec!["--workspace".into(), "fixture".into()],
+        }];
+        configure(
+            &directory,
+            "fixture-model",
+            "http://127.0.0.1:1234/v1",
+            false,
+            &declarations,
+            Some(McpTapeContext {
+                mode: crate::tape::Mode::Record,
+            }),
+            &run_dir,
+        )
+        .unwrap();
+        let config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(directory.join("config.toml")).unwrap())
+                .unwrap();
+        let server = &config["mcp_servers"]["filesystem"];
+        let args = server["args"].as_array().unwrap();
+        assert_eq!(args[0].as_str(), Some("__asb-mcp-relay"));
+        assert_eq!(args[1].as_str(), Some("--record-dir"));
+        assert_eq!(args[3].as_str(), Some("--"));
+        assert_eq!(args[4].as_str(), Some("mcp-filesystem"));
+        assert!(!run_dir.join("mcp-relay/filesystem").exists());
+
+        let artifacts = collect(&CollectionContext {
+            frozen: &Default::default(),
+            run_dir: &run_dir,
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &declarations,
+            mcp_tape: Some(McpTapeContext {
+                mode: crate::tape::Mode::Record,
+            }),
+        });
+        assert!(artifacts.errors.is_empty());
+        assert_eq!(artifacts.sealed_artifacts.len(), 1);
+        assert_eq!(artifacts.sealed_artifacts[0].kind, "mcp-relay-filesystem");
+        let replay = root.join("replay");
+        super::super::mcp_relay::materialize_bundle(&artifacts.sealed_artifacts[0].bytes, &replay)
+            .unwrap();
+        super::super::mcp_relay::validate_recording(&replay).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -388,6 +519,7 @@ mod tests {
                 runtime_dir: &root,
                 run_dir: &root,
                 mcp_servers: &mcp_servers,
+                mcp_tape: None,
                 tape: Some(crate::agents::TapeContext {
                     mode: crate::tape::Mode::Record,
                     cassette: &cassette,

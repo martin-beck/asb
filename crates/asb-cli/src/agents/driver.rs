@@ -491,6 +491,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         runtime_dir: &state_root,
         run_dir: &request.run_dir,
         mcp_servers: &request.config.mcp_servers,
+        mcp_tape: None,
         tape: request
             .tool_tape_cassette
             .as_deref()
@@ -680,6 +681,8 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         anthropic_input_includes_cache: crate::providers::anthropic_input_includes_cache(
             &request.config.provider,
         ),
+        mcp_servers: &request.config.mcp_servers,
+        mcp_tape: None,
     });
     let usage = crate::usage::from_sources(
         &request.config.provider,
