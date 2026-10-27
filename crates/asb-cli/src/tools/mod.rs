@@ -9,6 +9,7 @@ mod cli2key;
 mod flamegraph;
 mod harbor;
 mod iostat;
+mod livecodebench;
 mod mpstat;
 mod node;
 mod perf;
@@ -260,6 +261,7 @@ static REGISTRY: &[&dyn ToolAdapter] = &[
     &bpftrace::ADAPTER,
     &perfetto::ADAPTER,
     &flamegraph::ADAPTER,
+    &livecodebench::ADAPTER,
     &swebench::ADAPTER,
     &terminal_bench::ADAPTER,
     &harbor::ADAPTER,
@@ -455,6 +457,12 @@ mod tests {
                 "tb",
                 "terminal-bench==0.2.18",
                 &["docker==7.1.0"][..],
+            ),
+            (
+                "livecodebench",
+                "datasets-cli",
+                "datasets==3.5.0",
+                &["numpy==2.2.4", "tqdm==4.67.1"][..],
             ),
             ("harbor", "harbor", "harbor==0.24.0", &["docker==7.1.0"][..]),
         ] {

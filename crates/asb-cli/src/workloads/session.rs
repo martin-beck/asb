@@ -454,10 +454,20 @@ pub(crate) trait WorkloadSession {
 }
 
 pub(super) type Evaluator = fn(&str, &Path, &str) -> Result<Evaluation, String>;
+pub(super) type DynamicEvaluator =
+    Box<dyn Fn(&str, &Path, &str) -> Result<Evaluation, String> + Send + Sync>;
+
+enum FileEvaluator {
+    Static(Evaluator),
+    Dynamic {
+        evaluator: DynamicEvaluator,
+        baseline_passed: Option<bool>,
+    },
+}
 
 pub(super) struct FileSession {
     invocation: TaskInvocation,
-    evaluator: Evaluator,
+    evaluator: FileEvaluator,
     evaluation_kind: super::KnownEvaluationKind,
     baseline_passed: Option<bool>,
     initial_material: Result<String, String>,
@@ -470,14 +480,53 @@ impl FileSession {
         evaluator: Evaluator,
         evaluation_kind: super::KnownEvaluationKind,
     ) -> Self {
+        Self::with_evaluator(
+            context,
+            prompt,
+            FileEvaluator::Static(evaluator),
+            evaluation_kind,
+        )
+    }
+
+    /// A workload adapter may retain a bounded evaluator configuration without
+    /// teaching the generic runner about its dataset or result format.
+    pub fn new_dynamic(
+        context: &PreparationContext<'_>,
+        prompt: String,
+        evaluator: DynamicEvaluator,
+        evaluation_kind: super::KnownEvaluationKind,
+        baseline_passed: Option<bool>,
+    ) -> Self {
+        Self::with_evaluator(
+            context,
+            prompt,
+            FileEvaluator::Dynamic {
+                evaluator,
+                baseline_passed,
+            },
+            evaluation_kind,
+        )
+    }
+
+    fn with_evaluator(
+        context: &PreparationContext<'_>,
+        prompt: String,
+        evaluator: FileEvaluator,
+        evaluation_kind: super::KnownEvaluationKind,
+    ) -> Self {
         let initial_material = if context.verify_initial_material {
             super::material::fingerprint(context.workspace)
         } else {
             Err("initial material identity was not requested for this legacy execution".into())
         };
-        let baseline_passed = evaluator(context.workload, context.workspace, "")
-            .ok()
-            .map(|result| result == Evaluation::Passed);
+        let baseline_passed = match &evaluator {
+            FileEvaluator::Static(evaluator) => evaluator(context.workload, context.workspace, "")
+                .ok()
+                .map(|result| result == Evaluation::Passed),
+            FileEvaluator::Dynamic {
+                baseline_passed, ..
+            } => *baseline_passed,
+        };
         let initial_material = initial_material.and_then(|before| {
             if super::material::fingerprint(context.workspace)? == before {
                 Ok(before)
@@ -513,11 +562,18 @@ impl WorkloadSession for FileSession {
         self.baseline_passed
     }
     fn evaluate(&mut self, final_response: &str) -> Result<Evaluation, String> {
-        (self.evaluator)(
-            &self.invocation.identity.workload,
-            &self.invocation.workspace,
-            final_response,
-        )
+        match &self.evaluator {
+            FileEvaluator::Static(evaluator) => evaluator(
+                &self.invocation.identity.workload,
+                &self.invocation.workspace,
+                final_response,
+            ),
+            FileEvaluator::Dynamic { evaluator, .. } => evaluator(
+                &self.invocation.identity.workload,
+                &self.invocation.workspace,
+                final_response,
+            ),
+        }
     }
 }
 
@@ -807,6 +863,44 @@ mod tests {
             later.invocation().identity.attempt_id,
             session.invocation().identity.attempt_id
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dynamic_adapter_evaluator_keeps_its_own_bounded_configuration() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-dynamic-session-{}",
+            TaskIdentity::local("fixture", None).attempt_id
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let context = PreparationContext {
+            verify_initial_material: false,
+            budgets: Default::default(),
+            on_allocation: None,
+            workload: "adapter-fixture",
+            trial: Some("task-1"),
+            trial_set: None,
+            workload_directory: &root,
+            workspace: &root,
+            project_root: &root,
+            project_config: &crate::project::ProjectConfig::default(),
+        };
+        let mut session = FileSession::new_dynamic(
+            &context,
+            "answer the selected task".into(),
+            Box::new(|_, _, response| {
+                Ok(if response == "accepted" {
+                    Evaluation::Passed
+                } else {
+                    Evaluation::Failed("not accepted".into())
+                })
+            }),
+            super::super::KnownEvaluationKind::UpstreamHarness,
+            Some(false),
+        );
+        assert_eq!(session.baseline_passed(), Some(false));
+        assert_eq!(session.evaluate("accepted"), Ok(Evaluation::Passed));
+        assert_eq!(session.invocation().identity.task_id, "task-1");
         let _ = std::fs::remove_dir_all(root);
     }
 }
