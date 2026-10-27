@@ -255,6 +255,7 @@ mod adapter_layout_tests {
         ids: Vec<&'a str>,
         root_modules: &'a [&'a str],
         root_directories: &'a [&'a str],
+        shared_family_adapters: &'a [(&'a str, &'a str)],
     }
 
     #[test]
@@ -277,12 +278,14 @@ mod adapter_layout_tests {
                     "tool_replay_mcp.rs",
                 ],
                 root_directories: &[],
+                shared_family_adapters: &[],
             },
             CategoryLayout {
                 category: "providers",
                 ids: super::providers::names().to_vec(),
                 root_modules: &["mod.rs", "preparation.rs"],
                 root_directories: &[],
+                shared_family_adapters: &[],
             },
             CategoryLayout {
                 category: "workloads",
@@ -308,6 +311,10 @@ mod adapter_layout_tests {
                     "target.rs",
                 ],
                 root_directories: &["controller"], // Generic Unix/legacy protocol transports.
+                // LiveCodeBench publishes versioned scenario populations from
+                // one pinned official harness; its one owning adapter module
+                // deliberately owns only this explicit ID family.
+                shared_family_adapters: &[("livecodebench", "livecodebench.rs")],
             },
             CategoryLayout {
                 category: "proxy",
@@ -315,6 +322,7 @@ mod adapter_layout_tests {
                 // Category-wide capture evidence, not a provider/target adapter.
                 root_modules: &["mod.rs", "capture.rs", "tool_calls.rs", "usage.rs"],
                 root_directories: &[],
+                shared_family_adapters: &[],
             },
             CategoryLayout {
                 category: "collectors",
@@ -322,6 +330,7 @@ mod adapter_layout_tests {
                 // Category-wide bounded output codec, not a target adapter.
                 root_modules: &["mod.rs", "output.rs"],
                 root_directories: &[],
+                shared_family_adapters: &[],
             },
         ];
         for CategoryLayout {
@@ -329,6 +338,7 @@ mod adapter_layout_tests {
             ids,
             root_modules,
             root_directories,
+            shared_family_adapters,
         } in categories
         {
             let root = source.join(category);
@@ -373,9 +383,14 @@ mod adapter_layout_tests {
                         "registered {category} adapter {id} cannot be a category-wide module"
                     );
                 }
+                let direct_owner = adapters.join(format!("{stem}.rs")).is_file()
+                    || adapters.join(format!("{stem}_agent.rs")).is_file();
+                let shared_family_owner = shared_family_adapters.iter().any(|(family, file)| {
+                    (id == *family || id.starts_with(&format!("{family}-")))
+                        && adapters.join(file).is_file()
+                });
                 assert!(
-                    adapters.join(format!("{stem}.rs")).is_file()
-                        || adapters.join(format!("{stem}_agent.rs")).is_file(),
+                    direct_owner || shared_family_owner,
                     "missing {category} adapter file for {id}"
                 );
             }

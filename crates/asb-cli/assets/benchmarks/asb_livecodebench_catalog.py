@@ -15,6 +15,14 @@ import zlib
 
 MAX_TASKS = 10_000
 MAX_PROMPT = 64 * 1024
+# Official code-generation rows retain complete private test populations.  A
+# single one can be materially larger than an ordinary prompt, but it must
+# still fit within a finite project-local installation budget.
+# The pinned release-v6 population includes a 92,836,584-byte private test
+# corpus. Keep enough headroom for its canonical JSON representation without
+# making a row unbounded.
+MAX_METADATA = 128 * 1024 * 1024
+MAX_METADATA_TOTAL = 16 * 1024 * 1024 * 1024
 SOURCE_REVISION = "28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24"
 SOURCE_SHA256 = "56c7c42aee979def86b69547ecd6d5a877a0e4940af8923bf4325ca0defecbaf"
 SOURCE_URL = "https://codeload.github.com/LiveCodeBench/LiveCodeBench/tar.gz/" + SOURCE_REVISION
@@ -137,7 +145,7 @@ def catalog(args):
     os.environ["HF_HOME"] = str(Path(args.cache).resolve())
     install_source(args.cache)
     dataset = load(args)
-    tasks, seen = [], set()
+    tasks, seen, metadata_total = [], set(), 0
     for row in dataset:
         identifier = task_id(args.scenario, args.release, row)
         if identifier in seen:
@@ -149,8 +157,11 @@ def catalog(args):
         description = bounded(row.get("question_title") or row.get("contest_id") or identifier, "description")[:1024]
         row = normalized(dict(row))
         payload = (json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n").encode("utf-8")
-        if len(payload) > 4 * 1024 * 1024:
-            raise ValueError("LiveCodeBench task metadata exceeds 4 MiB")
+        if len(payload) > MAX_METADATA:
+            raise ValueError("LiveCodeBench task metadata exceeds 128 MiB")
+        metadata_total += len(payload)
+        if metadata_total > MAX_METADATA_TOTAL:
+            raise ValueError("LiveCodeBench task metadata exceeds the 16 GiB catalog budget")
         digest = hashlib.sha256(payload).hexdigest()
         metadata = f"evaluation-data/{digest}.json"
         data_path = Path(args.output) / metadata
