@@ -54,6 +54,8 @@ pub(crate) struct Blob {
 pub(crate) enum Operation {
     Process,
     ProcessStart,
+    ProcessFork,
+    ProcessExec,
     ProcessExit,
     Filesystem,
     Network,
@@ -82,6 +84,7 @@ pub(crate) fn write_root_lifecycle(run_dir: &std::path::Path) -> Result<(), Erro
         schema_version: SCHEMA_VERSION,
         sequence: transcript.len() as u64 + 1,
         process: ROOT_PROCESS,
+        parent_process: None,
         operation: Operation::ProcessStart,
         request: None,
         response: None,
@@ -91,6 +94,7 @@ pub(crate) fn write_root_lifecycle(run_dir: &std::path::Path) -> Result<(), Erro
         schema_version: SCHEMA_VERSION,
         sequence: transcript.len() as u64 + 1,
         process: ROOT_PROCESS,
+        parent_process: None,
         operation: Operation::ProcessExit,
         request: None,
         response: None,
@@ -215,12 +219,24 @@ impl GateWriter {
     }
 
     pub(crate) fn record(&mut self, operation: Operation) -> Result<(), Error> {
+        self.record_event(ROOT_PROCESS, operation, None)
+    }
+
+    /// Append one opaque process-tree event.  Host PID mapping stays entirely
+    /// inside the gate; only trace-local IDs are allowed into the sidecar.
+    pub(crate) fn record_event(
+        &mut self,
+        process: u64,
+        operation: Operation,
+        parent_process: Option<u64>,
+    ) -> Result<(), Error> {
         let sequence = self.events as u64 + 1;
         let event = Event {
             schema_version: SCHEMA_VERSION,
             sequence,
-            process: ROOT_PROCESS,
+            process,
             operation,
+            parent_process,
             request: None,
             response: None,
             effects: Vec::new(),
@@ -251,6 +267,9 @@ pub(crate) struct Event {
     /// Opaque, trace-local process identity.  This is never a host PID.
     pub process: u64,
     pub operation: Operation,
+    /// Parent trace-local identity for a fork event, never a host PID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_process: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<Blob>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -322,6 +341,12 @@ fn valid_event(event: &Event, prior_events: usize) -> bool {
         && event.schema_version == SCHEMA_VERSION
         && event.sequence == prior_events as u64 + 1
         && event.process > 0
+        && match event.operation {
+            Operation::ProcessFork => event
+                .parent_process
+                .is_some_and(|parent| parent > 0 && parent != event.process),
+            _ => event.parent_process.is_none(),
+        }
         && event.effects.len() <= MAX_BLOBS_PER_EVENT
         && event
             .request
@@ -358,6 +383,7 @@ mod tests {
             sequence,
             process: 1,
             operation,
+            parent_process: None,
             request: Some(blob('a')),
             response: Some(blob('b')),
             effects: vec![blob('c')],
@@ -382,6 +408,29 @@ mod tests {
         assert!(transcript.record(malformed).is_err());
         assert!(transcript.record(event(2, Operation::Network)).is_err());
         transcript.record(event(1, Operation::Network)).unwrap();
+    }
+
+    #[test]
+    fn fork_events_bind_distinct_opaque_parent_and_child_ids() {
+        let mut transcript = Transcript::default();
+        let mut fork = event(1, Operation::ProcessFork);
+        fork.process = 2;
+        fork.parent_process = Some(ROOT_PROCESS);
+        transcript.record(fork).unwrap();
+
+        let mut missing_parent = event(2, Operation::ProcessFork);
+        missing_parent.process = 3;
+        assert!(transcript.record(missing_parent).is_err());
+
+        let mut self_parent = event(2, Operation::ProcessFork);
+        self_parent.process = 3;
+        self_parent.parent_process = Some(3);
+        assert!(transcript.record(self_parent).is_err());
+
+        let mut non_fork_parent = event(2, Operation::ProcessExec);
+        non_fork_parent.process = 2;
+        non_fork_parent.parent_process = Some(ROOT_PROCESS);
+        assert!(transcript.record(non_fork_parent).is_err());
     }
 
     #[test]
