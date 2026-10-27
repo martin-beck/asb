@@ -12,7 +12,8 @@ use std::io::{BufRead, Write};
 
 pub(crate) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Framing {
     JsonLines,
     ContentLength,
