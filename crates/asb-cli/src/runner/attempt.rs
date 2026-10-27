@@ -788,6 +788,15 @@ impl<'a> ReadyAttempt<'a> {
                     },
                 }
                 .prepare(prepared.measurements.as_mut())?;
+                if prepared.capsule_record.is_some() || prepared.capsule_replay.is_some() {
+                    let root_executable = native.root_executable()?;
+                    if let Some(capture) = prepared.capsule_record.as_mut() {
+                        capture.bind_root_executable(root_executable.clone())?;
+                    }
+                    if let Some(replay) = prepared.capsule_replay.as_ref() {
+                        replay.verify_root_executable(&root_executable)?;
+                    }
+                }
                 let progress = progress::Context::new(
                     options.interactive,
                     &config.agent,

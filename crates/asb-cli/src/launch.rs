@@ -166,6 +166,15 @@ impl TargetLaunch {
                 .flatten(),
         }
     }
+
+    /// Resolve the exact program that this frozen command would launch. The
+    /// result is an execution identity input, never a recorded pathname.
+    pub(crate) fn resolved_executable(&self) -> Option<PathBuf> {
+        let cwd = self.cwd.as_deref().unwrap_or_else(|| Path::new("."));
+        let inherited_path = std::env::var_os("PATH");
+        let path = self.path.as_deref().or(inherited_path.as_deref());
+        crate::tools::host_executable_in_at(Path::new(&self.program), path, cwd)
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
