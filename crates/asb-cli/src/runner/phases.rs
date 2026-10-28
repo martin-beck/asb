@@ -124,6 +124,14 @@ pub(super) struct AgentOutcome {
 }
 
 impl ExecutionEvidence {
+    pub(super) fn capture_complete(
+        issues: &AttemptIssues,
+        guest: Option<&agents::driver::GuestResult>,
+    ) -> bool {
+        issues.capture_error.is_none()
+            && guest.is_none_or(|metadata| !metadata.transcript_truncated)
+    }
+
     pub fn agent_outcome(
         &self,
         agent: &str,
@@ -147,20 +155,31 @@ impl ExecutionEvidence {
                 .map(str::to_owned)
                 .or_else(|| agents::final_response(agent, &stdout, workspace)),
         };
-        let adapter_failure = (!self.capture_complete)
-            .then(|| {
-                "agent output capture incomplete; transcript interpretation unavailable".to_owned()
+        let adapter_failure = guest
+            .as_ref()
+            .and_then(|metadata| metadata.execution_failure.clone())
+            .or_else(|| {
+                // An isolated guest publishes its structured terminal result
+                // independently of the bounded presentation stream.  Keep an
+                // explicit truncation marker for continuation publication, but
+                // do not replace a valid guest result with a guessed failure.
+                // Native output has no such result, so it remains unavailable
+                // for transcript-derived interpretation after truncation.
+                guest.is_none().then_some(()).and_then(|()| {
+                    (!self.capture_complete).then(|| {
+                        "agent output capture incomplete; transcript interpretation unavailable"
+                            .to_owned()
+                    })
+                })
             })
             .or_else(|| {
-                guest
-                    .as_ref()
-                    .and_then(|metadata| metadata.execution_failure.clone())
-                    .or_else(|| {
-                        agents::find(agent).and_then(|adapter| {
-                            adapter
-                                .execution_failure(&bounded(&child.stdout), &bounded(&child.stderr))
-                        })
+                if guest.is_none() {
+                    agents::find(agent).and_then(|adapter| {
+                        adapter.execution_failure(&bounded(&child.stdout), &bounded(&child.stderr))
                     })
+                } else {
+                    None
+                }
             });
         let agent_failure = if adapter_failure.is_some() {
             adapter_failure

@@ -884,6 +884,7 @@ impl<'a> ReadyAttempt<'a> {
                 )
             };
 
+            let capture_complete = ExecutionEvidence::capture_complete(&issues, guest.as_ref());
             Ok((
                 ExecutionEvidence {
                     observation,
@@ -893,7 +894,7 @@ impl<'a> ReadyAttempt<'a> {
                     elapsed_ms: execution_elapsed_ms,
                     runtime_output,
                     artifact_owner,
-                    capture_complete: issues.capture_error.is_none(),
+                    capture_complete,
                 },
                 issues,
                 connection.as_ref().map(|connection| connection.interface),
