@@ -420,6 +420,7 @@ mod tests {
             id: "suite",
             dataset: "official/source",
             revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            source_sha256: "fcd30fba8098151a003ce953022e7e6db16f53f82298290a285b22722483a5a1",
             expected_tasks: 2,
         };
         fs::create_dir_all(root.join(adapter.id)).unwrap();

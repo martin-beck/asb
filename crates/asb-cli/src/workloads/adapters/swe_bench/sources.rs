@@ -2,7 +2,8 @@
 use super::SweBenchAdapter;
 use crate::Error;
 use crate::install::{
-    InstallResult, ProcessScope, ProducerDirectory, Purpose, install_source_bounded_in,
+    InstallResult, ProcessScope, ProducerDirectory, Purpose, VerifiedSource,
+    install_verified_source_bounded_in,
 };
 use crate::workloads::{InstallationContext, TaskIdentity};
 use std::fs;
@@ -74,12 +75,17 @@ pub(super) fn install(
             "part-{}",
             TaskIdentity::local(adapter.id, None).attempt_id
         ));
-        install_source_bounded_in(
+        install_verified_source_bounded_in(
             context.process,
             URL,
             &temporary,
-            "original SWE-bench Dockerfiles",
-            64 * 1024 * 1024,
+            VerifiedSource {
+                kind: "original SWE-bench Dockerfiles",
+                checksum: adapter.source_sha256,
+                executable: false,
+                limit: 64 * 1024 * 1024,
+            },
+            |_, _| Ok(()),
         )?;
         if !verify(&mut scope, &temporary, None)? {
             return Err(Error::Input("original SWE-bench source download failed or did not match its pinned checksum; inspect installation diagnostics, check network/proxy access and retry workload installation".into()).into());
@@ -148,6 +154,10 @@ mod tests {
             .unwrap();
         assert!(URL.ends_with(revision));
         assert!(helper.contains(&format!("SOURCE_REVISION = \"{revision}\"")));
+        assert!(helper.contains(&format!(
+            "SOURCE_SHA256 = \"{}\"",
+            super::super::ADAPTER.source_sha256
+        )));
     }
 
     #[test]
