@@ -1311,6 +1311,10 @@ mod tests {
                 .join("external-measures")
                 .to_string_lossy()
                 .into_owned();
+            let native_capsule = root
+                .join("recordings/new/native-capsule")
+                .to_string_lossy()
+                .into_owned();
             let policy = crate::planning::resolve_for_run(&config, true).unwrap();
             let prepared = Prepared::prepare(
                 &config_path,
@@ -1321,6 +1325,9 @@ mod tests {
                     cassette: Some(&cassette),
                     measurement_dir: Some(&measurements),
                     policy: Some(&policy),
+                    tool_mode: Some(crate::tape::Mode::Record),
+                    mcp_mode: Some(crate::tape::Mode::Record),
+                    native_capsule_record: Some(&native_capsule),
                     ..Default::default()
                 },
                 Some(&parent),
@@ -1330,6 +1337,17 @@ mod tests {
         }; // Temporary option strings are gone; policy is no longer borrowed.
         assert_eq!(prepared.options.policy.as_ref(), Some(&saved_policy));
         assert!(prepared.options.measurement_override);
+        assert_eq!(prepared.options.tool_mode, Some(crate::tape::Mode::Record));
+        assert_eq!(prepared.options.mcp_mode, Some(crate::tape::Mode::Record));
+        assert_eq!(
+            prepared.options.native_capsule_record.as_deref(),
+            Some(
+                root.join("recordings/new/native-capsule")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert!(prepared.options.native_capsule_replay.is_none());
         assert_eq!(
             prepared.plan.measurement_root.as_ref().unwrap(),
             &root.join("external-measures").join(&prepared.plan.campaign)
