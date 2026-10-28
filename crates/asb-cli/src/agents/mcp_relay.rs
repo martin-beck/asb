@@ -53,6 +53,59 @@ struct Bundle {
     payloads: BTreeMap<String, Vec<u8>>,
 }
 
+/// Adapter-neutral launch description for a declared MCP server.  A client
+/// adapter owns its configuration syntax; this module owns the only decision
+/// about whether that configuration addresses the declared server or ASB's
+/// bounded record/replay relay.
+pub(crate) struct ServerLaunch {
+    pub(crate) id: String,
+    pub(crate) program: OsString,
+    pub(crate) args: Vec<OsString>,
+}
+
+/// Resolve every declared MCP server for one attempt without interpreting its
+/// protocol or tool names.  Keeping this selection here ensures every adapter
+/// gets the same fail-closed replay behavior and never starts an upstream
+/// server for an MCP replay.
+pub(crate) fn server_launches(
+    run_dir: &Path,
+    declarations: &[crate::benchmark::McpServerConfig],
+    tape: Option<super::McpTapeContext<'_>>,
+) -> Result<Vec<ServerLaunch>, Error> {
+    declarations
+        .iter()
+        .map(|declaration| {
+            let launch = match tape {
+                Some(super::McpTapeContext {
+                    mode: crate::tape::Mode::Record,
+                    ..
+                }) => record_launch(run_dir, declaration)?,
+                Some(super::McpTapeContext {
+                    mode: crate::tape::Mode::Replay,
+                    cassette: Some(cassette),
+                }) => replay_launch(run_dir, declaration, cassette)?,
+                Some(super::McpTapeContext {
+                    mode: crate::tape::Mode::Replay,
+                    cassette: None,
+                }) => {
+                    return Err(Error::Run(
+                        "MCP replay needs its selected sealed relay bundle".into(),
+                    ));
+                }
+                None => super::tool_replay_mcp::Launch {
+                    program: declaration.program.clone().into(),
+                    args: declaration.args.iter().cloned().map(Into::into).collect(),
+                },
+            };
+            Ok(ServerLaunch {
+                id: declaration.id.clone(),
+                program: launch.program.into(),
+                args: launch.args,
+            })
+        })
+        .collect()
+}
+
 /// Adapter-facing command which substitutes one ordinary MCP server during a
 /// recording. The target directory remains absent until the relay owns the
 /// upstream process, so an interrupted launch cannot be mistaken for a
