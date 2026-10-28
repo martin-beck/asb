@@ -63,6 +63,10 @@ fn isolated_bpftrace_build_and_install_contracts() {
                     .current_dir(&path)
                     .env(CASE, case)
                     .env("ASB_INSTALL_FIXTURE_ROOT", &path)
+                    // The shared download cache is deliberately user scoped.
+                    // Keep each nested installer fixture independent of any
+                    // host cache entry (and of sibling fixture cases).
+                    .env("HOME", &path)
                     .env("PATH", path.join("commands"))
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
@@ -110,6 +114,7 @@ fn isolated_bpftrace_build_and_install_contracts() {
                 .current_dir(&path)
                 .env(CASE, case)
                 .env("ASB_INSTALL_FIXTURE_ROOT", &path)
+                .env("HOME", &path)
                 .env(
                     "PATH",
                     if case == "relative-path" {
@@ -331,14 +336,24 @@ esac"#,
             "configure-fails" | "configure-127" => "cmake could not configure",
             "compile-fails" | "compile-127" => "source compilation failed",
             "no-output" => "without a discoverable executable",
-            "missing-curl" | "missing-tar" | "missing-cmake" => "source build needs",
+            // The shared bounded downloader owns its curl prerequisite;
+            // extraction and compilation prerequisites remain bpftrace-build
+            // responsibilities.
+            "missing-curl" => "pinned bpftrace source needs",
+            "missing-tar" | "missing-cmake" => "source build needs",
             "source-blocked" => "cannot create bpftrace source directory",
             _ => unreachable!(),
         };
         assert!(error.contains(expected), "{error}");
         if let Some(dependency) = case.strip_prefix("missing-") {
             assert!(error.contains(&format!("`{dependency}`")), "{error}");
-            assert!(error.contains(bpftrace_dependency_commands(dependency)));
+            if dependency == "curl" {
+                // The reusable bounded downloader owns curl discovery, so it
+                // reports its generic, actionable curl installation remedy.
+                assert!(error.contains("sudo apt-get install -y curl"), "{error}");
+            } else {
+                assert!(error.contains(bpftrace_dependency_commands(dependency)));
+            }
         }
         if case == "source-blocked" {
             assert!(error.contains(&tool.join("source").display().to_string()));
