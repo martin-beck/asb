@@ -2,7 +2,7 @@ use super::{StaticTool, ToolKind};
 use crate::Error;
 use crate::install::{
     InstallFailure, InstallResult, OperationContext, ProducerDirectory, Purpose, Recipe,
-    command_output_in, host_executable, json_string, make_executable,
+    command_output_in, host_executable, install_source_bounded_in, json_string, make_executable,
 };
 use std::{
     fs,
@@ -104,42 +104,22 @@ fn build_bpftrace(
             root.display()
         ))
     })?;
-    let owner = ProducerDirectory::open(root)?;
-    let mut scope = owner.scope(context);
     let source_dir = root.join("source");
     let build_dir = root.join("build");
     let archive = root.join(".bpftrace-source.tar.gz");
     if !source_dir.is_dir() {
         progress(10, crate::install::ProgressStage::Downloading);
-        let curl = bpftrace_prerequisite(context, root, "curl")?;
-        let headers =
-            archive.with_extension(format!("headers-{}", crate::tools::runtime::unique_id()));
-        let download = crate::install::transfer::Download::start(
+        install_source_bounded_in(
+            context,
+            BPFTRACE_SOURCE,
             &archive,
-            &headers,
-            "Downloading bpftrace source",
-        );
-        let mut step = scope.prepare(curl, Purpose::Download, "pinned bpftrace source download")?;
-        step.command_mut()
-            .args([
-                "--disable",
-                "--fail",
-                "--location",
-                "--silent",
-                "--show-error",
-                "--dump-header",
-            ])
-            .arg(&headers)
-            .args(["--output"])
-            .arg(&archive)
-            .arg(BPFTRACE_SOURCE)
-            .stdin(std::process::Stdio::null());
-        let status = scope.run(step);
-        download.finish();
-        let _ = fs::remove_file(headers);
-        if !status?.status.success() {
-            return Err(Error::Io(format!("could not download pinned bpftrace source from {BPFTRACE_SOURCE}; verify network access and retry\n\n{}", bpftrace_source_commands())).into());
-        }
+            "pinned bpftrace source",
+            512 * 1024 * 1024,
+        )?;
+    }
+    let owner = ProducerDirectory::open(root)?;
+    let mut scope = owner.scope(context);
+    if !source_dir.is_dir() {
         progress(25, crate::install::ProgressStage::Extracting);
         fs::create_dir_all(&source_dir).map_err(|error| {
             Error::Io(format!(

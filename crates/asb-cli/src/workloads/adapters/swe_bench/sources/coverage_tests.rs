@@ -68,6 +68,7 @@ done
                 .env(CASE, case)
                 .env("ASB_SWE_SOURCE_ROOT", &directory)
                 .env("ASB_SWE_SOURCE_PYTHON", &python)
+                .env("HOME", &directory)
                 .env("PATH", directory.join("commands"))
                 .output()
                 .unwrap();

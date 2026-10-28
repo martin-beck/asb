@@ -564,15 +564,14 @@ fn download_contract(root: &Path) {
         )
     );
     fs::remove_file(root.join("bin/curl")).unwrap();
-    let error = install_source(
+    install_source(
         root,
         "https://fixture.invalid/success",
         &destination,
         "fixture",
     )
-    .unwrap_err();
-    assert!(error.to_string().contains("needs `curl`"));
-    assert!(error.to_string().contains("sudo apt-get install -y curl"));
+    .unwrap();
+    assert_eq!(fs::read(&destination).unwrap(), b"fixture data");
 }
 
 fn host_contract(root: &Path) {
