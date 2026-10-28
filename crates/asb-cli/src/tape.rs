@@ -16,15 +16,6 @@ pub enum Mode {
     Replay,
 }
 
-/// Delivery policy for a sealed replay response.  The default retains SSE
-/// event boundaries; adapters whose SDK has a deterministic whole-body parser
-/// can opt into one bounded write instead.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReplayDelivery {
-    Events,
-    WholeBody,
-}
-
 pub(crate) fn input_files() -> Result<Vec<std::path::PathBuf>, Error> {
     proxy::input_files(proxy::adapters::llmtape::NAME)
 }
@@ -36,31 +27,12 @@ pub(crate) fn runtime_inputs() -> Result<Vec<crate::runtime_inputs::Dependency>,
 pub struct Session(proxy::Chain);
 
 impl Session {
-    #[cfg(test)]
     pub fn start(
         mode: Mode,
         cassette: &Path,
         upstream: Option<&str>,
         respect_record_timings: bool,
         workspace: &Path,
-    ) -> Result<Self, Error> {
-        Self::start_with_delivery(
-            mode,
-            cassette,
-            upstream,
-            respect_record_timings,
-            workspace,
-            ReplayDelivery::Events,
-        )
-    }
-
-    pub fn start_with_delivery(
-        mode: Mode,
-        cassette: &Path,
-        upstream: Option<&str>,
-        respect_record_timings: bool,
-        workspace: &Path,
-        replay_delivery: ReplayDelivery,
     ) -> Result<Self, Error> {
         if mode == Mode::Replay {
             require_replay_cassette(cassette)?;
@@ -70,7 +42,6 @@ impl Session {
             cassette: cassette.to_path_buf(),
             respect_record_timings,
             workspace: workspace.to_path_buf(),
-            replay_delivery,
         };
         let mut configurations: HashMap<String, Box<dyn Any>> = HashMap::new();
         configurations.insert(proxy::adapters::llmtape::NAME.into(), Box::new(settings));

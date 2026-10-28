@@ -50,7 +50,6 @@ const cassette = mode === "record" ? option(args, "--out") : option(args, "--cas
 const upstream = mode === "record" ? option(args, "--upstream") : undefined;
 const mismatchEvidence = process.env.ASB_TAPE_MISMATCH_EVIDENCE;
 const respectRecordTimings = args.includes("--respect-record-timings");
-const replayWholeBody = args.includes("--replay-whole-body");
 const captureReceipt = process.env.ASB_TAPE_CAPTURE_RECEIPT;
 const captureNonce = process.env.ASB_TAPE_CAPTURE_NONCE;
 delete process.env.ASB_TAPE_CAPTURE_RECEIPT;
@@ -66,7 +65,6 @@ const activeCaptures = new Set();
 if (respectRecordTimings && mode !== "replay") {
   usage("--respect-record-timings is only valid with replay");
 }
-if (replayWholeBody && mode !== "replay") usage("--replay-whole-body is only valid with replay");
 if (mismatchEvidence && (mode !== "replay" || !isAbsolute(mismatchEvidence))) {
   usage("invalid private mismatch evidence destination");
 }
@@ -140,10 +138,6 @@ async function replayResponse(response, interaction) {
   const contentType = Object.entries(interaction.response.headers || {})
     .find(([name]) => name.toLowerCase() === "content-type")?.[1] || "";
   response.writeHead(interaction.response.status, interaction.response.headers || {});
-  if (replayWholeBody) {
-    response.end(replayBody);
-    return;
-  }
   if (!/text\/event-stream/i.test(contentType) || !replayBody.includes("\n\n")) {
     response.end(replayBody);
     return;
