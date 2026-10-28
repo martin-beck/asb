@@ -33,6 +33,7 @@ pub fn network_project(root: &Path) -> NetworkProjectGuard {
 
 const CONFIG_DIR: &str = ".asb";
 const CONFIG_FILE: &str = "project.toml";
+const CLEANUP_DIR: &str = ".asb-cleanup";
 
 #[cfg(target_os = "linux")]
 const HOST_SETTINGS: &[(&str, &str, &str)] = &[
@@ -241,6 +242,7 @@ impl Default for ProjectConfig {
 pub fn init(
     root: Option<PathBuf>,
     reset: bool,
+    clean: bool,
     yes: bool,
     output: &mut dyn std::io::Write,
 ) -> Result<(), Error> {
@@ -251,6 +253,16 @@ pub fn init(
         ));
     }
     let path = root.join(CONFIG_DIR).join(CONFIG_FILE);
+    if clean {
+        if !path.is_file() {
+            return Err(Error::Usage(
+                "project is not initialized; `asb init --clean` has no managed configuration to clean",
+            ));
+        }
+        let cleanup = clean_project(&root, &path)?;
+        writeln!(output, "Cleaned ASB initialization state. Previous configuration moved to {}. Installed tools, workloads, caches and results were preserved.", cleanup.display()).map_err(super::io_error)?;
+        return Ok(());
+    }
     if path.is_file() {
         if !reset {
             writeln!(
@@ -263,7 +275,8 @@ pub fn init(
                 "project already initialized; use `asb init --reset` for a fresh initialization",
             ));
         }
-        reset_project(&root, &path)?;
+        let cleanup = clean_project(&root, &path)?;
+        writeln!(output, "Reset cleanup moved previous configuration to {}; installed tools, workloads, caches and results were preserved.", cleanup.display()).map_err(super::io_error)?;
     }
     fs::create_dir_all(path.parent().expect("config parent"))
         .map_err(|error| Error::Io(format!("cannot create project configuration: {error}")))?;
@@ -641,64 +654,55 @@ fn run_sudo_write(path: &str, contents: &[u8]) -> bool {
     host_setup::SystemExecutor.execute(SudoMode::Passwordless, &Operation::write(path, contents))
 }
 
-fn reset_project(root: &Path, config_path: &Path) -> Result<(), Error> {
+/// Move initialization-owned configuration aside without redownloading assets.
+///
+/// Tools, workloads, caches, results and cassettes live outside `.asb` and are
+/// left untouched. The project Python runtime is moved through the cleanup
+/// snapshot and restored, so it remains reusable after an ASB upgrade.
+fn clean_project(root: &Path, config_path: &Path) -> Result<PathBuf, Error> {
     let state = root.join(CONFIG_DIR);
     reject_symlink(&state)?;
     reject_symlink(config_path)?;
-    // Stable admission coordination excludes new slots throughout deletion;
+    // Stable admission coordination excludes new slots throughout the move;
     // existing instance leases additionally exclude active/crash-cleanup services.
     let _tracing_leases = perfetto::lock_for_reset(root)?;
+    let cleanup_root = root.join(CLEANUP_DIR);
+    reject_symlink(&cleanup_root)?;
+    fs::create_dir_all(&cleanup_root)
+        .map_err(|error| Error::Io(format!("cannot create cleanup directory: {error}")))?;
+    let cleanup = cleanup_root.join(format!("init-{}", crate::tools::runtime::unique_id()));
+    fs::create_dir(&cleanup)
+        .map_err(|error| Error::Io(format!("cannot create cleanup snapshot: {error}")))?;
+    let preserved_python = state.join("python");
+    if preserved_python.exists() {
+        reject_symlink(&preserved_python)?;
+        fs::rename(&preserved_python, cleanup.join("python")).map_err(|error| {
+            Error::Io(format!("cannot preserve project Python runtime: {error}"))
+        })?;
+    }
+    fs::rename(&state, cleanup.join("configuration"))
+        .map_err(|error| Error::Io(format!("cannot move ASB configuration to cleanup: {error}")))?;
+    if cleanup.join("python").exists() {
+        fs::create_dir(&state)
+            .map_err(|error| Error::Io(format!("cannot recreate ASB state directory: {error}")))?;
+        fs::rename(cleanup.join("python"), state.join("python")).map_err(|error| {
+            Error::Io(format!("cannot restore project Python runtime: {error}"))
+        })?;
+    }
+    Ok(cleanup)
+}
+
+#[cfg(test)]
+fn reset_project(root: &Path, config_path: &Path) -> Result<(), Error> {
     let existing = fs::read_to_string(config_path)
         .map_err(|error| Error::Io(format!("cannot read {}: {error}", config_path.display())))?;
-    let config: ProjectConfig = toml::from_str(&existing).map_err(|error| {
+    let _: ProjectConfig = toml::from_str(&existing).map_err(|error| {
         Error::Input(format!(
             "cannot parse {} before reset: {error}",
             config_path.display()
         ))
     })?;
-    // Only direct children can be removed safely with std::fs::remove_dir_all:
-    // it does not follow the final symlink, but does follow intermediate ones.
-    // Validate everything before changing anything, including the default paths
-    // that initialization will recreate after the reset.
-    let defaults = ProjectConfig::default();
-    for directory in [
-        &config.tools_dir,
-        &config.workloads_dir,
-        &config.workspace_dir,
-        &defaults.tools_dir,
-        &defaults.workloads_dir,
-        &defaults.workspace_dir,
-    ] {
-        if !is_safe_project_relative_path(directory) {
-            return Err(Error::Input(format!(
-                "cannot reset configured directory {directory:?}: reset requires a direct child of the project; move its contents manually and update .asb/project.toml before retrying"
-            )));
-        }
-        reject_symlink(&root.join(directory))?;
-    }
-    if state.exists() {
-        fs::remove_dir_all(&state).map_err(|error| {
-            Error::Io(format!("cannot remove {}: {error}", config_path.display()))
-        })?;
-    }
-    for directory in [
-        &config.tools_dir,
-        &config.workloads_dir,
-        &config.workspace_dir,
-    ] {
-        let path = root.join(directory);
-        if path.is_dir() {
-            fs::remove_dir_all(&path)
-                .map_err(|error| Error::Io(format!("cannot remove {}: {error}", path.display())))?;
-        }
-    }
-    Ok(())
-}
-
-fn is_safe_project_relative_path(value: &str) -> bool {
-    let mut components = Path::new(value).components();
-    matches!(components.next(), Some(std::path::Component::Normal(_)))
-        && components.next().is_none()
+    clean_project(root, config_path).map(|_| ())
 }
 
 fn reject_symlink(path: &Path) -> Result<(), Error> {
@@ -933,7 +937,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("asb-project-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let mut output = Vec::new();
-        init(Some(root.clone()), false, false, &mut output).expect("init succeeds");
+        init(Some(root.clone()), false, false, false, &mut output).expect("init succeeds");
         #[cfg(target_os = "linux")]
         assert!(
             String::from_utf8_lossy(&output)
@@ -971,7 +975,7 @@ mod tests {
         fs::create_dir_all(root.join("workloads")).unwrap();
         fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
         fs::write(root.join("crates/asb-cli/Cargo.toml"), "[package]\n").unwrap();
-        let error = init(Some(root.clone()), false, false, &mut Vec::new())
+        let error = init(Some(root.clone()), false, false, false, &mut Vec::new())
             .expect_err("source checkout must be rejected");
         assert!(error.to_string().contains("source checkout"));
         assert!(!root.join(".asb").exists());
@@ -983,9 +987,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("asb-init-warning-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let mut output = Vec::new();
-        init(Some(root.clone()), false, false, &mut output).expect("initial init succeeds");
+        init(Some(root.clone()), false, false, false, &mut output).expect("initial init succeeds");
         fs::write(root.join("workloads/custom.txt"), "keep").unwrap();
-        let error = init(Some(root.clone()), false, false, &mut output)
+        let error = init(Some(root.clone()), false, false, false, &mut output)
             .expect_err("second init requires reset");
         assert!(error.to_string().contains("already initialized"));
         let text = String::from_utf8(output).unwrap();
@@ -999,20 +1003,89 @@ mod tests {
     }
 
     #[test]
-    fn init_reset_removes_managed_state_before_recreating_it() {
+    fn init_reset_recreates_configuration_and_preserves_downloaded_assets() {
         let root = std::env::temp_dir().join(format!("asb-init-reset-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        init(Some(root.clone()), false, false, &mut Vec::new()).expect("initial init succeeds");
-        fs::write(root.join("workloads/custom.txt"), "remove").unwrap();
+        init(Some(root.clone()), false, false, false, &mut Vec::new())
+            .expect("initial init succeeds");
+        fs::write(root.join("workloads/custom.txt"), "keep").unwrap();
+        fs::write(root.join(".asb-tools/downloaded-tool"), "keep").unwrap();
+        fs::create_dir_all(root.join("results")).unwrap();
+        fs::write(root.join("results/previous.json"), "keep").unwrap();
         let mut output = Vec::new();
-        init(Some(root.clone()), true, false, &mut output).expect("reset succeeds");
-        assert!(!root.join("workloads/custom.txt").exists());
+        init(Some(root.clone()), true, false, false, &mut output).expect("reset succeeds");
+        assert_eq!(
+            fs::read_to_string(root.join("workloads/custom.txt")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(".asb-tools/downloaded-tool")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("results/previous.json")).unwrap(),
+            "keep"
+        );
         assert!(root.join("workloads/bug-fix.txt").is_file());
         assert!(
             String::from_utf8(output)
                 .unwrap()
                 .contains("Bundled workloads available")
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clean_moves_configuration_and_preserves_assets_without_network_work() {
+        let root = std::env::temp_dir().join(format!("asb-init-clean-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".asb/python")).unwrap();
+        fs::create_dir_all(root.join(".asb-tools")).unwrap();
+        fs::create_dir_all(root.join("workloads")).unwrap();
+        fs::create_dir_all(root.join("results")).unwrap();
+        fs::create_dir_all(root.join(".asb-cache/provider")).unwrap();
+        fs::write(root.join(".asb/project.toml"), "tools_dir = '.asb-tools'\n").unwrap();
+        fs::create_dir_all(root.join(".asb/fixtures")).unwrap();
+        fs::write(root.join(".asb/fixtures/stale"), "remove").unwrap();
+        fs::write(root.join(".asb/python/runtime"), "keep").unwrap();
+        fs::write(root.join(".asb-tools/tool"), "keep").unwrap();
+        fs::write(root.join("workloads/catalog"), "keep").unwrap();
+        fs::write(root.join("results/run.json"), "keep").unwrap();
+        fs::write(root.join(".asb-cache/provider/helper"), "keep").unwrap();
+
+        let mut output = Vec::new();
+        init(Some(root.clone()), false, true, false, &mut output).expect("clean succeeds");
+
+        let cleanup = fs::read_dir(root.join(CLEANUP_DIR))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert!(cleanup.join("configuration/project.toml").is_file());
+        assert!(cleanup.join("configuration/fixtures/stale").is_file());
+        assert!(!root.join(".asb/project.toml").exists());
+        assert_eq!(
+            fs::read_to_string(root.join(".asb/python/runtime")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(".asb-tools/tool")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("workloads/catalog")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("results/run.json")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(".asb-cache/provider/helper")).unwrap(),
+            "keep"
+        );
+        assert!(String::from_utf8(output).unwrap().contains("preserved"));
         let _ = fs::remove_dir_all(root);
     }
 }
