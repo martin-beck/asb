@@ -12,6 +12,11 @@ use std::path::Path;
 
 const HELPER: &str = include_str!("../../../../assets/benchmarks/asb_livecodebench_catalog.py");
 const MAX_CATALOG_BYTES: u64 = 32 * 1024 * 1024;
+// The helper both fetches a streaming dataset and materializes its bounded
+// project-local catalog.  The latter can legitimately take longer than an
+// ordinary source transfer, so it uses the existing package-install budget
+// rather than the five-minute download budget.
+const CATALOG_MATERIALIZATION_PURPOSE: Purpose = Purpose::Package;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -144,8 +149,8 @@ pub(super) fn install(
         let python = tool.join("venv/bin/python");
         let mut step = scope.prepare(
             &python,
-            Purpose::Download,
-            "LiveCodeBench pinned dataset installation",
+            CATALOG_MATERIALIZATION_PURPOSE,
+            "LiveCodeBench pinned dataset materialization",
         )?;
         step.command_mut()
             .arg(tool.join("asb_livecodebench_catalog.py"))
@@ -297,6 +302,11 @@ mod tests {
             crate::workloads::KnownEvaluationKind::UpstreamHarness
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catalog_materialization_uses_the_package_install_budget() {
+        assert_eq!(CATALOG_MATERIALIZATION_PURPOSE, Purpose::Package);
     }
 
     #[test]
