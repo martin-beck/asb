@@ -298,14 +298,28 @@ pub(crate) fn run_with_interactive(
         },
         Some(CommandLine::Tool(options)) => match options.command {
             ToolCommand::List(_) => install::tool_list(stdout),
-            ToolCommand::Install(args) => install::tool(args.into(), stdout),
+            ToolCommand::Install(args) => {
+                let mut previous = None;
+                install::tool_with_progress(args.into(), stdout, &mut |percent, stage| {
+                    if previous.replace(stage) != Some(stage) {
+                        let _ = writeln!(stderr, "Installing: {} ({percent}%)", stage.label());
+                    }
+                })
+            }
         },
         Some(CommandLine::Workload(options)) => match options.command {
             Some(WorkloadCommand::List(args)) => install::workload_list(args.into(), stdout),
             Some(WorkloadCommand::Describe(args)) => {
                 crate::workloads::describe_module(&args.name, stdout)
             }
-            Some(WorkloadCommand::Install(args)) => install::workload(args.into(), stdout),
+            Some(WorkloadCommand::Install(args)) => {
+                let mut previous = None;
+                install::workload_with_progress(args.into(), stdout, &mut |percent, stage| {
+                    if previous.replace(stage) != Some(stage) {
+                        let _ = writeln!(stderr, "Installing: {} ({percent}%)", stage.label());
+                    }
+                })
+            }
             Some(WorkloadCommand::Trials) => options.name.as_deref().map_or_else(
                 || {
                     Err(Error::Input(
