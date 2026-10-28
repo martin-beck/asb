@@ -170,6 +170,10 @@ struct ActivationOptions {
     show_output: bool,
     measurement_override: bool,
     policy: Option<crate::planning::ResolvedPlan>,
+    tool_mode: Option<crate::tape::Mode>,
+    mcp_mode: Option<crate::tape::Mode>,
+    native_capsule_record: Option<String>,
+    native_capsule_replay: Option<String>,
 }
 
 impl Prepared {
@@ -358,6 +362,10 @@ impl Inspection {
                 show_output: options.show_output,
                 measurement_override: options.measurement_dir.is_some(),
                 policy: options.policy.cloned(),
+                tool_mode: options.tool_mode,
+                mcp_mode: options.mcp_mode,
+                native_capsule_record: options.native_capsule_record.map(Into::into),
+                native_capsule_replay: options.native_capsule_replay.map(Into::into),
             },
             parent,
             root,

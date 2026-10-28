@@ -105,6 +105,10 @@ impl BatchRun<'_> {
                 json: self.options.json,
                 show_output: self.options.show_output,
                 mode,
+                tool_mode: self.options.tool_mode,
+                mcp_mode: self.options.mcp_mode,
+                native_capsule_record: self.options.native_capsule_record.as_deref(),
+                native_capsule_replay: self.options.native_capsule_replay.as_deref(),
                 respect_record_timings: self.plan.respect_record_timings,
                 policy: Some(&policy),
                 batch: Some(&self.identity),
@@ -278,6 +282,10 @@ pub(crate) fn continue_campaign(
         policy: policy.cloned(),
         measurement_override: plan.measurement_storage
             == Some(super::super::campaign::MeasurementStorage::Override),
+        tool_mode: None,
+        mcp_mode: None,
+        native_capsule_record: None,
+        native_capsule_replay: None,
     };
     let pending_inputs: BTreeSet<_> = pending
         .iter()
