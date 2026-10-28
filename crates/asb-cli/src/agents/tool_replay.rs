@@ -37,6 +37,7 @@ pub(crate) enum Effect {
     CreateDirectory { path: String },
     WriteText { path: String, content: String },
     RemoveFile { path: String },
+    RemoveDirectory { path: String },
 }
 
 #[derive(Default)]
@@ -229,7 +230,8 @@ pub(crate) fn apply(root: &Path, effect: &Effect) -> Result<(), Error> {
     let relative = match effect {
         Effect::CreateDirectory { path }
         | Effect::WriteText { path, .. }
-        | Effect::RemoveFile { path } => Path::new(path),
+        | Effect::RemoveFile { path }
+        | Effect::RemoveDirectory { path } => Path::new(path),
     };
     let path = confined(
         &root,
@@ -251,6 +253,11 @@ pub(crate) fn apply(root: &Path, effect: &Effect) -> Result<(), Error> {
             std::fs::write(path, content)
         }
         Effect::RemoveFile { .. } => match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        },
+        Effect::RemoveDirectory { .. } => match std::fs::remove_dir_all(path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
