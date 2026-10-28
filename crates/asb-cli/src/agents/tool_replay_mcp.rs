@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -234,6 +234,22 @@ fn replay_transcript(context: &PreparationContext<'_>, cassette: &Path) -> Resul
 
 fn run(args: &[OsString]) -> Result<(), Error> {
     let options = options(args)?;
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    let mut input = BufReader::new(stdin.lock());
+    run_with_io(options, &mut input, &mut output)
+}
+
+/// Run one sealed local-tool session over already-bounded stdio framing.
+/// Keeping the session body independent of process-global stdio lets tests
+/// prove that Pi's short-lived per-call service persists both a failure event
+/// and its progress sidecar before reporting the failure to the extension.
+fn run_with_io(
+    options: Options,
+    input: &mut impl std::io::BufRead,
+    output: &mut impl Write,
+) -> Result<(), Error> {
     let mut transcript = match options.mode {
         Mode::Record if options.per_call_state.is_some() => Transcript::decode(
             &std::fs::read(&options.transcript)
@@ -256,15 +272,14 @@ fn run(args: &[OsString]) -> Result<(), Error> {
             transcript.set_cursor(state.cursor)?;
         }
     }
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let mut output = stdout.lock();
-    let mut input = BufReader::new(stdin.lock());
-    while let Some(request) = mcp_framing::read(&mut input, "local-tool MCP")? {
-        if let Some(response) = respond(&options, &mut transcript, &request.value)? {
-            mcp_framing::write(&mut output, &response, request.framing, "local-tool MCP")?;
+    let operation = (|| {
+        while let Some(request) = mcp_framing::read(input, "local-tool MCP")? {
+            if let Some(response) = respond(&options, &mut transcript, &request.value)? {
+                mcp_framing::write(output, &response, request.framing, "local-tool MCP")?;
+            }
         }
-    }
+        Ok(())
+    })();
     match options.mode {
         Mode::Record => {
             let bytes = transcript.encode()?;
@@ -272,7 +287,7 @@ fn run(args: &[OsString]) -> Result<(), Error> {
         }
         Mode::Replay if options.per_call_state.is_none() => transcript.finish()?,
         Mode::Replay => {}
-    }
+    };
     if let Some(state) = &options.per_call_state {
         let cursor = match options.mode {
             // Recording appends one event per short-lived service process;
@@ -283,7 +298,7 @@ fn run(args: &[OsString]) -> Result<(), Error> {
         };
         publish_per_call_state(state, cursor, transcript.len())?;
     }
-    Ok(())
+    operation
 }
 
 fn read_per_call_state(path: &Path) -> Result<PerCallState, Error> {
@@ -438,21 +453,54 @@ fn call(options: &Options, transcript: &mut Transcript, params: Value) -> Result
     let result = if options.mode == Mode::Replay {
         transcript.replay(&options.workspace, tool, &request)?
     } else {
-        let (result, effects) = execute(&options.workspace, tool, &request)?;
-        let sequence = transcript.encode()?.lines().count() as u64 + 1;
-        transcript.record(Event {
-            schema_version: SCHEMA_VERSION,
-            sequence,
-            tool: tool.into(),
-            request: request.clone(),
-            result: result.clone(),
-            effects,
-        })?;
+        let recorded = match execute(&options.workspace, tool, &request) {
+            Ok((result, effects)) => Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: transcript.len() as u64 + 1,
+                tool: tool.into(),
+                request: request.clone(),
+                result,
+                failure: None,
+                effects,
+            },
+            Err(error) => Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: transcript.len() as u64 + 1,
+                tool: tool.into(),
+                request: request.clone(),
+                result: Value::Null,
+                failure: Some(recordable_failure(&error)?),
+                effects: Vec::new(),
+            },
+        };
+        let failure = recorded.failure.clone();
+        let result = recorded.result.clone();
+        transcript.record(recorded)?;
+        if let Some(failure) = failure {
+            return Err(Error::Run(failure));
+        }
         result
     };
     Ok(
         json!({"content":[{"type":"text","text":serde_json::to_string(&result).map_err(|_| Error::Run("cannot render local-tool result".into()))?}]}),
     )
+}
+
+/// Failure turns are sealed only when they are already small, single-line
+/// local diagnostics.  This preserves causal replay without turning a tool
+/// transcript into a carrier for arbitrary process output.
+fn recordable_failure(error: &Error) -> Result<String, Error> {
+    let failure = error.to_string();
+    if failure.is_empty()
+        || failure.len() > 512
+        || failure.contains(['\n', '\r'])
+        || failure.chars().any(char::is_control)
+    {
+        return Err(Error::Run(
+            "local-tool failure is not safe for replay recording".into(),
+        ));
+    }
+    Ok(failure)
 }
 
 /// Retain only fields defined by the local-tool protocol.  Some agent SDKs
@@ -1011,6 +1059,7 @@ mod tests {
                 tool: "read_file".into(),
                 request: json!({"path":"answer.txt"}),
                 result: json!({"text":"answer","truncated":false}),
+                failure: None,
                 effects: Vec::new(),
             })
             .unwrap();
@@ -1093,6 +1142,108 @@ mod tests {
         let replayed = call(&replay_options, &mut replay, request).unwrap();
         assert_eq!(recorded, replayed);
         replay.finish().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_returns_a_recorded_tool_failure_without_touching_the_workspace() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-failure-replay-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let request = json!({
+            "name":"write_file",
+            "arguments":{"path":"../escape.txt","content":"no"}
+        });
+        let record = Options {
+            mode: Mode::Record,
+            workspace: root.clone(),
+            transcript: root.join("record.jsonl"),
+            per_call_state: None,
+        };
+        let mut transcript = Transcript::default();
+        let recorded = call(&record, &mut transcript, request.clone()).unwrap_err();
+        assert!(!recorded.to_string().is_empty());
+        let bytes = transcript.encode().unwrap();
+        assert!(
+            String::from_utf8(bytes.clone())
+                .unwrap()
+                .contains("failure")
+        );
+
+        let replay_root = root.join("never-opened");
+        let replay = Options {
+            mode: Mode::Replay,
+            workspace: replay_root,
+            transcript: root.join("replay.jsonl"),
+            per_call_state: None,
+        };
+        let mut replayed = Transcript::decode(&bytes).unwrap();
+        let replay_error = call(&replay, &mut replayed, request).unwrap_err();
+        assert_eq!(replay_error.to_string(), recorded.to_string());
+        replayed.finish().unwrap();
+        assert!(!root.join("escape.txt").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pi_per_call_failure_is_published_before_the_service_exits() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-pi-failure-publication-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let run_dir = root.join("run");
+        let transcript = run_dir.join("tool-replay/local-tools.jsonl");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, Transcript::default().encode().unwrap()).unwrap();
+        // A sparse file reaches the command snapshot's byte ceiling without
+        // retaining a large test fixture.  The first snapshot must fail before
+        // the command is executed, exactly like the Pi qualification symptom.
+        std::fs::File::create(workspace.join("oversized-source"))
+            .unwrap()
+            .set_len(MAX_COMMAND_SNAPSHOT_BYTES + 1)
+            .unwrap();
+        let state = per_call_state_path(&run_dir);
+        publish_per_call_state(&state, 0, 0).unwrap();
+        let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_command\",\"arguments\":{\"argv\":[\"pwd\"]}}}\n";
+        let record = Options {
+            mode: Mode::Record,
+            workspace: workspace.clone(),
+            transcript: transcript.clone(),
+            per_call_state: Some(state.clone()),
+        };
+        let error =
+            run_with_io(record, &mut BufReader::new(&request[..]), &mut Vec::new()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "local-tool command workspace exceeds snapshot byte bound"
+        );
+        let bytes = std::fs::read(&transcript).unwrap();
+        let recorded = Transcript::decode(&bytes).unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["failure"],
+            "local-tool command workspace exceeds snapshot byte bound"
+        );
+        let recorded_state = read_per_call_state(&state).unwrap();
+        assert_eq!((recorded_state.cursor, recorded_state.events), (1, 1));
+
+        // Replay initializes a fresh run-private cursor while retaining the
+        // sealed event count from the recording.
+        publish_per_call_state(&state, 0, 1).unwrap();
+        let replay = Options {
+            mode: Mode::Replay,
+            workspace: root.join("workspace-is-not-opened-during-replay"),
+            transcript,
+            per_call_state: Some(state),
+        };
+        let replay_error =
+            run_with_io(replay, &mut BufReader::new(&request[..]), &mut Vec::new()).unwrap_err();
+        assert_eq!(replay_error.to_string(), error.to_string());
+        verify_per_call_completion(&run_dir, None).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1281,6 +1432,7 @@ mod tests {
                 tool: "read_file".into(),
                 request: json!({"name":"read_file","arguments":{"path":"answer.txt"}}),
                 result: json!({"content":"recorded"}),
+                failure: None,
                 effects: Vec::new(),
             })
             .unwrap();
