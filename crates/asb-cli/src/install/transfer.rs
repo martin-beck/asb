@@ -117,32 +117,31 @@ impl Activity {
 
     pub(crate) fn finish(mut self) -> Progress {
         self.render(true);
+        self.snapshot()
+    }
+
+    fn snapshot(&self) -> Progress {
+        let elapsed = Instant::now()
+            .duration_since(self.started)
+            .as_secs_f64()
+            .max(0.001);
         Progress {
             completed_bytes: self.completed,
             total_bytes: self.total,
-            bytes_per_second: (self.completed as f64
-                / Instant::now()
-                    .duration_since(self.started)
-                    .as_secs_f64()
-                    .max(0.001)) as u64,
+            bytes_per_second: (self.completed as f64 / elapsed) as u64,
             rate_source: RateSource::DiskRead,
         }
     }
 
     fn render(&mut self, complete: bool) {
+        let progress = self.snapshot();
+        // The TUI owns a private status path in the installer process. Publish
+        // the known input size and consumed bytes even when this child has no
+        // terminal; direct CLI rendering below remains presentation-only.
+        publish_snapshot(progress);
         if !self.interactive {
             return;
         }
-        let elapsed = Instant::now()
-            .duration_since(self.started)
-            .as_secs_f64()
-            .max(0.001);
-        let progress = Progress {
-            completed_bytes: self.completed,
-            total_bytes: self.total,
-            bytes_per_second: (self.completed as f64 / elapsed) as u64,
-            rate_source: RateSource::DiskRead,
-        };
         let mut stderr = io::stderr().lock();
         let result = if complete {
             writeln!(stderr, "\r\x1b[2K{}", line(&self.label, progress))
@@ -162,6 +161,7 @@ impl Drop for Activity {
             let _ = write!(stderr, "\r\x1b[2K");
             let _ = stderr.flush();
         }
+        clear_snapshot();
     }
 }
 
@@ -496,6 +496,10 @@ fn publish_snapshot(snapshot: Progress) {
     let Some(path) = std::env::var_os(STATUS_ENV).map(PathBuf::from) else {
         return;
     };
+    publish_snapshot_at(&path, snapshot);
+}
+
+fn publish_snapshot_at(path: &Path, snapshot: Progress) {
     let total = snapshot
         .total_bytes
         .map_or_else(|| "?".into(), |value| value.to_string());
@@ -518,8 +522,12 @@ fn publish_snapshot(snapshot: Progress) {
 
 fn clear_snapshot() {
     if let Some(path) = std::env::var_os(STATUS_ENV).map(PathBuf::from) {
-        let _ = fs::remove_file(path);
+        clear_snapshot_at(&path);
     }
+}
+
+fn clear_snapshot_at(path: &Path) {
+    let _ = fs::remove_file(path);
 }
 
 fn content_length(headers: &Path) -> Option<u64> {
@@ -661,5 +669,25 @@ mod tests {
         thread::sleep(REFRESH + REFRESH);
         assert_eq!(monitor.finish().completed_bytes, 6144);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn validation_activity_publishes_a_determinate_disk_read_snapshot() {
+        let path = std::env::temp_dir().join(format!(
+            "asb-validation-progress-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let mut activity = Activity::new("Validating fixture", Some(4096));
+        activity.completed = 2048;
+        publish_snapshot_at(&path, activity.snapshot());
+        let snapshot = read_snapshot(&path).expect("validation activity publishes UI progress");
+        clear_snapshot_at(&path);
+        assert_eq!(snapshot.completed_bytes, 2048);
+        assert_eq!(snapshot.total_bytes, Some(4096));
+        assert_eq!(snapshot.rate_source, RateSource::DiskRead);
+        assert!(
+            !path.exists(),
+            "completed validation must not leave stale UI state"
+        );
     }
 }
