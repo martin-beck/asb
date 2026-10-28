@@ -222,7 +222,6 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
     }
 }
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
-    super::super::determinism::prepare("pi", context)?;
     let connection = context.connection;
     let directory = context.runtime_dir.join("pi/config");
     let api = match connection.interface {
@@ -388,6 +387,7 @@ fn configure_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentAdapter;
 
     #[test]
     fn counts_only_balanced_terminal_turns_in_complete_agent_cycles() {
@@ -473,6 +473,48 @@ mod tests {
             std::fs::read_to_string(directory.join("models.json")).expect("configuration exists");
         assert!(text.contains("test-model"));
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn generic_deterministic_extension_is_initialized_once() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-pi-determinism-{}-{}",
+            std::process::id(),
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiResponses,
+            base_url: "http://127.0.0.1:4321/v1".into(),
+            credential: Some("fixture-key".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let mut command = std::process::Command::new("pi");
+        ADAPTER
+            .prepare(&mut PreparationContext {
+                command: &mut command,
+                model: "test-model",
+                connection: &connection,
+                workspace: &workspace,
+                runtime_dir: &root.join("runtime"),
+                run_dir: &run_dir,
+                mcp_servers: &[],
+                mcp_tape: None,
+                tape: None,
+            })
+            .unwrap();
+        let trace = super::super::super::native_trace::Transcript::decode(
+            &std::fs::read(run_dir.join("native-trace/native-trace.jsonl")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(trace.len(), 1);
+        assert_eq!(
+            trace.events()[0].operation,
+            super::super::super::native_trace::Operation::Host
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
