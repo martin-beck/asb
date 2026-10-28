@@ -82,10 +82,6 @@ pub(crate) trait AgentAdapter: Sync {
     fn execution_identity(&self) -> ExecutionIdentity {
         ExecutionIdentity::WorkloadDefault
     }
-    /// Replay response delivery required by this adapter's SDK parser.
-    fn replay_delivery(&self) -> crate::tape::ReplayDelivery {
-        crate::tape::ReplayDelivery::Events
-    }
     fn replay_credential_vars(&self) -> &'static [&'static str] {
         &[]
     }
@@ -393,7 +389,6 @@ pub(super) struct StaticAdapter {
     forwarded_invocation_environment_vars: &'static [&'static str],
     preferred_executables: Option<PreferredExecutablesHook>,
     execution_identity: ExecutionIdentity,
-    replay_delivery: crate::tape::ReplayDelivery,
 }
 impl StaticAdapter {
     pub(super) const fn new(
@@ -429,20 +424,11 @@ impl StaticAdapter {
             forwarded_invocation_environment_vars: &[],
             preferred_executables: None,
             execution_identity: ExecutionIdentity::WorkloadDefault,
-            replay_delivery: crate::tape::ReplayDelivery::Events,
         }
     }
 
     pub(super) const fn with_collection(mut self, collect: CollectionHook) -> Self {
         self.collect = Some(collect);
-        self
-    }
-
-    pub(super) const fn with_replay_delivery(
-        mut self,
-        delivery: crate::tape::ReplayDelivery,
-    ) -> Self {
-        self.replay_delivery = delivery;
         self
     }
 
@@ -608,9 +594,6 @@ impl AgentAdapter for StaticAdapter {
     }
     fn execution_identity(&self) -> ExecutionIdentity {
         self.execution_identity
-    }
-    fn replay_delivery(&self) -> crate::tape::ReplayDelivery {
-        self.replay_delivery
     }
     fn replay_credential_vars(&self) -> &'static [&'static str] {
         self.replay_credential_vars
