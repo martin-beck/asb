@@ -169,7 +169,13 @@ pub(crate) fn run_with_interactive(
             if options.configure_host {
                 project::configure_host(options.root, options.yes, stdout)
             } else {
-                project::init(options.root, options.reset, options.yes, stdout)
+                project::init(
+                    options.root,
+                    options.reset,
+                    options.clean,
+                    options.yes,
+                    stdout,
+                )
             }
         }
         Some(CommandLine::Setup(options)) => match options.mode {
@@ -660,8 +666,11 @@ struct InitArgs {
     root: Option<PathBuf>,
     #[arg(long)]
     reset: bool,
+    /// Move initialized configuration aside while retaining installed assets and results.
+    #[arg(long, conflicts_with_all = ["reset", "configure_host"])]
+    clean: bool,
     /// Update optional host capabilities without resetting project data.
-    #[arg(long, conflicts_with = "reset")]
+    #[arg(long, conflicts_with_all = ["reset", "clean"])]
     configure_host: bool,
     /// Approve every privileged host-setup questionnaire without prompting.
     #[arg(long, short = 'y')]
