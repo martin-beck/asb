@@ -12,7 +12,9 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 const DEFAULT_AGENT_TIMEOUT_SECONDS: f64 = 900.0;
-const MAX_EXPORTED_ARTIFACTS: usize = 4;
+// Four adapter-owned sidecars plus the three fixed replay sidecars.  The
+// aggregate byte budget remains unchanged.
+const MAX_EXPORTED_ARTIFACTS: usize = 7;
 const MAX_EXPORTED_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -278,7 +280,7 @@ fn import_guest_artifacts(
         let valid_filename = receipt
             .filename
             .strip_prefix("artifact-")
-            .is_some_and(|suffix| matches!(suffix, "0" | "1" | "2" | "3"));
+            .is_some_and(|suffix| matches!(suffix, "0" | "1" | "2" | "3" | "4" | "5" | "6"));
         let valid_digest = receipt.sha256.len() == 64
             && receipt
                 .sha256
@@ -312,12 +314,32 @@ fn import_guest_artifacts(
         {
             return Err("guest artifact export digest differs from its receipt".into());
         }
-        metadata
-            .sealed_artifacts
-            .push(crate::agents::SealedArtifact {
-                kind: receipt.kind.clone(),
-                bytes,
-            });
+        match receipt.kind.as_str() {
+            crate::agents::driver::LOCAL_TOOL_TRANSCRIPT_ARTIFACT => {
+                if metadata.local_tool_transcript.is_some() {
+                    return Err("guest replay sidecar was duplicated in its result record".into());
+                }
+                metadata.local_tool_transcript = Some(bytes);
+            }
+            crate::agents::driver::DETERMINISTIC_MANIFEST_ARTIFACT => {
+                if metadata.deterministic_manifest.is_some() {
+                    return Err("guest replay sidecar was duplicated in its result record".into());
+                }
+                metadata.deterministic_manifest = Some(bytes);
+            }
+            crate::agents::driver::NATIVE_TRACE_ARTIFACT => {
+                if metadata.native_trace.is_some() {
+                    return Err("guest replay sidecar was duplicated in its result record".into());
+                }
+                metadata.native_trace = Some(bytes);
+            }
+            _ => metadata
+                .sealed_artifacts
+                .push(crate::agents::SealedArtifact {
+                    kind: receipt.kind.clone(),
+                    bytes,
+                }),
+        }
     }
     Ok(())
 }
