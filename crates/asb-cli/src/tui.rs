@@ -2225,10 +2225,10 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
     );
 }
 
-/// Format an honest, live installer indicator. Installer subprocesses write
-/// their output to `.asb/install.log` and do not expose byte-level progress,
-/// so the fixed percentage marks the completed stage while the moving marker
-/// proves that a download or package install is still being monitored.
+/// Format an honest, live installer indicator. The global bar remains visible
+/// while a transfer supplies a second, byte-accurate local bar. Installer
+/// subprocesses write their output to `.asb/install.log`; when no transfer is
+/// observable, the moving marker still proves a stage is being monitored.
 fn install_status_message(
     percent: u8,
     stage: &str,
@@ -2236,9 +2236,6 @@ fn install_status_message(
     started: Instant,
     tick: u64,
 ) -> String {
-    if let Some(transfer) = transfer {
-        return crate::install::transfer::line(stage, transfer);
-    }
     const WIDTH: usize = 20;
     const FRAMES: &[char] = &['▸', '▹', '▻', '▹'];
     let completed = (usize::from(percent).min(100) * WIDTH / 100).min(WIDTH);
@@ -2257,10 +2254,16 @@ fn install_status_message(
             bar.push('─');
         }
     }
-    format!(
+    let overall = format!(
         "Installing [{bar}] {percent}%: {stage} ({}s)",
         started.elapsed().as_secs()
-    )
+    );
+    transfer.map_or(overall.clone(), |transfer| {
+        format!(
+            "{overall} | {}",
+            crate::install::transfer::line("transfer", transfer)
+        )
+    })
 }
 
 /// Render the shared searchable, selectable list pane used by both TUIs.
@@ -3797,7 +3800,7 @@ mod tests {
     }
 
     #[test]
-    fn install_status_message_prefers_byte_accurate_transfer_progress() {
+    fn install_status_message_shows_overall_and_byte_accurate_transfer_progress() {
         let message = install_status_message(
             15,
             "downloading",
@@ -3810,7 +3813,9 @@ mod tests {
             Instant::now(),
             0,
         );
-        assert!(message.contains("[======50%-------] 512 B/1.0 KiB 256 B/s"));
+        assert!(message.contains("Installing ["));
+        assert!(message.contains("] 15%: downloading"));
+        assert!(message.contains("transfer [======50%-------] 512 B/1.0 KiB 256 B/s"));
     }
 
     #[test]
