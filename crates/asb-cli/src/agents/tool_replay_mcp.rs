@@ -9,6 +9,7 @@ use super::{
     tool_replay::{self, Effect, Event, SCHEMA_VERSION, Transcript},
 };
 use crate::Error;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -51,7 +52,17 @@ struct Options {
     mode: Mode,
     workspace: PathBuf,
     transcript: PathBuf,
+    per_call_state: Option<PathBuf>,
 }
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PerCallState {
+    schema_version: u32,
+    cursor: usize,
+}
+
+const PER_CALL_STATE_SCHEMA_VERSION: u32 = 1;
 
 /// The adapter-facing, private stdio command for a single tape-backed run.
 /// It is deliberately constructed here so every adapter gets the same sealed
@@ -109,6 +120,53 @@ pub(crate) fn launch(
     })
 }
 
+/// Pi invokes one private service process per local tool call because its
+/// extension host can leave a long-lived child unread.  Persist only the
+/// bounded transcript cursor between those short-lived processes; the service
+/// still owns every tool operation and does not introduce a daemon.
+pub(crate) fn per_call_launch(
+    context: &PreparationContext<'_>,
+    tape: TapeContext<'_>,
+) -> Result<Launch, Error> {
+    let mut launch = launch(context, tape)?;
+    let state = per_call_state_path(context.run_dir);
+    publish_per_call_state(&state, 0)?;
+    launch
+        .args
+        .extend(["--per-call-state".into(), state.into_os_string()]);
+    Ok(launch)
+}
+
+fn per_call_state_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("tool-replay/pi-progress.json")
+}
+
+/// Reject a Pi recording or replay whose sequence cursor does not prove that
+/// every sealed local-tool event was handled.  Ordinary non-tape Pi runs have
+/// neither artifact and therefore need no progress sidecar.
+pub(crate) fn verify_per_call_completion(
+    run_dir: &Path,
+    transcript: Option<&[u8]>,
+) -> Result<(), Error> {
+    let state = per_call_state_path(run_dir);
+    match (state.is_file(), transcript) {
+        (false, None) => Ok(()),
+        (false, Some(_)) => Err(Error::Run("Pi local-tool progress is missing".into())),
+        (true, None) => Err(Error::Run("Pi local-tool transcript is missing".into())),
+        (true, Some(bytes)) => {
+            let cursor = read_per_call_state(&state)?;
+            let transcript = Transcript::decode(bytes)?;
+            if cursor == transcript.len() {
+                Ok(())
+            } else {
+                Err(Error::Run(
+                    "Pi local-tool replay left recorded events unconsumed".into(),
+                ))
+            }
+        }
+    }
+}
+
 /// Guest workloads stage an executable launcher with its matching dynamic
 /// loader under `/opt/asb-runtime`. Child tool servers must use that launcher
 /// rather than the raw executable path: the latter can lack its staged loader
@@ -150,12 +208,22 @@ fn replay_transcript(context: &PreparationContext<'_>, cassette: &Path) -> Resul
 fn run(args: &[OsString]) -> Result<(), Error> {
     let options = options(args)?;
     let mut transcript = match options.mode {
+        Mode::Record if options.per_call_state.is_some() => Transcript::decode(
+            &std::fs::read(&options.transcript)
+                .map_err(|_| Error::Run("local-tool record transcript is unavailable".into()))?,
+        )?,
         Mode::Record => Transcript::default(),
         Mode::Replay => Transcript::decode(
             &std::fs::read(&options.transcript)
                 .map_err(|_| Error::Run("local-tool replay transcript is unavailable".into()))?,
         )?,
     };
+    if let Some(state) = &options.per_call_state {
+        let cursor = read_per_call_state(state)?;
+        if options.mode == Mode::Replay {
+            transcript.set_cursor(cursor)?;
+        }
+    }
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
@@ -170,9 +238,60 @@ fn run(args: &[OsString]) -> Result<(), Error> {
             let bytes = transcript.encode()?;
             publish_record_transcript(&options.transcript, &bytes)?;
         }
-        Mode::Replay => transcript.finish()?,
+        Mode::Replay if options.per_call_state.is_none() => transcript.finish()?,
+        Mode::Replay => {}
+    }
+    if let Some(state) = &options.per_call_state {
+        let cursor = match options.mode {
+            // Recording appends one event per short-lived service process;
+            // its progress is the sealed transcript length rather than the
+            // replay cursor, which intentionally stays at zero in record mode.
+            Mode::Record => transcript.len(),
+            Mode::Replay => transcript.cursor(),
+        };
+        publish_per_call_state(state, cursor)?;
     }
     Ok(())
+}
+
+fn read_per_call_state(path: &Path) -> Result<usize, Error> {
+    let bytes = std::fs::read(path)
+        .map_err(|_| Error::Run("local-tool per-call progress is unavailable".into()))?;
+    if bytes.len() > 1024 {
+        return Err(Error::Run(
+            "local-tool per-call progress exceeds its bound".into(),
+        ));
+    }
+    let state: PerCallState = serde_json::from_slice(&bytes)
+        .map_err(|_| Error::Run("local-tool per-call progress is malformed".into()))?;
+    if state.schema_version != PER_CALL_STATE_SCHEMA_VERSION {
+        return Err(Error::Run(
+            "local-tool per-call progress has an unsupported schema".into(),
+        ));
+    }
+    Ok(state.cursor)
+}
+
+fn publish_per_call_state(path: &Path, cursor: usize) -> Result<(), Error> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::Run("local-tool progress has no private namespace".into()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|_| Error::Run("cannot create local-tool progress namespace".into()))?;
+    let bytes = serde_json::to_vec(&PerCallState {
+        schema_version: PER_CALL_STATE_SCHEMA_VERSION,
+        cursor,
+    })
+    .map_err(|_| Error::Run("cannot render local-tool per-call progress".into()))?;
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temporary, bytes).map_err(crate::io_error)?;
+    std::fs::File::open(&temporary)
+        .and_then(|file| file.sync_all())
+        .map_err(crate::io_error)?;
+    std::fs::rename(&temporary, path).map_err(crate::io_error)?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(crate::io_error)
 }
 
 fn publish_record_transcript(path: &Path, bytes: &[u8]) -> Result<(), Error> {
@@ -205,6 +324,7 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
     let mut mode = None;
     let mut workspace = None;
     let mut transcript = None;
+    let mut per_call_state = None;
     let mut values = args.iter();
     while let Some(flag) = values.next() {
         let value = values
@@ -220,6 +340,7 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
             }
             "--workspace" => workspace = Some(PathBuf::from(value)),
             "--transcript" => transcript = Some(PathBuf::from(value)),
+            "--per-call-state" => per_call_state = Some(PathBuf::from(value)),
             _ => return Err(Error::Input("invalid local-tool MCP arguments".into())),
         }
     }
@@ -229,6 +350,7 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
             .ok_or_else(|| Error::Input("local-tool MCP workspace is required".into()))?,
         transcript: transcript
             .ok_or_else(|| Error::Input("local-tool MCP transcript is required".into()))?,
+        per_call_state,
     })
 }
 
@@ -651,6 +773,32 @@ mod tests {
     }
 
     #[test]
+    fn per_call_completion_requires_every_sealed_event() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-per-call-progress-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(root.join("tool-replay")).unwrap();
+        let mut transcript = Transcript::default();
+        transcript
+            .record(Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                tool: "read_file".into(),
+                request: json!({"path":"answer.txt"}),
+                result: json!({"text":"answer","truncated":false}),
+                effects: Vec::new(),
+            })
+            .unwrap();
+        let bytes = transcript.encode().unwrap();
+        publish_per_call_state(&per_call_state_path(&root), 0).unwrap();
+        assert!(verify_per_call_completion(&root, Some(&bytes)).is_err());
+        publish_per_call_state(&per_call_state_path(&root), 1).unwrap();
+        verify_per_call_completion(&root, Some(&bytes)).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn directory_listing_is_recorded_as_an_observation() {
         let root = std::env::temp_dir().join(format!("asb-mcp-directory-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -703,6 +851,7 @@ mod tests {
             mode: Mode::Record,
             workspace: root.clone(),
             transcript: root.join("record.jsonl"),
+            per_call_state: None,
         };
         let mut transcript = Transcript::default();
         let recorded = call(&record, &mut transcript, request.clone()).unwrap();
@@ -711,6 +860,7 @@ mod tests {
             mode: Mode::Replay,
             workspace: root.join("removed-workspace"),
             transcript: root.join("replay.jsonl"),
+            per_call_state: None,
         };
         let replayed = call(&replay_options, &mut replay, request).unwrap();
         assert_eq!(recorded, replayed);
@@ -729,6 +879,7 @@ mod tests {
             mode: Mode::Record,
             workspace: root.clone(),
             transcript: root.join("record.jsonl"),
+            per_call_state: None,
         };
         let mut transcript = Transcript::default();
         let recorded = call(
@@ -743,6 +894,7 @@ mod tests {
                 mode: Mode::Replay,
                 workspace: root.join("removed-workspace"),
                 transcript: root.join("replay.jsonl"),
+                per_call_state: None,
             },
             &mut replay,
             json!({"name":"run_command","arguments":{"argv":["pwd"],"_meta":{"client":"changed"}}}),
