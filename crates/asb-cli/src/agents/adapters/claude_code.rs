@@ -221,12 +221,15 @@ fn prepare_tool_replay(
         })?,
     )
     .map_err(|error| Error::Run(format!("cannot write Claude Code local tools: {error}")))?;
-    let mut allowed = vec!["mcp__asb_local_tools".to_owned()];
+    // Claude Code's allow-list addresses concrete MCP tool names, not a
+    // server prefix.  Keep native tools denied, but admit every tool exposed
+    // by ASB's sealed server and each declared relay server.
+    let mut allowed = vec!["mcp__asb_local_tools__*".to_owned()];
     allowed.extend(
         context
             .mcp_servers
             .iter()
-            .map(|declaration| format!("mcp__{}", declaration.id)),
+            .map(|declaration| format!("mcp__{}__*", declaration.id)),
     );
     context.command.args([
         "--allowedTools",
@@ -313,6 +316,11 @@ mod tests {
             mode: crate::tape::Mode::Record,
             cassette: &root.join("recording.asb.zip"),
         };
+        let declarations = [crate::benchmark::McpServerConfig {
+            id: "fixture".into(),
+            program: "fixture-mcp".into(),
+            args: Vec::new(),
+        }];
         prepare_tool_replay(
             &mut PreparationContext {
                 command: &mut command,
@@ -321,7 +329,7 @@ mod tests {
                 workspace: &workspace,
                 runtime_dir: &root.join("runtime"),
                 run_dir: &run_dir,
-                mcp_servers: &[],
+                mcp_servers: &declarations,
                 mcp_tape: None,
                 tape: None,
             },
@@ -335,7 +343,7 @@ mod tests {
             workspace: &workspace,
             runtime_dir: &root.join("runtime"),
             run_dir: &run_dir,
-            mcp_servers: &[],
+            mcp_servers: &declarations,
             mcp_tape: None,
             tape: Some(tape),
         })
@@ -345,7 +353,12 @@ mod tests {
             .map(|value| value.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(arguments.contains(&"--mcp-config".into()));
-        assert!(arguments.contains(&"mcp__asb_local_tools".into()));
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument.contains("mcp__asb_local_tools__*")
+                    && argument.contains("mcp__fixture__*"))
+        );
         assert!(
             arguments
                 .iter()
