@@ -236,6 +236,8 @@ fn prepare_tool_replay(
         &allowed.join(","),
         "--disallowedTools",
         "Bash,Edit,Write,Read,Glob,Grep,WebFetch,WebSearch,Task,Skill,NotebookEdit",
+        "--append-system-prompt",
+        "For this benchmark, inspect and modify the workspace through the configured MCP tools. Do not answer from assumptions; use the MCP tools to examine the task and apply the solution.",
     ]);
     Ok(())
 }
@@ -360,6 +362,16 @@ mod tests {
                     && argument.contains("mcp__fixture")
                     && !argument.contains("mcp__asb_local_tools__*")
                     && !argument.contains("mcp__fixture__*"))
+        );
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument == "--append-system-prompt")
+        );
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument.contains("configured MCP tools"))
         );
         assert!(
             arguments
