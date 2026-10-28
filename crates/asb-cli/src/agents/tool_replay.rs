@@ -8,6 +8,7 @@
 use crate::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
@@ -106,9 +107,18 @@ impl Transcript {
             Error::Run("local-tool replay has no remaining recorded event".into())
         })?;
         if event.tool != tool || &event.request != request {
-            return Err(Error::Run(
-                "local-tool replay request differs from its causal recording".into(),
-            ));
+            let digest = |value: &Value| {
+                let bytes = serde_json::to_vec(value).unwrap_or_default();
+                format!("{:x}", Sha256::digest(bytes))
+            };
+            return Err(Error::Run(format!(
+                "local-tool replay request differs from its causal recording \
+                     (expected tool {}, arguments sha256 {}; actual tool {}, arguments sha256 {})",
+                event.tool,
+                digest(&event.request),
+                tool,
+                digest(request),
+            )));
         }
         for effect in &event.effects {
             apply(root, effect)?;
