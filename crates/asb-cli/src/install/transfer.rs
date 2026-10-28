@@ -51,7 +51,7 @@ impl Progress {
 
 /// Observe an ASB-owned download destination while curl writes it.
 ///
-/// The current snapshot is available to any owner through [`snapshot`].  On
+/// The current snapshot is available to any owner through [`Download::snapshot`]. On
 /// an interactive terminal this also owns one redrawable stderr line.  The
 /// observer is presentation-only and cannot affect transfer success, source
 /// validation, or process custody.
