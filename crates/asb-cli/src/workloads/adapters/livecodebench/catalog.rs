@@ -152,6 +152,7 @@ pub(super) fn install(
             CATALOG_MATERIALIZATION_PURPOSE,
             "LiveCodeBench pinned dataset materialization",
         )?;
+        let catalog_output = context.workloads_root.join(adapter.id);
         step.command_mut()
             .arg(tool.join("asb_livecodebench_catalog.py"))
             .arg("catalog")
@@ -166,7 +167,7 @@ pub(super) fn install(
                 adapter.revision,
             ])
             .arg("--output")
-            .arg(context.workloads_root.join(adapter.id))
+            .arg(&catalog_output)
             .arg("--cache")
             .arg(context.project_root.join(".asb-cache/huggingface"))
             .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -178,8 +179,8 @@ pub(super) fn install(
             step.command_mut().args(["--release", release]);
         }
         let cache = context.project_root.join(".asb-cache/huggingface");
-        let monitor = crate::install::transfer::Cache::start(
-            &cache,
+        let monitor = crate::install::transfer::Cache::start_many(
+            &[&cache, &catalog_output],
             "Downloading LiveCodeBench dataset cache",
         );
         let result = scope.run(step);

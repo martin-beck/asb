@@ -14,6 +14,10 @@ const MATERIALIZER: &str = include_str!("../../../../assets/benchmarks/asb_swebe
 const TASK_SESSION: &str = include_str!("../../../../assets/benchmarks/asb_swebench_task.py");
 const TASK_SOURCES: &str = include_str!("../../../../assets/benchmarks/asb_swebench_sources.py");
 const MAX_CATALOG_BYTES: u64 = 16 * 1024 * 1024;
+// Streaming rows are normalized into project-local metadata while the source
+// cache is populated, so this is a bounded package materialization rather
+// than a short, single-file transfer.
+const CATALOG_MATERIALIZATION_PURPOSE: install::Purpose = install::Purpose::Package;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -209,10 +213,11 @@ pub(super) fn install(
             .map_err(crate::io_error)?;
         }
         progress(25, crate::install::ProgressStage::DownloadingAndValidating);
+        let catalog_output = context.workloads_root.join(adapter.id);
         let mut step = scope.prepare(
             &python,
-            install::Purpose::Download,
-            "official SWE-bench dataset installation",
+            CATALOG_MATERIALIZATION_PURPOSE,
+            "official SWE-bench dataset materialization",
         )?;
         step.command_mut()
             .arg(&helper)
@@ -228,7 +233,7 @@ pub(super) fn install(
                 "test",
             ])
             .arg("--output")
-            .arg(context.workloads_root.join(adapter.id))
+            .arg(&catalog_output)
             .arg("--cache")
             .arg(context.project_root.join(".asb-cache/huggingface"))
             .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -236,8 +241,10 @@ pub(super) fn install(
             .env("HF_HUB_DOWNLOAD_TIMEOUT", "60")
             .env("LITELLM_LOCAL_MODEL_COST_MAP", "True");
         let cache = context.project_root.join(".asb-cache/huggingface");
-        let monitor =
-            crate::install::transfer::Cache::start(&cache, "Downloading SWE-bench dataset cache");
+        let monitor = crate::install::transfer::Cache::start_many(
+            &[&cache, &catalog_output],
+            "Downloading and materializing SWE-bench dataset",
+        );
         let result = scope.run(step);
         let _ = monitor.finish();
         let status = result?.status;

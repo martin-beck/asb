@@ -217,6 +217,15 @@ impl Drop for Download {
 
 impl Cache {
     pub(crate) fn start(root: &Path, label: &str) -> Self {
+        Self::start_many(&[root], label)
+    }
+
+    /// Observe growth across disjoint ASB-owned cache or materialization roots.
+    ///
+    /// Package managers usually populate one cache directory, but some bounded
+    /// catalog builders stream source bytes into a cache while simultaneously
+    /// materializing normalized records elsewhere in the project.
+    pub(crate) fn start_many(roots: &[&Path], label: &str) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let state = Arc::new(Mutex::new(Progress::default()));
         let worker = thread::Builder::new()
@@ -224,9 +233,9 @@ impl Cache {
             .spawn({
                 let stop = Arc::clone(&stop);
                 let state = Arc::clone(&state);
-                let root = root.to_path_buf();
+                let roots = roots.iter().map(|root| (*root).to_path_buf()).collect();
                 let label = label.to_owned();
-                move || observe_cache(stop, state, root, label)
+                move || observe_cache(stop, state, roots, label)
             })
             .ok();
         Self {
@@ -353,16 +362,28 @@ fn observe_download(
     }
 }
 
-fn observe_cache(stop: Arc<AtomicBool>, state: Arc<Mutex<Progress>>, root: PathBuf, label: String) {
+fn observe_cache(
+    stop: Arc<AtomicBool>,
+    state: Arc<Mutex<Progress>>,
+    roots: Vec<PathBuf>,
+    label: String,
+) {
     let interactive = io::stderr().is_terminal();
     let started = Instant::now();
-    let initial = directory_size(&root);
+    let initial = roots.iter().fold(0_u64, |total, root| {
+        total.saturating_add(directory_size(root))
+    });
     let mut previous_bytes = 0;
     let mut previous_at = started;
     let mut visible = false;
     while !stop.load(Ordering::Acquire) {
         let now = Instant::now();
-        let completed = directory_size(&root).saturating_sub(initial);
+        let completed = roots
+            .iter()
+            .fold(0_u64, |total, root| {
+                total.saturating_add(directory_size(root))
+            })
+            .saturating_sub(initial);
         let elapsed = now.duration_since(previous_at);
         let speed = if elapsed.is_zero() {
             0
@@ -391,7 +412,12 @@ fn observe_cache(stop: Arc<AtomicBool>, state: Arc<Mutex<Progress>>, root: PathB
         }
         thread::sleep(REFRESH);
     }
-    let completed = directory_size(&root).saturating_sub(initial);
+    let completed = roots
+        .iter()
+        .fold(0_u64, |total, root| {
+            total.saturating_add(directory_size(root))
+        })
+        .saturating_sub(initial);
     let seconds = Instant::now()
         .duration_since(started)
         .as_secs_f64()
@@ -615,6 +641,25 @@ mod tests {
         let progress = monitor.finish();
         assert_eq!(progress.completed_bytes, 4096);
         assert_eq!(progress.total_bytes, None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn package_cache_reports_growth_from_every_owned_root() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-cache-progress-many-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let cache = root.join("cache");
+        let output = root.join("output");
+        fs::create_dir_all(&cache).unwrap();
+        fs::create_dir_all(&output).unwrap();
+        let monitor = Cache::start_many(&[&cache, &output], "Materializing fixture catalog");
+        thread::sleep(REFRESH + REFRESH);
+        fs::write(cache.join("download"), [0_u8; 4096]).unwrap();
+        fs::write(output.join("record"), [0_u8; 2048]).unwrap();
+        thread::sleep(REFRESH + REFRESH);
+        assert_eq!(monitor.finish().completed_bytes, 6144);
         fs::remove_dir_all(root).unwrap();
     }
 }
