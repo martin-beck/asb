@@ -193,20 +193,20 @@ pub(crate) fn run_with_diagnostics(
     if options.native_capsule_record.is_some()
         && (options.mode != Some(tape::Mode::Record)
             || config.concurrency != 1
-            || options.repeat.is_some())
+            || options.repeat.is_some_and(|repeat| repeat != 1))
     {
         return Err(Error::Input(
-            "--native-capsule-record requires --llm-record, concurrency = 1, and no --repeat"
+            "--native-capsule-record requires --llm-record, concurrency = 1, and at most --repeat 1"
                 .into(),
         ));
     }
     if options.native_capsule_replay.is_some()
         && (options.mode != Some(tape::Mode::Replay)
             || config.concurrency != 1
-            || options.repeat.is_some())
+            || options.repeat.is_some_and(|repeat| repeat != 1))
     {
         return Err(Error::Input(
-            "--native-capsule-replay requires --llm-replay, concurrency = 1, and no --repeat"
+            "--native-capsule-replay requires --llm-replay, concurrency = 1, and at most --repeat 1"
                 .into(),
         ));
     }
@@ -243,10 +243,18 @@ pub(crate) fn run_with_diagnostics(
         options.json,
         output,
     )?;
+    // The campaign journal is the only bounded publication/staging path for
+    // auxiliary replay artifacts.  A singleton campaign is semantically one
+    // direct execution, but gives MCP relay and native capsule modes their
+    // sealed sidecars without retaining an additional direct-run format.
+    let requires_artifact_campaign = options.mcp_mode.is_some()
+        || options.native_capsule_record.is_some()
+        || options.native_capsule_replay.is_some();
     if let Some(repeat) = options.repeat.or((bundled_replay
         || options.track.is_some()
-        || options.replay_seed.is_some())
-    .then_some(1))
+        || options.replay_seed.is_some()
+        || requires_artifact_campaign)
+        .then_some(1))
     {
         return repeated::run(config_path, config, repeat, options, output, warnings);
     }
