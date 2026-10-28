@@ -476,6 +476,9 @@ enable the default `llmtape` adapter; future adapters can be chained by setting
 `ASB_PROXY_CHAIN` to comma-separated names ordered from agent to provider. The
 agent always receives only the chain's loopback ingress endpoint, so enabling,
 disabling, or extending the chain does not change agent configuration.
+See [the lightweight replay architecture](docs/REPLAY_ARCHITECTURE.md) for the
+separate provider, MCP, adapter-local-tool, and native-lifecycle boundaries,
+resource limits, and required verification matrix.
 
 Sweep bundle/repeat integration is a separate delivery step; its existing JSONL
 record/replay path is unchanged. For a sweep, keep entries and their order unchanged, and use the same
