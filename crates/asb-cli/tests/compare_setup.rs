@@ -395,8 +395,8 @@ fn trial_sets_expand_enabled_trials_and_explicit_scopes_select_subsets() {
     let project = Project::new();
     project.seed_agent_installations(&[("pi", "pi")]);
     project.write(
-        "catalogs/agentbench.workload.toml",
-        "workload='agentbench'\n[[trials]]\nid='one'\n[[trials]]\nid='two'\n",
+        "catalogs/fixture-one.workload.toml",
+        "workload='fixture-one'\n[[trials]]\nid='one'\n[[trials]]\nid='two'\n",
     );
     project.write(
         "catalogs/gaia.workload.toml",
@@ -411,11 +411,11 @@ fn trial_sets_expand_enabled_trials_and_explicit_scopes_select_subsets() {
         "--model",
         "fixture",
         "--workload",
-        "agentbench",
+        "fixture-one",
         "--workload",
         "gaia",
         "--trial-set",
-        "agentbench.workload.toml",
+        "fixture-one.workload.toml",
         "--trial-set",
         "gaia.workload.toml",
         "--output",
@@ -427,7 +427,7 @@ fn trial_sets_expand_enabled_trials_and_explicit_scopes_select_subsets() {
     assert_eq!(sweep["configs"].as_array().unwrap().len(), 3);
     let mut subset = args.to_vec();
     *subset.last_mut().unwrap() = "subset.toml";
-    subset.extend(["--trial", "agentbench=two", "--trial", "gaia=three"]);
+    subset.extend(["--trial", "fixture-one=two", "--trial", "gaia=three"]);
     success(project.command(&subset));
     let sweep: toml::Value =
         toml::from_str(&std::fs::read_to_string(project.0.join("subset.toml")).unwrap()).unwrap();
@@ -590,7 +590,7 @@ fn repeated_trial_and_trial_set_also_generate_sweeps() {
         project.seed_agent_installations(&[("pi", "pi")]);
         project.write(
             "catalogs/selected.toml",
-            "workload='agentbench'\n[[trials]]\nid='one'\n",
+            "workload='fixture-one'\n[[trials]]\nid='one'\n",
         );
         let mut args = vec![
             "setup",
@@ -601,7 +601,7 @@ fn repeated_trial_and_trial_set_also_generate_sweeps() {
             "--model",
             "fixture",
             "--workload",
-            "agentbench",
+            "fixture-one",
             "--trial-set",
             "selected.toml",
             "--output",
@@ -717,7 +717,7 @@ fn all_trial_sets_and_scoped_all_trials_match_explicit_selections() {
     project.seed_agent_installations(&[("pi", "pi")]);
     project.write(
         "catalogs/a.workload.toml",
-        "workload='agentbench'\n[[trials]]\nid='one'\n[[trials]]\nid='two'\n",
+        "workload='fixture-one'\n[[trials]]\nid='one'\n[[trials]]\nid='two'\n",
     );
     project.write(
         "catalogs/b.workload.toml",
@@ -732,13 +732,13 @@ fn all_trial_sets_and_scoped_all_trials_match_explicit_selections() {
         "--model",
         "fixture",
         "--workload",
-        "agentbench",
+        "fixture-one",
         "--workload",
         "gaia",
         "--trial-set",
         "all",
         "--trial",
-        "agentbench=all",
+        "fixture-one=all",
         "--trial",
         "gaia=all",
         "--output",
@@ -755,7 +755,7 @@ fn all_trial_sets_and_scoped_all_trials_match_explicit_selections() {
         "--model",
         "fixture",
         "--workload",
-        "agentbench",
+        "fixture-one",
         "--workload",
         "gaia",
         "--trial-set",
@@ -763,9 +763,9 @@ fn all_trial_sets_and_scoped_all_trials_match_explicit_selections() {
         "--trial-set",
         "b.workload.toml",
         "--trial",
-        "agentbench=one",
+        "fixture-one=one",
         "--trial",
-        "agentbench=two",
+        "fixture-one=two",
         "--trial",
         "gaia=three",
         "--output",
