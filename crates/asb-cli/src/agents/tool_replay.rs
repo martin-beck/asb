@@ -136,6 +136,24 @@ impl Transcript {
             ))
         }
     }
+
+    pub(crate) fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    pub(crate) fn set_cursor(&mut self, cursor: usize) -> Result<(), Error> {
+        if cursor > self.events.len() {
+            return Err(Error::Run(
+                "local-tool replay progress exceeds its transcript".into(),
+            ));
+        }
+        self.cursor = cursor;
+        Ok(())
+    }
 }
 
 /// Parse and re-encode a transcript before it enters a cassette.  This makes

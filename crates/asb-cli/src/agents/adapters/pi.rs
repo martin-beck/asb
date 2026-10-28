@@ -1,4 +1,7 @@
-use super::{CommandContext, CommandSpec, PreparationContext, PromptDelivery, StaticAdapter};
+use super::{
+    AgentArtifacts, CollectionContext, CommandContext, CommandSpec, PreparationContext,
+    PromptDelivery, StaticAdapter,
+};
 use crate::{Error, install::Recipe};
 use std::path::Path;
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
@@ -14,6 +17,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_complete_tool_replay(prepare_tool_replay)
+.with_collection(collect)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
         namespace: "tool-replay",
@@ -61,6 +65,19 @@ fn execution_failure(stdout: &str, _: &str) -> Option<String> {
         }
     }
     failed.then(|| "agent reported a terminal API request failure or cancellation; inspect the private agent log".into())
+}
+
+fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
+    match super::super::tool_replay_mcp::verify_per_call_completion(
+        context.run_dir,
+        context.frozen.bytes("local-tools.jsonl"),
+    ) {
+        Ok(()) => AgentArtifacts::default(),
+        Err(error) => AgentArtifacts {
+            errors: vec![error.to_string()],
+            ..AgentArtifacts::default()
+        },
+    }
 }
 
 #[cfg(test)]
@@ -236,7 +253,7 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
-    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    let launch = super::super::tool_replay_mcp::per_call_launch(context, tape)?;
     let extension = context.runtime_dir.join("pi/asb-local-tools.ts");
     let parent = extension.parent().expect("Pi extension has a parent");
     std::fs::create_dir_all(parent).map_err(|error| {
@@ -512,6 +529,7 @@ mod tests {
         assert!(!source.contains(r#"}) + "\\n";"#));
         assert!(!source.contains("const pending = new Map()"));
         assert!(run_dir.join("tool-replay/local-tools.jsonl").is_file());
+        assert!(run_dir.join("tool-replay/pi-progress.json").is_file());
         let launch = command
             .get_envs()
             .find(|(name, _)| name.to_string_lossy() == "ASB_PI_LOCAL_TOOL_REPLAY")
@@ -519,6 +537,13 @@ mod tests {
             .expect("Pi local-tool launch specification");
         let launch = serde_json::from_str::<serde_json::Value>(&launch.to_string_lossy()).unwrap();
         assert_eq!(launch["args"][0], "__asb-tool-replay");
+        assert!(
+            launch["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| { value == "--per-call-state" })
+        );
         assert!(
             launch["args"]
                 .as_array()
