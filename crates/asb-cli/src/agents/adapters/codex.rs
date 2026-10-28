@@ -1,6 +1,5 @@
 use super::{
-    AgentArtifacts, CollectionContext, CommandContext, CommandSpec, McpTapeContext,
-    PreparationContext, PromptDelivery, StaticAdapter,
+    CommandContext, CommandSpec, McpTapeContext, PreparationContext, PromptDelivery, StaticAdapter,
 };
 use crate::{Error, install::Recipe};
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
@@ -18,7 +17,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_tool_replay(prepare_tool_replay)
 .with_mcp_servers()
 .with_mcp_relay()
-.with_collection(collect)
+.with_collection(super::super::mcp_relay::collect_artifacts)
 .with_artifact_specs(&[super::super::ArtifactSpec {
     namespace: "tool-replay",
     filename: "local-tools.jsonl",
@@ -231,38 +230,10 @@ fn declared_mcp_configuration(
         .map_err(|error| Error::Run(format!("cannot serialize Codex MCP configuration: {error}")))
 }
 
-fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
-    let mut artifacts = AgentArtifacts::default();
-    if context.mcp_tape.map(|tape| tape.mode) != Some(crate::tape::Mode::Record) {
-        return artifacts;
-    }
-    for declaration in context.mcp_servers {
-        let recording = context.run_dir.join("mcp-relay").join(&declaration.id);
-        let bundle = if recording.exists() {
-            super::super::mcp_relay::bundle_recording(&recording)
-        } else {
-            super::super::mcp_relay::empty_bundle()
-        };
-        match bundle {
-            Ok(bytes) => artifacts
-                .sealed_artifacts
-                .push(super::super::SealedArtifact {
-                    kind: format!("mcp-relay-{}", declaration.id),
-                    bytes,
-                }),
-            Err(error) => artifacts.errors.push(format!(
-                "cannot seal MCP relay recording for `{}`: {error}",
-                declaration.id
-            )),
-        }
-    }
-    artifacts
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::AgentAdapter;
+    use crate::agents::{AgentAdapter, CollectionContext};
     #[cfg(unix)]
     #[test]
     fn native_package_preference_is_owned_here_and_explicit_source_still_wins() {
@@ -396,7 +367,7 @@ mod tests {
         assert_eq!(args[4].as_str(), Some("mcp-filesystem"));
         assert!(!run_dir.join("mcp-relay/filesystem").exists());
 
-        let artifacts = collect(&CollectionContext {
+        let artifacts = super::super::mcp_relay::collect_artifacts(&CollectionContext {
             frozen: &Default::default(),
             run_dir: &run_dir,
             interface: None,

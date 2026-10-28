@@ -106,6 +106,36 @@ pub(crate) fn server_launches(
         .collect()
 }
 
+/// Seal the completed relay recordings for an adapter that opted into MCP
+/// recording.  Relay publication is transport-wide rather than client-specific:
+/// a missing or malformed recording remains a collection error instead of
+/// producing a cassette which could later replay against a live upstream.
+pub(crate) fn collect_artifacts(context: &super::CollectionContext<'_>) -> super::AgentArtifacts {
+    let mut artifacts = super::AgentArtifacts::default();
+    if context.mcp_tape.map(|tape| tape.mode) != Some(crate::tape::Mode::Record) {
+        return artifacts;
+    }
+    for declaration in context.mcp_servers {
+        let recording = context.run_dir.join("mcp-relay").join(&declaration.id);
+        let bundle = if recording.exists() {
+            bundle_recording(&recording)
+        } else {
+            empty_bundle()
+        };
+        match bundle {
+            Ok(bytes) => artifacts.sealed_artifacts.push(super::SealedArtifact {
+                kind: format!("mcp-relay-{}", declaration.id),
+                bytes,
+            }),
+            Err(error) => artifacts.errors.push(format!(
+                "cannot seal MCP relay recording for `{}`: {error}",
+                declaration.id
+            )),
+        }
+    }
+    artifacts
+}
+
 /// Adapter-facing command which substitutes one ordinary MCP server during a
 /// recording. The target directory remains absent until the relay owns the
 /// upstream process, so an interrupted launch cannot be mistaken for a
