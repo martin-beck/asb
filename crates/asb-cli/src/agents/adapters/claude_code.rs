@@ -221,15 +221,15 @@ fn prepare_tool_replay(
         })?,
     )
     .map_err(|error| Error::Run(format!("cannot write Claude Code local tools: {error}")))?;
-    // Claude Code's allow-list addresses concrete MCP tool names, not a
-    // server prefix.  Keep native tools denied, but admit every tool exposed
-    // by ASB's sealed server and each declared relay server.
-    let mut allowed = vec!["mcp__asb_local_tools__*".to_owned()];
+    // Claude Code does not accept glob patterns in `--allowedTools`.  Its
+    // documented `mcp__<server>` selector admits all tools from that server.
+    // Keep native tools denied, but admit each sealed MCP server as a unit.
+    let mut allowed = vec!["mcp__asb_local_tools".to_owned()];
     allowed.extend(
         context
             .mcp_servers
             .iter()
-            .map(|declaration| format!("mcp__{}__*", declaration.id)),
+            .map(|declaration| format!("mcp__{}", declaration.id)),
     );
     context.command.args([
         "--allowedTools",
@@ -356,8 +356,10 @@ mod tests {
         assert!(
             arguments
                 .iter()
-                .any(|argument| argument.contains("mcp__asb_local_tools__*")
-                    && argument.contains("mcp__fixture__*"))
+                .any(|argument| argument.contains("mcp__asb_local_tools")
+                    && argument.contains("mcp__fixture")
+                    && !argument.contains("mcp__asb_local_tools__*")
+                    && !argument.contains("mcp__fixture__*"))
         );
         assert!(
             arguments
