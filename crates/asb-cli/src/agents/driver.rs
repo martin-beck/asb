@@ -17,7 +17,15 @@ const REQUEST: &str = "ASB_GUEST_AGENT_REQUEST";
 /// Guest artifact bytes are copied by the owning workload controller rather
 /// than embedded in its bounded JSON control message.
 const MAX_EXPORTED_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_EXPORTED_ARTIFACTS: usize = 4;
+// Four adapter-owned sidecars plus the three fixed replay sidecars.  The
+// aggregate byte budget remains unchanged.
+const MAX_EXPORTED_ARTIFACTS: usize = 7;
+/// Reserved receipt kinds used to keep replay sidecars out of the bounded
+/// workload-controller JSON record.  They are restored only by the owning
+/// controller before the recorder sees the completed guest result.
+pub(crate) const LOCAL_TOOL_TRANSCRIPT_ARTIFACT: &str = "asb-local-tools";
+pub(crate) const DETERMINISTIC_MANIFEST_ARTIFACT: &str = "asb-determinism-manifest";
+pub(crate) const NATIVE_TRACE_ARTIFACT: &str = "asb-native-trace";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -715,7 +723,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let adapter = super::find(&request.config.agent).expect("validated agent");
     let frozen = artifact_owner.freeze();
-    let artifacts = adapter.collect(&super::CollectionContext {
+    let mut artifacts = adapter.collect(&super::CollectionContext {
         frozen: &frozen,
         run_dir: &request.run_dir,
         interface: Some(request.connection.interface),
@@ -728,6 +736,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             cassette: request.mcp_tape_cassette.as_deref(),
         }),
     });
+    let sidecars = controller_sidecars(&mut artifacts);
     let usage = crate::usage::from_sources(
         &request.config.provider,
         &request.config.agent,
@@ -736,8 +745,6 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         None,
     );
     let usage = crate::usage::with_artifact_usage(usage, artifacts.token_usage);
-    let exported_artifacts =
-        export_sealed_artifacts(&request.run_dir, &artifacts.sealed_artifacts)?;
     // Until the first durable publication transfers the frozen evidence, Drop
     // retains raw artifacts. This interim record never asserts settlement.
     let mut result = GuestResult {
@@ -765,12 +772,15 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         steps: artifacts
             .steps
             .or_else(|| adapter.step_count(&stdout, &stderr)),
-        local_tool_transcript: artifacts.local_tool_transcript,
-        deterministic_manifest: artifacts.deterministic_manifest,
-        native_trace: artifacts.native_trace,
+        // Large replay sidecars must cross the guest boundary as verified
+        // files.  Embedding their byte vectors would base64-expand them into
+        // the one-megabyte controller frame.
+        local_tool_transcript: None,
+        deterministic_manifest: None,
+        native_trace: None,
         sealed_artifacts: Vec::new(),
-        exported_artifacts,
-        adapter_errors: artifacts.errors,
+        exported_artifacts: Vec::new(),
+        adapter_errors: std::mem::take(&mut artifacts.errors),
         execution_failure: {
             #[cfg(target_os = "linux")]
             let timed_out = held.as_ref().is_some_and(|held| held.timed_out);
@@ -786,6 +796,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         transcript_truncated,
         namespace_collectors,
     };
+    result.exported_artifacts = export_sealed_artifacts(&request.run_dir, &sidecars)?;
     publish_artifacts(&mut result, artifact_owner, frozen.diagnostic(), |result| {
         publish_result(&request.run_dir, result)
     })?;
@@ -809,6 +820,31 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         .code()
         .and_then(|code| u8::try_from(code).ok())
         .unwrap_or(1))
+}
+
+/// Move replay sidecars into receipt-backed files before the result reaches
+/// the bounded controller JSON transport.
+fn controller_sidecars(artifacts: &mut super::AgentArtifacts) -> Vec<super::SealedArtifact> {
+    let mut sidecars = std::mem::take(&mut artifacts.sealed_artifacts);
+    for (kind, bytes) in [
+        (
+            LOCAL_TOOL_TRANSCRIPT_ARTIFACT,
+            artifacts.local_tool_transcript.take(),
+        ),
+        (
+            DETERMINISTIC_MANIFEST_ARTIFACT,
+            artifacts.deterministic_manifest.take(),
+        ),
+        (NATIVE_TRACE_ARTIFACT, artifacts.native_trace.take()),
+    ] {
+        if let Some(bytes) = bytes {
+            sidecars.push(super::SealedArtifact {
+                kind: kind.into(),
+                bytes,
+            });
+        }
+    }
+    sidecars
 }
 
 /// Keep opaque adapter sidecars out of the one-megabyte guest controller
@@ -948,6 +984,50 @@ pub(crate) fn entry() -> std::process::ExitCode {
 #[cfg(all(test, unix))]
 mod artifact_publication_tests {
     use super::*;
+
+    #[test]
+    fn replay_sidecars_leave_the_controller_result_before_receipt_export() {
+        let mut artifacts = super::super::AgentArtifacts {
+            local_tool_transcript: Some(vec![b't'; 768 * 1024]),
+            deterministic_manifest: Some(b"manifest".to_vec()),
+            native_trace: Some(b"trace".to_vec()),
+            ..Default::default()
+        };
+        let sidecars = controller_sidecars(&mut artifacts);
+        assert!(artifacts.local_tool_transcript.is_none());
+        assert!(artifacts.deterministic_manifest.is_none());
+        assert!(artifacts.native_trace.is_none());
+        assert_eq!(sidecars.len(), 3);
+        assert_eq!(sidecars[0].kind, LOCAL_TOOL_TRANSCRIPT_ARTIFACT);
+        assert_eq!(sidecars[0].bytes.len(), 768 * 1024);
+        assert_eq!(sidecars[1].kind, DETERMINISTIC_MANIFEST_ARTIFACT);
+        assert_eq!(sidecars[2].kind, NATIVE_TRACE_ARTIFACT);
+    }
+
+    #[test]
+    fn replay_sidecars_preserve_the_existing_adapter_sidecar_budget() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/controller-sidecars")
+            .join(crate::workloads::TaskIdentity::local("sidecars", None).attempt_id);
+        fs::create_dir_all(&root).unwrap();
+        let mut artifacts = super::super::AgentArtifacts {
+            sealed_artifacts: (0..4)
+                .map(|index| super::super::SealedArtifact {
+                    kind: format!("adapter-sidecar-{index}"),
+                    bytes: vec![index as u8],
+                })
+                .collect(),
+            local_tool_transcript: Some(b"tool".to_vec()),
+            deterministic_manifest: Some(b"manifest".to_vec()),
+            native_trace: Some(b"trace".to_vec()),
+            ..Default::default()
+        };
+        let sidecars = controller_sidecars(&mut artifacts);
+        let receipts = export_sealed_artifacts(&root, &sidecars).unwrap();
+        assert_eq!(receipts.len(), 7);
+        assert_eq!(receipts[6].kind, NATIVE_TRACE_ARTIFACT);
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn actual_first_and_final_publication_failures_keep_honest_evidence() {

@@ -213,6 +213,87 @@ fn guest_sidecars_cross_the_control_boundary_as_receipts_not_json_bytes() {
 }
 
 #[test]
+fn replay_sidecars_restore_from_receipts_without_entering_the_control_record() {
+    use sha2::{Digest, Sha256};
+    let root = std::env::temp_dir().join(format!(
+        "asb-replay-sidecar-{}",
+        crate::workloads::TaskIdentity::local("receipt", None).attempt_id
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let sidecars = [
+        (
+            crate::agents::driver::LOCAL_TOOL_TRANSCRIPT_ARTIFACT,
+            b"tool".as_slice(),
+        ),
+        (
+            crate::agents::driver::DETERMINISTIC_MANIFEST_ARTIFACT,
+            b"manifest".as_slice(),
+        ),
+        (
+            crate::agents::driver::NATIVE_TRACE_ARTIFACT,
+            b"trace".as_slice(),
+        ),
+    ];
+    let mut receipts = Vec::new();
+    for (index, (kind, bytes)) in sidecars.iter().enumerate() {
+        let filename = format!("artifact-{index}");
+        std::fs::write(root.join(&filename), bytes).unwrap();
+        receipts.push(json!({
+            "kind":kind,
+            "filename":filename,
+            "bytes":bytes.len(),
+            "sha256":format!("{:x}", Sha256::digest(bytes)),
+        }));
+    }
+    let mut value = completion();
+    value["result"]["metadata"]["exported_artifacts"] = Value::Array(receipts);
+    let result =
+        CompletedExecution::decode_with_artifacts(&value, ProcessLifetime::Quiesce, Some(&root))
+            .unwrap()
+            .into_execution()
+            .unwrap();
+    assert_eq!(
+        result.metadata.local_tool_transcript.as_deref(),
+        Some(b"tool".as_slice())
+    );
+    assert_eq!(
+        result.metadata.deterministic_manifest.as_deref(),
+        Some(b"manifest".as_slice())
+    );
+    assert_eq!(
+        result.metadata.native_trace.as_deref(),
+        Some(b"trace".as_slice())
+    );
+    assert!(result.metadata.sealed_artifacts.is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn replay_sidecar_receipt_rejects_a_duplicate_embedded_control_value() {
+    use sha2::{Digest, Sha256};
+    let root = std::env::temp_dir().join(format!(
+        "asb-replay-sidecar-duplicate-{}",
+        crate::workloads::TaskIdentity::local("receipt", None).attempt_id
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let bytes = b"sealed tools";
+    std::fs::write(root.join("artifact-0"), bytes).unwrap();
+    let mut value = completion();
+    value["result"]["metadata"]["local_tool_transcript"] = json!([1]);
+    value["result"]["metadata"]["exported_artifacts"] = json!([{
+        "kind":crate::agents::driver::LOCAL_TOOL_TRANSCRIPT_ARTIFACT,
+        "filename":"artifact-0",
+        "bytes":bytes.len(),
+        "sha256":format!("{:x}", Sha256::digest(bytes)),
+    }]);
+    assert!(
+        CompletedExecution::decode_with_artifacts(&value, ProcessLifetime::Quiesce, Some(&root),)
+            .is_err()
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn guest_sidecar_receipts_fail_closed_for_missing_or_changed_files() {
     let root = std::env::temp_dir().join(format!(
         "asb-guest-artifact-invalid-{}",
