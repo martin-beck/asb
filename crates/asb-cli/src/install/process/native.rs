@@ -11,6 +11,9 @@ use std::sync::{Mutex, mpsc};
 
 const CLEANUP: Duration = Duration::from_secs(6);
 const LOG_BYTES: usize = 16 * 1024 * 1024;
+/// A normal private-file flush should settle promptly. This remains bounded so
+/// an ancillary writer can never delay installer cancellation.
+const LOG_FINISH_WAIT: Duration = Duration::from_millis(100);
 const CHUNK: usize = 8192;
 const OPERATION_LOG_BYTES: usize = 64 * 1024 * 1024;
 const OPERATION_LOG_WORKERS: usize = 4;
@@ -94,6 +97,7 @@ pub(crate) struct LogReport {
 
 struct LogSink {
     queue: Option<mpsc::SyncSender<Vec<u8>>>,
+    completion: Option<mpsc::Receiver<()>>,
     report: Arc<Mutex<LogReport>>,
     budget: Arc<LogBudget>,
 }
@@ -122,6 +126,7 @@ impl LogSink {
             report.lock().unwrap().settled = true;
             return Self {
                 queue: None,
+                completion: None,
                 report,
                 budget,
             };
@@ -135,6 +140,7 @@ impl LogSink {
             report.lock().unwrap().settled = true;
             return Self {
                 queue: None,
+                completion: None,
                 report,
                 budget,
             };
@@ -150,6 +156,7 @@ impl LogSink {
                 drop(state);
                 return Self {
                     queue: None,
+                    completion: None,
                     report,
                     budget,
                 };
@@ -157,6 +164,7 @@ impl LogSink {
         };
         report.lock().unwrap().path = Some(path);
         let (queue, receive) = mpsc::sync_channel::<Vec<u8>>(16);
+        let (completion_send, completion) = mpsc::sync_channel(1);
         let state = Arc::clone(&report);
         let spawn = move || {
             std::thread::Builder::new()
@@ -216,6 +224,7 @@ impl LogSink {
                     drop(file);
                     drop(permit); // Actual writer/flush/close ended, not just a snapshot.
                     state.lock().unwrap().settled = true;
+                    let _ = completion_send.send(());
                 })
         };
         #[cfg(test)]
@@ -232,12 +241,14 @@ impl LogSink {
             drop(state);
             return Self {
                 queue: None,
+                completion: None,
                 report,
                 budget,
             };
         }
         Self {
             queue: Some(queue),
+            completion: Some(completion),
             report,
             budget,
         }
@@ -303,8 +314,12 @@ impl LogSink {
     }
     fn finish(mut self) -> LogReport {
         self.queue.take();
-        // Never join a potentially blocked regular-file writer. The report
-        // explicitly distinguishes pending diagnostics from complete capture.
+        // Wait briefly for an ordinary close/flush. Never join a potentially
+        // blocked regular-file writer: after this bound the report still
+        // distinguishes pending diagnostics from complete capture.
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.recv_timeout(LOG_FINISH_WAIT);
+        }
         self.report.lock().unwrap().clone()
     }
 }
