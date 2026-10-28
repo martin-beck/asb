@@ -1200,7 +1200,7 @@ mod tests {
             "bpftrace:all",
         ])
         .expect("bpftrace profile selection parses");
-        Cli::try_parse_from(["asb", "workload", "terminal-bench", "trials"])
+        Cli::try_parse_from(["asb", "workload", "terminal-bench-1.0", "trials"])
             .expect("workload trial listing parses");
     }
 }

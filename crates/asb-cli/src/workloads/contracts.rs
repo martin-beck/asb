@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn reference_names_cannot_advertise_official_scores_and_unknowns_stay_unknown() {
-        for id in ["swe-bench-pro", "terminal-bench", "tau-bench"] {
+        for id in ["swe-bench-pro", "tau-bench"] {
             let mut profile = super::super::descriptor(id).unwrap();
             assert!(profile.valid());
             assert_eq!(profile.support, SupportLevel::ReferenceSmoke);

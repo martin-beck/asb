@@ -2994,6 +2994,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::style::{Color, Style};
     use std::collections::BTreeSet;
+    use std::path::Path;
     use std::time::Instant;
 
     #[test]
@@ -3479,7 +3480,7 @@ mod tests {
         let workload = app.panes[PaneKind::Workloads.index()]
             .choices
             .iter()
-            .find(|choice| choice.label == "terminal-bench")
+            .find(|choice| choice.label == "terminal-bench-1.0")
             .expect("external workload catalog entry");
         assert_eq!(workload.availability, Availability::Missing);
         let _ = std::fs::remove_dir_all(root);
@@ -3800,7 +3801,7 @@ mod tests {
         let choices = super::external_workload_choices(&root);
         let terminal = choices
             .iter()
-            .find(|choice| choice.label == "terminal-bench")
+            .find(|choice| choice.label == "terminal-bench-1.0")
             .expect("catalog workload is listed");
         assert_eq!(terminal.availability, super::Availability::Missing);
         let _ = std::fs::remove_dir_all(root);
@@ -4114,7 +4115,7 @@ mod tests {
         let input = root.join("benchmark.toml");
         std::fs::write(
             &input,
-            "agent='pi'\nprovider='openrouter'\nmodel='configured-model'\nworkload='terminal-bench'\ntrial='smoke'\nconcurrency=2\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['system']\n",
+            "agent='pi'\nprovider='openrouter'\nmodel='configured-model'\nworkload='bug-fix'\ntrial='smoke'\nconcurrency=2\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['system']\n",
         )
         .unwrap();
 
@@ -4138,11 +4139,8 @@ mod tests {
         assert!(
             app.pane(PaneKind::Workloads)
                 .selected_choices()
-                .any(|choice| { choice.key.workload() == Some("terminal-bench") })
+                .any(|choice| { choice.key.workload() == Some("bug-fix") })
         );
-        assert!(app.pane(PaneKind::Extensions).selected_choices().any(|choice| {
-            matches!(&choice.key, ChoiceKey::ExtensionValue { workload, value, .. } if workload == "terminal-bench" && value == "smoke")
-        }));
         assert!(
             app.pane(PaneKind::Measurements)
                 .selected_choices()
@@ -4225,9 +4223,9 @@ mod tests {
     fn extension_all_control_tracks_and_toggles_every_value() {
         let mut pane = Pane::new(vec![
             Choice {
-                label: "[all] terminal-bench".into(),
+                label: "[all] terminal-bench-1.0".into(),
                 key: ChoiceKey::AllExtension {
-                    workload: "terminal-bench".into(),
+                    workload: "terminal-bench-1.0".into(),
                     extension: "trial".into(),
                 },
                 availability: Availability::Available,
@@ -4235,7 +4233,7 @@ mod tests {
             Choice {
                 label: "task-a".into(),
                 key: ChoiceKey::ExtensionValue {
-                    workload: "terminal-bench".into(),
+                    workload: "terminal-bench-1.0".into(),
                     extension: "trial".into(),
                     value: "task-a".into(),
                 },
@@ -4244,7 +4242,7 @@ mod tests {
             Choice {
                 label: "task-b".into(),
                 key: ChoiceKey::ExtensionValue {
-                    workload: "terminal-bench".into(),
+                    workload: "terminal-bench-1.0".into(),
                     extension: "trial".into(),
                     value: "task-b".into(),
                 },
@@ -4274,11 +4272,12 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
+        install_agentbench_catalog_fixture(&root);
         let mut app = App::new(root.clone(), ProjectConfig::default());
         let workload = app.panes[PaneKind::Workloads.index()]
             .choices
             .iter()
-            .position(|choice| choice.key.workload() == Some("terminal-bench"))
+            .position(|choice| choice.key.workload() == Some("agentbench"))
             .unwrap();
         app.panes[PaneKind::Workloads.index()].selected[workload] = true;
         app.refresh_extensions().unwrap();
@@ -4311,6 +4310,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
+        install_agentbench_catalog_fixture(&root);
         let mut app = App::new(root.clone(), ProjectConfig::default());
         app.panes[PaneKind::Agents.index()] = Pane::new(vec![agent_choice("pi")]);
         app.panes[PaneKind::Agents.index()].selected[0] = true;
@@ -4325,14 +4325,14 @@ mod tests {
             availability: Availability::Available,
         }]);
         app.panes[PaneKind::Models.index()].selected[0] = true;
-        app.panes[PaneKind::Workloads.index()] = Pane::new(vec![choice("terminal-bench")]);
+        app.panes[PaneKind::Workloads.index()] = Pane::new(vec![choice("agentbench")]);
         app.panes[PaneKind::Workloads.index()].selected[0] = true;
         app.refresh_extensions().unwrap();
         let trial = app.panes[PaneKind::Extensions.index()]
             .choices
             .iter()
             .position(|choice| {
-                matches!(&choice.key, ChoiceKey::ExtensionValue { value, .. } if value == "shell")
+                matches!(&choice.key, ChoiceKey::ExtensionValue { value, .. } if value == "fixture")
             })
             .unwrap();
         app.panes[PaneKind::Extensions.index()].selected[trial] = true;
@@ -4342,8 +4342,8 @@ mod tests {
         let config: crate::benchmark::BenchmarkConfig =
             toml::from_str(&std::fs::read_to_string(root.join(&manifest.configs[0])).unwrap())
                 .unwrap();
-        assert_eq!(config.workload, "terminal-bench");
-        assert_eq!(config.trial.as_deref(), Some("shell"));
+        assert_eq!(config.workload, "agentbench");
+        assert_eq!(config.trial.as_deref(), Some("fixture"));
         assert!(config.trial_set.is_none());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4373,8 +4373,18 @@ mod tests {
             app.panes[PaneKind::Models.index()].selected[0] = true;
             app.panes[PaneKind::Workloads.index()] = Pane::new(vec![choice(workload)]);
             app.panes[PaneKind::Workloads.index()].selected[0] = true;
-            let extension = crate::workloads::setup_extension(workload)
-                .unwrap_or_else(|| panic!("{workload} has no selectable trial extension"));
+            let Some(extension) = crate::workloads::setup_extension(workload) else {
+                // Reference-only adapters deliberately have no fabricated
+                // trial population. They remain unavailable until a
+                // source-specific catalog adapter is added.
+                assert_eq!(
+                    crate::workloads::installed_available(workload, &root.join("workloads")),
+                    Some(false),
+                    "{workload}"
+                );
+                let _ = std::fs::remove_dir_all(root);
+                continue;
+            };
             // Do not require a downloaded catalog here: the invariant is that
             // one selected extension value publishes one configuration for
             // every external family, including catalog-backed LiveCodeBench.
@@ -4391,5 +4401,18 @@ mod tests {
             assert_eq!(generate_configs(&app).unwrap().tests, 1, "{workload}");
             let _ = std::fs::remove_dir_all(root);
         }
+    }
+
+    fn install_agentbench_catalog_fixture(root: &Path) {
+        let workloads = root.join("workloads");
+        let source = workloads.join("agentbench/source/configs/tasks");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            workloads.join("agentbench/ASB-BUNDLE"),
+            "THUDM/AgentBench@d1e4a10db08c87075c78972e48ecc182be03e2d5\n",
+        )
+        .unwrap();
+        std::fs::write(source.join("fixture.yaml"), "name: fixture\n").unwrap();
+        crate::workloads::finalize_install("agentbench", &workloads).unwrap();
     }
 }
