@@ -27,6 +27,11 @@ pub(crate) struct Event {
     pub tool: String,
     pub request: Value,
     pub result: Value,
+    /// A bounded, canonical error returned by the local-tool service instead
+    /// of a result.  It is an observable tool turn: omitting it would shift
+    /// every following replay request after a recorded tool failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Effect>,
 }
@@ -52,6 +57,13 @@ impl Transcript {
             || event.schema_version != SCHEMA_VERSION
             || event.sequence != self.events.len() as u64 + 1
             || !valid_tool(&event.tool)
+            || event.failure.as_ref().is_some_and(|failure| {
+                failure.is_empty()
+                    || failure.len() > 512
+                    || failure.contains(['\n', '\r'])
+                    || failure.chars().any(char::is_control)
+            })
+            || event.failure.is_some() && (!event.effects.is_empty() || !event.result.is_null())
         {
             return Err(Error::Run("invalid local-tool transcript event".into()));
         }
@@ -125,6 +137,9 @@ impl Transcript {
             apply(root, effect)?;
         }
         self.cursor += 1;
+        if let Some(failure) = &event.failure {
+            return Err(Error::Run(failure.clone()));
+        }
         Ok(event.result.clone())
     }
 
@@ -433,6 +448,7 @@ mod tests {
             tool: "write_file".into(),
             request: serde_json::json!({"path":"answer.txt"}),
             result: serde_json::json!({"ok":true}),
+            failure: None,
             effects: vec![Effect::WriteText {
                 path: "answer.txt".into(),
                 content: "recorded".into(),
@@ -492,6 +508,20 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn transcript_rejects_an_unbounded_or_effectful_failure_event() {
+        let mut transcript = Transcript::default();
+        let mut invalid = event(1);
+        invalid.failure = Some("x".repeat(513));
+        invalid.result = Value::Null;
+        assert!(transcript.record(invalid).is_err());
+
+        let mut invalid = event(1);
+        invalid.failure = Some("bounded failure".into());
+        invalid.result = Value::Null;
+        assert!(transcript.record(invalid).is_err());
     }
 
     #[cfg(unix)]
