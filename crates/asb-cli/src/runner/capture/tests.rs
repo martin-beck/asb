@@ -79,7 +79,13 @@ fn dual_pipe_pressure_is_drained_with_bounded_capture_and_preserved_exit() {
     assert!(result.output.status.success());
     assert_eq!(result.output.stdout.len(), CAPTURE_LIMIT);
     assert_eq!(result.output.stderr.len(), CAPTURE_LIMIT);
-    assert!(result.capture_error.unwrap().contains("capture limit"));
+    assert!(
+        result
+            .capture_error
+            .as_deref()
+            .is_some_and(|error| error.contains("capture limit"))
+    );
+    assert!(result.only_transcript_truncated());
     assert_eq!(calls, 1);
 }
 

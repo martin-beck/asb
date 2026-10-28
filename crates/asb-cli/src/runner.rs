@@ -1389,6 +1389,11 @@ mod capture;
 pub(crate) use capture::transport::GuestTransport;
 use capture::{OwnedChild, PresentationPolicy, capture_with_output_streams};
 
+pub(crate) struct GuestProcessOutput {
+    pub output: Output,
+    pub transcript_truncated: bool,
+}
+
 #[cfg(test)]
 fn wait_with_output(
     child: OwnedChild,
@@ -1412,7 +1417,7 @@ pub(crate) fn run_guest_process(
     stderr: &mut dyn Write,
     runtime: Duration,
     on_spawn: &mut dyn FnMut(u32) -> Result<(), Error>,
-) -> Result<Output, Error> {
+) -> Result<GuestProcessOutput, Error> {
     #[cfg(target_os = "linux")]
     let mut descendants = crate::process_gate::DescendantScope::new()
         .map_err(|error| Error::Run(format!("cannot retain guest agent descendants: {error}")))?;
@@ -1427,15 +1432,33 @@ pub(crate) fn run_guest_process(
         stdin.write_all(prompt).map_err(crate::io_error)?;
     }
     on_spawn(child.id())?;
-    wait_with_output_streams(child, true, stdout, Some(stderr), runtime, &mut || {
-        #[cfg(target_os = "linux")]
-        return descendants.quiesce();
-        #[cfg(not(target_os = "linux"))]
-        Ok(())
+    let captured = capture_with_output_streams(
+        child,
+        true,
+        stdout,
+        Some(stderr),
+        runtime,
+        PresentationPolicy::CancelOnTransportFailure,
+        &mut || {
+            #[cfg(target_os = "linux")]
+            return descendants.quiesce();
+            #[cfg(not(target_os = "linux"))]
+            Ok(())
+        },
+    )
+    .map_err(|error| Error::Run(format!("cannot wait for guest agent: {error}")))?;
+    if let Some(error) = &captured.capture_error
+        && !captured.only_transcript_truncated()
+    {
+        return Err(Error::Run(format!("cannot wait for guest agent: {error}")));
+    }
+    Ok(GuestProcessOutput {
+        output: captured.output,
+        transcript_truncated: captured.transcript_truncated,
     })
-    .map_err(|error| Error::Run(format!("cannot wait for guest agent: {error}")))
 }
 
+#[cfg(test)]
 fn wait_with_output_streams(
     child: OwnedChild,
     show_output: bool,
@@ -2124,6 +2147,31 @@ mod tests {
         let error = super::wait_with_output(child, true, &mut FailingWriter).unwrap_err();
         assert!(error.to_string().contains("fixture output failure"));
         assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guest_process_returns_a_bounded_transcript_after_output_overflow() {
+        let mut command = std::process::Command::new("python3");
+        command
+            .args(["-c", "import os; os.write(1, b'x' * (9 * 1024 * 1024))"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let result = super::run_guest_process(
+            &mut command,
+            None,
+            &mut stdout,
+            &mut stderr,
+            std::time::Duration::from_secs(10),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert!(result.output.status.success());
+        assert!(result.transcript_truncated);
+        assert_eq!(result.output.stdout.len(), super::capture::CAPTURE_LIMIT);
+        assert_eq!(stdout.len(), 9 * 1024 * 1024);
     }
 
     #[test]
