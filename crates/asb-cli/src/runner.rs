@@ -2272,6 +2272,47 @@ mod tests {
     }
 
     #[test]
+    fn singleton_campaign_preserves_explicit_tool_replay_rejection() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-explicit-tool-campaign-{}",
+            crate::workloads::TaskIdentity::local("explicit-tool-campaign", None).attempt_id
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir(root.join(".asb")).unwrap();
+        std::fs::write(
+            root.join(".asb/project.toml"),
+            toml::to_string(&crate::project::ProjectConfig::default()).unwrap(),
+        )
+        .unwrap();
+        let config = root.join("benchmark.toml");
+        std::fs::write(
+            &config,
+            "agent='codex'\nworkload='bug-fix'\nprovider='not-a-provider'\nmodel='model'\nconcurrency=1\n",
+        )
+        .unwrap();
+        let capsule = root.join("capsule");
+        let error = run_with_tape(
+            config.to_str().unwrap(),
+            super::RunOptions {
+                mode: Some(crate::tape::Mode::Record),
+                tool_mode: Some(crate::tape::Mode::Record),
+                tool_mode_explicit: true,
+                native_capsule_record: Some(capsule.to_str().unwrap()),
+                ..Default::default()
+            },
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not yet provide an ASB tool interception transport")
+        );
+        assert!(!capsule.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn completion_records_preserve_unresolved_outcomes_cleanup_and_private_evidence() {
         use super::completion;
         use crate::workloads;
