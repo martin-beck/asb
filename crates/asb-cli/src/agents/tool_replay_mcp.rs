@@ -279,6 +279,7 @@ fn call(options: &Options, transcript: &mut Transcript, params: Value) -> Result
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    let request = canonical_request(tool, request)?;
     let result = if options.mode == Mode::Replay {
         transcript.replay(&options.workspace, tool, &request)?
     } else {
@@ -297,6 +298,35 @@ fn call(options: &Options, transcript: &mut Transcript, params: Value) -> Result
     Ok(
         json!({"content":[{"type":"text","text":serde_json::to_string(&result).map_err(|_| Error::Run("cannot render local-tool result".into()))?}]}),
     )
+}
+
+/// Retain only fields defined by the local-tool protocol.  Some agent SDKs
+/// decorate tool arguments with transport metadata; that metadata has no
+/// effect on execution and must not make an otherwise identical replay fail.
+fn canonical_request(tool: &str, request: Value) -> Result<Value, Error> {
+    let object = request
+        .as_object()
+        .ok_or_else(|| Error::Run("local-tool arguments must be an object".into()))?;
+    let fields: &[&str] = match tool {
+        "list_directory" => &["path"],
+        "search_text" => &["path", "query"],
+        "run_command" => &["argv"],
+        "read_file" => &["path"],
+        "write_file" => &["path", "content"],
+        "create_directory" | "remove_file" => &["path"],
+        _ => return Err(Error::Run("local-tool is unsupported".into())),
+    };
+    Ok(Value::Object(
+        fields
+            .iter()
+            .filter_map(|field| {
+                object
+                    .get(*field)
+                    .cloned()
+                    .map(|value| ((*field).into(), value))
+            })
+            .collect(),
+    ))
 }
 
 fn execute(root: &Path, tool: &str, request: &Value) -> Result<(Value, Vec<Effect>), Error> {
@@ -683,6 +713,41 @@ mod tests {
             transcript: root.join("replay.jsonl"),
         };
         let replayed = call(&replay_options, &mut replay, request).unwrap();
+        assert_eq!(recorded, replayed);
+        replay.finish().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_ignores_non_semantic_tool_argument_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-metadata-replay-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let record = Options {
+            mode: Mode::Record,
+            workspace: root.clone(),
+            transcript: root.join("record.jsonl"),
+        };
+        let mut transcript = Transcript::default();
+        let recorded = call(
+            &record,
+            &mut transcript,
+            json!({"name":"run_command","arguments":{"argv":["pwd"],"_meta":{"client":"fixture"}}}),
+        )
+        .unwrap();
+        let mut replay = Transcript::decode(&transcript.encode().unwrap()).unwrap();
+        let replayed = call(
+            &Options {
+                mode: Mode::Replay,
+                workspace: root.join("removed-workspace"),
+                transcript: root.join("replay.jsonl"),
+            },
+            &mut replay,
+            json!({"name":"run_command","arguments":{"argv":["pwd"],"_meta":{"client":"changed"}}}),
+        )
+        .unwrap();
         assert_eq!(recorded, replayed);
         replay.finish().unwrap();
         let _ = std::fs::remove_dir_all(root);
