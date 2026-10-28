@@ -79,6 +79,14 @@ def project(parent, name, mode):
     node = root / "fixture-bin/node"
     node.write_text("#!/bin/sh\nprintf 'v22.0.0\\n'\n")
     node.chmod(0o755)
+    # Exercise a current, unique workload identifier without network access.
+    # The fake extractor creates the smallest valid pinned AgentBench tree.
+    curl = root / "fixture-bin/curl"
+    curl.write_text("#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --output ]; then shift; printf fixture > \"$1\"; exit 0; fi\n  shift\ndone\nexit 1\n")
+    curl.chmod(0o755)
+    tar = root / "fixture-bin/tar"
+    tar.write_text("#!/bin/sh\ndest=\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --directory ] || [ \"$1\" = -C ]; then shift; dest=$1; fi\n  shift\ndone\n[ -n \"$dest\" ] || exit 2\n/bin/mkdir -p \"$dest/AgentBench/configs/tasks\"\nprintf 'name: fixture\\n' > \"$dest/AgentBench/configs/tasks/fixture.yaml\"\n")
+    tar.chmod(0o755)
     return root
 
 
@@ -291,7 +299,8 @@ def helper_protocol(binary, root, mode="tool", name="pi", expected_stages=(1, 8)
         else:
             assert 1 <= frame[6] <= 13, frame
             stages.add(frame[6])
-    assert final == expected_final
+    diagnostic = (root / ".asb/install.log").read_text() if (root / ".asb/install.log").exists() else ""
+    assert final == expected_final, (final, stages, diagnostic)
     finish_helper(child, receipts, expected_final)
     assert set(expected_stages).issubset(stages), (expected_stages, stages)
     receiver.close()
@@ -335,11 +344,7 @@ def main():
                 assert sentinel.poll() is None, "unrelated process was signalled"
             helper_protocol(binary, project(parent, "helper", "success"))
             workload = project(parent, "helper-workload", "success")
-            bundle = workload / "workloads/terminal-bench"
-            (bundle / "source").mkdir(parents=True)
-            (bundle / "source/README.md").write_text("Local retained source fixture.\n")
-            (bundle / "ASB-BUNDLE").write_text("terminal-bench/terminal-bench@452bf305c6daa62fc59061d22133a7cbc7c1572e")
-            helper_protocol(binary, workload, "workload", "terminal-bench", (1, 9, 12))
+            helper_protocol(binary, workload, "workload", "agentbench", (1, 3, 12))
             helper_protocol(binary, project(parent, "helper-dependencies", "fail"),
                             "dependencies", "flamegraph", (2, 3), 2)
             startup_failure(binary, project(parent, "startup", "slow"))
