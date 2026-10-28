@@ -39,6 +39,7 @@ fn record_uses_one_filesystem_resolved_destination_for_producer_and_receipt() {
             cassette: requested,
             respect_record_timings: false,
             workspace: fixture.0.clone(),
+            replay_delivery: crate::tape::ReplayDelivery::Events,
         };
         let mut session = ADAPTER
             .start(Some("http://127.0.0.1:1/v1"), Some(&settings))
@@ -71,6 +72,7 @@ fn external_override_never_receives_private_capture_capability_or_invents_eviden
             cassette: fixture.0.join("trace.jsonl"),
             respect_record_timings: false,
             workspace: fixture.0.clone(),
+            replay_delivery: crate::tape::ReplayDelivery::Events,
         };
         let mut session = ADAPTER
             .start(Some("http://127.0.0.1:1/v1"), Some(&settings))
@@ -185,6 +187,7 @@ fn existing_recording_destinations_are_refused_before_starting_a_proxy() {
             cassette: path,
             respect_record_timings: false,
             workspace: fixture.0.clone(),
+            replay_delivery: crate::tape::ReplayDelivery::Events,
         };
         let error = ADAPTER
             .start(Some("http://127.0.0.1:1/v1"), Some(&settings))
@@ -215,6 +218,7 @@ fn startup_errors_are_specific_and_remove_only_their_private_scratch() {
             cassette: root.0.join("tape.jsonl"),
             respect_record_timings: false,
             workspace: root.0.join("workspace"),
+            replay_delivery: crate::tape::ReplayDelivery::Events,
         };
         let error = match scenario.as_str() {
             "missing-upstream" => ADAPTER.start(None, Some(&settings)).err().unwrap(),

@@ -17,6 +17,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_complete_tool_replay(prepare_tool_replay)
+.with_replay_delivery(crate::tape::ReplayDelivery::WholeBody)
 .with_collection(collect)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
@@ -388,6 +389,15 @@ fn configure_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentAdapter;
+
+    #[test]
+    fn replay_uses_one_bounded_response_write_for_pi() {
+        assert_eq!(
+            ADAPTER.replay_delivery(),
+            crate::tape::ReplayDelivery::WholeBody
+        );
+    }
 
     #[test]
     fn counts_only_balanced_terminal_turns_in_complete_agent_cycles() {

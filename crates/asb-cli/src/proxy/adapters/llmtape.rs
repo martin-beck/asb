@@ -27,6 +27,7 @@ pub(crate) struct Settings {
     pub(crate) cassette: PathBuf,
     pub(crate) respect_record_timings: bool,
     pub(crate) workspace: PathBuf,
+    pub(crate) replay_delivery: crate::tape::ReplayDelivery,
 }
 
 struct RunningLlmtape {
@@ -173,6 +174,9 @@ impl ProxyAdapter for LlmtapeAdapter {
                 );
                 if request.respect_record_timings {
                     command.arg("--respect-record-timings");
+                }
+                if request.replay_delivery == crate::tape::ReplayDelivery::WholeBody {
+                    command.arg("--replay-whole-body");
                 }
             }
         }
