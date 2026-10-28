@@ -60,6 +60,7 @@ struct Options {
 struct PerCallState {
     schema_version: u32,
     cursor: usize,
+    events: usize,
 }
 
 const PER_CALL_STATE_SCHEMA_VERSION: u32 = 1;
@@ -130,7 +131,18 @@ pub(crate) fn per_call_launch(
 ) -> Result<Launch, Error> {
     let mut launch = launch(context, tape)?;
     let state = per_call_state_path(context.run_dir);
-    publish_per_call_state(&state, 0)?;
+    let transcript = launch
+        .args
+        .windows(2)
+        .find(|pair| pair[0] == "--transcript")
+        .map(|pair| PathBuf::from(&pair[1]))
+        .ok_or_else(|| Error::Run("local-tool launch has no transcript".into()))?;
+    let events = Transcript::decode(
+        &std::fs::read(&transcript)
+            .map_err(|_| Error::Run("local-tool transcript is unavailable".into()))?,
+    )?
+    .len();
+    publish_per_call_state(&state, 0, events)?;
     launch
         .args
         .extend(["--per-call-state".into(), state.into_os_string()]);
@@ -152,11 +164,16 @@ pub(crate) fn verify_per_call_completion(
     match (state.is_file(), transcript) {
         (false, None) => Ok(()),
         (false, Some(_)) => Err(Error::Run("Pi local-tool progress is missing".into())),
-        (true, None) => Err(Error::Run("Pi local-tool transcript is missing".into())),
+        (true, None) => {
+            let state = read_per_call_state(&state)?;
+            (state.cursor == state.events).then_some(()).ok_or_else(|| {
+                Error::Run("Pi local-tool replay left recorded events unconsumed".into())
+            })
+        }
         (true, Some(bytes)) => {
-            let cursor = read_per_call_state(&state)?;
+            let state = read_per_call_state(&state)?;
             let transcript = Transcript::decode(bytes)?;
-            if cursor == transcript.len() {
+            if state.events == transcript.len() && state.cursor == transcript.len() {
                 Ok(())
             } else {
                 Err(Error::Run(
@@ -219,9 +236,14 @@ fn run(args: &[OsString]) -> Result<(), Error> {
         )?,
     };
     if let Some(state) = &options.per_call_state {
-        let cursor = read_per_call_state(state)?;
+        let state = read_per_call_state(state)?;
+        if state.events != transcript.len() {
+            return Err(Error::Run(
+                "local-tool per-call progress does not bind its transcript".into(),
+            ));
+        }
         if options.mode == Mode::Replay {
-            transcript.set_cursor(cursor)?;
+            transcript.set_cursor(state.cursor)?;
         }
     }
     let stdin = std::io::stdin();
@@ -249,12 +271,12 @@ fn run(args: &[OsString]) -> Result<(), Error> {
             Mode::Record => transcript.len(),
             Mode::Replay => transcript.cursor(),
         };
-        publish_per_call_state(state, cursor)?;
+        publish_per_call_state(state, cursor, transcript.len())?;
     }
     Ok(())
 }
 
-fn read_per_call_state(path: &Path) -> Result<usize, Error> {
+fn read_per_call_state(path: &Path) -> Result<PerCallState, Error> {
     let bytes = std::fs::read(path)
         .map_err(|_| Error::Run("local-tool per-call progress is unavailable".into()))?;
     if bytes.len() > 1024 {
@@ -269,10 +291,10 @@ fn read_per_call_state(path: &Path) -> Result<usize, Error> {
             "local-tool per-call progress has an unsupported schema".into(),
         ));
     }
-    Ok(state.cursor)
+    Ok(state)
 }
 
-fn publish_per_call_state(path: &Path, cursor: usize) -> Result<(), Error> {
+fn publish_per_call_state(path: &Path, cursor: usize, events: usize) -> Result<(), Error> {
     let parent = path
         .parent()
         .ok_or_else(|| Error::Run("local-tool progress has no private namespace".into()))?;
@@ -281,6 +303,7 @@ fn publish_per_call_state(path: &Path, cursor: usize) -> Result<(), Error> {
     let bytes = serde_json::to_vec(&PerCallState {
         schema_version: PER_CALL_STATE_SCHEMA_VERSION,
         cursor,
+        events,
     })
     .map_err(|_| Error::Run("cannot render local-tool per-call progress".into()))?;
     let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
@@ -791,10 +814,14 @@ mod tests {
             })
             .unwrap();
         let bytes = transcript.encode().unwrap();
-        publish_per_call_state(&per_call_state_path(&root), 0).unwrap();
+        publish_per_call_state(&per_call_state_path(&root), 0, 1).unwrap();
         assert!(verify_per_call_completion(&root, Some(&bytes)).is_err());
-        publish_per_call_state(&per_call_state_path(&root), 1).unwrap();
+        publish_per_call_state(&per_call_state_path(&root), 1, 1).unwrap();
         verify_per_call_completion(&root, Some(&bytes)).unwrap();
+        // Replay consumes the sealed cassette outside the new run directory;
+        // the bound event count allows collection to validate completion
+        // without re-copying that private transcript.
+        verify_per_call_completion(&root, None).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 
