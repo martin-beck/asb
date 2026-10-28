@@ -459,15 +459,20 @@ impl App {
                     extension.tab
                 ))
             })?;
-            select_choice(
-                self.pane_mut(PaneKind::Extensions),
-                ChoiceKey::ExtensionValue {
-                    workload: config.workload.clone(),
-                    extension: extension.id.into(),
-                    value: trial.clone(),
-                },
-                input,
-            )?;
+            let key = ChoiceKey::ExtensionValue {
+                workload: config.workload.clone(),
+                extension: extension.id.into(),
+                value: trial.clone(),
+            };
+            let missing = self.pane(PaneKind::Workloads).choices.iter().any(|choice| {
+                choice.key.workload() == Some(config.workload.as_str())
+                    && choice.availability == Availability::Missing
+            });
+            if missing {
+                restore_extension_choice(self.pane_mut(PaneKind::Extensions), key);
+            } else {
+                select_choice(self.pane_mut(PaneKind::Extensions), key, input)?;
+            }
         }
         for index in 0..self.pane(PaneKind::Extensions).choices.len() {
             if matches!(
@@ -585,15 +590,27 @@ impl App {
             };
             tabs.insert(extension.tab);
             descriptions.insert(extension.description);
-            let values = workloads::setup_extension_values(&workload, &extension, &directory)
-                .map_err(Error::Input)?;
+            let missing = self.pane(PaneKind::Workloads).choices.iter().any(|choice| {
+                choice.key.workload() == Some(workload.as_str())
+                    && choice.availability == Availability::Missing
+            });
+            let values = match workloads::setup_extension_values(&workload, &extension, &directory)
+            {
+                Ok(values) => values,
+                Err(_) if missing => Vec::new(),
+                Err(error) => return Err(Error::Input(error)),
+            };
             choices.push(Choice {
                 label: format!("[all] {workload}"),
                 key: ChoiceKey::AllExtension {
                     workload: workload.clone(),
                     extension: extension.id.into(),
                 },
-                availability: Availability::Available,
+                availability: if missing {
+                    Availability::Missing
+                } else {
+                    Availability::Available
+                },
             });
             choices.extend(values.into_iter().map(|value| Choice {
                 label: value.clone(),
@@ -602,7 +619,11 @@ impl App {
                     extension: extension.id.into(),
                     value,
                 },
-                availability: Availability::Available,
+                availability: if missing {
+                    Availability::Missing
+                } else {
+                    Availability::Available
+                },
             }));
         }
         let mut pane = Pane::new(choices);
@@ -1029,6 +1050,33 @@ fn select_choice(pane: &mut Pane, key: ChoiceKey, input: &Path) -> Result<(), Er
     })?;
     pane.selected[index] = true;
     Ok(())
+}
+
+/// Restore a saved extension value even when its external workload is not
+/// installed yet.  The missing choice keeps the persisted configuration
+/// editable and directs the user to install the owning workload from its tab.
+fn restore_extension_choice(pane: &mut Pane, key: ChoiceKey) {
+    if let Some(index) = pane.choices.iter().position(|choice| choice.key == key) {
+        pane.selected[index] = true;
+        return;
+    }
+    let ChoiceKey::ExtensionValue {
+        workload,
+        extension,
+        value,
+    } = &key
+    else {
+        unreachable!("only extension values are restored as unavailable");
+    };
+    let label = value.clone();
+    let section = format!("{workload} {extension}s");
+    pane.choices.push(Choice {
+        label,
+        key,
+        availability: Availability::Missing,
+    });
+    pane.selected.push(true);
+    pane.sections.push(Some(section));
 }
 
 fn choice_key_label(key: &ChoiceKey) -> String {
@@ -2359,6 +2407,9 @@ fn install_setup_selection(
         Ok(())
     })?;
     app.refresh_availability();
+    if step == PaneKind::Workloads {
+        app.refresh_extensions()?;
+    }
     let ready = result.is_ok()
         && app.panes[step.index()]
             .choices
@@ -4003,6 +4054,51 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("unsafe configuration path")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn saved_external_workload_variant_reopens_before_it_is_installed() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-tui-preselect-external-variant-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("saved.toml");
+        std::fs::write(
+            &input,
+            "agent='pi'\nprovider='openrouter'\nmodel='configured-model'\nworkload='terminal-bench-2.1'\ntrial='smoke'\nconcurrency=1\n",
+        )
+        .unwrap();
+
+        let mut app = App::new(root.clone(), ProjectConfig::default());
+        app.preselect(&input).unwrap();
+        assert!(
+            app.pane(PaneKind::Workloads)
+                .selected_choices()
+                .any(|choice| choice.key.workload() == Some("terminal-bench-2.1"))
+        );
+        assert_eq!(
+            app.pane(PaneKind::Workloads)
+                .choices
+                .iter()
+                .find(|choice| choice.key.workload() == Some("terminal-bench-2.1"))
+                .expect("registered external variant")
+                .availability,
+            Availability::Missing
+        );
+        assert!(
+            app.pane(PaneKind::Extensions)
+                .selected_choices()
+                .any(|choice| {
+                    matches!(
+                        &choice.key,
+                        ChoiceKey::ExtensionValue { workload, value, .. }
+                            if workload == "terminal-bench-2.1" && value == "smoke"
+                    )
+                })
         );
         let _ = std::fs::remove_dir_all(root);
     }
