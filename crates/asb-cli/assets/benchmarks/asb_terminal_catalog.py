@@ -222,6 +222,12 @@ def main():
         response = {"status": "error", "error_class": type(error).__name__}
         if isinstance(error, CatalogError):
             response["reason"] = str(error)
+        else:
+            # This response is captured only in ASB's bounded private step
+            # diagnostics. Keep enough SDK context to make missing modules or
+            # incompatible evaluator versions actionable without emitting a
+            # traceback into the TUI protocol.
+            response["reason"] = str(error)[:1024]
         print(json.dumps(response))
         return 1
     return 0

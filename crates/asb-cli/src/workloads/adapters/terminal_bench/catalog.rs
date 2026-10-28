@@ -303,9 +303,10 @@ pub(super) fn install(
         }
     }
     let directory = context.workloads_root.join(adapter.id);
-    let run = |scope: &mut install::ProcessScope,
-               operation: &str,
-               archive: Option<&Path>|
+    let mut diagnostic = None;
+    let mut run = |scope: &mut install::ProcessScope,
+                   operation: &str,
+                   archive: Option<&Path>|
      -> install::InstallResult<bool> {
         let mut step = scope.prepare(
             tool.join("venv/bin/python"),
@@ -323,7 +324,9 @@ pub(super) fn install(
         if let Some(archive) = archive {
             step.command_mut().arg("--archive").arg(archive);
         }
-        Ok(scope.run(step)?.status.success())
+        let completed = scope.run(step)?;
+        diagnostic = completed.log.path;
+        Ok(completed.status.success())
     };
     if read(adapter, context.workloads_root).is_err() || !run(&mut scope, "verify", None)? {
         let cache = context.project_root.join(".asb-cache/workload-sources");
@@ -362,8 +365,12 @@ pub(super) fn install(
         }
         progress(50, crate::install::ProgressStage::Validating);
         if !run(&mut scope, "install", Some(&archive))? {
+            let log = diagnostic.as_ref().map_or_else(
+                || "the installation diagnostics".to_owned(),
+                |path| path.display().to_string(),
+            );
             return Err(Error::Input(format!(
-                "{} dataset validation failed; inspect .asb/install.log; reinstall `{}` with `asb tool install {}` if its SDK is incompatible",
+                "{} dataset validation failed; inspect {log}; reinstall `{}` with `asb tool install {}` if its SDK is incompatible",
                 adapter.id,
                 adapter.engine.tool(),
                 adapter.engine.tool()
