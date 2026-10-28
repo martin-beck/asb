@@ -247,9 +247,9 @@ pub(crate) fn ensure_in(
     };
     step.command_mut().stdin(Stdio::null());
     let monitor = downloads_python.then(|| {
-        crate::install::transfer::Cache::start(
-            &root.join(".asb/python/uv-cache"),
-            "Downloading Python runtime cache",
+        crate::install::transfer::Cache::start_many(
+            &[&root.join(".asb/python/uv-cache"), &env_dir],
+            "Downloading and materializing Python runtime",
         )
     });
     let result = scope.run(step);

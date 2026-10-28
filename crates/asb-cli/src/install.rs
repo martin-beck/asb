@@ -1195,7 +1195,10 @@ fn install_package(
                 .args(["--no-save", package])
                 .env("NPM_CONFIG_CACHE", &cache)
                 .stdin(Stdio::null());
-            let monitor = transfer::Cache::start(&cache, "Downloading npm package cache");
+            let monitor = transfer::Cache::start_many(
+                &[&cache, root],
+                "Downloading and materializing npm package",
+            );
             let result = scope.run(step);
             let _ = monitor.finish();
             let result = result?;
@@ -1248,7 +1251,10 @@ fn install_package(
                 .args(["-m", "pip", "install", package])
                 .env("PIP_CACHE_DIR", &cache)
                 .stdin(Stdio::null());
-            let monitor = transfer::Cache::start(&cache, "Downloading pip package cache");
+            let monitor = transfer::Cache::start_many(
+                &[&cache, root],
+                "Downloading and materializing pip package",
+            );
             let installed = scope.run(step);
             let _ = monitor.finish();
             let installed = installed?;
@@ -1266,7 +1272,10 @@ fn install_package(
                     .args(["-m", "pip", "install", dependency])
                     .env("PIP_CACHE_DIR", &cache)
                     .stdin(Stdio::null());
-                let monitor = transfer::Cache::start(&cache, "Downloading pip dependency cache");
+                let monitor = transfer::Cache::start_many(
+                    &[&cache, root],
+                    "Downloading and materializing pip dependency",
+                );
                 let result = scope.run(step);
                 let _ = monitor.finish();
                 let result = result?;
