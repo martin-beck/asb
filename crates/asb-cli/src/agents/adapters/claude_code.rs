@@ -14,6 +14,9 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_complete_tool_replay(prepare_tool_replay)
+.with_mcp_servers()
+.with_mcp_relay()
+.with_collection(super::super::mcp_relay::collect_artifacts)
 .with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"])
 .with_state_environment_vars(&["CLAUDE_CONFIG_DIR"])
 .with_unprivileged_execution()
@@ -80,6 +83,7 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
             config_root.display()
         ))
     })?;
+    configure_mcp_servers(context, &config_root)?;
     context.command.env("CLAUDE_CONFIG_DIR", &config_root);
     let connection = context.connection;
     let key = connection.credential.as_deref().unwrap_or("asb-local");
@@ -114,6 +118,78 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Render Claude Code's JSON configuration from the adapter-neutral declared
+/// server launches.  The tool-replay hook writes its private fragment first;
+/// this single config file composes it with ordinary declared MCP servers so
+/// Claude never receives competing `--mcp-config` inputs.
+fn configure_mcp_servers(
+    context: &mut PreparationContext<'_>,
+    config_root: &std::path::Path,
+) -> Result<(), Error> {
+    let launches = super::super::mcp_relay::server_launches(
+        context.run_dir,
+        context.mcp_servers,
+        context.mcp_tape,
+    )?;
+    if launches.is_empty() && context.tape.is_none() {
+        return Ok(());
+    }
+    let mut servers = serde_json::Map::new();
+    for launch in launches {
+        servers.insert(
+            launch.id,
+            serde_json::json!({
+                "command": launch.program.to_string_lossy(),
+                "args": launch.args.into_iter()
+                    .map(|argument| argument.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+            }),
+        );
+    }
+    if context.tape.is_some() {
+        let fragment = context.runtime_dir.join("claude-code/asb-local-tools.json");
+        let bytes = std::fs::read(&fragment).map_err(|error| {
+            Error::Run(format!(
+                "cannot read Claude Code sealed local-tool configuration: {error}"
+            ))
+        })?;
+        let configuration: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            Error::Run(format!(
+                "cannot decode Claude Code sealed local-tool configuration: {error}"
+            ))
+        })?;
+        let local = configuration
+            .get("mcpServers")
+            .and_then(|value| value.get("asb_local_tools"))
+            .cloned()
+            .ok_or_else(|| {
+                Error::Run("Claude Code sealed local-tool configuration is invalid".into())
+            })?;
+        servers.insert("asb_local_tools".into(), local);
+    }
+    let path = config_root.join("asb-mcp.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({"mcpServers": servers})).map_err(|error| {
+            Error::Run(format!(
+                "cannot encode Claude Code MCP configuration: {error}"
+            ))
+        })?,
+    )
+    .map_err(|error| {
+        Error::Run(format!(
+            "cannot write Claude Code MCP configuration: {error}"
+        ))
+    })?;
+    context.command.args([
+        "--mcp-config",
+        path.to_str().ok_or_else(|| {
+            Error::Run("Claude Code MCP configuration path is not valid UTF-8".into())
+        })?,
+    ]);
+    Ok(())
+}
+
 /// Claude Code only exposes MCP tools in print mode when they are explicitly
 /// allow-listed.  Couple that allow-list with a deny-list for every native
 /// local-action tool, so a taped execution cannot fall back to a shell or
@@ -145,12 +221,16 @@ fn prepare_tool_replay(
         })?,
     )
     .map_err(|error| Error::Run(format!("cannot write Claude Code local tools: {error}")))?;
+    let mut allowed = vec!["mcp__asb_local_tools".to_owned()];
+    allowed.extend(
+        context
+            .mcp_servers
+            .iter()
+            .map(|declaration| format!("mcp__{}", declaration.id)),
+    );
     context.command.args([
-        "--mcp-config",
-        path.to_str()
-            .ok_or_else(|| Error::Run("Claude Code local-tool path is not valid UTF-8".into()))?,
         "--allowedTools",
-        "mcp__asb_local_tools",
+        &allowed.join(","),
         "--disallowedTools",
         "Bash,Edit,Write,Read,Glob,Grep,WebFetch,WebSearch,Task,Skill,NotebookEdit",
     ]);
@@ -208,6 +288,8 @@ mod tests {
     #[test]
     fn tool_replay_is_declared_complete_only_with_a_sealed_mcp_transport() {
         assert!(ADAPTER.supports_tool_replay());
+        assert!(ADAPTER.supports_mcp_servers());
+        assert!(ADAPTER.supports_mcp_relay());
     }
 
     #[test]
@@ -227,6 +309,10 @@ mod tests {
             authentication: crate::endpoint::Authentication::Bearer,
         };
         let mut command = std::process::Command::new("claude");
+        let tape = super::super::TapeContext {
+            mode: crate::tape::Mode::Record,
+            cassette: &root.join("recording.asb.zip"),
+        };
         prepare_tool_replay(
             &mut PreparationContext {
                 command: &mut command,
@@ -239,11 +325,20 @@ mod tests {
                 mcp_tape: None,
                 tape: None,
             },
-            super::super::TapeContext {
-                mode: crate::tape::Mode::Record,
-                cassette: &root.join("recording.asb.zip"),
-            },
+            tape,
         )
+        .unwrap();
+        prepare_adapter(&mut PreparationContext {
+            command: &mut command,
+            model: "test-model",
+            connection: &connection,
+            workspace: &workspace,
+            runtime_dir: &root.join("runtime"),
+            run_dir: &run_dir,
+            mcp_servers: &[],
+            mcp_tape: None,
+            tape: Some(tape),
+        })
         .unwrap();
         let arguments = command
             .get_args()
@@ -257,7 +352,7 @@ mod tests {
                 .any(|value| value.contains("Bash,Edit,Write"))
         );
         let configuration: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(root.join("runtime/claude-code/asb-local-tools.json")).unwrap(),
+            &std::fs::read(root.join("runtime/claude-code/config/asb-mcp.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -265,6 +360,112 @@ mod tests {
             "__asb-tool-replay"
         );
         assert!(run_dir.join("tool-replay/local-tools.jsonl").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn declared_mcp_servers_use_one_owned_configuration() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-claude-mcp-{}-{}",
+            std::process::id(),
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::AnthropicMessages,
+            base_url: "http://127.0.0.1:4321/v1".into(),
+            credential: Some("asb-test".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let declarations = [crate::benchmark::McpServerConfig {
+            id: "fixture".into(),
+            program: "fixture-mcp".into(),
+            args: vec!["--workspace".into(), "fixture".into()],
+        }];
+        let mut command = std::process::Command::new("claude");
+        prepare_adapter(&mut PreparationContext {
+            command: &mut command,
+            model: "test-model",
+            connection: &connection,
+            workspace: &workspace,
+            runtime_dir: &root.join("runtime"),
+            run_dir: &root.join("run"),
+            mcp_servers: &declarations,
+            mcp_tape: None,
+            tape: None,
+        })
+        .unwrap();
+        let arguments = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|argument| *argument == "--mcp-config")
+                .count(),
+            1
+        );
+        let configuration: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("runtime/claude-code/config/asb-mcp.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            configuration["mcpServers"]["fixture"]["command"],
+            "fixture-mcp"
+        );
+        assert_eq!(
+            configuration["mcpServers"]["fixture"]["args"],
+            serde_json::json!(["--workspace", "fixture"])
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn declared_mcp_recording_substitutes_the_bounded_relay() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-claude-mcp-record-{}-{}",
+            std::process::id(),
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::AnthropicMessages,
+            base_url: "http://127.0.0.1:4321/v1".into(),
+            credential: Some("asb-test".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let declarations = [crate::benchmark::McpServerConfig {
+            id: "fixture".into(),
+            program: "must-not-start-directly".into(),
+            args: vec!["--fixture".into()],
+        }];
+        let mut command = std::process::Command::new("claude");
+        prepare_adapter(&mut PreparationContext {
+            command: &mut command,
+            model: "test-model",
+            connection: &connection,
+            workspace: &workspace,
+            runtime_dir: &root.join("runtime"),
+            run_dir: &root.join("run"),
+            mcp_servers: &declarations,
+            mcp_tape: Some(super::super::McpTapeContext {
+                mode: crate::tape::Mode::Record,
+                cassette: None,
+            }),
+            tape: None,
+        })
+        .unwrap();
+        let configuration: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("runtime/claude-code/config/asb-mcp.json")).unwrap(),
+        )
+        .unwrap();
+        let server = &configuration["mcpServers"]["fixture"];
+        assert_ne!(server["command"], "must-not-start-directly");
+        assert_eq!(server["args"][0], "__asb-mcp-relay");
+        assert_eq!(server["args"][1], "--record-dir");
         let _ = std::fs::remove_dir_all(root);
     }
     #[test]
