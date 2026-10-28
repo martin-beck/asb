@@ -106,6 +106,7 @@ impl BatchRun<'_> {
                 show_output: self.options.show_output,
                 mode,
                 tool_mode: self.options.tool_mode,
+                tool_mode_explicit: self.options.tool_mode_explicit,
                 mcp_mode: self.options.mcp_mode,
                 native_capsule_record: self.options.native_capsule_record.as_deref(),
                 native_capsule_replay: self.options.native_capsule_replay.as_deref(),
@@ -283,6 +284,7 @@ pub(crate) fn continue_campaign(
         measurement_override: plan.measurement_storage
             == Some(super::super::campaign::MeasurementStorage::Override),
         tool_mode: None,
+        tool_mode_explicit: false,
         mcp_mode: None,
         native_capsule_record: None,
         native_capsule_replay: None,

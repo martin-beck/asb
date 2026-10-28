@@ -171,6 +171,7 @@ struct ActivationOptions {
     measurement_override: bool,
     policy: Option<crate::planning::ResolvedPlan>,
     tool_mode: Option<crate::tape::Mode>,
+    tool_mode_explicit: bool,
     mcp_mode: Option<crate::tape::Mode>,
     native_capsule_record: Option<String>,
     native_capsule_replay: Option<String>,
@@ -363,6 +364,7 @@ impl Inspection {
                 measurement_override: options.measurement_dir.is_some(),
                 policy: options.policy.cloned(),
                 tool_mode: options.tool_mode,
+                tool_mode_explicit: options.tool_mode_explicit,
                 mcp_mode: options.mcp_mode,
                 native_capsule_record: options.native_capsule_record.map(Into::into),
                 native_capsule_replay: options.native_capsule_replay.map(Into::into),
@@ -1326,6 +1328,7 @@ mod tests {
                     measurement_dir: Some(&measurements),
                     policy: Some(&policy),
                     tool_mode: Some(crate::tape::Mode::Record),
+                    tool_mode_explicit: true,
                     mcp_mode: Some(crate::tape::Mode::Record),
                     native_capsule_record: Some(&native_capsule),
                     ..Default::default()
@@ -1338,6 +1341,7 @@ mod tests {
         assert_eq!(prepared.options.policy.as_ref(), Some(&saved_policy));
         assert!(prepared.options.measurement_override);
         assert_eq!(prepared.options.tool_mode, Some(crate::tape::Mode::Record));
+        assert!(prepared.options.tool_mode_explicit);
         assert_eq!(prepared.options.mcp_mode, Some(crate::tape::Mode::Record));
         assert_eq!(
             prepared.options.native_capsule_record.as_deref(),
