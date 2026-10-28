@@ -15,6 +15,44 @@ from test_environment import coverage_env
 from native_gate_owner import cleanup_children, publish_pid, signal_pinned, until
 
 
+class PtyProcess:
+    """A public CLI process with a real controlling terminal.
+
+    Passing a slave PTY to ``Popen`` only redirects file descriptors; it does
+    not make that PTY the child's controlling terminal.  The public command's
+    capacity confirmation is intentionally terminal-gated, so use ``pty.fork``
+    to model the same session semantics as a human terminal without inserting
+    a shell/PTY-wrapper process between the test and the owned CLI PID.
+    """
+    def __init__(self, args, cwd, env):
+        self.pid, self.terminal = pty.fork()
+        self.status = None
+        if self.pid == 0:
+            os.chdir(cwd)
+            os.execvpe(args[0], args, env)
+
+    def poll(self):
+        if self.status is None:
+            pid, status = os.waitpid(self.pid, os.WNOHANG)
+            if pid:
+                self.status = status
+        return None if self.status is None else os.waitstatus_to_exitcode(self.status)
+
+    def kill(self):
+        os.kill(self.pid, signal.SIGKILL)
+
+    def wait(self, timeout):
+        deadline = time.monotonic() + timeout
+        while self.poll() is None:
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(["asb"], timeout)
+            time.sleep(0.005)
+        return self.poll()
+
+    def close_terminal(self):
+        os.close(self.terminal)
+
+
 def owner(scripts, root, phase):
     mode = "replay" if phase == "replay" else "record"
     args = ["node", str(scripts / "llmtape.mjs"), mode, "--port", "0"]
@@ -36,7 +74,16 @@ def public_cli(binary, root, sibling):
     for measured in (False, True):
         case = root / ("cli-measured" if measured else "cli-unmeasured")
         case.mkdir()
-        env = coverage_env({"PATH": os.environ["PATH"], "HOME": str(case), "PYTHONDONTWRITEBYTECODE": "1"})
+        env = coverage_env({
+            "PATH": os.environ["PATH"],
+            "HOME": str(case),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            # Replay must route through its sealed tape, not a real bridge.
+            # Supplying an inert external endpoint keeps this owner-loss
+            # fixture provider-free while exercising the public CLI path.
+            "CLI2KEY_BASE_URL": "http://127.0.0.1:1",
+            "CLI2KEY_API_KEY": "fixture-key",
+        })
         initialized = subprocess.run([binary, "init"], cwd=case, env=env, input=b"",
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
         assert initialized.returncode == 0, initialized.stderr.decode()
@@ -46,6 +93,14 @@ def public_cli(binary, root, sibling):
                          f"os.execv({sys.executable!r}, [{sys.executable!r}, "
                          f"{str(Path(__file__).with_name('native_gate_owner.py'))!r}, '--client', {str(case)!r}])\n")
         agent.chmod(0o755)
+        # The run preflight owns selected tools and would otherwise invoke
+        # npm plus cli2key key-refresh before this test reaches the tape
+        # listener.  This test covers owner loss of the replay transport, not
+        # package installation, so provide the registered local layout.
+        bridge = case / ".asb-tools/cli2key/node_modules/.bin/codex-bridge"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text("#!/bin/sh\nexit 0\n")
+        bridge.chmod(0o755)
         (case / "tape").write_text(json.dumps({
             "request": {"method": "POST", "url": "/v1/responses", "body": json.dumps({
                 "model": "test-model", "input": "fixture", "tools": [{"type": "function"}]
@@ -59,41 +114,61 @@ def public_cli(binary, root, sibling):
         # The capacity guard intentionally accepts low-space execution only
         # after an interactive confirmation. Give the public binary a PTY and
         # answer that real prompt; do not relax its non-interactive policy.
-        terminal, child_terminal = pty.openpty()
-        process = subprocess.Popen([binary, "run", "benchmark.toml", "--replay", "--cassette", "tape"],
-                                   cwd=case, env=env, stdin=child_terminal,
-                                   stdout=child_terminal, stderr=child_terminal)
-        os.close(child_terminal)
-        os.write(terminal, b"y\n")
+        process = PtyProcess(
+            [binary, "run", "benchmark.toml", "--replay", "--cassette", "tape"],
+            case,
+            env,
+        )
+        os.write(process.terminal, b"y\n")
+        os.set_blocking(process.terminal, False)
+        terminal_output = bytearray()
+
+        def drain_terminal():
+            # The real terminal consumer continuously drains installation
+            # progress.  This owner-loss fixture must do the same: otherwise
+            # an automatic npm installation can fill the PTY while the test
+            # waits only for the client markers, blocking its progress thread
+            # and making the public CLI appear not to launch.
+            while True:
+                try:
+                    chunk = os.read(process.terminal, 8192)
+                except BlockingIOError:
+                    break
+                except OSError as error:
+                    if error.errno == errno.EIO:
+                        break
+                    raise
+                if not chunk:
+                    break
+                terminal_output.extend(chunk)
+                if len(terminal_output) > 16 * 1024:
+                    del terminal_output[:-16 * 1024]
+
         try:
             def started():
+                drain_terminal()
                 if process.poll() is not None:
-                    os.set_blocking(terminal, False)
-                    output = bytearray()
-                    while True:
-                        try:
-                            chunk = os.read(terminal, 8192)
-                        except BlockingIOError:
-                            break
-                        except OSError as error:
-                            # Linux reports EIO rather than an empty read when
-                            # the last process attached to a PTY exits. Treat it
-                            # as EOF so the assertion below preserves the child
-                            # output instead of masking the actual launch error.
-                            if error.errno == errno.EIO:
-                                break
-                            raise
-                        if not chunk:
-                            break
-                        output.extend(chunk)
-                    raise AssertionError(output.decode(errors="replace"))
+                    raise AssertionError(terminal_output.decode(errors="replace"))
                 return (case / "principal").exists() and (case / "helper").exists()
             # The PTY-confirmed capacity admission can add a scheduling turn
             # before the native client is launched. Keep this owner-loss
             # qualification bounded, but leave enough room for the full suite
             # to schedule the native client and publish both process markers
             # on a loaded CI runner.
-            until(started, "public CLI did not start native client", seconds=60)
+            try:
+                until(started, "public CLI did not start native client", seconds=60)
+            except AssertionError as error:
+                # Keep a bounded PTY transcript with the failure.  A process
+                # which remains alive has not reached the branch above that
+                # normally drains output, and hiding its prompt/error makes a
+                # launch-boundary regression impossible to diagnose.
+                drain_terminal()
+                children = Path(f"/proc/{process.pid}/task/{process.pid}/children")
+                descendants = children.read_text() if children.exists() else "unavailable"
+                raise AssertionError(
+                    f"{error}; public_cli_pid={process.pid}; children={descendants!r}; "
+                    f"pty={terminal_output.decode(errors='replace')!r}"
+                )
             ready_files = list(case.glob(".asb-tape-*/ready.json"))
             assert len(ready_files) == 1
             proxy = json.loads(ready_files[0].read_text())["pid"]
@@ -114,7 +189,7 @@ def public_cli(binary, root, sibling):
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=3)
-            os.close(terminal)
+            process.close_terminal()
 
 
 def guardian(scripts, root, binary):
