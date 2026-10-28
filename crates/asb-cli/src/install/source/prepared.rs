@@ -792,6 +792,10 @@ impl Snapshot {
         reader.seek(SeekFrom::Start(0)).map_err(crate::io_error)?;
         let mut digest = Sha256::new();
         let mut total = 0u64;
+        let mut progress = super::super::transfer::Activity::new(
+            format!("Validating {}", options.kind),
+            Some(metadata.len()),
+        );
         let mut buffer = [0; 64 * 1024];
         loop {
             let count = reader.read(&mut buffer).map_err(crate::io_error)?;
@@ -805,7 +809,9 @@ impl Snapshot {
                 return Err(size_error(options.kind, options.limit));
             }
             digest.update(&buffer[..count]);
+            progress.update(total);
         }
+        progress.finish();
         if total != metadata.len()
             || !unchanged_metadata(&metadata, &handle.metadata().map_err(crate::io_error)?)
         {

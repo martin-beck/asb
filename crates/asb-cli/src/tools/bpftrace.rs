@@ -112,6 +112,13 @@ fn build_bpftrace(
     if !source_dir.is_dir() {
         progress(10, crate::install::ProgressStage::Downloading);
         let curl = bpftrace_prerequisite(context, root, "curl")?;
+        let headers =
+            archive.with_extension(format!("headers-{}", crate::tools::runtime::unique_id()));
+        let download = crate::install::transfer::Download::start(
+            &archive,
+            &headers,
+            "Downloading bpftrace source",
+        );
         let mut step = scope.prepare(curl, Purpose::Download, "pinned bpftrace source download")?;
         step.command_mut()
             .args([
@@ -120,12 +127,17 @@ fn build_bpftrace(
                 "--location",
                 "--silent",
                 "--show-error",
-                "--output",
+                "--dump-header",
             ])
+            .arg(&headers)
+            .args(["--output"])
             .arg(&archive)
             .arg(BPFTRACE_SOURCE)
             .stdin(std::process::Stdio::null());
-        if !scope.run(step)?.status.success() {
+        let status = scope.run(step);
+        download.finish();
+        let _ = fs::remove_file(headers);
+        if !status?.status.success() {
             return Err(Error::Io(format!("could not download pinned bpftrace source from {BPFTRACE_SOURCE}; verify network access and retry\n\n{}", bpftrace_source_commands())).into());
         }
         progress(25, crate::install::ProgressStage::Extracting);
@@ -144,7 +156,16 @@ fn build_bpftrace(
             .arg(&source_dir)
             .arg("--strip-components=1")
             .stdin(std::process::Stdio::null());
-        if !scope.run(step)?.status.success() {
+        let archive_bytes = fs::metadata(&archive).ok().map(|metadata| metadata.len());
+        let mut extraction =
+            crate::install::transfer::Activity::new("Extracting bpftrace source", archive_bytes);
+        extraction.update(0);
+        let status = scope.run(step)?.status;
+        if let Some(bytes) = archive_bytes {
+            extraction.update(bytes);
+        }
+        extraction.finish();
+        if !status.success() {
             return Err(Error::Io(format!(
                 "could not extract the pinned bpftrace source; install tar and retry\n\n{}",
                 bpftrace_dependency_commands("tar")

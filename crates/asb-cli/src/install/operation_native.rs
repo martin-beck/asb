@@ -53,6 +53,8 @@ pub(crate) struct Operation {
     socket: UnixDatagram,
     percent: u8,
     stage: ProgressStage,
+    transfer: Option<install::transfer::Progress>,
+    transfer_path: PathBuf,
     result: Option<Completion>,
     finished: bool,
 }
@@ -76,6 +78,10 @@ impl Operation {
             return Err(failure("installation paths must be absolute"));
         }
         let executable = process_gate::executable().map_err(failure)?;
+        let transfer_path = root.join(".asb").join(format!(
+            ".install-transfer-{}",
+            crate::tools::runtime::unique_id()
+        ));
         let mut launch = ProcessLaunch::new(&executable);
         launch
             .arg("__asb-install")
@@ -117,6 +123,7 @@ impl Operation {
             .stderr(Stdio::null());
         let descriptor = writer.as_raw_fd();
         command.env(FD_ENV, descriptor.to_string());
+        command.env(install::transfer::STATUS_ENV, &transfer_path);
         // No allocation or environment access occurs in the post-fork callback.
         unsafe {
             command.pre_exec(move || set_cloexec(descriptor, false));
@@ -138,6 +145,8 @@ impl Operation {
             socket,
             percent: 0,
             stage: ProgressStage::Preparing,
+            transfer: None,
+            transfer_path,
             result: None,
             finished: false,
         })
@@ -149,6 +158,22 @@ impl Operation {
 
     pub(crate) fn stage(&self) -> ProgressStage {
         self.stage
+    }
+
+    pub(crate) fn transfer(&self) -> Option<install::transfer::Progress> {
+        self.transfer
+    }
+
+    fn receive_transfer(&mut self) {
+        if matches!(
+            self.stage,
+            ProgressStage::Downloading
+                | ProgressStage::DownloadingAndValidating
+                | ProgressStage::InstallingPackage
+                | ProgressStage::Dependencies
+        ) {
+            self.transfer = install::transfer::read_snapshot(&self.transfer_path);
+        }
     }
 
     fn receive(&mut self) -> Result<(), Error> {
@@ -165,6 +190,15 @@ impl Operation {
                         Message::Progress(percent, stage) => {
                             self.percent = percent;
                             self.stage = stage;
+                            if !matches!(
+                                stage,
+                                ProgressStage::Downloading
+                                    | ProgressStage::DownloadingAndValidating
+                                    | ProgressStage::InstallingPackage
+                                    | ProgressStage::Dependencies
+                            ) {
+                                self.transfer = None;
+                            }
                         }
                         Message::Final(result) => self.result = Some(result),
                     }
@@ -179,6 +213,7 @@ impl Operation {
 
     pub(crate) fn poll(&mut self) -> Result<Option<Result<(), Error>>, Error> {
         self.receive()?;
+        self.receive_transfer();
         let Some(status) = self.gate.try_wait().map_err(failure)? else {
             return Ok(None);
         };
@@ -188,6 +223,7 @@ impl Operation {
             self.receive()?;
         }
         self.finished = true;
+        let _ = std::fs::remove_file(&self.transfer_path);
         Ok(Some(match self.result {
             Some(Completion::Success) if status.success() => Ok(()),
             Some(result) if result != Completion::Success => Err(Error::Io(format!(
@@ -203,6 +239,7 @@ impl Operation {
     pub(crate) fn cancel(&mut self) -> Result<(), Error> {
         let result = self.gate.stop().map(|_| ()).map_err(failure);
         self.finished = true;
+        let _ = std::fs::remove_file(&self.transfer_path);
         result
     }
 }
@@ -458,6 +495,11 @@ mod tests {
                 socket,
                 percent: 0,
                 stage: ProgressStage::Preparing,
+                transfer: None,
+                transfer_path: std::env::temp_dir().join(format!(
+                    "asb-install-transfer-test-{}",
+                    crate::tools::runtime::unique_id()
+                )),
                 result: None,
                 finished: false,
             },

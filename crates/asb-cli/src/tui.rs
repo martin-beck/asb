@@ -1780,6 +1780,7 @@ fn drive_install(
         render(install_status_message(
             operation.percent(),
             operation.stage().label(),
+            operation.transfer(),
             started,
             tick,
         ))?;
@@ -2228,7 +2229,16 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
 /// their output to `.asb/install.log` and do not expose byte-level progress,
 /// so the fixed percentage marks the completed stage while the moving marker
 /// proves that a download or package install is still being monitored.
-fn install_status_message(percent: u8, stage: &str, started: Instant, tick: u64) -> String {
+fn install_status_message(
+    percent: u8,
+    stage: &str,
+    transfer: Option<crate::install::transfer::Progress>,
+    started: Instant,
+    tick: u64,
+) -> String {
+    if let Some(transfer) = transfer {
+        return crate::install::transfer::line(stage, transfer);
+    }
     const WIDTH: usize = 20;
     const FRAMES: &[char] = &['▸', '▹', '▻', '▹'];
     let completed = (usize::from(percent).min(100) * WIDTH / 100).min(WIDTH);
@@ -3776,14 +3786,31 @@ mod tests {
     #[test]
     fn install_status_message_shows_live_indeterminate_activity() {
         let started = Instant::now();
-        let first = install_status_message(15, "installing npm package", started, 0);
-        let second = install_status_message(15, "installing npm package", started, 1);
+        let first = install_status_message(15, "installing npm package", None, started, 0);
+        let second = install_status_message(15, "installing npm package", None, started, 1);
         assert!(first.contains("["));
         assert!(first.contains("] 15%: installing npm package"));
         assert_ne!(
             first, second,
             "the activity marker must move while a stage runs"
         );
+    }
+
+    #[test]
+    fn install_status_message_prefers_byte_accurate_transfer_progress() {
+        let message = install_status_message(
+            15,
+            "downloading",
+            Some(crate::install::transfer::Progress {
+                completed_bytes: 512,
+                total_bytes: Some(1024),
+                bytes_per_second: 256,
+                rate_source: crate::install::transfer::RateSource::Network,
+            }),
+            Instant::now(),
+            0,
+        );
+        assert!(message.contains("[======50%-------] 512 B/1.0 KiB 256 B/s"));
     }
 
     #[test]

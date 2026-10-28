@@ -212,6 +212,7 @@ pub(crate) fn ensure_in(
     fs::create_dir(&env_dir).map_err(crate::io_error)?;
     let owner = ProducerDirectory::open(&env_dir)?;
     let mut scope = owner.scope(context);
+    let downloads_python = interpreter.is_none();
     let mut step = if let Some(interpreter) = interpreter {
         writeln!(
             output,
@@ -245,7 +246,17 @@ pub(crate) fn ensure_in(
         step
     };
     step.command_mut().stdin(Stdio::null());
-    let status = scope.run(step)?.status;
+    let monitor = downloads_python.then(|| {
+        crate::install::transfer::Cache::start(
+            &root.join(".asb/python/uv-cache"),
+            "Downloading Python runtime cache",
+        )
+    });
+    let result = scope.run(step);
+    if let Some(monitor) = monitor {
+        let _ = monitor.finish();
+    }
+    let status = result?.status;
     let compatible = compatible_in(&mut scope, &python)?;
     owner.consume(scope.finish()?)?;
     if !status.success() || !compatible {

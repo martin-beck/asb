@@ -60,6 +60,9 @@ impl Operation {
     pub(crate) fn stage(&self) -> crate::install::ProgressStage {
         crate::install::ProgressStage::Preparing
     }
+    pub(crate) fn transfer(&self) -> Option<crate::install::transfer::Progress> {
+        None
+    }
     pub(crate) fn cancel(&mut self) -> Result<(), Error> {
         Ok(())
     }

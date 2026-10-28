@@ -235,7 +235,12 @@ pub(super) fn install(
             .env("HF_HUB_ETAG_TIMEOUT", "30")
             .env("HF_HUB_DOWNLOAD_TIMEOUT", "60")
             .env("LITELLM_LOCAL_MODEL_COST_MAP", "True");
-        let status = scope.run(step)?.status;
+        let cache = context.project_root.join(".asb-cache/huggingface");
+        let monitor =
+            crate::install::transfer::Cache::start(&cache, "Downloading SWE-bench dataset cache");
+        let result = scope.run(step);
+        let _ = monitor.finish();
+        let status = result?.status;
         if !status.success() {
             return Err(Error::Io(format!(
                 "{} official dataset installation failed; inspect .asb/install.log, check network/proxy access and retry `asb workload install {}`",

@@ -48,6 +48,8 @@ fn download_in(
     )))?;
     #[cfg(not(target_os = "linux"))]
     let curl = PathBuf::from("curl");
+    let headers = staging.with_extension(format!("headers-{}", tools::runtime::unique_id()));
+    let download = super::super::transfer::Download::start(staging, &headers, options.kind);
     let mut step = scope.prepare(curl, Purpose::Download, options.kind)?;
     step.command_mut()
         .args([
@@ -61,14 +63,28 @@ fn download_in(
             "--max-filesize",
         ])
         .arg(options.limit.to_string())
+        .arg("--dump-header")
+        .arg(&headers)
         .arg("--output")
         .arg(staging)
         .arg(source)
         .stdin(Stdio::null());
-    let result = scope.run(step)?;
+    let result = scope.run(step);
+    let progress = download.finish();
+    let _ = fs::remove_file(&headers);
+    let result = result?;
     if !result.status.success() {
         return Err(Error::Io(format!("could not download {}: curl exited with {}; previous installation was preserved; inspect {}", options.kind, result.status,
             result.log.path.as_ref().map_or_else(|| "the installation diagnostics".into(), |path| path.display().to_string()))).into());
+    }
+    if let Some(total) = progress
+        .total_bytes
+        .filter(|total| *total != progress.completed_bytes)
+    {
+        return Err(Error::Io(format!(
+            "could not download {}: received {} bytes but the server declared {} bytes; previous installation was preserved",
+            options.kind, progress.completed_bytes, total
+        )).into());
     }
     Ok(())
 }
