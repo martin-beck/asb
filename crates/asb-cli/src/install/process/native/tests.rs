@@ -64,6 +64,24 @@ fn ancillary_zero_and_enospc_do_not_claim_retained_bytes_or_complete_logs() {
 }
 
 #[test]
+fn ordinary_log_finish_confirms_writer_completion_before_snapshot() {
+    let root = root();
+    let sink = LogSink::new(&root, None);
+    sink.push(b"ordinary installer output");
+
+    let report = sink.finish();
+
+    assert!(report.settled, "ordinary writer was reported as pending");
+    assert_eq!(report.fault, None);
+    assert_eq!(report.retained, b"ordinary installer output".len());
+    assert_eq!(report.discarded, 0);
+    assert_eq!(
+        fs::read(report.path.expect("private log path")).unwrap(),
+        b"ordinary installer output"
+    );
+}
+
+#[test]
 fn log_namespace_never_overwrites_or_chmods_existing_foreign_entries() {
     let root = root();
     let foreign = root.join(".asb-install-step-foreign");
