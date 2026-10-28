@@ -1464,15 +1464,48 @@ pub(crate) fn install_verified_source_in(
     executable: bool,
     validate: impl FnOnce(&Path, &mut ProcessScope) -> InstallResult<()>,
 ) -> InstallResult<()> {
+    install_verified_source_bounded_in(
+        context,
+        source,
+        destination,
+        VerifiedSource {
+            kind,
+            checksum,
+            executable,
+            limit: source::MAX_SOURCE_BYTES,
+        },
+        validate,
+    )
+}
+
+/// Fixed source properties used for a bounded, checksum-verified download.
+pub(crate) struct VerifiedSource<'a> {
+    pub(crate) kind: &'a str,
+    pub(crate) checksum: &'a str,
+    pub(crate) executable: bool,
+    pub(crate) limit: u64,
+}
+
+/// Install a source with a published checksum while retaining the caller's
+/// bounded download budget.  Cache reuse validates this same checksum before
+/// an entry is accepted, so a valid cache envelope cannot substitute another
+/// payload for a pinned source.
+pub(crate) fn install_verified_source_bounded_in(
+    context: &OperationContext,
+    source: &str,
+    destination: &Path,
+    verified: VerifiedSource<'_>,
+    validate: impl FnOnce(&Path, &mut ProcessScope) -> InstallResult<()>,
+) -> InstallResult<()> {
     source::install_input_in(
         context,
         &source::Input::from_os(std::ffi::OsStr::new(source)),
         destination,
         source::Options {
-            kind,
-            limit: source::MAX_SOURCE_BYTES,
-            checksum: Some(checksum),
-            executable,
+            kind: verified.kind,
+            limit: verified.limit,
+            checksum: Some(verified.checksum),
+            executable: verified.executable,
         },
         validate,
         source::Publication::Replace,

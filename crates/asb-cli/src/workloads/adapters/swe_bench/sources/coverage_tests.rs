@@ -2,12 +2,14 @@
 //! They do not qualify the upstream archive. The real helper's unchanged
 //! production pin is independently checked below with a corrupt input.
 use super::*;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::Command;
 const ADAPTER: SweBenchAdapter = SweBenchAdapter {
     id: "fixture-suite",
     dataset: "fixture/source",
     revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    source_sha256: "fcd30fba8098151a003ce953022e7e6db16f53f82298290a285b22722483a5a1",
     expected_tasks: 0,
 };
 const PAYLOAD: &[u8] = b"small fixture source archive";
@@ -34,6 +36,7 @@ fn isolated_pinned_source_orchestration_preserves_and_validates_local_archive_by
             "installed",
             "changed-cache",
             "changed-installed",
+            "shared-cache-poisoned",
             "curl-fails",
             "curl-127",
             "missing-curl",
@@ -127,6 +130,18 @@ if args.catalog and os.environ['ASB_SWE_SOURCE_CASE']=='catalog-fails': sys.exit
             fs::remove_dir(&cache).unwrap();
             fs::write(&cache, b"blocked directory").unwrap();
         }
+        "shared-cache-poisoned" => {
+            let shared = root.join(".cache/asb/downloads");
+            fs::create_dir_all(&shared).unwrap();
+            let key = format!("{:x}", Sha256::digest(URL.as_bytes()));
+            let payload = b"corrupt source";
+            fs::write(shared.join(format!("{key}.blob")), payload).unwrap();
+            fs::write(
+                shared.join(format!("{key}.sha256")),
+                format!("{:x}\n", Sha256::digest(payload)),
+            )
+            .unwrap();
+        }
         _ => {}
     }
     if case == "changed-installed" {
@@ -152,7 +167,12 @@ if args.catalog and os.environ['ASB_SWE_SOURCE_CASE']=='catalog-fails': sys.exit
     });
     if matches!(
         case.as_str(),
-        "download" | "cached" | "installed" | "changed-cache" | "changed-installed"
+        "download"
+            | "cached"
+            | "installed"
+            | "changed-cache"
+            | "changed-installed"
+            | "shared-cache-poisoned"
     ) {
         result.unwrap();
         assert_eq!(fs::read(&destination).unwrap(), PAYLOAD);
@@ -188,7 +208,10 @@ if args.catalog and os.environ['ASB_SWE_SOURCE_CASE']=='catalog-fails': sys.exit
                 }
             );
         }
-        if matches!(case.as_str(), "download" | "changed-cache") {
+        if matches!(
+            case.as_str(),
+            "download" | "changed-cache" | "shared-cache-poisoned"
+        ) {
             let args = fs::read_to_string(root.join("curl-arguments")).unwrap();
             assert!(args.contains(URL));
             let args = args.split_whitespace().collect::<Vec<_>>();
@@ -205,12 +228,24 @@ if args.catalog and os.environ['ASB_SWE_SOURCE_CASE']=='catalog-fails': sys.exit
             assert!(!args.contains(&"--max-time"));
             assert!(args.contains(&"--fail"));
         }
+        if case == "shared-cache-poisoned" {
+            let key = format!("{:x}", Sha256::digest(URL.as_bytes()));
+            assert_eq!(
+                fs::read(
+                    root.join(".cache/asb/downloads")
+                        .join(format!("{key}.blob"))
+                )
+                .unwrap(),
+                PAYLOAD
+            );
+        }
     } else {
         let error = result.unwrap_err().to_string();
         let expected = match case.as_str() {
             "curl-fails" | "curl-127" => "could not download original SWE-bench Dockerfiles",
             "missing-curl" => "original SWE-bench Dockerfiles needs `curl`",
-            "checksum-fails" | "python-127" => "did not match its pinned checksum",
+            "checksum-fails" => "checksum mismatch",
+            "python-127" => "did not match its pinned checksum",
             "catalog-fails" => "do not match the installed dataset",
             "missing-python" => "cannot validate original SWE-bench source",
             "cache-directory-error" => "",

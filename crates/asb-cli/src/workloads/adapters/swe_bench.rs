@@ -13,6 +13,8 @@ pub(super) struct SweBenchAdapter {
     pub id: &'static str,
     pub dataset: &'static str,
     pub revision: &'static str,
+    /// Pinned digest for the shared original task-source archive.
+    pub source_sha256: &'static str,
     pub expected_tasks: usize,
 }
 
@@ -20,6 +22,7 @@ pub(super) static ADAPTER: SweBenchAdapter = SweBenchAdapter {
     id: "swe-bench",
     dataset: "SWE-bench/SWE-bench",
     revision: "c6fe717fd7a4c3ac1daa4055a4fd082c6a1d28a2",
+    source_sha256: "ff31aa1f8d2bb78f16559524264a99b868b7218ca82b390dc750bbc59538aa20",
     expected_tasks: 2294,
 };
 

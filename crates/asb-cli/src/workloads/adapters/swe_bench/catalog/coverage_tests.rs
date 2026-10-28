@@ -197,6 +197,7 @@ const ADAPTER: SweBenchAdapter = SweBenchAdapter {
     id: "fixture-suite",
     dataset: "fixture/source",
     revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    source_sha256: "fcd30fba8098151a003ce953022e7e6db16f53f82298290a285b22722483a5a1",
     expected_tasks: 2,
 };
 struct Fixture(PathBuf);

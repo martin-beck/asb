@@ -46,8 +46,15 @@ fn download_in(
 ) -> InstallResult<()> {
     if let Some(cache) = SharedDownload::lock(context, source, options.limit)? {
         if cache.restore(staging)? {
-            verify_download(staging, options)?;
-            return Ok(());
+            if verify_download(staging, options).is_ok() {
+                return Ok(());
+            }
+            // A URL-keyed cache receipt proves only that the cached bytes did
+            // not change.  A caller's published checksum still decides
+            // whether those bytes belong to this source.  Discard a
+            // self-consistent but wrong entry before re-fetching rather than
+            // turning it into a permanent installation failure.
+            cache.discard();
         }
         download_uncached(scope, source, staging, options)?;
         verify_download(staging, options)?;
