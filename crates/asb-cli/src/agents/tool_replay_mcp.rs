@@ -11,7 +11,10 @@ use super::{
 use crate::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -20,6 +23,13 @@ use std::time::{Duration, Instant};
 const MAX_COMMAND_ARGUMENTS: usize = 32;
 const MAX_COMMAND_ARGUMENT_BYTES: usize = 4096;
 const MAX_COMMAND_OUTPUT: usize = 1024 * 1024;
+/// Command effects share the local-tool transcript's 1 MiB event ceiling.
+/// The snapshot itself retains metadata only; file content is read only for a
+/// changed regular UTF-8 file that must be reconstructed during replay.
+const MAX_COMMAND_EFFECT_BYTES: usize = 768 * 1024;
+const MAX_COMMAND_EFFECT_ENTRIES: usize = 256;
+const MAX_COMMAND_SNAPSHOT_ENTRIES: usize = 4096;
+const MAX_COMMAND_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 // Pi records every tool result in several structured output events.  Keep one
 // confined file read comfortably below the outer agent-output capture bound,
 // while exposing truncation to the model so it can use search or a narrower
@@ -496,7 +506,12 @@ fn execute(root: &Path, tool: &str, request: &Value) -> Result<(Value, Vec<Effec
                 .collect::<Vec<_>>();
             Ok((json!({"matches":matches}), Vec::new()))
         }
-        "run_command" => Ok((run_command(root, request)?, Vec::new())),
+        "run_command" => {
+            let before = command_snapshot(root)?;
+            let result = run_command(root, request)?;
+            let after = command_snapshot(root)?;
+            Ok((result, command_effects(&before, &after, root)?))
+        }
         "read_file" => Ok((
             bounded_read_result(tool_replay::read_text(root, required_path(request)?)?),
             Vec::new(),
@@ -535,6 +550,192 @@ fn execute(root: &Path, tool: &str, request: &Value) -> Result<(Value, Vec<Effec
         }
         _ => Err(Error::Run("local-tool is unsupported".into())),
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CommandEntry {
+    Directory,
+    File { bytes: u64, sha256: [u8; 32] },
+}
+
+type CommandSnapshot = BTreeMap<String, CommandEntry>;
+
+/// A deliberately small workspace identity for a locally executed command.
+/// It follows neither symlinks nor build/cache trees. It identifies source
+/// changes without retaining workspace copies or adding syscall/kernel tracing.
+fn command_snapshot(root: &Path) -> Result<CommandSnapshot, Error> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| Error::Run("local-tool workspace is unavailable".into()))?;
+    let mut pending = vec![(root, PathBuf::new())];
+    let mut entries = CommandSnapshot::new();
+    let mut snapshot_bytes = 0_u64;
+    while let Some((directory, relative)) = pending.pop() {
+        let mut children = fs::read_dir(&directory)
+            .map_err(|_| Error::Run("cannot snapshot local-tool workspace".into()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| Error::Run("cannot snapshot local-tool workspace".into()))?;
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            let name = child
+                .file_name()
+                .into_string()
+                .map_err(|_| Error::Run("local-tool workspace has a non-UTF-8 path".into()))?;
+            if matches!(
+                name.as_str(),
+                ".git" | "target" | "node_modules" | "__pycache__" | ".pytest_cache"
+            ) {
+                continue;
+            }
+            if entries.len() >= MAX_COMMAND_SNAPSHOT_ENTRIES {
+                return Err(Error::Run(
+                    "local-tool command workspace exceeds snapshot bound".into(),
+                ));
+            }
+            let path = child.path();
+            let relative = relative.join(&name);
+            let relative_text = relative
+                .to_str()
+                .ok_or_else(|| Error::Run("local-tool workspace has a non-UTF-8 path".into()))?
+                .to_owned();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|_| Error::Run("cannot inspect local-tool workspace".into()))?;
+            if metadata.file_type().is_symlink() {
+                return Err(Error::Run(
+                    "local-tool command workspace contains a symlink".into(),
+                ));
+            }
+            if metadata.is_dir() {
+                entries.insert(relative_text, CommandEntry::Directory);
+                pending.push((path, relative));
+            } else if metadata.is_file() {
+                let sha256 = command_file_identity(&path, metadata.len(), &mut snapshot_bytes)?;
+                entries.insert(
+                    relative_text,
+                    CommandEntry::File {
+                        bytes: metadata.len(),
+                        sha256,
+                    },
+                );
+            } else {
+                return Err(Error::Run(
+                    "local-tool command workspace contains an unsupported file".into(),
+                ));
+            }
+        }
+    }
+    Ok(entries)
+}
+
+/// Hash each admissible source file once per snapshot.  The digest catches a
+/// same-length rewrite even on a filesystem with coarse or restored mtimes,
+/// while the shared byte ceiling keeps command replay lighter than a workspace
+/// copy or syscall-level recorder.
+fn command_file_identity(path: &Path, bytes: u64, consumed: &mut u64) -> Result<[u8; 32], Error> {
+    *consumed = consumed.checked_add(bytes).ok_or_else(|| {
+        Error::Run("local-tool command workspace exceeds snapshot byte bound".into())
+    })?;
+    if *consumed > MAX_COMMAND_SNAPSHOT_BYTES {
+        return Err(Error::Run(
+            "local-tool command workspace exceeds snapshot byte bound".into(),
+        ));
+    }
+    let mut file = fs::File::open(path)
+        .map_err(|_| Error::Run("cannot read local-tool workspace source".into()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    let mut read = 0_u64;
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|_| Error::Run("cannot read local-tool workspace source".into()))?;
+        if count == 0 {
+            break;
+        }
+        read = read.checked_add(count as u64).ok_or_else(|| {
+            Error::Run("local-tool command workspace exceeds snapshot byte bound".into())
+        })?;
+        if read > bytes {
+            return Err(Error::Run(
+                "local-tool workspace source changed during snapshot".into(),
+            ));
+        }
+        hasher.update(&buffer[..count]);
+    }
+    if read != bytes {
+        return Err(Error::Run(
+            "local-tool workspace source changed during snapshot".into(),
+        ));
+    }
+    Ok(hasher.finalize().into())
+}
+
+/// Emit only changed source state. Replay applies removals first, then
+/// directories and files, which also handles a bounded file-kind replacement.
+fn command_effects(
+    before: &CommandSnapshot,
+    after: &CommandSnapshot,
+    root: &Path,
+) -> Result<Vec<Effect>, Error> {
+    let mut effects = Vec::new();
+    let mut removed = BTreeSet::new();
+    for path in before.keys().filter(|path| !after.contains_key(*path)) {
+        removed.insert(path.clone());
+    }
+    for (path, entry) in before {
+        if let Some(after_entry) = after.get(path)
+            && std::mem::discriminant(entry) != std::mem::discriminant(after_entry)
+        {
+            removed.insert(path.clone());
+        }
+    }
+    for path in removed.iter().filter(|path| {
+        Path::new(path)
+            .parent()
+            .and_then(Path::to_str)
+            .is_none_or(|parent| !removed.contains(parent))
+    }) {
+        match before.get(path) {
+            Some(CommandEntry::Directory) => {
+                effects.push(Effect::RemoveDirectory { path: path.clone() });
+            }
+            Some(CommandEntry::File { .. }) => {
+                effects.push(Effect::RemoveFile { path: path.clone() })
+            }
+            None => {
+                return Err(Error::Run(
+                    "local-tool command ledger is inconsistent".into(),
+                ));
+            }
+        }
+    }
+    for (path, entry) in after {
+        if matches!(entry, CommandEntry::Directory) && before.get(path) != Some(entry) {
+            effects.push(Effect::CreateDirectory { path: path.clone() });
+        }
+    }
+    let mut content_bytes = 0usize;
+    for (path, entry) in after {
+        if before.get(path) != Some(entry) && matches!(entry, CommandEntry::File { .. }) {
+            let content = tool_replay::read_text(root, path)?;
+            content_bytes = content_bytes
+                .checked_add(content.len())
+                .ok_or_else(|| Error::Run("local-tool command effects exceed bound".into()))?;
+            if content_bytes > MAX_COMMAND_EFFECT_BYTES {
+                return Err(Error::Run("local-tool command effects exceed bound".into()));
+            }
+            effects.push(Effect::WriteText {
+                path: path.clone(),
+                content,
+            });
+        }
+    }
+    if effects.len() > MAX_COMMAND_EFFECT_ENTRIES {
+        return Err(Error::Run(
+            "local-tool command effects exceed entry bound".into(),
+        ));
+    }
+    Ok(effects)
 }
 
 fn bounded_read_result(text: String) -> Value {
@@ -892,6 +1093,95 @@ mod tests {
         let replayed = call(&replay_options, &mut replay, request).unwrap();
         assert_eq!(recorded, replayed);
         replay.finish().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_reconstructs_bounded_command_source_effects() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-command-effects-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let replay_root = root.join("replay");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = "alpha\n";
+        std::fs::write(root.join("source.txt"), source).unwrap();
+        // `sed -i` is an allowed, deterministic local command.  Unlike a
+        // formatter, this does not depend on an optional toolchain component
+        // or version-specific formatting choices.
+        let request = json!({
+            "name":"run_command",
+            "arguments":{"argv":["sed", "-i", "s/alpha/bravo/", "source.txt"]}
+        });
+        let record = Options {
+            mode: Mode::Record,
+            workspace: root.clone(),
+            transcript: root.join("record.jsonl"),
+            per_call_state: None,
+        };
+        let mut transcript = Transcript::default();
+        let recorded = call(&record, &mut transcript, request.clone()).unwrap();
+        let rewritten = std::fs::read_to_string(root.join("source.txt")).unwrap();
+        assert_eq!(rewritten, "bravo\n");
+        assert!(
+            String::from_utf8(transcript.encode().unwrap())
+                .unwrap()
+                .contains("source.txt")
+        );
+
+        std::fs::create_dir_all(&replay_root).unwrap();
+        std::fs::write(replay_root.join("source.txt"), source).unwrap();
+        let mut replay = Transcript::decode(&transcript.encode().unwrap()).unwrap();
+        let replayed = call(
+            &Options {
+                mode: Mode::Replay,
+                workspace: replay_root.clone(),
+                transcript: replay_root.join("replay.jsonl"),
+                per_call_state: None,
+            },
+            &mut replay,
+            request,
+        )
+        .unwrap();
+        assert_eq!(recorded, replayed);
+        assert_eq!(
+            std::fs::read_to_string(replay_root.join("source.txt")).unwrap(),
+            rewritten
+        );
+        replay.finish().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn command_ledger_detects_same_length_source_rewrite() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-command-identity-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.txt");
+        std::fs::write(&source, "alpha").unwrap();
+        let before = command_snapshot(&root).unwrap();
+        std::fs::write(&source, "bravo").unwrap();
+        let after = command_snapshot(&root).unwrap();
+        assert_eq!(
+            before.get("source.txt").and_then(|entry| match entry {
+                CommandEntry::File { bytes, .. } => Some(*bytes),
+                CommandEntry::Directory => None,
+            }),
+            after.get("source.txt").and_then(|entry| match entry {
+                CommandEntry::File { bytes, .. } => Some(*bytes),
+                CommandEntry::Directory => None,
+            })
+        );
+        assert_ne!(before, after);
+        assert_eq!(
+            command_effects(&before, &after, &root).unwrap(),
+            vec![Effect::WriteText {
+                path: "source.txt".into(),
+                content: "bravo".into(),
+            }]
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
