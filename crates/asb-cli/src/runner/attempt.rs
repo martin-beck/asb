@@ -663,12 +663,16 @@ impl<'a> ReadyAttempt<'a> {
                         } else {
                             providers::tape_upstream(&config.provider, bridge_url)
                         };
-                        Ok(Some(tape::Session::start(
+                        let replay_delivery = agents::find(&config.agent)
+                            .expect("validated agent adapter")
+                            .replay_delivery();
+                        Ok(Some(tape::Session::start_with_delivery(
                             *mode,
                             cassette,
                             upstream.as_deref(),
                             respect_record_timings,
                             &workspace,
+                            replay_delivery,
                         )?))
                     } else {
                         Ok(None)
