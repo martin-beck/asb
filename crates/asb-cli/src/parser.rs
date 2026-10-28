@@ -215,7 +215,7 @@ pub(crate) fn run_with_interactive(
                     measurement_dir: options.measurements.as_deref(),
                     mode: tape.carrier,
                     tool_mode: tape.tool,
-                    tool_mode_explicit: true,
+                    tool_mode_explicit: tape.tool_explicit,
                     mcp_mode: tape.mcp,
                     cassette: options.cassette.as_deref(),
                     native_capsule_record: options.native_capsule_record.as_deref(),
@@ -264,7 +264,7 @@ pub(crate) fn run_with_interactive(
                     interactive: interactive && !options.json,
                     mode: tape.carrier,
                     tool_mode: tape.tool,
-                    tool_mode_explicit: true,
+                    tool_mode_explicit: tape.tool_explicit,
                     mcp_mode: tape.mcp,
                     respect_record_timings: options.respect_record_timings,
                     cassette_root: options.cassette_root.as_deref().map(std::path::Path::new),
@@ -424,6 +424,9 @@ struct TapeSelection {
     carrier: Option<tape::Mode>,
     llm: Option<tape::Mode>,
     tool: Option<tape::Mode>,
+    /// Unlike legacy `--record`/`--replay`, an explicit tool selector asks
+    /// the adapter to guarantee complete local-tool interception.
+    tool_explicit: bool,
     mcp: Option<tape::Mode>,
 }
 
@@ -441,6 +444,7 @@ fn tape_selection(flags: TapeFlags) -> Result<TapeSelection, CliError> {
             || flags.tool_replay)
             .then_some(direction)
             .flatten(),
+        tool_explicit: flags.tool_record || flags.tool_replay,
         mcp: (flags.mcp_record || flags.mcp_replay)
             .then_some(direction)
             .flatten(),
@@ -509,6 +513,7 @@ mod tape_flag_tests {
         let selection = tape_selection(TapeFlags::from_run(&args)).unwrap();
         assert_eq!(selection.llm, Some(tape::Mode::Record));
         assert_eq!(selection.tool, Some(tape::Mode::Record));
+        assert!(selection.tool_explicit);
         assert_eq!(selection.mcp, None);
 
         let cli = Cli::try_parse_from(["asb", "run", "benchmark.toml", "--mcp-record"]).unwrap();
@@ -546,6 +551,15 @@ mod tape_flag_tests {
         let selection = tape_selection(TapeFlags::from_run(&args)).unwrap();
         assert_eq!(selection.llm, Some(tape::Mode::Record));
         assert_eq!(selection.tool, None);
+        assert!(!selection.tool_explicit);
+
+        let cli = Cli::try_parse_from(["asb", "run", "benchmark.toml", "--record"]).unwrap();
+        let Some(CommandLine::Run(args)) = cli.command else {
+            panic!("expected run arguments");
+        };
+        let selection = tape_selection(TapeFlags::from_run(&args)).unwrap();
+        assert_eq!(selection.tool, Some(tape::Mode::Record));
+        assert!(!selection.tool_explicit);
     }
 
     #[test]
