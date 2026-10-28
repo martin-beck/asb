@@ -1991,7 +1991,6 @@ mod tests {
                 "swe-perf",
                 "swe-rebench",
                 "tau-bench",
-                "terminal-bench",
                 "terminal-bench-1.0",
                 "terminal-bench-2.1",
             ]
@@ -2002,7 +2001,7 @@ mod tests {
                 "{:x}",
                 Sha256::digest(serde_json::to_vec(&sources).unwrap())
             ),
-            "665d97e6d00767fa69a39924e1332f33792cd69c037d0080e8b8f7fd0a8f4629",
+            "3d8a74f1935d9f7ae5bf1bdee27f56b975c0a124633d40b2a934f1763e02b77a",
             "installation names/order/URLs changed from the original registry"
         );
         let mut names = std::collections::BTreeSet::new();
@@ -2016,29 +2015,28 @@ mod tests {
             assert!(
                 source.starts_with("https://raw.githubusercontent.com/")
                     || source.starts_with("https://github.com/")
+                    || source.starts_with("https://huggingface.co/")
+                    || source.starts_with("https://datasets-server.huggingface.co/")
             );
-            assert!(source.split('/').any(|part| {
-                let revision = part.strip_suffix(".tar.gz").unwrap_or(part);
-                revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
-            }));
+            assert!(
+                source.contains("/releases/download/v")
+                    || source.split(['/', '=', '&', '?']).any(|part| {
+                        let revision = part.strip_suffix(".tar.gz").unwrap_or(part);
+                        revision.len() == 40
+                            && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    }),
+                "unversioned source URL for {name}: {source}"
+            );
         }
         assert_eq!(
             external_workload("swe-bench").map(|item| item.name),
             Some("swe-bench")
         );
         assert!(workloads::source_bundle("swe-bench").is_none());
-        assert!(workloads::source_bundle("terminal-bench").is_some());
-        assert!(workloads::source_bundle("tau-bench").is_some());
         assert!(external_workload("methodology-only").is_none());
         assert!(workloads::source_bundle("methodology-only").is_none());
         assert!(external_workload("bug-fix").is_none());
         assert!(workloads::source_bundle("bug-fix").is_none());
-        for (name, _) in &sources {
-            assert_eq!(
-                workloads::source_bundle(name).is_some(),
-                matches!(*name, "terminal-bench" | "tau-bench")
-            );
-        }
         let installed = external_workload_names().collect::<std::collections::BTreeSet<_>>();
         let adapters =
             workloads::external_adapter_names().collect::<std::collections::BTreeSet<_>>();
@@ -2046,74 +2044,6 @@ mod tests {
             adapters, installed,
             "every external workload needs an adapter"
         );
-    }
-
-    #[test]
-    fn complete_external_bundle_is_reused_when_already_installed() {
-        let directory =
-            std::env::temp_dir().join(format!("asb-external-bundle-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
-        let bundle_dir = directory.join("terminal-bench");
-        fs::create_dir_all(bundle_dir.join("source")).unwrap();
-        fs::write(bundle_dir.join("source/README.md"), "local source").unwrap();
-        let spec = workloads::source_bundle("terminal-bench").unwrap();
-        assert_eq!(
-            spec.archive,
-            "https://github.com/harbor-framework/terminal-bench/archive/452bf305c6daa62fc59061d22133a7cbc7c1572e.tar.gz"
-        );
-        assert_eq!(
-            spec.marker,
-            "terminal-bench/terminal-bench@452bf305c6daa62fc59061d22133a7cbc7c1572e"
-        );
-        let mut stages = Vec::new();
-        fs::write(bundle_dir.join("ASB-BUNDLE"), spec.marker).unwrap();
-        let mut output = Vec::new();
-        let mut progress = |percent: u8, stage: crate::install::ProgressStage| {
-            stages.push((percent, stage.to_owned()))
-        };
-        install_bundle(
-            "terminal-bench",
-            spec,
-            &directory,
-            &mut output,
-            &mut progress,
-        )
-        .expect("existing bundle is reused");
-        assert_eq!(stages.first().unwrap(), &(80, ProgressStage::Validating));
-        assert_eq!(stages.last().unwrap(), &(100, ProgressStage::Ready));
-        assert!(workload_available("terminal-bench", &directory));
-        assert!(bundle_dir.join("asb-trial/ASB-ADAPTER-FIXTURE").is_file());
-        let prompt = fs::read(directory.join("terminal-bench.txt")).unwrap();
-        let mut changed = spec;
-        changed.marker = "unqualified-revision";
-        assert!(
-            install_bundle(
-                "terminal-bench",
-                changed,
-                &directory,
-                &mut Vec::new(),
-                &mut |_, _| {}
-            )
-            .is_err()
-        );
-        assert_eq!(
-            fs::read(directory.join("terminal-bench.txt")).unwrap(),
-            prompt
-        );
-        assert_eq!(
-            fs::read_to_string(bundle_dir.join("ASB-BUNDLE")).unwrap(),
-            spec.marker
-        );
-        assert!(
-            String::from_utf8(output)
-                .unwrap()
-                .contains("already installed")
-        );
-        assert_eq!(
-            fs::read_to_string(bundle_dir.join("source/README.md")).unwrap(),
-            "local source"
-        );
-        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]

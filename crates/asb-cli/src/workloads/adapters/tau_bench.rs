@@ -3,6 +3,8 @@
 //! the stable ASB trial identifier.
 use super::{SetupExtension, SourceBundle, WorkloadAdapter};
 use crate::workloads::Trial;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -10,6 +12,23 @@ const REVISION: &str = "59a200c6d575d595120f1cb70fea53cef0632f6b";
 const AIRLINE_TASKS: usize = 50;
 const RETAIL_TASKS: usize = 115;
 const SOURCE_LIMIT: u64 = 2 * 1024 * 1024;
+const CATALOG_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Catalog {
+    schema_version: u32,
+    workload: String,
+    revision: String,
+    tasks: Vec<CatalogTask>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogTask {
+    id: String,
+    description: String,
+}
 
 pub(super) struct TauBenchAdapter;
 pub(super) static ADAPTER: TauBenchAdapter = TauBenchAdapter;
@@ -46,9 +65,11 @@ impl WorkloadAdapter for TauBenchAdapter {
     }
 
     fn finalize_install(&self, directory: &Path) -> Result<(), String> {
-        // Validate the actual pinned source now, before generic installation
-        // creates a trial-set that might otherwise contain synthetic entries.
-        installed_trials(directory)?;
+        // Enumerate the actual pinned source once, then publish the immutable
+        // installed catalog consumed by setup, CLI completion, and planning.
+        // This is deliberately local-only: installation owns the download;
+        // enumeration never makes a second network request.
+        write_catalog(directory, discover_trials(directory)?)?;
         remove_legacy_trial_set(directory)
     }
 
@@ -92,6 +113,61 @@ fn installed_trials(directory: &Path) -> Result<Vec<Trial>, String> {
                 .into(),
         );
     }
+    let path = root.join("catalog.json");
+    let bytes = fs::read(&path).map_err(|_| {
+        "tau-bench has no valid installed task catalog; run `asb workload install tau-bench`"
+            .to_owned()
+    })?;
+    let catalog: Catalog = serde_json::from_slice(&bytes).map_err(|_| {
+        "tau-bench has no valid installed task catalog; run `asb workload install tau-bench`"
+            .to_owned()
+    })?;
+    let expected_revision = REVISION;
+    if catalog.schema_version != CATALOG_SCHEMA_VERSION
+        || catalog.workload != "tau-bench"
+        || catalog.revision != expected_revision
+        || !valid_catalog_tasks(&catalog.tasks)
+    {
+        return Err(
+            "tau-bench installed task catalog does not match the pinned source; reinstall with `asb workload install tau-bench`".into(),
+        );
+    }
+    let discovered = discover_trials(directory)?;
+    if catalog
+        .tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<Vec<_>>()
+        != discovered
+            .iter()
+            .map(|trial| trial.id.as_str())
+            .collect::<Vec<_>>()
+    {
+        return Err(
+            "tau-bench installed task catalog differs from the pinned source; reinstall with `asb workload install tau-bench`".into(),
+        );
+    }
+    Ok(catalog
+        .tasks
+        .into_iter()
+        .map(|task| Trial {
+            id: task.id,
+            description: task.description,
+        })
+        .collect())
+}
+
+fn discover_trials(directory: &Path) -> Result<Vec<Trial>, String> {
+    let root = directory.join("tau-bench");
+    let marker = root.join("ASB-BUNDLE");
+    let expected_marker = format!("tau-bench/tau-bench@{REVISION}");
+    if fs::read_to_string(&marker).ok().as_deref().map(str::trim) != Some(expected_marker.as_str())
+    {
+        return Err(
+            "tau-bench has no valid installed task source; run `asb workload install tau-bench`"
+                .into(),
+        );
+    }
     let mut trials = Vec::with_capacity(AIRLINE_TASKS + RETAIL_TASKS);
     for (domain, count) in [("airline", AIRLINE_TASKS), ("retail", RETAIL_TASKS)] {
         let path = root
@@ -111,6 +187,48 @@ fn installed_trials(directory: &Path) -> Result<Vec<Trial>, String> {
         }));
     }
     Ok(trials)
+}
+
+fn write_catalog(directory: &Path, trials: Vec<Trial>) -> Result<(), String> {
+    let root = directory.join("tau-bench");
+    let catalog = Catalog {
+        schema_version: CATALOG_SCHEMA_VERSION,
+        workload: "tau-bench".into(),
+        revision: REVISION.into(),
+        tasks: trials
+            .into_iter()
+            .map(|trial| CatalogTask {
+                id: trial.id,
+                description: trial.description,
+            })
+            .collect(),
+    };
+    let bytes = serde_json::to_vec_pretty(&catalog)
+        .map_err(|error| format!("cannot serialize tau-bench task catalog: {error}"))?;
+    let temporary = root.join(".catalog.json.tmp");
+    fs::write(&temporary, bytes).map_err(|error| {
+        format!(
+            "cannot write tau-bench task catalog {}: {error}",
+            temporary.display()
+        )
+    })?;
+    fs::rename(&temporary, root.join("catalog.json"))
+        .map_err(|error| format!("cannot publish tau-bench task catalog: {error}"))
+}
+
+fn valid_catalog_tasks(tasks: &[CatalogTask]) -> bool {
+    if tasks.len() != AIRLINE_TASKS + RETAIL_TASKS {
+        return false;
+    }
+    let expected = [("airline", AIRLINE_TASKS), ("retail", RETAIL_TASKS)]
+        .into_iter()
+        .flat_map(|(domain, count)| (1..=count).map(move |number| format!("{domain}-{number}")))
+        .collect::<BTreeSet<_>>();
+    let actual = tasks
+        .iter()
+        .map(|task| task.id.clone())
+        .collect::<BTreeSet<_>>();
+    actual == expected && tasks.iter().all(|task| !task.description.trim().is_empty())
 }
 
 /// The pinned source represents every task as a four-space-indented mapping
@@ -152,10 +270,12 @@ mod tests {
             source(RETAIL_TASKS),
         )
         .unwrap();
+        ADAPTER.finalize_install(&root).unwrap();
         let trials = installed_trials(&root).unwrap();
         assert_eq!(trials.len(), AIRLINE_TASKS + RETAIL_TASKS);
         assert_eq!(trials.first().unwrap().id, "airline-1");
         assert_eq!(trials.last().unwrap().id, "retail-115");
+        assert!(tau.join("catalog.json").is_file());
         assert_eq!(ADAPTER.setup_extension().unwrap().id, "trial");
         let _ = fs::remove_dir_all(root);
     }
@@ -184,7 +304,7 @@ mod tests {
             source(RETAIL_TASKS),
         )
         .unwrap();
-        assert!(installed_trials(&root).is_err());
+        assert!(ADAPTER.finalize_install(&root).is_err());
         let _ = fs::remove_dir_all(root);
     }
 

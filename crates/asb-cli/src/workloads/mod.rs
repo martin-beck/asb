@@ -1207,7 +1207,7 @@ mod evaluation_kind_contract_tests;
 mod tests {
     use super::{
         copy_plan, copy_tree, load, load_trial, materialize_external_adapter, populate,
-        prepare_external, prepare_fixture, write_default_trial_set,
+        prepare_external, prepare_fixture,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1374,14 +1374,14 @@ mod tests {
     fn installed_external_source_is_copied_without_overwriting_workspace_edits() {
         let root = std::env::temp_dir().join(format!("asb-external-copy-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let source = root.join("workloads/terminal-bench/source");
+        let source = root.join("workloads/agentbench/source");
         let workspace = root.join("workspace");
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("README.md"), "upstream").unwrap();
         fs::create_dir_all(workspace.join("external-workload")).unwrap();
         fs::write(workspace.join("external-workload/README.md"), "edited").unwrap();
         assert_eq!(
-            prepare_external("terminal-bench", &root.join("workloads"), &workspace).unwrap(),
+            prepare_external("agentbench", &root.join("workloads"), &workspace).unwrap(),
             0
         );
         assert_eq!(
@@ -1675,27 +1675,27 @@ mod tests {
     fn trial_sets_round_trip_and_select_a_configured_prompt() {
         let directory = std::env::temp_dir().join(format!("asb-trials-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(directory.join("terminal-bench/trials")).unwrap();
-        fs::write(directory.join("terminal-bench.txt"), "base prompt").unwrap();
-        write_default_trial_set("terminal-bench", &directory).unwrap();
+        fs::create_dir_all(directory.join("bug-fix/trials")).unwrap();
+        fs::write(directory.join("bug-fix.txt"), "base prompt").unwrap();
         fs::write(
-            directory.join("terminal-bench/trials/debug.txt"),
-            "debug task",
+            directory.join("bug-fix.workload.toml"),
+            "workload = 'bug-fix'\n[[trials]]\nid = 'debug'\ndescription = 'debug task'\n",
         )
         .unwrap();
+        fs::write(directory.join("bug-fix/trials/debug.txt"), "debug task").unwrap();
         let prompt = load_trial(
-            "terminal-bench",
+            "bug-fix",
             Some("debug"),
-            Some("terminal-bench.workload.toml"),
+            Some("bug-fix.workload.toml"),
             &directory,
         )
         .unwrap();
         assert_eq!(prompt, "debug task");
         assert!(
             load_trial(
-                "terminal-bench",
+                "bug-fix",
                 Some("unknown"),
-                Some("terminal-bench.workload.toml"),
+                Some("bug-fix.workload.toml"),
                 &directory,
             )
             .is_err()

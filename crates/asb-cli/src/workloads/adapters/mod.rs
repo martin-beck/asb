@@ -40,6 +40,7 @@ mod evalplus;
 mod livecodebench;
 mod official_engine;
 mod prompt;
+mod source_catalog;
 mod swe_bench;
 mod swe_bench_lite;
 mod swe_bench_pro;
@@ -52,6 +53,8 @@ mod tau_bench;
 mod terminal_bench;
 mod terminal_bench_1_0;
 mod terminal_bench_2_1;
+
+pub(super) use source_catalog::SourceCatalogAdapter;
 
 /// An adapter-owned source bundle installed by the generic workload installer.
 #[derive(Clone, Copy)]
@@ -207,62 +210,6 @@ pub(super) trait WorkloadAdapter: Sync {
     fn prepare_source(&self, workloads: &Path, workspace: &Path) -> Result<usize, String>;
 }
 
-pub(super) struct StaticExternalAdapter {
-    id: &'static str,
-    source: &'static str,
-    bundle: Option<SourceBundle>,
-    trials: &'static [(&'static str, &'static str)],
-}
-
-impl StaticExternalAdapter {
-    pub(super) const fn new(
-        id: &'static str,
-        source: &'static str,
-        trials: &'static [(&'static str, &'static str)],
-    ) -> Self {
-        Self {
-            id,
-            source,
-            bundle: None,
-            trials,
-        }
-    }
-    pub(super) const fn with_bundle(mut self, bundle: SourceBundle) -> Self {
-        self.bundle = Some(bundle);
-        self
-    }
-}
-
-impl WorkloadAdapter for StaticExternalAdapter {
-    fn setup_extension(&self) -> Option<SetupExtension> {
-        // Static external adapters own a bounded trial catalogue. Expose it
-        // through the same adapter-owned selection extension as catalog-backed
-        // workloads so both setup frontends can select an individual trial.
-        Some(SetupExtension::trials())
-    }
-    fn source(&self) -> Option<&'static str> {
-        Some(self.source)
-    }
-    fn source_bundle(&self) -> Option<SourceBundle> {
-        self.bundle
-    }
-    fn id(&self) -> &'static str {
-        self.id
-    }
-    fn trial_ids(&self) -> Vec<Trial> {
-        self.trials
-            .iter()
-            .map(|(id, description)| Trial {
-                id: (*id).into(),
-                description: (*description).into(),
-            })
-            .collect()
-    }
-    fn prepare_source(&self, workloads: &Path, workspace: &Path) -> Result<usize, String> {
-        prepare_external_source(self.id, workloads, workspace)
-    }
-}
-
 pub(super) struct PromptAdapter;
 impl WorkloadAdapter for PromptAdapter {
     fn descriptor(&self, name: &str) -> super::contracts::ModuleDescriptor {
@@ -352,7 +299,6 @@ static REGISTRY: &[&dyn WorkloadAdapter] = &[
     &swe_perf::ADAPTER,
     &swe_rebench::ADAPTER,
     &tau_bench::ADAPTER,
-    &terminal_bench::ADAPTER,
     &terminal_bench_1_0::ADAPTER,
     &terminal_bench_2_1::ADAPTER,
 ];
@@ -388,31 +334,4 @@ pub(super) fn names() -> impl Iterator<Item = &'static str> {
         .iter()
         .map(|adapter| adapter.id())
         .filter(|id| *id != "prompt")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn static_swe_family_adapters_expose_the_trial_extension() {
-        for name in [
-            "swe-bench-pro",
-            "swe-efficiency",
-            "swe-lancer",
-            "swe-perf",
-            "swe-rebench",
-        ] {
-            let adapter = find(name).expect("registered static SWE-family adapter");
-            let extension = adapter.setup_extension().expect("trial extension");
-            assert_eq!(extension, SetupExtension::trials(), "{name}");
-            assert!(
-                !adapter
-                    .setup_extension_values(&extension, Path::new("."))
-                    .expect("static trial values")
-                    .is_empty(),
-                "{name} has selectable static trials"
-            );
-        }
-    }
 }

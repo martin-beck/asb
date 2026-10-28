@@ -828,8 +828,8 @@ fn python_contract(root: &Path) {
 fn bundle_contract(root: &Path) {
     let directory = root.join("workloads");
     fs::create_dir(&directory).unwrap();
-    fs::create_dir(directory.join(".terminal-bench.extract")).unwrap();
-    fs::write(directory.join(".terminal-bench.extract/stale"), "stale").unwrap();
+    fs::create_dir(directory.join(".fixture-external.extract")).unwrap();
+    fs::write(directory.join(".fixture-external.extract/stale"), "stale").unwrap();
     let source: &'static str = Box::leak(
         root.join("fixture.tar.gz")
             .to_string_lossy()
@@ -844,7 +844,7 @@ fn bundle_contract(root: &Path) {
     let mut output = Vec::new();
     let mut progress = Vec::new();
     install_bundle(
-        "terminal-bench",
+        "fixture-external",
         spec(),
         &directory,
         &mut output,
@@ -854,36 +854,35 @@ fn bundle_contract(root: &Path) {
     assert!(
         String::from_utf8(output)
             .unwrap()
-            .contains("Installed external workload terminal-bench")
+            .contains("Installed external workload fixture-external")
     );
     assert_eq!(
-        fs::read(directory.join("terminal-bench/source/README.md")).unwrap(),
+        fs::read(directory.join("fixture-external/source/README.md")).unwrap(),
         b"retained upstream fixture source"
     );
-    let generated_prompt = fs::read_to_string(directory.join("terminal-bench.txt")).unwrap();
-    assert!(generated_prompt.contains("External workload adapter trial `terminal-bench`"));
-    assert!(generated_prompt.contains("Do not edit the tests"));
+    let generated_prompt = fs::read_to_string(directory.join("fixture-external.txt")).unwrap();
+    assert_eq!(generated_prompt, "fixture task prompt");
     assert_eq!(progress.last().unwrap().0, 100);
-    assert!(!directory.join(".terminal-bench.extract").exists());
-    assert!(!directory.join(".terminal-bench.tar.gz").exists());
+    assert!(!directory.join(".fixture-external.extract").exists());
+    assert!(!directory.join(".fixture-external.tar.gz").exists());
     // Reuse restores a missing generated prompt, not modified source files.
-    fs::remove_file(directory.join("terminal-bench.txt")).unwrap();
+    fs::remove_file(directory.join("fixture-external.txt")).unwrap();
     install_bundle(
-        "terminal-bench",
+        "fixture-external",
         spec(),
         &directory,
         &mut Vec::new(),
         &mut |_, _| {},
     )
     .unwrap();
-    assert!(directory.join("terminal-bench.txt").is_file());
+    assert!(directory.join("fixture-external.txt").is_file());
     fs::write(
-        directory.join("terminal-bench/ASB-BUNDLE"),
+        directory.join("fixture-external/ASB-BUNDLE"),
         "wrong-revision",
     )
     .unwrap();
     let error = install_bundle(
-        "terminal-bench",
+        "fixture-external",
         spec(),
         &directory,
         &mut Vec::new(),
@@ -891,7 +890,11 @@ fn bundle_contract(root: &Path) {
     )
     .unwrap_err();
     assert!(error.to_string().contains("different pinned revision"));
-    assert!(directory.join("terminal-bench/source/README.md").is_file());
+    assert!(
+        directory
+            .join("fixture-external/source/README.md")
+            .is_file()
+    );
     fs::create_dir(directory.join("incomplete")).unwrap();
     let error = install_bundle(
         "incomplete",
@@ -913,7 +916,7 @@ fn bundle_contract(root: &Path) {
     assert!(
         String::from_utf8(listed)
             .unwrap()
-            .contains("terminal-bench [trial set]")
+            .contains("fixture-external [trial set]")
     );
 }
 
@@ -982,7 +985,7 @@ fn diagnostics_contract(root: &Path) {
     assert!(
         error
             .to_string()
-            .contains("did you mean external workload `terminal-bench`")
+            .contains("did you mean external workload `terminal-bench-1.0`")
     );
     let directory = root.join("empty-workloads");
     fs::create_dir(&directory).unwrap();

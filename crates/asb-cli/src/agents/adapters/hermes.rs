@@ -252,7 +252,7 @@ mod tests {
             agent: "hermes".into(),
             provider: "cli2key".into(),
             model: "gpt-6.1-sol".into(),
-            workload: "terminal-bench".into(),
+            workload: "terminal-bench-1.0".into(),
             concurrency: 2,
             trial_set: None,
             trial: None,

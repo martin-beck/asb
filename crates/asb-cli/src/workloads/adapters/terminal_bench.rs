@@ -1,4 +1,3 @@
-use super::StaticExternalAdapter;
 mod catalog;
 
 pub(super) const ORIGINAL_ENGINE: super::official_engine::EngineBinding =
@@ -175,41 +174,16 @@ impl super::WorkloadAdapter for TerminalBenchAdapter {
     }
 }
 
-/// Legacy reference/smoke alias; never relabel old smoke results as official.
-pub(super) static ADAPTER: StaticExternalAdapter = StaticExternalAdapter::new(
-    "terminal-bench",
-    "https://raw.githubusercontent.com/harbor-framework/terminal-bench/452bf305c6daa62fc59061d22133a7cbc7c1572e/README.md",
-    &[
-        (
-            "smoke",
-            "Short terminal task suitable for a local smoke run.",
-        ),
-        (
-            "shell",
-            "Shell and filesystem task from the local Terminal-Bench checkout.",
-        ),
-        (
-            "debug",
-            "Debugging task from the local Terminal-Bench checkout.",
-        ),
-    ],
-).with_bundle(super::SourceBundle {
-    archive: "https://github.com/harbor-framework/terminal-bench/archive/452bf305c6daa62fc59061d22133a7cbc7c1572e.tar.gz",
-    marker: "terminal-bench/terminal-bench@452bf305c6daa62fc59061d22133a7cbc7c1572e",
-    prompt: "Use the installed upstream Terminal-Bench checkout in `external-workload`. Inspect its README, task definitions, and local runner instructions, then execute or improve a concrete terminal task using only the installed checkout and run its focused tests. Do not download additional data during the run.\n",
-});
-
 #[cfg(test)]
 mod tests {
     use super::super::WorkloadAdapter;
     use serde_json::json;
 
     #[test]
-    fn terminal_bench_adapters_and_compatibility_alias_expose_trial_extensions() {
+    fn every_registered_terminal_bench_version_exposes_an_official_trial_catalog() {
         for adapter in [
             &super::super::terminal_bench_1_0::ADAPTER as &dyn WorkloadAdapter,
             &super::super::terminal_bench_2_1::ADAPTER,
-            &super::ADAPTER,
         ] {
             let extension = adapter.setup_extension().expect("trial extension");
             assert_eq!(extension.id, "trial");
