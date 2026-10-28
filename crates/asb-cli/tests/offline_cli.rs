@@ -306,8 +306,13 @@ fn tui_selection_installs_locally_before_enabling_agent_or_workload() {
         project.init();
         project.write("fake-bin/npm", "#!/bin/sh\ncase \"$ASB_TEST_INSTALL_MODE\" in failure) exit 1;; no-executable) exit 0;; esac\nprefix=\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --prefix ]; then shift; prefix=$1; fi\n  shift\ndone\n[ -n \"$prefix\" ] || exit 2\nmkdir -p \"$prefix/node_modules/.bin\"\nprintf '#!/bin/sh\\nexit 0\\n' > \"$prefix/node_modules/.bin/codex\"\n[ \"$ASB_TEST_INSTALL_MODE\" = not-runnable ] || chmod +x \"$prefix/node_modules/.bin/codex\"\nexit 0\n");
         project.write("fake-bin/curl", "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output ]; then shift; printf '#!/bin/sh\\nexit 0\\n' > \"$1\"; exit 0; fi; shift; done\nexit 1\n");
+        // External workloads are pinned source archives.  Keep this terminal
+        // fixture offline by materialising the minimal valid AgentBench tree
+        // when the installer invokes tar, rather than handing tar the fake
+        // curl response as though it were an archive.
+        project.write("fake-bin/tar", "#!/bin/sh\ndest=\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --directory ]; then shift; dest=$1; fi\n  shift\ndone\n[ -n \"$dest\" ] || exit 2\nmkdir -p \"$dest/AgentBench/configs/tasks\"\nprintf 'name: fixture\\n' > \"$dest/AgentBench/configs/tasks/fixture.yaml\"\n");
         project.write("fake-bin/perf", "#!/bin/sh\nexit 0\n");
-        for name in ["npm", "curl", "perf"] {
+        for name in ["npm", "curl", "tar", "perf"] {
             std::fs::set_permissions(
                 project.0.join("fake-bin").join(name),
                 std::fs::Permissions::from_mode(0o755),
