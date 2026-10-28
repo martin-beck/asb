@@ -533,12 +533,25 @@ fn clear_snapshot_at(path: &Path) {
 fn content_length(headers: &Path) -> Option<u64> {
     let bytes = fs::read(headers).ok()?;
     let text = std::str::from_utf8(&bytes[..bytes.len().min(HEADER_LIMIT)]).ok()?;
-    text.lines().rev().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.eq_ignore_ascii_case("content-length")
-            .then(|| value.trim().parse::<u64>().ok())
-            .flatten()
-    })
+    // `curl --dump-header` records every redirect response. Only the final
+    // response can describe the downloaded body: a zero/absent length there
+    // means a streamed body with an unknown total, never a reason to borrow a
+    // preceding redirect's length.
+    let mut content_length = None;
+    for line in text.lines().rev() {
+        let line = line.trim();
+        if line.starts_with("HTTP/") {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = value.trim().parse::<u64>().ok();
+            break;
+        }
+    }
+    content_length.filter(|length| *length > 0)
 }
 
 fn bytes(value: u64) -> String {
@@ -596,6 +609,21 @@ mod tests {
         ));
         fs::write(&path, "HTTP/1.1 302 Found\r\nContent-Length: 7\r\n\r\nHTTP/2 200\r\ncontent-length: 42\r\n\r\n").unwrap();
         assert_eq!(content_length(&path), Some(42));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn content_length_treats_final_zero_as_an_unknown_stream_length() {
+        let path = std::env::temp_dir().join(format!(
+            "asb-progress-zero-length-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        fs::write(
+            &path,
+            "HTTP/1.1 302 Found\r\ncontent-length: 42\r\n\r\nHTTP/2 200\r\ncontent-length: 0\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(content_length(&path), None);
         fs::remove_file(path).unwrap();
     }
 
