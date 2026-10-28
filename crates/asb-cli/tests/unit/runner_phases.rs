@@ -592,6 +592,54 @@ fn native_and_guest_apply_the_same_adapter_terminal_answer_policy() {
 }
 
 #[test]
+fn truncated_guest_transcript_is_incomplete_without_discarding_guest_metadata() {
+    let mut execution = evidence(0, true);
+    {
+        let metadata = execution.guest.as_mut().expect("guest evidence");
+        metadata.transcript_truncated = true;
+        assert_eq!(metadata.final_response.as_deref(), Some("submission"));
+    }
+    assert!(!ExecutionEvidence::capture_complete(
+        &AttemptIssues::default(),
+        execution.guest.as_ref()
+    ));
+    execution.capture_complete = false;
+    let agent = execution.agent_outcome("pi", Path::new("."), None);
+    assert!(agent.failure.is_none());
+    assert_eq!(agent.final_response.as_deref(), Some("submission"));
+    let grade = workloads::outcome::EvaluationOutcome::binary(true);
+    let decision = crate::runner::disposition::RunDisposition::from_facts(
+        crate::runner::disposition::RunFacts {
+            evaluation: &grade,
+            evaluation_kind: workloads::KnownEvaluationKind::UpstreamHarness,
+            process_success: agent.failure.is_none(),
+            agent_failure: agent.failure.as_deref(),
+            capture_incomplete: true,
+            run_error: None,
+            collector_error: None,
+            output_error: None,
+            provider_cleanup_error: None,
+            workload_cleanup_confirmed: true,
+            proxy_cleanup_confirmed: true,
+        },
+    );
+    assert_eq!(
+        decision.status,
+        crate::runner::disposition::RunStatus::Completed
+    );
+    assert!(decision.success);
+    execution
+        .guest
+        .as_mut()
+        .expect("guest evidence")
+        .transcript_truncated = false;
+    assert!(ExecutionEvidence::capture_complete(
+        &AttemptIssues::default(),
+        execution.guest.as_ref()
+    ));
+}
+
+#[test]
 fn native_reward_pending_and_error_survive_marker_and_cleanup_failures() {
     use workloads::outcome::EvaluationOutcome as Evaluation;
     for grade in [3, 4, 5] {

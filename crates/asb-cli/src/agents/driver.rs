@@ -150,6 +150,12 @@ pub(crate) struct GuestResult {
     pub execution_failure: Option<String>,
     #[serde(default)]
     pub tree_quiesced: bool,
+    /// The isolated client presentation transcript reached the bounded
+    /// retention limit. The retained prefix is still useful for adapter
+    /// extraction, while controller-side outcome handling must not mistake it
+    /// for a complete transcript.
+    #[serde(default)]
+    pub transcript_truncated: bool,
     #[serde(default)]
     pub namespace_collectors: std::collections::BTreeMap<String, serde_json::Value>,
 }
@@ -696,9 +702,9 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         )?
     };
     #[cfg(target_os = "linux")]
-    if held.as_ref().is_some_and(|held| held.truncated) {
-        return Err(Error::Run("retained client output exceeded its capture limit; grading must preserve the incomplete attempt".into()));
-    }
+    let transcript_truncated = held.as_ref().is_some_and(|held| held.truncated);
+    #[cfg(not(target_os = "linux"))]
+    let transcript_truncated = false;
     let namespace_collectors = capture
         .as_mut()
         .map(|session| session.export_execution_namespace_state())
@@ -777,6 +783,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             }
         },
         tree_quiesced: cfg!(target_os = "linux") && !retained,
+        transcript_truncated,
         namespace_collectors,
     };
     publish_artifacts(&mut result, artifact_owner, frozen.diagnostic(), |result| {
@@ -989,6 +996,7 @@ mod artifact_publication_tests {
                 adapter_errors: Vec::new(),
                 execution_failure: None,
                 tree_quiesced: true,
+                transcript_truncated: true,
                 namespace_collectors: Default::default(),
             };
             let destination = root.join("agent-result.json");
@@ -1023,6 +1031,7 @@ mod artifact_publication_tests {
                 assert_eq!(durable.final_response.as_deref(), Some("submission"));
                 assert_eq!(durable.steps, Some(4));
                 assert_eq!(durable.token_usage.total_tokens, Some(34));
+                assert!(durable.transcript_truncated);
                 assert!(
                     durable.tree_quiesced,
                     "scratch publication never rewrites process ownership"
