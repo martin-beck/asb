@@ -171,6 +171,7 @@ impl Operation {
                 | ProgressStage::DownloadingAndValidating
                 | ProgressStage::InstallingPackage
                 | ProgressStage::Dependencies
+                | ProgressStage::Validating
         ) {
             self.transfer = install::transfer::read_snapshot(&self.transfer_path);
         }
@@ -196,6 +197,7 @@ impl Operation {
                                     | ProgressStage::DownloadingAndValidating
                                     | ProgressStage::InstallingPackage
                                     | ProgressStage::Dependencies
+                                    | ProgressStage::Validating
                             ) {
                                 self.transfer = None;
                             }
