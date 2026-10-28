@@ -203,70 +203,27 @@ fn declared_mcp_configuration(
     mcp_tape: Option<McpTapeContext<'_>>,
     run_dir: &std::path::Path,
 ) -> Result<String, Error> {
-    if declarations.is_empty() {
-        return Ok(String::new());
-    }
     let mut servers = toml::map::Map::new();
-    for declaration in declarations {
-        let launch = match mcp_tape {
-            Some(McpTapeContext {
-                mode: crate::tape::Mode::Record,
-                ..
-            }) => Some(super::super::mcp_relay::record_launch(
-                run_dir,
-                declaration,
-            )?),
-            Some(McpTapeContext {
-                mode: crate::tape::Mode::Replay,
-                cassette: Some(cassette),
-            }) => Some(super::super::mcp_relay::replay_launch(
-                run_dir,
-                declaration,
-                cassette,
-            )?),
-            Some(McpTapeContext {
-                mode: crate::tape::Mode::Replay,
-                cassette: None,
-            }) => {
-                return Err(Error::Run(
-                    "MCP replay needs its selected sealed relay bundle".into(),
-                ));
-            }
-            None => None,
-        };
+    for launch in super::super::mcp_relay::server_launches(run_dir, declarations, mcp_tape)? {
         let mut server = toml::map::Map::new();
         server.insert(
             "command".into(),
-            toml::Value::String(
-                launch
-                    .as_ref()
-                    .map(|launch| launch.program.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| declaration.program.clone()),
-            ),
+            toml::Value::String(launch.program.to_string_lossy().into_owned()),
         );
         server.insert(
             "args".into(),
-            toml::Value::Array(launch.map_or_else(
-                || {
-                    declaration
-                        .args
-                        .iter()
-                        .cloned()
-                        .map(toml::Value::String)
-                        .collect()
-                },
-                |launch| {
-                    launch
-                        .args
-                        .into_iter()
-                        .map(|argument| {
-                            toml::Value::String(argument.to_string_lossy().into_owned())
-                        })
-                        .collect()
-                },
-            )),
+            toml::Value::Array(
+                launch
+                    .args
+                    .into_iter()
+                    .map(|argument| toml::Value::String(argument.to_string_lossy().into_owned()))
+                    .collect(),
+            ),
         );
-        servers.insert(declaration.id.clone(), toml::Value::Table(server));
+        servers.insert(launch.id, toml::Value::Table(server));
+    }
+    if servers.is_empty() {
+        return Ok(String::new());
     }
     let mut root = toml::map::Map::new();
     root.insert("mcp_servers".into(), toml::Value::Table(servers));
