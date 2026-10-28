@@ -179,6 +179,11 @@ fn source_symlinks_and_rename_failure_never_mutate_foreign_destinations() {
 }
 
 #[test]
+fn verified_shared_download_cache_is_reused_by_another_project() {
+    Fixture::new().run("shared-cache");
+}
+
+#[test]
 fn timeout_reaps_the_owned_downloader_and_retains_incomplete_raw() {
     Fixture::new().run("timeout");
 }
@@ -446,17 +451,58 @@ fn publication_fixture_child() {
             assert_old_ready(&root, &destination);
             assert_eq!(scratch(&destination), retained);
             fs::remove_file(root.join("bin/curl")).unwrap();
-            let error = install_fixture(
+            install_fixture(
                 &root,
                 "https://fixture.invalid/success",
                 &destination,
                 options("fixture", None, MAX_SOURCE_BYTES),
                 |_, _| Ok(()),
             )
-            .unwrap_err();
-            assert_old_ready(&root, &destination);
+            .unwrap();
+            assert_eq!(fs::read(&destination).unwrap(), NEW);
             assert_eq!(scratch(&destination), retained);
-            assert!(error.to_string().contains("needs `curl`"), "{error}");
+        }
+        "shared-cache" => {
+            let digest = format!("{:x}", Sha256::digest(NEW));
+            install_fixture(
+                &root,
+                "https://fixture.invalid/success",
+                &destination,
+                options("fixture", Some(&digest), 1024),
+                |_, _| Ok(()),
+            )
+            .unwrap();
+            let cache = root.join(".cache/asb/downloads");
+            assert_eq!(
+                fs::read_dir(&cache)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "blob"))
+                    .count(),
+                1
+            );
+            let other = root.join("second-project");
+            fs::create_dir_all(other.join(".asb")).unwrap();
+            fs::write(
+                other.join(".asb/project.toml"),
+                "tools_dir='tools'\nworkloads_dir='workloads'\nworkspace_dir='workspace'\n",
+            )
+            .unwrap();
+            fs::remove_file(root.join("bin/curl")).unwrap();
+            let other_destination = other.join("tools/perf/bin/perf");
+            fs::create_dir_all(other_destination.parent().unwrap()).unwrap();
+            install_fixture(
+                &other,
+                "https://fixture.invalid/success",
+                &other_destination,
+                options("fixture", Some(&digest), 1024),
+                |_, _| Ok(()),
+            )
+            .unwrap();
+            assert_eq!(fs::read(other_destination).unwrap(), NEW);
         }
         "symlinks" => {
             let foreign = root.join("foreign");

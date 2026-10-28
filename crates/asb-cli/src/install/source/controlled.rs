@@ -3,6 +3,11 @@ use super::*;
 use crate::install::process::{
     InstallFailure, InstallResult, OperationContext, ProcessScope, Purpose,
 };
+use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
 pub(crate) fn check_version_in(
@@ -33,6 +38,35 @@ pub(crate) fn check_version_in(
 }
 
 fn download_in(
+    context: &OperationContext,
+    scope: &mut ProcessScope,
+    source: &str,
+    staging: &Path,
+    options: &Options<'_>,
+) -> InstallResult<()> {
+    if let Some(cache) = SharedDownload::lock(context, source, options.limit)? {
+        if cache.restore(staging)? {
+            verify_download(staging, options)?;
+            return Ok(());
+        }
+        download_uncached(scope, source, staging, options)?;
+        verify_download(staging, options)?;
+        cache.store(staging)?;
+        return Ok(());
+    }
+    download_uncached(scope, source, staging, options)
+}
+
+fn verify_download(staging: &Path, options: &Options<'_>) -> InstallResult<()> {
+    validate_file(staging, options)?;
+    if let Some(checksum) = options.checksum {
+        let handle = File::open(staging).map_err(crate::io_error)?;
+        super::verify_pinned_checksum(&handle, staging, checksum, options.kind, options.limit)?;
+    }
+    Ok(())
+}
+
+fn download_uncached(
     scope: &mut ProcessScope,
     source: &str,
     staging: &Path,
@@ -89,6 +123,166 @@ fn download_in(
     Ok(())
 }
 
+/// A user-owned, content-verified cache for ASB's direct archive downloads.
+///
+/// Cache names are SHA-256 digests of the source URL, so the cache contains no
+/// URL or project path metadata. Each entry has an adjacent checksum receipt
+/// and an advisory file lock. A corrupt, oversized, or symlinked entry is
+/// discarded while holding that entry's lock and fetched again.
+struct SharedDownload {
+    artifact: PathBuf,
+    receipt: PathBuf,
+    _lock: File,
+    limit: u64,
+}
+
+impl SharedDownload {
+    fn lock(context: &OperationContext, source: &str, limit: u64) -> InstallResult<Option<Self>> {
+        let Some(root) = shared_cache_directory("downloads") else {
+            return Ok(None);
+        };
+        let key = format!("{:x}", Sha256::digest(source.as_bytes()));
+        let lock_path = root.join(format!("{key}.lock"));
+        let lock = match fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+        {
+            Ok(lock) => lock,
+            Err(_) => return Ok(None),
+        };
+        loop {
+            context.check_before_admission("shared download cache lock", &root)?;
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(fs::TryLockError::Error(error)) => {
+                    return Err(
+                        Error::Io(format!("cannot lock ASB download cache: {error}")).into(),
+                    );
+                }
+            }
+        }
+        Ok(Some(Self {
+            artifact: root.join(format!("{key}.blob")),
+            receipt: root.join(format!("{key}.sha256")),
+            _lock: lock,
+            limit,
+        }))
+    }
+
+    fn restore(&self, destination: &Path) -> InstallResult<bool> {
+        let valid = self
+            .receipt()
+            .zip(self.digest_file(&self.artifact).ok().flatten())
+            .is_some_and(|(expected, actual)| expected == actual);
+        if !valid {
+            self.discard();
+            return Ok(false);
+        }
+        copy_bounded(&self.artifact, destination, self.limit)?;
+        Ok(true)
+    }
+
+    fn store(&self, source: &Path) -> InstallResult<()> {
+        let Some(digest) = self.digest_file(source)? else {
+            return Err(
+                Error::Input("downloaded source is not a bounded regular file".into()).into(),
+            );
+        };
+        let temporary = self
+            .artifact
+            .with_extension(format!("part-{}", crate::tools::runtime::unique_id()));
+        copy_bounded(source, &temporary, self.limit)?;
+        let receipt = self
+            .receipt
+            .with_extension(format!("part-{}", crate::tools::runtime::unique_id()));
+        fs::write(&receipt, format!("{digest}\n")).map_err(crate::io_error)?;
+        fs::rename(&temporary, &self.artifact).map_err(crate::io_error)?;
+        fs::rename(&receipt, &self.receipt).map_err(crate::io_error)?;
+        Ok(())
+    }
+
+    fn receipt(&self) -> Option<String> {
+        let metadata = fs::symlink_metadata(&self.receipt).ok()?;
+        if !metadata.is_file() || metadata.len() != 65 {
+            return None;
+        }
+        let value = fs::read_to_string(&self.receipt).ok()?;
+        let digest = value.strip_suffix('\n')?;
+        (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| digest.to_ascii_lowercase())
+    }
+
+    fn digest_file(&self, path: &Path) -> Result<Option<String>, Error> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(crate::io_error(error)),
+        };
+        if !metadata.is_file() || metadata.len() > self.limit {
+            return Ok(None);
+        }
+        let mut file = File::open(path).map_err(crate::io_error)?;
+        let mut digest = Sha256::new();
+        let mut bytes = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).map_err(crate::io_error)?;
+            if read == 0 {
+                break;
+            }
+            bytes = bytes.saturating_add(read as u64);
+            if bytes > self.limit {
+                return Ok(None);
+            }
+            digest.update(&buffer[..read]);
+        }
+        Ok(Some(format!("{:x}", digest.finalize())))
+    }
+
+    fn discard(&self) {
+        let _ = fs::remove_file(&self.artifact);
+        let _ = fs::remove_file(&self.receipt);
+    }
+}
+
+fn shared_cache_directory(kind: &str) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    let root = PathBuf::from(home).join(".cache/asb");
+    let path = root.join(kind);
+    fs::create_dir_all(&path).ok()?;
+    #[cfg(unix)]
+    {
+        let _ = fs::set_permissions(&root, fs::Permissions::from_mode(0o700));
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o700));
+    }
+    Some(path)
+}
+
+fn copy_bounded(source: &Path, destination: &Path, limit: u64) -> InstallResult<()> {
+    let metadata = fs::symlink_metadata(source).map_err(crate::io_error)?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(Error::Input("cached download is not a bounded regular file".into()).into());
+    }
+    let mut input = File::open(source).map_err(crate::io_error)?;
+    let mut output = File::create(destination).map_err(crate::io_error)?;
+    let copied = io::copy(
+        &mut Read::by_ref(&mut input).take(limit.saturating_add(1)),
+        &mut output,
+    )
+    .map_err(crate::io_error)?;
+    output.flush().map_err(crate::io_error)?;
+    if copied != metadata.len() || copied > limit {
+        return Err(Error::Input("cached download changed while it was copied".into()).into());
+    }
+    Ok(())
+}
+
 pub(in crate::install) fn install_input_in(
     context: &OperationContext,
     source: &Input,
@@ -103,7 +297,7 @@ pub(in crate::install) fn install_input_in(
     let mut scope = staging.producer_scope(context);
     let prepared = (|| -> InstallResult<prepared::Snapshot> {
         match source {
-            Input::Remote(url) => download_in(&mut scope, url, &staging.file, &options)?,
+            Input::Remote(url) => download_in(context, &mut scope, url, &staging.file, &options)?,
             Input::Local(path) | Input::Pinned { path, .. } => {
                 let mut input_options = OpenOptions::new();
                 input_options.read(true);
