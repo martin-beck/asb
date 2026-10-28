@@ -306,8 +306,13 @@ fn tui_selection_installs_locally_before_enabling_agent_or_workload() {
         project.init();
         project.write("fake-bin/npm", "#!/bin/sh\ncase \"$ASB_TEST_INSTALL_MODE\" in failure) exit 1;; no-executable) exit 0;; esac\nprefix=\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --prefix ]; then shift; prefix=$1; fi\n  shift\ndone\n[ -n \"$prefix\" ] || exit 2\nmkdir -p \"$prefix/node_modules/.bin\"\nprintf '#!/bin/sh\\nexit 0\\n' > \"$prefix/node_modules/.bin/codex\"\n[ \"$ASB_TEST_INSTALL_MODE\" = not-runnable ] || chmod +x \"$prefix/node_modules/.bin/codex\"\nexit 0\n");
         project.write("fake-bin/curl", "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output ]; then shift; printf '#!/bin/sh\\nexit 0\\n' > \"$1\"; exit 0; fi; shift; done\nexit 1\n");
+        // External workloads are pinned source archives.  Keep this terminal
+        // fixture offline by materialising the minimal valid AgentBench tree
+        // when the installer invokes tar, rather than handing tar the fake
+        // curl response as though it were an archive.
+        project.write("fake-bin/tar", "#!/bin/sh\ndest=\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --directory ]; then shift; dest=$1; fi\n  shift\ndone\n[ -n \"$dest\" ] || exit 2\nmkdir -p \"$dest/AgentBench/configs/tasks\"\nprintf 'name: fixture\\n' > \"$dest/AgentBench/configs/tasks/fixture.yaml\"\n");
         project.write("fake-bin/perf", "#!/bin/sh\nexit 0\n");
-        for name in ["npm", "curl", "perf"] {
+        for name in ["npm", "curl", "tar", "perf"] {
             std::fs::set_permissions(
                 project.0.join("fake-bin").join(name),
                 std::fs::Permissions::from_mode(0o755),
@@ -2522,8 +2527,19 @@ fn pre_solved_workspace_is_preserved_but_never_earns_resolution_credit() {
 #[cfg(unix)]
 #[test]
 fn external_smoke_cannot_report_upstream_task_success_or_invent_steps() {
+    use std::os::unix::fs::PermissionsExt;
+
     for passed in [false, true] {
         let project = replay_project(1);
+        // This is sealed replay coverage.  The final human-output invocation
+        // must not fall through to a networked npm install of cli2key before
+        // it reaches the cassette-backed provider path.
+        let bridge = project
+            .0
+            .join(".asb-tools/cli2key/node_modules/.bin/codex-bridge");
+        std::fs::create_dir_all(bridge.parent().unwrap()).unwrap();
+        std::fs::write(&bridge, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&bridge, std::fs::Permissions::from_mode(0o755)).unwrap();
         project.write("workloads/agentbench.txt", "Local adapter smoke only.\n");
         project.write("benchmark.toml", "agent='pi'\nworkload='agentbench'\nprovider='cli2key'\nmodel='test-model'\nworkspace='workspace'\nlog_file='run.log'\n");
         project.write("workspace/external-workload/asb-trial/src/task.py", if passed {

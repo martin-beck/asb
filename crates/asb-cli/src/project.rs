@@ -275,6 +275,11 @@ pub fn init(
                 "project already initialized; use `asb init --reset` for a fresh initialization",
             ));
         }
+        // Reset intentionally preserves downloaded assets, but it is still a
+        // destructive configuration transition. Validate every formerly
+        // managed location before moving any state so a malicious or stale
+        // configuration cannot turn a failed reset into a partial mutation.
+        validate_reset_paths(&root, &path)?;
         let cleanup = clean_project(&root, &path)?;
         writeln!(output, "Reset cleanup moved previous configuration to {}; installed tools, workloads, caches and results were preserved.", cleanup.display()).map_err(super::io_error)?;
     }
@@ -347,6 +352,44 @@ pub fn init(
     #[cfg(target_os = "linux")]
     writeln!(output, "For complete CPU accounting across short-lived child processes, use writable cgroup-v2 delegation. On systemd Linux, run:\n  systemd-run --user --scope -p Delegate=yes -- asb run CONFIG.toml\nFor a sweep, replace `asb run CONFIG.toml` with `asb sweep SWEEP.toml`. Other delegated setups can set ASB_CGROUP_PARENT to a writable cgroup-v2 directory. Without delegation, ASB uses sampled process accounting.").map_err(super::io_error)?;
     Ok(())
+}
+
+fn validate_reset_paths(root: &Path, config_path: &Path) -> Result<(), Error> {
+    let existing = fs::read_to_string(config_path).map_err(|error| {
+        Error::Io(format!(
+            "cannot read {} before reset: {error}",
+            config_path.display()
+        ))
+    })?;
+    let config: ProjectConfig = toml::from_str(&existing).map_err(|error| {
+        Error::Input(format!(
+            "cannot parse {} before reset: {error}",
+            config_path.display()
+        ))
+    })?;
+    let defaults = ProjectConfig::default();
+    for directory in [
+        &config.tools_dir,
+        &config.workloads_dir,
+        &config.workspace_dir,
+        &defaults.tools_dir,
+        &defaults.workloads_dir,
+        &defaults.workspace_dir,
+    ] {
+        if !is_safe_project_relative_path(directory) {
+            return Err(Error::Input(format!(
+                "cannot reset configured directory {directory:?}: reset requires a direct child of the project; move its contents manually and update .asb/project.toml before retrying"
+            )));
+        }
+        reject_symlink(&root.join(directory))?;
+    }
+    Ok(())
+}
+
+fn is_safe_project_relative_path(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
 }
 
 /// Recheck optional host capabilities without resetting an existing project.
