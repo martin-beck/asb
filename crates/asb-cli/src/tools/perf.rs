@@ -150,7 +150,13 @@ fn distribution_perf(scope: &mut ProcessScope, stage: &Path) -> InstallResult<Pa
             .args(["download", package])
             .current_dir(&directory)
             .stdin(std::process::Stdio::null());
-        if !scope.run(step)?.status.success() {
+        let monitor = crate::install::transfer::Cache::start(
+            &directory,
+            "Downloading perf distribution package",
+        );
+        let result = scope.run(step);
+        let _ = monitor.finish();
+        if !result?.status.success() {
             continue;
         }
         let archive = fs::read_dir(&directory)
@@ -238,7 +244,16 @@ fn build_perf_from_source(
         .arg(&source)
         .arg("--strip-components=1")
         .stdin(std::process::Stdio::null());
-    if !scope.run(step)?.status.success() {
+    let archive_bytes = fs::metadata(&archive).ok().map(|metadata| metadata.len());
+    let mut extraction =
+        crate::install::transfer::Activity::new("Extracting perf source", archive_bytes);
+    extraction.update(0);
+    let status = scope.run(step)?.status;
+    if let Some(bytes) = archive_bytes {
+        extraction.update(bytes);
+    }
+    extraction.finish();
+    if !status.success() {
         return Err(Error::Io("could not extract perf source".into()).into());
     }
     progress(50, crate::install::ProgressStage::Building);

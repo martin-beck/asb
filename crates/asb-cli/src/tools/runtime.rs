@@ -136,7 +136,15 @@ pub(super) fn archive(
                 "--no-same-permissions",
             ])
             .stdin(std::process::Stdio::null());
+        let archive_bytes = fs::metadata(&download).ok().map(|metadata| metadata.len());
+        let mut extraction =
+            crate::install::transfer::Activity::new("Extracting language runtime", archive_bytes);
+        extraction.update(0);
         let status = scope.run(step)?.status;
+        if let Some(bytes) = archive_bytes {
+            extraction.update(bytes);
+        }
+        extraction.finish();
         owner.consume(scope.finish()?)?;
         if !status.success() || programs.iter().any(|(_, path)| !stage.join(path).is_file()) {
             return Err(Error::Io(format!(

@@ -172,7 +172,14 @@ pub(super) fn install(
         if let Some(release) = adapter.release {
             step.command_mut().args(["--release", release]);
         }
-        if !scope.run(step)?.status.success() {
+        let cache = context.project_root.join(".asb-cache/huggingface");
+        let monitor = crate::install::transfer::Cache::start(
+            &cache,
+            "Downloading LiveCodeBench dataset cache",
+        );
+        let result = scope.run(step);
+        let _ = monitor.finish();
+        if !result?.status.success() {
             return Err(Error::Io(format!(
                 "{} official dataset installation failed; inspect .asb/install.log, check network/proxy access and retry `asb workload install {}`",
                 adapter.id, adapter.id

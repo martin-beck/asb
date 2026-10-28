@@ -24,6 +24,7 @@ pub(crate) mod goose;
 #[path = "../tests/unit/installer_process_boundary.rs"]
 mod process_boundary_red;
 mod source;
+pub(crate) mod transfer;
 pub(crate) use process::{
     InstallFailure, InstallResult, OperationContext, ProcessScope, ProducerDirectory, Purpose,
 };
@@ -901,7 +902,14 @@ fn install_bundle_in(
         .args(["--directory"])
         .arg(&extract)
         .stdin(Stdio::null());
+    let archive_bytes = fs::metadata(&archive).ok().map(|metadata| metadata.len());
+    let mut extraction = transfer::Activity::new("Extracting external workload", archive_bytes);
+    extraction.update(0);
     let status = scope.run(step)?.status;
+    if let Some(bytes) = archive_bytes {
+        extraction.update(bytes);
+    }
+    extraction.finish();
     owner.consume(scope.finish()?)?;
     if !status.success() {
         return Err(Error::Io(format!("could not extract external workload {name}")).into());
@@ -1180,13 +1188,17 @@ fn install_package(
             }
             #[cfg(not(target_os = "linux"))]
             tools::apply_runtime_path_at(step.command_mut(), root.parent().expect("tool parent"))?;
+            let cache = context.root().join(".asb-cache/npm");
             step.command_mut()
                 .args(["install", "--prefix"])
                 .arg(root)
                 .args(["--no-save", package])
-                .env("NPM_CONFIG_CACHE", context.root().join(".asb-cache/npm"))
+                .env("NPM_CONFIG_CACHE", &cache)
                 .stdin(Stdio::null());
-            let result = scope.run(step)?;
+            let monitor = transfer::Cache::start(&cache, "Downloading npm package cache");
+            let result = scope.run(step);
+            let _ = monitor.finish();
+            let result = result?;
             result.status
         }
         Recipe::Python {
@@ -1226,6 +1238,7 @@ fn install_package(
             }
             progress(35, ProgressStage::InstallingPackage);
             let python = venv.join("bin/python");
+            let cache = context.root().join(".asb-cache/pip");
             let mut step = scope.prepare(
                 &python,
                 Purpose::Package,
@@ -1233,8 +1246,12 @@ fn install_package(
             )?;
             step.command_mut()
                 .args(["-m", "pip", "install", package])
+                .env("PIP_CACHE_DIR", &cache)
                 .stdin(Stdio::null());
-            let installed = scope.run(step)?;
+            let monitor = transfer::Cache::start(&cache, "Downloading pip package cache");
+            let installed = scope.run(step);
+            let _ = monitor.finish();
+            let installed = installed?;
             if !installed.status.success() {
                 return Err(Error::Io(format!("Python package installation failed for {package} ({}); inspect the installation diagnostics", installed.status)).into());
             }
@@ -1247,8 +1264,12 @@ fn install_package(
                 )?;
                 step.command_mut()
                     .args(["-m", "pip", "install", dependency])
+                    .env("PIP_CACHE_DIR", &cache)
                     .stdin(Stdio::null());
-                let result = scope.run(step)?;
+                let monitor = transfer::Cache::start(&cache, "Downloading pip dependency cache");
+                let result = scope.run(step);
+                let _ = monitor.finish();
+                let result = result?;
                 if !result.status.success() {
                     return Err(Error::Io(format!(
                         "Python runtime dependency installation failed for {dependency} ({})",

@@ -69,7 +69,14 @@ pub(crate) fn install_archive_in(
             .arg("--directory")
             .arg(&extract)
             .stdin(Stdio::null());
+        let mut extraction = crate::install::transfer::Activity::new(
+            "Extracting Goose archive",
+            Some(metadata.len()),
+        );
+        extraction.update(0);
         let status = scope.run(step)?.status;
+        extraction.update(metadata.len());
+        extraction.finish();
         owner.consume(scope.finish()?)?;
         if !status.success() {
             return Err(Error::Io("could not extract the pinned Goose binary".into()).into());
