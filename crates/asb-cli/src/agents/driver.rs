@@ -670,10 +670,11 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     } else {
         None
     };
-    let output = if retained {
+    let (output, transcript_truncated) = if retained {
         #[cfg(target_os = "linux")]
         {
-            held.as_ref().expect("retained process").output.clone()
+            let held = held.as_ref().expect("retained process");
+            (held.output.clone(), held.truncated)
         }
         #[cfg(not(target_os = "linux"))]
         return Err(Error::Input(
@@ -689,7 +690,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         #[cfg(unix)]
         let mut transport_err = crate::runner::GuestTransport::new(&std::io::stderr(), deadline)
             .map_err(crate::io_error)?;
-        crate::runner::run_guest_process(
+        let captured = crate::runner::run_guest_process(
             &mut command,
             stdin_prompt.as_deref(),
             #[cfg(unix)]
@@ -707,12 +708,9 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
                 }
                 Ok(())
             },
-        )?
+        )?;
+        (captured.output, captured.transcript_truncated)
     };
-    #[cfg(target_os = "linux")]
-    let transcript_truncated = held.as_ref().is_some_and(|held| held.truncated);
-    #[cfg(not(target_os = "linux"))]
-    let transcript_truncated = false;
     let namespace_collectors = capture
         .as_mut()
         .map(|session| session.export_execution_namespace_state())

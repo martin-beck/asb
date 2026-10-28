@@ -209,6 +209,17 @@ pub(super) struct CapturedOutput {
     pub output: Output,
     pub output_error: Option<String>,
     pub capture_error: Option<String>,
+    pub transcript_truncated: bool,
+    pub stream_fault: bool,
+    pub drain_timed_out: bool,
+}
+
+impl CapturedOutput {
+    /// A bounded transcript prefix is distinct from a failed pipe or an
+    /// incomplete drain. Only the former can accompany a guest result.
+    pub(super) fn only_transcript_truncated(&self) -> bool {
+        self.transcript_truncated && !self.stream_fault && !self.drain_timed_out
+    }
 }
 
 /// Best-effort terminal presentation is independent from capture custody.
@@ -465,6 +476,8 @@ fn capture_inner(
     let mut status = None;
     let mut output_error = None;
     let mut capture_error = None;
+    let mut stream_fault = false;
+    let mut drain_timed_out = false;
     let mut timed_out = false;
     loop {
         if status.is_none() {
@@ -509,6 +522,7 @@ fn capture_inner(
             match reader.batch(&mut present) {
                 Ok(read) => progress |= read,
                 Err(error) => {
+                    stream_fault = true;
                     if matches!(policy, PresentationPolicy::CancelOnTransportFailure) {
                         return Err(error);
                     }
@@ -538,6 +552,7 @@ fn capture_inner(
             break;
         }
         if drain_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            drain_timed_out = true;
             capture_error.get_or_insert_with(|| "agent output drain deadline exceeded after exit; transcript evidence is incomplete".into());
             break;
         }
@@ -561,6 +576,9 @@ fn capture_inner(
         },
         output_error,
         capture_error,
+        transcript_truncated: stdout.truncated || stderr.truncated,
+        stream_fault,
+        drain_timed_out,
     })
 }
 
