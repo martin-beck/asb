@@ -303,6 +303,16 @@ try:
         return original_persist_tool_result(content, tool_name, tool_use_id, **kwargs)
 
     tool_executor.maybe_persist_tool_result = persist_terminal_result
+    if MODE == "replay":
+        # Establish a bounded zero cursor before Hermes starts.  This survives
+        # a provider-tape rejection that can terminate the one-shot process
+        # before a terminal call returns or an exit hook runs.
+        _write_progress(
+            False,
+            "native terminal replay awaiting invocation",
+            0,
+            len(transport.exchanges),
+        )
     atexit.register(transport.close)
 
     # Hermes terminates its one-shot CLI through ``os._exit``.  That bypasses
