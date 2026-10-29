@@ -3,6 +3,13 @@ use super::{
     StaticAdapter,
 };
 use crate::{Error, install::Recipe};
+/// Dormant project-local SDK seam for future native tool cassette transport.
+///
+/// The normal OpenHands command remains the installed CLI.  It exposes no
+/// terminal-executor configuration, so no existing run can select this helper.
+/// A future ASB-owned launcher may import the helper and provide a typed SDK
+/// `ToolExecutor` once the bounded native-cassette schema is available.
+const SDK_LAUNCHER: &str = include_str!("../../../assets/scripts/openhands-sdk-launcher.py");
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "openhands",
     "openhands",
@@ -144,6 +151,68 @@ fn conversation_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sdk_launcher_is_dormant_and_uses_the_terminal_factory_parameter() {
+        assert!(SDK_LAUNCHER.contains("def with_terminal_executor(agent: Any, executor: Any)"));
+        assert!(SDK_LAUNCHER.contains("from openhands.tools.terminal import TerminalTool"));
+        assert!(SDK_LAUNCHER.contains("tool.name != TerminalTool.name"));
+        assert!(SDK_LAUNCHER.contains("Tool(name=TerminalTool.name, params=params)"));
+        assert!(SDK_LAUNCHER.contains("params[\"executor\"] = executor"));
+        assert!(SDK_LAUNCHER.contains("agent.model_copy(update={\"tools\": tools})"));
+        assert!(!SDK_LAUNCHER.contains("register_tool("));
+        assert!(!SDK_LAUNCHER.contains("setattr("));
+        assert!(!SDK_LAUNCHER.contains("open("));
+        assert!(!SDK_LAUNCHER.contains("def main("));
+    }
+
+    #[test]
+    fn sdk_launcher_injects_the_installed_cli_terminal_tool() {
+        let Some(python) = std::env::var_os("ASB_TEST_OPENHANDS_PYTHON") else {
+            // OpenHands is intentionally a project-local optional tool, not a
+            // test dependency. The installed-SDK regression is opt-in.
+            return;
+        };
+        let root =
+            std::env::temp_dir().join(format!("asb-openhands-sdk-launcher-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let launcher = root.join("openhands_sdk_launcher.py");
+        std::fs::write(&launcher, SDK_LAUNCHER).unwrap();
+        let script = r#"
+import importlib.util
+import sys
+
+from openhands.tools.terminal import TerminalTool
+from openhands_cli.utils import get_default_cli_tools
+
+spec = importlib.util.spec_from_file_location("asb_openhands_launcher", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class Agent:
+    def __init__(self, tools):
+        self.tools = tools
+    def model_copy(self, *, update):
+        return Agent(update["tools"])
+
+original = Agent(get_default_cli_tools())
+executor = object()
+configured = module.with_terminal_executor(original, executor)
+terminal = [tool for tool in configured.tools if tool.name == TerminalTool.name]
+assert len(terminal) == 1
+assert terminal[0].params["executor"] is executor
+assert "executor" not in [tool for tool in original.tools if tool.name == TerminalTool.name][0].params
+"#;
+        let status = std::process::Command::new(python)
+            .arg("-c")
+            .arg(script)
+            .arg(&launcher)
+            .env("OPENHANDS_SUPPRESS_BANNER", "1")
+            .status()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(root);
+        assert!(status.success());
+    }
 
     #[test]
     fn sums_each_model_call_without_double_counting_accumulated_stats() {
