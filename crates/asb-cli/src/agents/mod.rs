@@ -1114,27 +1114,41 @@ mod tests {
 
     #[test]
     fn complete_tool_replay_adapters_declare_a_bounded_replay_sidecar() {
+        let local_sidecar = |adapter: &dyn AgentAdapter| {
+            adapter.artifact_specs().iter().any(|spec| {
+                spec.namespace == "tool-replay"
+                    && spec.filename == "local-tools.jsonl"
+                    && spec.format == ArtifactFormat::JsonLines
+            })
+        };
+        let native_sidecar = |adapter: &dyn AgentAdapter| {
+            adapter.artifact_specs().iter().any(|spec| {
+                spec.filename.contains("native-tool") && spec.format == ArtifactFormat::JsonLines
+            })
+        };
         for adapter in all()
             .iter()
             .copied()
             .filter(|adapter| adapter.supports_tool_replay())
         {
-            let sealed_local_transcript = adapter.artifact_specs().iter().any(|spec| {
-                spec.namespace == "tool-replay"
-                    && spec.filename == "local-tools.jsonl"
-                    && spec.format == ArtifactFormat::JsonLines
-            });
-            let sealed_native_sidecar = adapter.artifact_specs().iter().any(|spec| {
-                spec.namespace == "hermes"
-                    && spec.filename == "native-tool-sidecar.jsonl"
-                    && spec.format == ArtifactFormat::JsonLines
-            });
+            let complete_sidecar = if adapter.supports_native_tool_transport() {
+                native_sidecar(adapter)
+            } else {
+                local_sidecar(adapter)
+            };
             assert!(
-                sealed_local_transcript || sealed_native_sidecar,
-                "{} advertises complete tool replay without sealing local-tools.jsonl",
+                complete_sidecar,
+                "{} advertises complete tool replay without its declared bounded sidecar",
                 adapter.id()
             );
         }
+        // Negative coverage: non-native adapters cannot satisfy the contract
+        // merely by declaring an unrelated native artifact, while native
+        // adapters are not required to pretend their transport is MCP/local.
+        assert!(local_sidecar(find("pi").unwrap()));
+        assert!(!native_sidecar(find("pi").unwrap()));
+        assert!(native_sidecar(find("openhands").unwrap()));
+        assert!(!local_sidecar(find("openhands").unwrap()));
     }
 
     #[test]
