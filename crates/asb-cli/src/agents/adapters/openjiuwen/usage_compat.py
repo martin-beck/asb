@@ -116,6 +116,8 @@ _recorded_outputs = {}
 _recorded_outputs_by_key = {}
 _replayed_renders = {}
 _replayed_renders_by_key = {}
+_recorded_outputs_by_value = {}
+_replayed_renders_by_value = {}
 _native_workspace = os.path.realpath(
     os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", "")
 ) if os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE") else ""
@@ -135,6 +137,9 @@ def _payload(value):
 def _output_key(tool_name, output):
     """Identify a model-facing result even if OpenJiuwen copies ToolOutput."""
     return tool_name + ":" + _digest(_canonical(_normalize_workspace(output.model_dump())))
+
+def _output_value_key(output):
+    return _digest(_canonical(_normalize_workspace(output.model_dump())))
 
 def _normalize_workspace(value):
     if isinstance(value, str):
@@ -248,7 +253,33 @@ try:
     )
     from openjiuwen.harness.tools.shell import BashTool
     from openjiuwen.harness.tools.code import CodeTool
-    from openjiuwen.core.foundation.tool.schema import ToolOutput
+    from openjiuwen.core.foundation.tool.schema import Tool, ToolOutput
+
+    _original_base_render = Tool.render_for_llm
+
+    def _remember_recorded_render(output_event, rendered):
+        envelope = json.loads(base64.b64decode(output_event["output_b64"]))
+        if envelope["rendered"] is None:
+            envelope["rendered"] = _normalize_workspace(rendered)
+            encoded = _canonical(envelope)
+            output_event["response_sha256"] = _digest(encoded)
+            output_event["output_b64"] = _payload(encoded)
+
+    def _base_render_with_native_replay(self, output):
+        replayed = _replayed_renders.get(id(output))
+        if replayed is None:
+            replayed = _replayed_renders_by_value.get(_output_value_key(output))
+        if replayed is not None:
+            return replayed
+        rendered = _original_base_render(self, output)
+        output_event = _recorded_outputs.get(id(output))
+        if output_event is None:
+            output_event = _recorded_outputs_by_value.get(_output_value_key(output))
+        if output_event is not None:
+            _remember_recorded_render(output_event, rendered)
+        return rendered
+
+    Tool.render_for_llm = _base_render_with_native_replay
 
     def _wrap_native_tool(tool_name, tool_type):
         original_invoke = tool_type.invoke
@@ -294,6 +325,7 @@ try:
                 rendered = _materialize_workspace(envelope["rendered"])
                 _replayed_renders[id(result)] = rendered
                 _replayed_renders_by_key[_output_key(tool_name, result)] = rendered
+                _replayed_renders_by_value[_output_value_key(result)] = rendered
                 return result
             output = await original_invoke(self, inputs, **kwargs)
             if _record_path:
@@ -322,6 +354,7 @@ try:
                 ])
                 _recorded_outputs[id(output)] = output_event
                 _recorded_outputs_by_key[_output_key(tool_name, output)] = output_event
+                _recorded_outputs_by_value[_output_value_key(output)] = output_event
             return output
 
         def _render_with_native_replay(self, output):
@@ -335,16 +368,11 @@ try:
             if output_event is None:
                 output_event = _recorded_outputs_by_key.get(_output_key(tool_name, output))
             if output_event is not None:
-                envelope = json.loads(base64.b64decode(output_event["output_b64"]))
                 # A tool result can be rendered more than once for status or
                 # tracing. Preserve the first model-facing rendering: later
                 # renderings can be stateful/truncated and must not replace
                 # the value that the recording sent to the provider.
-                if envelope["rendered"] is None:
-                    envelope["rendered"] = _normalize_workspace(rendered)
-                    encoded = _canonical(envelope)
-                    output_event["response_sha256"] = _digest(encoded)
-                    output_event["output_b64"] = _payload(encoded)
+                _remember_recorded_render(output_event, rendered)
             return rendered
 
         tool_type.invoke = _invoke_with_native_replay
