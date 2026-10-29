@@ -441,6 +441,20 @@ mod tests {
         assert!(hook.contains("_task_id, _session_id"));
         assert!(!hook.contains("\"task_id\": task_id"));
         assert!(hook.contains("entry.handler = registered_terminal"));
+        // During an ASB native record/replay run, Hermes' generic oversized
+        // terminal-output persistence would substitute a process-local
+        // sandbox path into the next provider request.  The adapter keeps the
+        // recorded terminal response inline instead; no non-terminal result
+        // is affected by this narrow wrapper.
+        assert!(
+            hook.contains(
+                "def persist_terminal_result(content, tool_name, tool_use_id, **kwargs):"
+            )
+        );
+        assert!(hook.contains("if tool_name == \"terminal\":"));
+        assert!(hook.contains(
+            "return original_persist_tool_result(content, tool_name, tool_use_id, **kwargs)"
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 

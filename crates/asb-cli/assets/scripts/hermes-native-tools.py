@@ -268,6 +268,24 @@ try:
     entry = registry._tools.get("terminal")
     if entry is not None:
         entry.handler = registered_terminal
+
+    # Hermes normally persists a large terminal result into its ephemeral
+    # sandbox and replaces it with a message containing that sandbox path.
+    # The result is then placed in the next Responses request.  An ASB native
+    # recording already retains the exact terminal response in the private
+    # sidecar, whereas the sandbox path is process-local and consequently
+    # differs between record and replay.  Keep only this adapter-owned
+    # terminal result inline while native replay is active.  Other tools and
+    # normal Hermes invocations retain Hermes' standard persistence policy.
+    import agent.tool_executor as tool_executor
+    original_persist_tool_result = tool_executor.maybe_persist_tool_result
+
+    def persist_terminal_result(content, tool_name, tool_use_id, **kwargs):
+        if tool_name == "terminal":
+            return content
+        return original_persist_tool_result(content, tool_name, tool_use_id, **kwargs)
+
+    tool_executor.maybe_persist_tool_result = persist_terminal_result
     atexit.register(transport.close)
 
     # Hermes terminates its one-shot CLI through ``os._exit``.  That bypasses
