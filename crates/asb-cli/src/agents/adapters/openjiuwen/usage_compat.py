@@ -113,7 +113,9 @@ _native_events = []
 _native_cursor = 0
 _native_alias = "openjiuwen-native-tools-1"
 _recorded_outputs = {}
+_recorded_outputs_by_key = {}
 _replayed_renders = {}
+_replayed_renders_by_key = {}
 _native_workspace = os.path.realpath(
     os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", "")
 ) if os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE") else ""
@@ -129,6 +131,10 @@ def _digest(value):
 
 def _payload(value):
     return base64.b64encode(value).decode("ascii")
+
+def _output_key(tool_name, output):
+    """Identify a model-facing result even if OpenJiuwen copies ToolOutput."""
+    return tool_name + ":" + _digest(_canonical(_normalize_workspace(output.model_dump())))
 
 def _normalize_workspace(value):
     if isinstance(value, str):
@@ -285,7 +291,9 @@ try:
                 result = ToolOutput.model_validate(_materialize_workspace(
                     envelope["tool_output"]
                 ))
-                _replayed_renders[id(result)] = _materialize_workspace(envelope["rendered"])
+                rendered = _materialize_workspace(envelope["rendered"])
+                _replayed_renders[id(result)] = rendered
+                _replayed_renders_by_key[_output_key(tool_name, result)] = rendered
                 return result
             output = await original_invoke(self, inputs, **kwargs)
             if _record_path:
@@ -313,14 +321,19 @@ try:
                     output_event,
                 ])
                 _recorded_outputs[id(output)] = output_event
+                _recorded_outputs_by_key[_output_key(tool_name, output)] = output_event
             return output
 
         def _render_with_native_replay(self, output):
             replayed = _replayed_renders.get(id(output))
+            if replayed is None:
+                replayed = _replayed_renders_by_key.get(_output_key(tool_name, output))
             if replayed is not None:
                 return replayed
             rendered = original_render(self, output)
             output_event = _recorded_outputs.get(id(output))
+            if output_event is None:
+                output_event = _recorded_outputs_by_key.get(_output_key(tool_name, output))
             if output_event is not None:
                 envelope = json.loads(base64.b64decode(output_event["output_b64"]))
                 envelope["rendered"] = _normalize_workspace(rendered)

@@ -556,6 +556,10 @@ async def main():
     for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool):
         instance = tool()
         output = await instance.invoke({{"value": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})
+        # The real OpenJiuwen pipeline may reconstruct a ToolOutput between
+        # invocation and rendering. Exercise the adapter's stable value key,
+        # rather than relying on Python object identity.
+        output = type(output).model_validate(output.model_dump())
         result.append(instance.render_for_llm(output))
     print(json.dumps(result, sort_keys=True))
 asyncio.run(main())
