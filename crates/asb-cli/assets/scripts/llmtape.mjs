@@ -332,9 +332,12 @@ function normalizeCassetteBody(body) {
     // client-side rendering observation, not request semantics: the same
     // recorded command necessarily takes a different amount of time while an
     // offline replay is being driven.  Scope the replacement to this complete
-    // fixed Codex envelope so a prompt or arbitrary tool result merely
-    // mentioning a wall time remains cassette-significant.
+    // fixed Codex envelopes so a prompt or arbitrary tool result merely
+    // mentioning a wall time remains cassette-significant.  An asynchronous
+    // shell result also includes a process-local session number; retain its
+    // status text and every other byte of the result.
     .replace(/(Chunk ID: [^\n]*?(?:\r?\n|\\n)Wall time: )\d+(?:\.\d+)? seconds(?=(?:\r?\n|\\n)Process exited with code \d+)/g, "$1<asb-wall-time> seconds")
+    .replace(/(Chunk ID: [^\n]*?(?:\r?\n|\\n)Wall time: )\d+(?:\.\d+)? seconds((?:\r?\n|\\n)Process running with session ID )\d+/g, "$1<asb-wall-time> seconds$2<asb-session>")
     // Normalize generated call identifiers, but retain the relationship
     // between distinct IDs in one request/response. OpenCode can receive
     // multiple tool calls in a streamed response; collapsing every ID into

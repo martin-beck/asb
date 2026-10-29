@@ -1317,6 +1317,34 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_codex_async_shell_envelope() {
+        let root = test_root();
+        let cassette = root.join("codex-async-shell.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Chunk ID: deadbeef\nWall time: 0.2164 seconds\nProcess running with session ID 7812\nwaiting for command output"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let replayed = recorded.replace("0.2164", "1.904").replace("7812", "9914");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_status = replayed.replace("Process running", "Process exited");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &changed_status).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        let changed_output = replayed.replace("waiting for command output", "different output");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &changed_output).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_rejects_changed_body_and_extra_requests() {
         let root = test_root();
         let cassette = cassette(&root);
