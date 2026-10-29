@@ -772,9 +772,7 @@ impl<'a> ReadyAttempt<'a> {
             let native_tool = options
                 .native_tool_inputs
                 .and_then(|inputs| inputs.get(options.replica.index.checked_sub(1)?))
-                .and_then(|input| {
-                    input.native_tool_launch().zip(input.native_tool.as_deref())
-                });
+                .and_then(|input| input.native_tool_launch().zip(input.native_tool.as_deref()));
             let isolated = prepared.workload.execute(
                 &mut workloads::ExecutionContext {
                     launch,
