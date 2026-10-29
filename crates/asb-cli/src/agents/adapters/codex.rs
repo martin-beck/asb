@@ -284,7 +284,12 @@ fn bind_provider_tool_outputs(
         std::fs::read(capture).map_err(|_| "Codex provider capture is unavailable".to_owned())?;
     let capture = std::str::from_utf8(&capture)
         .map_err(|_| "Codex provider capture is not UTF-8".to_owned())?;
-    let mut outputs = std::collections::BTreeMap::<String, Vec<u8>>::new();
+    // Codex's Responses input is a cumulative history.  A `call_id` can be
+    // retained for multiple different historical tool outputs, so it is not a
+    // global output key.  Derive the newly appended result suffix from each
+    // successive snapshot and bind it to the native hook's causal order.
+    let mut prior = Vec::<(String, Vec<u8>)>::new();
+    let mut outputs = std::collections::VecDeque::<Vec<u8>>::new();
     for line in capture.lines() {
         let row: serde_json::Value = serde_json::from_str(line)
             .map_err(|_| "Codex provider capture is invalid".to_owned())?;
@@ -296,34 +301,32 @@ fn bind_provider_tool_outputs(
         };
         let body: serde_json::Value = serde_json::from_str(body)
             .map_err(|_| "Codex provider request body is invalid".to_owned())?;
-        for item in body
+        let current = body
             .get("input")
             .and_then(serde_json::Value::as_array)
             .into_iter()
             .flatten()
-        {
-            let (Some(id), Some(output)) = (
-                item.get("call_id").and_then(serde_json::Value::as_str),
-                item.get("output").and_then(serde_json::Value::as_str),
-            ) else {
-                continue;
-            };
-            match outputs.entry(id.to_owned()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(output.as_bytes().to_vec());
-                }
-                std::collections::btree_map::Entry::Occupied(entry)
-                    if entry.get().as_slice() == output.as_bytes() =>
-                {
-                    // Later request snapshots legitimately retain historical
-                    // tool results. They are the same native exchange, not a
-                    // second tool call.
-                }
-                std::collections::btree_map::Entry::Occupied(_) => {
-                    return Err("Codex provider capture repeats a native tool identity".into());
-                }
-            }
+            .filter_map(|item| {
+                Some((
+                    item.get("call_id")
+                        .and_then(serde_json::Value::as_str)?
+                        .to_owned(),
+                    item.get("output")
+                        .and_then(serde_json::Value::as_str)?
+                        .as_bytes()
+                        .to_vec(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        if !current.starts_with(&prior) {
+            return Err("Codex provider tool result history diverges".into());
         }
+        outputs.extend(
+            current[prior.len()..]
+                .iter()
+                .map(|(_, output)| output.clone()),
+        );
+        prior = current;
     }
     let mut rows = sidecar
         .split_inclusive(|byte| *byte == b'\n')
@@ -351,10 +354,10 @@ fn bind_provider_tool_outputs(
                     .to_owned(),
             );
         } else if row.get("event").and_then(serde_json::Value::as_str) == Some("output") {
-            let id = pending
+            pending
                 .take()
                 .ok_or_else(|| "Codex native sidecar output has no request".to_owned())?;
-            let output = outputs.remove(&id).ok_or_else(|| {
+            let output = outputs.pop_front().ok_or_else(|| {
                 "Codex provider capture has no matching native tool result".to_owned()
             })?;
             let output = serde_json::to_vec(
@@ -1061,5 +1064,45 @@ mod tests {
         );
         assert!(!mismatch.status.success());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_correlation_consumes_cumulative_same_id_history_in_order() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-codex-provider-history-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let request = |id: &str| {
+            encode_base64(
+                serde_json::to_string(&serde_json::json!({"tool_use_id": id}))
+                    .unwrap()
+                    .as_bytes(),
+            )
+        };
+        let sidecar = [
+            serde_json::json!({"event":"write","request_b64":request("call-1")}),
+            serde_json::json!({"event":"output"}),
+            serde_json::json!({"event":"write","request_b64":request("call-1")}),
+            serde_json::json!({"event":"output"}),
+            serde_json::json!({"event":"workspace_effect"}),
+        ]
+        .into_iter()
+        .map(|row| serde_json::to_string(&row).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n";
+        let first = serde_json::json!({"request":{"body":serde_json::json!({"input":[{"call_id":"call-1","output":"first"}]}).to_string()}});
+        let second = serde_json::json!({"request":{"body":serde_json::json!({"input":[{"call_id":"call-1","output":"first"},{"call_id":"call-1","output":"second"}]}).to_string()}});
+        let capture = root.join("capture.jsonl");
+        std::fs::write(&capture, format!("{first}\n{second}\n")).unwrap();
+        let bound = bind_provider_tool_outputs(sidecar.as_bytes(), &capture).unwrap();
+        let rows = String::from_utf8(bound)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_ne!(rows[1]["output_b64"], rows[3]["output_b64"]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
