@@ -336,7 +336,9 @@ fn retain_payload_budget(current: usize, next: usize) -> Result<usize, Error> {
 }
 
 fn decode_payload(value: &str) -> Result<Vec<u8>, Error> {
-    if value.len() > MAX_PAYLOAD_BYTES.saturating_mul(4).div_ceil(3) + 4 || value.len() % 4 != 0 {
+    if value.len() > MAX_PAYLOAD_BYTES.saturating_mul(4).div_ceil(3) + 4
+        || !value.len().is_multiple_of(4)
+    {
         return Err(Error(
             "native tool payload encoding is invalid or excessive".into(),
         ));
