@@ -285,12 +285,27 @@ function normalizeHermesVerificationScriptPath(value) {
   );
 }
 
+// OpenJiuwen's local vision-capability probe writes its generated image into a
+// per-process temporary directory. The probe result forwarded in the next
+// provider request includes that generated filename. Its 12-hex suffix is a
+// local artifact identity rather than probe or workload content, so preserve
+// the complete OpenJiuwen-specific filename convention while canonicalizing
+// only that suffix. Other paths, extensions, and all surrounding output stay
+// cassette-significant.
+function normalizeOpenJiuwenVisionProbeOutputPath(value) {
+  return value.replace(
+    /\bopenjiuwen(?:_[A-Za-z0-9]+)+\/[A-Za-z0-9]+_[0-9a-f]{12}\.[A-Za-z0-9]+\b/gi,
+    (path) => path.replace(/_[0-9a-f]{12}(?=\.[A-Za-z0-9]+$)/i, "_<asb-openjiuwen-probe-output>"),
+  );
+}
+
 function normalizeCassetteBody(body) {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const callIdentifiers = new Map();
   const normalized = normalizeFunctionRenderingAddress(normalizePytestElapsed(
+    normalizeOpenJiuwenVisionProbeOutputPath(
     normalizeWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace)
       .replaceAll(workspace || "\u0000", "<asb-workspace>"))
     // Preserve distinct call IDs before the generic UUID normalizer below.
@@ -361,7 +376,7 @@ function normalizeCassetteBody(body) {
     // pip's download progress embeds live transfer throughput and ETA after
     // the already-significant artifact size. Keep the package and byte count
     // strict while removing only transport timing from tool history.
-    .replace(/(\b\d+(?:\.\d+)?\/\d+(?:\.\d+)? (?:kB|MB|GB) )\d+(?:\.\d+)? (?:kB|MB|GB)\/s eta \d+:\d+:\d+/g, "$1<asb-transfer-rate> eta <asb-transfer-eta>")));
+    .replace(/(\b\d+(?:\.\d+)?\/\d+(?:\.\d+)? (?:kB|MB|GB) )\d+(?:\.\d+)? (?:kB|MB|GB)\/s eta \d+:\d+:\d+/g, "$1<asb-transfer-rate> eta <asb-transfer-eta>"))));
   try {
     const structuredToolCallIdentifiers = new Map();
     const structuredContentBlockIdentifiers = new Map();

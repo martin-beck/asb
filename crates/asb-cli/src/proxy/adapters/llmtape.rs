@@ -1014,6 +1014,29 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_openjiuwen_vision_probe_output_filename() {
+        let root = test_root();
+        let cassette = root.join("openjiuwen-vision-probe-output.jsonl");
+        let recorded = r#"{"model":"m","temperature":0,"messages":[{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"OpenJiuwen local vision probe stored output at /tmp/openjiuwen_vision_probe/image_123456789abc.png"}]}]}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/messages", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = recorded.replace("123456789abc", "abcdef012345");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let response = request_to(&session, "/v1/messages", &replayed);
+        assert!(response.contains("200 OK"), "{response}");
+        session.stop().unwrap();
+
+        let unrelated = replayed.replace("openjiuwen_vision_probe", "other_vision_probe");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/messages", &unrelated).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_structured_python_callable_address_rendering() {
         let root = test_root();
         let cassette = root.join("structured-python-callable-address.jsonl");
