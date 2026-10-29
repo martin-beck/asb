@@ -1091,6 +1091,7 @@ mod tests {
         assert!(find("opencode").unwrap().supports_tool_replay());
         assert!(find("claude-code").unwrap().supports_tool_replay());
         assert!(find("cline").unwrap().supports_tool_replay());
+        assert!(find("continue").unwrap().supports_tool_replay());
         assert!(find("qwen-code").unwrap().supports_tool_replay());
         assert!(find("hermes").unwrap().supports_tool_replay());
         assert!(!find("codex").unwrap().supports_tool_replay());
