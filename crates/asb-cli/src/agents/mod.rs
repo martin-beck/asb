@@ -1077,7 +1077,7 @@ mod tests {
             .filter(|adapter| adapter.supports_native_tool_transport())
             .map(|adapter| adapter.id())
             .collect::<Vec<_>>();
-        assert_eq!(capable, vec!["openhands", "openjiuwen"]);
+        assert_eq!(capable, vec!["codex", "openhands", "openjiuwen"]);
         let adapter = find("codex").unwrap();
         assert!(select_process(adapter, "not-executed", None).is_ok());
     }
