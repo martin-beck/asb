@@ -365,7 +365,7 @@ if (taped) {
 } else {
   require('fs').writeFileSync('src/parser.py', "def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n");
 }
-fetch(base + '/responses', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({model:'test-model',input:'fixture',messages:[{messageId:require('crypto').randomBytes(16).toString('hex'),conversationRequestId:require('crypto').randomBytes(16).toString('hex'),role:'assistant',content:'fixture'}],tools:[{type:'function'}]})})
+fetch(base + '/responses', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({model:'test-model',input:'fixture',messages:[{messageId:require('crypto').randomBytes(16).toString('hex'),traceId:require('crypto').randomBytes(16).toString('hex'),conversationRequestId:require('crypto').randomBytes(16).toString('hex'),role:'assistant',content:'fixture'}],tools:[{type:'function'}]})})
   .then(async r => { if (!r.ok) throw new Error(await r.text()); console.log('{"type":"result","num_turns":1,"usage":{"input_tokens":1,"output_tokens":1}}'); })
   .catch(error => { console.error(error); process.exitCode = 1; });
 "##)

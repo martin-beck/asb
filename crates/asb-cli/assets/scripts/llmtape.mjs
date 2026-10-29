@@ -470,6 +470,17 @@ function normalizeCassetteBody(body) {
           && /^[0-9a-f]{32}$/i.test(value)) {
         return "<asb-workbuddy-message>";
       }
+      // The client assigns a separate generated trace ID to the same history
+      // envelope. It is correlation metadata, not model-visible content.
+      if (typeof value === "string"
+          && path.length === 3
+          && path[0] === "messages"
+          && /^\d+$/.test(path[1])
+          && path[2] === "traceId"
+          && key === "traceId"
+          && /^[0-9a-f]{32}$/i.test(value)) {
+        return "<asb-workbuddy-trace>";
+      }
       if (typeof value === "string") {
         value = normalizeToolSearchOrdering(value);
         value = normalizeLsDiagnosticOrdering(value);
