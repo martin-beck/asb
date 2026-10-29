@@ -509,13 +509,19 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         })
         .transpose()?;
     let specification = adapter.command(&super::CommandContext {
+        executable: &program,
         config: &execution_config,
         endpoint: Some(&request.connection.base_url),
         interface: Some(request.connection.interface),
         prompt: &request.prompt,
         native_tool,
     });
-    let mut command = super::select_process(adapter, &program, native_tool)?.direct();
+    let process_program = if specification.program == adapter.executable() {
+        &program
+    } else {
+        &specification.program
+    };
+    let mut command = super::select_process(adapter, process_program, native_tool)?.direct();
     command.args(specification.args);
     let stdin_prompt = match specification.prompt_delivery {
         super::PromptDelivery::Argument => {

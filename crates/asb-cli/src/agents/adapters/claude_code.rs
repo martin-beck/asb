@@ -282,6 +282,7 @@ mod tests {
         )
         .unwrap();
         let command = ADAPTER.command(&CommandContext {
+            executable: "claude",
             config: &config,
             endpoint: None,
             interface: None,

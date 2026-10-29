@@ -31,6 +31,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Dispatch the adapter-private OpenHands native bridge without exposing the
+/// adapter registry itself to unrelated CLI modules.
+pub(crate) fn openhands_native_entry(args: &[std::ffi::OsString]) -> std::process::ExitCode {
+    adapters::openhands_native::entry(args)
+}
+
 /// Versioned delivery of task inputs into an isolated coding-agent invocation.
 /// Bump when incompatible input/session semantics change, not for binary updates.
 pub(crate) const REPLAY_INPUT_CONTRACT: &str = "asb-agent-input-and-session-v1";
@@ -208,6 +214,9 @@ impl PreparationContext<'_> {
 }
 
 pub(crate) struct CommandContext<'a> {
+    /// Resolved project-local agent executable. Adapter-owned alternate SDK
+    /// launchers may derive their matching interpreter from this wrapper.
+    pub executable: &'a str,
     pub config: &'a BenchmarkConfig,
     pub endpoint: Option<&'a str>,
     pub interface: Option<Interface>,
@@ -410,6 +419,7 @@ pub(super) struct StaticAdapter {
     complete_tool_replay: bool,
     mcp_servers: bool,
     mcp_relay: bool,
+    native_tool_transport: bool,
     collect: Option<CollectionHook>,
     artifact_specs: &'static [ArtifactSpec],
     deterministic_extension: bool,
@@ -445,6 +455,7 @@ impl StaticAdapter {
             complete_tool_replay: false,
             mcp_servers: false,
             mcp_relay: false,
+            native_tool_transport: false,
             collect: None,
             artifact_specs: &[],
             deterministic_extension: false,
@@ -496,6 +507,12 @@ impl StaticAdapter {
     /// server with ASB's transport-only relay.
     pub(super) const fn with_mcp_relay(mut self) -> Self {
         self.mcp_relay = true;
+        self
+    }
+
+    /// Declares an adapter-owned, tested consumer for a sealed native sidecar.
+    pub(super) const fn with_native_tool_transport(mut self) -> Self {
+        self.native_tool_transport = true;
         self
     }
 
@@ -641,6 +658,9 @@ impl AgentAdapter for StaticAdapter {
     }
     fn supports_mcp_relay(&self) -> bool {
         self.mcp_relay
+    }
+    fn supports_native_tool_transport(&self) -> bool {
+        self.native_tool_transport
     }
     fn forwarded_invocation_environment_vars(&self) -> &'static [&'static str] {
         self.forwarded_invocation_environment_vars
@@ -1005,6 +1025,7 @@ mod tests {
         };
         for adapter in all() {
             let command = adapter.command(&CommandContext {
+                executable: adapter.executable(),
                 config: &config,
                 endpoint: Some("http://127.0.0.1:3000/v1"),
                 interface: Some(Interface::AnthropicMessages),

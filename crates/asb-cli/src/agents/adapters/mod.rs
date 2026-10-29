@@ -11,6 +11,7 @@ mod hermes;
 mod mini_swe;
 mod opencode;
 mod openhands;
+pub(crate) mod openhands_native;
 mod openjiuwen;
 mod pi;
 mod qwen_code;

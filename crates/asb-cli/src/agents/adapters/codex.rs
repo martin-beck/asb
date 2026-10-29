@@ -492,6 +492,7 @@ mod tests {
         )
         .unwrap();
         let spec = command(&CommandContext {
+            executable: "codex",
             config: &config,
             endpoint: None,
             interface: None,
