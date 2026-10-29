@@ -112,11 +112,13 @@ impl Activity {
             return;
         }
         self.last = now;
-        self.render(false);
+        self.render();
     }
 
     pub(crate) fn finish(mut self) -> Progress {
-        self.render(true);
+        // Completed validation and extraction remain transient UI.  `Drop`
+        // clears this row without committing a separate line for each step.
+        self.render();
         self.snapshot()
     }
 
@@ -133,7 +135,7 @@ impl Activity {
         }
     }
 
-    fn render(&mut self, complete: bool) {
+    fn render(&mut self) {
         let progress = self.snapshot();
         // The TUI owns a private status path in the installer process. Publish
         // the known input size and consumed bytes even when this child has no
@@ -143,13 +145,9 @@ impl Activity {
             return;
         }
         let mut stderr = io::stderr().lock();
-        let result = if complete {
-            writeln!(stderr, "\r\x1b[2K{}", line(&self.label, progress))
-        } else {
-            write!(stderr, "\r\x1b[2K{}", line(&self.label, progress))
-        };
+        let result = redraw_line(&mut stderr, &line(&self.label, progress));
         if result.and_then(|()| stderr.flush()).is_ok() {
-            self.visible = !complete;
+            self.visible = true;
         }
     }
 }
@@ -158,8 +156,7 @@ impl Drop for Activity {
     fn drop(&mut self) {
         if self.visible {
             let mut stderr = io::stderr().lock();
-            let _ = write!(stderr, "\r\x1b[2K");
-            let _ = stderr.flush();
+            let _ = clear_line(&mut stderr);
         }
         clear_snapshot();
     }
@@ -332,7 +329,7 @@ fn observe_download(
         publish_snapshot(snapshot);
         if interactive {
             let mut stderr = io::stderr().lock();
-            if write!(stderr, "\r\x1b[2K{}", line(&label, snapshot))
+            if redraw_line(&mut stderr, &line(&label, snapshot))
                 .and_then(|()| stderr.flush())
                 .is_ok()
             {
@@ -357,8 +354,7 @@ fn observe_download(
     publish_snapshot(snapshot);
     if visible {
         let mut stderr = io::stderr().lock();
-        let _ = writeln!(stderr, "\r\x1b[2K{}", line(&label, snapshot));
-        let _ = stderr.flush();
+        let _ = clear_line(&mut stderr);
     }
 }
 
@@ -403,7 +399,7 @@ fn observe_cache(
         publish_snapshot(snapshot);
         if interactive {
             let mut stderr = io::stderr().lock();
-            if write!(stderr, "\r\x1b[2K{}", line(&label, snapshot))
+            if redraw_line(&mut stderr, &line(&label, snapshot))
                 .and_then(|()| stderr.flush())
                 .is_ok()
             {
@@ -432,9 +428,20 @@ fn observe_cache(
     publish_snapshot(snapshot);
     if visible {
         let mut stderr = io::stderr().lock();
-        let _ = writeln!(stderr, "\r\x1b[2K{}", line(&label, snapshot));
-        let _ = stderr.flush();
+        let _ = clear_line(&mut stderr);
     }
+}
+
+/// Redraw transient transfer activity without adding a durable terminal line.
+/// Sweep-level progress is deliberately rendered elsewhere as durable output.
+fn redraw_line(output: &mut impl Write, text: &str) -> io::Result<()> {
+    write!(output, "\r\x1b[2K{text}")
+}
+
+/// Clear a transient progress row without advancing the terminal.
+fn clear_line(output: &mut impl Write) -> io::Result<()> {
+    write!(output, "\r\x1b[2K")?;
+    output.flush()
 }
 
 /// Counts only regular files below an ASB-owned cache directory.  The cache
@@ -599,6 +606,18 @@ mod tests {
             )
             .contains("[-------?%-------] 512 B/? 256 B/s")
         );
+    }
+
+    #[test]
+    fn transient_activity_redraw_and_cleanup_do_not_advance_the_terminal() {
+        let mut output = Vec::new();
+        redraw_line(&mut output, "Validating runtime archive [=====]").unwrap();
+        clear_line(&mut output).unwrap();
+        assert_eq!(
+            output,
+            b"\r\x1b[2KValidating runtime archive [=====]\r\x1b[2K"
+        );
+        assert!(!output.contains(&b'\n'));
     }
 
     #[test]
