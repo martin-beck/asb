@@ -14,6 +14,11 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_complete_tool_replay(prepare_tool_replay)
+.with_artifact_specs(&[super::super::ArtifactSpec {
+    namespace: "tool-replay",
+    filename: "local-tools.jsonl",
+    format: super::super::ArtifactFormat::JsonLines,
+}])
 .with_mcp_servers()
 .with_mcp_relay()
 .with_collection(super::super::mcp_relay::collect_artifacts)

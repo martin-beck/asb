@@ -1008,6 +1008,25 @@ mod tests {
     }
 
     #[test]
+    fn complete_tool_replay_adapters_seal_their_local_tool_transcript() {
+        for adapter in all()
+            .iter()
+            .copied()
+            .filter(|adapter| adapter.supports_tool_replay())
+        {
+            assert!(
+                adapter.artifact_specs().iter().any(|spec| {
+                    spec.namespace == "tool-replay"
+                        && spec.filename == "local-tools.jsonl"
+                        && spec.format == ArtifactFormat::JsonLines
+                }),
+                "{} advertises complete tool replay without sealing local-tools.jsonl",
+                adapter.id()
+            );
+        }
+    }
+
+    #[test]
     fn final_response_uses_structured_events_not_prompt_or_tool_text() {
         let root = std::env::temp_dir().join(format!("asb-final-response-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
