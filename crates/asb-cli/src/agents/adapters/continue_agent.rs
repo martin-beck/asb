@@ -203,6 +203,7 @@ mod tests {
         std::fs::write(directory.join("sessions.json"), "[]").unwrap();
         let context = CollectionContext {
             frozen: &Default::default(),
+            provider_capture: None,
             run_dir: &root,
             interface: None,
             anthropic_input_includes_cache: false,

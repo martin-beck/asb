@@ -290,6 +290,7 @@ assert "executor" not in [tool for tool in original.tools if tool.name == Termin
         std::fs::write(conversations.join("first/base_state.json"), doc).unwrap();
         let context = CollectionContext {
             frozen: &Default::default(),
+            provider_capture: None,
             run_dir: &root,
             interface: None,
             anthropic_input_includes_cache: false,

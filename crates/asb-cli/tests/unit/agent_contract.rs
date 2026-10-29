@@ -31,6 +31,7 @@ fn config() -> BenchmarkConfig {
 fn collect_context() -> CollectionContext<'static> {
     static FROZEN: std::sync::OnceLock<FrozenArtifacts> = std::sync::OnceLock::new();
     CollectionContext {
+        provider_capture: None,
         frozen: FROZEN.get_or_init(FrozenArtifacts::default),
         run_dir: Path::new("fixture-run"),
         interface: None,
