@@ -470,6 +470,7 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
             r#"
 class Config:
     enable_read_image_multimodal = None
+    parallel_tool_calls = None
 class Agent:
     _deep_config = Config()
 def create_agent(_cfg):
@@ -550,6 +551,7 @@ from openjiuwen.harness.tools.code import CodeTool
 async def main():
     agent, _tracker = factory.create_agent(None)
     assert agent._deep_config.enable_read_image_multimodal is False
+    assert agent._deep_config.parallel_tool_calls is False
     result = []
     for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool):
         instance = tool()

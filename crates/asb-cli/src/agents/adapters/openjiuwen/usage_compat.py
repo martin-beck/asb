@@ -220,6 +220,11 @@ if _record_path or _replay_path:
             config = getattr(agent, "_deep_config", None)
             if config is not None:
                 config.enable_read_image_multimodal = False
+                # Native direct tools are captured as an ordered adapter
+                # transcript. Keep the benchmark launch profile serial so a
+                # batch of concurrent tool completions cannot reorder the
+                # model-facing results between record and replay.
+                config.parallel_tool_calls = False
             return agent, tracker
 
         _agent_factory.create_agent = _create_text_only_agent
