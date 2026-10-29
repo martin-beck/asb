@@ -333,7 +333,13 @@ impl Prepared {
                             .map_err(input_error)?,
                     );
                 }
-                publish_bytes(&root.join(native_tool), &bytes)?;
+                // The isolated workload runs outside the campaign root. Keep
+                // the owner-only replay input pointed at the exact staged
+                // sidecar, rather than the relative catalogue name used
+                // before staging.
+                let staged_native_tool = root.join(native_tool);
+                publish_bytes(&staged_native_tool, &bytes)?;
+                input.native_tool = Some(staged_native_tool);
             }
             for relay in &input.mcp_relays {
                 let bytes = self
