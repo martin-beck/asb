@@ -398,6 +398,11 @@ mod tests {
                 .unwrap()
                 .contains("_HERMES_CORE_TOOLS[:] = [\"terminal\"]")
         );
+        assert!(
+            std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
+                .unwrap()
+                .contains("task_id, session_id, force, workdir")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

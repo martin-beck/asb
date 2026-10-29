@@ -30,7 +30,7 @@ def _digest(value):
     return hashlib.sha256(value).hexdigest()
 
 
-def _request(command, background, timeout, task_id, force, workdir, pty, notify_on_complete, watch_patterns):
+def _request(command, background, timeout, task_id, session_id, force, workdir, pty, notify_on_complete, watch_patterns):
     return _encoded({
         "kind": "terminal",
         "schema_version": 1,
@@ -38,6 +38,7 @@ def _request(command, background, timeout, task_id, force, workdir, pty, notify_
         "background": background,
         "timeout": timeout,
         "task_id": task_id,
+        "session_id": session_id,
         "force": force,
         "workdir": workdir,
         "pty": pty,
@@ -205,7 +206,7 @@ try:
 
     def terminal(command, background=False, timeout=None, task_id=None, session_id=None, force=False,
                  workdir=None, pty=False, notify_on_complete=False, watch_patterns=None):
-        return transport.invoke(original, command, background, timeout, task_id, force, workdir,
+        return transport.invoke(original, command, background, timeout, task_id, session_id, force, workdir,
                                 pty, notify_on_complete, watch_patterns)
 
     terminal_tool.terminal_tool = terminal
