@@ -1032,6 +1032,34 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_structured_hermes_verification_script_path() {
+        let root = test_root();
+        let cassette = root.join("structured-hermes-verification-script.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Temporary verification script: /opt/asb-private/agent-state/tmp/hermes-verify-nnolyulw.py\nAd-hoc verification passed."}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = r#"{"model":"m","input":[{"type":"function_call_output","output":"Temporary verification script: /opt/asb-private/agent-state/tmp/hermes-verify-fkdeg5vs.py\nAd-hoc verification passed."}]}"#;
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let filename_change =
+            replayed.replace("hermes-verify-fkdeg5vs.py", "hermes-check-fkdeg5vs.py");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &filename_change).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        let content_change = replayed.replace("verification passed", "verification failed");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &content_change).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_complete_testbed_search_block_ordering() {
         let root = test_root();
         let cassette = root.join("opencode-search-order.jsonl");

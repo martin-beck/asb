@@ -274,6 +274,17 @@ function normalizeObjectRenderingAddress(value) {
   return value.replace(/(<[^<>\n]+ object at )0x[0-9a-f]+>/gi, "$1<asb-address>>");
 }
 
+// Hermes creates a one-shot verification script under its private temp root.
+// Its random basename is a run-local artifact path, not tool-result content.
+// Keep the rule confined to that exact Hermes filename convention; other temp
+// paths, filenames, extensions, and all surrounding output remain strict.
+function normalizeHermesVerificationScriptPath(value) {
+  return value.replace(
+    /\/opt\/asb-private\/agent-state\/tmp\/hermes-verify-[A-Za-z0-9]+\.py/g,
+    "<asb-hermes-verification-script>",
+  );
+}
+
 function normalizeCassetteBody(body) {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
@@ -281,8 +292,7 @@ function normalizeCassetteBody(body) {
   const callIdentifiers = new Map();
   const normalized = normalizeFunctionRenderingAddress(normalizePytestElapsed(
     normalizeWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace)
-      .replaceAll(workspace || "\u0000", "<asb-workspace>")),
-  ))
+      .replaceAll(workspace || "\u0000", "<asb-workspace>"))
     // Preserve distinct call IDs before the generic UUID normalizer below.
     // OpenCode uses `call-<uuid>` while some OpenAI-compatible clients use
     // `call_<uuid>`; both forms are provider-generated rather than prompt
@@ -346,7 +356,7 @@ function normalizeCassetteBody(body) {
     // pip's download progress embeds live transfer throughput and ETA after
     // the already-significant artifact size. Keep the package and byte count
     // strict while removing only transport timing from tool history.
-    .replace(/(\b\d+(?:\.\d+)?\/\d+(?:\.\d+)? (?:kB|MB|GB) )\d+(?:\.\d+)? (?:kB|MB|GB)\/s eta \d+:\d+:\d+/g, "$1<asb-transfer-rate> eta <asb-transfer-eta>"));
+    .replace(/(\b\d+(?:\.\d+)?\/\d+(?:\.\d+)? (?:kB|MB|GB) )\d+(?:\.\d+)? (?:kB|MB|GB)\/s eta \d+:\d+:\d+/g, "$1<asb-transfer-rate> eta <asb-transfer-eta>")));
   try {
     const structuredToolCallIdentifiers = new Map();
     const structuredContentBlockIdentifiers = new Map();
@@ -481,6 +491,7 @@ function normalizeCassetteBody(body) {
       if (typeof value === "string") {
         value = normalizeFunctionRenderingAddress(value);
         value = normalizeObjectRenderingAddress(value);
+        value = normalizeHermesVerificationScriptPath(value);
         value = normalizeToolSearchOrdering(value);
         value = normalizeLsDiagnosticOrdering(value);
         const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
