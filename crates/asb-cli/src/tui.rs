@@ -3956,6 +3956,23 @@ mod tests {
         for pane in &mut app.panes[..4] {
             pane.selected[0] = true;
         }
+        // A trial-capable workload publishes the current extension pane, even
+        // when the workload row is a persisted trial set. Mirror the explicit
+        // all-trials selection made by the setup wizard.
+        app.panes[PaneKind::Extensions.index()] = Pane::new(
+            (0..2294)
+                .map(|index| Choice {
+                    label: format!("fixture-instance-{index}"),
+                    key: ChoiceKey::ExtensionValue {
+                        workload: "swe-bench".into(),
+                        extension: "trial".into(),
+                        value: format!("fixture-instance-{index}"),
+                    },
+                    availability: Availability::Available,
+                })
+                .collect(),
+        );
+        app.panes[PaneKind::Extensions.index()].selected.fill(true);
         let generated = generate_configs(&app).unwrap();
         assert_eq!(generated.tests, 2294);
         assert!(std::fs::metadata(&generated.sweep).unwrap().len() > 64 * 1024);
