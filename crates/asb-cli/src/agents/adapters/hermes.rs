@@ -419,6 +419,11 @@ mod tests {
         assert!(
             std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
                 .unwrap()
+                .contains("\"invocations\": invocations")
+        );
+        assert!(
+            std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
+                .unwrap()
                 .contains("_HERMES_CORE_TOOLS[:] = [\"terminal\"]")
         );
         assert!(

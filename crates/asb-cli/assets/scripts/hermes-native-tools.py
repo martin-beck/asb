@@ -50,9 +50,9 @@ def _request(command, background, timeout, _task_id, _session_id, force, workdir
     })
 
 
-def _write_progress(complete, error=None):
+def _write_progress(complete, error=None, invocations=0):
     PROGRESS.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    document = {"schema_version": 1, "mode": MODE, "complete": complete}
+    document = {"schema_version": 1, "mode": MODE, "complete": complete, "invocations": invocations}
     if error is not None:
         document["error"] = error
     temporary = PROGRESS.with_suffix(".tmp")
@@ -130,14 +130,14 @@ class Recorder:
         self.complete = True
         try:
             if self.failed:
-                _write_progress(False, "terminal tool did not settle")
+                _write_progress(False, "terminal tool did not settle", len(self.entries) // 2)
                 return
             self._event({"event": "exit", "alias": SESSION, "success": True})
             effect = _digest(b"".join(self.entries))
             self._event({"event": "workspace_effect", "sha256": effect})
-            _write_progress(True)
+            _write_progress(True, invocations=len(self.entries) // 2)
         except BaseException:
-            _write_progress(False, "native sidecar finalization failed")
+            _write_progress(False, "native sidecar finalization failed", len(self.entries) // 2)
         finally:
             self.file.close()
 
@@ -207,7 +207,7 @@ class Replayer:
 
     def close(self):
         complete = not self.failed and self.index == len(self.exchanges)
-        _write_progress(complete, None if complete else self.failure or "native terminal replay is incomplete")
+        _write_progress(complete, None if complete else self.failure or "native terminal replay is incomplete", self.index)
 
 
 def _request_difference(expected, actual):
