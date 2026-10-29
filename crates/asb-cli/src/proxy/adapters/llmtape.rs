@@ -986,6 +986,34 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_qwen_persisted_output_filename() {
+        let root = test_root();
+        let cassette = root.join("qwen-persisted-output.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"content":"<persisted-output>\nOutput too large (37 KB). Full output saved to: /opt/asb-private/agent-state/home/.qwen/tmp/427298c01319355aae99da720b647df7cd291b9e3d2f3b5950ed35fb285aaf3f/tool-results/call_193d25ef253b4045a147311558349385.txt\nFull output sha256: cd15fb964c709e38041ea1ae54f12add71bf2c7ac8c8167883326629ccd06745\n</persisted-output>"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = recorded.replace(
+            "/opt/asb-private/agent-state/home/.qwen/tmp/427298c01319355aae99da720b647df7cd291b9e3d2f3b5950ed35fb285aaf3f/tool-results/call_193d25ef253b4045a147311558349385.txt",
+            "/opt/asb-private/agent-state/home/.qwen/tmp/427298c01319355aae99da720b647df7cd291b9e3d2f3b5950ed35fb285aaf3f/tool-results/asb-replay-1891570-<asb-timestamp>-4.txt",
+        );
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_digest = replayed.replace(
+            "cd15fb964c709e38041ea1ae54f12add71bf2c7ac8c8167883326629ccd06745",
+            "dd15fb964c709e38041ea1ae54f12add71bf2c7ac8c8167883326629ccd06745",
+        );
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_digest).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_complete_testbed_search_block_ordering() {
         let root = test_root();
         let cassette = root.join("opencode-search-order.jsonl");
