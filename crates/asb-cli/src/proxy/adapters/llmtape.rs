@@ -1078,7 +1078,7 @@ mod tests {
     fn replay_normalizes_only_codex_shell_envelope_wall_time() {
         let root = test_root();
         let cassette = root.join("codex-shell-wall-time.jsonl");
-        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Chunk ID: deadbeef\nWall time: 0.2164 seconds\nProcess exited with code 0\nOriginal token count: 12\nresult"}]}"#;
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Chunk ID: <asb-chunk>\nWall time: 0.2164 seconds\nProcess exited with code 0\nOriginal token count: 12\nresult"}]}"#;
         let line = serde_json::json!({
             "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
             "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
