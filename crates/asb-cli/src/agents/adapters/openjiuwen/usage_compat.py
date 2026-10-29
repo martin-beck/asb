@@ -204,6 +204,23 @@ if _record_path or _replay_path:
 
         _agent_factory._build_memory_rail = lambda _cfg: None
         _agent_factory._build_subagents = lambda _model: []
+
+        # The upstream CLI otherwise starts an asynchronous image-capability
+        # probe in every fresh process.  It is unrelated to these text-only
+        # benchmarks, consumes an unrecorded provider request, and makes a
+        # fresh replay begin on a different request than its recording.  Pin
+        # this adapter launch profile to text-only before the agent is started;
+        # interactive OpenJiuwen remains unchanged.
+        _create_agent = _agent_factory.create_agent
+
+        def _create_text_only_agent(*args, **kwargs):
+            agent, tracker = _create_agent(*args, **kwargs)
+            config = getattr(agent, "_deep_config", None)
+            if config is not None:
+                config.enable_read_image_multimodal = False
+            return agent, tracker
+
+        _agent_factory.create_agent = _create_text_only_agent
     except ImportError:
         pass
 

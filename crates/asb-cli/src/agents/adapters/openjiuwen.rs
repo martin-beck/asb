@@ -436,6 +436,7 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         for relative in [
             "core/foundation/llm/schema",
             "core/foundation/tool",
+            "harness/cli/agent",
             "harness/tools/shell",
             "harness/tools",
         ] {
@@ -449,6 +450,8 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
             "core/foundation/llm/schema/__init__.py",
             "core/foundation/tool/__init__.py",
             "harness/__init__.py",
+            "harness/cli/__init__.py",
+            "harness/cli/agent/__init__.py",
             "harness/tools/__init__.py",
             "harness/tools/shell/__init__.py",
         ] {
@@ -460,6 +463,18 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         std::fs::write(
             package.join("__init__.py"),
             "import sys\nassert '--asb-native-tool-replay' not in sys.argv\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("harness/cli/agent/factory.py"),
+            r#"
+class Config:
+    enable_read_image_multimodal = None
+class Agent:
+    _deep_config = Config()
+def create_agent(_cfg):
+    return Agent(), object()
+"#,
         )
         .unwrap();
         std::fs::write(
@@ -525,10 +540,13 @@ class GrepTool(_Tool): label = "grep"
                 r#"#!{}
 import asyncio, json
 import os
+from openjiuwen.harness.cli.agent import factory
 from openjiuwen.harness.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool
 from openjiuwen.harness.tools.shell import BashTool
 from openjiuwen.harness.tools.code import CodeTool
 async def main():
+    agent, _tracker = factory.create_agent(None)
+    assert agent._deep_config.enable_read_image_multimodal is False
     result = []
     for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool):
         result.append((await tool().invoke({{"value": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})).model_dump())
