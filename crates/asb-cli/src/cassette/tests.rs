@@ -525,6 +525,34 @@ fn native_sidecars_are_sealed_complete_and_published_with_the_track() {
 }
 
 #[test]
+fn native_transport_consumes_only_a_sealed_archive_sidecar() {
+    let fixture = Fixture::new();
+    let digest_value = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let request_sha256 = digest(b"request");
+    let output_sha256 = digest(b"output");
+    let native_bytes = format!(
+        "{{\"event\":\"launch\",\"session\":\"launch-1\",\"program_sha256\":\"{digest_value}\"}}\n{{\"event\":\"session_alias\",\"alias\":\"shell-1\",\"session\":\"launch-1\"}}\n{{\"event\":\"poll\",\"alias\":\"shell-1\"}}\n{{\"event\":\"write\",\"alias\":\"shell-1\",\"request_sha256\":\"{request_sha256}\",\"request_b64\":\"cmVxdWVzdA==\"}}\n{{\"event\":\"output\",\"alias\":\"shell-1\",\"response_sha256\":\"{output_sha256}\",\"output_b64\":\"b3V0cHV0\"}}\n{{\"event\":\"exit\",\"alias\":\"shell-1\",\"success\":true}}\n{{\"event\":\"workspace_effect\",\"sha256\":\"{digest_value}\"}}\n"
+    );
+    let mut manifest = manifest(1);
+    manifest.tracks[0].native = Some(NativeTrack {
+        complete: true,
+        events: 7,
+        bytes: native_bytes.len() as u64,
+        sha256: digest(native_bytes.as_bytes()),
+    });
+    let path = fixture.zip(
+        &manifest,
+        &[
+            ("tracks/1.jsonl", b"{}\n".as_slice()),
+            ("native/1.jsonl", native_bytes.as_bytes()),
+        ],
+    );
+    let mut archive = Archive::open(&path, Limits::default()).unwrap();
+    let transport = NativeToolTransport::from_archive(&mut archive, 1).unwrap();
+    assert_eq!(transport.sessions()[0].alias(), "shell-1");
+}
+
+#[test]
 fn native_sidecars_reject_orphan_duplicate_oversize_incomplete_and_mutated_payloads() {
     let fixture = Fixture::new();
     let native_bytes = b"{\"event\":\"launch\"}\n";
