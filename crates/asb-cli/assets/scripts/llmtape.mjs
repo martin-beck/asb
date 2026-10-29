@@ -352,6 +352,11 @@ function normalizeCassetteBody(body) {
     // retain all file contents, failure counts, and commands while replacing
     // only those run-local rendering details before cassette comparison.
     .replace(/\/opt\/asb-private\/agent-state\/data\/opencode\/tool-output\/tool_[A-Za-z0-9_-]+/g, "<asb-opencode-tool-output>")
+    // OpenJiuwen persists a bounded Bash result beneath a generated filename
+    // before forwarding its preview to the model.  The basename is recreated
+    // on replay; retain the directory, extension, and every preview byte while
+    // normalizing only this documented twelve-hex filename convention.
+    .replace(/bash_outputs\/bash_[0-9a-f]{12}\.txt/gi, "bash_outputs/<asb-openjiuwen-bash-output>.txt")
     // Qwen Code writes an oversized tool result to a generated private file
     // and forwards a fixed persisted-output envelope to the model. The file
     // name changes when llmtape materializes a replay response, while the
