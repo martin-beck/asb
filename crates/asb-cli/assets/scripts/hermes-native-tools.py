@@ -184,6 +184,9 @@ class Replayer:
             expected = self.exchanges[self.index][0] if self.index < len(self.exchanges) else None
             component = "sequence" if expected is None else _request_difference(expected, request)
             self.failure = "native terminal request differs:" + component
+            # A bounded field name is safe to retain in the private process
+            # diagnostic; never write either tool request or response.
+            print("ASB_HERMES_NATIVE_MISMATCH:" + component, file=sys.stderr, flush=True)
             raise RuntimeError("Hermes terminal request differs from its recording")
         response = self.exchanges[self.index][1]
         self.index += 1
