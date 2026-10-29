@@ -872,20 +872,57 @@ impl Session {
             .as_deref_mut()
             .map(|session| session.execution_namespace_collectors())
             .unwrap_or_default();
-        // This is deliberately an opaque envelope.  Later adapter-owned
-        // capture/replay can select a direction and guest-private export
-        // target without teaching the remote transport a capsule protocol.
-        let capsule = crate::agents::driver::GuestCapsule::default();
         let environment = guest_environment(&context.config.agent, |name| std::env::var(name).ok());
         let tape_cassette = guest_tape_cassette(context.tape_cassette)?;
         let tool_tape_cassette = guest_tape_cassette(context.tool_tape_cassette)?;
         let mcp_tape_cassette = guest_tape_cassette(context.mcp_tape_cassette)?;
+        let artifact_output = self.artifacts.join("guest-artifacts");
+        std::fs::create_dir_all(&artifact_output)
+            .map_err(|error| format!("cannot allocate guest artifact export directory: {error}"))?;
         let mut private_inputs = replay_private_inputs(
             context.mcp_tape_cassette.or(context.tool_tape_cassette),
             context.tool_replay || context.mcp_mode == Some(crate::tape::Mode::Replay),
             &context.config.mcp_servers,
             context.mcp_mode == Some(crate::tape::Mode::Replay),
         )?;
+        // Capsule bytes remain opaque to remote dispatch.  The driver owns
+        // generic workspace capture/staging; the adapter still owns its
+        // native tool semantics and transcript protocol.
+        let capsule = match context.native_capsule() {
+            Some(crate::workloads::session::NativeCapsule::Record(destination)) => {
+                if destination.as_os_str().is_empty() {
+                    return Err("guest native capsule destination is invalid".into());
+                }
+                crate::agents::driver::GuestCapsule {
+                    mode: crate::agents::driver::GuestCapsuleMode::Record,
+                    export: Some(crate::agents::driver::GuestCapsuleExport {
+                        target: "native-capsule.zip".into(),
+                    }),
+                }
+            }
+            Some(crate::workloads::session::NativeCapsule::Replay(source)) => {
+                let bytes = crate::agents::capsule::encode_transport(source).map_err(|error| {
+                    format!("cannot prepare guest native capsule replay: {error}")
+                })?;
+                let staged = artifact_output.join("native-capsule.zip");
+                std::fs::write(&staged, &bytes).map_err(|error| {
+                    format!("cannot stage guest native capsule replay: {error}")
+                })?;
+                private_inputs.push(PrivateInput {
+                    source: staged,
+                    target: "native-capsule.zip".into(),
+                    bytes: bytes.len() as u64,
+                    sha256: crate::cassette::digest(&bytes),
+                });
+                crate::agents::driver::GuestCapsule {
+                    mode: crate::agents::driver::GuestCapsuleMode::Replay,
+                    export: Some(crate::agents::driver::GuestCapsuleExport {
+                        target: "native-capsule.zip".into(),
+                    }),
+                }
+            }
+            None => crate::agents::driver::GuestCapsule::default(),
+        };
         let native_tool_launch = context
             .native_tool()
             .map(|(launch, source)| {
@@ -903,9 +940,6 @@ impl Session {
                 Ok::<crate::cassette::NativeToolLaunch, String>(launch.clone())
             })
             .transpose()?;
-        let artifact_output = self.artifacts.join("guest-artifacts");
-        std::fs::create_dir_all(&artifact_output)
-            .map_err(|error| format!("cannot allocate guest artifact export directory: {error}"))?;
         // Adapter extensions may require a tiny static helper inside the guest
         // runtime.  Stage declared opaque bytes without interpreting their
         // protocol; the adapter alone selects the guest-relative target.
@@ -1258,6 +1292,10 @@ fn runtime_binary() -> Result<PathBuf, String> {
 }
 
 impl WorkloadSession for Session {
+    fn uses_isolated_guest(&self) -> bool {
+        true
+    }
+
     fn initial_material_sha256(&self) -> Result<String, String> {
         self.initial_material.clone()
     }

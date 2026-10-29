@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 const MAX_ENTRIES: usize = 4096;
@@ -23,6 +24,129 @@ const MAX_OBJECT_STORE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EXECUTABLE_IDENTITY_BYTES: u64 = 256 * 1024 * 1024;
 const OBJECTS_DIRECTORY: &str = "objects";
 const MANIFEST_FILENAME: &str = "manifest.json";
+/// Guest capsule delivery is deliberately smaller than the on-disk capsule
+/// budget because it crosses the bounded remote artifact channel as one
+/// opaque sidecar.
+pub(crate) const MAX_TRANSPORT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Encode a complete, already validated capsule for opaque guest transport.
+/// This routine does not inspect adapter protocols or workspace contents; it
+/// only carries the capsule's existing canonical manifest and object store.
+pub(crate) fn encode_transport(root: &Path) -> Result<Vec<u8>, Error> {
+    let (store, manifest) = Store::open(root)?;
+    let manifest_bytes = fs::read(store.root().join(MANIFEST_FILENAME)).map_err(crate::io_error)?;
+    let mut objects = BTreeSet::new();
+    for entry in manifest.base.iter().chain(&manifest.effects) {
+        objects.insert(entry.object.sha256.as_str());
+    }
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .unix_permissions(0o600);
+    writer
+        .start_file(MANIFEST_FILENAME, options)
+        .map_err(zip_error)?;
+    writer.write_all(&manifest_bytes).map_err(crate::io_error)?;
+    for digest in objects {
+        let path = store.objects().join(digest);
+        let bytes = fs::read(&path)
+            .map_err(|_| Error::Run("native capsule object is unavailable".into()))?;
+        if bytes.len() as u64 > MAX_OBJECT_BYTES
+            || format!("{:x}", Sha256::digest(&bytes)) != digest
+        {
+            return Err(Error::Run("native capsule object is invalid".into()));
+        }
+        writer
+            .start_file(format!("{OBJECTS_DIRECTORY}/{digest}"), options)
+            .map_err(zip_error)?;
+        writer.write_all(&bytes).map_err(crate::io_error)?;
+    }
+    let bytes = writer.finish().map_err(zip_error)?.into_inner();
+    if bytes.len() > MAX_TRANSPORT_BYTES {
+        return Err(Error::Run(
+            "guest native capsule export exceeds its bound".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Materialize a sealed opaque guest capsule only below a fresh private
+/// directory. The normal capsule validator remains the authority for the
+/// reconstructed manifest and object references.
+pub(crate) fn decode_transport(bytes: &[u8], destination: &Path) -> Result<(), Error> {
+    if bytes.len() > MAX_TRANSPORT_BYTES {
+        return Err(Error::Run(
+            "guest native capsule import exceeds its bound".into(),
+        ));
+    }
+    if destination.exists() {
+        return Err(Error::Run(
+            "guest native capsule destination already exists".into(),
+        ));
+    }
+    fs::create_dir(destination).map_err(crate::io_error)?;
+    let mut archive = ZipArchive::new(Cursor::new(bytes))
+        .map_err(|_| Error::Run("guest native capsule import is malformed".into()))?;
+    if archive.is_empty() || archive.len() > MAX_ENTRIES + 1 {
+        return Err(Error::Run(
+            "guest native capsule import has invalid entries".into(),
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut total = 0usize;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|_| Error::Run("guest native capsule import is malformed".into()))?;
+        let name = entry
+            .enclosed_name()
+            .ok_or_else(|| Error::Run("guest native capsule import has unsafe entries".into()))?
+            .to_str()
+            .ok_or_else(|| Error::Run("guest native capsule import has unsafe entries".into()))?
+            .to_owned();
+        let valid = name == MANIFEST_FILENAME
+            || name
+                .strip_prefix(&format!("{OBJECTS_DIRECTORY}/"))
+                .is_some_and(valid_digest);
+        if !valid || !seen.insert(name.clone()) || entry.is_dir() {
+            return Err(Error::Run(
+                "guest native capsule import has unsafe entries".into(),
+            ));
+        }
+        let size = usize::try_from(entry.size())
+            .ok()
+            .filter(|size| *size <= MAX_OBJECT_BYTES as usize)
+            .ok_or_else(|| Error::Run("guest native capsule import exceeds its bound".into()))?;
+        total = total
+            .checked_add(size)
+            .filter(|total| *total <= MAX_TRANSPORT_BYTES)
+            .ok_or_else(|| Error::Run("guest native capsule import exceeds its bound".into()))?;
+        let target = destination.join(&name);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(crate::io_error)?;
+        }
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .map_err(crate::io_error)?;
+        std::io::copy(&mut entry, &mut output).map_err(crate::io_error)?;
+        output.sync_all().map_err(crate::io_error)?;
+    }
+    let _ = Store::open(destination)?;
+    Ok(())
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn zip_error(_error: zip::result::ZipError) -> Error {
+    Error::Run("guest native capsule transport is invalid".into())
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1441,6 +1565,28 @@ mod tests {
         let replay = Replay::open(&destination, &workspace).unwrap();
         assert_eq!(fs::read(workspace.join("input.txt")).unwrap(), b"before");
         assert!(!workspace.join("stale.txt").exists());
+        replay.finish(&workspace).unwrap();
+        assert_eq!(fs::read(workspace.join("input.txt")).unwrap(), b"after");
+    }
+
+    #[test]
+    fn opaque_transport_round_trips_a_complete_guest_capsule() {
+        let root = test_root("transport");
+        let source = root.0.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("input.txt"), b"before").unwrap();
+        let capsule = root.0.join("capsule");
+        let capture = Capture::start(&capsule, &source).unwrap();
+        fs::write(source.join("input.txt"), b"after").unwrap();
+        capture.finish(&source).unwrap();
+
+        let encoded = encode_transport(&capsule).unwrap();
+        let restored = root.0.join("restored");
+        decode_transport(&encoded, &restored).unwrap();
+        let workspace = root.0.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let replay = Replay::open(&restored, &workspace).unwrap();
+        assert_eq!(fs::read(workspace.join("input.txt")).unwrap(), b"before");
         replay.finish(&workspace).unwrap();
         assert_eq!(fs::read(workspace.join("input.txt")).unwrap(), b"after");
     }

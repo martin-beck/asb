@@ -164,6 +164,8 @@ fn prepared(
             tape: None,
             capsule_record: None,
             capsule_replay: None,
+            guest_capsule_record: None,
+            guest_capsule_replay: None,
         },
         operations,
     )
