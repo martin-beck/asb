@@ -497,7 +497,12 @@ impl Recorder {
                     requests: capture.map(|capture| capture.inference_requests),
                     steps: result.steps,
                 },
-                native: native_tool.as_ref().map(|(native, _)| native.clone()),
+                // `commit_with_native` is the sole owner that derives the
+                // immutable native catalogue entry from the supplied opaque
+                // sidecar.  Pre-populating this field would let callers
+                // bypass that custody boundary and is rejected by the
+                // journal before it stages the payload.
+                native: None,
                 artifacts: Vec::new(),
             };
             let journal = state
