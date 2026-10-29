@@ -80,8 +80,9 @@ fn prepare_native_tool_replay(
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
     let output = context.run_dir.join("openhands");
-    std::fs::create_dir_all(&output)
-        .map_err(|_| Error::Run("cannot create OpenHands native tool artifact directory".into()))?;
+    // `openhands` is a declared artifact namespace. ArtifactOwner claims it
+    // before this hook runs, so preparation must not create it: the SDK
+    // bridge creates its sidecar only after that claim has been established.
     if tape.mode == crate::tape::Mode::Record {
         context.command.env(
             "ASB_OPENHANDS_NATIVE_RECORD_SIDECAR",
@@ -129,37 +130,30 @@ fn sdk_python(executable: &str) -> Option<String> {
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
     let directory = context.run_dir.join("openhands/conversations");
-    let mut state = None;
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return AgentArtifacts::default();
-    };
-    for entry in entries {
-        let Ok(entry) = entry else {
-            return AgentArtifacts::default();
-        };
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-            continue;
+    let mut artifacts = AgentArtifacts::default();
+    let state = std::fs::read_dir(directory).ok().and_then(|entries| {
+        let mut state = None;
+        for entry in entries {
+            let entry = entry.ok()?;
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            if state.is_some() {
+                return None;
+            }
+            state = Some(entry.path().join("base_state.json"));
         }
-        if state.is_some() {
-            return AgentArtifacts::default();
-        }
-        state = Some(entry.path().join("base_state.json"));
-    }
-    let Some(value) = state.as_deref().and_then(super::super::read_usage_document) else {
-        return AgentArtifacts::default();
-    };
-    let mut artifacts = AgentArtifacts {
+        state
+    });
+    if let Some(value) = state.as_deref().and_then(super::super::read_usage_document) {
         // OpenHands/LiteLLM reports cache reads alongside an inclusive input
         // total for providers such as cli2key. This accounting rule is owned
         // by the provider, not by the particular transport selected here.
-        token_usage: Some(conversation_usage(
+        artifacts.token_usage = Some(conversation_usage(
             &value,
             context.anthropic_input_includes_cache,
-        )),
-        steps: None,
-        final_response: None,
-        ..Default::default()
-    };
+        ));
+    }
     if let Some(sidecar) = context.frozen.bytes("native-tool-sidecar.jsonl") {
         artifacts.native_tool_sidecar = Some(sidecar.to_vec());
     }
@@ -221,6 +215,117 @@ fn conversation_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentAdapter;
+    use std::process::Command;
+
+    fn connection() -> crate::endpoint::Connection {
+        crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiChat,
+            base_url: "http://127.0.0.1:4242/v1".into(),
+            credential: Some("fixture-key".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        }
+    }
+
+    fn environment(command: &Command) -> std::collections::HashMap<String, String> {
+        command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn native_record_selects_sdk_launcher_and_publishes_its_frozen_sidecar() {
+        let root =
+            std::env::temp_dir().join(format!("asb-openhands-native-{}", std::process::id()));
+        let run = root.join("run");
+        let tape = root.join("provider.jsonl");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&tape, b"{}\n").unwrap();
+        let config = crate::benchmark::BenchmarkConfig {
+            planning: None,
+            agent: "openhands".into(),
+            provider: "cli2key".into(),
+            model: "fixture".into(),
+            workload: "adapter-smoke".into(),
+            concurrency: 1,
+            trial_set: None,
+            trial: None,
+            workspace: "workspace".into(),
+            log_file: "benchmark.log".into(),
+            measurements: None,
+            mcp_servers: Vec::new(),
+        };
+        let specification = command(&CommandContext {
+            executable: "openhands",
+            config: &config,
+            endpoint: Some("http://127.0.0.1:4242/v1"),
+            interface: Some(crate::endpoint::Interface::OpenAiChat),
+            prompt: "solve the fixture",
+            native_tool_mode: Some(crate::tape::Mode::Record),
+            native_tool: None,
+        });
+        assert_eq!(specification.program, "openhands");
+        assert_eq!(specification.args.first().map(String::as_str), Some("-c"));
+        assert!(
+            specification
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--mode", "record"])
+        );
+
+        let mut owner = super::super::ArtifactOwner::prepare(&run, ARTIFACTS).unwrap();
+        let mut command = Command::new("openhands");
+        ADAPTER
+            .prepare(&mut PreparationContext {
+                command: &mut command,
+                model: "fixture",
+                connection: &connection(),
+                workspace: &root,
+                runtime_dir: &root,
+                run_dir: &run,
+                mcp_servers: &[],
+                mcp_tape: None,
+                tape: Some(super::super::TapeContext {
+                    mode: crate::tape::Mode::Record,
+                    cassette: &tape,
+                }),
+            })
+            .unwrap();
+        let sidecar = run.join("openhands/native-tool-sidecar.jsonl");
+        assert_eq!(
+            environment(&command).get("ASB_OPENHANDS_NATIVE_RECORD_SIDECAR"),
+            Some(&sidecar.display().to_string())
+        );
+        // ArtifactOwner, not adapter preparation, owns this pre-claimed
+        // namespace. The SDK bridge may now create the single declared file.
+        assert!(run.join("openhands").is_dir());
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        std::fs::write(&sidecar, b"{\"schema_version\":1}\n").unwrap();
+        let frozen = owner.freeze();
+        assert!(!frozen.error);
+        let artifacts = collect(&CollectionContext {
+            frozen: &frozen,
+            provider_capture: None,
+            run_dir: &run,
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert_eq!(
+            artifacts.native_tool_sidecar.as_deref(),
+            Some(b"{\"schema_version\":1}\n".as_slice())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn sdk_launcher_uses_the_terminal_factory_and_private_bridge_only() {
