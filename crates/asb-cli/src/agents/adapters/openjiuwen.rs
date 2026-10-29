@@ -519,6 +519,8 @@ class AbilityManager:
     @staticmethod
     def _render_tool_result(tool, _tool_call, result):
         return tool.render_for_llm(result)
+    async def execute(self, *_args, **_kwargs):
+        return []
 "#,
         )
         .unwrap();

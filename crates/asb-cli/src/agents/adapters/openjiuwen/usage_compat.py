@@ -112,6 +112,7 @@ except ImportError:
 _native_events = []
 _native_cursor = 0
 _native_alias = "openjiuwen-native-tools-1"
+_message_cursor = 0
 _recorded_outputs = {}
 _recorded_outputs_by_key = {}
 _replayed_renders = {}
@@ -268,8 +269,6 @@ try:
 
     def _base_render_with_native_replay(self, output):
         replayed = _replayed_renders.get(id(output))
-        if replayed is None:
-            replayed = _replayed_renders_by_value.get(_output_value_key(output))
         if replayed is not None:
             return replayed
         rendered = _original_base_render(self, output)
@@ -293,8 +292,6 @@ try:
         @staticmethod
         def _render_tool_result_with_native_replay(tool, tool_call, result):
             replayed = _replayed_renders.get(id(result))
-            if replayed is None:
-                replayed = _replayed_renders_by_value.get(_output_value_key(result))
             if replayed is not None:
                 return replayed
             rendered = _original_render_tool_result(tool, tool_call, result)
@@ -306,6 +303,32 @@ try:
             return rendered
 
         AbilityManager._render_tool_result = _render_tool_result_with_native_replay
+        _original_execute = AbilityManager.execute
+        async def _execute_with_native_messages(self, *args, **kwargs):
+            global _message_cursor
+            results = await _original_execute(self, *args, **kwargs)
+            outputs = [event for event in _native_events if event.get("event") == "output"]
+            for _result, message in results:
+                if message is None:
+                    continue
+                if _message_cursor >= len(outputs):
+                    raise RuntimeError("ASB OpenJiuwen native replay has an extra final tool message")
+                event = outputs[_message_cursor]
+                _message_cursor += 1
+                envelope = json.loads(base64.b64decode(event["output_b64"]))
+                if _replay_path:
+                    final = envelope.get("message")
+                    if not isinstance(final, dict) or final.get("tool_call_id") != message.tool_call_id or not isinstance(final.get("content"), str):
+                        raise RuntimeError("ASB OpenJiuwen native replay final tool message is missing or out of order")
+                    message.content = _materialize_workspace(final["content"])
+                else:
+                    if envelope.get("message") is None:
+                        envelope["message"] = {"tool_call_id": message.tool_call_id, "content": _normalize_workspace(message.content)}
+                        encoded = _canonical(envelope)
+                        event["response_sha256"] = _digest(encoded)
+                        event["output_b64"] = _payload(encoded)
+            return results
+        AbilityManager.execute = _execute_with_native_messages
     except ImportError:
         pass
 
@@ -341,7 +364,7 @@ try:
                 envelope = json.loads(base64.b64decode(output["output_b64"]))
                 if (
                     not isinstance(envelope, dict)
-                    or set(envelope) != {"tool_output", "rendered"}
+                    or set(envelope) != {"tool_output", "rendered", "message"}
                     or not isinstance(envelope["rendered"], str)
                 ):
                     raise RuntimeError(
@@ -363,6 +386,7 @@ try:
                 encoded = _canonical({
                     "tool_output": _normalize_workspace(output.model_dump()),
                     "rendered": None,
+                    "message": None,
                 })
                 output_event = json.loads(_event(
                     "output",
