@@ -12,7 +12,6 @@ struct Context<'a> {
     policy: crate::planning::ResolvedPlan,
     measurement_path: Option<PathBuf>,
     tape_cassette: Option<(tape::Mode, PathBuf)>,
-    provider_capture_path: Option<PathBuf>,
     tool_tape_cassette: Option<(tape::Mode, PathBuf)>,
     mcp_tape_cassette: Option<(tape::Mode, PathBuf)>,
     network: Option<project::NetworkProjectGuard>,
@@ -88,12 +87,6 @@ impl<'a> ConfiguredAttempt<'a> {
             )
         });
         let network = project::network_project(&project_root);
-        // Keep the recorder-owned binding before constructing the context.
-        // `options` is also retained for the whole attempt, but collection
-        // must not recover the producer late from presentation or tape
-        // configuration.  This path is opaque here: adapters receive only
-        // its bounded bytes after the provider proxy has settled.
-        let provider_capture_path = options.provider_capture_path.map(PathBuf::from);
         let context = Context {
             config_path: config_path.into(),
             publication_config,
@@ -104,7 +97,6 @@ impl<'a> ConfiguredAttempt<'a> {
             policy,
             measurement_path,
             tape_cassette,
-            provider_capture_path,
             tool_tape_cassette,
             mcp_tape_cassette,
             network: Some(network),
@@ -990,10 +982,16 @@ impl<'a> CompletedAttempt<'a> {
         // does not read or interpret protocol bytes; the adapter owns that
         // bounded correlation. The tape route is the direct-record fallback
         // for legacy activation copies that did not retain the private field.
-        let provider_capture = context.provider_capture_path.as_deref();
-        if context.options.mode == Some(tape::Mode::Record) && provider_capture.is_none() {
+        // Adapter-local tool recording is selected through the tool tape,
+        // not the provider tape. Preserve that opaque selected cassette for
+        // collection; the adapter alone reads and correlates its wire data.
+        let provider_capture = context
+            .tool_tape_cassette
+            .as_ref()
+            .and_then(|(mode, path)| (*mode == tape::Mode::Record).then_some(path.as_path()));
+        if context.options.tool_mode == Some(tape::Mode::Record) && provider_capture.is_none() {
             settled.issues.run_error(
-                "record collection lost the admitted provider capture handle before adapter collection"
+                "record collection lost the admitted tool-tape capture handle before adapter collection"
                     .into(),
             );
         }
