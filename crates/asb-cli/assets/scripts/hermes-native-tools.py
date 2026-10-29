@@ -327,5 +327,16 @@ try:
 
     os._exit = closing_os_exit
 except BaseException as error:
-    _write_progress(False, "native terminal transport initialization failed")
+    # Python suppresses sitecustomize import failures and continues starting
+    # Hermes.  Keep only a fixed sidecar category so ASB can fail the adapter
+    # qualification instead of mistaking an unhooked native tool for replay.
+    known = {
+        "Hermes native replay sidecar is unavailable",
+        "Hermes native replay sidecar is invalid",
+        "Hermes native replay sidecar is incomplete",
+        "Hermes native replay sidecar has an unsupported session",
+        "Hermes native replay sidecar digest is invalid",
+    }
+    detail = str(error) if isinstance(error, RuntimeError) and str(error) in known else None
+    _write_progress(False, detail or "native terminal transport initialization failed")
     raise

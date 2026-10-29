@@ -252,9 +252,15 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
                         | "native terminal request differs:watch_patterns"
                         | "native terminal request differs:sequence"
                         | "native terminal request differs:encoding"
+                        | "Hermes native replay sidecar is unavailable"
+                        | "Hermes native replay sidecar is invalid"
+                        | "Hermes native replay sidecar is incomplete"
+                        | "Hermes native replay sidecar has an unsupported session"
+                        | "Hermes native replay sidecar digest is invalid"
                 )
             });
         artifacts.errors.push(match detail {
+            Some(detail) if detail.starts_with("Hermes ") => detail.into(),
             Some(detail) => format!("Hermes {detail}"),
             None => "Hermes native terminal replay did not complete".into(),
         });
@@ -607,6 +613,31 @@ mod tests {
         assert_eq!(
             artifacts.errors,
             vec!["Hermes native terminal replay did not complete"]
+        );
+    }
+
+    #[test]
+    fn native_progress_exposes_only_known_sidecar_initialization_failure() {
+        let frozen = crate::agents::artifacts::FrozenArtifacts::for_test(
+            "native-tool-progress.json",
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "replay",
+                "complete": false,
+                "error": "Hermes native replay sidecar is invalid",
+            }),
+        );
+        let artifacts = collect(&CollectionContext {
+            frozen: &frozen,
+            run_dir: Path::new("/fixture"),
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert_eq!(
+            artifacts.errors,
+            vec!["Hermes native replay sidecar is invalid"]
         );
     }
 
