@@ -502,6 +502,7 @@ class ToolOutput:
         .unwrap();
         let tools = r#"
 import os
+import json
 from openjiuwen.core.foundation.tool.schema import ToolOutput
 class _Tool:
     label = ""
@@ -509,6 +510,8 @@ class _Tool:
         with open(os.environ["ASB_TEST_NATIVE_EXECUTED"], "a", encoding="utf-8") as marker:
             marker.write(self.label + "\n")
         return ToolOutput(data={"tool": self.label, "inputs": inputs})
+    def render_for_llm(self, output):
+        return os.environ["ASB_TEST_RENDER_PREFIX"] + json.dumps(output.model_dump(), sort_keys=True)
 class ReadFileTool(_Tool): label = "read_file"
 class WriteFileTool(_Tool): label = "write_file"
 class EditFileTool(_Tool): label = "edit_file"
@@ -549,7 +552,9 @@ async def main():
     assert agent._deep_config.enable_read_image_multimodal is False
     result = []
     for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool):
-        result.append((await tool().invoke({{"value": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})).model_dump())
+        instance = tool()
+        output = await instance.invoke({{"value": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})
+        result.append(instance.render_for_llm(output))
     print(json.dumps(result, sort_keys=True))
 asyncio.run(main())
 "#,
@@ -568,6 +573,7 @@ asyncio.run(main())
             .env("PYTHONPATH", &root)
             .env("ASB_TEST_NATIVE_EXECUTED", &marker)
             .env("ASB_TEST_WORKSPACE", &record_workspace)
+            .env("ASB_TEST_RENDER_PREFIX", "record:")
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_RECORD", &sidecar)
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &record_workspace)
             .output()
@@ -587,6 +593,7 @@ asyncio.run(main())
             .env("PYTHONPATH", &root)
             .env("ASB_TEST_NATIVE_EXECUTED", &marker)
             .env("ASB_TEST_WORKSPACE", &replay_workspace)
+            .env("ASB_TEST_RENDER_PREFIX", "replay:")
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
             .output()
             .unwrap();

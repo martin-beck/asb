@@ -112,6 +112,8 @@ except ImportError:
 _native_events = []
 _native_cursor = 0
 _native_alias = "openjiuwen-native-tools-1"
+_recorded_outputs = {}
+_replayed_renders = {}
 _native_workspace = os.path.realpath(
     os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", "")
 ) if os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE") else ""
@@ -239,6 +241,7 @@ try:
 
     def _wrap_native_tool(tool_name, tool_type):
         original_invoke = tool_type.invoke
+        original_render = tool_type.render_for_llm
 
         async def _invoke_with_native_replay(self, inputs, **kwargs):
             global _native_cursor
@@ -265,15 +268,35 @@ try:
                         f"actual_shape={json.dumps(_request_shape(actual_request), sort_keys=True)})"
                     )
                 _native_cursor += 1
-                return ToolOutput.model_validate(_materialize_workspace(
-                    json.loads(base64.b64decode(output["output_b64"]))
+                envelope = json.loads(base64.b64decode(output["output_b64"]))
+                if (
+                    not isinstance(envelope, dict)
+                    or set(envelope) != {"tool_output", "rendered"}
+                    or not isinstance(envelope["rendered"], str)
+                ):
+                    raise RuntimeError(
+                        "ASB OpenJiuwen native replay sidecar has no rendered tool result"
+                    )
+                result = ToolOutput.model_validate(_materialize_workspace(
+                    envelope["tool_output"]
                 ))
+                _replayed_renders[id(result)] = _materialize_workspace(envelope["rendered"])
+                return result
             output = await original_invoke(self, inputs, **kwargs)
             if _record_path:
                 # Keep the opaque sidecar portable across fresh replay
                 # workspaces. The foreground client still receives the live
                 # output; only the sealed replay artifact uses this marker.
-                encoded = _canonical(_normalize_workspace(output.model_dump()))
+                encoded = _canonical({
+                    "tool_output": _normalize_workspace(output.model_dump()),
+                    "rendered": None,
+                })
+                output_event = json.loads(_event(
+                    "output",
+                    alias=_native_alias,
+                    response_sha256=_digest(encoded),
+                    output_b64=_payload(encoded),
+                ))
                 _native_events.extend([
                     json.loads(_event("poll", alias=_native_alias)),
                     json.loads(_event(
@@ -282,16 +305,27 @@ try:
                         request_sha256=_digest(request),
                         request_b64=_payload(request),
                     )),
-                    json.loads(_event(
-                        "output",
-                        alias=_native_alias,
-                        response_sha256=_digest(encoded),
-                        output_b64=_payload(encoded),
-                    )),
+                    output_event,
                 ])
+                _recorded_outputs[id(output)] = output_event
             return output
 
+        def _render_with_native_replay(self, output):
+            replayed = _replayed_renders.get(id(output))
+            if replayed is not None:
+                return replayed
+            rendered = original_render(self, output)
+            output_event = _recorded_outputs.get(id(output))
+            if output_event is not None:
+                envelope = json.loads(base64.b64decode(output_event["output_b64"]))
+                envelope["rendered"] = _normalize_workspace(rendered)
+                encoded = _canonical(envelope)
+                output_event["response_sha256"] = _digest(encoded)
+                output_event["output_b64"] = _payload(encoded)
+            return rendered
+
         tool_type.invoke = _invoke_with_native_replay
+        tool_type.render_for_llm = _render_with_native_replay
 
     for _tool_name, _tool_type in (
         ("read_file", ReadFileTool),
@@ -311,6 +345,12 @@ except ImportError:
 def _seal_native_tool_sidecar():
     if not _record_path or len(_native_events) == 2:
         return
+    for event in _native_events:
+        if event.get("event") != "output":
+            continue
+        envelope = json.loads(base64.b64decode(event["output_b64"]))
+        if envelope.get("rendered") is None:
+            return
     _native_events.extend([
         json.loads(_event("exit", alias=_native_alias, success=True)),
         json.loads(_event("workspace_effect", sha256=_digest(b"openjiuwen-grep-v1"))),
