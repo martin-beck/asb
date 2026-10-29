@@ -27,6 +27,8 @@ pub(crate) const LOCAL_TOOL_TRANSCRIPT_ARTIFACT: &str = "asb-local-tools";
 pub(crate) const DETERMINISTIC_MANIFEST_ARTIFACT: &str = "asb-determinism-manifest";
 pub(crate) const NATIVE_TRACE_ARTIFACT: &str = "asb-native-trace";
 pub(crate) const NATIVE_TOOL_SIDECAR_ARTIFACT: &str = "asb-native-tool-sidecar";
+/// Opaque adapter-owned workspace effects, transferred through guest receipts.
+pub(crate) const NATIVE_WORKSPACE_CAPSULE_ARTIFACT: &str = "asb-native-workspace-capsule";
 /// Generic, receipt-bound frozen adapter state.  It is restored only after
 /// the provider tape has settled, then interpreted by the owning adapter.
 pub(crate) const DEFERRED_COLLECTION_ARTIFACT: &str = "asb-deferred-adapter-collection";
@@ -110,10 +112,79 @@ pub(crate) struct GuestRequest {
     /// Payload-free authority for the fixed private native sidecar location.
     #[serde(default)]
     pub native_tool_launch: Option<crate::cassette::NativeToolLaunch>,
+    /// Opaque capsule direction selected by the owning remote dispatcher.
+    /// The driver may carry this bounded intent across the guest boundary but
+    /// does not infer paths or interpret adapter tool protocols.
+    #[serde(default)]
+    pub capsule: GuestCapsule,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: f64,
     #[serde(default)]
     pub namespace_collectors: Vec<String>,
+}
+
+/// Opaque request for a capsule owned by the selected adapter.  The remote
+/// transport carries this envelope but neither interprets a capsule protocol
+/// nor chooses files within one.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GuestCapsule {
+    #[serde(default)]
+    pub mode: GuestCapsuleMode,
+    /// A guest-private, relative export target.  It is only a bounded
+    /// transport declaration in this slice; later adapter-owned capture will
+    /// publish its bytes through the existing receipt channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export: Option<GuestCapsuleExport>,
+}
+
+impl GuestCapsule {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        if let Some(export) = &self.export {
+            export.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GuestCapsuleMode {
+    #[default]
+    None,
+    Record,
+    Replay,
+}
+
+/// Location class for a future adapter-owned guest capsule export.  The
+/// controller supplies only a private relative name; no host path crosses the
+/// request boundary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GuestCapsuleExport {
+    pub target: String,
+}
+
+impl GuestCapsuleExport {
+    fn validate(&self) -> Result<(), Error> {
+        if self.target.is_empty() || self.target.len() > 128 {
+            return Err(Error::Input(
+                "guest capsule export target is invalid".into(),
+            ));
+        }
+        let path = Path::new(&self.target);
+        if path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::CurDir
+                )
+            })
+        {
+            return Err(Error::Input("guest capsule export target is unsafe".into()));
+        }
+        Ok(())
+    }
 }
 
 fn default_timeout() -> f64 {
@@ -614,6 +685,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
 }
 
 fn run(request: GuestRequest) -> Result<u8, Error> {
+    request.capsule.validate()?;
     let retained =
         request.process_lifetime == crate::workloads::session::ProcessLifetime::ThroughEvaluation;
     if retained {
@@ -636,6 +708,26 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             "quiescent guest execution cannot declare retained ownership".into(),
         ));
     }
+    fs::create_dir_all(&request.run_dir)
+        .map_err(|error| Error::Io(format!("cannot create private guest artifacts: {error}")))?;
+    let capsule_replay = match request.capsule.mode {
+        GuestCapsuleMode::Replay => {
+            let export = request.capsule.export.as_ref().ok_or_else(|| {
+                Error::Input("guest native capsule replay has no staged input".into())
+            })?;
+            let input = request.runtime_dir.join(&export.target);
+            let bytes = fs::read(&input).map_err(|_| {
+                Error::Run("guest native capsule replay input is unavailable".into())
+            })?;
+            if bytes.len() > MAX_EXPORTED_ARTIFACT_BYTES {
+                return Err(Error::Run(
+                    "guest native capsule replay exceeds its bound".into(),
+                ));
+            }
+            Some(bytes)
+        }
+        GuestCapsuleMode::None | GuestCapsuleMode::Record => None,
+    };
     let PreparedGuest {
         mut command,
         stdin_prompt,
@@ -767,6 +859,19 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     let adapter = super::find(&request.config.agent).expect("validated agent");
     let frozen = artifact_owner.freeze();
     let deferred_collection = frozen.deferred_collection_bytes()?;
+    let mut sealed = vec![super::SealedArtifact {
+        kind: DEFERRED_COLLECTION_ARTIFACT.into(),
+        bytes: deferred_collection,
+    }];
+    if request.capsule.mode == GuestCapsuleMode::Record {
+        sealed.push(super::SealedArtifact {
+            kind: NATIVE_WORKSPACE_CAPSULE_ARTIFACT.into(),
+            bytes: adapter.capture_native_workspace_capsule(&workspace)?,
+        });
+    }
+    if let Some(bytes) = capsule_replay {
+        adapter.apply_native_workspace_capsule(&workspace, &bytes)?;
+    }
     let usage = crate::usage::from_sources(
         &request.config.provider,
         &request.config.agent,
@@ -805,7 +910,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         deterministic_manifest: None,
         native_trace: None,
         native_tool_sidecar: None,
-        deferred_collection: Some(deferred_collection),
+        deferred_collection: None,
         sealed_artifacts: Vec::new(),
         exported_artifacts: Vec::new(),
         adapter_errors: Vec::new(),
@@ -824,16 +929,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         transcript_truncated,
         namespace_collectors,
     };
-    result.exported_artifacts = export_sealed_artifacts(
-        &request.run_dir,
-        &[super::SealedArtifact {
-            kind: DEFERRED_COLLECTION_ARTIFACT.into(),
-            bytes: result
-                .deferred_collection
-                .take()
-                .expect("deferred collection was constructed"),
-        }],
-    )?;
+    result.exported_artifacts = export_sealed_artifacts(&request.run_dir, &sealed)?;
     publish_artifacts(&mut result, artifact_owner, frozen.diagnostic(), |result| {
         publish_result(&request.run_dir, result)
     })?;

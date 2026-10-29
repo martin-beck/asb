@@ -188,6 +188,34 @@ fn configuration() -> crate::benchmark::BenchmarkConfig {
     )
     .unwrap()
 }
+
+#[test]
+fn native_capsule_replay_stages_opaque_bytes_as_one_private_input() {
+    let fixture = Fixture::new();
+    let source = fixture.0.join("adapter-owned.patch");
+    let artifact_output = fixture.0.join("guest-artifacts");
+    fs::create_dir_all(&artifact_output).unwrap();
+    // Deliberately not a recognized capsule format: remote dispatch must
+    // transfer only bounded opaque bytes and leave interpretation to Hermes.
+    let bytes = b"adapter-owned-opaque-capsule";
+    fs::write(&source, bytes).unwrap();
+    let mut inputs = Vec::new();
+    let capsule = super::stage_native_capsule(
+        Some(crate::workloads::session::NativeCapsule::Replay(&source)),
+        &artifact_output,
+        &mut inputs,
+    )
+    .unwrap();
+    assert_eq!(
+        capsule.mode,
+        crate::agents::driver::GuestCapsuleMode::Replay
+    );
+    assert_eq!(capsule.export.unwrap().target, "native-capsule.zip");
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].target, "native-capsule.zip");
+    assert_eq!(inputs[0].bytes, bytes.len() as u64);
+    assert_eq!(fs::read(&inputs[0].source).unwrap(), bytes);
+}
 fn connection() -> crate::endpoint::Connection {
     serde_json::from_value(json!({"interface":"open_ai_chat","authentication":"bearer",
         "base_url":"http://127.0.0.1:1/v1","credential":"fixture-not-a-real-key"}))

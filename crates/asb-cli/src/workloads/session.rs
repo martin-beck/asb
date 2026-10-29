@@ -293,11 +293,23 @@ pub(crate) struct ExecutionContext<'a> {
     /// The path is private runner state, never result evidence.
     #[cfg(not(test))]
     pub native_tool: Option<(&'a crate::cassette::NativeToolLaunch, &'a Path)>,
+    /// Opaque native workspace capsule transport selected by the runner. The
+    /// isolated workload dispatch owns host/guest movement; adapters retain
+    /// their own tool and protocol semantics.
+    #[cfg(not(test))]
+    pub native_capsule: Option<NativeCapsule<'a>>,
     pub measurements: Option<&'a mut crate::measurements::Session>,
     pub show_output: bool,
     /// Presentation is best-effort and deliberately cannot influence workload
     /// ownership, transport, or result custody.
     pub progress: Option<&'a mut dyn ExecutionProgress>,
+}
+
+#[derive(Clone, Copy)]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) enum NativeCapsule<'a> {
+    Record(&'a Path),
+    Replay(&'a Path),
 }
 
 impl<'a> ExecutionContext<'a> {
@@ -306,8 +318,18 @@ impl<'a> ExecutionContext<'a> {
         self.native_tool
     }
 
+    #[cfg(not(test))]
+    pub(crate) fn native_capsule(&self) -> Option<NativeCapsule<'a>> {
+        self.native_capsule
+    }
+
     #[cfg(test)]
     pub(crate) fn native_tool(&self) -> Option<(&crate::cassette::NativeToolLaunch, &Path)> {
+        None
+    }
+
+    #[cfg(test)]
+    pub(crate) fn native_capsule(&self) -> Option<NativeCapsule<'a>> {
         None
     }
 }
@@ -471,6 +493,12 @@ pub(crate) trait WorkloadSession {
         _output: &mut dyn std::io::Write,
     ) -> Option<Result<ExecutionResult, String>> {
         None
+    }
+
+    /// Whether this session executes the agent in a separately owned guest
+    /// filesystem rather than the controller workspace.
+    fn uses_isolated_guest(&self) -> bool {
+        false
     }
 }
 

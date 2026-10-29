@@ -201,6 +201,29 @@ pub(crate) fn run_with_diagnostics(
     let text = read_config(config_path)?;
     let config: BenchmarkConfig = toml::from_str(&text)
         .map_err(|error| Error::Input(format!("cannot parse {path}: {error}")))?;
+    let cassette = options
+        .cassette
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| default_cassette(config_path, &config));
+    let derived_capsule = automatic_native_capsule(
+        &config.agent,
+        options.mode,
+        options.native_capsule_record.is_some() || options.native_capsule_replay.is_some(),
+        &cassette,
+    );
+    let options = RunOptions {
+        native_capsule_record: options
+            .native_capsule_record
+            .or((options.mode == Some(tape::Mode::Record))
+                .then_some(derived_capsule.as_deref())
+                .flatten()),
+        native_capsule_replay: options
+            .native_capsule_replay
+            .or((options.mode == Some(tape::Mode::Replay))
+                .then_some(derived_capsule.as_deref())
+                .flatten()),
+        ..options
+    };
     if options.native_capsule_record.is_some()
         && (options.mode != Some(tape::Mode::Record)
             || config.concurrency != 1
@@ -271,6 +294,20 @@ pub(crate) fn run_with_diagnostics(
         return repeated::run(config_path, config, repeat, options, output, warnings);
     }
     run_loaded(config_path, config, options, output, warnings)
+}
+
+fn automatic_native_capsule(
+    agent: &str,
+    mode: Option<tape::Mode>,
+    explicit: bool,
+    cassette: &Path,
+) -> Option<String> {
+    (!explicit && matches!(mode, Some(tape::Mode::Record | tape::Mode::Replay)))
+        .then(|| {
+            crate::agents::find(agent).filter(|adapter| adapter.supports_native_workspace_capsule())
+        })
+        .flatten()
+        .map(|_| format!("{}.native-capsule", cassette.display()))
 }
 
 fn write_trial_start(output: &mut dyn Write, config: &BenchmarkConfig) -> Result<(), Error> {
@@ -3005,5 +3042,46 @@ mod tests {
         assert_eq!(values["NO_PROXY"], "127.0.0.1,localhost,::1");
         assert_eq!(values["no_proxy"], "127.0.0.1,localhost,::1");
         assert_eq!(values["NODE_USE_ENV_PROXY"], "1");
+    }
+
+    #[test]
+    fn native_workspace_adapters_derive_a_capsule_only_for_ordinary_tape_modes() {
+        let cassette = std::path::Path::new("recording.asb.zip");
+        assert_eq!(
+            super::automatic_native_capsule(
+                "hermes",
+                Some(crate::tape::Mode::Record),
+                false,
+                cassette
+            ),
+            Some("recording.asb.zip.native-capsule".into())
+        );
+        assert_eq!(
+            super::automatic_native_capsule(
+                "hermes",
+                Some(crate::tape::Mode::Replay),
+                false,
+                cassette
+            ),
+            Some("recording.asb.zip.native-capsule".into())
+        );
+        assert_eq!(
+            super::automatic_native_capsule(
+                "opencode",
+                Some(crate::tape::Mode::Record),
+                false,
+                cassette
+            ),
+            None
+        );
+        assert_eq!(
+            super::automatic_native_capsule(
+                "hermes",
+                Some(crate::tape::Mode::Record),
+                true,
+                cassette
+            ),
+            None
+        );
     }
 }

@@ -31,6 +31,28 @@ def _digest(value):
     return hashlib.sha256(value).hexdigest()
 
 
+def _stable_workdir(workdir):
+    """Canonicalize only an attempt-local absolute directory.
+
+    Hermes reports a terminal tool's working directory back to its model.  A
+    remote record and replay use distinct guest roots, so that absolute value
+    is volatile even though the requested directory is semantically the same.
+    Preserve relative and foreign absolute paths exactly: only a path under
+    the guest's current workspace becomes a stable workspace-relative name.
+    """
+    if not isinstance(workdir, str):
+        return workdir
+    try:
+        candidate = Path(workdir)
+        if not candidate.is_absolute():
+            return workdir
+        root = Path.cwd().resolve()
+        relative = candidate.resolve().relative_to(root)
+    except (OSError, ValueError):
+        return workdir
+    return "." if not relative.parts else f"./{relative.as_posix()}"
+
+
 def _request(command, background, timeout, _task_id, _session_id, force, workdir, pty, notify_on_complete, watch_patterns):
     return _encoded({
         "kind": "terminal",
@@ -43,7 +65,7 @@ def _request(command, background, timeout, _task_id, _session_id, force, workdir
         # replay identity; command, options, workdir and every response byte
         # remain exact.
         "force": force,
-        "workdir": workdir,
+        "workdir": _stable_workdir(workdir),
         "pty": pty,
         "notify_on_complete": notify_on_complete,
         "watch_patterns": watch_patterns,
