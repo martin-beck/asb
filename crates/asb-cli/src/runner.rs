@@ -698,6 +698,11 @@ fn run_mode(
     output: &mut dyn Write,
     warnings: &Mutex<BTreeSet<String>>,
 ) -> Result<(), Error> {
+    if options.mode == Some(tape::Mode::Record) && options.provider_capture_path.is_none() {
+        return Err(Error::Run(
+            "record dispatch lost its owned provider capture path before attempt admission".into(),
+        ));
+    }
     // Register before any fallible setup. Early return or unwinding aborts peers.
     let mut arrival = options
         .preparation_gate
