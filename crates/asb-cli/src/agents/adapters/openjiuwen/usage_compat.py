@@ -111,6 +111,7 @@ except ImportError:
 # workspace and change the provider conversation.
 _native_events = []
 _native_cursor = 0
+_record_dispatch_cursor = 0
 _native_alias = "openjiuwen-native-tools-1"
 _message_cursor = 0
 _history_cursor = 0
@@ -436,10 +437,13 @@ try:
         original_render = tool_type.render_for_llm
 
         async def _invoke_with_native_replay(self, inputs, **kwargs):
-            global _native_cursor
+            global _native_cursor, _record_dispatch_cursor
             request = _canonical({"tool": tool_name, "inputs": _normalize_workspace(inputs)})
-            _trace_once({"v": 1, "kind": "dispatch", "index": _native_cursor,
+            dispatch_index = _native_cursor if _replay_path else _record_dispatch_cursor
+            _trace_once({"v": 1, "kind": "dispatch", "index": dispatch_index,
                 "tool_sha256": _digest(tool_name.encode("utf-8")), "shape_sha256": _digest(request)})
+            if not _replay_path:
+                _record_dispatch_cursor += 1
             if _replay_path:
                 exchanges = _replay_exchanges(_native_events)
                 if _native_cursor >= len(exchanges):
