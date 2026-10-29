@@ -248,12 +248,19 @@ function normalizeLsDiagnosticOrdering(value) {
   return [...diagnostics.sort(), ...ordinary].join("\n");
 }
 
+function normalizePytestElapsed(value) {
+  // JSON encodes an earlier line feed as the two characters `\\n`, so a
+  // word-boundary-only matcher misses a summary in a structured tool value.
+  // Retain every count/category; only elapsed rendering is volatile.
+  return value.replace(/(^|\\n|\r?\n)((?:\d+ (?:failed|passed|skipped|deselected|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1$2<asb-elapsed>");
+}
+
 function normalizeCassetteBody(body) {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const callIdentifiers = new Map();
-  const normalized = normalizeWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace)
+  const normalized = normalizePytestElapsed(normalizeWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace)
     .replaceAll(workspace || "\u0000", "<asb-workspace>"))
     // Preserve distinct call IDs before the generic UUID normalizer below.
     // OpenCode uses `call-<uuid>` while some OpenAI-compatible clients use
@@ -315,11 +322,10 @@ function normalizeCassetteBody(body) {
     // only those run-local rendering details before cassette comparison.
     .replace(/\/opt\/asb-private\/agent-state\/data\/opencode\/tool-output\/tool_[A-Za-z0-9_-]+/g, "<asb-opencode-tool-output>")
     .replace(/(<function [^\n>]+ at )0x[0-9a-f]+>/gi, "$1<asb-address>>")
-    .replace(/((?:\b\d+ (?:failed|passed|skipped|deselected|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1<asb-elapsed>")
     // pip's download progress embeds live transfer throughput and ETA after
     // the already-significant artifact size. Keep the package and byte count
     // strict while removing only transport timing from tool history.
-    .replace(/(\b\d+(?:\.\d+)?\/\d+(?:\.\d+)? (?:kB|MB|GB) )\d+(?:\.\d+)? (?:kB|MB|GB)\/s eta \d+:\d+:\d+/g, "$1<asb-transfer-rate> eta <asb-transfer-eta>");
+    .replace(/(\b\d+(?:\.\d+)?\/\d+(?:\.\d+)? (?:kB|MB|GB) )\d+(?:\.\d+)? (?:kB|MB|GB)\/s eta \d+:\d+:\d+/g, "$1<asb-transfer-rate> eta <asb-transfer-eta>"));
   try {
     const structuredToolCallIdentifiers = new Map();
     const structuredContentBlockIdentifiers = new Map();
@@ -471,7 +477,7 @@ function normalizeCassetteBody(body) {
             return match;
           });
         }
-        return withoutGuidance;
+        return normalizePytestElapsed(withoutGuidance);
       }
       if (Array.isArray(value)) return value.map((item, index) => sort(item, String(index), [...path, String(index)]));
       if (value && typeof value === "object") {
@@ -479,7 +485,8 @@ function normalizeCassetteBody(body) {
       }
       return value;
     };
-    return JSON.stringify(sort(JSON.parse(normalized))).replace(/\.\.\/[^"\\]*AGENTS\.md(?:\\n)?/g, "");
+    return JSON.stringify(sort(JSON.parse(normalized)))
+      .replace(/\.\.\/[^"\\]*AGENTS\.md(?:\\n)?/g, "");
   } catch {
     return normalized;
   }
