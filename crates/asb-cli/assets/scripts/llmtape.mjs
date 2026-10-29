@@ -457,6 +457,19 @@ function normalizeCassetteBody(body) {
           && key === "conversationRequestId") {
         return "<asb-workbuddy-conversation-request>";
       }
+      // WorkBuddy also assigns a fresh opaque 32-hex message ID to every
+      // history item. It links client-side conversation state only; retain
+      // the surrounding role and content while canonicalizing this fixed
+      // protocol field.
+      if (typeof value === "string"
+          && path.length === 3
+          && path[0] === "messages"
+          && /^\d+$/.test(path[1])
+          && path[2] === "messageId"
+          && key === "messageId"
+          && /^[0-9a-f]{32}$/i.test(value)) {
+        return "<asb-workbuddy-message>";
+      }
       if (typeof value === "string") {
         value = normalizeToolSearchOrdering(value);
         value = normalizeLsDiagnosticOrdering(value);
