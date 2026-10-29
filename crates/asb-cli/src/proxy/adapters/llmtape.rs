@@ -1077,6 +1077,29 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_codex_shell_envelope_wall_time() {
+        let root = test_root();
+        let cassette = root.join("codex-shell-wall-time.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Chunk ID: deadbeef\nWall time: 0.2164 seconds\nProcess exited with code 0\nOriginal token count: 12\nresult"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let replayed = recorded.replace("0.2164", "0.1995");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_exit = replayed.replace("code 0", "code 1");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &changed_exit).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_rejects_changed_body_and_extra_requests() {
         let root = test_root();
         let cassette = cassette(&root);

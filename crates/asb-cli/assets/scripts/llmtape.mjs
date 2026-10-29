@@ -284,6 +284,14 @@ function normalizeCassetteBody(body) {
     .replace(/original token count: \d+/g, "original token count: <asb-token-count>")
     .replace(/Total output lines: \d+/g, "Total output lines: <asb-line-count>")
     .replace(/codex-arg[A-Za-z0-9_-]+/g, "codex-arg<asb-random>")
+    // Codex's shell transport prefixes each captured command result with a
+    // generated chunk identifier and wall-clock duration.  The duration is a
+    // client-side rendering observation, not request semantics: the same
+    // recorded command necessarily takes a different amount of time while an
+    // offline replay is being driven.  Scope the replacement to this complete
+    // fixed Codex envelope so a prompt or arbitrary tool result merely
+    // mentioning a wall time remains cassette-significant.
+    .replace(/(Chunk ID: [^\n]*(?:\r?\n|\\n)Wall time: )\d+(?:\.\d+)? seconds(?=(?:\r?\n|\\n)Process exited with code \d+)/g, "$1<asb-wall-time> seconds")
     // Normalize generated call identifiers, but retain the relationship
     // between distinct IDs in one request/response. OpenCode can receive
     // multiple tool calls in a streamed response; collapsing every ID into
