@@ -308,8 +308,15 @@ try:
             global _message_cursor
             results = await _original_execute(self, *args, **kwargs)
             outputs = [event for event in _native_events if event.get("event") == "output"]
-            for _result, message in results:
-                if message is None:
+            for entry in results:
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                _result, message = entry
+                if (
+                    _result is None
+                    or not isinstance(getattr(message, "tool_call_id", None), str)
+                    or not isinstance(getattr(message, "content", None), str)
+                ):
                     continue
                 if _message_cursor >= len(outputs):
                     raise RuntimeError("ASB OpenJiuwen native replay has an extra final tool message")
@@ -324,6 +331,10 @@ try:
                 else:
                     if envelope.get("message") is None:
                         envelope["message"] = {"tool_call_id": message.tool_call_id, "content": _normalize_workspace(message.content)}
+                        # The final ToolMessage is the model-facing rendering.
+                        # Store it here rather than guessing from copied output
+                        # values or an earlier renderer invocation.
+                        envelope["rendered"] = envelope["message"]["content"]
                         encoded = _canonical(envelope)
                         event["response_sha256"] = _digest(encoded)
                         event["output_b64"] = _payload(encoded)

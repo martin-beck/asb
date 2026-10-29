@@ -519,8 +519,11 @@ class AbilityManager:
     @staticmethod
     def _render_tool_result(tool, _tool_call, result):
         return tool.render_for_llm(result)
-    async def execute(self, *_args, **_kwargs):
-        return []
+    async def execute(self, result=None, message=None):
+        return ["non-tool", (result, message)]
+class ToolMessage:
+    def __init__(self, tool_call_id, content):
+        self.tool_call_id, self.content = tool_call_id, content
 "#,
         )
         .unwrap();
@@ -575,7 +578,7 @@ from openjiuwen.harness.cli.agent import factory
 from openjiuwen.harness.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool
 from openjiuwen.harness.tools.shell import BashTool
 from openjiuwen.harness.tools.code import CodeTool
-from openjiuwen.core.single_agent.ability_manager import AbilityManager
+from openjiuwen.core.single_agent.ability_manager import AbilityManager, ToolMessage
 async def main():
     agent, _tracker = factory.create_agent(None)
     assert agent._deep_config.enable_read_image_multimodal is False
@@ -590,7 +593,11 @@ async def main():
         output = type(output).model_validate(output.model_dump())
         first_render = AbilityManager._render_tool_result(instance, None, output)
         AbilityManager._render_tool_result(instance, None, output)
-        result.append(first_render)
+        message = ToolMessage(os.environ.get("ASB_TEST_TOOL_CALL_ID", tool.label), "live")
+        mixed = await AbilityManager().execute(output, message)
+        assert mixed[0] == "non-tool"
+        assert mixed[1][1].tool_call_id == tool.label
+        result.append(mixed[1][1].content)
     print(json.dumps(result, sort_keys=True))
 asyncio.run(main())
 "#,
@@ -617,6 +624,12 @@ asyncio.run(main())
         assert!(
             record.status.success(),
             "{}",
+            String::from_utf8_lossy(&record.stderr)
+        );
+        assert!(
+            sidecar.exists(),
+            "record stdout={} stderr={}",
+            String::from_utf8_lossy(&record.stdout),
             String::from_utf8_lossy(&record.stderr)
         );
         assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 8);
@@ -648,6 +661,24 @@ asyncio.run(main())
         assert!(
             !marker.exists(),
             "native tool replay executed a direct tool"
+        );
+        let mismatch = super::process(entry.to_str().unwrap())
+            .unwrap()
+            .direct()
+            .arg("--asb-native-tool-replay")
+            .arg(&sidecar)
+            .env("PYTHONPATH", &root)
+            .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_TEST_WORKSPACE", &replay_workspace)
+            .env("ASB_TEST_RENDER_PREFIX", "replay:")
+            .env("ASB_TEST_TOOL_CALL_ID", "changed-tool-call")
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
+            .output()
+            .unwrap();
+        assert!(!mismatch.status.success());
+        assert!(
+            String::from_utf8_lossy(&mismatch.stderr)
+                .contains("final tool message is missing or out of order")
         );
         std::fs::remove_dir_all(root).unwrap();
     }
