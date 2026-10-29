@@ -115,6 +115,7 @@ _native_alias = "openjiuwen-native-tools-1"
 _message_cursor = 0
 _history_cursor = 0
 _final_history = []
+_history_trace = []
 _recorded_outputs = {}
 _replayed_renders = {}
 _replayed_output_events = {}
@@ -339,6 +340,18 @@ try:
                     if history:
                         raise RuntimeError("ASB OpenJiuwen native replay has duplicate final history")
                     history = envelope["history"]
+                if "history_trace" in envelope:
+                    trace = envelope["history_trace"]
+                    if not isinstance(trace, list) or any(
+                        not isinstance(item, dict)
+                        or item.get("v") != 1
+                        or item.get("kind") not in ("history", "dispatch")
+                        or not isinstance(item.get("index"), int)
+                        or item["index"] < 0
+                        or any(not isinstance(value, str) or len(value) != 64 for key, value in item.items() if key.endswith("_sha256"))
+                        for item in trace
+                    ):
+                        raise RuntimeError("ASB OpenJiuwen native replay history trace is malformed")
             if _replay_path and not isinstance(history, list):
                 raise RuntimeError("ASB OpenJiuwen native replay final history is missing")
             final_outputs = []
@@ -392,6 +405,9 @@ try:
                             raise RuntimeError("ASB OpenJiuwen native replay final history/native message disagrees")
                     message.tool_call_id = expected["tool_call_id"]
                     message.content = _materialize_workspace(expected["content"])
+                    _history_trace.append({"v": 1, "kind": "history", "index": _history_cursor,
+                        "id_sha256": _digest(message.tool_call_id.encode("utf-8")),
+                        "content_sha256": _digest(message.content.encode("utf-8"))})
                     _history_cursor += 1
                 else:
                     _final_history.append({
@@ -413,6 +429,8 @@ try:
         async def _invoke_with_native_replay(self, inputs, **kwargs):
             global _native_cursor
             request = _canonical({"tool": tool_name, "inputs": _normalize_workspace(inputs)})
+            _history_trace.append({"v": 1, "kind": "dispatch", "index": _native_cursor,
+                "tool_sha256": _digest(tool_name.encode("utf-8")), "shape_sha256": _digest(request)})
             if _replay_path:
                 exchanges = _replay_exchanges(_native_events)
                 if _native_cursor >= len(exchanges):
@@ -439,7 +457,7 @@ try:
                 if (
                     not isinstance(envelope, dict)
                     or not {"tool_output", "rendered", "message"}.issubset(envelope)
-                    or set(envelope) - {"tool_output", "rendered", "message", "history"}
+                    or set(envelope) - {"tool_output", "rendered", "message", "history", "history_trace"}
                     or (envelope["rendered"] is not None and not isinstance(envelope["rendered"], str))
                 ):
                     raise RuntimeError(
@@ -540,6 +558,7 @@ def _seal_native_tool_sidecar():
         if event.get("event") == "output":
             envelope = json.loads(base64.b64decode(event["output_b64"]))
             envelope["history"] = _final_history
+            envelope["history_trace"] = _history_trace
             encoded = _canonical(envelope)
             event["response_sha256"] = _digest(encoded)
             event["output_b64"] = _payload(encoded)
