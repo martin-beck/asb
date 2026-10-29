@@ -1,5 +1,5 @@
 //! Attempt-scoped scratch ownership, frozen before interpretation and settled once.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -196,6 +196,10 @@ impl ArtifactOwner {
     pub fn prepare(run_dir: &Path, specs: &[ArtifactSpec]) -> Result<Self, crate::Error> {
         assert!(specs.len() <= 16);
         let mut owner = Self::default();
+        // A namespace may contain several independently bounded artifacts.
+        // Claim it exactly once, then pin a fresh descriptor for each child.
+        // A pre-existing namespace still fails closed as foreign evidence.
+        let mut claimed_namespaces = BTreeSet::new();
         for spec in specs {
             for component in [spec.namespace, spec.filename] {
                 assert!(
@@ -218,12 +222,14 @@ impl ArtifactOwner {
                 use std::os::unix::fs::DirBuilderExt;
                 builder.mode(0o700);
             }
-            builder.create(&directory).map_err(|_| {
-                crate::Error::Run(
-                    "cannot create fresh agent artifact namespace; existing paths were preserved"
-                        .into(),
-                )
-            })?;
+            if claimed_namespaces.insert(spec.namespace) {
+                builder.create(&directory).map_err(|_| {
+                    crate::Error::Run(
+                        "cannot create fresh agent artifact namespace; existing paths were preserved"
+                            .into(),
+                    )
+                })?;
+            }
             let namespace = open_regular_or_directory(&directory).map_err(crate::io_error)?;
             let metadata = Observation::read(&namespace).map_err(crate::io_error)?;
             owner.files.push(OwnedFile {
@@ -888,6 +894,34 @@ mod tests {
         assert!(!frozen.error);
         assert_eq!(frozen.bytes("local-tools.jsonl"), Some(bytes.as_slice()));
         assert!(frozen.document("local-tools.jsonl").is_none());
+        assert!(owner.settle().is_ok());
+    }
+
+    #[test]
+    fn several_artifacts_can_share_one_fresh_owned_namespace() {
+        let fixture = Fixture::new();
+        let specs = [
+            ArtifactSpec {
+                namespace: "shared",
+                filename: "first.json",
+                format: ArtifactFormat::Json,
+            },
+            ArtifactSpec {
+                namespace: "shared",
+                filename: "second.jsonl",
+                format: ArtifactFormat::JsonLines,
+            },
+        ];
+        let mut owner = ArtifactOwner::prepare(&fixture.0, &specs).unwrap();
+        fs::write(fixture.0.join("shared/first.json"), "{}\n").unwrap();
+        fs::write(fixture.0.join("shared/second.jsonl"), "{\"event\":1}\n").unwrap();
+        let frozen = owner.freeze();
+        assert!(!frozen.error);
+        assert_eq!(frozen.document("first.json"), Some(&serde_json::json!({})));
+        assert_eq!(
+            frozen.bytes("second.jsonl"),
+            Some(b"{\"event\":1}\n".as_slice())
+        );
         assert!(owner.settle().is_ok());
     }
 

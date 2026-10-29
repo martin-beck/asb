@@ -11,6 +11,9 @@ use super::{
 };
 use crate::{Error, install::Recipe};
 
+const NATIVE_TOOL_SITE_CUSTOMIZE: &str =
+    include_str!("../../../assets/scripts/hermes-native-tools.py");
+
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "hermes",
     "hermes",
@@ -23,12 +26,26 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_complete_tool_replay(prepare_native_tool_replay)
+.with_native_tool_transport()
 .with_collection(collect)
-.with_artifact_specs(&[super::super::ArtifactSpec {
-    namespace: "hermes",
-    filename: "usage.json",
-    format: super::super::ArtifactFormat::Json,
-}])
+.with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "hermes",
+        filename: "usage.json",
+        format: super::super::ArtifactFormat::Json,
+    },
+    super::super::ArtifactSpec {
+        namespace: "hermes",
+        filename: "native-tool-sidecar.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "hermes",
+        filename: "native-tool-progress.json",
+        format: super::super::ArtifactFormat::Json,
+    },
+])
 .with_state_environment_vars(&["HERMES_HOME"])
 .with_final_response(final_response);
 
@@ -50,6 +67,71 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
         ],
         prompt_delivery: super::PromptDelivery::Embedded,
     }
+}
+
+fn prepare_native_tool_replay(
+    context: &mut PreparationContext<'_>,
+    tape: super::super::TapeContext<'_>,
+) -> Result<(), Error> {
+    let directory = context.runtime_dir.join("hermes-native-tools");
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        Error::Run(format!(
+            "cannot create Hermes native-tool runtime directory: {error}"
+        ))
+    })?;
+    std::fs::write(
+        directory.join("sitecustomize.py"),
+        NATIVE_TOOL_SITE_CUSTOMIZE,
+    )
+    .map_err(|error| {
+        Error::Run(format!(
+            "cannot write Hermes native-tool transport: {error}"
+        ))
+    })?;
+    // `hermes` is a declared artifact namespace.  Do not create it here:
+    // ArtifactOwner exclusively claims that directory immediately before the
+    // adapter runs.  The injected runtime hook creates its files only after
+    // that claim, which prevents a preparation-time namespace collision.
+    let output = context.run_dir.join("hermes");
+    let progress = output.join("native-tool-progress.json");
+    let diagnostic = context
+        .runtime_dir
+        .join("hermes-native-tools/native-tool-diagnostic.json");
+    let mode = match tape.mode {
+        crate::tape::Mode::Record => "record",
+        crate::tape::Mode::Replay => "replay",
+    };
+    let sidecar = match tape.mode {
+        crate::tape::Mode::Record => output.join("native-tool-sidecar.jsonl"),
+        // The guest driver gives adapters an `agent-state` child as their
+        // mutable runtime directory.  The sealed replay input is deliberately
+        // staged at the owned guest-private runtime root, beside that child,
+        // so it is not recreated or inferred from a provider cassette.
+        crate::tape::Mode::Replay => context
+            .runtime_dir
+            .parent()
+            .ok_or_else(|| Error::Run("cannot resolve Hermes native replay directory".into()))?
+            .join("native-tool-sidecar.jsonl"),
+    };
+    let inherited = std::env::var_os("PYTHONPATH");
+    let mut entries = vec![directory];
+    if let Some(inherited) = inherited.as_deref() {
+        entries.extend(std::env::split_paths(inherited));
+    }
+    let python_path = std::env::join_paths(entries)
+        .map_err(|_| Error::Run("cannot construct Hermes native-tool Python path".into()))?;
+    context
+        .command
+        // Only Hermes' terminal tool is exposed while a complete tool tape is
+        // requested. Its file and code tools bypass the terminal protocol.
+        .arg("--toolsets")
+        .arg("terminal")
+        .env("PYTHONPATH", python_path)
+        .env("ASB_HERMES_NATIVE_MODE", mode)
+        .env("ASB_HERMES_NATIVE_SIDECAR", sidecar)
+        .env("ASB_HERMES_NATIVE_PROGRESS", progress)
+        .env("ASB_HERMES_NATIVE_DIAGNOSTIC", diagnostic);
+    Ok(())
 }
 
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
@@ -143,15 +225,86 @@ fn yaml_quote(value: &str) -> String {
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
-    let Some(value) = context.frozen.document("usage.json") else {
-        return AgentArtifacts::default();
-    };
-    AgentArtifacts {
-        token_usage: Some(super::super::usage_fields(value).with_derived_total()),
-        steps: value.get("api_calls").and_then(serde_json::Value::as_u64),
-        final_response: None,
-        ..Default::default()
+    let mut artifacts = AgentArtifacts::default();
+    if let Some(value) = context.frozen.document("usage.json") {
+        artifacts.token_usage = Some(super::super::usage_fields(value).with_derived_total());
+        artifacts.steps = value.get("api_calls").and_then(serde_json::Value::as_u64);
     }
+    let Some(progress) = context.frozen.document("native-tool-progress.json") else {
+        return artifacts;
+    };
+    let complete = progress
+        .get("complete")
+        .and_then(serde_json::Value::as_bool);
+    let mode = progress.get("mode").and_then(serde_json::Value::as_str);
+    if progress
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+        || complete != Some(true)
+        || !matches!(mode, Some("record") | Some("replay"))
+    {
+        let detail = progress
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| {
+                matches!(
+                    *value,
+                    "native terminal request differs:command"
+                        | "native terminal request differs:background"
+                        | "native terminal request differs:timeout"
+                        | "native terminal request differs:force"
+                        | "native terminal request differs:workdir"
+                        | "native terminal request differs:pty"
+                        | "native terminal request differs:notify_on_complete"
+                        | "native terminal request differs:watch_patterns"
+                        | "native terminal request differs:sequence"
+                        | "native terminal request differs:encoding"
+                        | "Hermes native replay sidecar is unavailable"
+                        | "Hermes native replay sidecar is invalid"
+                        | "Hermes native replay sidecar is incomplete"
+                        | "Hermes native replay sidecar has an unsupported session"
+                        | "Hermes native replay sidecar digest is invalid"
+                )
+            });
+        artifacts.errors.push(match detail {
+            Some(detail) if detail.starts_with("Hermes ") => detail.into(),
+            Some(detail) => format!("Hermes {detail}"),
+            None => "Hermes native terminal replay did not complete".into(),
+        });
+        // Counts are adapter-private lifecycle metadata, not terminal request
+        // or response data.  Retain a tightly bounded replay cursor only when
+        // it is structurally valid, so a failed qualification can distinguish
+        // an unbound dispatch from a post-dispatch replay defect.
+        if mode == Some("replay") {
+            let consumed = progress
+                .get("invocations")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|value| *value <= 4_096);
+            let expected = progress
+                .get("expected_invocations")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|value| *value <= 4_096);
+            if let (Some(consumed), Some(expected)) = (consumed, expected)
+                && consumed <= expected
+            {
+                artifacts.errors.push(format!(
+                    "Hermes native terminal replay consumed {consumed} of {expected} calls"
+                ));
+            }
+        }
+        return artifacts;
+    }
+    if mode == Some("record") {
+        let Some(sidecar) = context.frozen.bytes("native-tool-sidecar.jsonl") else {
+            artifacts
+                .errors
+                .push("Hermes native terminal recording is unavailable".into());
+            return artifacts;
+        };
+        artifacts.native_tool_sidecar = Some(sidecar.to_vec());
+    }
+    artifacts
 }
 
 fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> {
@@ -202,6 +355,7 @@ mod tests {
             endpoint: Some("http://127.0.0.1:1/v1"),
             interface: Some(crate::endpoint::Interface::OpenAiResponses),
             prompt: "solve the fixture",
+            native_tool_mode: None,
             native_tool: None,
         });
         assert_eq!(spec.program, "hermes");
@@ -248,6 +402,139 @@ mod tests {
     }
 
     #[test]
+    fn native_terminal_tape_installs_a_private_recording_hook() {
+        let root = std::env::temp_dir().join(format!("asb-hermes-native-{}", std::process::id()));
+        let run = root.join("run");
+        let tape = root.join("provider.jsonl");
+        let mut command = Command::new("hermes");
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiResponses,
+            base_url: "http://127.0.0.1:4242/v1".into(),
+            credential: Some("fixture-key".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        prepare_native_tool_replay(
+            &mut PreparationContext {
+                command: &mut command,
+                model: "fixture",
+                connection: &connection,
+                workspace: &root,
+                runtime_dir: &root,
+                run_dir: &run,
+                mcp_servers: &[],
+                mcp_tape: None,
+                tape: None,
+            },
+            super::super::TapeContext {
+                mode: crate::tape::Mode::Record,
+                cassette: &tape,
+            },
+        )
+        .unwrap();
+        let env = environment(&command);
+        assert_eq!(env["ASB_HERMES_NATIVE_MODE"], "record");
+        assert_eq!(
+            env["ASB_HERMES_NATIVE_SIDECAR"],
+            run.join("hermes/native-tool-sidecar.jsonl")
+                .display()
+                .to_string()
+        );
+        assert!(env["PYTHONPATH"].contains("hermes-native-tools"));
+        assert!(command.get_args().any(|argument| argument == "--toolsets"));
+        assert!(command.get_args().any(|argument| argument == "terminal"));
+        // Declared artifacts are owned by the driver before the injected
+        // runtime creates them. Preparation must not pre-create a path in the
+        // adapter namespace, or the owner correctly treats it as foreign.
+        assert!(!run.join("hermes").exists());
+        assert!(
+            std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
+                .unwrap()
+                .contains("terminal_tool.terminal_tool = terminal")
+        );
+        assert!(
+            std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
+                .unwrap()
+                .contains("\"invocations\": invocations")
+        );
+        assert!(
+            std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
+                .unwrap()
+                .contains("_HERMES_CORE_TOOLS[:] = [\"terminal\"]")
+        );
+        assert!(
+            std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
+                .unwrap()
+                .contains("task_id, session_id, force, workdir")
+        );
+        assert!(
+            std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
+                .unwrap()
+                .contains("def closing_os_exit(code):")
+        );
+        let hook =
+            std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py")).unwrap();
+        assert!(hook.contains("_task_id, _session_id"));
+        assert!(!hook.contains("\"task_id\": task_id"));
+        assert!(hook.contains("entry.handler = registered_terminal"));
+        assert!(hook.contains("native terminal replay in progress"));
+        assert!(hook.contains("native terminal replay awaiting invocation"));
+        // During an ASB native record/replay run, Hermes' generic oversized
+        // terminal-output persistence would substitute a process-local
+        // sandbox path into the next provider request.  The adapter keeps the
+        // recorded terminal response inline instead; no non-terminal result
+        // is affected by this narrow wrapper.
+        assert!(
+            hook.contains(
+                "def persist_terminal_result(content, tool_name, tool_use_id, **kwargs):"
+            )
+        );
+        assert!(hook.contains("if tool_name == \"terminal\":"));
+        assert!(hook.contains(
+            "return original_persist_tool_result(content, tool_name, tool_use_id, **kwargs)"
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_terminal_replay_uses_the_guest_private_sidecar_root() {
+        let root = std::env::temp_dir().join(format!("asb-hermes-native-{}", std::process::id()));
+        let runtime = root.join("agent-state");
+        let run = root.join("run");
+        let tape = root.join("provider.jsonl");
+        let mut command = Command::new("hermes");
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiResponses,
+            base_url: "http://127.0.0.1:4242/v1".into(),
+            credential: Some("fixture-key".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        prepare_native_tool_replay(
+            &mut PreparationContext {
+                command: &mut command,
+                model: "fixture",
+                connection: &connection,
+                workspace: &root,
+                runtime_dir: &runtime,
+                run_dir: &run,
+                mcp_servers: &[],
+                mcp_tape: None,
+                tape: None,
+            },
+            super::super::TapeContext {
+                mode: crate::tape::Mode::Replay,
+                cassette: &tape,
+            },
+        )
+        .unwrap();
+        let env = environment(&command);
+        assert_eq!(
+            env["ASB_HERMES_NATIVE_SIDECAR"],
+            root.join("native-tool-sidecar.jsonl").display().to_string()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn cli2key_command_uses_named_responses_provider() {
         let config = crate::benchmark::BenchmarkConfig {
             planning: None,
@@ -269,10 +556,136 @@ mod tests {
             endpoint: Some("http://127.0.0.1:1/v1"),
             interface: Some(crate::endpoint::Interface::OpenAiResponses),
             prompt: "solve the fixture",
+            native_tool_mode: None,
             native_tool: None,
         });
         assert!(spec.args.contains(&"asb-cli2key".into()));
         assert!(!spec.args.contains(&"openai-api".into()));
+    }
+
+    #[test]
+    fn native_progress_exposes_only_whitelisted_mismatch_fields() {
+        for field in ["command", "timeout", "workdir", "watch_patterns"] {
+            let frozen = crate::agents::artifacts::FrozenArtifacts::for_test(
+                "native-tool-progress.json",
+                serde_json::json!({
+                    "schema_version": 1,
+                    "mode": "replay",
+                    "complete": false,
+                    "error": format!("native terminal request differs:{field}"),
+                }),
+            );
+            let artifacts = collect(&CollectionContext {
+                frozen: &frozen,
+                run_dir: Path::new("/fixture"),
+                interface: None,
+                anthropic_input_includes_cache: false,
+                mcp_servers: &[],
+                mcp_tape: None,
+            });
+            assert_eq!(
+                artifacts.errors,
+                vec![format!("Hermes native terminal request differs:{field}")]
+            );
+        }
+        let frozen = crate::agents::artifacts::FrozenArtifacts::for_test(
+            "native-tool-progress.json",
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "replay",
+                "complete": false,
+                "error": "native terminal request differs:unexpected-private-value",
+            }),
+        );
+        let artifacts = collect(&CollectionContext {
+            frozen: &frozen,
+            run_dir: Path::new("/fixture"),
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert_eq!(
+            artifacts.errors,
+            vec!["Hermes native terminal replay did not complete"]
+        );
+    }
+
+    #[test]
+    fn native_progress_exposes_only_bounded_replay_cursor_metadata() {
+        let frozen = crate::agents::artifacts::FrozenArtifacts::for_test(
+            "native-tool-progress.json",
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "replay",
+                "complete": false,
+                "invocations": 2,
+                "expected_invocations": 14,
+            }),
+        );
+        let artifacts = collect(&CollectionContext {
+            frozen: &frozen,
+            run_dir: Path::new("/fixture"),
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert_eq!(
+            artifacts.errors,
+            vec![
+                "Hermes native terminal replay did not complete",
+                "Hermes native terminal replay consumed 2 of 14 calls",
+            ]
+        );
+
+        let malformed = crate::agents::artifacts::FrozenArtifacts::for_test(
+            "native-tool-progress.json",
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "replay",
+                "complete": false,
+                "invocations": 9_999,
+                "expected_invocations": 1,
+            }),
+        );
+        let artifacts = collect(&CollectionContext {
+            frozen: &malformed,
+            run_dir: Path::new("/fixture"),
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert_eq!(
+            artifacts.errors,
+            vec!["Hermes native terminal replay did not complete"]
+        );
+    }
+
+    #[test]
+    fn native_progress_exposes_only_known_sidecar_initialization_failure() {
+        let frozen = crate::agents::artifacts::FrozenArtifacts::for_test(
+            "native-tool-progress.json",
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "replay",
+                "complete": false,
+                "error": "Hermes native replay sidecar is invalid",
+            }),
+        );
+        let artifacts = collect(&CollectionContext {
+            frozen: &frozen,
+            run_dir: Path::new("/fixture"),
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert_eq!(
+            artifacts.errors,
+            vec!["Hermes native replay sidecar is invalid"]
+        );
     }
 
     #[test]

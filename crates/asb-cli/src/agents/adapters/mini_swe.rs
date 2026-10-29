@@ -15,12 +15,24 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
-.with_collection(collect)
-.with_artifact_specs(&[super::super::ArtifactSpec {
-    namespace: "mini-swe",
-    filename: "trajectory.json",
-    format: super::super::ArtifactFormat::Json,
-}]);
+.with_tool_replay(prepare_tool_replay)
+.with_guest_private_assets(&[super::super::GuestPrivateAsset {
+    target: "asb_mini_swe_tools.py",
+    bytes: TOOL_TRANSPORT.as_bytes(),
+}])
+.with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "tool-replay",
+        filename: "local-tools.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "mini-swe",
+        filename: "trajectory.json",
+        format: super::super::ArtifactFormat::Json,
+    },
+])
+.with_collection(collect);
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
         program: "mini".into(),
@@ -43,6 +55,11 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
     }
 }
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
+    if let Some(tape) = context.tape
+        && tape.mode == crate::tape::Mode::Record
+    {
+        prepare_tool_transport(context, tape)?;
+    }
     context
         .command
         .arg("--output")
@@ -73,6 +90,203 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         .env("MSWEA_COST_TRACKING", "ignore_errors");
     Ok(())
 }
+
+/// Mini-SWE executes its own `bash` tool rather than accepting an MCP tool
+/// server.  Keep that client protocol here: the generic tape only stages the
+/// opaque sidecar selected for this run.
+fn prepare_tool_replay(
+    context: &mut PreparationContext<'_>,
+    tape: super::super::TapeContext<'_>,
+) -> Result<(), Error> {
+    prepare_tool_transport(context, tape)
+}
+
+fn prepare_tool_transport(
+    context: &mut PreparationContext<'_>,
+    tape: super::super::TapeContext<'_>,
+) -> Result<(), Error> {
+    // Private inputs are staged at the guest-private root; `runtime_dir` is
+    // its per-agent-state child.  Keep the import path aligned with the flat,
+    // validated private-input target above.
+    let directory = context.runtime_dir.parent().unwrap_or(context.runtime_dir);
+    let transcript = match tape.mode {
+        crate::tape::Mode::Record => {
+            let transcript = context.run_dir.join("tool-replay/local-tools.jsonl");
+            if let Some(parent) = transcript.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    Error::Run(format!(
+                        "could not create Mini-SWE tool transcript directory: {error}"
+                    ))
+                })?;
+            }
+            std::fs::write(&transcript, b"").map_err(|error| {
+                Error::Run(format!(
+                    "could not initialize Mini-SWE tool transcript: {error}"
+                ))
+            })?;
+            transcript
+        }
+        // The generic guest boundary stages the selected opaque replay
+        // sidecar at its private root. Mini-SWE owns its filename and uses it
+        // only through this adapter-local environment extension.
+        crate::tape::Mode::Replay => directory.join("local-tools.jsonl"),
+    };
+    context
+        .command
+        .arg("--environment-class")
+        .arg("asb_mini_swe_tools.AsbTapeEnvironment")
+        .env("PYTHONPATH", directory)
+        .env("ASB_MINI_SWE_TOOL_TAPE", transcript)
+        .env(
+            "ASB_MINI_SWE_TOOL_MODE",
+            match tape.mode {
+                crate::tape::Mode::Record => "record",
+                crate::tape::Mode::Replay => "replay",
+            },
+        );
+    Ok(())
+}
+
+/// Adapter-private Mini-SWE environment extension.  It serializes only the
+/// agent's own command/result exchange; the sealed artifact pipeline retains
+/// the bytes as an opaque local-tools sidecar.
+const TOOL_TRANSPORT: &str = r#"import hashlib
+import json
+import os
+from pathlib import Path
+
+from minisweagent.environments.local import LocalEnvironment
+from minisweagent.exceptions import Submitted
+
+_PATH = Path(os.environ["ASB_MINI_SWE_TOOL_TAPE"])
+_MODE = os.environ["ASB_MINI_SWE_TOOL_MODE"]
+_LIMIT = 128
+_MAX_EFFECT_BYTES = 512 * 1024
+
+
+class AsbTapeEnvironment(LocalEnvironment):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if _MODE == "replay":
+            self._entries = [json.loads(line) for line in _PATH.read_text(encoding="utf-8").splitlines() if line]
+        else:
+            self._entries = []
+        if len(self._entries) > _LIMIT:
+            raise RuntimeError("Mini-SWE local tool transcript exceeds the bounded replay limit")
+        self._position = 0
+
+    def _append(self, entry):
+        if len(self._entries) >= _LIMIT:
+            raise RuntimeError("Mini-SWE local tool transcript exceeds the bounded replay limit")
+        encoded = json.dumps(entry, separators=(",", ":"), ensure_ascii=False)
+        with _PATH.open("a", encoding="utf-8") as handle:
+            handle.write(encoded + "\n")
+        self._entries.append(entry)
+
+    def _record(self, command, result, effects):
+        event = {
+            "schema_version": 1,
+            "sequence": len(self._entries) + 1,
+            "tool": "mini-swe.bash",
+            "request": {"command": command},
+            "result": result,
+        }
+        if effects:
+            event["effects"] = effects
+        self._append(event)
+
+    def _root(self, cwd):
+        root = Path(cwd or self.config.cwd or os.getcwd()).resolve()
+        if not root.is_dir():
+            raise RuntimeError("Mini-SWE local tool workspace is unavailable")
+        return root
+
+    def _snapshot(self, root):
+        files = {}
+        for path in root.rglob("*"):
+            if not path.is_file() or path.is_symlink():
+                continue
+            if any(part in {".git", "__pycache__"} for part in path.parts) or path.suffix in {".pyc", ".pyo"}:
+                continue
+            relative = path.relative_to(root).as_posix()
+            with path.open("rb") as source:
+                files[relative] = hashlib.file_digest(source, "sha256").digest()
+        return files
+
+    def _effects(self, root, before, after):
+        effects = []
+        total = 0
+        for path in sorted(before.keys() - after.keys()):
+            effects.append({"kind": "remove_file", "path": path})
+        for path in sorted(after):
+            if before.get(path) != after[path]:
+                try:
+                    content = (root / path).read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    raise RuntimeError("Mini-SWE local tool changed a non-text workspace file")
+                total += len(content.encode("utf-8"))
+                if total > _MAX_EFFECT_BYTES:
+                    raise RuntimeError("Mini-SWE local tool workspace effects exceed the bounded replay limit")
+                effects.append({"kind": "write_text", "path": path, "content": content})
+        return effects
+
+    def _apply_effects(self, root, effects):
+        if not isinstance(effects, list):
+            raise RuntimeError("Mini-SWE replay workspace effects are malformed")
+        for effect in effects:
+            if not isinstance(effect, dict):
+                raise RuntimeError("Mini-SWE replay workspace effect is malformed")
+            path = effect.get("path")
+            if not isinstance(path, str) or not path or Path(path).is_absolute() or ".." in Path(path).parts:
+                raise RuntimeError("Mini-SWE replay workspace effect escapes its workspace")
+            target = root.joinpath(*Path(path).parts)
+            kind = effect.get("kind")
+            if kind == "write_text":
+                content = effect.get("content")
+                if not isinstance(content, str):
+                    raise RuntimeError("Mini-SWE replay workspace write is malformed")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            elif kind == "remove_file":
+                if target.is_file() or target.is_symlink():
+                    target.unlink()
+            else:
+                raise RuntimeError("Mini-SWE replay workspace effect is unsupported")
+
+    def execute(self, action, cwd="", *, timeout=None):
+        command = action.get("command", "")
+        if _MODE == "record":
+            root = self._root(cwd)
+            before = self._snapshot(root)
+            try:
+                output = super().execute(action, cwd, timeout=timeout)
+            except Submitted as submitted:
+                self._record(command, {"submitted": list(submitted.messages)}, self._effects(root, before, self._snapshot(root)))
+                raise
+            self._record(command, output, self._effects(root, before, self._snapshot(root)))
+            return output
+        if self._position >= len(self._entries):
+            raise RuntimeError("Mini-SWE replay requested an unrecorded local tool result")
+        entry = self._entries[self._position]
+        self._position += 1
+        if (
+            entry.get("schema_version") != 1
+            or entry.get("sequence") != self._position
+            or entry.get("tool") != "mini-swe.bash"
+            or entry.get("request", {}).get("command") != command
+        ):
+            raise RuntimeError("Mini-SWE replay local tool command differs from the recording")
+        output = entry.get("result")
+        if not isinstance(output, dict):
+            raise RuntimeError("Mini-SWE replay local tool result is malformed")
+        self._apply_effects(self._root(cwd), entry.get("effects", []))
+        if "submitted" in output:
+            submitted = output["submitted"]
+            if not isinstance(submitted, list):
+                raise RuntimeError("Mini-SWE replay submission is malformed")
+            raise Submitted(*submitted)
+        return output
+"#;
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
     let Some(document) = context.frozen.document("trajectory.json") else {
@@ -131,6 +345,125 @@ fn trajectory_usage(value: &serde_json::Value) -> crate::measurements::TokenUsag
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentAdapter;
+    use std::{collections::HashMap, process::Command};
+
+    fn environment(command: &Command) -> HashMap<String, String> {
+        command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tape_backed_preparation_owns_mini_swe_bash_results() {
+        let root = std::env::temp_dir().join(format!("asb-mini-swe-tape-{}", std::process::id()));
+        let workspace = root.join("workspace");
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cassette = root.join("record.jsonl");
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiChat,
+            base_url: "http://127.0.0.1:4321/v1".into(),
+            credential: Some("fixture-key".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let runtime = root.join("agent-state");
+        let mut command = Command::new("mini");
+        ADAPTER
+            .prepare(&mut PreparationContext {
+                command: &mut command,
+                model: "fixture-model",
+                connection: &connection,
+                workspace: &workspace,
+                runtime_dir: &runtime,
+                run_dir: &run_dir,
+                mcp_servers: &[],
+                mcp_tape: None,
+                tape: Some(super::super::TapeContext {
+                    mode: crate::tape::Mode::Record,
+                    cassette: &cassette,
+                }),
+            })
+            .unwrap();
+        let arguments = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(arguments.windows(2).any(|pair| {
+            pair[0] == "--environment-class" && pair[1] == "asb_mini_swe_tools.AsbTapeEnvironment"
+        }));
+        let command_environment = environment(&command);
+        let transcript = run_dir.join("tool-replay/local-tools.jsonl");
+        assert_eq!(
+            command_environment.get("ASB_MINI_SWE_TOOL_TAPE"),
+            Some(&transcript.to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            command_environment.get("ASB_MINI_SWE_TOOL_MODE"),
+            Some(&"record".into())
+        );
+        assert_eq!(
+            command_environment.get("PYTHONPATH"),
+            Some(&root.to_string_lossy().into_owned())
+        );
+        assert!(transcript.is_file());
+
+        let mut replay_command = Command::new("mini");
+        ADAPTER
+            .prepare(&mut PreparationContext {
+                command: &mut replay_command,
+                model: "fixture-model",
+                connection: &connection,
+                workspace: &workspace,
+                runtime_dir: &runtime,
+                run_dir: &run_dir,
+                mcp_servers: &[],
+                mcp_tape: None,
+                tape: Some(super::super::TapeContext {
+                    mode: crate::tape::Mode::Replay,
+                    cassette: &cassette,
+                }),
+            })
+            .unwrap();
+        let replay_environment = environment(&replay_command);
+        assert_eq!(
+            replay_environment.get("ASB_MINI_SWE_TOOL_TAPE"),
+            Some(
+                &root
+                    .join("local-tools.jsonl")
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
+        assert_eq!(
+            replay_environment.get("ASB_MINI_SWE_TOOL_MODE"),
+            Some(&"replay".into())
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mini_swe_tool_tape_uses_real_jsonl_separators() {
+        // `TOOL_TRANSPORT` is a Rust raw string. The embedded Python must
+        // receive one escape, not a literal backslash followed by `n`, or
+        // adjacent records become one malformed JSON document at sealing.
+        assert!(TOOL_TRANSPORT.contains("handle.write(encoded + \"\\n\")"));
+        assert!(!TOOL_TRANSPORT.contains("handle.write(encoded + \"\\\\n\")"));
+    }
+
+    #[test]
+    fn mini_swe_replays_the_client_submission_payload_without_retyping_it() {
+        assert!(TOOL_TRANSPORT.contains("if not isinstance(submitted, list):"));
+        assert!(!TOOL_TRANSPORT.contains("all(isinstance(item, str) for item in submitted)"));
+    }
 
     #[test]
     fn collection_uses_the_native_step_limit_counter() {

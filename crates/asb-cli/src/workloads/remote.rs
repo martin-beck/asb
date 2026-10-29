@@ -902,6 +902,38 @@ impl Session {
         let artifact_output = self.artifacts.join("guest-artifacts");
         std::fs::create_dir_all(&artifact_output)
             .map_err(|error| format!("cannot allocate guest artifact export directory: {error}"))?;
+        // Adapter extensions may require a tiny static helper inside the guest
+        // runtime.  Stage declared opaque bytes without interpreting their
+        // protocol; the adapter alone selects the guest-relative target.
+        let adapter = crate::agents::find(&context.config.agent)
+            .ok_or_else(|| "selected agent has no installation adapter".to_owned())?;
+        for asset in adapter.guest_private_assets() {
+            let target = std::path::Path::new(asset.target);
+            if target.is_absolute()
+                || target.components().any(|part| {
+                    matches!(
+                        part,
+                        std::path::Component::ParentDir | std::path::Component::RootDir
+                    )
+                })
+            {
+                return Err("adapter guest asset has an unsafe target".into());
+            }
+            let source = artifact_output.join("adapter-private").join(target);
+            let parent = source
+                .parent()
+                .ok_or_else(|| "adapter guest asset has no parent".to_owned())?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("cannot stage adapter guest asset: {error}"))?;
+            std::fs::write(&source, asset.bytes)
+                .map_err(|error| format!("cannot stage adapter guest asset: {error}"))?;
+            private_inputs.push(PrivateInput {
+                source,
+                target: asset.target.into(),
+                bytes: asset.bytes.len() as u64,
+                sha256: crate::cassette::digest(asset.bytes),
+            });
+        }
         let payload = AgentRequest {
             binary: &binary,
             project_root: context.project_root,

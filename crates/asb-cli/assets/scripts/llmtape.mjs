@@ -7,6 +7,7 @@ import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } f
 import http from "node:http";
 import { performance } from "node:perf_hooks";
 import { isAbsolute } from "node:path";
+import { pathToFileURL } from "node:url";
 import { quiesceNetworkRequests, networkFetch } from "./network-fetch.mjs";
 import { CaptureSession, responseDelivery } from "./capture-session.mjs";
 import { normalizeWorkspacePaths } from "./tape-normalization.mjs";
@@ -21,6 +22,9 @@ let stopping = false;
 // volatile.  The request and body limits bound this map for a session.
 const replayMaterializedIdentifiers = new Map();
 let replayMaterializedIdentifierSequence = 0;
+const agentWireExtension = process.env.ASB_TAPE_AGENT_WIRE_EXTENSION
+  ? await import(pathToFileURL(process.env.ASB_TAPE_AGENT_WIRE_EXTENSION).href)
+  : null;
 
 function usage(message) {
   if (message) console.error(`llmtape: ${message}`);
@@ -285,7 +289,7 @@ function normalizeHermesVerificationScriptPath(value) {
   );
 }
 
-function normalizeCassetteBody(body) {
+function normalizeCassetteBody(body, url = "") {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
   const workspace = process.env.ASB_TAPE_WORKSPACE;
@@ -371,6 +375,11 @@ function normalizeCassetteBody(body) {
     // strict while removing only transport timing from tool history.
     .replace(/(\b\d+(?:\.\d+)?\/\d+(?:\.\d+)? (?:kB|MB|GB) )\d+(?:\.\d+)? (?:kB|MB|GB)\/s eta \d+:\d+:\d+/g, "$1<asb-transfer-rate> eta <asb-transfer-eta>")));
   try {
+    const parsed = JSON.parse(normalized);
+    // The tape core passes opaque request data to an optional adapter-owned
+    // extension. It neither identifies the adapter nor interprets its fields.
+    const extensionValue = agentWireExtension?.normalizeRequest?.({ url, body: parsed });
+    const canonical = extensionValue === undefined ? parsed : extensionValue;
     const structuredToolCallIdentifiers = new Map();
     const structuredContentBlockIdentifiers = new Map();
     const canonicalToolCallIdentifier = (identifier) => {
@@ -490,17 +499,6 @@ function normalizeCassetteBody(body) {
           && key === "id") {
         return canonicalContentBlockIdentifier(value);
       }
-      // WorkBuddy carries a process-local conversation request identifier in
-      // each OpenAI-compatible history item.  It is not a model-visible
-      // instruction or result and naturally changes for every replay.
-      if (typeof value === "string"
-          && path.length === 3
-          && path[0] === "messages"
-          && /^\d+$/.test(path[1])
-          && path[2] === "conversationRequestId"
-          && key === "conversationRequestId") {
-        return "<asb-workbuddy-conversation-request>";
-      }
       if (typeof value === "string") {
         value = normalizeFunctionRenderingAddress(value);
         value = normalizeObjectRenderingAddress(value);
@@ -532,7 +530,7 @@ function normalizeCassetteBody(body) {
       }
       return value;
     };
-    return JSON.stringify(sort(JSON.parse(normalized)))
+    return JSON.stringify(sort(canonical))
       .replace(/\.\.\/[^"\\]*AGENTS\.md(?:\\n)?/g, "");
   } catch {
     return normalized;
@@ -595,7 +593,7 @@ function normalizeWorkspaceText(value, workspace, replacement = "<asb-workspace>
 function requestKey(request) {
   // Match the normalized full request, not just model and endpoint: a changed
   // prompt or tool state must not silently consume an unrelated response.
-  return JSON.stringify([request.method, request.url, normalizeCassetteBody(request.body)]);
+  return JSON.stringify([request.method, request.url, normalizeCassetteBody(request.body, request.url)]);
 }
 
 const interactions = mode === "replay"
@@ -606,7 +604,7 @@ const interactions = mode === "replay"
         const interaction = JSON.parse(line);
         if (interaction.request) {
           interaction.request.url = requestPath(interaction.request.url);
-          interaction.request.body = normalizeCassetteBody(interaction.request.body);
+          interaction.request.body = normalizeCassetteBody(interaction.request.body, interaction.request.url);
         }
         if (interaction.response?.body) {
           interaction.response.body = normalizeCassetteBody(interaction.response.body);
@@ -808,7 +806,7 @@ async function handle(request, response, recording) {
     // recorder and makes separate-directory replay path-stable.
     url: requestPath(request.url),
     headers: redactHeaders(Object.fromEntries(Object.entries(request.headers))),
-    body: body.length ? normalizeCassetteBody(normalizedBody) : null,
+    body: body.length ? normalizeCassetteBody(normalizedBody, request.url || "/") : null,
   };
 
   if (mode === "replay") {
