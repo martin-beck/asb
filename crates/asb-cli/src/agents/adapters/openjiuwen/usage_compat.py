@@ -114,6 +114,7 @@ _native_cursor = 0
 _native_alias = "openjiuwen-native-tools-1"
 _message_cursor = 0
 _history_cursor = 0
+_final_history = []
 _recorded_outputs = {}
 _replayed_renders = {}
 _replayed_output_events = {}
@@ -328,10 +329,18 @@ try:
         AbilityManager._render_tool_result = _render_tool_result_with_native_replay
         _original_execute = AbilityManager.execute
         async def _execute_with_native_messages(self, *args, **kwargs):
-            global _message_cursor, _history_cursor
+            global _message_cursor, _history_cursor, _final_history
             results = await _original_execute(self, *args, **kwargs)
             outputs = [event for event in _native_events if event.get("event") == "output"]
-            history = [event for event in _native_events if event.get("event") == "final_message"]
+            history = []
+            for output in outputs:
+                envelope = json.loads(base64.b64decode(output["output_b64"]))
+                if "history" in envelope:
+                    if history:
+                        raise RuntimeError("ASB OpenJiuwen native replay has duplicate final history")
+                    history = envelope["history"]
+            if _replay_path and not isinstance(history, list):
+                raise RuntimeError("ASB OpenJiuwen native replay final history is missing")
             final_outputs = []
             for output in outputs:
                 envelope = json.loads(base64.b64decode(output["output_b64"]))
@@ -385,14 +394,13 @@ try:
                     message.content = _materialize_workspace(expected["content"])
                     _history_cursor += 1
                 else:
-                    _native_events.append(json.loads(_event(
-                        "final_message",
-                        native=event is not None,
-                        message={
+                    _final_history.append({
+                        "native": event is not None,
+                        "message": {
                             "tool_call_id": message.tool_call_id,
                             "content": _normalize_workspace(message.content),
                         },
-                    )))
+                    })
             return results
         AbilityManager.execute = _execute_with_native_messages
     except ImportError:
@@ -430,7 +438,8 @@ try:
                 envelope = json.loads(base64.b64decode(output["output_b64"]))
                 if (
                     not isinstance(envelope, dict)
-                    or set(envelope) != {"tool_output", "rendered", "message"}
+                    or not {"tool_output", "rendered", "message"}.issubset(envelope)
+                    or set(envelope) - {"tool_output", "rendered", "message", "history"}
                     or (envelope["rendered"] is not None and not isinstance(envelope["rendered"], str))
                 ):
                     raise RuntimeError(
@@ -525,6 +534,16 @@ def _seal_native_tool_sidecar():
         final_messages += 1
     if final_messages == 0:
         return
+    if not _final_history:
+        return
+    for event in _native_events:
+        if event.get("event") == "output":
+            envelope = json.loads(base64.b64decode(event["output_b64"]))
+            envelope["history"] = _final_history
+            encoded = _canonical(envelope)
+            event["response_sha256"] = _digest(encoded)
+            event["output_b64"] = _payload(encoded)
+            break
     _native_events.extend([
         json.loads(_event("exit", alias=_native_alias, success=True)),
         json.loads(_event("workspace_effect", sha256=_digest(b"openjiuwen-grep-v1"))),
@@ -547,8 +566,11 @@ if _replay_path:
     )
     if _message_cursor != _recorded_final_messages:
         raise SystemExit("ASB OpenJiuwen native replay left final tool messages unconsumed")
-    _recorded_history_messages = sum(
-        1 for event in _native_events if event.get("event") == "final_message"
-    )
+    _recorded_history_messages = 0
+    for event in _native_events:
+        if event.get("event") == "output":
+            envelope = json.loads(base64.b64decode(event["output_b64"]))
+            if "history" in envelope:
+                _recorded_history_messages += len(envelope["history"])
     if _history_cursor != _recorded_history_messages:
         raise SystemExit("ASB OpenJiuwen native replay left final history messages unconsumed")
