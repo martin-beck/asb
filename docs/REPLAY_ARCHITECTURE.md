@@ -27,9 +27,12 @@ and report completion.  It must not know an agent name, a tool name, a
 tool-call field, a client-specific identifier, a workspace-effect format, or a
 client wire protocol.
 
-Every agent-specific record/replay capability instead belongs to that agent's
-adapter or to a private extension module immediately beside it.  The extension
-owns all of the following:
+Every adapter-specific record/replay capability instead belongs to its owning
+agent, provider, or workload adapter, or to a private extension module
+immediately beside it.  An agent extension owns client/tool behavior; a
+provider extension owns provider-wire normalization and proxy setup; a workload
+extension owns workload-side replay inputs and evaluator reconstruction.  The
+extension owns all of the following:
 
 - injecting the agent's hook, extension, MCP configuration, or wrapper;
 - the sidecar kind and version, its payload codec, and its bounded validation;
@@ -96,11 +99,11 @@ replay.
 ## Commands and selection
 
 `--llm-record` and `--llm-replay` select only provider traffic. `--tool-record`
-and `--tool-replay` select the adapter-owned local-tool layer. `--mcp-record`
-and `--mcp-replay` select declared MCP transport. The legacy `--record` and
-`--replay` select the LLM and local-tool layers together. `--cassette` chooses
-their shared cassette carrier, and `--respect-record-timings` replays recorded
-provider response delays.
+and `--tool-replay` select the chosen agent adapter's tool extension.
+`--mcp-record` and `--mcp-replay` select the chosen adapter's declared MCP
+extension. The legacy `--record` and `--replay` select the LLM and enabled
+adapter extensions together. `--cassette` chooses their shared sealed carrier,
+and `--respect-record-timings` replays recorded provider response delays.
 
 Replay rejects a missing cassette, a changed selected request, invalid sidecar,
 or unconsumed local-tool event. It does not silently substitute a live provider
@@ -116,7 +119,7 @@ its compact native trace provides this: it retains process-lifecycle evidence
 and preserves runtime measurement, but does not emulate arbitrary native calls.
 
 Consequently, a complete tool replay guarantee is adapter-specific. An adapter
-must either route every benchmark-exposed tool through its local-tool transport
+must either route every benchmark-exposed tool through its own replay extension
 or decline that capability. New agent adapters should first use a documented
 client extension/MCP ingress where one exists; a proposed native capture backend
 must demonstrate bounded capture, per-process scope, exact replay semantics,
@@ -129,8 +132,8 @@ The design is intentionally light on disk and kernel work:
 - the LLM proxy has one private session directory per execution and records
   selected exchanges rather than packet or syscall streams;
 - MCP relay payloads, local-tool transcripts, and native trace indexes are
-  bounded, sealed artifacts; replay sidecars are staged as files rather than
-  copied through controller messages;
+  bounded, sealed adapter-owned artifacts; the common layer stages their bytes
+  as files rather than copying protocol data through controller messages;
 - the native trace index contains opaque content identities, not command lines,
   paths, prompt text, credentials, or output;
 - runner capture continues to drain streams while retaining bounded prefixes;
@@ -156,3 +159,14 @@ qualification:
 Live-provider smoke tests are local qualifications, not CI requirements. They
 must use one agent and one explicit workload trial before broader sweeps are
 promoted.
+
+## Placement and review rule
+
+Put an adapter's replay implementation and its positive/negative tests in
+`agents/adapters/<adapter>.rs` or a narrowly named sibling such as
+`agents/adapters/<adapter>_replay.rs`; provider and workload extensions follow
+the corresponding adapter directories. The shared tape and runner may change
+only for adapter-neutral artifact custody, lifecycle dispatch, resource bounds,
+or cross-adapter contract tests. A named adapter, wire field, protocol-specific
+JSON path, or replay special case in shared code is a design defect: move it
+back into the owning extension.
