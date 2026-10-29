@@ -211,6 +211,12 @@ pub(super) struct PreparedAttempt {
     pub tape: Option<tape::Session>,
     pub capsule_record: Option<agents::capsule::Capture>,
     pub capsule_replay: Option<agents::capsule::Replay>,
+    /// Remote guests capture their own actual workspace. These paths remain
+    /// runner-private custody locations, not guest request fields.
+    #[cfg_attr(test, allow(dead_code))]
+    pub guest_capsule_record: Option<std::path::PathBuf>,
+    #[cfg_attr(test, allow(dead_code))]
+    pub guest_capsule_replay: Option<std::path::PathBuf>,
 }
 
 pub(super) struct ExecutedAttempt {
@@ -292,6 +298,42 @@ impl SettledAttempt {
             .map(|replay| replay.finish(workspace).map(|()| None))
             .transpose()
             .map(Option::flatten)
+    }
+
+    /// Retain an opaque guest-captured capsule at the runner-selected path.
+    /// The receipt was verified by workload transport before this point; this
+    /// function deliberately does not parse an adapter's tool protocol.
+    pub fn retain_guest_capsule(&mut self) -> Result<(), Error> {
+        let Some(destination) = self.prepared.guest_capsule_record.take() else {
+            return Ok(());
+        };
+        let artifacts = &mut self
+            .evidence
+            .guest
+            .as_mut()
+            .ok_or_else(|| Error::Run("guest native capsule export has no guest result".into()))?
+            .sealed_artifacts;
+        let index = artifacts
+            .iter()
+            .position(|artifact| {
+                artifact.kind == crate::agents::driver::NATIVE_WORKSPACE_CAPSULE_ARTIFACT
+            })
+            .ok_or_else(|| Error::Run("guest native capsule export is missing".into()))?;
+        let bytes = artifacts.remove(index).bytes;
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(Error::Run(
+                "guest native capsule export exceeds its bound".into(),
+            ));
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .map_err(crate::io_error)?;
+        use std::io::Write;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(crate::io_error)
     }
 
     pub fn native_capsule_failure(&mut self, error: Error) {

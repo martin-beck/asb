@@ -580,18 +580,37 @@ impl<'a> ReadyAttempt<'a> {
                 ));
             }
             let workspace = workload_session.invocation().workspace.clone();
-            let capsule_record = options
-                .native_capsule_record
-                .map(|destination| {
-                    agents::capsule::Capture::start(Path::new(destination), &workspace)
-                })
-                .transpose()?;
-            // Restore only after the workload has prepared its normal isolated
-            // workspace, retaining that session's ownership and mounts.
-            let capsule_replay = options
-                .native_capsule_replay
-                .map(|source| agents::capsule::Replay::open(Path::new(source), &workspace))
-                .transpose()?;
+            let (capsule_record, capsule_replay, guest_capsule_record, guest_capsule_replay) =
+                if workload_session.uses_isolated_guest() {
+                    // The actual workspace is owned by the remote guest. Keep
+                    // selected host paths as opaque custody only; its adapter
+                    // captures and applies the payload in the guest.
+                    (
+                        None,
+                        None,
+                        options.native_capsule_record.map(PathBuf::from),
+                        options.native_capsule_replay.map(PathBuf::from),
+                    )
+                } else {
+                    (
+                        options
+                            .native_capsule_record
+                            .map(|destination| {
+                                agents::capsule::Capture::start(Path::new(destination), &workspace)
+                            })
+                            .transpose()?,
+                        // Restore only after the workload has prepared its normal
+                        // workspace, retaining that session's ownership and mounts.
+                        options
+                            .native_capsule_replay
+                            .map(|source| {
+                                agents::capsule::Replay::open(Path::new(source), &workspace)
+                            })
+                            .transpose()?,
+                        None,
+                        None,
+                    )
+                };
             if let Some(arrival) = arrival.as_mut() {
                 let identity = (|| {
                     let task = &workload_session.invocation().identity;
@@ -697,9 +716,19 @@ impl<'a> ReadyAttempt<'a> {
                 launch,
                 capsule_record,
                 capsule_replay,
+                guest_capsule_record,
+                guest_capsule_replay,
             ))
         })();
-        let (metadata, tape, launch, capsule_record, capsule_replay) = match prepared {
+        let (
+            metadata,
+            tape,
+            launch,
+            capsule_record,
+            capsule_replay,
+            guest_capsule_record,
+            guest_capsule_replay,
+        ) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => return Err(cancel_prepared(error, arrival, workload_session.as_mut())),
         };
@@ -712,6 +741,8 @@ impl<'a> ReadyAttempt<'a> {
                 tape,
                 capsule_record,
                 capsule_replay,
+                guest_capsule_record,
+                guest_capsule_replay,
             },
             selected_offer,
             launch,
@@ -802,6 +833,17 @@ impl<'a> ReadyAttempt<'a> {
                         .map(|(_, cassette)| cassette.as_path()),
                     #[cfg(not(test))]
                     native_tool,
+                    #[cfg(not(test))]
+                    native_capsule: prepared
+                        .guest_capsule_record
+                        .as_deref()
+                        .map(workloads::session::NativeCapsule::Record)
+                        .or_else(|| {
+                            prepared
+                                .guest_capsule_replay
+                                .as_deref()
+                                .map(workloads::session::NativeCapsule::Replay)
+                        }),
                     measurements: prepared.measurements.as_mut(),
                     show_output,
                     progress: isolated_progress
@@ -999,6 +1041,12 @@ impl<'a> CompletedAttempt<'a> {
                 "record collection lost the admitted tool-tape capture handle before adapter collection"
                     .into(),
             );
+        }
+        // Remote guests return adapter-owned workspace effects through a
+        // receipt-backed opaque artifact before adapter collection or
+        // evaluator cleanup can discard their private custody.
+        if let Err(error) = settled.retain_guest_capsule() {
+            settled.native_capsule_failure(error);
         }
         // Isolated guests return their frozen adapter state through the same
         // receipt-backed artifact route used for sidecars.  This lets the
