@@ -113,9 +113,11 @@ function responseHeaders(headers) {
 
 // A forwarded streamed provider reply is conclusive only when the upstream
 // body has a terminal SSE frame, this proxy has called `response.end`, and the
-// client did not abort its request. This admits the normal HTTP/1.1 pattern
-// where a client closes directly after consuming the final frame, but never
-// promotes a partial stream or arbitrary close to a completed capture.
+// client did not abort its request. `handle` reaches this point only after its
+// async request-body iterator completed, which is the reliable body-complete
+// proof when this client immediately closes HTTP/1.1. This admits that normal
+// close pattern, but never promotes a partial stream or arbitrary close to a
+// completed capture.
 function completedSseResponse(response, body) {
   const contentType = String(response.headers["content-type"] || "").toLowerCase();
   if (!contentType.startsWith("text/event-stream") || !body.endsWith("\n")) return false;
@@ -1073,7 +1075,6 @@ const server = http.createServer((request, response) => {
   const delivered = responseDelivery(response, () =>
     recording.completedSseResponse
       && recording.responseEnded
-      && request.complete === true
       && request.aborted !== true,
   );
   activeCaptures.add(recording);
