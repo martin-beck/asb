@@ -515,12 +515,24 @@ class Tool:
         std::fs::write(
             package.join("core/single_agent/ability_manager.py"),
             r#"
+import os
 class AbilityManager:
     @staticmethod
     def _render_tool_result(tool, _tool_call, result):
         return tool.render_for_llm(result)
     async def execute(self, result=None, message=None):
-        return ["non-tool", (result, message)]
+        class SyntheticResult:
+            def model_dump(self):
+                return {"success": False, "data": {"unrelated": True}, "error": None}
+        pairs = [
+            "non-tool",
+            (SyntheticResult(), ToolMessage("before", "unrelated-before")),
+            (result, message),
+            (SyntheticResult(), ToolMessage("after", "unrelated-after")),
+        ]
+        if os.environ.get("ASB_TEST_EXTRA_NATIVE_MESSAGE"):
+            pairs.append((result, ToolMessage(message.tool_call_id, "extra-native")))
+        return pairs
 class ToolMessage:
     def __init__(self, tool_call_id, content):
         self.tool_call_id, self.content = tool_call_id, content
@@ -588,16 +600,19 @@ async def main():
         instance = tool()
         output = await instance.invoke({{"value": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})
         # The real OpenJiuwen pipeline may reconstruct a ToolOutput between
-        # invocation and rendering. Exercise the adapter's stable value key,
-        # rather than relying on Python object identity.
-        output = type(output).model_validate(output.model_dump())
+        # invocation and rendering. Exercise the adapter's immediate,
+        # payload-verified association rather than object identity alone.
+        if not os.environ.get("ASB_TEST_KEEP_RESULT_IDENTITY"):
+            output = type(output).model_validate(output.model_dump())
         first_render = AbilityManager._render_tool_result(instance, None, output)
         AbilityManager._render_tool_result(instance, None, output)
         message = ToolMessage(os.environ.get("ASB_TEST_TOOL_CALL_ID", tool.label), "live")
         mixed = await AbilityManager().execute(output, message)
         assert mixed[0] == "non-tool"
-        assert mixed[1][1].tool_call_id == tool.label
-        result.append(mixed[1][1].content)
+        assert mixed[1][1].content == "unrelated-before"
+        assert mixed[2][1].tool_call_id == tool.label
+        assert mixed[3][1].content == "unrelated-after"
+        result.append(mixed[2][1].content)
     print(json.dumps(result, sort_keys=True))
 asyncio.run(main())
 "#,
@@ -680,6 +695,22 @@ asyncio.run(main())
             String::from_utf8_lossy(&mismatch.stderr)
                 .contains("final tool message is missing or out of order")
         );
+        let extra = super::process(entry.to_str().unwrap())
+            .unwrap()
+            .direct()
+            .arg("--asb-native-tool-replay")
+            .arg(&sidecar)
+            .env("PYTHONPATH", &root)
+            .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_TEST_WORKSPACE", &replay_workspace)
+            .env("ASB_TEST_RENDER_PREFIX", "replay:")
+            .env("ASB_TEST_EXTRA_NATIVE_MESSAGE", "1")
+            .env("ASB_TEST_KEEP_RESULT_IDENTITY", "1")
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
+            .output()
+            .unwrap();
+        assert!(!extra.status.success());
+        assert!(String::from_utf8_lossy(&extra.stderr).contains("final tool message"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
