@@ -65,6 +65,43 @@ struct Options {
     per_call_state: Option<PathBuf>,
 }
 
+/// A restarted client may briefly overlap its old and new stdio MCP children.
+/// The transcript and cursor are one coupled, run-private state machine, so a
+/// second process must not read either halfway through the first process's
+/// publication.  This create-new lease is deliberately fail-closed instead of
+/// trying to merge two independently executed tool calls.
+#[derive(Debug)]
+struct PersistentStateLease {
+    path: PathBuf,
+}
+
+impl PersistentStateLease {
+    fn acquire(state: &Path) -> Result<Self, Error> {
+        let path = state.with_extension("lock");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|_| Error::Run("local-tool persistent transcript is already in use".into()))?;
+        if let Err(error) = file
+            .write_all(b"asb-local-tool-state\n")
+            .and_then(|_| file.sync_all())
+        {
+            let _ = fs::remove_file(&path);
+            return Err(crate::io_error(error));
+        }
+        Ok(Self { path })
+    }
+}
+
+impl Drop for PersistentStateLease {
+    fn drop(&mut self) {
+        // This is a private, create-new lease.  If removal fails, retain it so
+        // a later process fails closed rather than overwriting uncertain state.
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PerCallState {
@@ -131,10 +168,9 @@ pub(crate) fn launch(
     })
 }
 
-/// Pi invokes one private service process per local tool call because its
-/// extension host can leave a long-lived child unread.  Persist only the
-/// bounded transcript cursor between those short-lived processes; the service
-/// still owns every tool operation and does not introduce a daemon.
+/// Some clients restart their private MCP service between tool calls. Persist
+/// the bounded transcript and replay cursor across those short-lived processes;
+/// the service still owns every tool operation and does not introduce a daemon.
 pub(crate) fn per_call_launch(
     context: &PreparationContext<'_>,
     tape: TapeContext<'_>,
@@ -160,7 +196,7 @@ pub(crate) fn per_call_launch(
 }
 
 fn per_call_state_path(run_dir: &Path) -> PathBuf {
-    run_dir.join("tool-replay/pi-progress.json")
+    run_dir.join("tool-replay/persistent-progress.json")
 }
 
 /// Reject a Pi recording or replay whose sequence cursor does not prove that
@@ -250,6 +286,11 @@ fn run_with_io(
     input: &mut impl std::io::BufRead,
     output: &mut impl Write,
 ) -> Result<(), Error> {
+    let _lease = options
+        .per_call_state
+        .as_deref()
+        .map(PersistentStateLease::acquire)
+        .transpose()?;
     let mut transcript = match options.mode {
         Mode::Record if options.per_call_state.is_some() => Transcript::decode(
             &std::fs::read(&options.transcript)
@@ -1244,6 +1285,88 @@ mod tests {
             run_with_io(replay, &mut BufReader::new(&request[..]), &mut Vec::new()).unwrap_err();
         assert_eq!(replay_error.to_string(), error.to_string());
         verify_per_call_completion(&run_dir, None).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persistent_mcp_lifecycles_append_and_replay_every_event() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-persistent-lifecycles-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let run_dir = root.join("run");
+        let transcript = run_dir.join("tool-replay/local-tools.jsonl");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(workspace.join("first.txt"), "first\n").unwrap();
+        std::fs::write(workspace.join("second.txt"), "second\n").unwrap();
+        std::fs::write(&transcript, Transcript::default().encode().unwrap()).unwrap();
+        let state = per_call_state_path(&run_dir);
+        publish_per_call_state(&state, 0, 0).unwrap();
+        let first = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"first.txt\"}}}\n";
+        let second = b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"second.txt\"}}}\n";
+
+        let record = |request: &[u8]| {
+            let mut output = Vec::new();
+            run_with_io(
+                Options {
+                    mode: Mode::Record,
+                    workspace: workspace.clone(),
+                    transcript: transcript.clone(),
+                    per_call_state: Some(state.clone()),
+                },
+                &mut BufReader::new(request),
+                &mut output,
+            )
+            .unwrap();
+            output
+        };
+        let first_recorded = record(first);
+        let second_recorded = record(second);
+        let sealed = std::fs::read(&transcript).unwrap();
+        assert_eq!(Transcript::decode(&sealed).unwrap().len(), 2);
+        assert_eq!(read_per_call_state(&state).unwrap().events, 2);
+
+        // A replay starts from the sealed event count but consumes it through
+        // the same two independently restarted MCP service lifecycles.
+        publish_per_call_state(&state, 0, 2).unwrap();
+        let replay = |request: &[u8]| {
+            let mut output = Vec::new();
+            run_with_io(
+                Options {
+                    mode: Mode::Replay,
+                    workspace: root.join("replay-workspace-is-not-opened"),
+                    transcript: transcript.clone(),
+                    per_call_state: Some(state.clone()),
+                },
+                &mut BufReader::new(request),
+                &mut output,
+            )
+            .unwrap();
+            output
+        };
+        assert_eq!(replay(first), first_recorded);
+        assert_eq!(replay(second), second_recorded);
+        verify_per_call_completion(&run_dir, Some(&sealed)).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persistent_mcp_lifecycle_refuses_an_overlapping_service() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-persistent-lock-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = root.join("persistent-progress.json");
+        let lease = PersistentStateLease::acquire(&state).unwrap();
+        let error = PersistentStateLease::acquire(&state)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already in use"), "{error}");
+        drop(lease);
+        PersistentStateLease::acquire(&state).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 
