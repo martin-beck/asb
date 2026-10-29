@@ -175,7 +175,14 @@ export function responseEventToChatChunk(event, model) {
   if (value.type === "response.output_text.delta") return { ...base, choices: [{ index: value.output_index ?? 0, delta: { content: value.delta ?? "" }, finish_reason: null }] };
   if (value.type === "response.output_item.done" && value.item?.type === "function_call") {
     const item = value.item;
-    return { ...base, choices: [{ index: value.output_index ?? 0, delta: { tool_calls: [{ index: 0, id: item.call_id ?? item.id, type: "function", function: { name: item.name, arguments: item.arguments ?? "{}" } }] }, finish_reason: null }] };
+    // OpenAI's streaming Chat protocol identifies every parallel tool call by
+    // its index.  Reusing zero caused clients such as WorkBuddy to merge
+    // separately streamed calls into one impossible concatenated tool name.
+    const toolIndex = value.output_index ?? 0;
+    // This is still one assistant choice. `toolIndex` identifies a tool call
+    // inside that choice; using it as the choice index makes clients treat
+    // subsequent parallel calls as incomplete alternative completions.
+    return { ...base, choices: [{ index: 0, delta: { tool_calls: [{ index: toolIndex, id: item.call_id ?? item.id, type: "function", function: { name: item.name, arguments: item.arguments ?? "{}" } }] }, finish_reason: null }] };
   }
   if (value.type === "response.completed") {
     const completed = responseToChatCompletion(response);
