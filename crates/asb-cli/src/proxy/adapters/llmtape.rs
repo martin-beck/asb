@@ -27,6 +27,9 @@ pub(crate) struct Settings {
     pub(crate) cassette: PathBuf,
     pub(crate) respect_record_timings: bool,
     pub(crate) workspace: PathBuf,
+    /// Opaque adapter-owned request extension; llmtape materializes and
+    /// invokes it without interpreting its wire protocol.
+    pub(crate) wire_extension: Option<&'static str>,
 }
 
 struct RunningLlmtape {
@@ -101,6 +104,18 @@ impl ProxyAdapter for LlmtapeAdapter {
             ))
         })?;
         let scratch = Scratch::create(&parent)?;
+        let wire_extension = request
+            .wire_extension
+            .map(|source| {
+                let path = scratch.path.join("agent-wire-extension.mjs");
+                std::fs::write(&path, source).map_err(|error| {
+                    Error::Run(format!(
+                        "cannot materialize adapter tape extension: {error}"
+                    ))
+                })?;
+                Ok::<_, Error>(path)
+            })
+            .transpose()?;
         // Every replay has its own copy and progress file. Sharing the source
         // directly would race on the proxy's cassette progress sidecar.
         let replay_cassette = scratch.path.join("cassette.jsonl");
@@ -130,6 +145,10 @@ impl ProxyAdapter for LlmtapeAdapter {
         command.env_remove("ASB_TAPE_CAPTURE_RECEIPT");
         command.env_remove("ASB_TAPE_CAPTURE_NONCE");
         command.env_remove("ASB_TAPE_MISMATCH_EVIDENCE");
+        command.env_remove("ASB_TAPE_AGENT_WIRE_EXTENSION");
+        if let Some(path) = wire_extension {
+            command.env("ASB_TAPE_AGENT_WIRE_EXTENSION", path);
+        }
         let capture = (builtin && request.mode == Mode::Record).then(|| {
             (
                 scratch.path.join("capture.json"),

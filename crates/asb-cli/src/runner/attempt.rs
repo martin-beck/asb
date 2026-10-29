@@ -663,12 +663,13 @@ impl<'a> ReadyAttempt<'a> {
                         } else {
                             providers::tape_upstream(&config.provider, bridge_url)
                         };
-                        Ok(Some(tape::Session::start(
+                        Ok(Some(tape::Session::start_for_agent(
                             *mode,
                             cassette,
                             upstream.as_deref(),
                             respect_record_timings,
                             &workspace,
+                            Some(&config.agent),
                         )?))
                     } else {
                         Ok(None)
