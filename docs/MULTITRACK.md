@@ -88,6 +88,48 @@ loads only the selected entry and strips terminal control effects when displayed
 Corruption is an actionable data error, not a reason to introduce a signing or
 key-management prerequisite.
 
+## Private native-tool payloads (planned schema v2)
+
+Some agents execute native tools without an interceptable MCP transport. Exact
+offline replay for those agents requires the agent-visible native-tool request
+and response bytes; a digest, a summary, or redacted output cannot reproduce a
+later tool turn. Schema v2 may therefore add a manifest-bound, canonical
+per-track native sidecar. This is a private replay payload, not public evidence
+or a report artifact.
+
+The sidecar contract is deliberately narrower than the provider track:
+
+- The manifest declares its canonical entry name, exact byte count, SHA-256,
+  event count, and positive completion state. Readers reject orphaned,
+  duplicate, noncanonical, oversized, incomplete, substituted, or malformed
+  sidecars before admitting a native replay.
+- Native events are bounded and ordered: launch, stable session alias,
+  poll/write, output, exit, and a declared workspace-effect digest. Replay
+  rejects missing, extra, reordered, or changed events and never re-executes a
+  recorded native operation.
+- The recorder stores only credential-free tool protocol fields. It never
+  stores credential values, inherited environment dumps, authorization headers,
+  host-home paths, or unclassified opaque fields. A call that cannot be
+  represented under this rule makes the native sidecar incomplete rather than
+  silently retaining unsafe bytes.
+- Filesystem locations are represented only by declared workspace-relative
+  paths or stable private-root placeholders. Absolute host paths are neither
+  published nor replay-significant.
+- Native bytes are materialized in owner-only private custody, excluded from
+  CLI logs, reports, viewer output, comparison data, receipts, and public
+  evidence. Failed/incomplete partial custody is retained only for the owning
+  user under the same access boundary; successful journal staging is removed
+  only after verified archive publication. Deleting a published bundle deletes
+  its sidecars together; ASB never scavenges user bundles automatically.
+- Native replay is an explicit opt-in capability. Ordinary `--replay` does not
+  authorize it; selection must require a complete sidecar and an adapter that
+  proves its native executor is fully intercepted. Additive MCP support alone
+  is insufficient.
+
+This contract intentionally does not add encryption, signing, telemetry, or a
+host key-management dependency. It keeps exact private replay bytes local and
+bounded while preserving the existing public-evidence privacy boundary.
+
 ## Integration invariants and acceptance
 
 - No archive or selection dispatch inside provider adapters or proxy protocol.
