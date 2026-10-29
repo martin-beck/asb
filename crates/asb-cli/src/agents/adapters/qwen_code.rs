@@ -1,4 +1,7 @@
-use super::{CommandContext, CommandSpec, PreparationContext, PromptDelivery, StaticAdapter};
+use super::{
+    AgentArtifacts, CollectionContext, CommandContext, CommandSpec, PreparationContext,
+    PromptDelivery, StaticAdapter,
+};
 use crate::{Error, install::Recipe};
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "qwen-code",
@@ -13,6 +16,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_complete_tool_replay(prepare_tool_replay)
+.with_collection(collect)
 .with_artifact_specs(&[super::super::ArtifactSpec {
     namespace: "tool-replay",
     filename: "local-tools.jsonl",
@@ -71,6 +75,19 @@ fn output_usage(
 fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> {
     super::super::structured_final_response_document(output)
 }
+
+fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
+    match super::super::tool_replay_mcp::verify_persistent_per_call_completion(
+        context.run_dir,
+        context.frozen.bytes("local-tools.jsonl"),
+    ) {
+        Ok(()) => AgentArtifacts::default(),
+        Err(error) => AgentArtifacts {
+            errors: vec![error.to_string()],
+            ..AgentArtifacts::default()
+        },
+    }
+}
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
         program: "qwen".into(),
@@ -126,7 +143,9 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
-    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    // Qwen may replace the configured stdio MCP child after a tool response.
+    // Keep the sealed transcript and replay cursor across those restarts.
+    let launch = super::super::tool_replay_mcp::persistent_per_call_launch(context, tape)?;
     let directory = context.runtime_dir.join("qwen-code");
     std::fs::create_dir_all(&directory)
         .map_err(|error| Error::Run(format!("cannot create Qwen local-tool directory: {error}")))?;
