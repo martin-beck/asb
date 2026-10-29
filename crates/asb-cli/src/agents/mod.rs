@@ -1133,7 +1133,7 @@ mod tests {
             .filter(|adapter| adapter.supports_native_tool_transport())
             .map(|adapter| adapter.id())
             .collect::<Vec<_>>();
-        assert_eq!(capable, vec!["openhands", "openjiuwen", "hermes"]);
+        assert_eq!(capable, vec!["codex", "openhands", "openjiuwen", "hermes"]);
         assert!(!find("pi").unwrap().supports_native_tool_transport());
         let adapter = find("codex").unwrap();
         assert!(select_process(adapter, "not-executed", None).is_ok());
