@@ -598,6 +598,12 @@ async def main():
     result = []
     for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool):
         instance = tool()
+        # A wrapped native tool can call another wrapped native tool before
+        # the outer result is returned to AbilityManager. The inner exchange
+        # is replayed but must not consume a final ToolMessage cursor.
+        inner = ReadFileTool()
+        inner_output = await inner.invoke({{"inner": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})
+        inner.render_for_llm(inner_output)
         output = await instance.invoke({{"value": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})
         # The real OpenJiuwen pipeline may reconstruct a ToolOutput between
         # invocation and rendering. Exercise the adapter's immediate,
@@ -647,7 +653,10 @@ asyncio.run(main())
             String::from_utf8_lossy(&record.stdout),
             String::from_utf8_lossy(&record.stderr)
         );
-        assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 8);
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap().lines().count(),
+            16
+        );
         std::fs::remove_file(&marker).unwrap();
         let replay = super::process(entry.to_str().unwrap())
             .unwrap()

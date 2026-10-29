@@ -150,6 +150,12 @@ def _materialize_workspace(value):
         return {key: _materialize_workspace(item) for key, item in value.items()}
     return value
 
+def _owned_recorded_event(output):
+    recorded = _recorded_outputs.get(id(output))
+    if recorded is not None and recorded[0] is output:
+        return recorded[1]
+    return None
+
 def _request_shape(value):
     if isinstance(value, str):
         return {
@@ -249,11 +255,23 @@ try:
 
     _original_base_render = Tool.render_for_llm
 
+    def _remember_recorded_render(output_event, rendered):
+        envelope = json.loads(base64.b64decode(output_event["output_b64"]))
+        if envelope["rendered"] is None:
+            envelope["rendered"] = _normalize_workspace(rendered)
+            encoded = _canonical(envelope)
+            output_event["response_sha256"] = _digest(encoded)
+            output_event["output_b64"] = _payload(encoded)
+
     def _base_render_with_native_replay(self, output):
         replayed = _replayed_renders.get(id(output))
         if replayed is not None:
             return replayed
-        return _original_base_render(self, output)
+        rendered = _original_base_render(self, output)
+        event = _owned_recorded_event(output)
+        if event is not None:
+            _remember_recorded_render(event, rendered)
+        return rendered
 
     Tool.render_for_llm = _base_render_with_native_replay
 
@@ -270,7 +288,11 @@ try:
             replayed = _replayed_renders.get(id(result))
             if replayed is not None:
                 return replayed
-            return _original_render_tool_result(tool, tool_call, result)
+            rendered = _original_render_tool_result(tool, tool_call, result)
+            event = _owned_recorded_event(result)
+            if event is not None:
+                _remember_recorded_render(event, rendered)
+            return rendered
 
         AbilityManager._render_tool_result = _render_tool_result_with_native_replay
         _original_execute = AbilityManager.execute
@@ -278,6 +300,12 @@ try:
             global _message_cursor
             results = await _original_execute(self, *args, **kwargs)
             outputs = [event for event in _native_events if event.get("event") == "output"]
+            final_outputs = []
+            for output in outputs:
+                envelope = json.loads(base64.b64decode(output["output_b64"]))
+                final = envelope.get("message")
+                if isinstance(final, dict):
+                    final_outputs.append(output)
             for entry in results:
                 if not isinstance(entry, tuple) or len(entry) != 2:
                     continue
@@ -292,47 +320,55 @@ try:
                     replayed = _replayed_output_events.get(id(_result))
                     event = replayed[1] if replayed is not None and replayed[0] is _result else None
                 else:
-                    recorded = _recorded_outputs.get(id(_result))
-                    event = recorded[1] if recorded is not None and recorded[0] is _result else None
-                if event is None and _message_cursor < len(outputs):
+                    event = _owned_recorded_event(_result)
+                if event is None:
                     # Upstream rails may reconstruct a ToolOutput before
-                    # returning it. Only associate that copy with the
-                    # immediate next native result when its whole normalized
-                    # payload matches; unrelated manager entries remain
-                    # untouched in both record and replay.
+                    # returning it. During replay the sealed final-message
+                    # sequence is the only admissible candidate. During
+                    # recording, accept exactly one unsealed native output;
+                    # an ambiguous duplicate is deliberately left unsealed.
                     try:
-                        expected = json.loads(base64.b64decode(
-                            outputs[_message_cursor]["output_b64"]
-                        ))
-                        if expected.get("tool_output") == _normalize_workspace(
-                            _result.model_dump()
-                        ):
-                            event = outputs[_message_cursor]
+                        actual = _normalize_workspace(_result.model_dump())
+                        if _replay_path:
+                            candidates = final_outputs[_message_cursor:_message_cursor + 1]
+                        else:
+                            candidates = []
+                            for output in outputs:
+                                envelope = json.loads(base64.b64decode(output["output_b64"]))
+                                if envelope.get("message") is None:
+                                    candidates.append(output)
+                        matches = [
+                            candidate for candidate in candidates
+                            if json.loads(base64.b64decode(candidate["output_b64"])).get("tool_output") == actual
+                        ]
+                        if len(matches) == 1:
+                            event = matches[0]
                     except (AttributeError, KeyError, TypeError, ValueError):
                         pass
                 if event is None:
                     continue
-                if _message_cursor >= len(outputs):
-                    raise RuntimeError("ASB OpenJiuwen native replay has an extra final tool message")
-                if event is not outputs[_message_cursor]:
-                    raise RuntimeError("ASB OpenJiuwen native replay final tool message is out of order")
-                _message_cursor += 1
                 envelope = json.loads(base64.b64decode(event["output_b64"]))
                 if _replay_path:
+                    if _message_cursor >= len(final_outputs):
+                        raise RuntimeError("ASB OpenJiuwen native replay has an extra final tool message")
+                    if event is not final_outputs[_message_cursor]:
+                        raise RuntimeError("ASB OpenJiuwen native replay final tool message is out of order")
                     final = envelope.get("message")
                     if not isinstance(final, dict) or final.get("tool_call_id") != message.tool_call_id or not isinstance(final.get("content"), str):
                         raise RuntimeError("ASB OpenJiuwen native replay final tool message is missing or out of order")
                     message.content = _materialize_workspace(final["content"])
+                    _message_cursor += 1
                 else:
-                    if envelope.get("message") is None:
-                        envelope["message"] = {"tool_call_id": message.tool_call_id, "content": _normalize_workspace(message.content)}
-                        # The final ToolMessage is the model-facing rendering.
-                        # Store it here rather than guessing from copied output
-                        # values or an earlier renderer invocation.
-                        envelope["rendered"] = envelope["message"]["content"]
-                        encoded = _canonical(envelope)
-                        event["response_sha256"] = _digest(encoded)
-                        event["output_b64"] = _payload(encoded)
+                    if envelope.get("message") is not None:
+                        raise RuntimeError("ASB OpenJiuwen native replay has an extra final tool message")
+                    envelope["message"] = {"tool_call_id": message.tool_call_id, "content": _normalize_workspace(message.content)}
+                    # The final ToolMessage is the model-facing rendering.
+                    # Store it here rather than guessing from copied output
+                    # values or an earlier renderer invocation.
+                    envelope["rendered"] = envelope["message"]["content"]
+                    encoded = _canonical(envelope)
+                    event["response_sha256"] = _digest(encoded)
+                    event["output_b64"] = _payload(encoded)
             return results
         AbilityManager.execute = _execute_with_native_messages
     except ImportError:
@@ -380,15 +416,6 @@ try:
                     envelope["tool_output"]
                 ))
                 rendered = _materialize_workspace(envelope["rendered"])
-                final = envelope["message"]
-                if (
-                    not isinstance(final, dict)
-                    or not isinstance(final.get("tool_call_id"), str)
-                    or not isinstance(final.get("content"), str)
-                ):
-                    raise RuntimeError(
-                        "ASB OpenJiuwen native replay sidecar has no final tool message"
-                    )
                 _replayed_renders[id(result)] = rendered
                 # Retain the result object with its event. ``id()`` alone is
                 # not a provenance marker: a reconstructed result can let a
@@ -428,7 +455,11 @@ try:
             replayed = _replayed_renders.get(id(output))
             if replayed is not None:
                 return replayed
-            return original_render(self, output)
+            rendered = original_render(self, output)
+            event = _owned_recorded_event(output)
+            if event is not None:
+                _remember_recorded_render(event, rendered)
+            return rendered
 
         tool_type.invoke = _invoke_with_native_replay
         tool_type.render_for_llm = _render_with_native_replay
@@ -451,18 +482,21 @@ except ImportError:
 def _seal_native_tool_sidecar():
     if not _record_path or len(_native_events) == 2:
         return
+    final_messages = 0
     for event in _native_events:
         if event.get("event") != "output":
             continue
         envelope = json.loads(base64.b64decode(event["output_b64"]))
         final = envelope.get("message")
-        if (
-            envelope.get("rendered") is None
-            or not isinstance(final, dict)
-            or not isinstance(final.get("tool_call_id"), str)
-            or not isinstance(final.get("content"), str)
-        ):
+        if envelope.get("rendered") is None:
             return
+        if final is None:
+            continue
+        if not isinstance(final, dict) or not isinstance(final.get("tool_call_id"), str) or not isinstance(final.get("content"), str):
+            return
+        final_messages += 1
+    if final_messages == 0:
+        return
     _native_events.extend([
         json.loads(_event("exit", alias=_native_alias, success=True)),
         json.loads(_event("workspace_effect", sha256=_digest(b"openjiuwen-grep-v1"))),
