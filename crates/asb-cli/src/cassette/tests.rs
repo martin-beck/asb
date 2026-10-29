@@ -1748,3 +1748,73 @@ fn journal_recovery_recounts_native_sidecars_before_the_next_commit() {
         .unwrap();
     recovered.finalize().unwrap();
 }
+
+#[test]
+fn private_sidecar_cleanup_warnings_use_catalogue_labels_not_staging_paths() {
+    for (skip, expected) in [(1, "auxiliary artifact local-tools"), (2, "native sidecar")] {
+        let fixture = Fixture::new();
+        let destination = fixture.0.join("recording.zip");
+        let mut journal =
+            RecordingJournal::create(&destination, manifest(0), 1, Limits::default()).unwrap();
+        journal.begin(1, 1).unwrap();
+        let artifact_bytes = b"{\"artifact\":true}\n";
+        let native_bytes = b"{\"event\":\"tool\"}\n";
+        let artifact = Artifact {
+            kind: "local-tools".into(),
+            bytes: artifact_bytes.len() as u64,
+            sha256: digest(artifact_bytes),
+        };
+        let native = NativeTrack {
+            complete: true,
+            events: 1,
+            bytes: native_bytes.len() as u64,
+            sha256: digest(native_bytes),
+        };
+        let mut provider = b"{}\n".as_slice();
+        let mut artifact_source = artifact_bytes.as_slice();
+        let mut native_source = native_bytes.as_slice();
+        journal
+            .commit_with_native(
+                manifest(1).tracks.remove(0),
+                &mut provider,
+                vec![ArtifactInput {
+                    artifact,
+                    source: &mut artifact_source,
+                }],
+                Some(NativeInput {
+                    native,
+                    source: &mut native_source,
+                }),
+            )
+            .unwrap();
+        let private_root = journal.partial_directory().display().to_string();
+        journal.inject_publication_failure_after("after-payload-cleanup", skip);
+        let publication = journal.finalize().unwrap();
+        assert!(!publication.cleanup_complete);
+        assert!(
+            publication
+                .warnings
+                .iter()
+                .any(|warning| warning.contains(expected))
+        );
+        assert!(
+            publication
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains(&private_root)
+                    && !warning.contains("native-1.jsonl"))
+        );
+    }
+}
+
+#[test]
+fn schema_v1_archive_without_native_sidecars_remains_readable() {
+    let fixture = Fixture::new();
+    let mut legacy = manifest(1);
+    legacy.schema_version = 1;
+    let path = fixture.zip(&legacy, &[("tracks/1.jsonl", b"{}\n".as_slice())]);
+    let mut archive = Archive::open(&path, Limits::default()).unwrap();
+    assert_eq!(archive.manifest(), &legacy);
+    assert!(archive.manifest().tracks[0].native.is_none());
+    assert_eq!(archive.read_track(1).unwrap(), b"{}\n");
+}
