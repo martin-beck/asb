@@ -112,7 +112,7 @@ function responseHeaders(headers) {
 }
 
 // A forwarded streamed provider reply is conclusive only when the upstream
-// body has a terminal SSE frame, `response.end` has been called, and the
+// body has a terminal SSE frame, this proxy has called `response.end`, and the
 // client did not abort its request. This admits the normal HTTP/1.1 pattern
 // where a client closes directly after consuming the final frame, but never
 // promotes a partial stream or arbitrary close to a completed capture.
@@ -1030,6 +1030,7 @@ async function handle(request, response, recording) {
   }
   response.writeHead(recordedResponse.status, recordedResponse.headers);
   if (recording) recording.completedSseResponse = completedSseResponse(recordedResponse, responseBody);
+  if (recording) recording.responseEnded = true;
   response.end(responseBody);
 }
 
@@ -1065,12 +1066,13 @@ const server = http.createServer((request, response) => {
     response,
     controller: new AbortController(),
     completedSseResponse: false,
+    responseEnded: false,
   };
   // Subscribe before handle can finish or close a response. Completion requires
   // both full capture and positive delivery, not merely an upstream EOF.
   const delivered = responseDelivery(response, () =>
     recording.completedSseResponse
-      && response.writableEnded === true
+      && recording.responseEnded
       && request.complete === true
       && request.aborted !== true,
   );
