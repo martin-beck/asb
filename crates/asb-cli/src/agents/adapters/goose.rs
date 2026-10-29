@@ -83,6 +83,13 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
         args: vec![
             "run".into(),
             "--no-session".into(),
+            // Goose can otherwise dispatch sibling MCP calls concurrently.
+            // The ASB local-tool sidecar is a causal transcript, so make the
+            // adapter's tool boundary explicit: a result must be observed
+            // before the client asks its next tool.  This is adapter launch
+            // policy, not a generic replay ordering relaxation.
+            "--system".into(),
+            "Use exactly one tool call per assistant turn. Wait for that tool result before making another tool call.".into(),
             "--max-turns".into(),
             // A single turn cannot complete even the bundled fixture: Goose
             // needs one turn to inspect and another to edit/test. Keep the
@@ -328,6 +335,11 @@ mod tests {
                 .find(|pair| pair[0] == "--max-turns")
                 .map(|pair| pair[1].as_str()),
             Some("16")
+        );
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|pair| pair[0] == "--system" && pair[1].contains("exactly one tool call"))
         );
     }
 }
