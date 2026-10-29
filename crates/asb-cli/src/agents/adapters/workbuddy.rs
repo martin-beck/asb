@@ -56,7 +56,9 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "workbuddy",
     "codebuddy",
     Recipe::Npm {
-        package: "@tencent-ai/codebuddy-code@2.167.0",
+        // Pin the current CodeBuddy CLI release used by this adapter. ASB
+        // preserves its sealed local-tool replay semantics independently.
+        package: "@tencent-ai/codebuddy-code@2.178.1",
         executable: "codebuddy",
         manifest: None,
     },
@@ -393,7 +395,13 @@ mod tests {
         let replay = root.join("replay.jsonl");
         let transcript = root.join("local-tools.jsonl");
         std::fs::write(&replay, "{}\n").unwrap();
-        std::fs::write(&transcript, "{\"schema_version\":1,\"events\":[]}\n").unwrap();
+        std::fs::write(
+            &transcript,
+            crate::agents::tool_replay::Transcript::default()
+                .encode()
+                .unwrap(),
+        )
+        .unwrap();
         ADAPTER
             .prepare(&mut PreparationContext {
                 command: &mut command,

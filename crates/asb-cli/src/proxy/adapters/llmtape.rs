@@ -982,6 +982,23 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_workbuddy_client_transport_envelope() {
+        let root = test_root();
+        let cassette = root.join("workbuddy-transport.jsonl");
+        let recorded = r#"{"model":"m","cache_retention":"long","max_tokens":8192,"reasoning_effort":"medium","temperature":0,"verbosity":"low","extra_vars":{"initiator":"user"},"messages":[{"role":"system","content":"You are CodeBuddy Code.\n<codebuddy_background_info>\nYou are powered by the model named GPT-6.1-Sol. The exact model ID is gpt-6.1-sol."},{"role":"user","content":[{"text":"memory: srv-data-projects-live-results-asb-executions-record-1-batch-1-workspace/memory"}]},{"role":"assistant","messageId":"11111111111111111111111111111111","requestModelId":"gpt-6.1-sol","requestModelName":"GPT-6.1-Sol","content":"done"}],"tools":[{"type":"function","function":{"name":"read_file"}}],"stream":true}"#;
+        let replayed = r#"{"model":"m","messages":[{"role":"system","content":"You are CodeBuddy Code.\n<codebuddy_background_info>\nYou are powered by the model named gpt-6.1-sol. The exact model ID is gpt-6.1-sol."},{"role":"user","content":[{"text":"memory: srv-data-projects-live-results-asb-executions-replay-2-batch-1-workspace/memory"}]},{"role":"assistant","messageId":"22222222222222222222222222222222","requestModelId":"custom-local:gpt-6.1-sol","requestModelName":"gpt-6.1-sol","content":"done"}],"tools":[{"type":"function","function":{"name":"read_file"}}],"stream":true}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, replayed).contains("200 OK"));
+        session.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_opencode_tool_output_rendering_volatility() {
         let root = test_root();
         let cassette = root.join("opencode-tool-output.jsonl");
