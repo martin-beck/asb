@@ -16,11 +16,15 @@ const MAX_COMMAND_BYTES: usize = 64 * 1024;
 const MAX_CONTENT_BYTES: usize = 384 * 1024;
 const MAX_TIMEOUT_SECONDS: f64 = 86_400.0;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Options {
+    mode: Mode,
     sidecar: PathBuf,
-    launch_json: String,
+    launch_json: Option<String>,
+}
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Mode {
+    Record,
+    Replay,
 }
 
 #[derive(Deserialize)]
@@ -33,11 +37,19 @@ enum Request {
         timeout: Option<f64>,
         reset: bool,
     },
+    RecordTerminal {
+        schema_version: u32,
+        action: serde_json::Value,
+        observation: serde_json::Value,
+    },
 }
 
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Response {
+    Ack {
+        schema_version: u32,
+    },
     TerminalObservation {
         schema_version: u32,
         content: String,
@@ -91,7 +103,7 @@ enum SidecarRequest<'a> {
     },
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum SidecarResponse {
     TerminalObservation {
@@ -119,12 +131,19 @@ pub(crate) fn entry(args: &[OsString]) -> std::process::ExitCode {
 
 fn run(args: &[OsString]) -> Result<(), Error> {
     let options = parse_options(args)?;
-    if options.launch_json.len() > 32 * 1024 {
+    if options.mode == Mode::Record {
+        return record(options);
+    }
+    let launch_json = options
+        .launch_json
+        .as_deref()
+        .ok_or_else(|| Error::Run("OpenHands native launch descriptor is missing".into()))?;
+    if launch_json.len() > 32 * 1024 {
         return Err(Error::Run(
             "OpenHands native launch descriptor is excessive".into(),
         ));
     }
-    let launch: NativeToolLaunch = serde_json::from_str(&options.launch_json)
+    let launch: NativeToolLaunch = serde_json::from_str(launch_json)
         .map_err(|_| Error::Run("OpenHands native launch descriptor is invalid".into()))?;
     let mut transport = launch.open_staged(&options.sidecar).map_err(|_| {
         Error::Run("OpenHands native sidecar is unavailable or differs from its descriptor".into())
@@ -183,15 +202,172 @@ fn run(args: &[OsString]) -> Result<(), Error> {
     })
 }
 
+fn record(options: Options) -> Result<(), Error> {
+    let parent = options
+        .sidecar
+        .parent()
+        .ok_or_else(|| Error::Run("OpenHands native sidecar has no parent".into()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|_| Error::Run("cannot create OpenHands native sidecar directory".into()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&options.sidecar)
+        .map_err(|_| Error::Run("cannot create OpenHands native sidecar".into()))?;
+    let session = "openhands-terminal-1";
+    let digest = crate::cassette::digest(b"asb-openhands-sdk-terminal-v1");
+    let mut write = |value: serde_json::Value| -> Result<(), Error> {
+        let line = serde_json::to_vec(&value)
+            .map_err(|_| Error::Run("cannot encode OpenHands native sidecar".into()))?;
+        file.write_all(&line)
+            .and_then(|_| file.write_all(b"\n"))
+            .map_err(|_| Error::Run("cannot write OpenHands native sidecar".into()))
+    };
+    write(
+        serde_json::json!({"event":"launch","session":"openhands-launch-1","program_sha256":digest}),
+    )?;
+    write(
+        serde_json::json!({"event":"session_alias","alias":session,"session":"openhands-launch-1"}),
+    )?;
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut input = stdin.lock();
+    let mut output = stdout.lock();
+    let mut line = Vec::new();
+    let mut effect = Vec::new();
+    loop {
+        line.clear();
+        if input
+            .read_until(b'\n', &mut line)
+            .map_err(|_| Error::Run("cannot read OpenHands native record frame".into()))?
+            == 0
+        {
+            break;
+        }
+        if line.len() > MAX_LINE_BYTES || !line.ends_with(b"\n") {
+            return Err(Error::Run(
+                "OpenHands native record frame is oversized or unframed".into(),
+            ));
+        }
+        let Request::RecordTerminal {
+            schema_version,
+            action,
+            observation,
+        } = serde_json::from_slice::<Request>(&line[..line.len() - 1])
+            .map_err(|_| Error::Run("OpenHands native record frame is invalid".into()))?
+        else {
+            return Err(Error::Run(
+                "OpenHands native record frame is invalid".into(),
+            ));
+        };
+        if schema_version != SCHEMA_VERSION {
+            return Err(Error::Run(
+                "OpenHands native record schema is invalid".into(),
+            ));
+        }
+        let request: Request = serde_json::from_value(action)
+            .map_err(|_| Error::Run("OpenHands terminal action is invalid".into()))?;
+        let encoded = match request {
+            Request::TerminalAction {
+                schema_version,
+                command,
+                is_input,
+                timeout,
+                reset,
+            } => {
+                if schema_version != 1 || command.len() > MAX_COMMAND_BYTES || (is_input && reset) {
+                    return Err(Error::Run(
+                        "OpenHands terminal action is unsupported".into(),
+                    ));
+                }
+                serde_json::to_vec(&SidecarRequest::TerminalAction {
+                    schema_version,
+                    command: &command,
+                    is_input,
+                    timeout,
+                    reset,
+                })
+                .unwrap()
+            }
+            _ => unreachable!(),
+        };
+        let observation: SidecarResponse = serde_json::from_value(observation)
+            .map_err(|_| Error::Run("OpenHands terminal observation is invalid".into()))?;
+        let SidecarResponse::TerminalObservation {
+            schema_version,
+            content,
+            ..
+        } = &observation;
+        if *schema_version != SCHEMA_VERSION || content.len() > MAX_CONTENT_BYTES {
+            return Err(Error::Run(
+                "OpenHands terminal observation is unsupported".into(),
+            ));
+        }
+        let encoded_output = serde_json::to_vec(&observation)
+            .map_err(|_| Error::Run("cannot encode OpenHands terminal observation".into()))?;
+        write(serde_json::json!({"event":"poll","alias":session}))?;
+        write(
+            serde_json::json!({"event":"write","alias":session,"request_sha256":crate::cassette::digest(&encoded),"request_b64":base64(&encoded)}),
+        )?;
+        write(
+            serde_json::json!({"event":"output","alias":session,"response_sha256":crate::cassette::digest(&encoded_output),"output_b64":base64(&encoded_output)}),
+        )?;
+        effect.extend_from_slice(&encoded);
+        effect.extend_from_slice(&encoded_output);
+        let ack = serde_json::to_vec(&Response::Ack { schema_version: 1 }).unwrap();
+        output
+            .write_all(&ack)
+            .and_then(|_| output.write_all(b"\n"))
+            .and_then(|_| output.flush())
+            .map_err(|_| Error::Run("cannot acknowledge OpenHands terminal record".into()))?;
+    }
+    write(serde_json::json!({"event":"exit","alias":session,"success":true}))?;
+    write(
+        serde_json::json!({"event":"workspace_effect","sha256":crate::cassette::digest(&effect)}),
+    )?;
+    Ok(())
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            T[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 fn parse_options(args: &[OsString]) -> Result<Options, Error> {
     let mut sidecar = None;
     let mut launch_json = None;
+    let mut mode = None;
     let mut values = args.iter();
     while let Some(flag) = values.next() {
         let value = values
             .next()
             .ok_or_else(|| Error::Run("OpenHands native bridge arguments are incomplete".into()))?;
         match flag.to_str() {
+            Some("--mode") if mode.is_none() => {
+                mode = match value.to_str() {
+                    Some("record") => Some(Mode::Record),
+                    Some("replay") => Some(Mode::Replay),
+                    _ => None,
+                }
+            }
             Some("--sidecar") if sidecar.is_none() => sidecar = Some(PathBuf::from(value)),
             Some("--launch-json") if launch_json.is_none() => {
                 launch_json = value.to_str().map(str::to_owned)
@@ -204,9 +380,11 @@ fn parse_options(args: &[OsString]) -> Result<Options, Error> {
         }
     }
     Ok(Options {
+        mode: mode.ok_or_else(|| {
+            Error::Run("OpenHands native bridge mode is missing or invalid".into())
+        })?,
         sidecar: sidecar.ok_or_else(|| Error::Run("OpenHands native sidecar is missing".into()))?,
-        launch_json: launch_json
-            .ok_or_else(|| Error::Run("OpenHands native launch descriptor is missing".into()))?,
+        launch_json,
     })
 }
 
@@ -221,7 +399,10 @@ fn replay_request(
         is_input,
         timeout,
         reset,
-    } = request;
+    } = request
+    else {
+        return Err(Error::Run("OpenHands terminal action is invalid".into()));
+    };
     if schema_version != SCHEMA_VERSION
         || command.len() > MAX_COMMAND_BYTES
         || timeout.is_some_and(|value| {

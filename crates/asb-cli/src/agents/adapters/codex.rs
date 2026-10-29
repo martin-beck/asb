@@ -497,6 +497,7 @@ mod tests {
             endpoint: None,
             interface: None,
             prompt: "private fixture prompt",
+            native_tool_mode: None,
             native_tool: None,
         });
         assert_eq!(spec.prompt_delivery, PromptDelivery::Stdin);

@@ -1520,6 +1520,7 @@ fn command_for_with_interface(
             endpoint: provider_base_url,
             interface,
             prompt,
+            native_tool_mode: None,
             native_tool: None,
         }));
     }
