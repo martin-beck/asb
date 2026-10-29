@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 const MAX_RECEIPT: u64 = 16 * 1024;
 const MAX_PAYLOAD: u64 = 256 * 1024 * 1024;
 const MAX_REQUESTS: u64 = 1_000_000;
+const MAX_DELIVERY_FAILURES: usize = 16;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -78,6 +79,17 @@ struct Receipt {
     bytes: u64,
     sha256: String,
     complete: bool,
+    #[serde(default)]
+    delivery_failures: Vec<DeliveryFailure>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeliveryFailure {
+    sequence: u64,
+    method: String,
+    path: String,
+    cause: String,
 }
 
 impl Request {
@@ -101,6 +113,7 @@ impl Request {
         {
             return Err(invalid("receipt identity or handler accounting differs"));
         }
+        validate_delivery_failures(&receipt.delivery_failures, receipt.failed, receipt.accepted)?;
         let evidence = CaptureEvidence {
             adapter: adapter.into(),
             output: self.output.clone(),
@@ -151,6 +164,41 @@ impl Request {
         }
         Ok(evidence)
     }
+}
+
+fn validate_delivery_failures(
+    failures: &[DeliveryFailure],
+    failed: u64,
+    accepted: u64,
+) -> Result<(), Error> {
+    if failures.len() > MAX_DELIVERY_FAILURES || failures.len() as u64 > failed {
+        return Err(invalid(
+            "delivery failure metadata exceeds accounting bounds",
+        ));
+    }
+    let mut sequences = std::collections::BTreeSet::new();
+    for failure in failures {
+        if failure.sequence == 0
+            || failure.sequence > accepted
+            || !sequences.insert(failure.sequence)
+            || failure.method.len() > 16
+            || failure.method.len() < 3
+            || !failure.method.bytes().all(|byte| byte.is_ascii_uppercase())
+            || failure.path.len() > 256
+            || !failure.path.starts_with('/')
+            || failure
+                .path
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || matches!(byte, b'?' | b'#'))
+            || !matches!(
+                failure.cause.as_str(),
+                "close" | "error" | "handler_error" | "undelivered"
+            )
+        {
+            return Err(invalid("delivery failure metadata is malformed"));
+        }
+    }
+    Ok(())
 }
 
 fn regular(path: &Path) -> Result<File, Error> {
@@ -261,6 +309,29 @@ mod tests {
             fixture.publish(&receipt);
             let error = fixture.request.read("fixture").unwrap_err().to_string();
             assert!(!error.contains("do-not-echo-private-nonce"));
+        }
+    }
+
+    #[test]
+    fn accepts_only_bounded_non_secret_delivery_failure_metadata() {
+        let fixture = Fixture::new(b"{}\n");
+        let mut receipt = fixture.receipt(false);
+        receipt["accepted"] = json!(1);
+        receipt["completed"] = json!(0);
+        receipt["failed"] = json!(1);
+        receipt["recorded"] = json!(1);
+        receipt["inference_requests"] = json!(1);
+        receipt["delivery_failures"] = json!([{
+            "sequence": 1, "method": "POST", "path": "/v1/messages", "cause": "close"
+        }]);
+        fixture.publish(&receipt);
+        assert!(fixture.request.read("llmtape").is_ok());
+
+        for path in ["/v1/messages?credential=private", "not-a-path"] {
+            let mut invalid = receipt.clone();
+            invalid["delivery_failures"][0]["path"] = json!(path);
+            fixture.publish(&invalid);
+            assert!(fixture.request.read("llmtape").is_err());
         }
     }
 
