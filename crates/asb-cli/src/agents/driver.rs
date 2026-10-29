@@ -19,13 +19,14 @@ const REQUEST: &str = "ASB_GUEST_AGENT_REQUEST";
 const MAX_EXPORTED_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 // Four adapter-owned sidecars plus the three fixed replay sidecars.  The
 // aggregate byte budget remains unchanged.
-const MAX_EXPORTED_ARTIFACTS: usize = 7;
+const MAX_EXPORTED_ARTIFACTS: usize = 8;
 /// Reserved receipt kinds used to keep replay sidecars out of the bounded
 /// workload-controller JSON record.  They are restored only by the owning
 /// controller before the recorder sees the completed guest result.
 pub(crate) const LOCAL_TOOL_TRANSCRIPT_ARTIFACT: &str = "asb-local-tools";
 pub(crate) const DETERMINISTIC_MANIFEST_ARTIFACT: &str = "asb-determinism-manifest";
 pub(crate) const NATIVE_TRACE_ARTIFACT: &str = "asb-native-trace";
+pub(crate) const NATIVE_TOOL_SIDECAR_ARTIFACT: &str = "asb-native-tool-sidecar";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +104,9 @@ pub(crate) struct GuestRequest {
     /// relay sidecars. It is never inferred from a loopback provider endpoint.
     #[serde(default)]
     pub mcp_tape_cassette: Option<PathBuf>,
+    /// Payload-free authority for the fixed private native sidecar location.
+    #[serde(default)]
+    pub native_tool_launch: Option<crate::cassette::NativeToolLaunch>,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: f64,
     #[serde(default)]
@@ -144,6 +148,11 @@ pub(crate) struct GuestResult {
     pub deterministic_manifest: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_trace: Option<Vec<u8>>,
+    /// Private complete native-tool stream.  It crosses an isolated guest only
+    /// through the receipt-backed artifact channel and is sealed by the host
+    /// recorder, never serialized in the controller result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_tool_sidecar: Option<Vec<u8>>,
     /// Host-only sealed sidecars restored from the controller-owned export
     /// directory after this small result record crosses the guest boundary.
     #[serde(skip)]
@@ -491,13 +500,41 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         .to_str()
         .ok_or_else(|| Error::Input("task shell directory must be valid UTF-8".into()))?
         .to_owned();
+    let native_tool_path = request.runtime_dir.join("native-tool-sidecar.jsonl");
+    let native_tool = request
+        .native_tool_launch
+        .as_ref()
+        .map(|launch| {
+            launch
+                .validate_staged(&native_tool_path)
+                .map_err(|error| Error::Input(error.to_string()))?;
+            Ok(super::NativeToolContext {
+                launch,
+                path: &native_tool_path,
+            })
+        })
+        .transpose()?;
     let specification = adapter.command(&super::CommandContext {
+        executable: &program,
         config: &execution_config,
         endpoint: Some(&request.connection.base_url),
         interface: Some(request.connection.interface),
         prompt: &request.prompt,
+        native_tool_mode: request.tool_tape_cassette.as_ref().map(|_| {
+            if request.tool_replay {
+                crate::tape::Mode::Replay
+            } else {
+                crate::tape::Mode::Record
+            }
+        }),
+        native_tool,
     });
-    let mut command = adapter.process(&program)?.direct();
+    let process_program = if specification.program == adapter.executable() {
+        &program
+    } else {
+        &specification.program
+    };
+    let mut command = super::select_process(adapter, process_program, native_tool)?.direct();
     command.args(specification.args);
     let stdin_prompt = match specification.prompt_delivery {
         super::PromptDelivery::Argument => {
@@ -776,6 +813,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         local_tool_transcript: None,
         deterministic_manifest: None,
         native_trace: None,
+        native_tool_sidecar: None,
         sealed_artifacts: Vec::new(),
         exported_artifacts: Vec::new(),
         adapter_errors: std::mem::take(&mut artifacts.errors),
@@ -834,6 +872,10 @@ fn controller_sidecars(artifacts: &mut super::AgentArtifacts) -> Vec<super::Seal
             artifacts.deterministic_manifest.take(),
         ),
         (NATIVE_TRACE_ARTIFACT, artifacts.native_trace.take()),
+        (
+            NATIVE_TOOL_SIDECAR_ARTIFACT,
+            artifacts.native_tool_sidecar.take(),
+        ),
     ] {
         if let Some(bytes) = bytes {
             sidecars.push(super::SealedArtifact {
@@ -989,17 +1031,20 @@ mod artifact_publication_tests {
             local_tool_transcript: Some(vec![b't'; 768 * 1024]),
             deterministic_manifest: Some(b"manifest".to_vec()),
             native_trace: Some(b"trace".to_vec()),
+            native_tool_sidecar: Some(b"native-tool".to_vec()),
             ..Default::default()
         };
         let sidecars = controller_sidecars(&mut artifacts);
         assert!(artifacts.local_tool_transcript.is_none());
         assert!(artifacts.deterministic_manifest.is_none());
         assert!(artifacts.native_trace.is_none());
-        assert_eq!(sidecars.len(), 3);
+        assert!(artifacts.native_tool_sidecar.is_none());
+        assert_eq!(sidecars.len(), 4);
         assert_eq!(sidecars[0].kind, LOCAL_TOOL_TRANSCRIPT_ARTIFACT);
         assert_eq!(sidecars[0].bytes.len(), 768 * 1024);
         assert_eq!(sidecars[1].kind, DETERMINISTIC_MANIFEST_ARTIFACT);
         assert_eq!(sidecars[2].kind, NATIVE_TRACE_ARTIFACT);
+        assert_eq!(sidecars[3].kind, NATIVE_TOOL_SIDECAR_ARTIFACT);
     }
 
     #[test]
@@ -1018,12 +1063,14 @@ mod artifact_publication_tests {
             local_tool_transcript: Some(b"tool".to_vec()),
             deterministic_manifest: Some(b"manifest".to_vec()),
             native_trace: Some(b"trace".to_vec()),
+            native_tool_sidecar: Some(b"native-tool".to_vec()),
             ..Default::default()
         };
         let sidecars = controller_sidecars(&mut artifacts);
         let receipts = export_sealed_artifacts(&root, &sidecars).unwrap();
-        assert_eq!(receipts.len(), 7);
+        assert_eq!(receipts.len(), 8);
         assert_eq!(receipts[6].kind, NATIVE_TRACE_ARTIFACT);
+        assert_eq!(receipts[7].kind, NATIVE_TOOL_SIDECAR_ARTIFACT);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1069,6 +1116,7 @@ mod artifact_publication_tests {
                 local_tool_transcript: None,
                 deterministic_manifest: None,
                 native_trace: None,
+                native_tool_sidecar: None,
                 sealed_artifacts: Vec::new(),
                 exported_artifacts: Vec::new(),
                 adapter_errors: Vec::new(),

@@ -68,7 +68,7 @@ fn execution_failure(stdout: &str, _: &str) -> Option<String> {
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
-    match super::super::tool_replay_mcp::verify_per_call_completion(
+    let mut artifacts = match super::super::tool_replay_mcp::verify_per_call_completion(
         context.run_dir,
         context.frozen.bytes("local-tools.jsonl"),
     ) {
@@ -77,7 +77,12 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
             errors: vec![error.to_string()],
             ..AgentArtifacts::default()
         },
-    }
+    };
+    // Pi opted into the deterministic extension, so this adapter owns the
+    // corresponding manifest selection.  The generic dispatcher only seals
+    // the opaque bytes returned in AgentArtifacts.
+    artifacts.deterministic_manifest = context.frozen.bytes("manifest.json").map(ToOwned::to_owned);
+    artifacts
 }
 
 #[cfg(test)]

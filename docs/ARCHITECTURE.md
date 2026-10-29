@@ -1669,6 +1669,21 @@ distinctive workspace layout before creating any files.
 
 The reusable `cassette` backend defines multi-track manifests, compatibility
 identities, bounded selective ZIP reading and reproducible selection plans.
+Schema 2 additionally permits one optional sealed native sidecar per track at
+`native/<track-id>.jsonl`. Its catalogue records only completion, event count,
+byte length and digest; the cassette layer treats bytes as opaque and rejects
+orphaned, duplicate, incomplete, changed or non-canonically framed sidecars.
+The journal stages that sidecar before the track's immutable commit, so a future
+native transport cannot consume an unsealed post-commit attachment. Schema 1
+recordings remain readable when they contain no native sidecar. Native ingress,
+event semantics and replay dispatch remain outside this storage contract.
+`NativeToolTransport` is the next private boundary: it consumes only a complete
+sealed sidecar and requires the exact bounded lifecycle `launch`, session alias,
+`poll`, `write`, `output`, `exit`, then one terminal workspace-effect digest.
+The sealed private stream retains bounded exact request/output bytes solely for
+replay, alongside aliases, terminal status and digests. Command arguments,
+paths, prompts and every native payload remain absent from manifests, public
+evidence and reports. No agent is wired to this transport yet.
 It neither starts providers nor changes workloads. Metadata parsing uses a
 validated bounded central-directory snapshot before enabling payload reads;
 selected entries receive CRC, length and SHA-256 validation. Its single-owner

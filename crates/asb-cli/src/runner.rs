@@ -112,6 +112,9 @@ struct RunResult<'a> {
     deterministic_manifest: Option<Vec<u8>>,
     #[serde(skip)]
     native_trace: Option<Vec<u8>>,
+    /// Complete private native-tool stream supplied by an adapter.  This is
+    /// consumed only by recording publication, never user-facing output.
+    native_tool_sidecar: Option<Vec<u8>>,
     /// Adapter-owned bounded sidecars retained only by the sealed cassette.
     #[serde(skip)]
     sealed_artifacts: Vec<agents::SealedArtifact>,
@@ -132,6 +135,10 @@ pub(crate) struct RunOptions<'a> {
     pub recording: Option<&'a recording::Recorder>,
     pub repeat: Option<u64>,
     pub batch: Option<&'a repeated::BatchIdentity>,
+    /// Exact selected native replay inputs for this batch.  This is private
+    /// execution state and is never serialized into a plan or result.
+    #[cfg_attr(test, allow(dead_code))]
+    pub native_tool_inputs: Option<&'a [&'a campaign::ReplayInput]>,
     pub verify_initial_material: bool,
     pub preparation_gate: Option<&'a batch::Gate>,
     pub launch_gate: Option<&'a batch::Gate>,
@@ -1508,10 +1515,13 @@ fn command_for_with_interface(
 ) -> Result<CommandSpec, Error> {
     if let Some(adapter) = agents::find(&config.agent) {
         return Ok(adapter.command(&agents::CommandContext {
+            executable: adapter.executable(),
             config,
             endpoint: provider_base_url,
             interface,
             prompt,
+            native_tool_mode: None,
+            native_tool: None,
         }));
     }
     let agent_names = agents::names().collect::<Vec<_>>();
@@ -2525,6 +2535,7 @@ mod tests {
             local_tool_transcript: None,
             deterministic_manifest: None,
             native_trace: None,
+            native_tool_sidecar: None,
             sealed_artifacts: Vec::new(),
             cassette: None,
             measurement_directory: None,

@@ -40,7 +40,8 @@ fn shared_wire_projections_preserve_exact_existing_bytes_and_optional_fields() {
         );
         assert_eq!(serde_json::to_string(c).unwrap(), compatibility);
         let expected = format!(
-            "{{\"schema_version\":1,\"recording_id\":{},\"compatibility\":{compatibility},\"concurrency\":1,\"tracks\":{}}}",
+            "{{\"schema_version\":{},\"recording_id\":{},\"compatibility\":{compatibility},\"concurrency\":1,\"tracks\":{}}}",
+            value.schema_version,
             encoded(&value.recording_id),
             serde_json::to_string(&value.tracks).unwrap()
         );

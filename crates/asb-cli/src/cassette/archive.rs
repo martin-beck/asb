@@ -65,6 +65,7 @@ pub struct Archive {
     archive: ZipArchive<MetadataReader>,
     manifest: Manifest,
     entries: BTreeMap<u64, usize>,
+    native_entries: BTreeMap<u64, usize>,
     artifact_entries: BTreeMap<(u64, String), usize>,
     limits: Limits,
     metadata_bytes: (u64, u64),
@@ -160,12 +161,17 @@ impl Archive {
                         .and_then(|base| id.parse::<u64>().ok().map(|id| (id, base)))
                 })
                 .is_some_and(|(id, kind)| id > 0 && name == format!("artifacts/{id}/{kind}.jsonl"));
+            let canonical_native = name
+                .strip_prefix("native/")
+                .and_then(|value| value.strip_suffix(".jsonl"))
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some_and(|id| id > 0 && name == format!("native/{id}.jsonl"));
             let size_limit = if is_manifest {
                 limits.max_manifest_bytes
             } else {
                 limits.max_track_bytes
             };
-            if (!is_manifest && !canonical_track && !canonical_artifact)
+            if (!is_manifest && !canonical_track && !canonical_artifact && !canonical_native)
                 || names.contains_key(&name)
                 || entry.encrypted()
                 || entry.compression() != CompressionMethod::Deflated
@@ -206,12 +212,18 @@ impl Archive {
             .iter()
             .map(|track| track.artifacts.len())
             .sum::<usize>();
-        if names.len() != manifest.tracks.len() + artifact_count + 1 {
+        let native_count = manifest
+            .tracks
+            .iter()
+            .filter(|track| track.native.is_some())
+            .count();
+        if names.len() != manifest.tracks.len() + artifact_count + native_count + 1 {
             return Err(Error(
                 "cassette manifest and ZIP track catalogue differ".into(),
             ));
         }
         let mut entries = BTreeMap::new();
+        let mut native_entries = BTreeMap::new();
         let mut artifact_entries = BTreeMap::new();
         for track in &manifest.tracks {
             let index = *names
@@ -224,6 +236,22 @@ impl Archive {
                 )));
             }
             entries.insert(track.id, index);
+            if let Some(native) = &track.native {
+                let name = track.native_entry_name();
+                let index = *names.get(&name).ok_or_else(|| {
+                    Error(format!(
+                        "cassette track {} native sidecar is missing",
+                        track.id
+                    ))
+                })?;
+                if archive.by_index_data(index).map_err(zip_error)?.size() != native.bytes {
+                    return Err(Error(format!(
+                        "cassette track {} native sidecar length differs from manifest",
+                        track.id
+                    )));
+                }
+                native_entries.insert(track.id, index);
+            }
             for artifact in &track.artifacts {
                 let name = track.artifact_entry_name(&artifact.kind);
                 let index = *names.get(&name).ok_or_else(|| {
@@ -245,6 +273,7 @@ impl Archive {
             archive,
             manifest,
             entries,
+            native_entries,
             artifact_entries,
             limits,
             metadata_bytes: (directory_bytes, bytes.len() as u64),
@@ -272,6 +301,39 @@ impl Archive {
         if bytes.len() as u64 != track.bytes || digest(&bytes) != track.sha256 {
             return Err(Error(format!(
                 "cassette track {id} checksum or length mismatch"
+            )));
+        }
+        Ok(bytes)
+    }
+
+    /// Decode one complete sealed native sidecar. This validates only its
+    /// bounded opaque JSONL framing; no command, path, prompt, or output data
+    /// is interpreted by the cassette layer.
+    pub fn read_native(&mut self, id: u64) -> Result<Vec<u8>, Error> {
+        let track = self.manifest.track(id)?;
+        let native = track
+            .native
+            .as_ref()
+            .ok_or_else(|| Error(format!("cassette track {id} has no native sidecar")))?;
+        if !native.complete {
+            return Err(Error(format!(
+                "cassette track {id} native sidecar is incomplete"
+            )));
+        }
+        let index = *self
+            .native_entries
+            .get(&id)
+            .ok_or_else(|| Error("cassette native sidecar is absent".into()))?;
+        let bytes = read_bounded(&mut self.archive, index, self.limits.max_track_bytes)?;
+        if bytes.len() as u64 != native.bytes || digest(&bytes) != native.sha256 {
+            return Err(Error(format!(
+                "cassette track {id} native sidecar checksum or length mismatch"
+            )));
+        }
+        let events = bytes.iter().filter(|byte| **byte == b'\n').count() as u64;
+        if events != native.events || (!bytes.is_empty() && !bytes.ends_with(b"\n")) {
+            return Err(Error(format!(
+                "cassette track {id} native sidecar event framing mismatch"
             )));
         }
         Ok(bytes)

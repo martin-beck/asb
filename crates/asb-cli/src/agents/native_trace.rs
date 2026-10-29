@@ -30,6 +30,20 @@ const SHA256_HEX_BYTES: usize = 64;
 /// opaque, per-trace identifiers instead.
 pub(crate) const ROOT_PROCESS: u64 = 1;
 
+/// Publish the generic process-gate lifecycle index as a bounded opaque
+/// sidecar.  This is deliberately owned by the native-trace extension rather
+/// than static adapter dispatch: adapters do not define its format, and the
+/// runner only seals, stages, and digests the selected bytes.
+pub(crate) fn collect_lifecycle_artifact(
+    context: &super::CollectionContext<'_>,
+    artifacts: &mut super::AgentArtifacts,
+) {
+    artifacts.native_trace = context
+        .frozen
+        .bytes("native-trace.jsonl")
+        .map(ToOwned::to_owned);
+}
+
 /// Inherited only by the private ASB process gate.  The gate immediately marks
 /// it close-on-exec, so the benchmark client cannot retain the trace writer.
 #[cfg(unix)]

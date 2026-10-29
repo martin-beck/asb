@@ -7,6 +7,7 @@ import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } f
 import http from "node:http";
 import { performance } from "node:perf_hooks";
 import { isAbsolute } from "node:path";
+import { pathToFileURL } from "node:url";
 import { quiesceNetworkRequests, networkFetch } from "./network-fetch.mjs";
 import { CaptureSession, responseDelivery } from "./capture-session.mjs";
 import { normalizeWorkspacePaths } from "./tape-normalization.mjs";
@@ -21,6 +22,9 @@ let stopping = false;
 // volatile.  The request and body limits bound this map for a session.
 const replayMaterializedIdentifiers = new Map();
 let replayMaterializedIdentifierSequence = 0;
+const agentWireExtension = process.env.ASB_TAPE_AGENT_WIRE_EXTENSION
+  ? await import(pathToFileURL(process.env.ASB_TAPE_AGENT_WIRE_EXTENSION).href)
+  : null;
 
 function usage(message) {
   if (message) console.error(`llmtape: ${message}`);
@@ -285,9 +289,42 @@ function normalizeHermesVerificationScriptPath(value) {
   );
 }
 
-function normalizeCassetteBody(body) {
+function normalizeCassetteBody(body, url = "") {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
+  // CodeBuddy conditionally emits transport tuning fields on its first
+  // OpenAI-compatible request. They are not prompt or tool semantics, and a
+  // fresh replay process may omit them entirely. Keep the model, messages,
+  // tools, and every explicit tool result strict while removing only this
+  // client-local envelope variance from the cassette key.
+  try {
+    const parsed = JSON.parse(body);
+    const isWorkBuddy = Array.isArray(parsed.messages)
+      && parsed.messages.some((message) => JSON.stringify(message?.content || "").includes("You are CodeBuddy Code."));
+    if (isWorkBuddy) {
+      for (const field of [
+        "cache_retention",
+        "extra_vars",
+        "max_tokens",
+        "reasoning_effort",
+        "reasoning_summary",
+        "temperature",
+        "verbosity",
+      ]) delete parsed[field];
+      for (const message of parsed.messages) {
+        if (typeof message?.content === "string") {
+          message.content = message.content.replace(
+            /(<codebuddy_background_info>[\s\S]*?model named ).*?(\. The exact model ID is ).*?(?=\.(?:\n|$))/i,
+            "$1<asb-workbuddy-model>$2<asb-workbuddy-model>",
+          );
+        }
+      }
+      body = JSON.stringify(parsed);
+    }
+  } catch {
+    // The regular canonicalizer below retains malformed request bodies as
+    // strict byte strings.
+  }
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const callIdentifiers = new Map();
   const normalized = normalizeFunctionRenderingAddress(normalizePytestElapsed(
@@ -315,6 +352,7 @@ function normalizeCassetteBody(body) {
     // WorkBuddy derives a memory-project slug from the absolute workspace;
     // canonicalize that generated slug when record and replay roots differ.
     .replace(/srv-data-projects-[A-Za-z0-9_.-]+-(?:sweep-(?:record|replay)-[A-Za-z0-9_.-]+|workspaces(?:-replay)?-[A-Za-z0-9_.-]+)/g, "<asb-project-workspace>")
+    .replace(/srv-data-projects-[A-Za-z0-9_.-]+-results-asb-executions-[A-Za-z0-9-]+-batch-\d+-workspace/g, "<asb-project-workspace>")
     // Codex includes a diagnostic token count in shell-tool output. It is
     // derived from the rendered transcript and can change during replay; it
     // is not provider request semantics.
@@ -332,9 +370,12 @@ function normalizeCassetteBody(body) {
     // client-side rendering observation, not request semantics: the same
     // recorded command necessarily takes a different amount of time while an
     // offline replay is being driven.  Scope the replacement to this complete
-    // fixed Codex envelope so a prompt or arbitrary tool result merely
-    // mentioning a wall time remains cassette-significant.
+    // fixed Codex envelopes so a prompt or arbitrary tool result merely
+    // mentioning a wall time remains cassette-significant.  An asynchronous
+    // shell result also includes a process-local session number; retain its
+    // status text and every other byte of the result.
     .replace(/(Chunk ID: [^\n]*?(?:\r?\n|\\n)Wall time: )\d+(?:\.\d+)? seconds(?=(?:\r?\n|\\n)Process exited with code \d+)/g, "$1<asb-wall-time> seconds")
+    .replace(/(Chunk ID: [^\n]*?(?:\r?\n|\\n)Wall time: )\d+(?:\.\d+)? seconds((?:\r?\n|\\n)Process running with session ID )\d+/g, "$1<asb-wall-time> seconds$2<asb-session>")
     // Normalize generated call identifiers, but retain the relationship
     // between distinct IDs in one request/response. OpenCode can receive
     // multiple tool calls in a streamed response; collapsing every ID into
@@ -352,12 +393,27 @@ function normalizeCassetteBody(body) {
     // retain all file contents, failure counts, and commands while replacing
     // only those run-local rendering details before cassette comparison.
     .replace(/\/opt\/asb-private\/agent-state\/data\/opencode\/tool-output\/tool_[A-Za-z0-9_-]+/g, "<asb-opencode-tool-output>")
+    // OpenJiuwen persists a bounded Bash result beneath a generated filename
+    // before forwarding its preview to the model.  The basename is recreated
+    // on replay; retain the directory, extension, and every preview byte while
+    // normalizing only this documented twelve-hex filename convention.
+    .replace(/bash_outputs\/bash_[0-9a-f]{12}\.txt/gi, "bash_outputs/<asb-openjiuwen-bash-output>.txt")
+    // Qwen Code writes an oversized tool result to a generated private file
+    // and forwards a fixed persisted-output envelope to the model. The file
+    // name changes when llmtape materializes a replay response, while the
+    // envelope's digest and every retained preview line stay significant.
+    .replace(/(Full output saved to: )\/opt\/asb-private\/agent-state\/home\/\.qwen\/tmp\/[0-9a-f]+\/tool-results\/(?:call_[0-9a-f]+|asb-replay-\d+-<asb-timestamp>-\d+)\.txt/g, "$1<asb-qwen-persisted-output>")
     .replace(/((?:\b\d+ (?:failed|passed|skipped|deselected|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1<asb-elapsed>")
     // pip's download progress embeds live transfer throughput and ETA after
     // the already-significant artifact size. Keep the package and byte count
     // strict while removing only transport timing from tool history.
     .replace(/(\b\d+(?:\.\d+)?\/\d+(?:\.\d+)? (?:kB|MB|GB) )\d+(?:\.\d+)? (?:kB|MB|GB)\/s eta \d+:\d+:\d+/g, "$1<asb-transfer-rate> eta <asb-transfer-eta>")));
   try {
+    const parsed = JSON.parse(normalized);
+    // The tape core passes opaque request data to an optional adapter-owned
+    // extension. It neither identifies the adapter nor interprets its fields.
+    const extensionValue = agentWireExtension?.normalizeRequest?.({ url, body: parsed });
+    const canonical = extensionValue === undefined ? parsed : extensionValue;
     const structuredToolCallIdentifiers = new Map();
     const structuredContentBlockIdentifiers = new Map();
     const canonicalToolCallIdentifier = (identifier) => {
@@ -488,6 +544,17 @@ function normalizeCassetteBody(body) {
           && key === "conversationRequestId") {
         return "<asb-workbuddy-conversation-request>";
       }
+      // WorkBuddy also creates a per-process history message identifier. It
+      // addresses client telemetry only; the role, content, and tool history
+      // next to it remain cassette-significant.
+      if (typeof value === "string"
+          && path.length === 3
+          && path[0] === "messages"
+          && /^\d+$/.test(path[1])
+          && ["messageId", "requestModelId", "requestModelName"].includes(path[2])
+          && key === path[2]) {
+        return `<asb-workbuddy-${path[2]}>`;
+      }
       if (typeof value === "string") {
         value = normalizeFunctionRenderingAddress(value);
         value = normalizeObjectRenderingAddress(value);
@@ -519,7 +586,7 @@ function normalizeCassetteBody(body) {
       }
       return value;
     };
-    return JSON.stringify(sort(JSON.parse(normalized)))
+    return JSON.stringify(sort(canonical))
       .replace(/\.\.\/[^"\\]*AGENTS\.md(?:\\n)?/g, "");
   } catch {
     return normalized;
@@ -582,7 +649,7 @@ function normalizeWorkspaceText(value, workspace, replacement = "<asb-workspace>
 function requestKey(request) {
   // Match the normalized full request, not just model and endpoint: a changed
   // prompt or tool state must not silently consume an unrelated response.
-  return JSON.stringify([request.method, request.url, normalizeCassetteBody(request.body)]);
+  return JSON.stringify([request.method, request.url, normalizeCassetteBody(request.body, request.url)]);
 }
 
 const interactions = mode === "replay"
@@ -593,7 +660,7 @@ const interactions = mode === "replay"
         const interaction = JSON.parse(line);
         if (interaction.request) {
           interaction.request.url = requestPath(interaction.request.url);
-          interaction.request.body = normalizeCassetteBody(interaction.request.body);
+          interaction.request.body = normalizeCassetteBody(interaction.request.body, interaction.request.url);
         }
         if (interaction.response?.body) {
           interaction.response.body = normalizeCassetteBody(interaction.response.body);
@@ -795,7 +862,7 @@ async function handle(request, response, recording) {
     // recorder and makes separate-directory replay path-stable.
     url: requestPath(request.url),
     headers: redactHeaders(Object.fromEntries(Object.entries(request.headers))),
-    body: body.length ? normalizeCassetteBody(normalizedBody) : null,
+    body: body.length ? normalizeCassetteBody(normalizedBody, request.url || "/") : null,
   };
 
   if (mode === "replay") {

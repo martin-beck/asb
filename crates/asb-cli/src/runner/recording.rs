@@ -3,8 +3,8 @@ mod raw;
 pub(crate) mod union;
 use super::{RunResult, io_error, replica};
 use crate::cassette::{
-    Artifact, ArtifactInput, Compatibility, Limits, Manifest, Publication, RecordingJournal,
-    Statistics, Track, TrackEvidence,
+    Artifact, ArtifactInput, Compatibility, Limits, Manifest, NativeInput, NativeToolTransport,
+    NativeTrack, Publication, RecordingJournal, Statistics, Track, TrackEvidence,
 };
 use crate::{Error, proxy};
 use serde::{Deserialize, Serialize};
@@ -474,6 +474,14 @@ impl Recorder {
             } else {
                 (0, crate::cassette::digest(b""))
             };
+            // The producer is adapter-owned, but the recorder owns the only
+            // conversion from private bytes to cassette-native metadata. This
+            // prevents adapters from minting an unchecked track declaration.
+            let mut native_tool = result
+                .native_tool_sidecar
+                .as_deref()
+                .map(seal_native_tool_sidecar)
+                .transpose()?;
             let track = Track {
                 id: (batch - 1) * self.concurrency as u64 + replica.index as u64,
                 batch,
@@ -489,6 +497,12 @@ impl Recorder {
                     requests: capture.map(|capture| capture.inference_requests),
                     steps: result.steps,
                 },
+                // `commit_with_native` is the sole owner that derives the
+                // immutable native catalogue entry from the supplied opaque
+                // sidecar.  Pre-populating this field would let callers
+                // bypass that custody boundary and is rejected by the
+                // journal before it stages the payload.
+                native: None,
                 artifacts: Vec::new(),
             };
             let journal = state
@@ -568,14 +582,30 @@ impl Recorder {
             if let Some(file) = &mut file {
                 file.seek(SeekFrom::Start(0)).map_err(io_error)?;
                 journal
-                    .commit_with_artifacts(track.clone(), file, artifact_inputs)
+                    .commit_with_native(
+                        track.clone(),
+                        file,
+                        artifact_inputs,
+                        native_tool.as_mut().map(|(native, source)| NativeInput {
+                            native: native.clone(),
+                            source,
+                        }),
+                    )
                     .map_err(recording_error)?;
             } else {
                 journal
-                    .commit_with_artifacts(track.clone(), &mut std::io::empty(), artifact_inputs)
+                    .commit_with_native(
+                        track.clone(),
+                        &mut std::io::empty(),
+                        artifact_inputs,
+                        native_tool.as_mut().map(|(native, source)| NativeInput {
+                            native: native.clone(),
+                            source,
+                        }),
+                    )
                     .map_err(recording_error)?;
             }
-            // commit_with_artifacts constructs the immutable artifact list
+            // commit_with_native constructs the immutable auxiliary catalogue
             // itself; obtain that committed track before asking for evidence.
             // Supplying an already-populated list would be rejected by the
             // journal, while retaining the pre-commit track would fail its
@@ -654,7 +684,10 @@ impl Recorder {
                         Err(error) => {
                             published.cleanup_complete=false;
                             cleanup_failures+=1;
-                            if cleanup_failures<=16 { published.warnings.push(error.to_string()); }
+                            if cleanup_failures<=16 {
+                                let _ = error;
+                                published.warnings.push(raw_cleanup_warning(track.id));
+                            }
                         }
                     }
                 }
@@ -706,6 +739,23 @@ impl Recorder {
         }
         result
     }
+}
+
+/// Validate a complete adapter-owned sidecar before the journal sees it.
+///
+/// This boundary intentionally retains its payload only in the cursor handed
+/// to the journal. Result JSON and durable evidence receive just the sealed
+/// `NativeTrack` metadata.
+fn seal_native_tool_sidecar(bytes: &[u8]) -> Result<(NativeTrack, std::io::Cursor<&[u8]>), Error> {
+    let native = NativeTrack {
+        complete: true,
+        events: bytes.iter().filter(|byte| **byte == b'\n').count() as u64,
+        bytes: bytes.len() as u64,
+        sha256: crate::cassette::digest(bytes),
+    };
+    NativeToolTransport::from_sidecar(&native, bytes)
+        .map_err(|_| Error::Run("adapter native tool sidecar is invalid or incomplete".into()))?;
+    Ok((native, std::io::Cursor::new(bytes)))
 }
 
 fn validate_sealed_artifact_budget(
@@ -811,6 +861,13 @@ std::thread_local! {
 fn cleanup_raw(output: &Path, track: &Track, original: Option<&fs::Metadata>) -> Result<(), Error> {
     raw::cleanup(output, track, original)
 }
+
+fn raw_cleanup_warning(track_id: u64) -> String {
+    format!(
+        "published cassette is usable; track {track_id} raw capture cleanup incomplete; private evidence retained"
+    )
+}
+
 fn open_payload(output: &Path) -> Result<Option<File>, Error> {
     match fs::symlink_metadata(output) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -868,6 +925,16 @@ mod tests {
     use super::*;
     std::thread_local! {
         pub(super) static CAPACITY_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn raw_cleanup_warning_has_only_a_stable_track_label() {
+        let warning = raw_cleanup_warning(7);
+        assert_eq!(
+            warning,
+            "published cassette is usable; track 7 raw capture cleanup incomplete; private evidence retained"
+        );
+        assert!(!warning.contains('/'));
     }
 
     #[test]
@@ -990,6 +1057,7 @@ mod tests {
                 bytes: 3,
                 sha256: crate::cassette::digest(b"{}\n"),
                 statistics: Statistics::default(),
+                native: None,
                 artifacts: Vec::new(),
             };
             let replacement_root = root.clone();
@@ -1129,6 +1197,7 @@ mod tests {
                 bytes: 3,
                 sha256: crate::cassette::digest(b"{}\n"),
                 statistics: Statistics::default(),
+                native: None,
                 artifacts: Vec::new(),
             };
             match mode {
@@ -1174,5 +1243,35 @@ mod tests {
             bytes: vec![0; MAX_SEALED_ARTIFACT_BYTES + 1],
         };
         assert!(validate_sealed_artifact_budget(&[over]).is_err());
+    }
+
+    #[test]
+    fn native_tool_sidecar_is_validated_before_private_track_publication() {
+        let digest = "a".repeat(64);
+        let request = b"{}";
+        let lines = [
+            format!(
+                "{{\"event\":\"launch\",\"session\":\"launch-1\",\"program_sha256\":\"{digest}\"}}"
+            ),
+            "{\"event\":\"session_alias\",\"alias\":\"shell-1\",\"session\":\"launch-1\"}".into(),
+            "{\"event\":\"poll\",\"alias\":\"shell-1\"}".into(),
+            format!(
+                "{{\"event\":\"write\",\"alias\":\"shell-1\",\"request_sha256\":\"{}\",\"request_b64\":\"e30=\"}}",
+                crate::cassette::digest(request)
+            ),
+            format!(
+                "{{\"event\":\"output\",\"alias\":\"shell-1\",\"response_sha256\":\"{}\",\"output_b64\":\"e30=\"}}",
+                crate::cassette::digest(request)
+            ),
+            "{\"event\":\"exit\",\"alias\":\"shell-1\",\"success\":true}".into(),
+            format!("{{\"event\":\"workspace_effect\",\"sha256\":\"{digest}\"}}"),
+        ];
+        let bytes = format!("{}\n", lines.join("\n")).into_bytes();
+        let (native, source) = seal_native_tool_sidecar(&bytes).expect("valid sidecar");
+        assert!(native.complete);
+        assert_eq!(native.events, lines.len() as u64);
+        assert_eq!(native.bytes, bytes.len() as u64);
+        assert_eq!(source.into_inner(), bytes.as_slice());
+        assert!(seal_native_tool_sidecar(b"invalid\n").is_err());
     }
 }

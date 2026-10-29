@@ -663,12 +663,13 @@ impl<'a> ReadyAttempt<'a> {
                         } else {
                             providers::tape_upstream(&config.provider, bridge_url)
                         };
-                        Ok(Some(tape::Session::start(
+                        Ok(Some(tape::Session::start_for_agent(
                             *mode,
                             cassette,
                             upstream.as_deref(),
                             respect_record_timings,
                             &workspace,
+                            Some(&config.agent),
                         )?))
                     } else {
                         Ok(None)
@@ -768,6 +769,11 @@ impl<'a> ReadyAttempt<'a> {
                 options.replay_statistics(),
             )
             .display();
+            #[cfg(not(test))]
+            let native_tool = options
+                .native_tool_inputs
+                .and_then(|inputs| inputs.get(options.replica.index.checked_sub(1)?))
+                .and_then(|input| input.native_tool_launch().zip(input.native_tool.as_deref()));
             let isolated = prepared.workload.execute(
                 &mut workloads::ExecutionContext {
                     launch,
@@ -789,6 +795,8 @@ impl<'a> ReadyAttempt<'a> {
                     mcp_tape_cassette: mcp_tape_cassette
                         .as_ref()
                         .map(|(_, cassette)| cassette.as_path()),
+                    #[cfg(not(test))]
+                    native_tool,
                     measurements: prepared.measurements.as_mut(),
                     show_output,
                     progress: isolated_progress
@@ -995,6 +1003,7 @@ impl<'a> CompletedAttempt<'a> {
                 .guest
                 .as_ref()
                 .map(|guest| agents::AgentArtifacts {
+                    native_tool_sidecar: guest.native_tool_sidecar.clone(),
                     sealed_artifacts: guest.sealed_artifacts.clone(),
                     errors: guest.adapter_errors.clone(),
                     ..Default::default()
@@ -1231,6 +1240,10 @@ impl ResultFacts {
             .as_ref()
             .and_then(|metadata| metadata.native_trace.clone())
             .or(adapter_artifacts.native_trace.clone());
+        let native_tool_sidecar = guest
+            .as_ref()
+            .and_then(|metadata| metadata.native_tool_sidecar.clone())
+            .or(adapter_artifacts.native_tool_sidecar.clone());
         let sealed_artifacts = adapter_artifacts.sealed_artifacts.clone();
         let mut stderr = bounded(&child.stderr);
         if let Some(error) = provider_cleanup_error.as_ref() {
@@ -1319,6 +1332,7 @@ impl ResultFacts {
             local_tool_transcript,
             deterministic_manifest,
             native_trace,
+            native_tool_sidecar,
             sealed_artifacts,
             cassette: tape_cassette
                 .as_ref()

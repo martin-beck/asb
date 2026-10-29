@@ -876,15 +876,64 @@ impl Session {
         let tape_cassette = guest_tape_cassette(context.tape_cassette)?;
         let tool_tape_cassette = guest_tape_cassette(context.tool_tape_cassette)?;
         let mcp_tape_cassette = guest_tape_cassette(context.mcp_tape_cassette)?;
-        let private_inputs = replay_private_inputs(
+        let mut private_inputs = replay_private_inputs(
             context.mcp_tape_cassette.or(context.tool_tape_cassette),
             context.tool_replay || context.mcp_mode == Some(crate::tape::Mode::Replay),
             &context.config.mcp_servers,
             context.mcp_mode == Some(crate::tape::Mode::Replay),
         )?;
+        let native_tool_launch = context
+            .native_tool()
+            .map(|(launch, source)| {
+                launch
+                    .validate_staged(source)
+                    .map_err(|error| format!("sealed native tool sidecar is invalid: {error}"))?;
+                let bytes = std::fs::read(source)
+                    .map_err(|_| "sealed native tool sidecar is unavailable".to_owned())?;
+                private_inputs.push(PrivateInput {
+                    source: source.to_path_buf(),
+                    target: "native-tool-sidecar.jsonl".into(),
+                    bytes: bytes.len() as u64,
+                    sha256: crate::cassette::digest(&bytes),
+                });
+                Ok::<crate::cassette::NativeToolLaunch, String>(launch.clone())
+            })
+            .transpose()?;
         let artifact_output = self.artifacts.join("guest-artifacts");
         std::fs::create_dir_all(&artifact_output)
             .map_err(|error| format!("cannot allocate guest artifact export directory: {error}"))?;
+        // Adapter extensions may require a tiny static helper inside the guest
+        // runtime.  Stage declared opaque bytes without interpreting their
+        // protocol; the adapter alone selects the guest-relative target.
+        let adapter = crate::agents::find(&context.config.agent)
+            .ok_or_else(|| "selected agent has no installation adapter".to_owned())?;
+        for asset in adapter.guest_private_assets() {
+            let target = std::path::Path::new(asset.target);
+            if target.is_absolute()
+                || target.components().any(|part| {
+                    matches!(
+                        part,
+                        std::path::Component::ParentDir | std::path::Component::RootDir
+                    )
+                })
+            {
+                return Err("adapter guest asset has an unsafe target".into());
+            }
+            let source = artifact_output.join("adapter-private").join(target);
+            let parent = source
+                .parent()
+                .ok_or_else(|| "adapter guest asset has no parent".to_owned())?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("cannot stage adapter guest asset: {error}"))?;
+            std::fs::write(&source, asset.bytes)
+                .map_err(|error| format!("cannot stage adapter guest asset: {error}"))?;
+            private_inputs.push(PrivateInput {
+                source,
+                target: asset.target.into(),
+                bytes: asset.bytes.len() as u64,
+                sha256: crate::cassette::digest(asset.bytes),
+            });
+        }
         let payload = AgentRequest {
             binary: &binary,
             project_root: context.project_root,
@@ -908,6 +957,7 @@ impl Session {
                 "tool_tape_cassette":tool_tape_cassette,
                 "mcp_mode":context.mcp_mode,
                 "mcp_tape_cassette":mcp_tape_cassette,
+                "native_tool_launch":native_tool_launch,
                 "namespace_collectors":namespace_collectors}),
         };
         self.controller.send(

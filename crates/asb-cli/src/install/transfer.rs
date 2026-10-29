@@ -112,11 +112,13 @@ impl Activity {
             return;
         }
         self.last = now;
-        self.render(false);
+        self.render();
     }
 
     pub(crate) fn finish(mut self) -> Progress {
-        self.render(true);
+        // Completed validation and extraction remain transient UI.  `Drop`
+        // clears this row without committing a separate line for each step.
+        self.render();
         self.snapshot()
     }
 
@@ -133,7 +135,7 @@ impl Activity {
         }
     }
 
-    fn render(&mut self, complete: bool) {
+    fn render(&mut self) {
         let progress = self.snapshot();
         // The TUI owns a private status path in the installer process. Publish
         // the known input size and consumed bytes even when this child has no
@@ -143,13 +145,9 @@ impl Activity {
             return;
         }
         let mut stderr = io::stderr().lock();
-        let result = if complete {
-            writeln!(stderr, "\r\x1b[2K{}", line(&self.label, progress))
-        } else {
-            write!(stderr, "\r\x1b[2K{}", line(&self.label, progress))
-        };
+        let result = redraw_line(&mut stderr, &line(&self.label, progress));
         if result.and_then(|()| stderr.flush()).is_ok() {
-            self.visible = !complete;
+            self.visible = true;
         }
     }
 }
@@ -158,17 +156,24 @@ impl Drop for Activity {
     fn drop(&mut self) {
         if self.visible {
             let mut stderr = io::stderr().lock();
-            let _ = write!(stderr, "\r\x1b[2K");
-            let _ = stderr.flush();
+            let _ = clear_line(&mut stderr);
         }
         clear_snapshot();
     }
 }
 
 impl Download {
-    pub(crate) fn start(destination: &Path, headers: &Path, label: &str) -> Self {
+    pub(crate) fn start(
+        destination: &Path,
+        headers: &Path,
+        label: &str,
+        discovered_total: Option<u64>,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let state = Arc::new(Mutex::new(Progress::default()));
+        let state = Arc::new(Mutex::new(Progress {
+            total_bytes: discovered_total,
+            ..Progress::default()
+        }));
         let worker = thread::Builder::new()
             .name("asb-download-progress".into())
             .spawn({
@@ -177,7 +182,7 @@ impl Download {
                 let destination = destination.to_path_buf();
                 let headers = headers.to_path_buf();
                 let label = label.to_owned();
-                move || observe_download(stop, state, destination, headers, label)
+                move || observe_download(stop, state, destination, headers, label, discovered_total)
             })
             .ok();
         Self {
@@ -301,6 +306,7 @@ fn observe_download(
     destination: PathBuf,
     headers: PathBuf,
     label: String,
+    discovered_total: Option<u64>,
 ) {
     let interactive = io::stderr().is_terminal();
     let started = Instant::now();
@@ -312,7 +318,7 @@ fn observe_download(
         let completed = fs::metadata(&destination)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        let total = content_length(&headers);
+        let total = content_length(&headers).or(discovered_total);
         let elapsed = now.duration_since(previous_at);
         let speed = if elapsed.is_zero() {
             0
@@ -332,7 +338,7 @@ fn observe_download(
         publish_snapshot(snapshot);
         if interactive {
             let mut stderr = io::stderr().lock();
-            if write!(stderr, "\r\x1b[2K{}", line(&label, snapshot))
+            if redraw_line(&mut stderr, &line(&label, snapshot))
                 .and_then(|()| stderr.flush())
                 .is_ok()
             {
@@ -345,7 +351,7 @@ fn observe_download(
     let completed = fs::metadata(&destination)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
-    let total = content_length(&headers);
+    let total = content_length(&headers).or(discovered_total);
     let seconds = now.duration_since(started).as_secs_f64().max(0.001);
     let snapshot = Progress {
         completed_bytes: completed,
@@ -357,8 +363,7 @@ fn observe_download(
     publish_snapshot(snapshot);
     if visible {
         let mut stderr = io::stderr().lock();
-        let _ = writeln!(stderr, "\r\x1b[2K{}", line(&label, snapshot));
-        let _ = stderr.flush();
+        let _ = clear_line(&mut stderr);
     }
 }
 
@@ -403,7 +408,7 @@ fn observe_cache(
         publish_snapshot(snapshot);
         if interactive {
             let mut stderr = io::stderr().lock();
-            if write!(stderr, "\r\x1b[2K{}", line(&label, snapshot))
+            if redraw_line(&mut stderr, &line(&label, snapshot))
                 .and_then(|()| stderr.flush())
                 .is_ok()
             {
@@ -432,9 +437,20 @@ fn observe_cache(
     publish_snapshot(snapshot);
     if visible {
         let mut stderr = io::stderr().lock();
-        let _ = writeln!(stderr, "\r\x1b[2K{}", line(&label, snapshot));
-        let _ = stderr.flush();
+        let _ = clear_line(&mut stderr);
     }
+}
+
+/// Redraw transient transfer activity without adding a durable terminal line.
+/// Sweep-level progress is deliberately rendered elsewhere as durable output.
+fn redraw_line(output: &mut impl Write, text: &str) -> io::Result<()> {
+    write!(output, "\r\x1b[2K{text}")
+}
+
+/// Clear a transient progress row without advancing the terminal.
+fn clear_line(output: &mut impl Write) -> io::Result<()> {
+    write!(output, "\r\x1b[2K")?;
+    output.flush()
 }
 
 /// Counts only regular files below an ASB-owned cache directory.  The cache
@@ -530,7 +546,10 @@ fn clear_snapshot_at(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
-fn content_length(headers: &Path) -> Option<u64> {
+/// Return the body length announced by the final HTTP response. A range
+/// response may omit `Content-Length` (which is just the one-byte range), so
+/// its complete `Content-Range` total is the fallback.
+pub(crate) fn content_length(headers: &Path) -> Option<u64> {
     let bytes = fs::read(headers).ok()?;
     let text = std::str::from_utf8(&bytes[..bytes.len().min(HEADER_LIMIT)]).ok()?;
     // `curl --dump-header` records every redirect response. Only the final
@@ -538,6 +557,7 @@ fn content_length(headers: &Path) -> Option<u64> {
     // means a streamed body with an unknown total, never a reason to borrow a
     // preceding redirect's length.
     let mut content_length = None;
+    let mut content_range = None;
     for line in text.lines().rev() {
         let line = line.trim();
         if line.starts_with("HTTP/") {
@@ -548,10 +568,16 @@ fn content_length(headers: &Path) -> Option<u64> {
         };
         if name.eq_ignore_ascii_case("content-length") {
             content_length = value.trim().parse::<u64>().ok();
-            break;
+        } else if name.eq_ignore_ascii_case("content-range") {
+            content_range = value
+                .trim()
+                .rsplit_once('/')
+                .and_then(|(_, total)| total.parse::<u64>().ok());
         }
     }
-    content_length.filter(|length| *length > 0)
+    content_range
+        .filter(|length| *length > 0)
+        .or_else(|| content_length.filter(|length| *length > 0))
 }
 
 fn bytes(value: u64) -> String {
@@ -602,6 +628,18 @@ mod tests {
     }
 
     #[test]
+    fn transient_activity_redraw_and_cleanup_do_not_advance_the_terminal() {
+        let mut output = Vec::new();
+        redraw_line(&mut output, "Validating runtime archive [=====]").unwrap();
+        clear_line(&mut output).unwrap();
+        assert_eq!(
+            output,
+            b"\r\x1b[2KValidating runtime archive [=====]\r\x1b[2K"
+        );
+        assert!(!output.contains(&b'\n'));
+    }
+
+    #[test]
     fn content_length_uses_the_final_redirect_response() {
         let path = std::env::temp_dir().join(format!(
             "asb-progress-{}",
@@ -624,6 +662,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(content_length(&path), None);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn content_length_uses_final_range_total_when_head_length_is_unavailable() {
+        let path = std::env::temp_dir().join(format!(
+            "asb-progress-range-length-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        fs::write(
+            &path,
+            "HTTP/2 206\r\ncontent-length: 1\r\ncontent-range: bytes 0-0/1048576\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(content_length(&path), Some(1_048_576));
         fs::remove_file(path).unwrap();
     }
 

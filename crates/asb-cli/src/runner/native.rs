@@ -112,7 +112,7 @@ impl NativePlan<'_> {
         }
         let launch = agents::find(&config.agent).map_or_else(
             || Ok(crate::launch::ProcessLaunch::new(&program)),
-            |adapter| adapter.process(&program),
+            |adapter| crate::agents::select_process(adapter, &program, None),
         )?;
         #[cfg(unix)]
         let gate =

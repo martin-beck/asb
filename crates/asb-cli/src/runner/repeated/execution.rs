@@ -98,6 +98,20 @@ impl BatchRun<'_> {
                 ));
             }
         };
+        // Bind each admitted replica to its already selected replay input.
+        // This is execution-private and never reconstructed from an adjacent
+        // provider cassette name.
+        let native_tool_inputs: Vec<_> = if mode == Some(crate::tape::Mode::Replay) {
+            let start = (number as usize - 1) * self.plan.concurrency;
+            self.plan.slots[start..start + self.plan.concurrency]
+                .iter()
+                .map(|slot| {
+                    &self.plan.replay_inputs[slot.replay_input.expect("planned replay input")]
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let result = super::super::run_admitted_batch(
             self.config_path,
             selected,
@@ -113,6 +127,8 @@ impl BatchRun<'_> {
                 respect_record_timings: self.plan.respect_record_timings,
                 policy: Some(&policy),
                 batch: Some(&self.identity),
+                native_tool_inputs: (!native_tool_inputs.is_empty())
+                    .then_some(native_tool_inputs.as_slice()),
                 measurement_dir: measurement_override.as_deref(),
                 cassette: self.cassette,
                 recording: self.recording.as_deref(),

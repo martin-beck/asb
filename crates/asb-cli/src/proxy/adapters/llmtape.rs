@@ -27,6 +27,9 @@ pub(crate) struct Settings {
     pub(crate) cassette: PathBuf,
     pub(crate) respect_record_timings: bool,
     pub(crate) workspace: PathBuf,
+    /// Opaque adapter-owned request extension; llmtape materializes and
+    /// invokes it without interpreting its wire protocol.
+    pub(crate) wire_extension: Option<&'static str>,
 }
 
 struct RunningLlmtape {
@@ -101,6 +104,18 @@ impl ProxyAdapter for LlmtapeAdapter {
             ))
         })?;
         let scratch = Scratch::create(&parent)?;
+        let wire_extension = request
+            .wire_extension
+            .map(|source| {
+                let path = scratch.path.join("agent-wire-extension.mjs");
+                std::fs::write(&path, source).map_err(|error| {
+                    Error::Run(format!(
+                        "cannot materialize adapter tape extension: {error}"
+                    ))
+                })?;
+                Ok::<_, Error>(path)
+            })
+            .transpose()?;
         // Every replay has its own copy and progress file. Sharing the source
         // directly would race on the proxy's cassette progress sidecar.
         let replay_cassette = scratch.path.join("cassette.jsonl");
@@ -130,6 +145,10 @@ impl ProxyAdapter for LlmtapeAdapter {
         command.env_remove("ASB_TAPE_CAPTURE_RECEIPT");
         command.env_remove("ASB_TAPE_CAPTURE_NONCE");
         command.env_remove("ASB_TAPE_MISMATCH_EVIDENCE");
+        command.env_remove("ASB_TAPE_AGENT_WIRE_EXTENSION");
+        if let Some(path) = wire_extension {
+            command.env("ASB_TAPE_AGENT_WIRE_EXTENSION", path);
+        }
         let capture = (builtin && request.mode == Mode::Record).then(|| {
             (
                 scratch.path.join("capture.json"),
@@ -963,6 +982,23 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_workbuddy_client_transport_envelope() {
+        let root = test_root();
+        let cassette = root.join("workbuddy-transport.jsonl");
+        let recorded = r#"{"model":"m","cache_retention":"long","max_tokens":8192,"reasoning_effort":"medium","temperature":0,"verbosity":"low","extra_vars":{"initiator":"user"},"messages":[{"role":"system","content":"You are CodeBuddy Code.\n<codebuddy_background_info>\nYou are powered by the model named GPT-6.1-Sol. The exact model ID is gpt-6.1-sol."},{"role":"user","content":[{"text":"memory: srv-data-projects-live-results-asb-executions-record-1-batch-1-workspace/memory"}]},{"role":"assistant","messageId":"11111111111111111111111111111111","requestModelId":"gpt-6.1-sol","requestModelName":"GPT-6.1-Sol","content":"done"}],"tools":[{"type":"function","function":{"name":"read_file"}}],"stream":true}"#;
+        let replayed = r#"{"model":"m","messages":[{"role":"system","content":"You are CodeBuddy Code.\n<codebuddy_background_info>\nYou are powered by the model named gpt-6.1-sol. The exact model ID is gpt-6.1-sol."},{"role":"user","content":[{"text":"memory: srv-data-projects-live-results-asb-executions-replay-2-batch-1-workspace/memory"}]},{"role":"assistant","messageId":"22222222222222222222222222222222","requestModelId":"custom-local:gpt-6.1-sol","requestModelName":"gpt-6.1-sol","content":"done"}],"tools":[{"type":"function","function":{"name":"read_file"}}],"stream":true}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, replayed).contains("200 OK"));
+        session.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_opencode_tool_output_rendering_volatility() {
         let root = test_root();
         let cassette = root.join("opencode-tool-output.jsonl");
@@ -981,6 +1017,56 @@ mod tests {
         let changed_result = replayed.replace("14 failed, 30 passed", "13 failed, 31 passed");
         let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
         assert!(request(&session, &changed_result).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_qwen_persisted_output_filename() {
+        let root = test_root();
+        let cassette = root.join("qwen-persisted-output.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"content":"<persisted-output>\nOutput too large (37 KB). Full output saved to: /opt/asb-private/agent-state/home/.qwen/tmp/427298c01319355aae99da720b647df7cd291b9e3d2f3b5950ed35fb285aaf3f/tool-results/call_193d25ef253b4045a147311558349385.txt\nFull output sha256: cd15fb964c709e38041ea1ae54f12add71bf2c7ac8c8167883326629ccd06745\n</persisted-output>"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = recorded.replace(
+            "/opt/asb-private/agent-state/home/.qwen/tmp/427298c01319355aae99da720b647df7cd291b9e3d2f3b5950ed35fb285aaf3f/tool-results/call_193d25ef253b4045a147311558349385.txt",
+            "/opt/asb-private/agent-state/home/.qwen/tmp/427298c01319355aae99da720b647df7cd291b9e3d2f3b5950ed35fb285aaf3f/tool-results/asb-replay-1891570-<asb-timestamp>-4.txt",
+        );
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_digest = replayed.replace(
+            "cd15fb964c709e38041ea1ae54f12add71bf2c7ac8c8167883326629ccd06745",
+            "dd15fb964c709e38041ea1ae54f12add71bf2c7ac8c8167883326629ccd06745",
+        );
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_digest).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_openjiuwen_generated_bash_output_filename() {
+        let root = test_root();
+        let cassette = root.join("openjiuwen-bash-output.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"role":"tool","content":"Bash output saved to bash_outputs/bash_2ea5c8b331cb.txt\nPreview (first 2 lines):\nsemantic result: resolved"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = recorded.replace("bash_2ea5c8b331cb.txt", "bash_a0865e8bb19c.txt");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_preview = replayed.replace("resolved", "failed");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_preview).contains("409 Conflict"));
         assert!(session.stop().unwrap_err().to_string().contains("rejected"));
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1267,6 +1353,34 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_codex_async_shell_envelope() {
+        let root = test_root();
+        let cassette = root.join("codex-async-shell.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Chunk ID: deadbeef\nWall time: 0.2164 seconds\nProcess running with session ID 7812\nwaiting for command output"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let replayed = recorded.replace("0.2164", "1.904").replace("7812", "9914");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_status = replayed.replace("Process running", "Process exited");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &changed_status).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        let changed_output = replayed.replace("waiting for command output", "different output");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &changed_output).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_rejects_changed_body_and_extra_requests() {
         let root = test_root();
         let cassette = cassette(&root);
@@ -1451,11 +1565,11 @@ mod tests {
     }
 
     #[test]
-    fn replay_normalizes_anthropic_content_and_workbuddy_conversation_ids() {
+    fn replay_normalizes_anthropic_content_tool_ids() {
         let root = test_root();
         let cassette = root.join("adapter-volatile-ids.jsonl");
-        let recorded = r#"{"model":"m","messages":[{"role":"assistant","conversationRequestId":"0123456789abcdef0123456789abcdef","content":[{"type":"tool_use","id":"toolu_01ARecord","name":"read_file","input":{"path":"src/lib.rs"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01ARecord","content":"done"}]}],"temperature":0}"#;
-        let replayed = r#"{"model":"m","messages":[{"role":"assistant","conversationRequestId":"abcdef0123456789abcdef0123456789","content":[{"type":"tool_use","id":"toolu_01BReplay","name":"read_file","input":{"path":"src/lib.rs"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01BReplay","content":"done"}]}],"temperature":0}"#;
+        let recorded = r#"{"model":"m","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01ARecord","name":"read_file","input":{"path":"src/lib.rs"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01ARecord","content":"done"}]}],"temperature":0}"#;
+        let replayed = r#"{"model":"m","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01BReplay","name":"read_file","input":{"path":"src/lib.rs"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01BReplay","content":"done"}]}],"temperature":0}"#;
         let line = serde_json::json!({
             "request": {"method":"POST", "url":"/v1/messages", "body":recorded},
             "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
