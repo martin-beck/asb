@@ -281,6 +281,7 @@ main().catch(e => { console.error(e); process.exitCode = 1; });
             "--replay",
             "--cassette",
             "tape.jsonl",
+            "--verbose",
         ],
         true,
     );
@@ -373,7 +374,7 @@ if (taped) {
   const server = config.mcpServers && config.mcpServers['asb-local-tools'];
   if (!server || server.type !== 'stdio' || !server.command || !Array.isArray(server.args) || server.alwaysLoad !== true) { console.error('first-turn private MCP configuration missing'); process.exit(10); }
   const localTool = require('child_process').spawnSync(server.command, server.args, {
-    input: JSON.stringify({jsonrpc:'2.0', id:1, method:'tools/call', params:{name:'write_file', arguments:{path:'src/parser.py', content:"def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n"}}}) + '\n',
+    input: JSON.stringify({jsonrpc:'2.0', id:1, method:'tools/call', params:{name:'write_file', arguments:{path:'/testbed/src/parser.py', content:"def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n"}}}) + '\n',
     encoding: 'utf8',
   });
   if (localTool.status !== 0 || !localTool.stdout.includes('"content"')) { console.error('private MCP tool failed'); process.exit(11); }

@@ -1,6 +1,8 @@
 use super::{CommandContext, CommandSpec, PreparationContext, PromptDelivery, StaticAdapter};
 use crate::{Error, install::Recipe};
 
+const MCP_PATH_BRIDGE: &str = include_str!("../../../assets/scripts/workbuddy-mcp-proxy.mjs");
+
 // CodeBuddy restores these complete client defaults after resuming a
 // conversation, although its initial request omits them. This adapter-owned
 // opaque wire extension keeps that client-local resume state out of cassette
@@ -170,6 +172,15 @@ fn prepare_tool_replay(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let bridge = context.runtime_dir.join("workbuddy-mcp-proxy.mjs");
+    std::fs::write(&bridge, MCP_PATH_BRIDGE)
+        .map_err(|error| Error::Run(format!("cannot write WorkBuddy MCP path bridge: {error}")))?;
+    let child = serde_json::to_string(
+        &std::iter::once(program.to_owned())
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|_| Error::Run("cannot encode WorkBuddy MCP child command".into()))?;
     // CodeBuddy accepts an inline MCP document.  Do not materialize this
     // inside the workload checkout: an untracked .mcp.json changes both the
     // agent trajectory and the grader's view of the repository.
@@ -177,8 +188,8 @@ fn prepare_tool_replay(
         "mcpServers": {
             "asb-local-tools": {
                 "type": "stdio",
-                "command": program,
-                "args": args,
+                "command": "node",
+                "args": [bridge, child],
                 // CodeBuddy defers MCP discovery by default.  A benchmark's
                 // first model turn must see the sealed tool set, rather than
                 // completing before the server is advertised.
@@ -245,6 +256,7 @@ mod tests {
     use crate::agents::AgentAdapter;
     use std::io::{Read, Write};
     use std::net::TcpStream;
+    use std::process::{Command, Stdio};
 
     fn replay_request(session: &crate::tape::Session, body: &str) -> String {
         let address = session
@@ -437,28 +449,82 @@ mod tests {
             mcp["mcpServers"]["asb-local-tools"]["alwaysLoad"], true,
             "the first headless turn must wait for the sealed MCP server"
         );
-        assert_eq!(
-            mcp["mcpServers"]["asb-local-tools"]["args"][0],
-            "__asb-tool-replay"
+        assert_eq!(mcp["mcpServers"]["asb-local-tools"]["command"], "node");
+        assert!(
+            mcp["mcpServers"]["asb-local-tools"]["args"][0]
+                .as_str()
+                .is_some_and(|value| value.ends_with("workbuddy-mcp-proxy.mjs"))
         );
         assert!(
-            mcp["mcpServers"]["asb-local-tools"]["args"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|argument| argument == "--metadata-trace")
+            mcp["mcpServers"]["asb-local-tools"]["args"][1]
+                .as_str()
+                .is_some_and(|value| value.contains("__asb-tool-replay"))
         );
+        let child: Vec<String> = serde_json::from_str(
+            mcp["mcpServers"]["asb-local-tools"]["args"][1]
+                .as_str()
+                .expect("encoded private MCP child"),
+        )
+        .expect("private MCP child array");
+        assert!(child.iter().any(|argument| argument == "--metadata-trace"));
         assert!(
-            mcp["mcpServers"]["asb-local-tools"]["args"]
-                .as_array()
-                .unwrap()
+            child
                 .iter()
-                .any(|argument| {
-                    argument.as_str().is_some_and(|value| {
-                        value.ends_with("mcp-trace/workbuddy-mcp-metadata.jsonl")
-                    })
-                })
+                .any(|argument| { argument.ends_with("mcp-trace/workbuddy-mcp-metadata.jsonl") })
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn private_mcp_bridge_owns_codebuddy_testbed_path_translation() {
+        assert!(MCP_PATH_BRIDGE.contains("/testbed"));
+        assert!(MCP_PATH_BRIDGE.contains("relativeTestbed"));
+        assert!(MCP_PATH_BRIDGE.contains("tools/call"));
+    }
+
+    #[test]
+    fn private_mcp_bridge_maps_testbed_and_rejects_traversal() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-workbuddy-mcp-bridge-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let bridge = root.join("bridge.mjs");
+        let echo = root.join("echo.mjs");
+        std::fs::write(&bridge, MCP_PATH_BRIDGE).unwrap();
+        std::fs::write(&echo, "process.stdin.pipe(process.stdout);\n").unwrap();
+        let child =
+            serde_json::to_string(&vec!["node".to_owned(), echo.display().to_string()]).unwrap();
+        let mut process = Command::new("node")
+            .arg(&bridge)
+            .arg(child)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let requests = [
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/testbed/src/parser.py"}}}),
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/etc/passwd"}}}),
+            serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/testbed/../secret"}}}),
+        ];
+        {
+            let input = process.stdin.as_mut().unwrap();
+            for request in requests {
+                writeln!(input, "{request}").unwrap();
+            }
+        }
+        let output = process.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let frames = std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 3);
+        let frame = |id| frames.iter().find(|frame| frame["id"] == id).unwrap();
+        assert_eq!(frame(1)["params"]["arguments"]["path"], "src/parser.py");
+        assert_eq!(frame(2)["params"]["arguments"]["path"], "/etc/passwd");
+        assert_eq!(frame(3)["error"]["code"], -32602);
         let _ = std::fs::remove_dir_all(root);
     }
 }
