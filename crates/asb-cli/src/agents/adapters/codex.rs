@@ -1008,21 +1008,18 @@ mod tests {
         );
         assert!(replay.status.success());
         let value: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
-        let command = value["hookSpecificOutput"]["updatedInput"]["command"]
-            .as_str()
-            .unwrap();
-        assert!(command.contains(" emit 0"));
-        let emitted = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .env("ASB_CODEX_NATIVE_MODE", "replay")
-            .env("ASB_CODEX_NATIVE_SIDECAR", &sidecar)
-            .env("ASB_CODEX_NATIVE_PROGRESS", &progress)
-            .env("ASB_CODEX_NATIVE_STATE", &state)
-            .output()
-            .unwrap();
-        assert!(emitted.status.success());
-        assert_eq!(String::from_utf8(emitted.stdout).unwrap(), "fixture\n");
+        assert_eq!(
+            value["hookSpecificOutput"]["hookEventName"].as_str(),
+            Some("PreToolUse")
+        );
+        assert_eq!(
+            value["hookSpecificOutput"]["permissionDecision"].as_str(),
+            Some("allow")
+        );
+        assert!(
+            value["hookSpecificOutput"].get("updatedInput").is_none(),
+            "replay must retain Codex's original shell wrapper and request shape"
+        );
         let replay_post = invoke_native_hook(
             &script,
             "replay",
