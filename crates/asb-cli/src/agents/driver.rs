@@ -758,9 +758,16 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let adapter = super::find(&request.config.agent).expect("validated agent");
     let frozen = artifact_owner.freeze();
+    // Preserve the selected adapter tool tape as an opaque collection handle.
+    // Generic driver code does not inspect provider wire data; adapters that
+    // own a local-tool transport decide whether and how to correlate it.
+    let provider_capture = request
+        .tool_tape_cassette
+        .as_deref()
+        .filter(|_| !request.tool_replay);
     let mut artifacts = adapter.collect(&super::CollectionContext {
         frozen: &frozen,
-        provider_capture: None,
+        provider_capture,
         run_dir: &request.run_dir,
         interface: Some(request.connection.interface),
         anthropic_input_includes_cache: crate::providers::anthropic_input_includes_cache(
