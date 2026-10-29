@@ -601,8 +601,8 @@ impl RecordingJournal {
                 })();
                 if let Err(error) = result {
                     warnings.push(format!(
-                        "could not remove sealed auxiliary recording payload {}: {error}",
-                        path.display()
+                        "published archive is usable; track {} auxiliary artifact {} cleanup incomplete: {error}",
+                        track.id, artifact.kind
                     ));
                 }
             }
@@ -623,8 +623,8 @@ impl RecordingJournal {
                 })();
                 if let Err(error) = result {
                     warnings.push(format!(
-                        "could not remove sealed native recording payload {}: {error}",
-                        path.display()
+                        "published archive is usable; track {} native sidecar cleanup incomplete: {error}",
+                        track.id
                     ));
                     return warnings;
                 }
