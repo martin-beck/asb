@@ -489,6 +489,7 @@ impl Recorder {
                     requests: capture.map(|capture| capture.inference_requests),
                     steps: result.steps,
                 },
+                native: None,
                 artifacts: Vec::new(),
             };
             let journal = state
@@ -654,7 +655,10 @@ impl Recorder {
                         Err(error) => {
                             published.cleanup_complete=false;
                             cleanup_failures+=1;
-                            if cleanup_failures<=16 { published.warnings.push(error.to_string()); }
+                            if cleanup_failures<=16 {
+                                let _ = error;
+                                published.warnings.push(raw_cleanup_warning(track.id));
+                            }
                         }
                     }
                 }
@@ -811,6 +815,13 @@ std::thread_local! {
 fn cleanup_raw(output: &Path, track: &Track, original: Option<&fs::Metadata>) -> Result<(), Error> {
     raw::cleanup(output, track, original)
 }
+
+fn raw_cleanup_warning(track_id: u64) -> String {
+    format!(
+        "published cassette is usable; track {track_id} raw capture cleanup incomplete; private evidence retained"
+    )
+}
+
 fn open_payload(output: &Path) -> Result<Option<File>, Error> {
     match fs::symlink_metadata(output) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -868,6 +879,16 @@ mod tests {
     use super::*;
     std::thread_local! {
         pub(super) static CAPACITY_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn raw_cleanup_warning_has_only_a_stable_track_label() {
+        let warning = raw_cleanup_warning(7);
+        assert_eq!(
+            warning,
+            "published cassette is usable; track 7 raw capture cleanup incomplete; private evidence retained"
+        );
+        assert!(!warning.contains('/'));
     }
 
     #[test]
@@ -990,6 +1011,7 @@ mod tests {
                 bytes: 3,
                 sha256: crate::cassette::digest(b"{}\n"),
                 statistics: Statistics::default(),
+                native: None,
                 artifacts: Vec::new(),
             };
             let replacement_root = root.clone();
@@ -1129,6 +1151,7 @@ mod tests {
                 bytes: 3,
                 sha256: crate::cassette::digest(b"{}\n"),
                 statistics: Statistics::default(),
+                native: None,
                 artifacts: Vec::new(),
             };
             match mode {

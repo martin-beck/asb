@@ -71,6 +71,7 @@ fn track(id: u64) -> Track {
         bytes: 3,
         sha256: crate::cassette::digest(b"{}\n"),
         statistics: Statistics::default(),
+        native: None,
         artifacts: Vec::new(),
     }
 }

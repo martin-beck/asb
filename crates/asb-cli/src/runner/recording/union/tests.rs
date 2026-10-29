@@ -129,6 +129,7 @@ impl Fixture {
                     bytes: 3,
                     sha256: crate::cassette::digest(b"{}\n"),
                     statistics: Statistics::default(),
+                    native: None,
                     artifacts: Vec::new(),
                 },
                 &mut &b"{}\n"[..],

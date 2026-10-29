@@ -335,6 +335,7 @@ mod tests {
                 bytes: 3,
                 sha256: crate::cassette::digest(b"{}\n"),
                 statistics: Default::default(),
+                native: None,
                 artifacts: Vec::new(),
             }
         }

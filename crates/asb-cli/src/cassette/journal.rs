@@ -2,7 +2,7 @@
 mod evidence;
 mod publication;
 mod reservation;
-use super::{Artifact, Error, Limits, Manifest, Statistics, Track, digest};
+use super::{Artifact, Error, Limits, Manifest, NativeTrack, Statistics, Track, digest};
 use crate::output_lock::OutputLock;
 #[cfg(test)]
 pub(super) use evidence::observed;
@@ -29,6 +29,16 @@ pub struct ArtifactInput<'a> {
     /// Immutable catalogue metadata for this payload.
     pub artifact: Artifact,
     /// Exact bytes to stage and verify against [`Self::artifact`].
+    pub source: &'a mut dyn Read,
+}
+
+/// Bytes for a sealed native sidecar. The journal treats this as opaque JSONL;
+/// a future native ingress owns event semantics and must not attach it after
+/// the provider track has committed.
+pub struct NativeInput<'a> {
+    /// Immutable metadata for the native sidecar.
+    pub native: NativeTrack,
+    /// Exact bytes to stage and verify against [`Self::native`].
     pub source: &'a mut dyn Read,
 }
 
@@ -267,12 +277,15 @@ impl RecordingJournal {
             .tracks
             .iter()
             .try_fold(0u64, |total, track| {
-                track
+                let total = total.checked_add(track.bytes)?;
+                let total = track
                     .artifacts
                     .iter()
-                    .try_fold(total.checked_add(track.bytes)?, |total, artifact| {
-                        total.checked_add(artifact.bytes)
-                    })
+                    .try_fold(total, |total, artifact| total.checked_add(artifact.bytes))?;
+                track
+                    .native
+                    .as_ref()
+                    .map_or(Some(total), |native| total.checked_add(native.bytes))
             })
             .ok_or_else(|| Error("recording staged byte count overflow".into()))?;
         Ok(journal)
@@ -322,16 +335,28 @@ impl RecordingJournal {
     /// never process exit alone. Failed staging retains its uncommitted payload
     /// for inspection; another commit cannot overwrite it.
     pub fn commit(&mut self, track: Track, source: &mut dyn Read) -> Result<(), Error> {
-        self.commit_with_artifacts(track, source, Vec::new())
+        self.commit_with_native(track, source, Vec::new(), None)
     }
 
     /// Stage a provider transcript and every catalogue-declared auxiliary
     /// payload before publishing one immutable track commit.
     pub fn commit_with_artifacts(
         &mut self,
+        track: Track,
+        source: &mut dyn Read,
+        artifacts: Vec<ArtifactInput<'_>>,
+    ) -> Result<(), Error> {
+        self.commit_with_native(track, source, artifacts, None)
+    }
+
+    /// Stage a provider transcript, every declared artifact, and an optional
+    /// sealed native sidecar before publishing one immutable track commit.
+    pub fn commit_with_native(
+        &mut self,
         mut track: Track,
         source: &mut dyn Read,
         artifacts: Vec<ArtifactInput<'_>>,
+        native: Option<NativeInput<'_>>,
     ) -> Result<(), Error> {
         if self
             .intent
@@ -343,7 +368,7 @@ impl RecordingJournal {
         {
             return Err(Error("imported slots require the artifact-copy API".into()));
         }
-        if !track.artifacts.is_empty() {
+        if !track.artifacts.is_empty() || track.native.is_some() {
             return Err(Error(
                 "caller must supply auxiliary payloads through the journal bundle API".into(),
             ));
@@ -352,7 +377,8 @@ impl RecordingJournal {
             .iter()
             .map(|input| input.artifact.clone())
             .collect();
-        self.commit_bundle(track, source, artifacts)
+        track.native = native.as_ref().map(|input| input.native.clone());
+        self.commit_bundle(track, source, artifacts, native)
     }
 
     /// Import a reserved original track without manufacturing an execution,
@@ -404,7 +430,7 @@ impl RecordingJournal {
             &serde_json::to_vec(&started).map_err(json_error)?,
         )?;
         self.starts.insert(track.id, started);
-        self.commit_bundle(track, source, artifacts)
+        self.commit_bundle(track, source, artifacts, None)
     }
 
     /// Explicitly finish an artifact import after interruption. This never
@@ -468,7 +494,7 @@ impl RecordingJournal {
             file.sync_all().map_err(io_error)?;
             return self.publish_commit(track);
         }
-        self.commit_bundle(track, source, Vec::new())
+        self.commit_bundle(track, source, Vec::new(), None)
     }
 
     fn commit_bundle(
@@ -476,6 +502,7 @@ impl RecordingJournal {
         track: Track,
         source: &mut dyn Read,
         artifacts: Vec<ArtifactInput<'_>>,
+        native: Option<NativeInput<'_>>,
     ) -> Result<(), Error> {
         self.check_root()?;
         self.ensure_recording()?;
@@ -489,6 +516,11 @@ impl RecordingJournal {
         {
             return Err(Error(
                 "track auxiliary artifact catalogue differs from supplied payloads".into(),
+            ));
+        }
+        if track.native.as_ref() != native.as_ref().map(|input| &input.native) {
+            return Err(Error(
+                "track native sidecar metadata differs from supplied payload".into(),
             ));
         }
         if self.commits.contains_key(&track.id) {
@@ -505,6 +537,13 @@ impl RecordingJournal {
                 total.checked_add(artifact.bytes)
             })
             .ok_or_else(|| Error("recording payload length overflow".into()))?;
+        let bundle_bytes = if let Some(native) = &track.native {
+            bundle_bytes
+                .checked_add(native.bytes)
+                .ok_or_else(|| Error("recording payload length overflow".into()))?
+        } else {
+            bundle_bytes
+        };
         if self
             .staged_bytes
             .checked_add(bundle_bytes)
@@ -526,9 +565,43 @@ impl RecordingJournal {
                 input.source,
             )?;
         }
+        if let Some(input) = native {
+            self.stage_native_payload(track.id, &input.native, input.source)?;
+        }
         #[cfg(test)]
         self.publication_fault.check("before-payload-commit")?;
         self.publish_commit(track)
+    }
+
+    fn stage_native_payload(
+        &mut self,
+        id: u64,
+        native: &NativeTrack,
+        source: &mut dyn Read,
+    ) -> Result<(), Error> {
+        self.stage_payload(&self.native_path(id), native.bytes, &native.sha256, source)?;
+        let file = open_regular(&self.native_path(id), native.bytes)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(usize::try_from(native.bytes).map_err(|_| {
+                Error("native sidecar length cannot fit local address space".into())
+            })?)
+            .map_err(|_| Error("cannot allocate bounded native sidecar inspection".into()))?;
+        file.take(native.bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(io_error)?;
+        if bytes.len() as u64 != native.bytes {
+            return Err(Error(
+                "native sidecar changed during staged inspection".into(),
+            ));
+        }
+        let events = bytes.iter().filter(|byte| **byte == b'\n').count() as u64;
+        if events != native.events || (!bytes.is_empty() && !bytes.ends_with(b"\n")) {
+            return Err(Error(
+                "native sidecar event framing mismatch; incomplete payload retained".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn stage_payload(
@@ -718,6 +791,24 @@ impl RecordingJournal {
                 .filter(|total| *total <= self.limits.max_total_bytes)
                 .ok_or_else(|| Error("recording payloads exceed aggregate byte limit".into()))?;
             if let Some(track) = self.commits.get(&started.id) {
+                if let Some(native) = &track.native {
+                    let path = self.native_path(track.id);
+                    let length = open_regular(&path, self.limits.max_track_bytes)?
+                        .metadata()
+                        .map_err(io_error)?
+                        .len();
+                    total = total
+                        .checked_add(length)
+                        .filter(|total| *total <= self.limits.max_total_bytes)
+                        .ok_or_else(|| {
+                            Error("recording payloads exceed aggregate byte limit".into())
+                        })?;
+                    if length != native.bytes {
+                        return Err(Error(
+                            "committed native sidecar is missing or changed".into(),
+                        ));
+                    }
+                }
                 for artifact in &track.artifacts {
                     let path = self.artifact_path(track.id, &artifact.kind);
                     let length = open_regular(&path, self.limits.max_track_bytes)?
@@ -747,6 +838,21 @@ impl RecordingJournal {
                 let mut artifact_remaining = remaining
                     .checked_sub(track.bytes)
                     .ok_or_else(|| Error("recording aggregate byte limit exceeded".into()))?;
+                if let Some(native) = &track.native {
+                    if hash_file(
+                        &self.native_path(track.id),
+                        native.bytes.min(artifact_remaining),
+                    )? != (native.bytes, native.sha256.clone())
+                    {
+                        return Err(Error(format!(
+                            "recording track {} native sidecar differs from its commit",
+                            track.id
+                        )));
+                    }
+                    artifact_remaining = artifact_remaining
+                        .checked_sub(native.bytes)
+                        .ok_or_else(|| Error("recording aggregate byte limit exceeded".into()))?;
+                }
                 for artifact in &track.artifacts {
                     if hash_file(
                         &self.artifact_path(track.id, &artifact.kind),
@@ -782,6 +888,7 @@ impl RecordingJournal {
                     bytes,
                     sha256,
                     statistics: Statistics::default(),
+                    native: None,
                     artifacts: Vec::new(),
                 }
             };
@@ -792,6 +899,13 @@ impl RecordingJournal {
                     total.checked_add(artifact.bytes)
                 })
                 .ok_or_else(|| Error("recording aggregate byte limit exceeded".into()))?;
+            let payload_bytes = if let Some(native) = &track.native {
+                payload_bytes
+                    .checked_add(native.bytes)
+                    .ok_or_else(|| Error("recording aggregate byte limit exceeded".into()))?
+            } else {
+                payload_bytes
+            };
             remaining = remaining
                 .checked_sub(payload_bytes)
                 .ok_or_else(|| Error("recording aggregate byte limit exceeded".into()))?;
@@ -819,10 +933,14 @@ impl RecordingJournal {
         self.root.join(format!("artifact-{id}-{kind}.jsonl"))
     }
 
+    fn native_path(&self, id: u64) -> PathBuf {
+        self.root.join(format!("native-{id}.jsonl"))
+    }
+
     /// Auxiliary payloads are never diagnostic sidecars: every such filename
     /// must be named by a committed track or finalization refuses publication.
     fn verify_auxiliary_staging_names(&self) -> Result<(), Error> {
-        let expected =
+        let mut expected =
             self.commits
                 .values()
                 .flat_map(|track| {
@@ -831,13 +949,21 @@ impl RecordingJournal {
                     })
                 })
                 .collect::<std::collections::BTreeSet<_>>();
+        expected.extend(self.commits.values().filter_map(|track| {
+            track
+                .native
+                .as_ref()
+                .map(|_| format!("native-{}.jsonl", track.id))
+        }));
         for entry in fs::read_dir(&self.root).map_err(io_error)? {
             let name = entry
                 .map_err(io_error)?
                 .file_name()
                 .to_string_lossy()
                 .into_owned();
-            if name.starts_with("artifact-") && !expected.contains(&name) {
+            if (name.starts_with("artifact-") || name.starts_with("native-"))
+                && !expected.contains(&name)
+            {
                 return Err(Error(
                     "recording contains an uncommitted or foreign auxiliary artifact".into(),
                 ));
@@ -931,6 +1057,11 @@ impl RecordingJournal {
     #[cfg(test)]
     pub(super) fn inject_publication_failure(&mut self, point: &'static str) {
         self.publication_fault.point = Some(point);
+    }
+
+    #[cfg(test)]
+    pub(super) fn staged_bytes(&self) -> u64 {
+        self.staged_bytes
     }
 
     #[cfg(test)]
