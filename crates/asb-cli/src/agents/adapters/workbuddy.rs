@@ -125,6 +125,11 @@ fn prepare_tool_replay(
         // track.  The selected server is the only local-tool authority.
         .arg("--tools")
         .arg("")
+        // `-y` bypasses tool invocation confirmation, but CodeBuddy keeps a
+        // separate non-interactive enrollment gate for project MCP servers.
+        // Admit only this private, already sealed server.
+        .arg("--settings")
+        .arg(r#"{"enabledMcpjsonServers":["asb-local-tools"]}"#)
         .arg("--strict-mcp-config")
         .arg("--mcp-config")
         .arg(configuration);
@@ -259,6 +264,15 @@ mod tests {
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(args.windows(2).any(|pair| pair == ["--tools", ""]));
+        let settings = args
+            .windows(2)
+            .find(|pair| pair[0] == "--settings")
+            .map(|pair| serde_json::from_str::<serde_json::Value>(&pair[1]).unwrap())
+            .expect("private MCP enrollment settings");
+        assert_eq!(
+            settings["enabledMcpjsonServers"],
+            serde_json::json!(["asb-local-tools"])
+        );
         assert!(
             args.iter()
                 .any(|argument| argument == "--strict-mcp-config")
