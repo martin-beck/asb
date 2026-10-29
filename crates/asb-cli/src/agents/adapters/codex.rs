@@ -308,11 +308,20 @@ fn bind_provider_tool_outputs(
             ) else {
                 continue;
             };
-            if outputs
-                .insert(id.to_owned(), output.as_bytes().to_vec())
-                .is_some()
-            {
-                return Err("Codex provider capture repeats a native tool identity".into());
+            match outputs.entry(id.to_owned()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(output.as_bytes().to_vec());
+                }
+                std::collections::btree_map::Entry::Occupied(entry)
+                    if entry.get().as_slice() == output.as_bytes() =>
+                {
+                    // Later request snapshots legitimately retain historical
+                    // tool results. They are the same native exchange, not a
+                    // second tool call.
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {
+                    return Err("Codex provider capture repeats a native tool identity".into());
+                }
             }
         }
     }
@@ -967,7 +976,13 @@ mod tests {
                 "input": [{"call_id": "call-1", "output": "fixture"}]
             }).to_string()}
         });
-        std::fs::write(root.join("capture.jsonl"), format!("{capture}\n")).unwrap();
+        // Provider request snapshots can retain the same already-completed
+        // call in later turns. Equal historical rows represent one exchange.
+        std::fs::write(
+            root.join("capture.jsonl"),
+            format!("{capture}\n{capture}\n"),
+        )
+        .unwrap();
         std::fs::write(
             &sidecar,
             bind_provider_tool_outputs(rows.as_bytes(), &root.join("capture.jsonl")).unwrap(),
