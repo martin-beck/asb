@@ -97,6 +97,15 @@ pub(crate) struct ReplayInput {
     /// Older recordings omit it until a native capture backend is selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_trace: Option<PathBuf>,
+    /// Owner-only selected v2 native-tool sidecar. This is deliberately not
+    /// serialized into campaign plans or public result data.
+    #[serde(skip)]
+    pub native_tool: Option<PathBuf>,
+    /// Payload-free authority derived during private staging.  Campaign plans
+    /// intentionally retain neither this descriptor nor its sidecar path.
+    #[cfg(not(test))]
+    #[serde(skip)]
+    pub native_tool_launch: Option<crate::cassette::NativeToolLaunch>,
     /// Sealed generic MCP relay bundles, addressed only by their declared
     /// stable server id. A replay adapter must reject a requested server whose
     /// bundle is absent rather than launch its original program.
@@ -104,6 +113,19 @@ pub(crate) struct ReplayInput {
     pub mcp_relays: Vec<McpRelayInput>,
     pub bytes: u64,
     pub sha256: String,
+}
+
+impl ReplayInput {
+    #[cfg(not(test))]
+    pub(crate) fn native_tool_launch(&self) -> Option<&crate::cassette::NativeToolLaunch> {
+        self.native_tool_launch.as_ref()
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn native_tool_launch(&self) -> Option<&crate::cassette::NativeToolLaunch> {
+        None
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

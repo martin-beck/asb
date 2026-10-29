@@ -111,6 +111,19 @@ struct NativeExchange {
 }
 
 impl NativeToolTransport {
+    /// Derive payload-free launch authority from one already selected sealed
+    /// sidecar. Callers retain bytes in a private owner-only staging file; this
+    /// descriptor intentionally contains no pathname or payload.
+    pub fn launch_descriptor(native: NativeTrack, bytes: &[u8]) -> Result<NativeToolLaunch, Error> {
+        let transport = Self::from_sidecar(&native, bytes)?;
+        Ok(NativeToolLaunch {
+            native,
+            launch_session: transport.launch_session,
+            workspace_effect_sha256: transport.workspace_effect_sha256,
+            sessions: transport.sessions,
+        })
+    }
+
     /// Validate and stage a selected sidecar as an owner-only private runtime file.
     pub fn stage_from_archive(
         archive: &mut Archive,
@@ -124,7 +137,7 @@ impl NativeToolTransport {
             .clone()
             .ok_or_else(|| Error(format!("cassette track {track_id} has no native sidecar")))?;
         let bytes = archive.read_native(track_id)?;
-        let transport = Self::from_sidecar(&native, &bytes)?;
+        Self::from_sidecar(&native, &bytes)?;
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -138,12 +151,7 @@ impl NativeToolTransport {
         file.write_all(&bytes)
             .and_then(|()| file.sync_all())
             .map_err(|_| Error("cannot stage private native tool sidecar".into()))?;
-        Ok(NativeToolLaunch {
-            native,
-            launch_session: transport.launch_session,
-            workspace_effect_sha256: transport.workspace_effect_sha256,
-            sessions: transport.sessions,
-        })
+        Self::launch_descriptor(native, &bytes)
     }
     /// Read and validate the sealed native sidecar selected from an archive.
     pub fn from_archive(archive: &mut Archive, track_id: u64) -> Result<Self, Error> {
