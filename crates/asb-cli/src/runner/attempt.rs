@@ -40,6 +40,11 @@ impl<'a> ConfiguredAttempt<'a> {
             project_root,
             project_config,
         } = admitted;
+        if options.recording.is_some() && options.mode != Some(tape::Mode::Record) {
+            return Err(Error::Run(
+                "recording attempt lost its selected record mode before adapter preparation".into(),
+            ));
+        }
         let publication_config = std::path::absolute(config_path).map_err(io_error)?;
         let measurement_path = options
             .measurement_dir
