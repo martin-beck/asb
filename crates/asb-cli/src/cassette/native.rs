@@ -35,6 +35,11 @@ pub struct NativeToolLaunch {
 }
 
 impl NativeToolLaunch {
+    /// Validated private session identities for the selected sidecar.
+    pub fn sessions(&self) -> &[NativeSession] {
+        &self.sessions
+    }
+
     /// Validate a staged owned sidecar without disclosing its pathname or bytes.
     pub fn validate_staged(&self, path: &Path) -> Result<(), Error> {
         let mut options = OpenOptions::new();
@@ -76,6 +81,16 @@ impl NativeToolLaunch {
             ));
         }
         Ok(())
+    }
+
+    /// Open the already-authorized private sidecar for one adapter-owned
+    /// transport.  Callers receive the decoded transport only after the
+    /// descriptor and owner-only staged file agree exactly.
+    pub fn open_staged(&self, path: &Path) -> Result<NativeToolTransport, Error> {
+        self.validate_staged(path)?;
+        let bytes =
+            std::fs::read(path).map_err(|_| Error("native tool sidecar is unavailable".into()))?;
+        NativeToolTransport::from_sidecar(&self.native, &bytes)
     }
 }
 

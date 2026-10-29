@@ -242,6 +242,7 @@ mod tests {
             mcp_servers: Vec::new(),
         };
         let spec = command(&CommandContext {
+            executable: "openjiuwen",
             config: &config,
             endpoint: Some("http://127.0.0.1:3000/v1"),
             interface: Some(crate::endpoint::Interface::AnthropicMessages),

@@ -53,6 +53,7 @@ fn static_adapter_defaults_are_empty_and_preparation_command_hooks_are_called() 
         }
     ));
     let command = adapter.command(&CommandContext {
+        executable: adapter.executable(),
         config: &config(),
         endpoint: None,
         interface: None,

@@ -1512,6 +1512,7 @@ fn command_for_with_interface(
 ) -> Result<CommandSpec, Error> {
     if let Some(adapter) = agents::find(&config.agent) {
         return Ok(adapter.command(&agents::CommandContext {
+            executable: adapter.executable(),
             config,
             endpoint: provider_base_url,
             interface,

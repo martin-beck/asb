@@ -23,8 +23,27 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_replay_credential_vars(&["LLM_API_KEY"])
+.with_native_tool_transport()
 .with_collection(collect);
 fn command(context: &CommandContext<'_>) -> CommandSpec {
+    if let Some(native) = context.native_tool {
+        let launch_json =
+            serde_json::to_string(native.launch).expect("native launch descriptor is serializable");
+        return CommandSpec {
+            program: sdk_python(context.executable).unwrap_or_else(|| context.executable.into()),
+            args: vec![
+                "-c".into(),
+                SDK_LAUNCHER.into(),
+                "--sidecar".into(),
+                native.path.to_string_lossy().into_owned(),
+                "--launch-json".into(),
+                launch_json,
+                "--task".into(),
+                context.prompt.into(),
+            ],
+            prompt_delivery: super::PromptDelivery::Embedded,
+        };
+    }
     CommandSpec {
         program: "openhands".into(),
         args: vec![
@@ -59,6 +78,20 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         )
         .env("OPENHANDS_SUPPRESS_BANNER", "1");
     Ok(())
+}
+
+/// Project-local pip entry points have an absolute interpreter shebang. The
+/// SDK launcher must use that interpreter, never a host Python that might not
+/// contain the installed OpenHands SDK.
+fn sdk_python(executable: &str) -> Option<String> {
+    let line = std::fs::read_to_string(executable)
+        .ok()?
+        .lines()
+        .next()?
+        .to_owned();
+    let interpreter = line.strip_prefix("#!")?.trim();
+    (!interpreter.is_empty() && std::path::Path::new(interpreter).is_file())
+        .then(|| interpreter.to_owned())
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
@@ -153,7 +186,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sdk_launcher_is_dormant_and_uses_the_terminal_factory_parameter() {
+    fn sdk_launcher_uses_the_terminal_factory_and_private_bridge_only() {
         assert!(SDK_LAUNCHER.contains("def with_terminal_executor(agent: Any, executor: Any)"));
         assert!(SDK_LAUNCHER.contains("from openhands.tools.terminal import TerminalTool"));
         assert!(SDK_LAUNCHER.contains("tool.name != TerminalTool.name"));
@@ -162,8 +195,9 @@ mod tests {
         assert!(SDK_LAUNCHER.contains("agent.model_copy(update={\"tools\": tools})"));
         assert!(!SDK_LAUNCHER.contains("register_tool("));
         assert!(!SDK_LAUNCHER.contains("setattr("));
-        assert!(!SDK_LAUNCHER.contains("open("));
-        assert!(!SDK_LAUNCHER.contains("def main("));
+        assert!(SDK_LAUNCHER.contains("def main()"));
+        assert!(SDK_LAUNCHER.contains("__asb-openhands-native-bridge"));
+        assert!(!SDK_LAUNCHER.contains("native-tool-sidecar.jsonl"));
     }
 
     #[test]
