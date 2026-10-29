@@ -233,16 +233,6 @@ fn per_call_state_path(run_dir: &Path, name: &str) -> PathBuf {
     run_dir.join("tool-replay").join(name)
 }
 
-/// Reject a Pi recording or replay whose sequence cursor does not prove that
-/// every sealed local-tool event was handled.  Ordinary non-tape Pi runs have
-/// neither artifact and therefore need no progress sidecar.
-pub(crate) fn verify_per_call_completion(
-    run_dir: &Path,
-    transcript: Option<&[u8]>,
-) -> Result<(), Error> {
-    verify_per_call_completion_at(run_dir, transcript, "pi-progress.json")
-}
-
 /// Verify a frozen per-call receipt after an isolated guest has returned its
 /// adapter-owned artifacts to the host.  The caller owns which receipt it
 /// requests; this utility validates only the common bounded cursor contract.
@@ -251,20 +241,6 @@ pub(crate) fn verify_persistent_per_call_completion_receipt(
     transcript: Option<&[u8]>,
 ) -> Result<(), Error> {
     let receipt = receipt.map(read_per_call_state_value).transpose()?;
-    verify_per_call_completion_receipt(receipt, transcript)
-}
-
-fn verify_per_call_completion_at(
-    run_dir: &Path,
-    transcript: Option<&[u8]>,
-    state_name: &str,
-) -> Result<(), Error> {
-    let state = per_call_state_path(run_dir, state_name);
-    let receipt = if state.is_file() {
-        Some(read_per_call_state(&state)?)
-    } else {
-        None
-    };
     verify_per_call_completion_receipt(receipt, transcript)
 }
 
@@ -1418,14 +1394,19 @@ mod tests {
             })
             .unwrap();
         let bytes = transcript.encode().unwrap();
-        publish_per_call_state(&per_call_state_path(&root, "pi-progress.json"), 0, 1).unwrap();
-        assert!(verify_per_call_completion(&root, Some(&bytes)).is_err());
-        publish_per_call_state(&per_call_state_path(&root, "pi-progress.json"), 1, 1).unwrap();
-        verify_per_call_completion(&root, Some(&bytes)).unwrap();
+        let state = per_call_state_path(&root, "pi-progress.json");
+        publish_per_call_state(&state, 0, 1).unwrap();
+        let receipt = serde_json::to_value(read_per_call_state(&state).unwrap()).unwrap();
+        assert!(
+            verify_persistent_per_call_completion_receipt(Some(&receipt), Some(&bytes)).is_err()
+        );
+        publish_per_call_state(&state, 1, 1).unwrap();
+        let receipt = serde_json::to_value(read_per_call_state(&state).unwrap()).unwrap();
+        verify_persistent_per_call_completion_receipt(Some(&receipt), Some(&bytes)).unwrap();
         // Replay consumes the sealed cassette outside the new run directory;
         // the bound event count allows collection to validate completion
         // without re-copying that private transcript.
-        verify_per_call_completion(&root, None).unwrap();
+        verify_persistent_per_call_completion_receipt(Some(&receipt), None).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1611,7 +1592,7 @@ mod tests {
             mode: Mode::Replay,
             workspace: root.join("workspace-is-not-opened-during-replay"),
             transcript,
-            per_call_state: Some(state),
+            per_call_state: Some(state.clone()),
             metadata_trace: None,
         };
         let mut replay_output = Vec::new();
@@ -1622,7 +1603,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replay_output, output);
-        verify_per_call_completion(&run_dir, None).unwrap();
+        let receipt = serde_json::to_value(read_per_call_state(&state).unwrap()).unwrap();
+        verify_persistent_per_call_completion_receipt(Some(&receipt), None).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 
