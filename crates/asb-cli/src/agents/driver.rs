@@ -110,10 +110,79 @@ pub(crate) struct GuestRequest {
     /// Payload-free authority for the fixed private native sidecar location.
     #[serde(default)]
     pub native_tool_launch: Option<crate::cassette::NativeToolLaunch>,
+    /// Opaque capsule direction selected by the owning remote dispatcher.
+    /// The driver may carry this bounded intent across the guest boundary but
+    /// does not infer paths or interpret adapter tool protocols.
+    #[serde(default)]
+    pub capsule: GuestCapsule,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: f64,
     #[serde(default)]
     pub namespace_collectors: Vec<String>,
+}
+
+/// Opaque request for a capsule owned by the selected adapter.  The remote
+/// transport carries this envelope but neither interprets a capsule protocol
+/// nor chooses files within one.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GuestCapsule {
+    #[serde(default)]
+    pub mode: GuestCapsuleMode,
+    /// A guest-private, relative export target.  It is only a bounded
+    /// transport declaration in this slice; later adapter-owned capture will
+    /// publish its bytes through the existing receipt channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export: Option<GuestCapsuleExport>,
+}
+
+impl GuestCapsule {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        if let Some(export) = &self.export {
+            export.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GuestCapsuleMode {
+    #[default]
+    None,
+    Record,
+    Replay,
+}
+
+/// Location class for a future adapter-owned guest capsule export.  The
+/// controller supplies only a private relative name; no host path crosses the
+/// request boundary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GuestCapsuleExport {
+    pub target: String,
+}
+
+impl GuestCapsuleExport {
+    fn validate(&self) -> Result<(), Error> {
+        if self.target.is_empty() || self.target.len() > 128 {
+            return Err(Error::Input(
+                "guest capsule export target is invalid".into(),
+            ));
+        }
+        let path = Path::new(&self.target);
+        if path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::CurDir
+                )
+            })
+        {
+            return Err(Error::Input("guest capsule export target is unsafe".into()));
+        }
+        Ok(())
+    }
 }
 
 fn default_timeout() -> f64 {
@@ -614,6 +683,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
 }
 
 fn run(request: GuestRequest) -> Result<u8, Error> {
+    request.capsule.validate()?;
     let retained =
         request.process_lifetime == crate::workloads::session::ProcessLifetime::ThroughEvaluation;
     if retained {

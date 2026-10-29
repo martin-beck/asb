@@ -25,6 +25,7 @@ impl Fixture {
             mcp_mode: None,
             mcp_tape_cassette: None,
             native_tool_launch: None,
+            capsule: Default::default(),
             inherit_working_directory: false,
             process_lifetime: Default::default(),
             workload_owner: None,
@@ -58,6 +59,45 @@ impl Fixture {
             .unwrap(),
         )
         .unwrap();
+    }
+}
+
+#[test]
+fn guest_capsule_request_round_trips_and_rejects_unsafe_export_paths() {
+    use crate::agents::driver::{GuestCapsule, GuestCapsuleExport, GuestCapsuleMode};
+
+    let capsule = GuestCapsule {
+        mode: GuestCapsuleMode::Record,
+        export: Some(GuestCapsuleExport {
+            target: "capsules/hermes.json".into(),
+        }),
+    };
+    let encoded = serde_json::to_string(&capsule).unwrap();
+    assert_eq!(
+        serde_json::from_str::<GuestCapsule>(&encoded).unwrap(),
+        capsule
+    );
+    capsule.validate().unwrap();
+    assert!(
+        serde_json::from_str::<GuestCapsule>(
+            r#"{"mode":"record","export":{"target":"capsule"},"extra":true}"#
+        )
+        .is_err()
+    );
+
+    for target in [
+        "/host/private",
+        "../other",
+        "capsules/../../other",
+        "./capsule",
+    ] {
+        let capsule = GuestCapsule {
+            mode: GuestCapsuleMode::Replay,
+            export: Some(GuestCapsuleExport {
+                target: target.into(),
+            }),
+        };
+        assert!(capsule.validate().is_err(), "{target} must be rejected");
     }
 }
 impl Drop for Fixture {

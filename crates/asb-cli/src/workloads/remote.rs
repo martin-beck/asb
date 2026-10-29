@@ -872,6 +872,10 @@ impl Session {
             .as_deref_mut()
             .map(|session| session.execution_namespace_collectors())
             .unwrap_or_default();
+        // This is deliberately an opaque envelope.  Later adapter-owned
+        // capture/replay can select a direction and guest-private export
+        // target without teaching the remote transport a capsule protocol.
+        let capsule = crate::agents::driver::GuestCapsule::default();
         let environment = guest_environment(&context.config.agent, |name| std::env::var(name).ok());
         let tape_cassette = guest_tape_cassette(context.tape_cassette)?;
         let tool_tape_cassette = guest_tape_cassette(context.tool_tape_cassette)?;
@@ -958,6 +962,7 @@ impl Session {
                 "mcp_mode":context.mcp_mode,
                 "mcp_tape_cassette":mcp_tape_cassette,
                 "native_tool_launch":native_tool_launch,
+                "capsule":capsule,
                 "namespace_collectors":namespace_collectors}),
         };
         self.controller.send(
