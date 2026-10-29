@@ -25,6 +25,11 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
         format: super::super::ArtifactFormat::JsonLines,
     },
     super::super::ArtifactSpec {
+        namespace: "tool-replay",
+        filename: "pi-progress.json",
+        format: super::super::ArtifactFormat::Json,
+    },
+    super::super::ArtifactSpec {
         namespace: "determinism",
         filename: "manifest.json",
         format: super::super::ArtifactFormat::Json,
@@ -68,16 +73,17 @@ fn execution_failure(stdout: &str, _: &str) -> Option<String> {
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
-    let mut artifacts = match super::super::tool_replay_mcp::verify_per_call_completion(
-        context.run_dir,
-        context.frozen.bytes("local-tools.jsonl"),
-    ) {
-        Ok(()) => AgentArtifacts::default(),
-        Err(error) => AgentArtifacts {
-            errors: vec![error.to_string()],
-            ..AgentArtifacts::default()
-        },
-    };
+    let mut artifacts =
+        match super::super::tool_replay_mcp::verify_persistent_per_call_completion_receipt(
+            context.frozen.document("pi-progress.json"),
+            context.frozen.bytes("local-tools.jsonl"),
+        ) {
+            Ok(()) => AgentArtifacts::default(),
+            Err(error) => AgentArtifacts {
+                errors: vec![error.to_string()],
+                ..AgentArtifacts::default()
+            },
+        };
     // Pi opted into the deterministic extension, so this adapter owns the
     // corresponding manifest selection.  The generic dispatcher only seals
     // the opaque bytes returned in AgentArtifacts.
@@ -393,6 +399,72 @@ fn configure_provider(
 mod tests {
     use super::*;
     use crate::agents::AgentAdapter;
+
+    fn frozen_collection_artifacts(
+        progress: serde_json::Value,
+        transcript: Vec<u8>,
+    ) -> crate::agents::FrozenArtifacts {
+        let envelope = serde_json::json!({
+            "schema_version": 1,
+            "documents": {"pi-progress.json": progress},
+            "bytes": {"local-tools.jsonl": transcript},
+        });
+        crate::agents::FrozenArtifacts::from_deferred_collection_bytes(
+            &serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn deferred_collection_uses_the_exported_per_call_mcp_receipt() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-pi-deferred-receipt-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let frozen = frozen_collection_artifacts(
+            serde_json::json!({"schema_version": 1, "cursor": 0, "events": 0}),
+            Vec::new(),
+        );
+        let artifacts = collect(&CollectionContext {
+            frozen: &frozen,
+            provider_capture: None,
+            run_dir: &root,
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert!(artifacts.errors.is_empty(), "{:?}", artifacts.errors);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn deferred_collection_rejects_an_unconsumed_per_call_mcp_receipt() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-pi-deferred-receipt-reject-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let frozen = frozen_collection_artifacts(
+            serde_json::json!({"schema_version": 1, "cursor": 0, "events": 1}),
+            Vec::new(),
+        );
+        let artifacts = collect(&CollectionContext {
+            frozen: &frozen,
+            provider_capture: None,
+            run_dir: &root,
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert_eq!(
+            artifacts.errors,
+            ["local-tool replay left recorded events unconsumed"]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn counts_only_balanced_terminal_turns_in_complete_agent_cycles() {
