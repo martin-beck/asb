@@ -27,6 +27,9 @@ pub(crate) const LOCAL_TOOL_TRANSCRIPT_ARTIFACT: &str = "asb-local-tools";
 pub(crate) const DETERMINISTIC_MANIFEST_ARTIFACT: &str = "asb-determinism-manifest";
 pub(crate) const NATIVE_TRACE_ARTIFACT: &str = "asb-native-trace";
 pub(crate) const NATIVE_TOOL_SIDECAR_ARTIFACT: &str = "asb-native-tool-sidecar";
+/// Generic, receipt-bound frozen adapter state.  It is restored only after
+/// the provider tape has settled, then interpreted by the owning adapter.
+pub(crate) const DEFERRED_COLLECTION_ARTIFACT: &str = "asb-deferred-adapter-collection";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -153,6 +156,11 @@ pub(crate) struct GuestResult {
     /// recorder, never serialized in the controller result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_tool_sidecar: Option<Vec<u8>>,
+    /// Generic frozen adapter state exported by an isolated guest for host-side
+    /// collection after the outer provider tape settles.  Its payload is never
+    /// present in controller JSON or user-facing evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_collection: Option<Vec<u8>>,
     /// Host-only sealed sidecars restored from the controller-owned export
     /// directory after this small result record crosses the guest boundary.
     #[serde(skip)]
@@ -758,28 +766,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let adapter = super::find(&request.config.agent).expect("validated agent");
     let frozen = artifact_owner.freeze();
-    // Preserve the selected adapter tool tape as an opaque collection handle.
-    // Generic driver code does not inspect provider wire data; adapters that
-    // own a local-tool transport decide whether and how to correlate it.
-    let provider_capture = request
-        .tool_tape_cassette
-        .as_deref()
-        .filter(|_| !request.tool_replay);
-    let mut artifacts = adapter.collect(&super::CollectionContext {
-        frozen: &frozen,
-        provider_capture,
-        run_dir: &request.run_dir,
-        interface: Some(request.connection.interface),
-        anthropic_input_includes_cache: crate::providers::anthropic_input_includes_cache(
-            &request.config.provider,
-        ),
-        mcp_servers: &request.config.mcp_servers,
-        mcp_tape: request.mcp_mode.map(|mode| super::McpTapeContext {
-            mode,
-            cassette: request.mcp_tape_cassette.as_deref(),
-        }),
-    });
-    let sidecars = controller_sidecars(&mut artifacts);
+    let deferred_collection = frozen.deferred_collection_bytes()?;
     let usage = crate::usage::from_sources(
         &request.config.provider,
         &request.config.agent,
@@ -787,7 +774,6 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         &stderr,
         None,
     );
-    let usage = crate::usage::with_artifact_usage(usage, artifacts.token_usage);
     // Until the first durable publication transfers the frozen evidence, Drop
     // retains raw artifacts. This interim record never asserts settlement.
     let mut result = GuestResult {
@@ -808,13 +794,10 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         workload_owner: request.workload_owner,
         schema_version: 1,
         exit_code: output.status.code(),
-        final_response: artifacts
-            .final_response
-            .or_else(|| super::final_response(&request.config.agent, &stdout, &workspace)),
+        final_response: super::final_response(&request.config.agent, &stdout, &workspace),
         token_usage: usage,
-        steps: artifacts
-            .steps
-            .or_else(|| adapter.step_count(&stdout, &stderr)),
+        steps: super::find(&request.config.agent)
+            .and_then(|adapter| adapter.step_count(&stdout, &stderr)),
         // Large replay sidecars must cross the guest boundary as verified
         // files.  Embedding their byte vectors would base64-expand them into
         // the one-megabyte controller frame.
@@ -822,9 +805,10 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         deterministic_manifest: None,
         native_trace: None,
         native_tool_sidecar: None,
+        deferred_collection: Some(deferred_collection),
         sealed_artifacts: Vec::new(),
         exported_artifacts: Vec::new(),
-        adapter_errors: std::mem::take(&mut artifacts.errors),
+        adapter_errors: Vec::new(),
         execution_failure: {
             #[cfg(target_os = "linux")]
             let timed_out = held.as_ref().is_some_and(|held| held.timed_out);
@@ -840,7 +824,16 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         transcript_truncated,
         namespace_collectors,
     };
-    result.exported_artifacts = export_sealed_artifacts(&request.run_dir, &sidecars)?;
+    result.exported_artifacts = export_sealed_artifacts(
+        &request.run_dir,
+        &[super::SealedArtifact {
+            kind: DEFERRED_COLLECTION_ARTIFACT.into(),
+            bytes: result
+                .deferred_collection
+                .take()
+                .expect("deferred collection was constructed"),
+        }],
+    )?;
     publish_artifacts(&mut result, artifact_owner, frozen.diagnostic(), |result| {
         publish_result(&request.run_dir, result)
     })?;
@@ -868,6 +861,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
 
 /// Move replay sidecars into receipt-backed files before the result reaches
 /// the bounded controller JSON transport.
+#[cfg(test)]
 fn controller_sidecars(artifacts: &mut super::AgentArtifacts) -> Vec<super::SealedArtifact> {
     let mut sidecars = std::mem::take(&mut artifacts.sealed_artifacts);
     for (kind, bytes) in [
@@ -1125,6 +1119,7 @@ mod artifact_publication_tests {
                 deterministic_manifest: None,
                 native_trace: None,
                 native_tool_sidecar: None,
+                deferred_collection: None,
                 sealed_artifacts: Vec::new(),
                 exported_artifacts: Vec::new(),
                 adapter_errors: Vec::new(),
