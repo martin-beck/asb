@@ -63,6 +63,10 @@ struct Options {
     workspace: PathBuf,
     transcript: PathBuf,
     per_call_state: Option<PathBuf>,
+    /// Optional run-private protocol progress trace.  It deliberately stores
+    /// only method, request ordinal, ID shape, framing and response state;
+    /// request parameters, tool arguments and tool results never enter it.
+    metadata_trace: Option<PathBuf>,
 }
 
 /// A restarted client may briefly overlap its old and new stdio MCP children.
@@ -168,9 +172,22 @@ pub(crate) fn launch(
     })
 }
 
+/// Add a run-private, payload-free MCP progress trace to an otherwise normal
+/// launch.  This is for adapter compatibility diagnosis only: it is neither a
+/// cassette artifact nor user-facing evidence.
+pub(crate) fn with_metadata_trace(mut launch: Launch, path: &Path) -> Launch {
+    launch
+        .args
+        .extend(["--metadata-trace".into(), path.as_os_str().to_owned()]);
+    launch
+}
+
 /// Some clients restart their private MCP service between tool calls. Persist
-/// the bounded transcript and replay cursor across those short-lived processes;
-/// the service still owns every tool operation and does not introduce a daemon.
+/// the bounded transcript and replay cursor across those short-lived processes.
+/// Pi invokes one private service process per local tool call because its
+/// extension host can leave a long-lived child unread.  Persist only the
+/// bounded transcript cursor between those short-lived processes; the service
+/// still owns every tool operation and does not introduce a daemon.
 pub(crate) fn per_call_launch(
     context: &PreparationContext<'_>,
     tape: TapeContext<'_>,
@@ -323,6 +340,11 @@ fn run_with_io(
         .as_deref()
         .map(PersistentStateLease::acquire)
         .transpose()?;
+    let mut metadata_trace = options
+        .metadata_trace
+        .as_deref()
+        .map(MetadataTrace::open)
+        .transpose()?;
     let mut transcript = match options.mode {
         Mode::Record if options.per_call_state.is_some() => Transcript::decode(
             &std::fs::read(&options.transcript)
@@ -347,8 +369,38 @@ fn run_with_io(
     }
     let operation = (|| {
         while let Some(request) = mcp_framing::read(input, "local-tool MCP")? {
-            if let Some(response) = respond(&options, &mut transcript, &request.value)? {
+            let request_trace = metadata_trace
+                .as_mut()
+                .map(|trace| {
+                    trace.request(
+                        request.value.get("method").and_then(Value::as_str),
+                        request.value.get("id"),
+                        request
+                            .value
+                            .get("params")
+                            .and_then(|params| params.get("name"))
+                            .and_then(Value::as_str),
+                        request.framing,
+                    )
+                })
+                .transpose()?;
+            let response = match respond(&options, &mut transcript, &request.value) {
+                Ok(response) => response,
+                Err(error) => {
+                    if let (Some(trace), Some(sequence)) = (metadata_trace.as_mut(), request_trace)
+                    {
+                        trace.response(sequence, "error", None)?;
+                    }
+                    return Err(error);
+                }
+            };
+            if let Some(response) = response {
                 mcp_framing::write(output, &response, request.framing, "local-tool MCP")?;
+                if let (Some(trace), Some(sequence)) = (metadata_trace.as_mut(), request_trace) {
+                    trace.response(sequence, "result", Some(&response))?;
+                }
+            } else if let (Some(trace), Some(sequence)) = (metadata_trace.as_mut(), request_trace) {
+                trace.response(sequence, "notification", None)?;
             }
         }
         Ok(())
@@ -446,6 +498,7 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
     let mut workspace = None;
     let mut transcript = None;
     let mut per_call_state = None;
+    let mut metadata_trace = None;
     let mut values = args.iter();
     while let Some(flag) = values.next() {
         let value = values
@@ -462,6 +515,7 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
             "--workspace" => workspace = Some(PathBuf::from(value)),
             "--transcript" => transcript = Some(PathBuf::from(value)),
             "--per-call-state" => per_call_state = Some(PathBuf::from(value)),
+            "--metadata-trace" => metadata_trace = Some(PathBuf::from(value)),
             _ => return Err(Error::Input("invalid local-tool MCP arguments".into())),
         }
     }
@@ -472,7 +526,123 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
         transcript: transcript
             .ok_or_else(|| Error::Input("local-tool MCP transcript is required".into()))?,
         per_call_state,
+        metadata_trace,
     })
+}
+
+struct MetadataTrace {
+    file: std::fs::File,
+    next_sequence: u64,
+}
+
+impl MetadataTrace {
+    fn open(path: &Path) -> Result<Self, Error> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| Error::Run("local-tool metadata trace has no parent".into()))?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            Error::Run(format!("cannot create local-tool metadata trace: {error}"))
+        })?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(path).map_err(|error| {
+            Error::Run(format!("cannot create local-tool metadata trace: {error}"))
+        })?;
+        Ok(Self {
+            file,
+            next_sequence: 1,
+        })
+    }
+
+    fn request(
+        &mut self,
+        method: Option<&str>,
+        id: Option<&Value>,
+        tool: Option<&str>,
+        framing: mcp_framing::Framing,
+    ) -> Result<u64, Error> {
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        // A trace-write failure is surfaced before we execute a tool, avoiding
+        // a misleading partial diagnostic record.
+        self.write(json!({
+            "schema_version": 1,
+            "sequence": sequence,
+            "event": "request",
+            "method": method.unwrap_or("<missing>"),
+            "tool": tool,
+            "id_shape": id_shape(id),
+            "framing": framing,
+        }))?;
+        Ok(sequence)
+    }
+
+    fn response(
+        &mut self,
+        sequence: u64,
+        status: &str,
+        response: Option<&Value>,
+    ) -> Result<(), Error> {
+        self.write(json!({
+            "schema_version": 1,
+            "sequence": sequence,
+            "event": "response",
+            "status": status,
+            "response_shape": response_shape(response),
+        }))
+    }
+
+    fn write(&mut self, value: Value) -> Result<(), Error> {
+        let bytes = serde_json::to_vec(&value)
+            .map_err(|_| Error::Run("cannot encode local-tool metadata trace".into()))?;
+        self.file
+            .write_all(&bytes)
+            .and_then(|()| self.file.write_all(b"\n"))
+            .and_then(|()| self.file.sync_data())
+            .map_err(|error| Error::Run(format!("cannot write local-tool metadata trace: {error}")))
+    }
+}
+
+/// Retain only fixed protocol-envelope facts after a successful write+flush.
+/// Values, content text, tool arguments and results are intentionally absent.
+fn response_shape(response: Option<&Value>) -> &'static str {
+    let Some(result) = response
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("result"))
+        .and_then(Value::as_object)
+    else {
+        return "other";
+    };
+    let has_content = result
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|content| !content.is_empty());
+    let structured = result
+        .get("structuredContent")
+        .is_some_and(Value::is_object);
+    let successful = result.get("isError").and_then(Value::as_bool) == Some(false);
+    match (has_content, structured, successful) {
+        (true, true, true) => "content_structured_success",
+        (true, false, _) => "content",
+        _ => "other",
+    }
+}
+
+fn id_shape(id: Option<&Value>) -> &'static str {
+    match id {
+        None => "absent",
+        Some(Value::Null) => "null",
+        Some(Value::String(_)) => "string",
+        Some(Value::Number(_)) => "number",
+        Some(Value::Bool(_)) => "boolean",
+        Some(Value::Array(_)) => "array",
+        Some(Value::Object(_)) => "object",
+    }
 }
 
 fn respond(
@@ -569,9 +739,17 @@ fn call(options: &Options, transcript: &mut Transcript, params: Value) -> Result
         }
         result
     };
-    Ok(
-        json!({"content":[{"type":"text","text":serde_json::to_string(&result).map_err(|_| Error::Run("cannot render local-tool result".into()))?}]}),
-    )
+    let text = serde_json::to_string(&result)
+        .map_err(|_| Error::Run("cannot render local-tool result".into()))?;
+    // `isError` is optional in MCP, but explicit success matters to clients
+    // which keep a tool turn pending until its terminal outcome is declared.
+    // Keep the historical text content for broadly compatible clients while
+    // also publishing the bounded value in the standard structured field.
+    Ok(json!({
+        "content":[{"type":"text","text":text}],
+        "structuredContent": result,
+        "isError": false,
+    }))
 }
 
 /// Failure turns are sealed only when they are already small, single-line
@@ -1030,6 +1208,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn metadata_trace_retains_protocol_progress_without_payloads() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-metadata-trace-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let transcript = root.join("tool-replay/local-tools.jsonl");
+        let trace = root.join("tool-replay/metadata.jsonl");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, Transcript::default().encode().unwrap()).unwrap();
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"initialize\",\"params\":{\"secret\":\"not-retained\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{\"secret\":\"not-retained\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"list_directory\",\"arguments\":{}}}\n"
+        );
+        let mut output = Vec::new();
+        run_with_io(
+            Options {
+                mode: Mode::Record,
+                workspace,
+                transcript,
+                per_call_state: None,
+                metadata_trace: Some(trace.clone()),
+            },
+            &mut BufReader::new(input.as_bytes()),
+            &mut output,
+        )
+        .unwrap();
+        let entries = std::fs::read_to_string(&trace).unwrap();
+        assert!(!entries.contains("not-retained"));
+        assert!(!entries.contains("params"));
+        let entries = entries
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 6);
+        assert_eq!(entries[0]["method"], "initialize");
+        assert_eq!(entries[0]["id_shape"], "number");
+        assert_eq!(entries[1]["status"], "result");
+        assert_eq!(entries[2]["method"], "notifications/initialized");
+        assert_eq!(entries[2]["id_shape"], "absent");
+        assert_eq!(entries[3]["status"], "notification");
+        assert_eq!(entries[4]["method"], "tools/call");
+        assert_eq!(entries[4]["tool"], "list_directory");
+        assert_eq!(entries[5]["status"], "result");
+        assert_eq!(entries[5]["response_shape"], "content_structured_success");
+        assert!(!entries.iter().any(|entry| entry.get("result").is_some()));
+        assert!(!String::from_utf8(output).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn private_mcp_accepts_and_answers_content_length_jsonrpc() {
         let body = br#"{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}"#;
         let request = [
@@ -1230,6 +1461,7 @@ mod tests {
             workspace: root.clone(),
             transcript: root.join("record.jsonl"),
             per_call_state: None,
+            metadata_trace: None,
         };
         let mut transcript = Transcript::default();
         let recorded = call(&record, &mut transcript, request.clone()).unwrap();
@@ -1239,9 +1471,13 @@ mod tests {
             workspace: root.join("removed-workspace"),
             transcript: root.join("replay.jsonl"),
             per_call_state: None,
+            metadata_trace: None,
         };
         let replayed = call(&replay_options, &mut replay, request).unwrap();
         assert_eq!(recorded, replayed);
+        assert_eq!(replayed["isError"], false);
+        assert!(replayed["structuredContent"].is_object());
+        assert!(replayed["content"][0]["text"].is_string());
         replay.finish().unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1262,6 +1498,7 @@ mod tests {
             workspace: root.clone(),
             transcript: root.join("record.jsonl"),
             per_call_state: None,
+            metadata_trace: None,
         };
         let mut transcript = Transcript::default();
         let recorded = call(&record, &mut transcript, request.clone()).unwrap_err();
@@ -1279,6 +1516,7 @@ mod tests {
             workspace: replay_root,
             transcript: root.join("replay.jsonl"),
             per_call_state: None,
+            metadata_trace: None,
         };
         let mut replayed = Transcript::decode(&bytes).unwrap();
         let replay_error = call(&replay, &mut replayed, request).unwrap_err();
@@ -1316,6 +1554,7 @@ mod tests {
             workspace: workspace.clone(),
             transcript: transcript.clone(),
             per_call_state: Some(state.clone()),
+            metadata_trace: None,
         };
         let mut output = Vec::new();
         run_with_io(record, &mut BufReader::new(&request[..]), &mut output).unwrap();
@@ -1343,6 +1582,7 @@ mod tests {
             workspace: root.join("workspace-is-not-opened-during-replay"),
             transcript,
             per_call_state: Some(state),
+            metadata_trace: None,
         };
         let mut replay_output = Vec::new();
         run_with_io(
@@ -1383,6 +1623,7 @@ mod tests {
                     workspace: workspace.clone(),
                     transcript: transcript.clone(),
                     per_call_state: Some(state.clone()),
+                    metadata_trace: None,
                 },
                 &mut BufReader::new(request),
                 &mut output,
@@ -1407,6 +1648,7 @@ mod tests {
                     workspace: root.join("replay-workspace-is-not-opened"),
                     transcript: transcript.clone(),
                     per_call_state: Some(state.clone()),
+                    metadata_trace: None,
                 },
                 &mut BufReader::new(request),
                 &mut output,
@@ -1460,6 +1702,7 @@ mod tests {
             workspace: root.clone(),
             transcript: root.join("record.jsonl"),
             per_call_state: None,
+            metadata_trace: None,
         };
         let mut transcript = Transcript::default();
         let recorded = call(&record, &mut transcript, request.clone()).unwrap();
@@ -1480,6 +1723,7 @@ mod tests {
                 workspace: replay_root.clone(),
                 transcript: replay_root.join("replay.jsonl"),
                 per_call_state: None,
+                metadata_trace: None,
             },
             &mut replay,
             request,
@@ -1539,6 +1783,7 @@ mod tests {
             workspace: root.clone(),
             transcript: root.join("record.jsonl"),
             per_call_state: None,
+            metadata_trace: None,
         };
         let mut transcript = Transcript::default();
         let recorded = call(
@@ -1554,6 +1799,7 @@ mod tests {
                 workspace: root.join("removed-workspace"),
                 transcript: root.join("replay.jsonl"),
                 per_call_state: None,
+                metadata_trace: None,
             },
             &mut replay,
             json!({"name":"run_command","arguments":{"argv":["pwd"],"_meta":{"client":"changed"}}}),

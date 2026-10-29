@@ -58,6 +58,7 @@ fn static_adapter_defaults_are_empty_and_preparation_command_hooks_are_called() 
         endpoint: None,
         interface: None,
         prompt: "fixture prompt",
+        native_tool_mode: None,
         native_tool: None,
     });
     assert_eq!(command.program, "fixture");

@@ -19,6 +19,8 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_output_usage(output_usage)
 .with_final_response(final_response)
 .with_final_response_failure(final_response_failure)
+.with_native_tool_transport()
+.with_collection(collect)
 .with_process(process);
 
 fn final_response_failure(response: Option<&str>) -> Option<String> {
@@ -70,29 +72,29 @@ fn process(executable: &str) -> Result<crate::launch::ProcessLaunch, Error> {
     Ok(command)
 }
 fn command(context: &CommandContext<'_>) -> CommandSpec {
+    let mut args = vec![
+        "-v".into(),
+        "-w".into(),
+        context.config.workspace.clone(),
+        "--model".into(),
+        context.config.model.clone(),
+        "--provider".into(),
+        "anthropic".into(),
+        "--api-base".into(),
+        context.endpoint.unwrap_or_default().into(),
+    ];
+    if let Some(native) = context.native_tool {
+        args.extend([
+            "--asb-native-tool-replay".into(),
+            native.path.to_string_lossy().into_owned(),
+        ]);
+    }
+    args.extend(["run".into(), "-f".into(), "stream-json".into(), format!(
+        "{}\n\nDo not use todo/planning tools for this run. Execute the requested work directly and return a final response when complete.", context.prompt
+    )]);
     CommandSpec {
         program: "openjiuwen".into(),
-        args: [
-            "-v",
-            "-w",
-            context.config.workspace.as_str(),
-            "--model",
-            context.config.model.as_str(),
-            "--provider",
-            "anthropic",
-            "--api-base",
-            context.endpoint.unwrap_or_default(),
-            "run",
-            "-f",
-            "stream-json",
-            &format!(
-                "{}\n\nDo not use todo/planning tools for this run. Execute the requested work directly and return a final response when complete.",
-                context.prompt
-            ),
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect(),
+        args,
         prompt_delivery: super::PromptDelivery::Embedded,
     }
 }
@@ -186,7 +188,20 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         "OPENJIUWEN_API_KEY",
         connection.credential.as_deref().unwrap_or("asb-local"),
     );
+    context.command.env(
+        "ASB_OPENJIUWEN_NATIVE_TOOL_RECORD",
+        context.run_dir.join("openjiuwen-native-tools.jsonl"),
+    );
     Ok(())
+}
+
+fn collect(context: &crate::agents::CollectionContext<'_>) -> crate::agents::AgentArtifacts {
+    crate::agents::AgentArtifacts {
+        native_tool_sidecar: std::fs::read(context.run_dir.join("openjiuwen-native-tools.jsonl"))
+            .ok()
+            .filter(|bytes| !bytes.is_empty()),
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
@@ -247,6 +262,7 @@ mod tests {
             endpoint: Some("http://127.0.0.1:3000/v1"),
             interface: Some(crate::endpoint::Interface::AnthropicMessages),
             prompt: "repair",
+            native_tool_mode: None,
             native_tool: None,
         });
         assert_eq!(spec.args.first().map(String::as_str), Some("-v"));
