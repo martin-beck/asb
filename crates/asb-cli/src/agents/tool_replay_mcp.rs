@@ -175,8 +175,25 @@ pub(crate) fn per_call_launch(
     context: &PreparationContext<'_>,
     tape: TapeContext<'_>,
 ) -> Result<Launch, Error> {
+    per_call_launch_at(context, tape, "pi-progress.json")
+}
+
+/// Qwen restarts its private MCP child independently of Pi.  Its progress
+/// must therefore not occupy Pi's established per-call state path.
+pub(crate) fn persistent_per_call_launch(
+    context: &PreparationContext<'_>,
+    tape: TapeContext<'_>,
+) -> Result<Launch, Error> {
+    per_call_launch_at(context, tape, "persistent-progress.json")
+}
+
+fn per_call_launch_at(
+    context: &PreparationContext<'_>,
+    tape: TapeContext<'_>,
+    state_name: &str,
+) -> Result<Launch, Error> {
     let mut launch = launch(context, tape)?;
-    let state = per_call_state_path(context.run_dir);
+    let state = per_call_state_path(context.run_dir, state_name);
     let transcript = launch
         .args
         .windows(2)
@@ -195,8 +212,8 @@ pub(crate) fn per_call_launch(
     Ok(launch)
 }
 
-fn per_call_state_path(run_dir: &Path) -> PathBuf {
-    run_dir.join("tool-replay/persistent-progress.json")
+fn per_call_state_path(run_dir: &Path, name: &str) -> PathBuf {
+    run_dir.join("tool-replay").join(name)
 }
 
 /// Reject a Pi recording or replay whose sequence cursor does not prove that
@@ -206,14 +223,29 @@ pub(crate) fn verify_per_call_completion(
     run_dir: &Path,
     transcript: Option<&[u8]>,
 ) -> Result<(), Error> {
-    let state = per_call_state_path(run_dir);
+    verify_per_call_completion_at(run_dir, transcript, "pi-progress.json")
+}
+
+pub(crate) fn verify_persistent_per_call_completion(
+    run_dir: &Path,
+    transcript: Option<&[u8]>,
+) -> Result<(), Error> {
+    verify_per_call_completion_at(run_dir, transcript, "persistent-progress.json")
+}
+
+fn verify_per_call_completion_at(
+    run_dir: &Path,
+    transcript: Option<&[u8]>,
+    state_name: &str,
+) -> Result<(), Error> {
+    let state = per_call_state_path(run_dir, state_name);
     match (state.is_file(), transcript) {
         (false, None) => Ok(()),
-        (false, Some(_)) => Err(Error::Run("Pi local-tool progress is missing".into())),
+        (false, Some(_)) => Err(Error::Run("local-tool progress is missing".into())),
         (true, None) => {
             let state = read_per_call_state(&state)?;
             (state.cursor == state.events).then_some(()).ok_or_else(|| {
-                Error::Run("Pi local-tool replay left recorded events unconsumed".into())
+                Error::Run("local-tool replay left recorded events unconsumed".into())
             })
         }
         (true, Some(bytes)) => {
@@ -223,7 +255,7 @@ pub(crate) fn verify_per_call_completion(
                 Ok(())
             } else {
                 Err(Error::Run(
-                    "Pi local-tool replay left recorded events unconsumed".into(),
+                    "local-tool replay left recorded events unconsumed".into(),
                 ))
             }
         }
@@ -1105,9 +1137,9 @@ mod tests {
             })
             .unwrap();
         let bytes = transcript.encode().unwrap();
-        publish_per_call_state(&per_call_state_path(&root), 0, 1).unwrap();
+        publish_per_call_state(&per_call_state_path(&root, "pi-progress.json"), 0, 1).unwrap();
         assert!(verify_per_call_completion(&root, Some(&bytes)).is_err());
-        publish_per_call_state(&per_call_state_path(&root), 1, 1).unwrap();
+        publish_per_call_state(&per_call_state_path(&root, "pi-progress.json"), 1, 1).unwrap();
         verify_per_call_completion(&root, Some(&bytes)).unwrap();
         // Replay consumes the sealed cassette outside the new run directory;
         // the bound event count allows collection to validate completion
@@ -1247,7 +1279,7 @@ mod tests {
             .unwrap()
             .set_len(MAX_COMMAND_SNAPSHOT_BYTES + 1)
             .unwrap();
-        let state = per_call_state_path(&run_dir);
+        let state = per_call_state_path(&run_dir, "pi-progress.json");
         publish_per_call_state(&state, 0, 0).unwrap();
         let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_command\",\"arguments\":{\"argv\":[\"pwd\"]}}}\n";
         let record = Options {
@@ -1302,7 +1334,7 @@ mod tests {
         std::fs::write(workspace.join("first.txt"), "first\n").unwrap();
         std::fs::write(workspace.join("second.txt"), "second\n").unwrap();
         std::fs::write(&transcript, Transcript::default().encode().unwrap()).unwrap();
-        let state = per_call_state_path(&run_dir);
+        let state = per_call_state_path(&run_dir, "persistent-progress.json");
         publish_per_call_state(&state, 0, 0).unwrap();
         let first = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"first.txt\"}}}\n";
         let second = b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"second.txt\"}}}\n";
@@ -1348,7 +1380,7 @@ mod tests {
         };
         assert_eq!(replay(first), first_recorded);
         assert_eq!(replay(second), second_recorded);
-        verify_per_call_completion(&run_dir, Some(&sealed)).unwrap();
+        verify_persistent_per_call_completion(&run_dir, Some(&sealed)).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 

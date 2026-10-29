@@ -77,7 +77,7 @@ fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> 
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
-    match super::super::tool_replay_mcp::verify_per_call_completion(
+    match super::super::tool_replay_mcp::verify_persistent_per_call_completion(
         context.run_dir,
         context.frozen.bytes("local-tools.jsonl"),
     ) {
@@ -145,7 +145,7 @@ fn prepare_tool_replay(
 ) -> Result<(), Error> {
     // Qwen may replace the configured stdio MCP child after a tool response.
     // Keep the sealed transcript and replay cursor across those restarts.
-    let launch = super::super::tool_replay_mcp::per_call_launch(context, tape)?;
+    let launch = super::super::tool_replay_mcp::persistent_per_call_launch(context, tape)?;
     let directory = context.runtime_dir.join("qwen-code");
     std::fs::create_dir_all(&directory)
         .map_err(|error| Error::Run(format!("cannot create Qwen local-tool directory: {error}")))?;
