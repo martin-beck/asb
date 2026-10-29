@@ -202,6 +202,31 @@ def _response_text(value):
     return text, code if isinstance(code, int) else 0
 
 
+def _replay_post(value):
+    identifier = _tool_id(value)
+
+    def operation():
+        state = _load_state()
+        index = state["pending"].get(identifier)
+        if not isinstance(index, int):
+            raise RuntimeError("Codex native replay response has no matching request")
+        try:
+            encoded = state["replay"][index][1]
+            response = json.loads(base64.b64decode(encoded).decode("utf-8"))
+        except (IndexError, KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError("Codex native replay response is unavailable") from error
+        del state["pending"][identifier]
+        _save_state(state)
+        # Codex serializes a tool result after the native command returns.  A
+        # replayed command alone cannot reproduce that wrapper exactly.  Its
+        # documented post-tool hook accepts the original structured result,
+        # so restore that adapter-owned value before Codex prepares the next
+        # provider request.
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedMCPToolOutput": response}}, separators=(",", ":")))
+
+    _with_lock(operation)
+
+
 def _emit(index):
     state = _load_state()
     try:
@@ -250,6 +275,10 @@ def main():
     elif command == "post":
         if MODE == "record":
             _record_post(_read_input())
+        elif MODE == "replay":
+            _replay_post(_read_input())
+        else:
+            raise RuntimeError("Codex native hook mode is invalid")
     elif command == "finish":
         _finish()
     elif command == "emit" and len(sys.argv) == 3:
