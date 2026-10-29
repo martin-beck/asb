@@ -121,8 +121,8 @@ function responseHeaders(headers) {
 function completedSseResponse(response, body) {
   const contentType = String(response.headers["content-type"] || "").toLowerCase();
   if (!contentType.startsWith("text/event-stream") || !body.endsWith("\n")) return false;
-  return /(?:^|\n)event:\s*message_stop\s*(?:\n|$)/.test(body)
-    || /(?:^|\n)data:\s*\[DONE\]\s*(?:\n|$)/.test(body);
+  return /(?:^|\n)event:[ \t]*message_stop[ \t]*(?:\n|$)/.test(body)
+    || /(?:^|\n)data:[ \t]*\[DONE\][ \t]*(?:\n|$)/.test(body);
 }
 
 // Preserve server-sent event boundaries during replay.  Several agent CLIs
