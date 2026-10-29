@@ -10,9 +10,13 @@ use super::{
     StaticAdapter,
 };
 use crate::{Error, install::Recipe};
+use std::io::{Read, Write};
+use std::path::Path;
+use std::process::{Command, Stdio};
 
 const NATIVE_TOOL_SITE_CUSTOMIZE: &str =
     include_str!("../../../assets/scripts/hermes-native-tools.py");
+const MAX_WORKSPACE_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "hermes",
@@ -28,6 +32,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_complete_tool_replay(prepare_native_tool_replay)
 .with_native_tool_transport()
+.with_native_workspace_capsule(capture_workspace_capsule, apply_workspace_capsule)
 .with_collection(collect)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
@@ -48,6 +53,72 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 ])
 .with_state_environment_vars(&["HERMES_HOME"])
 .with_final_response(final_response);
+
+/// Hermes owns the workspace-effect representation: an ordinary bounded Git
+/// binary patch. Remote orchestration transfers these bytes opaquely and
+/// never parses commands, paths, or terminal protocol fields from them.
+fn capture_workspace_capsule(workspace: &Path) -> Result<Vec<u8>, Error> {
+    let mut child = Command::new("git")
+        .args(["diff", "--binary", "--no-ext-diff", "--no-color"])
+        .current_dir(workspace)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| Error::Run("cannot start Hermes workspace effect capture".into()))?;
+    let mut bytes = Vec::new();
+    child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::Run("Hermes workspace effect capture has no output".into()))?
+        .take((MAX_WORKSPACE_CAPSULE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Error::Run("cannot read Hermes workspace effect capture".into()))?;
+    if bytes.len() > MAX_WORKSPACE_CAPSULE_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(Error::Run(
+            "Hermes workspace effect exceeds its bound".into(),
+        ));
+    }
+    if !child
+        .wait()
+        .map_err(|_| Error::Run("cannot finish Hermes workspace effect capture".into()))?
+        .success()
+    {
+        return Err(Error::Run("Hermes workspace effect capture failed".into()));
+    }
+    Ok(bytes)
+}
+
+fn apply_workspace_capsule(workspace: &Path, bytes: &[u8]) -> Result<(), Error> {
+    if bytes.len() > MAX_WORKSPACE_CAPSULE_BYTES {
+        return Err(Error::Run(
+            "Hermes workspace effect exceeds its bound".into(),
+        ));
+    }
+    let mut child = Command::new("git")
+        .args(["apply", "--binary", "--whitespace=nowarn"])
+        .current_dir(workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| Error::Run("cannot start Hermes workspace effect replay".into()))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| Error::Run("Hermes workspace effect replay has no input".into()))?
+        .write_all(bytes)
+        .map_err(|_| Error::Run("cannot stage Hermes workspace effect replay".into()))?;
+    if !child
+        .wait()
+        .map_err(|_| Error::Run("cannot finish Hermes workspace effect replay".into()))?
+        .success()
+    {
+        return Err(Error::Run("Hermes workspace effect replay failed".into()));
+    }
+    Ok(())
+}
 
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     // Provider-specific aliases are selected by the provider layer. This
@@ -721,6 +792,37 @@ mod tests {
         assert_eq!(usage.cached_tokens, Some(3));
         assert_eq!(usage.total_tokens, Some(18));
         assert_eq!(artifacts.steps, Some(4));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_capsule_replays_hermes_owned_git_effects() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-hermes-workspace-capsule-{}",
+            crate::workloads::TaskIdentity::local("fixture", None).attempt_id
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let run = |arguments: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        run(&["init", "-q"]);
+        std::fs::write(root.join("task.txt"), "before\n").unwrap();
+        run(&["add", "task.txt"]);
+        std::fs::write(root.join("task.txt"), "after\n").unwrap();
+        let capsule = capture_workspace_capsule(&root).unwrap();
+        run(&["checkout", "--", "task.txt"]);
+        apply_workspace_capsule(&root, &capsule).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("task.txt")).unwrap(),
+            "after\n"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

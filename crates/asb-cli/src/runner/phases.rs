@@ -320,7 +320,20 @@ impl SettledAttempt {
             })
             .ok_or_else(|| Error::Run("guest native capsule export is missing".into()))?;
         let bytes = artifacts.remove(index).bytes;
-        crate::agents::capsule::decode_transport(&bytes, &destination)
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(Error::Run(
+                "guest native capsule export exceeds its bound".into(),
+            ));
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .map_err(crate::io_error)?;
+        use std::io::Write;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(crate::io_error)
     }
 
     pub fn native_capsule_failure(&mut self, error: Error) {

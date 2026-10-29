@@ -706,6 +706,26 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             "quiescent guest execution cannot declare retained ownership".into(),
         ));
     }
+    fs::create_dir_all(&request.run_dir)
+        .map_err(|error| Error::Io(format!("cannot create private guest artifacts: {error}")))?;
+    let capsule_replay = match request.capsule.mode {
+        GuestCapsuleMode::Replay => {
+            let export = request.capsule.export.as_ref().ok_or_else(|| {
+                Error::Input("guest native capsule replay has no staged input".into())
+            })?;
+            let input = request.runtime_dir.join(&export.target);
+            let bytes = fs::read(&input).map_err(|_| {
+                Error::Run("guest native capsule replay input is unavailable".into())
+            })?;
+            if bytes.len() > MAX_EXPORTED_ARTIFACT_BYTES {
+                return Err(Error::Run(
+                    "guest native capsule replay exceeds its bound".into(),
+                ));
+            }
+            Some(bytes)
+        }
+        GuestCapsuleMode::None | GuestCapsuleMode::Record => None,
+    };
     let PreparedGuest {
         mut command,
         stdin_prompt,
@@ -837,6 +857,19 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     let adapter = super::find(&request.config.agent).expect("validated agent");
     let frozen = artifact_owner.freeze();
     let deferred_collection = frozen.deferred_collection_bytes()?;
+    let mut sealed = vec![super::SealedArtifact {
+        kind: DEFERRED_COLLECTION_ARTIFACT.into(),
+        bytes: deferred_collection,
+    }];
+    if request.capsule.mode == GuestCapsuleMode::Record {
+        sealed.push(super::SealedArtifact {
+            kind: NATIVE_WORKSPACE_CAPSULE_ARTIFACT.into(),
+            bytes: adapter.capture_native_workspace_capsule(&workspace)?,
+        });
+    }
+    if let Some(bytes) = capsule_replay {
+        adapter.apply_native_workspace_capsule(&workspace, &bytes)?;
+    }
     let usage = crate::usage::from_sources(
         &request.config.provider,
         &request.config.agent,
@@ -875,7 +908,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         deterministic_manifest: None,
         native_trace: None,
         native_tool_sidecar: None,
-        deferred_collection: Some(deferred_collection),
+        deferred_collection: None,
         sealed_artifacts: Vec::new(),
         exported_artifacts: Vec::new(),
         adapter_errors: Vec::new(),
@@ -894,16 +927,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         transcript_truncated,
         namespace_collectors,
     };
-    result.exported_artifacts = export_sealed_artifacts(
-        &request.run_dir,
-        &[super::SealedArtifact {
-            kind: DEFERRED_COLLECTION_ARTIFACT.into(),
-            bytes: result
-                .deferred_collection
-                .take()
-                .expect("deferred collection was constructed"),
-        }],
-    )?;
+    result.exported_artifacts = export_sealed_artifacts(&request.run_dir, &sealed)?;
     publish_artifacts(&mut result, artifact_owner, frozen.diagnostic(), |result| {
         publish_result(&request.run_dir, result)
     })?;

@@ -885,9 +885,8 @@ impl Session {
             &context.config.mcp_servers,
             context.mcp_mode == Some(crate::tape::Mode::Replay),
         )?;
-        // Capsule bytes remain opaque to remote dispatch.  The driver owns
-        // generic workspace capture/staging; the adapter still owns its
-        // native tool semantics and transcript protocol.
+        // Capsule bytes remain opaque to remote dispatch. The selected adapter
+        // owns capture/apply semantics; this layer only stages verified bytes.
         let capsule = match context.native_capsule() {
             Some(crate::workloads::session::NativeCapsule::Record(destination)) => {
                 if destination.as_os_str().is_empty() {
@@ -901,9 +900,21 @@ impl Session {
                 }
             }
             Some(crate::workloads::session::NativeCapsule::Replay(source)) => {
-                let bytes = crate::agents::capsule::encode_transport(source).map_err(|error| {
-                    format!("cannot prepare guest native capsule replay: {error}")
-                })?;
+                let metadata = std::fs::symlink_metadata(source)
+                    .map_err(|_| "guest native capsule replay is unavailable".to_owned())?;
+                if !metadata.file_type().is_file()
+                    || metadata.file_type().is_symlink()
+                    || metadata.len() > 16 * 1024 * 1024
+                {
+                    return Err(
+                        "guest native capsule replay is invalid or exceeds its bound".into(),
+                    );
+                }
+                let bytes = std::fs::read(source)
+                    .map_err(|_| "guest native capsule replay is unavailable".to_owned())?;
+                if bytes.len() as u64 != metadata.len() {
+                    return Err("guest native capsule replay changed before staging".into());
+                }
                 let staged = artifact_output.join("native-capsule.zip");
                 std::fs::write(&staged, &bytes).map_err(|error| {
                     format!("cannot stage guest native capsule replay: {error}")

@@ -302,7 +302,7 @@ fn automatic_native_capsule(
 ) -> Option<String> {
     (!explicit && matches!(mode, Some(tape::Mode::Record | tape::Mode::Replay)))
         .then(|| {
-            crate::agents::find(agent).filter(|adapter| adapter.supports_native_tool_transport())
+            crate::agents::find(agent).filter(|adapter| adapter.supports_native_workspace_capsule())
         })
         .flatten()
         .map(|_| format!("{}.native-capsule", cassette.display()))
@@ -3043,7 +3043,7 @@ mod tests {
     }
 
     #[test]
-    fn native_tool_adapters_derive_a_capsule_only_for_ordinary_tape_modes() {
+    fn native_workspace_adapters_derive_a_capsule_only_for_ordinary_tape_modes() {
         let cassette = std::path::Path::new("recording.asb.zip");
         assert_eq!(
             super::automatic_native_capsule(

@@ -94,6 +94,26 @@ pub(crate) trait AgentAdapter: Sync {
     fn supports_native_tool_transport(&self) -> bool {
         false
     }
+    /// Whether this adapter owns a bounded guest-workspace effect capsule.
+    /// Remote orchestration may only transfer the opaque bytes; capture and
+    /// application remain adapter responsibilities.
+    fn supports_native_workspace_capsule(&self) -> bool {
+        false
+    }
+    fn capture_native_workspace_capsule(&self, _workspace: &Path) -> Result<Vec<u8>, Error> {
+        Err(Error::Run(
+            "agent does not implement native workspace capsule capture".into(),
+        ))
+    }
+    fn apply_native_workspace_capsule(
+        &self,
+        _workspace: &Path,
+        _bytes: &[u8],
+    ) -> Result<(), Error> {
+        Err(Error::Run(
+            "agent does not implement native workspace capsule replay".into(),
+        ))
+    }
     fn process(&self, executable: &str) -> Result<crate::launch::ProcessLaunch, Error> {
         Ok(crate::launch::ProcessLaunch::new(executable))
     }
@@ -439,6 +459,8 @@ type StepCountHook = fn(&str, &str) -> Option<u64>;
 type FailureHook = fn(&str, &str) -> Option<String>;
 type PreferredExecutablesHook = fn(&Path) -> Vec<PathBuf>;
 type ResponseFailureHook = fn(Option<&str>) -> Option<String>;
+type WorkspaceCapsuleCaptureHook = fn(&Path) -> Result<Vec<u8>, Error>;
+type WorkspaceCapsuleApplyHook = fn(&Path, &[u8]) -> Result<(), Error>;
 
 /// Trait-object implementation whose behavior is supplied by individual files.
 pub(super) struct StaticAdapter {
@@ -453,6 +475,7 @@ pub(super) struct StaticAdapter {
     mcp_servers: bool,
     mcp_relay: bool,
     native_tool_transport: bool,
+    native_workspace_capsule: Option<(WorkspaceCapsuleCaptureHook, WorkspaceCapsuleApplyHook)>,
     collect: Option<CollectionHook>,
     replay_artifacts: Option<ArtifactCollectionHook>,
     lifecycle_artifacts: Option<ArtifactCollectionHook>,
@@ -493,6 +516,7 @@ impl StaticAdapter {
             mcp_servers: false,
             mcp_relay: false,
             native_tool_transport: false,
+            native_workspace_capsule: None,
             collect: None,
             replay_artifacts: None,
             lifecycle_artifacts: Some(native_trace::collect_lifecycle_artifact),
@@ -556,6 +580,17 @@ impl StaticAdapter {
     /// Declares an adapter-owned, tested consumer for a sealed native sidecar.
     pub(super) const fn with_native_tool_transport(mut self) -> Self {
         self.native_tool_transport = true;
+        self
+    }
+
+    /// Declares adapter-owned bounded workspace-effect capture/replay for an
+    /// isolated guest. Remote orchestration only transfers the returned bytes.
+    pub(super) const fn with_native_workspace_capsule(
+        mut self,
+        capture: WorkspaceCapsuleCaptureHook,
+        apply: WorkspaceCapsuleApplyHook,
+    ) -> Self {
+        self.native_workspace_capsule = Some((capture, apply));
         self
     }
 
@@ -726,6 +761,23 @@ impl AgentAdapter for StaticAdapter {
     }
     fn supports_native_tool_transport(&self) -> bool {
         self.native_tool_transport
+    }
+    fn supports_native_workspace_capsule(&self) -> bool {
+        self.native_workspace_capsule.is_some()
+    }
+    fn capture_native_workspace_capsule(&self, workspace: &Path) -> Result<Vec<u8>, Error> {
+        self.native_workspace_capsule
+            .ok_or_else(|| {
+                Error::Run("agent does not implement native workspace capsule capture".into())
+            })?
+            .0(workspace)
+    }
+    fn apply_native_workspace_capsule(&self, workspace: &Path, bytes: &[u8]) -> Result<(), Error> {
+        self.native_workspace_capsule
+            .ok_or_else(|| {
+                Error::Run("agent does not implement native workspace capsule replay".into())
+            })?
+            .1(workspace, bytes)
     }
     fn forwarded_invocation_environment_vars(&self) -> &'static [&'static str] {
         self.forwarded_invocation_environment_vars
