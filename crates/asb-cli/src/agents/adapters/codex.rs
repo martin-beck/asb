@@ -1,7 +1,10 @@
 use super::{
-    CommandContext, CommandSpec, McpTapeContext, PreparationContext, PromptDelivery, StaticAdapter,
+    AgentArtifacts, CollectionContext, CommandContext, CommandSpec, McpTapeContext,
+    PreparationContext, PromptDelivery, StaticAdapter,
 };
 use crate::{Error, install::Recipe};
+
+const NATIVE_HOOKS: &str = include_str!("../../../assets/scripts/codex-native-hooks.py");
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "codex",
     "codex",
@@ -17,12 +20,25 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_tool_replay(prepare_tool_replay)
 .with_mcp_servers()
 .with_mcp_relay()
-.with_collection(super::super::mcp_relay::collect_artifacts)
-.with_artifact_specs(&[super::super::ArtifactSpec {
-    namespace: "tool-replay",
-    filename: "local-tools.jsonl",
-    format: super::super::ArtifactFormat::JsonLines,
-}])
+.with_native_tool_transport()
+.with_collection(collect)
+.with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "tool-replay",
+        filename: "local-tools.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "codex",
+        filename: "native-tool-sidecar.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "codex",
+        filename: "native-tool-progress.json",
+        format: super::super::ArtifactFormat::Json,
+    },
+])
 .with_state_environment_vars(&["CODEX_HOME"])
 .with_forwarded_invocation_environment_vars(&["ASB_CODEX_SANDBOX_MODE"])
 .with_preferred_executables(preferred_executables);
@@ -127,11 +143,33 @@ fn prepare_tool_replay(
     servers.insert("asb_tool_replay".into(), toml::Value::Table(server));
     let mut root = toml::map::Map::new();
     root.insert("mcp_servers".into(), toml::Value::Table(servers));
-    let contents = toml::to_string(&toml::Value::Table(root)).map_err(|error| {
+    let mut contents = toml::to_string(&toml::Value::Table(root)).map_err(|error| {
         Error::Run(format!(
             "cannot serialize Codex local-tool replay configuration: {error}"
         ))
     })?;
+    let hook_dir = context.runtime_dir.join("codex-native-hooks");
+    std::fs::create_dir_all(&hook_dir).map_err(|error| {
+        Error::Run(format!(
+            "cannot create Codex native hook directory: {error}"
+        ))
+    })?;
+    let hook = hook_dir.join("hook.py");
+    std::fs::write(&hook, NATIVE_HOOKS)
+        .map_err(|error| Error::Run(format!("cannot write Codex native hook: {error}")))?;
+    let mode = match tape.mode {
+        crate::tape::Mode::Record => "record",
+        crate::tape::Mode::Replay => "replay",
+    };
+    let artifact_dir = context.run_dir.join("codex");
+    let sidecar = match tape.mode {
+        crate::tape::Mode::Record => artifact_dir.join("native-tool-sidecar.jsonl"),
+        crate::tape::Mode::Replay => context.runtime_dir.join("native-tool-sidecar.jsonl"),
+    };
+    let progress = artifact_dir.join("native-tool-progress.json");
+    let state = context.runtime_dir.join("codex-native-hook-state.json");
+    let command = hook_command(&hook)?;
+    contents.push_str(&native_hook_configuration(&command)?);
     std::fs::write(directory.join("asb-tool-replay.toml"), contents).map_err(|error| {
         Error::Run(format!(
             "cannot write Codex local-tool replay configuration: {error}"
@@ -142,7 +180,73 @@ fn prepare_tool_replay(
     // the shell in that case leaves a coding benchmark unable to read, edit,
     // or test its assigned repository. The workload guest remains the
     // execution boundary, while the tape still records the provider turns.
+    context
+        .command
+        .arg("--dangerously-bypass-hook-trust")
+        .env("ASB_CODEX_NATIVE_MODE", mode)
+        .env("ASB_CODEX_NATIVE_SIDECAR", sidecar)
+        .env("ASB_CODEX_NATIVE_PROGRESS", progress)
+        .env("ASB_CODEX_NATIVE_STATE", state);
     Ok(())
+}
+
+/// Codex currently exposes local shell and patch calls through its documented
+/// lifecycle hooks. The adapter owns their payload schema and the replay shim;
+/// the runner sees only the completed opaque native sidecar.
+fn hook_command(path: &std::path::Path) -> Result<String, Error> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| Error::Run("Codex native hook path is not valid UTF-8".into()))?;
+    if value.contains(['\0', '\n', '\r']) {
+        return Err(Error::Run("Codex native hook path is unsafe".into()));
+    }
+    Ok(format!("python3 '{}'", value.replace('\'', "'\\\"'\\\"'")))
+}
+
+fn native_hook_configuration(command: &str) -> Result<String, Error> {
+    let quoted = |operation| toml::Value::String(format!("{command} {operation}")).to_string();
+    Ok(format!(
+        "\n[[hooks.PreToolUse]]\nmatcher = \".*\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = {}\n\n[[hooks.PostToolUse]]\nmatcher = \".*\"\n[[hooks.PostToolUse.hooks]]\ntype = \"command\"\ncommand = {}\n\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = {}\n",
+        quoted("pre"),
+        quoted("post"),
+        quoted("finish"),
+    ))
+}
+
+fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
+    let mut artifacts = super::super::mcp_relay::collect_artifacts(context);
+    let Some(progress) = context.frozen.document("native-tool-progress.json") else {
+        artifacts
+            .errors
+            .push("Codex native tool hook did not publish a completion receipt".into());
+        return artifacts;
+    };
+    let complete = progress
+        .get("complete")
+        .and_then(serde_json::Value::as_bool);
+    let mode = progress.get("mode").and_then(serde_json::Value::as_str);
+    if progress
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+        || complete != Some(true)
+        || !matches!(mode, Some("record") | Some("replay"))
+    {
+        artifacts
+            .errors
+            .push("Codex native tool hook did not complete".into());
+        return artifacts;
+    }
+    if mode == Some("record") {
+        let Some(sidecar) = context.frozen.bytes("native-tool-sidecar.jsonl") else {
+            artifacts
+                .errors
+                .push("Codex native tool recording is unavailable".into());
+            return artifacts;
+        };
+        artifacts.native_tool_sidecar = Some(sidecar.to_vec());
+    }
+    artifacts
 }
 
 fn sandbox_args(value: Option<String>) -> Result<&'static [&'static str], Error> {
@@ -234,6 +338,7 @@ fn declared_mcp_configuration(
 mod tests {
     use super::*;
     use crate::agents::{AgentAdapter, CollectionContext};
+    use std::io::Write;
     #[cfg(unix)]
     #[test]
     fn native_package_preference_is_owned_here_and_explicit_source_still_wins() {
@@ -574,6 +679,156 @@ mod tests {
             Some("mcp-filesystem")
         );
         assert_eq!(config["model"].as_str(), Some("fixture-model"));
+        assert_eq!(
+            config["hooks"]["PreToolUse"][0]["matcher"].as_str(),
+            Some(".*")
+        );
+        assert!(
+            args.iter()
+                .any(|argument| argument == "--dangerously-bypass-hook-trust")
+        );
+        assert!(
+            !root.join("codex/native-tool-progress.json").exists(),
+            "the adapter must leave its declared namespace for the owner"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn invoke_native_hook(
+        script: &std::path::Path,
+        mode: &str,
+        sidecar: &std::path::Path,
+        progress: &std::path::Path,
+        state: &std::path::Path,
+        operation: &str,
+        input: Option<&str>,
+    ) -> std::process::Output {
+        let mut command = std::process::Command::new("python3");
+        command
+            .arg(script)
+            .arg(operation)
+            .env("ASB_CODEX_NATIVE_MODE", mode)
+            .env("ASB_CODEX_NATIVE_SIDECAR", sidecar)
+            .env("ASB_CODEX_NATIVE_PROGRESS", progress)
+            .env("ASB_CODEX_NATIVE_STATE", state);
+        if input.is_some() {
+            command.stdin(std::process::Stdio::piped());
+        }
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        let mut child = command.spawn().unwrap();
+        if let Some(input) = input {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+        }
+        child.wait_with_output().unwrap()
+    }
+
+    #[test]
+    fn native_hook_records_and_replays_only_the_adapter_wire() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-codex-native-hook-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("hook.py");
+        std::fs::write(&script, NATIVE_HOOKS).unwrap();
+        let sidecar = root.join("sidecar.jsonl");
+        let progress = root.join("progress.json");
+        let state = root.join("state.json");
+        let pre = r#"{"tool_name":"Bash","tool_use_id":"call-1","tool_input":{"command":"printf fixture"}}"#;
+        let post = r#"{"tool_name":"Bash","tool_use_id":"call-1","tool_response":{"stdout":"fixture","exit_code":0}}"#;
+        assert!(
+            invoke_native_hook(
+                &script,
+                "record",
+                &sidecar,
+                &progress,
+                &state,
+                "pre",
+                Some(pre)
+            )
+            .status
+            .success()
+        );
+        assert!(
+            invoke_native_hook(
+                &script,
+                "record",
+                &sidecar,
+                &progress,
+                &state,
+                "post",
+                Some(post)
+            )
+            .status
+            .success()
+        );
+        assert!(
+            invoke_native_hook(
+                &script, "record", &sidecar, &progress, &state, "finish", None
+            )
+            .status
+            .success()
+        );
+        let rows = std::fs::read_to_string(&sidecar).unwrap();
+        assert_eq!(rows.lines().count(), 7);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&progress).unwrap())
+                .unwrap()["complete"],
+            true
+        );
+        std::fs::remove_file(&state).unwrap();
+        let replay = invoke_native_hook(
+            &script,
+            "replay",
+            &sidecar,
+            &progress,
+            &state,
+            "pre",
+            Some(pre),
+        );
+        assert!(replay.status.success());
+        let value: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+        let command = value["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap();
+        assert!(command.contains(" emit 0"));
+        let emitted = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .env("ASB_CODEX_NATIVE_MODE", "replay")
+            .env("ASB_CODEX_NATIVE_SIDECAR", &sidecar)
+            .env("ASB_CODEX_NATIVE_PROGRESS", &progress)
+            .env("ASB_CODEX_NATIVE_STATE", &state)
+            .output()
+            .unwrap();
+        assert!(emitted.status.success());
+        assert_eq!(String::from_utf8(emitted.stdout).unwrap(), "fixture\n");
+        assert!(
+            invoke_native_hook(
+                &script, "replay", &sidecar, &progress, &state, "finish", None
+            )
+            .status
+            .success()
+        );
+        let mismatch = invoke_native_hook(
+            &script,
+            "replay",
+            &sidecar,
+            &progress,
+            &state,
+            "pre",
+            Some(
+                r#"{"tool_name":"Bash","tool_use_id":"call-2","tool_input":{"command":"different"}}"#,
+            ),
+        );
+        assert!(!mismatch.status.success());
         let _ = std::fs::remove_dir_all(root);
     }
 }
