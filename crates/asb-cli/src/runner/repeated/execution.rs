@@ -24,6 +24,7 @@ pub(super) struct SettledBatch {
     pub stopped: bool,
     pub reason: Option<String>,
     pub quiescent: bool,
+    pub completed: usize,
 }
 
 impl BatchRun<'_> {
@@ -181,6 +182,7 @@ impl BatchRun<'_> {
             stopped,
             reason,
             quiescent: completed == dispatch.count() && cleanup,
+            completed,
         })
     }
 }
@@ -296,6 +298,7 @@ pub(crate) fn continue_campaign(
     let options = ActivationOptions {
         json,
         show_output,
+        verbose: false,
         policy: policy.cloned(),
         measurement_override: plan.measurement_storage
             == Some(super::super::campaign::MeasurementStorage::Override),

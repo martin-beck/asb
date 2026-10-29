@@ -604,7 +604,7 @@ impl SettledSweep<'_> {
         }
         #[cfg(all(test, unix))]
         tests::before_comparison(Path::new(&source));
-        let comparison_error = if options.json || output.failed() {
+        let comparison_error = if options.json || !options.verbose || output.failed() {
             compare::run(&source, &mut std::io::sink()).err()
         } else {
             compare::run(&source, output).err()
@@ -612,18 +612,24 @@ impl SettledSweep<'_> {
         let primary = if failures.is_empty() {
             comparison_error.map_or(Ok(()), Err)
         } else {
-            let mut details = format!(
-                "sweep completed with {} failed benchmark(s): {}",
-                failures
-                    .iter()
-                    .map(|(_, configs)| configs.len())
-                    .sum::<usize>(),
-                failures
-                    .iter()
-                    .map(|(error, configs)| format!("{}: {error}", configs.join(", ")))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            );
+            let failed = failures
+                .iter()
+                .map(|(_, configs)| configs.len())
+                .sum::<usize>();
+            let mut details = if options.verbose {
+                format!(
+                    "sweep completed with {failed} failed benchmark(s): {}",
+                    failures
+                        .iter()
+                        .map(|(error, configs)| format!("{}: {error}", configs.join(", ")))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            } else {
+                format!(
+                    "sweep completed with {failed} failed benchmark(s); rerun with --verbose for diagnostics"
+                )
+            };
             if let Some(error) = comparison_error {
                 details.push_str(&format!("; comparison failed: {error}"));
             }

@@ -184,6 +184,7 @@ impl Execution<'_> {
                 policy: entry.policy.as_ref(),
                 json: self.options.json,
                 show_output: self.options.show_output,
+                verbose: self.options.verbose,
                 interactive: self.options.live_progress(),
                 measurement_dir: None,
                 mode: self.options.mode,

@@ -146,6 +146,8 @@ pub(crate) struct RunOptions<'a> {
     pub execution_cohort: Option<&'a measurements::ExecutionCohort>,
     pub json: bool,
     pub show_output: bool,
+    /// Emit diagnostic evidence paths and detailed replay/recording information.
+    pub verbose: bool,
     /// Print the selected trial before any run work begins.
     pub announce_trial: bool,
     /// The process was launched with both presentation streams attached to a terminal.

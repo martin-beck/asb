@@ -217,6 +217,7 @@ pub(crate) fn run_with_interactive(
                     repeat: options.repeat.or(options.record.then_some(1)),
                     json: options.json,
                     show_output: options.show_output,
+                    verbose: options.verbose,
                     announce_trial: !options.json,
                     measurement_dir: options.measurements.as_deref(),
                     mode: tape.carrier,
@@ -235,8 +236,10 @@ pub(crate) fn run_with_interactive(
             .and_then(|_| {
                 if json {
                     Ok(())
-                } else {
+                } else if options.verbose {
                     super::compare::generate(&report_path, stdout).map(|_| ())
+                } else {
+                    super::compare::generate(&report_path, &mut std::io::sink()).map(|_| ())
                 }
             })
         }
@@ -267,6 +270,7 @@ pub(crate) fn run_with_interactive(
                     seed: options.seed,
                     json: options.json,
                     show_output: options.show_output,
+                    verbose: options.verbose,
                     interactive: interactive && !options.json,
                     mode: tape.carrier,
                     tool_mode: tape.tool,
@@ -583,6 +587,27 @@ mod tape_flag_tests {
     }
 
     #[test]
+    fn run_and_sweep_verbose_flags_are_opt_in() {
+        let cli = Cli::try_parse_from(["asb", "run", "benchmark.toml"]).unwrap();
+        let Some(CommandLine::Run(args)) = cli.command else {
+            panic!("expected run arguments");
+        };
+        assert!(!args.verbose);
+
+        let cli = Cli::try_parse_from(["asb", "run", "benchmark.toml", "-v"]).unwrap();
+        let Some(CommandLine::Run(args)) = cli.command else {
+            panic!("expected run arguments");
+        };
+        assert!(args.verbose);
+
+        let cli = Cli::try_parse_from(["asb", "sweep", "sweep.toml", "--verbose"]).unwrap();
+        let Some(CommandLine::Sweep(args)) = cli.command else {
+            panic!("expected sweep arguments");
+        };
+        assert!(args.verbose);
+    }
+
+    #[test]
     fn record_and_replay_directions_conflict_across_layers() {
         let error = Cli::try_parse_from([
             "asb",
@@ -807,6 +832,9 @@ struct RunArgs {
     native_capsule_replay: Option<String>,
     #[arg(long)]
     json: bool,
+    /// Print execution evidence paths, replay selections, cassette details, and report links.
+    #[arg(short = 'v', long)]
+    verbose: bool,
     #[arg(long = "show-output", conflicts_with = "json")]
     show_output: bool,
     #[arg(long, value_hint = clap::ValueHint::DirPath)]
@@ -874,6 +902,9 @@ struct SweepArgs {
     respect_record_timings: bool,
     #[arg(long)]
     json: bool,
+    /// Print execution evidence paths, replay selections, cassette details, and report links.
+    #[arg(short = 'v', long)]
+    verbose: bool,
     #[arg(
         long = "show-output",
         conflicts_with = "json",

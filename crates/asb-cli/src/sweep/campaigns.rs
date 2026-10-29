@@ -247,6 +247,7 @@ pub(super) fn prepare(
             runner::RunOptions {
                 json: options.json,
                 show_output: options.show_output,
+                verbose: options.verbose,
                 mode: options.mode,
                 tool_mode: options.tool_mode,
                 tool_mode_explicit: options.tool_mode_explicit,

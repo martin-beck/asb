@@ -48,6 +48,8 @@ pub(crate) struct Options<'a> {
     pub seed: Option<u64>,
     pub json: bool,
     pub show_output: bool,
+    /// Emit diagnostic evidence paths and detailed replay/recording information.
+    pub verbose: bool,
     /// The process has both presentation streams attached to a terminal.
     ///
     /// Parallel configurations deliberately do not use a shared live line:
@@ -77,6 +79,7 @@ impl Default for Options<'_> {
             seed: None,
             json: false,
             show_output: false,
+            verbose: false,
             interactive: false,
             mode: None,
             tool_mode: None,
