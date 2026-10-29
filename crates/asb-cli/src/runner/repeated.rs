@@ -168,6 +168,7 @@ enum PreparedReplay {
 struct ActivationOptions {
     json: bool,
     show_output: bool,
+    quiet_output: bool,
     measurement_override: bool,
     policy: Option<crate::planning::ResolvedPlan>,
     tool_mode: Option<crate::tape::Mode>,
@@ -361,6 +362,7 @@ impl Inspection {
             options: ActivationOptions {
                 json: options.json,
                 show_output: options.show_output,
+                quiet_output: options.quiet_output,
                 measurement_override: options.measurement_dir.is_some(),
                 policy: options.policy.cloned(),
                 tool_mode: options.tool_mode,
@@ -578,7 +580,7 @@ pub(crate) fn execute(
         )
         .map_err(|error| Error::Io(error.to_string()))?;
         writeln!(output).map_err(io_error)?;
-    } else {
+    } else if !options.quiet_output {
         writeln!(
             output,
             "Execution plan: {} ({total} executions)",
@@ -594,7 +596,7 @@ pub(crate) fn execute(
             )
             .map_err(|error| Error::Io(error.to_string()))?;
             writeln!(output).map_err(io_error)?;
-        } else {
+        } else if !options.quiet_output {
             writeln!(
                 output,
                 "Replay seed: {} ({})\nSelected track IDs: {}",
@@ -613,6 +615,7 @@ pub(crate) fn execute(
     replay::disclose_incomplete(&plan.replay_inputs, options.json, output)?;
     let mut reference: Option<Compatibility> = plan.replay_compatibility.clone();
     let mut failures = 0u64;
+    let mut completed_executions = 0usize;
     let mut completed_batches = 0u64;
     let mut stopped = false;
     let mut first_reason = None;
@@ -675,7 +678,9 @@ pub(crate) fn execute(
             stopped: batch_stopped,
             reason,
             quiescent,
+            completed,
         } = settled;
+        completed_executions += completed;
         stopped = batch_stopped;
         producers_quiescent &= quiescent;
         if first_reason.is_none() {
@@ -715,7 +720,7 @@ pub(crate) fn execute(
             )
             .map_err(|error| Error::Io(error.to_string()))?;
             writeln!(output).map_err(io_error)?;
-        } else {
+        } else if !options.quiet_output {
             match &publication {
                 Some(Ok(Some(published))) => {
                     writeln!(
@@ -751,19 +756,34 @@ pub(crate) fn execute(
                 .unwrap_or("recording publication failed")
         )));
     }
+    if !options.json && options.quiet_output {
+        writeln!(
+            output,
+            "Benchmarks: succeeded={completed_executions} failed={}",
+            total.saturating_sub(completed_executions),
+        )
+        .map_err(io_error)?;
+    }
     if failures > 0 || stopped {
-        Err(Error::Run(format!(
-            "repeated execution had {failures} failed batch(es){}; {}; inspect {}",
-            if stopped {
-                " and stopped further admission"
-            } else {
-                ""
-            },
-            first_reason
-                .as_deref()
-                .unwrap_or("incomplete execution evidence"),
-            root.join("plan.json").display()
-        )))
+        if !options.quiet_output {
+            Err(Error::Run(format!(
+                "repeated execution had {failures} failed batch(es){}; {}; inspect {}",
+                if stopped {
+                    " and stopped further admission"
+                } else {
+                    ""
+                },
+                first_reason
+                    .as_deref()
+                    .unwrap_or("incomplete execution evidence"),
+                root.join("plan.json").display()
+            )))
+        } else {
+            Err(Error::Run(format!(
+                "benchmark execution failed: {} of {total} execution(s) completed; rerun with --verbose for diagnostics",
+                completed_executions,
+            )))
+        }
     } else {
         Ok(())
     }
