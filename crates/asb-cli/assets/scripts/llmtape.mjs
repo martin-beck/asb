@@ -891,7 +891,14 @@ const server = http.createServer((request, response) => {
     return;
   }
   let token;
-  try { token = capture.begin(); }
+  try {
+    // Preserve only bounded protocol shape for an incomplete capture's
+    // private delivery diagnostic. Query strings/headers/bodies are excluded.
+    token = capture.begin({
+      method: request.method,
+      path: requestPath(request.url).split("?", 1)[0],
+    });
+  }
   catch (error) { fail(error); return; }
   if (!token) {
     response.writeHead(503, { connection: "close" });
@@ -904,14 +911,14 @@ const server = http.createServer((request, response) => {
   const delivered = responseDelivery(response);
   activeCaptures.add(recording);
   recording.done = (async () => {
-    let success = false;
+    let delivery = { terminal: "unsettled", delivered: false };
     try {
       await handle(request, response, recording);
-      success = await delivered;
+      delivery = await delivered;
     } catch (error) {
       fail(error);
     } finally {
-      capture.end(token, success);
+      capture.end(token, delivery);
       activeCaptures.delete(recording);
     }
   })();

@@ -377,6 +377,10 @@ impl ProxySession for RunningLlmtape {
             .map(|request| request.read(NAME));
         let capture_error = match captured {
             Some(Ok(evidence)) => {
+                // Incomplete captures have no completion receipt. Keep their
+                // bounded private delivery diagnostic beside the recorder
+                // receipt for inspection rather than deleting it on drop.
+                self._scratch.retain |= !evidence.complete;
                 self.capture = Some(evidence);
                 None
             }
