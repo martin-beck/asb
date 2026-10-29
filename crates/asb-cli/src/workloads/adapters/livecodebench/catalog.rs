@@ -350,6 +350,12 @@ mod tests {
             "asb-livecodebench-trial-integration-{}",
             crate::workloads::TaskIdentity::local("lcb", None).attempt_id
         ));
+        fs::create_dir_all(root.join(".asb")).unwrap();
+        fs::write(
+            root.join(".asb/project.toml"),
+            "tools_dir='tools'\nworkloads_dir='.'\nworkspace_dir='workspace'\n",
+        )
+        .unwrap();
         let adapters: &[&LiveCodeBenchAdapter] = &[
             &CODE_GENERATION_V1,
             &CODE_GENERATION_V2,
@@ -388,6 +394,40 @@ mod tests {
                 "{}",
                 adapter.id
             );
+            let reference = format!("{}.toml", adapter.id);
+            fs::write(
+                root.join(&reference),
+                format!(
+                    "agent='pi'\nprovider='openrouter'\nmodel='fixture'\nworkload='{}'\ntrial='fixture-1'\n",
+                    adapter.id
+                ),
+            )
+            .unwrap();
+            let manifest = crate::sweep::SweepFile {
+                configs: vec![reference],
+                resources: None,
+            };
+            let plan = crate::sweep::plan::build(&root, &manifest).unwrap();
+            let selection = &plan.entries[0].selection;
+            assert_eq!(selection.task_id, "fixture-1");
+            assert_eq!(selection.population_size, Some(2));
+            assert_eq!(selection.evaluation_kind, "upstream-harness");
+            let module = selection.module.as_ref().expect("official module binding");
+            assert_eq!(module, &adapter.descriptor(adapter.id));
+            assert_eq!(
+                module.protocol.environment,
+                crate::workloads::contracts::EnvironmentKind::Native
+            );
+            let mut description = Vec::new();
+            crate::workloads::describe_module(adapter.id, &mut description).unwrap();
+            let described: crate::workloads::contracts::ModuleDescriptor =
+                serde_json::from_slice(&description).unwrap();
+            assert_eq!(&described, module);
+            let results = crate::sweep::plan::fresh_results(&root, adapter.id, &plan).unwrap();
+            let loaded = crate::sweep::plan::SweepPlan::load(&results, &root, &manifest)
+                .unwrap()
+                .unwrap();
+            assert_eq!(&loaded.entries[0].selection, selection);
             crate::workloads::write_default_trial_set(adapter.id, &root).unwrap();
             let trial_set = crate::workloads::read_trial_set(
                 &root.join(format!("{}.workload.toml", adapter.id)),
