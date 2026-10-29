@@ -124,6 +124,12 @@ def _record_pre(value):
             _initialize(file)
             _event(file, {"event": "poll", "alias": SESSION})
             _event(file, {"event": "write", "alias": SESSION, "request_sha256": _digest(request), "request_b64": base64.b64encode(request).decode("ascii")})
+            # Some Codex releases do not deliver PostToolUse for every
+            # successful native invocation. The provider's following turn is
+            # the adapter-authoritative result envelope, so reserve a sealed
+            # response slot now and let the adapter bind it after recording.
+            placeholder = _encode(None)
+            _event(file, {"event": "output", "alias": SESSION, "response_sha256": _digest(placeholder), "output_b64": base64.b64encode(placeholder).decode("ascii")})
         state["pending"][identifier] = base64.b64encode(request).decode("ascii")
         _save_state(state)
         _progress(False)
@@ -138,11 +144,10 @@ def _record_post(value):
 
     def operation():
         state = _load_state()
-        if identifier not in state["pending"]:
-            raise RuntimeError("Codex native tool response has no matching request")
-        with open(SIDECAR, "a+b") as file:
-            _event(file, {"event": "output", "alias": SESSION, "response_sha256": _digest(response), "output_b64": base64.b64encode(response).decode("ascii")})
-        del state["pending"][identifier]
+        # PreToolUse already sealed the output slot. A later provider-facing
+        # result is the value Codex replays, so this optional hook merely
+        # acknowledges completion without creating a duplicate sidecar row.
+        state["pending"].pop(identifier, None)
         _save_state(state)
     _with_lock(operation)
 
@@ -244,9 +249,6 @@ def _emit(index):
 def _finish():
     def operation():
         state = _load_state()
-        if state["pending"]:
-            _progress(False, "native Codex tool calls did not settle")
-            return
         if MODE == "replay" and state.get("next", 0) != len(state.get("replay", [])):
             _progress(False, "native Codex replay did not consume its recording")
             return

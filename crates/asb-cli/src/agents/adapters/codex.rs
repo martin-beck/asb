@@ -918,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn native_hook_records_and_replays_only_the_adapter_wire() {
+    fn native_hook_seals_and_replays_when_codex_omits_post_tool_use() {
         let root = std::env::temp_dir().join(format!(
             "asb-codex-native-hook-{}",
             crate::tools::runtime::unique_id()
@@ -930,7 +930,6 @@ mod tests {
         let progress = root.join("progress.json");
         let state = root.join("state.json");
         let pre = r#"{"tool_name":"Bash","tool_use_id":"call-1","tool_input":{"command":"printf fixture"}}"#;
-        let post = r#"{"tool_name":"Bash","tool_use_id":"call-1","tool_response":{"stdout":"fixture","exit_code":0}}"#;
         assert!(
             invoke_native_hook(
                 &script,
@@ -940,19 +939,6 @@ mod tests {
                 &state,
                 "pre",
                 Some(pre)
-            )
-            .status
-            .success()
-        );
-        assert!(
-            invoke_native_hook(
-                &script,
-                "record",
-                &sidecar,
-                &progress,
-                &state,
-                "post",
-                Some(post)
             )
             .status
             .success()
