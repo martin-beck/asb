@@ -18,6 +18,81 @@ record/replay hop; additional registered hops can be named in `ASB_PROXY_CHAIN`.
 The agent receives the chain's loopback ingress, so its provider configuration
 does not change when a hop is added or removed.
 
+## Adapter-owned replay extensions
+
+Record/replay has a deliberately narrow shared core.  The core may create an
+attempt, select a mode, start a transparent protocol relay, own bounded private
+files, seal their byte count and digest, stage the selected bytes for replay,
+and report completion.  It must not know an agent name, a tool name, a
+tool-call field, a client-specific identifier, a workspace-effect format, or a
+client wire protocol.
+
+Every agent-specific record/replay capability instead belongs to that agent's
+adapter or to a private extension module immediately beside it.  The extension
+owns all of the following:
+
+- injecting the agent's hook, extension, MCP configuration, or wrapper;
+- the sidecar kind and version, its payload codec, and its bounded validation;
+- request identity, allowed normalization, ordering, cursor consumption, and
+  mismatch diagnostics;
+- conversion between the client protocol and a recorded result; and
+- adapter-focused record, replay, rejected-mismatch, and no-live-effect tests.
+
+The generic cassette and runner layers handle an extension sidecar as opaque
+bytes plus a stable extension descriptor.  They can reject absent, oversized,
+changed, duplicate, incomplete, or unconsumed sidecars, but never deserialize
+their payload to decide how an agent tool, terminal, filesystem, or SDK call
+behaves.  An adapter creates the replay consumer after the core has staged the
+sealed bytes.  This preserves one common custody and lifecycle implementation
+without turning it into a second generic agent protocol.
+
+For example, an OpenHands terminal bridge owns its terminal-action and
+terminal-observation schema; a Hermes extension owns its registered terminal
+handler and session-ID normalization; and an OpenJiuwen extension owns its
+grep/search protocol.  The shared code sees only each extension's descriptor
+and private bytes.  A transparent MCP relay is a separate exception only at
+the framing level: it may relay MCP messages without understanding a server's
+tool names or payload semantics.
+
+### Extension contract
+
+An adapter extension has three lifecycle hooks:
+
+1. **Prepare:** given the selected mode and cassette identity, install the
+   client's normal hook or wrapper and declare one or more private artifact
+   descriptors.  It cannot ask the runner to interpret client data.
+2. **Collect:** after the process settles, validate and return its own bounded
+   artifacts.  The core seals these unchanged with the provider track.
+3. **Replay:** given only the staged, sealed descriptor and byte stream, build
+   the client's replay hook.  It must fail closed on a changed request,
+   exhausted stream, invalid schema, or remaining event; it must not start the
+   original native tool or reach a live backend.
+
+The extension's stable identifier includes its adapter and schema version, so
+an incompatible codec is rejected before launch.  Extension diagnostics are
+bounded and redact payloads, prompts, credentials, host paths, and raw tool
+output.  Generic diagnostics identify only the extension descriptor and the
+custody failure.
+
+This also defines where shared code may evolve.  A reusable *opaque* file
+sealer, descriptor registry, framing implementation, or timing cursor can be
+shared.  A reusable semantic terminal/tool transcript, client ID normalizer,
+or result applier cannot: it stays in an adapter extension, even if two
+adapters currently look similar.  Similar extensions may later extract a
+small explicitly-versioned adapter-extension library, but it remains outside
+the generic cassette/runner path and is adopted explicitly by each adapter.
+
+### Migration rule
+
+Existing generic native-sidecar parsing is transitional.  New adapters must
+not add fields or behavior to it.  Its semantic event decoding, terminal or
+workspace-effect validation, and replay cursor will move to the owning adapter
+extensions; the generic layer will retain only opaque sidecar custody,
+aggregate bounds, and completion accounting.  During that migration, an
+adapter must prove that its own extension—not the generic runner—rejects a
+changed native request and prevents the original tool from starting during
+replay.
+
 ## Commands and selection
 
 `--llm-record` and `--llm-replay` select only provider traffic. `--tool-record`
