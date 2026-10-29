@@ -686,7 +686,7 @@ asyncio.run(main())
             !marker.exists(),
             "native tool replay executed a direct tool"
         );
-        let mismatch = super::process(entry.to_str().unwrap())
+        let regenerated_id = super::process(entry.to_str().unwrap())
             .unwrap()
             .direct()
             .arg("--asb-native-tool-replay")
@@ -699,10 +699,56 @@ asyncio.run(main())
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
             .output()
             .unwrap();
+        assert!(
+            regenerated_id.status.success(),
+            "{}",
+            String::from_utf8_lossy(&regenerated_id.stderr)
+        );
+        let tampered = root.join("native-tampered.jsonl");
+        let tamper = std::process::Command::new(python.trim())
+            .args([
+                "-c",
+                r#"import base64,json,sys
+source,destination=sys.argv[1:]
+events=[]
+changed=False
+for line in open(source, encoding="utf-8"):
+    event=json.loads(line)
+    if not changed and event.get("event")=="output":
+        envelope=json.loads(base64.b64decode(event["output_b64"]))
+        if envelope.get("message") is not None:
+            envelope["message"]=None
+            event["output_b64"]=base64.b64encode(json.dumps(envelope,separators=(",",":")).encode()).decode()
+            changed=True
+    events.append(event)
+assert changed
+with open(destination,"w",encoding="utf-8") as output:
+    for event in events:
+        output.write(json.dumps(event,separators=(",",":"))+"\n")
+"#,
+                sidecar.to_str().unwrap(),
+                tampered.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(tamper.status.success());
+        let mismatch = super::process(entry.to_str().unwrap())
+            .unwrap()
+            .direct()
+            .arg("--asb-native-tool-replay")
+            .arg(&tampered)
+            .env("PYTHONPATH", &root)
+            .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_TEST_WORKSPACE", &replay_workspace)
+            .env("ASB_TEST_RENDER_PREFIX", "replay:")
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
+            .output()
+            .unwrap();
         assert!(!mismatch.status.success());
         assert!(
+            String::from_utf8_lossy(&mismatch.stderr).contains("final tool message"),
+            "{}",
             String::from_utf8_lossy(&mismatch.stderr)
-                .contains("final tool message is missing or out of order")
         );
         let extra = super::process(entry.to_str().unwrap())
             .unwrap()

@@ -343,6 +343,15 @@ try:
                         ]
                         if len(matches) == 1:
                             event = matches[0]
+                        elif _replay_path:
+                            raw_matches = [
+                                output for output in outputs
+                                if json.loads(base64.b64decode(output["output_b64"])).get("tool_output") == actual
+                            ]
+                            if raw_matches:
+                                raise RuntimeError(
+                                    "ASB OpenJiuwen native replay final tool message is missing or out of order"
+                                )
                     except (AttributeError, KeyError, TypeError, ValueError):
                         pass
                 if event is None:
@@ -354,8 +363,16 @@ try:
                     if event is not final_outputs[_message_cursor]:
                         raise RuntimeError("ASB OpenJiuwen native replay final tool message is out of order")
                     final = envelope.get("message")
-                    if not isinstance(final, dict) or final.get("tool_call_id") != message.tool_call_id or not isinstance(final.get("content"), str):
+                    if not isinstance(final, dict) or not isinstance(final.get("tool_call_id"), str) or not isinstance(final.get("content"), str):
                         raise RuntimeError("ASB OpenJiuwen native replay final tool message is missing or out of order")
+                    # The upstream parser reconstructs its internal
+                    # ToolMessage identifier on every replay (the recorded
+                    # and replay ids have different lengths/digests despite
+                    # the first provider request matching). Restore the
+                    # sealed final id at this adapter-owned boundary. The
+                    # exact native-result association and final-message
+                    # cursor above remain the fail-closed provenance checks.
+                    message.tool_call_id = final["tool_call_id"]
                     message.content = _materialize_workspace(final["content"])
                     _message_cursor += 1
                 else:
