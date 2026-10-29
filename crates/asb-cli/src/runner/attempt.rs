@@ -12,6 +12,7 @@ struct Context<'a> {
     policy: crate::planning::ResolvedPlan,
     measurement_path: Option<PathBuf>,
     tape_cassette: Option<(tape::Mode, PathBuf)>,
+    provider_capture_path: Option<PathBuf>,
     tool_tape_cassette: Option<(tape::Mode, PathBuf)>,
     mcp_tape_cassette: Option<(tape::Mode, PathBuf)>,
     network: Option<project::NetworkProjectGuard>,
@@ -97,6 +98,7 @@ impl<'a> ConfiguredAttempt<'a> {
             policy,
             measurement_path,
             tape_cassette,
+            provider_capture_path: options.provider_capture_path.map(PathBuf::from),
             tool_tape_cassette,
             mcp_tape_cassette,
             network: Some(network),
@@ -979,10 +981,9 @@ impl<'a> CompletedAttempt<'a> {
             );
         }
         let provider_capture = match context
-            .tape_cassette
-            .as_ref()
-            .filter(|(mode, _)| *mode == tape::Mode::Record)
-            .map(|(_, path)| opaque_provider_capture(path))
+            .provider_capture_path
+            .as_deref()
+            .map(opaque_provider_capture)
             .transpose()
         {
             Ok(binding) => binding,

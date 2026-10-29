@@ -133,6 +133,8 @@ pub(crate) struct RunOptions<'a> {
     pub track: Option<crate::cassette::Selector>,
     pub replay_seed: Option<u64>,
     pub recording: Option<&'a recording::Recorder>,
+    /// Opaque, recorder-owned provider capture selected before dispatch.
+    pub provider_capture_path: Option<&'a Path>,
     pub repeat: Option<u64>,
     pub batch: Option<&'a repeated::BatchIdentity>,
     /// Exact selected native replay inputs for this batch.  This is private
