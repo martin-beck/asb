@@ -1,7 +1,10 @@
 use super::{
-    CommandContext, CommandSpec, McpTapeContext, PreparationContext, PromptDelivery, StaticAdapter,
+    AgentArtifacts, CollectionContext, CommandContext, CommandSpec, McpTapeContext,
+    PreparationContext, PromptDelivery, StaticAdapter,
 };
 use crate::{Error, install::Recipe};
+
+const NATIVE_HOOKS: &str = include_str!("../../../assets/scripts/codex-native-hooks.py");
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "codex",
     "codex",
@@ -17,12 +20,25 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_tool_replay(prepare_tool_replay)
 .with_mcp_servers()
 .with_mcp_relay()
-.with_collection(super::super::mcp_relay::collect_artifacts)
-.with_artifact_specs(&[super::super::ArtifactSpec {
-    namespace: "tool-replay",
-    filename: "local-tools.jsonl",
-    format: super::super::ArtifactFormat::JsonLines,
-}])
+.with_native_tool_transport()
+.with_collection(collect)
+.with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "tool-replay",
+        filename: "local-tools.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "codex-native-sidecar",
+        filename: "native-tool-sidecar.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "codex-native-progress",
+        filename: "native-tool-progress.json",
+        format: super::super::ArtifactFormat::Json,
+    },
+])
 .with_state_environment_vars(&["CODEX_HOME"])
 .with_forwarded_invocation_environment_vars(&["ASB_CODEX_SANDBOX_MODE"])
 .with_preferred_executables(preferred_executables);
@@ -127,11 +143,38 @@ fn prepare_tool_replay(
     servers.insert("asb_tool_replay".into(), toml::Value::Table(server));
     let mut root = toml::map::Map::new();
     root.insert("mcp_servers".into(), toml::Value::Table(servers));
-    let contents = toml::to_string(&toml::Value::Table(root)).map_err(|error| {
+    let mut contents = toml::to_string(&toml::Value::Table(root)).map_err(|error| {
         Error::Run(format!(
             "cannot serialize Codex local-tool replay configuration: {error}"
         ))
     })?;
+    let hook_dir = context.runtime_dir.join("codex-native-hooks");
+    std::fs::create_dir_all(&hook_dir).map_err(|error| {
+        Error::Run(format!(
+            "cannot create Codex native hook directory: {error}"
+        ))
+    })?;
+    let hook = hook_dir.join("hook.py");
+    std::fs::write(&hook, NATIVE_HOOKS)
+        .map_err(|error| Error::Run(format!("cannot write Codex native hook: {error}")))?;
+    let mode = match tape.mode {
+        crate::tape::Mode::Record => "record",
+        crate::tape::Mode::Replay => "replay",
+    };
+    let sidecar = match tape.mode {
+        crate::tape::Mode::Record => context
+            .run_dir
+            .join("codex-native-sidecar")
+            .join("native-tool-sidecar.jsonl"),
+        crate::tape::Mode::Replay => context.runtime_dir.join("native-tool-sidecar.jsonl"),
+    };
+    let progress = context
+        .run_dir
+        .join("codex-native-progress")
+        .join("native-tool-progress.json");
+    let state = context.runtime_dir.join("codex-native-hook-state.json");
+    let command = hook_command(&hook)?;
+    contents.push_str(&native_hook_configuration(&command)?);
     std::fs::write(directory.join("asb-tool-replay.toml"), contents).map_err(|error| {
         Error::Run(format!(
             "cannot write Codex local-tool replay configuration: {error}"
@@ -142,7 +185,342 @@ fn prepare_tool_replay(
     // the shell in that case leaves a coding benchmark unable to read, edit,
     // or test its assigned repository. The workload guest remains the
     // execution boundary, while the tape still records the provider turns.
+    context
+        .command
+        .arg("--dangerously-bypass-hook-trust")
+        .env("ASB_CODEX_NATIVE_MODE", mode)
+        .env("ASB_CODEX_NATIVE_SIDECAR", sidecar)
+        .env("ASB_CODEX_NATIVE_PROGRESS", progress)
+        .env("ASB_CODEX_NATIVE_STATE", state);
     Ok(())
+}
+
+/// Codex currently exposes local shell and patch calls through its documented
+/// lifecycle hooks. The adapter owns their payload schema and the replay shim;
+/// the runner sees only the completed opaque native sidecar.
+fn hook_command(path: &std::path::Path) -> Result<String, Error> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| Error::Run("Codex native hook path is not valid UTF-8".into()))?;
+    if value.contains(['\0', '\n', '\r']) {
+        return Err(Error::Run("Codex native hook path is unsafe".into()));
+    }
+    Ok(format!("python3 '{}'", value.replace('\'', "'\\\"'\\\"'")))
+}
+
+fn native_hook_configuration(command: &str) -> Result<String, Error> {
+    let quoted = |operation| toml::Value::String(format!("{command} {operation}")).to_string();
+    Ok(format!(
+        "\n[[hooks.PreToolUse]]\nmatcher = \".*\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = {}\n\n[[hooks.PostToolUse]]\nmatcher = \".*\"\n[[hooks.PostToolUse.hooks]]\ntype = \"command\"\ncommand = {}\n\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = {}\n",
+        quoted("pre"),
+        quoted("post"),
+        quoted("finish"),
+    ))
+}
+
+fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
+    let mut artifacts = super::super::mcp_relay::collect_artifacts(context);
+    let Some(progress) = context.frozen.document("native-tool-progress.json") else {
+        artifacts
+            .errors
+            .push("Codex native tool hook did not publish a completion receipt".into());
+        return artifacts;
+    };
+    let complete = progress
+        .get("complete")
+        .and_then(serde_json::Value::as_bool);
+    let mode = progress.get("mode").and_then(serde_json::Value::as_str);
+    if progress
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+        || complete != Some(true)
+        || !matches!(mode, Some("record") | Some("replay"))
+    {
+        let detail = progress
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| value.len() <= 160 && !value.chars().any(char::is_control))
+            .map(|value| format!(": {value}"))
+            .unwrap_or_default();
+        artifacts
+            .errors
+            .push(format!("Codex native tool hook did not complete{detail}"));
+        return artifacts;
+    }
+    if mode == Some("record") {
+        let Some(sidecar) = context.frozen.bytes("native-tool-sidecar.jsonl") else {
+            artifacts
+                .errors
+                .push("Codex native tool recording is unavailable".into());
+            return artifacts;
+        };
+        match context
+            .provider_capture
+            .ok_or_else(|| "Codex provider capture binding is unavailable".to_owned())
+            .and_then(|capture| bind_provider_tool_outputs(sidecar, capture))
+        {
+            Ok(sidecar) => artifacts.native_tool_sidecar = Some(sidecar),
+            Err(error) => artifacts.errors.push(error),
+        }
+    }
+    artifacts
+}
+
+/// Codex serializes native command results into its provider protocol after a
+/// post-tool hook runs.  Keep that adapter-specific envelope with the sealed
+/// native exchange, so replay can restore the exact hook result without
+/// attempting to reconstruct Codex's private serialization.
+fn bind_provider_tool_outputs(
+    sidecar: &[u8],
+    capture: &std::path::Path,
+) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::metadata(capture)
+        .map_err(|_| "Codex provider capture is unavailable".to_owned())?;
+    if metadata.len() > 256 * 1024 * 1024 {
+        return Err("Codex provider capture exceeds its bound".to_owned());
+    }
+    let capture =
+        std::fs::read(capture).map_err(|_| "Codex provider capture is unavailable".to_owned())?;
+    let capture = std::str::from_utf8(&capture)
+        .map_err(|_| "Codex provider capture is not UTF-8".to_owned())?;
+    // Codex's Responses input is a cumulative history.  A `call_id` can be
+    // retained for multiple different historical tool outputs, so it is not a
+    // global output key.  Derive the newly appended result suffix from each
+    // successive snapshot and bind it to the native hook's causal order.
+    let mut prior = Vec::<(String, Vec<u8>)>::new();
+    let mut prior_calls = Vec::<String>::new();
+    let mut streamed_calls = false;
+    let mut outputs = std::collections::VecDeque::<Vec<u8>>::new();
+    for line in capture.lines() {
+        let row: serde_json::Value = serde_json::from_str(line)
+            .map_err(|_| "Codex provider capture is invalid".to_owned())?;
+        let Some(body) = row
+            .pointer("/request/body")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let body: serde_json::Value = serde_json::from_str(body)
+            .map_err(|_| "Codex provider request body is invalid".to_owned())?;
+        let current = body
+            .get("input")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                Some((
+                    item.get("call_id")
+                        .and_then(serde_json::Value::as_str)?
+                        .to_owned(),
+                    item.get("output")
+                        .and_then(serde_json::Value::as_str)?
+                        .as_bytes()
+                        .to_vec(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        if !current.starts_with(&prior) {
+            return Err("Codex provider tool result history diverges".into());
+        }
+        let appended = &current[prior.len()..];
+        if streamed_calls && appended.len() != prior_calls.len() {
+            return Err("Codex provider call/result sequence diverges".into());
+        }
+        if streamed_calls {
+            for (name, (_, output)) in prior_calls.iter().zip(appended) {
+                match name.as_str() {
+                    // Codex presents its native Bash lifecycle hook as the
+                    // Responses-compatible exec command. The native sidecar
+                    // owns only that causal stream.
+                    "exec_command" => outputs.push_back(output.clone()),
+                    // This provider operation resumes an already-owned
+                    // process; it has no PreToolUse native shell boundary.
+                    "write_stdin" => (),
+                    _ => {
+                        return Err(
+                            "Codex provider call is not replayable through the native hook".into(),
+                        );
+                    }
+                }
+            }
+        } else {
+            // Fixture/legacy captures without a streamed Responses envelope
+            // retain the historical conservative one-result-per-hook route.
+            outputs.extend(appended.iter().map(|(_, output)| output.clone()));
+        }
+        prior = current;
+        let calls = provider_function_calls(&row)?;
+        streamed_calls |= calls.1;
+        prior_calls = calls.0;
+    }
+    if streamed_calls && !prior_calls.is_empty() {
+        return Err("Codex provider call has no following result".into());
+    }
+    let mut rows = sidecar
+        .split_inclusive(|byte| *byte == b'\n')
+        .map(|line| {
+            serde_json::from_slice::<serde_json::Value>(line)
+                .map_err(|_| "Codex native sidecar is invalid".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut pending = None;
+    for row in &mut rows {
+        if row.get("event").and_then(serde_json::Value::as_str) == Some("write") {
+            let request = row
+                .get("request_b64")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "Codex native sidecar request is missing".to_owned())?;
+            let request = decode_base64(request)
+                .map_err(|_| "Codex native sidecar request is invalid".to_owned())?;
+            let request: serde_json::Value = serde_json::from_slice(&request)
+                .map_err(|_| "Codex native sidecar request is invalid".to_owned())?;
+            pending = Some(
+                request
+                    .get("tool_use_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "Codex native sidecar has no tool identity".to_owned())?
+                    .to_owned(),
+            );
+        } else if row.get("event").and_then(serde_json::Value::as_str) == Some("output") {
+            pending
+                .take()
+                .ok_or_else(|| "Codex native sidecar output has no request".to_owned())?;
+            let output = outputs.pop_front().ok_or_else(|| {
+                "Codex provider capture has no matching native tool result".to_owned()
+            })?;
+            let output = serde_json::to_vec(
+                &String::from_utf8(output)
+                    .map_err(|_| "Codex provider tool result is not UTF-8".to_owned())?,
+            )
+            .map_err(|_| "cannot encode Codex provider tool result".to_owned())?;
+            row["output_b64"] = serde_json::Value::String(encode_base64(&output));
+            row["response_sha256"] = serde_json::Value::String(crate::cassette::digest(&output));
+        }
+    }
+    if pending.is_some() || !outputs.is_empty() {
+        return Err("Codex native/provider tool result inventory does not match".into());
+    }
+    if rows
+        .last()
+        .and_then(|row| row.get("event"))
+        .and_then(serde_json::Value::as_str)
+        != Some("workspace_effect")
+    {
+        return Err("Codex native sidecar has no workspace effect".into());
+    }
+    let prefix = rows[..rows.len() - 1]
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "cannot encode Codex native sidecar".to_owned())?
+        .join("\n");
+    rows.last_mut().expect("checked sidecar effect")["sha256"] =
+        serde_json::Value::String(crate::cassette::digest(format!("{prefix}\n").as_bytes()));
+    let encoded = rows
+        .into_iter()
+        .map(|row| serde_json::to_string(&row))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "cannot encode Codex native sidecar".to_owned())?
+        .join("\n")
+        + "\n";
+    Ok(encoded.into_bytes())
+}
+
+/// Return the function calls completed by one streamed Responses response.
+/// Their results appear as the newly appended cumulative input items of the
+/// next request, so this adapter-local sequence identifies native shell calls
+/// without interpreting generic tape data.
+fn provider_function_calls(row: &serde_json::Value) -> Result<(Vec<String>, bool), String> {
+    let Some(body) = row
+        .pointer("/response/body")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok((Vec::new(), false));
+    };
+    let mut calls = Vec::new();
+    for line in body.lines() {
+        let Some(payload) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let value: serde_json::Value = serde_json::from_str(payload)
+            .map_err(|_| "Codex provider response is invalid".to_owned())?;
+        if value.get("type").and_then(serde_json::Value::as_str)
+            != Some("response.output_item.done")
+        {
+            continue;
+        }
+        let Some(item) = value.get("item") else {
+            return Err("Codex provider response is invalid".into());
+        };
+        if item.get("type").and_then(serde_json::Value::as_str) == Some("function_call") {
+            calls.push(
+                item.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| "Codex provider function call is invalid".to_owned())?
+                    .to_owned(),
+            );
+        }
+    }
+    Ok((calls, true))
+}
+
+fn decode_base64(value: &str) -> Result<Vec<u8>, ()> {
+    fn digit(byte: u8) -> Result<u8, ()> {
+        match byte {
+            b'A'..=b'Z' => Ok(byte - b'A'),
+            b'a'..=b'z' => Ok(byte - b'a' + 26),
+            b'0'..=b'9' => Ok(byte - b'0' + 52),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            _ => Err(()),
+        }
+    }
+    if !value.len().is_multiple_of(4) {
+        return Err(());
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 4 * 3);
+    for chunk in value.as_bytes().chunks_exact(4) {
+        let (a, b) = (digit(chunk[0])?, digit(chunk[1])?);
+        let (pad_c, pad_d) = (chunk[2] == b'=', chunk[3] == b'=');
+        if pad_c && !pad_d {
+            return Err(());
+        }
+        let c = if pad_c { 0 } else { digit(chunk[2])? };
+        let d = if pad_d { 0 } else { digit(chunk[3])? };
+        bytes.push((a << 2) | (b >> 4));
+        if !pad_c {
+            bytes.push((b << 4) | (c >> 2));
+        }
+        if !pad_d {
+            bytes.push((c << 6) | d);
+        }
+    }
+    Ok(bytes)
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0];
+        let b = *chunk.get(1).unwrap_or(&0);
+        let c = *chunk.get(2).unwrap_or(&0);
+        output.push(ALPHABET[(a >> 2) as usize] as char);
+        output.push(ALPHABET[((a & 3) << 4 | b >> 4) as usize] as char);
+        output.push(if chunk.len() > 1 {
+            ALPHABET[((b & 15) << 2 | c >> 6) as usize] as char
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            ALPHABET[(c & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    output
 }
 
 fn sandbox_args(value: Option<String>) -> Result<&'static [&'static str], Error> {
@@ -234,6 +612,7 @@ fn declared_mcp_configuration(
 mod tests {
     use super::*;
     use crate::agents::{AgentAdapter, CollectionContext};
+    use std::io::Write;
     #[cfg(unix)]
     #[test]
     fn native_package_preference_is_owned_here_and_explicit_source_still_wins() {
@@ -369,6 +748,7 @@ mod tests {
 
         let artifacts = super::super::mcp_relay::collect_artifacts(&CollectionContext {
             frozen: &Default::default(),
+            provider_capture: None,
             run_dir: &run_dir,
             interface: None,
             anthropic_input_includes_cache: false,
@@ -575,6 +955,292 @@ mod tests {
             Some("mcp-filesystem")
         );
         assert_eq!(config["model"].as_str(), Some("fixture-model"));
+        assert_eq!(
+            config["hooks"]["PreToolUse"][0]["matcher"].as_str(),
+            Some(".*")
+        );
+        assert!(
+            args.iter()
+                .any(|argument| argument == "--dangerously-bypass-hook-trust")
+        );
+        assert!(
+            !root
+                .join("codex-native-progress/native-tool-progress.json")
+                .exists(),
+            "the adapter must leave its declared namespace for the owner"
+        );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn invoke_native_hook(
+        script: &std::path::Path,
+        mode: &str,
+        sidecar: &std::path::Path,
+        progress: &std::path::Path,
+        state: &std::path::Path,
+        operation: &str,
+        input: Option<&str>,
+    ) -> std::process::Output {
+        let mut command = std::process::Command::new("python3");
+        command
+            .arg(script)
+            .arg(operation)
+            .env("ASB_CODEX_NATIVE_MODE", mode)
+            .env("ASB_CODEX_NATIVE_SIDECAR", sidecar)
+            .env("ASB_CODEX_NATIVE_PROGRESS", progress)
+            .env("ASB_CODEX_NATIVE_STATE", state);
+        if input.is_some() {
+            command.stdin(std::process::Stdio::piped());
+        }
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        let mut child = command.spawn().unwrap();
+        if let Some(input) = input {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+        }
+        child.wait_with_output().unwrap()
+    }
+
+    #[test]
+    fn native_hook_seals_and_replays_when_codex_omits_post_tool_use() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-codex-native-hook-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("hook.py");
+        std::fs::write(&script, NATIVE_HOOKS).unwrap();
+        let sidecar = root.join("sidecar.jsonl");
+        let progress = root.join("progress.json");
+        let state = root.join("state.json");
+        let marker = root.join("unexpected-native-execution");
+        let pre = format!(
+            r#"{{"tool_name":"Bash","tool_use_id":"call-1","tool_input":{{"command":"touch {}"}}}}"#,
+            marker.display()
+        );
+        assert!(
+            invoke_native_hook(
+                &script,
+                "record",
+                &sidecar,
+                &progress,
+                &state,
+                "pre",
+                Some(&pre)
+            )
+            .status
+            .success()
+        );
+        assert!(
+            invoke_native_hook(
+                &script, "record", &sidecar, &progress, &state, "finish", None
+            )
+            .status
+            .success()
+        );
+        let rows = std::fs::read_to_string(&sidecar).unwrap();
+        assert_eq!(rows.lines().count(), 7);
+        let capture = serde_json::json!({
+            "request": {"body": serde_json::json!({
+                "input": [{"call_id": "call-1", "output": "fixture"}]
+            }).to_string()}
+        });
+        // Provider request snapshots can retain the same already-completed
+        // call in later turns. Equal historical rows represent one exchange.
+        std::fs::write(
+            root.join("capture.jsonl"),
+            format!("{capture}\n{capture}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            &sidecar,
+            bind_provider_tool_outputs(rows.as_bytes(), &root.join("capture.jsonl")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&progress).unwrap())
+                .unwrap()["complete"],
+            true
+        );
+        std::fs::remove_file(&state).unwrap();
+        let replay = invoke_native_hook(
+            &script,
+            "replay",
+            &sidecar,
+            &progress,
+            &state,
+            "pre",
+            Some(&pre),
+        );
+        assert!(replay.status.success());
+        let value: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+        let command = value["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap();
+        assert!(command.contains(" emit 0"));
+        assert!(
+            !command.contains(marker.to_str().unwrap()),
+            "the replay wrapper must not execute the recorded native command"
+        );
+        let emitted = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .env("ASB_CODEX_NATIVE_MODE", "replay")
+            .env("ASB_CODEX_NATIVE_SIDECAR", &sidecar)
+            .env("ASB_CODEX_NATIVE_PROGRESS", &progress)
+            .env("ASB_CODEX_NATIVE_STATE", &state)
+            .output()
+            .unwrap();
+        assert!(emitted.status.success());
+        assert_eq!(String::from_utf8(emitted.stdout).unwrap(), "fixture");
+        assert!(
+            !marker.exists(),
+            "the recorded native command must never run in replay"
+        );
+        let replay_post = invoke_native_hook(
+            &script,
+            "replay",
+            &sidecar,
+            &progress,
+            &state,
+            "post",
+            Some(
+                r#"{"tool_name":"Bash","tool_use_id":"call-1","tool_response":"ignored-emitter-output"}"#,
+            ),
+        );
+        assert!(replay_post.status.success());
+        let replay_post: serde_json::Value = serde_json::from_slice(&replay_post.stdout).unwrap();
+        assert_eq!(
+            replay_post["hookSpecificOutput"]["hookEventName"].as_str(),
+            Some("PostToolUse")
+        );
+        assert_eq!(
+            replay_post["hookSpecificOutput"]["updatedMCPToolOutput"].as_str(),
+            Some("fixture")
+        );
+        assert!(
+            invoke_native_hook(
+                &script, "replay", &sidecar, &progress, &state, "finish", None
+            )
+            .status
+            .success()
+        );
+        let mismatch = invoke_native_hook(
+            &script,
+            "replay",
+            &sidecar,
+            &progress,
+            &state,
+            "pre",
+            Some(
+                r#"{"tool_name":"Bash","tool_use_id":"call-2","tool_input":{"command":"different"}}"#,
+            ),
+        );
+        assert!(!mismatch.status.success());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_correlation_consumes_cumulative_same_id_history_in_order() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-codex-provider-history-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let request = |id: &str| {
+            encode_base64(
+                serde_json::to_string(&serde_json::json!({"tool_use_id": id}))
+                    .unwrap()
+                    .as_bytes(),
+            )
+        };
+        let sidecar = [
+            serde_json::json!({"event":"write","request_b64":request("call-1")}),
+            serde_json::json!({"event":"output"}),
+            serde_json::json!({"event":"write","request_b64":request("call-1")}),
+            serde_json::json!({"event":"output"}),
+            serde_json::json!({"event":"workspace_effect"}),
+        ]
+        .into_iter()
+        .map(|row| serde_json::to_string(&row).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n";
+        let first = serde_json::json!({"request":{"body":serde_json::json!({"input":[{"call_id":"call-1","output":"first"}]}).to_string()}});
+        let second = serde_json::json!({"request":{"body":serde_json::json!({"input":[{"call_id":"call-1","output":"first"},{"call_id":"call-1","output":"second"}]}).to_string()}});
+        let capture = root.join("capture.jsonl");
+        std::fs::write(&capture, format!("{first}\n{second}\n")).unwrap();
+        let bound = bind_provider_tool_outputs(sidecar.as_bytes(), &capture).unwrap();
+        let rows = String::from_utf8(bound)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_ne!(rows[1]["output_b64"], rows[3]["output_b64"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn provider_correlation_ignores_non_native_write_stdin_results() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-codex-provider-call-kinds-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let request = encode_base64(br#"{"tool_use_id":"call-1"}"#);
+        let sidecar = [
+            serde_json::json!({"event":"write","request_b64":request}),
+            serde_json::json!({"event":"output"}),
+            serde_json::json!({"event":"workspace_effect"}),
+        ]
+        .into_iter()
+        .map(|row| serde_json::to_string(&row).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n";
+        let response = |name: &str| {
+            format!(
+                "data: {}\n",
+                serde_json::json!({
+                    "type":"response.output_item.done",
+                    "item":{"type":"function_call","name":name}
+                })
+            )
+        };
+        let row = |input: serde_json::Value, response: String| {
+            serde_json::json!({
+                "request":{"body":serde_json::json!({"input":input}).to_string()},
+                "response":{"body":response}
+            })
+        };
+        let capture = root.join("capture.jsonl");
+        let first = row(serde_json::json!([]), response("exec_command"));
+        let second = row(
+            serde_json::json!([{"call_id":"same","output":"native"}]),
+            response("write_stdin"),
+        );
+        let third = row(
+            serde_json::json!([
+                {"call_id":"same","output":"native"},
+                {"call_id":"same","output":"stream"}
+            ]),
+            String::new(),
+        );
+        std::fs::write(&capture, format!("{first}\n{second}\n{third}\n")).unwrap();
+        let bound = bind_provider_tool_outputs(sidecar.as_bytes(), &capture).unwrap();
+        let rows = String::from_utf8(bound)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let output = decode_base64(rows[1]["output_b64"].as_str().unwrap()).unwrap();
+        assert_eq!(output, br#""native""#);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

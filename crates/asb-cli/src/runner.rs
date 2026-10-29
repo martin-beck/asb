@@ -133,6 +133,8 @@ pub(crate) struct RunOptions<'a> {
     pub track: Option<crate::cassette::Selector>,
     pub replay_seed: Option<u64>,
     pub recording: Option<&'a recording::Recorder>,
+    /// Opaque, recorder-owned provider capture selected before dispatch.
+    pub provider_capture_path: Option<&'a Path>,
     pub repeat: Option<u64>,
     pub batch: Option<&'a repeated::BatchIdentity>,
     /// Exact selected native replay inputs for this batch.  This is private
@@ -254,7 +256,8 @@ pub(crate) fn run_with_diagnostics(
     // auxiliary replay artifacts.  A singleton campaign is semantically one
     // direct execution, but gives MCP relay and native capsule modes their
     // sealed sidecars without retaining an additional direct-run format.
-    let requires_artifact_campaign = options.mcp_mode.is_some()
+    let requires_artifact_campaign = options.mode == Some(tape::Mode::Record)
+        || options.mcp_mode.is_some()
         || options.native_capsule_record.is_some()
         || options.native_capsule_replay.is_some();
     if let Some(repeat) = options.repeat.or((bundled_replay
@@ -695,6 +698,11 @@ fn run_mode(
     output: &mut dyn Write,
     warnings: &Mutex<BTreeSet<String>>,
 ) -> Result<(), Error> {
+    if options.mode == Some(tape::Mode::Record) && options.provider_capture_path.is_none() {
+        return Err(Error::Run(
+            "record dispatch lost its owned provider capture path before attempt admission".into(),
+        ));
+    }
     // Register before any fallible setup. Early return or unwinding aborts peers.
     let mut arrival = options
         .preparation_gate

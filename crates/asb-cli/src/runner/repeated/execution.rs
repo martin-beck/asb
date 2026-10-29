@@ -14,6 +14,10 @@ pub(super) struct BatchRun<'a> {
     pub finished_path: PathBuf,
     pub generation: Option<StartReference>,
     pub cassette: Option<&'a str>,
+    /// Recorder-owned provider producer, retained independently from a
+    /// user-facing cassette spelling.  Adapter collection receives only its
+    /// bounded opaque bytes after the proxy settles.
+    pub provider_capture_path: Option<PathBuf>,
     pub recording: Option<Arc<super::super::recording::Recorder>>,
     pub reused: Option<&'a BTreeMap<usize, serde_json::Value>>,
 }
@@ -132,6 +136,7 @@ impl BatchRun<'_> {
                 measurement_dir: measurement_override.as_deref(),
                 cassette: self.cassette,
                 recording: self.recording.as_deref(),
+                provider_capture_path: self.provider_capture_path.as_deref(),
                 on_completion: Some(&observer),
                 reused: self.reused,
                 ..Default::default()
@@ -401,6 +406,9 @@ pub(crate) fn continue_campaign(
             finished_path: generation_batch.join("finished.json"),
             generation: Some(reference.clone()),
             cassette: cassette.as_deref(),
+            provider_capture_path: recording
+                .as_ref()
+                .map(|_| super::super::recording::producer(&root, number, 1, plan.concurrency)),
             recording: recording.clone(),
             reused: Some(&reused),
         }

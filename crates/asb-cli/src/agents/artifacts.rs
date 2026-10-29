@@ -162,6 +162,57 @@ impl FrozenArtifacts {
     pub fn diagnostic(&self) -> Option<String> {
         (!self.diagnostics.is_empty()).then(|| self.diagnostics.join("; "))
     }
+
+    /// Serialize a frozen, adapter-owned snapshot for an isolated guest's
+    /// host-side collection phase.  The envelope is generic custody data: its
+    /// payload is not interpreted until the owning adapter receives the
+    /// reconstructed `FrozenArtifacts` after the provider tape has settled.
+    pub(crate) fn deferred_collection_bytes(&self) -> Result<Vec<u8>, crate::Error> {
+        #[derive(serde::Serialize)]
+        struct Envelope<'a> {
+            schema_version: u8,
+            documents: &'a BTreeMap<String, serde_json::Value>,
+            bytes: &'a BTreeMap<String, Vec<u8>>,
+        }
+        serde_json::to_vec(&Envelope {
+            schema_version: 1,
+            documents: &self.documents,
+            bytes: &self.bytes,
+        })
+        .map_err(|_| crate::Error::Run("cannot encode deferred adapter artifacts".into()))
+    }
+
+    /// Reconstruct generic frozen custody data received through the bounded
+    /// guest artifact channel.  This deliberately validates only the common
+    /// envelope; adapter codecs remain responsible for their own documents.
+    pub(crate) fn from_deferred_collection_bytes(bytes: &[u8]) -> Result<Self, String> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Envelope {
+            schema_version: u8,
+            documents: BTreeMap<String, serde_json::Value>,
+            bytes: BTreeMap<String, Vec<u8>>,
+        }
+        let envelope: Envelope = serde_json::from_slice(bytes)
+            .map_err(|_| "deferred adapter artifact receipt is invalid".to_owned())?;
+        if envelope.schema_version != 1
+            || envelope.documents.len() > 16
+            || envelope.bytes.len() > 16
+            || envelope
+                .bytes
+                .values()
+                .try_fold(0usize, |total, value| total.checked_add(value.len()))
+                .is_none_or(|total| total > LIMIT as usize)
+        {
+            return Err("deferred adapter artifact receipt exceeds its bounds".into());
+        }
+        Ok(Self {
+            documents: envelope.documents,
+            bytes: envelope.bytes,
+            error: false,
+            diagnostics: Vec::new(),
+        })
+    }
     #[cfg(test)]
     pub(crate) fn for_test(filename: &str, value: serde_json::Value) -> Self {
         Self {
@@ -1138,5 +1189,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn deferred_collection_round_trip_preserves_generic_frozen_snapshots() {
+        let frozen = FrozenArtifacts {
+            documents: [(
+                "progress.json".into(),
+                serde_json::json!({"complete": true}),
+            )]
+            .into_iter()
+            .collect(),
+            bytes: [("sidecar.jsonl".into(), b"event\n".to_vec())]
+                .into_iter()
+                .collect(),
+            error: false,
+            diagnostics: Vec::new(),
+        };
+        let restored = FrozenArtifacts::from_deferred_collection_bytes(
+            &frozen.deferred_collection_bytes().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored.document("progress.json").unwrap()["complete"],
+            true
+        );
+        assert_eq!(restored.bytes("sidecar.jsonl"), Some(&b"event\n"[..]));
+    }
+
+    #[test]
+    fn deferred_collection_rejects_unknown_or_oversized_envelopes() {
+        assert!(
+            FrozenArtifacts::from_deferred_collection_bytes(
+                br#"{"schema_version":1,"extra":true,"documents":{},"bytes":{}}"#
+            )
+            .is_err()
+        );
+        let bytes = vec![b'x'; LIMIT as usize + 1];
+        let value =
+            serde_json::json!({"schema_version":1,"documents":{},"bytes":{"sidecar":bytes}});
+        assert!(
+            FrozenArtifacts::from_deferred_collection_bytes(&serde_json::to_vec(&value).unwrap())
+                .is_err()
+        );
     }
 }

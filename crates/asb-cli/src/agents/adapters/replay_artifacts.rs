@@ -43,6 +43,7 @@ mod tests {
         std::fs::write(run_dir.join("tool-replay/local-tools.jsonl"), b"tool\n").unwrap();
         let frozen = owner.freeze();
         let context = CollectionContext {
+            provider_capture: None,
             run_dir: &run_dir,
             frozen: &frozen,
             interface: None,
