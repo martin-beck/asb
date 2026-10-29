@@ -1,9 +1,9 @@
 """Adapter-owned Codex local-tool recorder/replayer.
 
-Codex invokes configured lifecycle hooks around every local tool call. This
+Codex invokes configured lifecycle hooks around every local tool call.  This
 script records only the hook-provided structured request/result objects in the
-private native sidecar. During replay the pre-tool hook validates the original
-call unchanged; the post-tool hook restores its recorded structured result.
+private native sidecar. During replay the pre-tool hook replaces the native
+call with this script's inert emitter, so no recorded command is executed.
 """
 import base64
 import fcntl
@@ -172,6 +172,10 @@ def _replay_exchanges():
     return exchanges
 
 
+def _quote(argument):
+    return "'" + argument.replace("'", "'\"'\"'") + "'"
+
+
 def _replay_pre(value):
     request = _request(value)
     identifier = _tool_id(value)
@@ -185,12 +189,21 @@ def _replay_pre(value):
         state["pending"][identifier] = index
         state["next"] = index + 1
         _save_state(state)
-        # Preserve Codex's original shell wrapper. Replacing it with a replay
-        # emitter changes the command shape retained in cumulative provider
-        # snapshots. The paired post-hook supplies the recorded result after
-        # the native call boundary instead.
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}}, separators=(",", ":")))
+        command = "{} {} emit {}".format(_quote(sys.executable), _quote(str(Path(__file__).resolve())), index)
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": {"command": command}}}, separators=(",", ":")))
     _with_lock(operation)
+
+
+def _response_text(value):
+    if isinstance(value, str):
+        return value, 0
+    if not isinstance(value, dict):
+        return json.dumps(value, separators=(",", ":")), 0
+    text = value.get("stdout", value.get("output", value.get("aggregated_output", value.get("text", ""))))
+    if not isinstance(text, str):
+        text = json.dumps(text, separators=(",", ":"))
+    code = value.get("exit_code", value.get("exitCode", 0))
+    return text, code if isinstance(code, int) else 0
 
 
 def _replay_post(value):
@@ -216,6 +229,18 @@ def _replay_post(value):
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedMCPToolOutput": response}}, separators=(",", ":")))
 
     _with_lock(operation)
+
+
+def _emit(index):
+    state = _load_state()
+    try:
+        encoded = state["replay"][index][1]
+        response = json.loads(base64.b64decode(encoded).decode("utf-8"))
+    except (IndexError, KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Codex native replay response is unavailable") from error
+    text, code = _response_text(response)
+    sys.stdout.write(text)
+    raise SystemExit(code)
 
 
 def _finish():
@@ -255,6 +280,8 @@ def main():
             raise RuntimeError("Codex native hook mode is invalid")
     elif command == "finish":
         _finish()
+    elif command == "emit" and len(sys.argv) == 3:
+        _emit(int(sys.argv[2]))
     else:
         raise RuntimeError("Codex native hook command is invalid")
 

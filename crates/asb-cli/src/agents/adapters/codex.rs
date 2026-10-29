@@ -951,7 +951,11 @@ mod tests {
         let sidecar = root.join("sidecar.jsonl");
         let progress = root.join("progress.json");
         let state = root.join("state.json");
-        let pre = r#"{"tool_name":"Bash","tool_use_id":"call-1","tool_input":{"command":"printf fixture"}}"#;
+        let marker = root.join("unexpected-native-execution");
+        let pre = format!(
+            r#"{{"tool_name":"Bash","tool_use_id":"call-1","tool_input":{{"command":"touch {}"}}}}"#,
+            marker.display()
+        );
         assert!(
             invoke_native_hook(
                 &script,
@@ -960,7 +964,7 @@ mod tests {
                 &progress,
                 &state,
                 "pre",
-                Some(pre)
+                Some(&pre)
             )
             .status
             .success()
@@ -1004,21 +1008,32 @@ mod tests {
             &progress,
             &state,
             "pre",
-            Some(pre),
+            Some(&pre),
         );
         assert!(replay.status.success());
         let value: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
-        assert_eq!(
-            value["hookSpecificOutput"]["hookEventName"].as_str(),
-            Some("PreToolUse")
-        );
-        assert_eq!(
-            value["hookSpecificOutput"]["permissionDecision"].as_str(),
-            Some("allow")
-        );
+        let command = value["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap();
+        assert!(command.contains(" emit 0"));
         assert!(
-            value["hookSpecificOutput"].get("updatedInput").is_none(),
-            "replay must retain Codex's original shell wrapper and request shape"
+            !command.contains(marker.to_str().unwrap()),
+            "the replay wrapper must not execute the recorded native command"
+        );
+        let emitted = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .env("ASB_CODEX_NATIVE_MODE", "replay")
+            .env("ASB_CODEX_NATIVE_SIDECAR", &sidecar)
+            .env("ASB_CODEX_NATIVE_PROGRESS", &progress)
+            .env("ASB_CODEX_NATIVE_STATE", &state)
+            .output()
+            .unwrap();
+        assert!(emitted.status.success());
+        assert_eq!(String::from_utf8(emitted.stdout).unwrap(), "fixture");
+        assert!(
+            !marker.exists(),
+            "the recorded native command must never run in replay"
         );
         let replay_post = invoke_native_hook(
             &script,
