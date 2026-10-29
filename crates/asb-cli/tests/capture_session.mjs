@@ -230,13 +230,10 @@ test("incomplete records retain bounded terminal classifications without payload
   capture.end(errored, { terminal: "error", delivered: false });
   const value = capture.finalize(receipt);
   assert.equal(value.complete, false);
-  assert.deepEqual(JSON.parse(fs.readFileSync(`${receipt}.delivery.json`)), {
-    schema_version: 1,
-    failures: [
-      { ordinal: 1, method: "POST", path: "/v1/messages", terminal: "close" },
-      { ordinal: 2, method: "POST", path: "/v1/embeddings", terminal: "error" },
-    ],
-  });
+  assert.deepEqual(value.delivery_failures, [
+    { sequence: 1, method: "POST", path: "/v1/messages", cause: "close" },
+    { sequence: 2, method: "POST", path: "/v1/embeddings", cause: "error" },
+  ]);
 });
 
 test("complete records do not retain a delivery sidecar", (t) => {
