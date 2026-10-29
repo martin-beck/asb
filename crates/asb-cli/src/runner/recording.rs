@@ -232,6 +232,13 @@ pub(super) fn preflight(destination: &Path) -> Result<PathBuf, Error> {
 }
 
 impl Recorder {
+    /// The one private producer file this recorder will later commit for a
+    /// selected replica. Callers may retain a bounded read-only view before
+    /// publication, but must not reinterpret its protocol bytes.
+    pub(crate) fn producer_path(&self, batch: u64, replica: usize) -> PathBuf {
+        producer(&self.root, batch, replica, self.concurrency)
+    }
+
     pub fn new(
         destination: PathBuf,
         root: PathBuf,

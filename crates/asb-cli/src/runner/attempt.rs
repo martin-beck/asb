@@ -978,7 +978,17 @@ impl<'a> CompletedAttempt<'a> {
                     .unwrap_or_else(|| "agent artifact snapshot unavailable".into()),
             );
         }
-        let provider_capture = match opaque_provider_capture(&settled.proxy_evidence) {
+        let provider_capture = match context
+            .options
+            .recording
+            .zip(context.options.batch)
+            .map(|(recorder, batch)| {
+                opaque_provider_capture(
+                    &recorder.producer_path(batch.number(), context.options.replica.index),
+                )
+            })
+            .transpose()
+        {
             Ok(binding) => binding,
             Err(error) => {
                 settled.issues.run_error(error.to_string());
@@ -1096,22 +1106,14 @@ impl<'a> CompletedAttempt<'a> {
     }
 }
 
-fn opaque_provider_capture(evidence: &crate::proxy::Evidence) -> Result<Option<Vec<u8>>, Error> {
-    if evidence.captures.is_empty() {
-        return Ok(None);
-    }
-    if evidence.captures.len() != 1 {
-        return Err(Error::Run("provider capture binding is ambiguous".into()));
-    }
-    let capture = &evidence.captures[0];
-    capture.validate()?;
-    let bytes = std::fs::read(&capture.output).map_err(crate::io_error)?;
-    if bytes.len() as u64 != capture.bytes || crate::cassette::digest(&bytes) != capture.sha256 {
+fn opaque_provider_capture(path: &std::path::Path) -> Result<Vec<u8>, Error> {
+    let bytes = std::fs::read(path).map_err(crate::io_error)?;
+    if bytes.len() > 256 * 1024 * 1024 {
         return Err(Error::Run(
-            "provider capture binding receipt differs".into(),
+            "provider capture binding exceeds its bound".into(),
         ));
     }
-    Ok(Some(bytes))
+    Ok(bytes)
 }
 
 struct PublicationResources {
