@@ -168,7 +168,7 @@ enum PreparedReplay {
 struct ActivationOptions {
     json: bool,
     show_output: bool,
-    verbose: bool,
+    quiet_output: bool,
     measurement_override: bool,
     policy: Option<crate::planning::ResolvedPlan>,
     tool_mode: Option<crate::tape::Mode>,
@@ -362,7 +362,7 @@ impl Inspection {
             options: ActivationOptions {
                 json: options.json,
                 show_output: options.show_output,
-                verbose: options.verbose,
+                quiet_output: options.quiet_output,
                 measurement_override: options.measurement_dir.is_some(),
                 policy: options.policy.cloned(),
                 tool_mode: options.tool_mode,
@@ -580,7 +580,7 @@ pub(crate) fn execute(
         )
         .map_err(|error| Error::Io(error.to_string()))?;
         writeln!(output).map_err(io_error)?;
-    } else if options.verbose {
+    } else if !options.quiet_output {
         writeln!(
             output,
             "Execution plan: {} ({total} executions)",
@@ -596,7 +596,7 @@ pub(crate) fn execute(
             )
             .map_err(|error| Error::Io(error.to_string()))?;
             writeln!(output).map_err(io_error)?;
-        } else if options.verbose {
+        } else if !options.quiet_output {
             writeln!(
                 output,
                 "Replay seed: {} ({})\nSelected track IDs: {}",
@@ -717,7 +717,7 @@ pub(crate) fn execute(
             )
             .map_err(|error| Error::Io(error.to_string()))?;
             writeln!(output).map_err(io_error)?;
-        } else if options.verbose {
+        } else if !options.quiet_output {
             match &publication {
                 Some(Ok(Some(published))) => {
                     writeln!(
@@ -753,7 +753,7 @@ pub(crate) fn execute(
                 .unwrap_or("recording publication failed")
         )));
     }
-    if !options.json && !options.verbose {
+    if !options.json && options.quiet_output {
         writeln!(
             output,
             "Benchmarks: succeeded={completed_executions} failed={}",
@@ -762,7 +762,7 @@ pub(crate) fn execute(
         .map_err(io_error)?;
     }
     if failures > 0 || stopped {
-        if options.verbose {
+        if !options.quiet_output {
             Err(Error::Run(format!(
                 "repeated execution had {failures} failed batch(es){}; {}; inspect {}",
                 if stopped {

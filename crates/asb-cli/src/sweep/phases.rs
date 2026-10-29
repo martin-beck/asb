@@ -604,7 +604,7 @@ impl SettledSweep<'_> {
         }
         #[cfg(all(test, unix))]
         tests::before_comparison(Path::new(&source));
-        let comparison_error = if options.json || !options.verbose || output.failed() {
+        let comparison_error = if options.json || options.quiet_output || output.failed() {
             compare::run(&source, &mut std::io::sink()).err()
         } else {
             compare::run(&source, output).err()
@@ -616,7 +616,7 @@ impl SettledSweep<'_> {
                 .iter()
                 .map(|(_, configs)| configs.len())
                 .sum::<usize>();
-            let mut details = if options.verbose {
+            let mut details = if !options.quiet_output {
                 format!(
                     "sweep completed with {failed} failed benchmark(s): {}",
                     failures

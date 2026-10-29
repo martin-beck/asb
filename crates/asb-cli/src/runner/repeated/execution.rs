@@ -298,7 +298,7 @@ pub(crate) fn continue_campaign(
     let options = ActivationOptions {
         json,
         show_output,
-        verbose: false,
+        quiet_output: false,
         policy: policy.cloned(),
         measurement_override: plan.measurement_storage
             == Some(super::super::campaign::MeasurementStorage::Override),
