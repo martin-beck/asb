@@ -88,12 +88,11 @@ fn prepare_native_tool_replay(
             "cannot write Hermes native-tool transport: {error}"
         ))
     })?;
+    // `hermes` is a declared artifact namespace.  Do not create it here:
+    // ArtifactOwner exclusively claims that directory immediately before the
+    // adapter runs.  The injected runtime hook creates its files only after
+    // that claim, which prevents a preparation-time namespace collision.
     let output = context.run_dir.join("hermes");
-    std::fs::create_dir_all(&output).map_err(|error| {
-        Error::Run(format!(
-            "cannot create Hermes tool artifact directory: {error}"
-        ))
-    })?;
     let progress = output.join("native-tool-progress.json");
     let mode = match tape.mode {
         crate::tape::Mode::Record => "record",
@@ -388,7 +387,7 @@ mod tests {
         // Declared artifacts are owned by the driver before the injected
         // runtime creates them. Preparation must not pre-create a path in the
         // adapter namespace, or the owner correctly treats it as foreign.
-        assert!(!run.join("hermes/native-tool-progress.json").exists());
+        assert!(!run.join("hermes").exists());
         assert!(
             std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
                 .unwrap()
