@@ -990,12 +990,24 @@ impl<'a> CompletedAttempt<'a> {
         // does not read or interpret protocol bytes; the adapter owns that
         // bounded correlation. The tape route is the direct-record fallback
         // for legacy activation copies that did not retain the private field.
-        let provider_capture = context.provider_capture_path.as_deref().or_else(|| {
-            context
-                .tape_cassette
-                .as_ref()
-                .and_then(|(mode, path)| (*mode == tape::Mode::Record).then_some(path.as_path()))
-        });
+        let provider_capture = context
+            .provider_capture_path
+            .as_deref()
+            .or_else(|| {
+                context.tape_cassette.as_ref().and_then(|(mode, path)| {
+                    (*mode == tape::Mode::Record).then_some(path.as_path())
+                })
+            })
+            .or_else(|| {
+                // A proxy chain owns its published output handles. This is a
+                // custody fallback only: generic code neither opens nor
+                // parses the file, and adapters receive one opaque handle.
+                settled
+                    .proxy_evidence
+                    .output_files
+                    .first()
+                    .map(PathBuf::as_path)
+            });
         let adapter_artifacts = if settled.evidence.guest.is_none() {
             agents::find(&config.agent)
                 .map(|adapter| {
