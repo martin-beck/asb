@@ -255,13 +255,25 @@ function normalizePytestElapsed(value) {
   return value.replace(/(^|\\n|\r?\n)((?:\d+ (?:failed|passed|skipped|deselected|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1$2<asb-elapsed>");
 }
 
+// Python renders a callable's process-local address in its fixed repr.  This
+// is terminal presentation noise, not a tool result change.  Keep the exact
+// existing callable-rendering rule in one helper so it applies both before
+// parsing a request and after structured request strings have been decoded.
+function normalizeFunctionRenderingAddress(value) {
+  // Callable names can include a nested `<locals>` segment, so stop only at
+  // the fixed ` at 0x...>` suffix rather than at the first closing bracket.
+  return value.replace(/(<function [^\n]*? at )0x[0-9a-f]+>/gi, "$1<asb-address>>");
+}
+
 function normalizeCassetteBody(body) {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const callIdentifiers = new Map();
-  const normalized = normalizePytestElapsed(normalizeWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace)
-    .replaceAll(workspace || "\u0000", "<asb-workspace>"))
+  const normalized = normalizeFunctionRenderingAddress(normalizePytestElapsed(
+    normalizeWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace)
+      .replaceAll(workspace || "\u0000", "<asb-workspace>")),
+  ))
     // Preserve distinct call IDs before the generic UUID normalizer below.
     // OpenCode uses `call-<uuid>` while some OpenAI-compatible clients use
     // `call_<uuid>`; both forms are provider-generated rather than prompt
@@ -321,7 +333,7 @@ function normalizeCassetteBody(body) {
     // retain all file contents, failure counts, and commands while replacing
     // only those run-local rendering details before cassette comparison.
     .replace(/\/opt\/asb-private\/agent-state\/data\/opencode\/tool-output\/tool_[A-Za-z0-9_-]+/g, "<asb-opencode-tool-output>")
-    .replace(/(<function [^\n>]+ at )0x[0-9a-f]+>/gi, "$1<asb-address>>")
+    .replace(/((?:\b\d+ (?:failed|passed|skipped|deselected|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1<asb-elapsed>")
     // pip's download progress embeds live transfer throughput and ETA after
     // the already-significant artifact size. Keep the package and byte count
     // strict while removing only transport timing from tool history.
@@ -458,6 +470,7 @@ function normalizeCassetteBody(body) {
         return "<asb-workbuddy-conversation-request>";
       }
       if (typeof value === "string") {
+        value = normalizeFunctionRenderingAddress(value);
         value = normalizeToolSearchOrdering(value);
         value = normalizeLsDiagnosticOrdering(value);
         const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
