@@ -651,9 +651,9 @@ class AbilityManager:
                 return {"success": False, "data": {"unrelated": True}, "error": None}
         pairs = [
             "non-tool",
-            (SyntheticResult(), None),
+            (SyntheticResult(), ToolMessage("synthetic-before", "unrelated-before")),
             (result, message),
-            (SyntheticResult(), None),
+            (SyntheticResult(), ToolMessage("synthetic-after", "unrelated-after")),
         ]
         if os.environ.get("ASB_TEST_EXTRA_NATIVE_MESSAGE"):
             pairs.append((result, ToolMessage(message.tool_call_id, "extra-native")))
@@ -730,19 +730,20 @@ async def main():
         inner_output = await inner.invoke({{"inner": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})
         inner.render_for_llm(inner_output)
         output = await instance.invoke({{"value": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})
-        # The real OpenJiuwen pipeline may reconstruct a ToolOutput between
-        # invocation and rendering. Exercise the adapter's immediate,
-        # payload-verified association rather than object identity alone.
-        if not os.environ.get("ASB_TEST_KEEP_RESULT_IDENTITY"):
-            output = type(output).model_validate(output.model_dump())
-        first_render = AbilityManager._render_tool_result(instance, None, output)
-        AbilityManager._render_tool_result(instance, None, output)
-        message = ToolMessage(os.environ.get("ASB_TEST_TOOL_CALL_ID", tool.label), "live")
+        # Final-message admission is provenance-based: a copied ToolOutput
+        # has no private native marker and must not be guessed from payload.
+        tool_call = type("ToolCall", (), {{"id": os.environ.get("ASB_TEST_TOOL_CALL_ID", tool.label)}})()
+        first_render = AbilityManager._render_tool_result(instance, tool_call, output)
+        AbilityManager._render_tool_result(instance, tool_call, output)
+        message_id = os.environ.get("ASB_TEST_TOOL_CALL_ID", tool.label)
+        if os.environ.get("ASB_TEST_CHANGED_FINAL_PROVENANCE"):
+            message_id = "changed-" + message_id
+        message = ToolMessage(message_id, "live")
         mixed = await AbilityManager().execute(output, message)
         assert mixed[0] == "non-tool"
-        assert mixed[1][1] is None
+        assert mixed[1][1].content == "unrelated-before"
         assert isinstance(mixed[2][1].tool_call_id, str)
-        assert mixed[3][1] is None
+        assert mixed[3][1].content == "unrelated-after"
         result.append(mixed[2][1].tool_call_id)
     print(json.dumps(result, sort_keys=True))
 asyncio.run(main())
@@ -873,6 +874,24 @@ with open(destination,"w",encoding="utf-8") as output:
             .unwrap();
         assert!(!extra.status.success());
         assert!(String::from_utf8_lossy(&extra.stderr).contains("final tool message"));
+        let changed_provenance = super::process(entry.to_str().unwrap())
+            .unwrap()
+            .direct()
+            .arg("--asb-native-tool-replay")
+            .arg(&sidecar)
+            .env("PYTHONPATH", &root)
+            .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_TEST_WORKSPACE", &replay_workspace)
+            .env("ASB_TEST_RENDER_PREFIX", "replay:")
+            .env("ASB_TEST_CHANGED_FINAL_PROVENANCE", "1")
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
+            .output()
+            .unwrap();
+        assert!(!changed_provenance.status.success());
+        assert!(
+            String::from_utf8_lossy(&changed_provenance.stderr)
+                .contains("left final tool messages unconsumed")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

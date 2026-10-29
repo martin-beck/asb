@@ -116,6 +116,10 @@ _message_cursor = 0
 _recorded_outputs = {}
 _replayed_renders = {}
 _replayed_output_events = {}
+# Private, process-local provenance.  A final ToolMessage is eligible only
+# when AbilityManager rendered the exact output returned by a wrapped native
+# tool; values and tool-call ids are not provenance.
+_final_event_by_tool_call_id = {}
 _native_workspace = os.path.realpath(
     os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", "")
 ) if os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE") else ""
@@ -155,6 +159,21 @@ def _owned_recorded_event(output):
     if recorded is not None and recorded[0] is output:
         return recorded[1]
     return None
+
+def _owned_replayed_event(output):
+    replayed = _replayed_output_events.get(id(output))
+    if replayed is not None and replayed[0] is output:
+        return replayed[1]
+    return None
+
+def _bind_final_event(tool_call, event):
+    tool_call_id = getattr(tool_call, "id", None)
+    if not isinstance(tool_call_id, str) or not tool_call_id or event is None:
+        return
+    previous = _final_event_by_tool_call_id.get(tool_call_id)
+    if previous is not None and previous is not event:
+        raise RuntimeError("ASB OpenJiuwen native replay final tool provenance changed")
+    _final_event_by_tool_call_id[tool_call_id] = event
 
 def _request_shape(value):
     if isinstance(value, str):
@@ -287,11 +306,13 @@ try:
         def _render_tool_result_with_native_replay(tool, tool_call, result):
             replayed = _replayed_renders.get(id(result))
             if replayed is not None:
-                return replayed
-            rendered = _original_render_tool_result(tool, tool_call, result)
-            event = _owned_recorded_event(result)
+                rendered = replayed
+            else:
+                rendered = _original_render_tool_result(tool, tool_call, result)
+            event = _owned_replayed_event(result) if _replay_path else _owned_recorded_event(result)
             if event is not None:
                 _remember_recorded_render(event, rendered)
+                _bind_final_event(tool_call, event)
             return rendered
 
         AbilityManager._render_tool_result = _render_tool_result_with_native_replay
@@ -316,55 +337,15 @@ try:
                     or not isinstance(getattr(message, "content", None), str)
                 ):
                     continue
-                if _replay_path:
-                    # AbilityManager is the final model-message boundary.
-                    # OpenJiuwen may reconstruct its ToolOutput before this
-                    # point, so object identity cannot distinguish a valid
-                    # final result from its copy. Consume only the next sealed
-                    # final message; a missing or extra concrete ToolMessage
-                    # is a fail-closed sequence error.
-                    if _message_cursor >= len(final_outputs):
-                        raise RuntimeError("ASB OpenJiuwen native replay has an extra final tool message")
-                    event = final_outputs[_message_cursor]
-                else:
-                    event = _owned_recorded_event(_result)
-                if event is None and not _replay_path:
-                    # Upstream rails may reconstruct a ToolOutput before
-                    # returning it. During replay the sealed final-message
-                    # sequence is the only admissible candidate. During
-                    # recording, accept exactly one unsealed native output;
-                    # an ambiguous duplicate is deliberately left unsealed.
-                    try:
-                        actual = _normalize_workspace(_result.model_dump())
-                        if _replay_path:
-                            candidates = final_outputs[_message_cursor:_message_cursor + 1]
-                        else:
-                            candidates = []
-                            for output in outputs:
-                                envelope = json.loads(base64.b64decode(output["output_b64"]))
-                                if envelope.get("message") is None:
-                                    candidates.append(output)
-                        matches = [
-                            candidate for candidate in candidates
-                            if json.loads(base64.b64decode(candidate["output_b64"])).get("tool_output") == actual
-                        ]
-                        if len(matches) == 1:
-                            event = matches[0]
-                        elif _replay_path:
-                            raw_matches = [
-                                output for output in outputs
-                                if json.loads(base64.b64decode(output["output_b64"])).get("tool_output") == actual
-                            ]
-                            if raw_matches:
-                                raise RuntimeError(
-                                    "ASB OpenJiuwen native replay final tool message is missing or out of order"
-                                )
-                    except (AttributeError, KeyError, TypeError, ValueError):
-                        pass
+                # Only this private association is eligible.  Synthetic and
+                # rail-generated ToolMessages must pass through untouched.
+                event = _final_event_by_tool_call_id.get(message.tool_call_id)
                 if event is None:
                     continue
                 envelope = json.loads(base64.b64decode(event["output_b64"]))
                 if _replay_path:
+                    if _message_cursor >= len(final_outputs) or event is not final_outputs[_message_cursor]:
+                        raise RuntimeError("ASB OpenJiuwen native replay final tool message is missing or out of order")
                     final = envelope.get("message")
                     if not isinstance(final, dict) or not isinstance(final.get("tool_call_id"), str) or not isinstance(final.get("content"), str):
                         raise RuntimeError("ASB OpenJiuwen native replay final tool message is missing or out of order")
@@ -531,3 +512,11 @@ if _replay_path:
     _recorded_exchanges = sum(1 for event in _native_events if event.get("event") == "write")
     if _native_cursor != _recorded_exchanges:
         raise SystemExit("ASB OpenJiuwen native replay left recorded native tool exchanges unconsumed")
+    _recorded_final_messages = sum(
+        1
+        for event in _native_events
+        if event.get("event") == "output"
+        and isinstance(json.loads(base64.b64decode(event["output_b64"])).get("message"), dict)
+    )
+    if _message_cursor != _recorded_final_messages:
+        raise SystemExit("ASB OpenJiuwen native replay left final tool messages unconsumed")
