@@ -103,7 +103,15 @@ fn prepare_native_tool_replay(
     };
     let sidecar = match tape.mode {
         crate::tape::Mode::Record => output.join("native-tool-sidecar.jsonl"),
-        crate::tape::Mode::Replay => context.runtime_dir.join("native-tool-sidecar.jsonl"),
+        // The guest driver gives adapters an `agent-state` child as their
+        // mutable runtime directory.  The sealed replay input is deliberately
+        // staged at the owned guest-private runtime root, beside that child,
+        // so it is not recreated or inferred from a provider cassette.
+        crate::tape::Mode::Replay => context
+            .runtime_dir
+            .parent()
+            .ok_or_else(|| Error::Run("cannot resolve Hermes native replay directory".into()))?
+            .join("native-tool-sidecar.jsonl"),
     };
     let inherited = std::env::var_os("PYTHONPATH");
     let mut entries = vec![directory];
@@ -484,6 +492,45 @@ mod tests {
         assert!(hook.contains(
             "return original_persist_tool_result(content, tool_name, tool_use_id, **kwargs)"
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_terminal_replay_uses_the_guest_private_sidecar_root() {
+        let root = std::env::temp_dir().join(format!("asb-hermes-native-{}", std::process::id()));
+        let runtime = root.join("agent-state");
+        let run = root.join("run");
+        let tape = root.join("provider.jsonl");
+        let mut command = Command::new("hermes");
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiResponses,
+            base_url: "http://127.0.0.1:4242/v1".into(),
+            credential: Some("fixture-key".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        prepare_native_tool_replay(
+            &mut PreparationContext {
+                command: &mut command,
+                model: "fixture",
+                connection: &connection,
+                workspace: &root,
+                runtime_dir: &runtime,
+                run_dir: &run,
+                mcp_servers: &[],
+                mcp_tape: None,
+                tape: None,
+            },
+            super::super::TapeContext {
+                mode: crate::tape::Mode::Replay,
+                cassette: &tape,
+            },
+        )
+        .unwrap();
+        let env = environment(&command);
+        assert_eq!(
+            env["ASB_HERMES_NATIVE_SIDECAR"],
+            root.join("native-tool-sidecar.jsonl").display().to_string()
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
