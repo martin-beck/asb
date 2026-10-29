@@ -468,6 +468,54 @@ mod tests {
     }
 
     #[test]
+    fn native_progress_exposes_only_whitelisted_mismatch_fields() {
+        for field in ["command", "timeout", "workdir", "watch_patterns"] {
+            let frozen = crate::agents::artifacts::FrozenArtifacts::for_test(
+                "native-tool-progress.json",
+                serde_json::json!({
+                    "schema_version": 1,
+                    "mode": "replay",
+                    "complete": false,
+                    "error": format!("native terminal request differs:{field}"),
+                }),
+            );
+            let artifacts = collect(&CollectionContext {
+                frozen: &frozen,
+                run_dir: Path::new("/fixture"),
+                interface: None,
+                anthropic_input_includes_cache: false,
+                mcp_servers: &[],
+                mcp_tape: None,
+            });
+            assert_eq!(
+                artifacts.errors,
+                vec![format!("Hermes native terminal request differs:{field}")]
+            );
+        }
+        let frozen = crate::agents::artifacts::FrozenArtifacts::for_test(
+            "native-tool-progress.json",
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "replay",
+                "complete": false,
+                "error": "native terminal request differs:unexpected-private-value",
+            }),
+        );
+        let artifacts = collect(&CollectionContext {
+            frozen: &frozen,
+            run_dir: Path::new("/fixture"),
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert_eq!(
+            artifacts.errors,
+            vec!["Hermes native terminal replay did not complete"]
+        );
+    }
+
+    #[test]
     fn usage_ledger_is_collected_without_parsing_response_text() {
         let root = std::env::temp_dir().join(format!("asb-hermes-usage-{}", std::process::id()));
         let path = root.join("hermes/usage.json");
