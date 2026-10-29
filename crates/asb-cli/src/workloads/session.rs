@@ -302,16 +302,12 @@ pub(crate) struct ExecutionContext<'a> {
 
 impl<'a> ExecutionContext<'a> {
     #[cfg(not(test))]
-    pub(crate) fn native_tool(
-        &self,
-    ) -> Option<(&crate::cassette::NativeToolLaunch, &Path)> {
+    pub(crate) fn native_tool(&self) -> Option<(&crate::cassette::NativeToolLaunch, &Path)> {
         self.native_tool
     }
 
     #[cfg(test)]
-    pub(crate) fn native_tool(
-        &self,
-    ) -> Option<(&crate::cassette::NativeToolLaunch, &Path)> {
+    pub(crate) fn native_tool(&self) -> Option<(&crate::cassette::NativeToolLaunch, &Path)> {
         None
     }
 }
