@@ -196,7 +196,11 @@ class Replayer:
             # A bounded field name is safe to retain in the private process
             # diagnostic; never write either tool request or response.
             print("ASB_HERMES_NATIVE_MISMATCH:" + component, file=sys.stderr, flush=True)
-            raise RuntimeError("Hermes terminal request differs from its recording")
+            # Hermes turns a raised tool exception into a runtime-rendered
+            # error envelope. Return only the fixed field category instead so
+            # the next provider request can diagnose the binding without
+            # disclosing either side of the tool exchange.
+            return json.dumps({"asb_native_mismatch": component}, separators=(",", ":"))
         response = self.exchanges[self.index][1]
         self.index += 1
         try:
