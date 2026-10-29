@@ -30,15 +30,17 @@ def _digest(value):
     return hashlib.sha256(value).hexdigest()
 
 
-def _request(command, background, timeout, task_id, session_id, force, workdir, pty, notify_on_complete, watch_patterns):
+def _request(command, background, timeout, _task_id, _session_id, force, workdir, pty, notify_on_complete, watch_patterns):
     return _encoded({
         "kind": "terminal",
         "schema_version": 1,
         "command": command,
         "background": background,
         "timeout": timeout,
-        "task_id": task_id,
-        "session_id": session_id,
+        # Hermes generates these IDs for each process. They route no terminal
+        # operation themselves, so exclude only them from the adapter-owned
+        # replay identity; command, options, workdir and every response byte
+        # remain exact.
         "force": force,
         "workdir": workdir,
         "pty": pty,
