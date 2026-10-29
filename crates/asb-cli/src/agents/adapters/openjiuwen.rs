@@ -10,6 +10,58 @@ const ARTIFACTS: &[super::super::ArtifactSpec] = &[super::super::ArtifactSpec {
     format: super::super::ArtifactFormat::JsonLines,
 }];
 
+// OpenJiuwen recreates a provider-wire tool-result id after replaying an
+// Anthropic tool-use response. The response's immediate assistant turn is
+// already materialized by llmtape, so use that exact ordered turn as the
+// adapter-local authority for the following result turn. This is deliberately
+// narrower than a generic id normalizer: malformed, missing, reordered, or
+// non-adjacent tool exchanges fail before a request is forwarded.
+const TAPE_WIRE_EXTENSION: &str = r#"
+function fail(reason) {
+  throw new Error(`OpenJiuwen tool-result replay relation is invalid: ${reason}`);
+}
+
+function object(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+export function normalizeRequest(request) {
+  const value = request?.body;
+  if (!request?.url?.includes("/messages") || !object(value) || !Array.isArray(value.messages)) {
+    return value;
+  }
+  for (let index = 0; index < value.messages.length; index += 1) {
+    const resultTurn = value.messages[index];
+    if (!object(resultTurn) || resultTurn.role !== "user" || !Array.isArray(resultTurn.content)) continue;
+    const results = resultTurn.content.filter((block) => object(block) && block.type === "tool_result");
+    if (results.length === 0) continue;
+    if (results.length !== resultTurn.content.length || index === 0) {
+      fail("tool results must occupy one non-initial user turn");
+    }
+    const callTurn = value.messages[index - 1];
+    if (!object(callTurn) || callTurn.role !== "assistant" || !Array.isArray(callTurn.content)) {
+      fail("tool results require the immediately preceding assistant tool-use turn");
+    }
+    const calls = callTurn.content.filter((block) => object(block) && block.type === "tool_use");
+    if (calls.length !== callTurn.content.length || calls.length !== results.length) {
+      fail("tool-use and tool-result counts must match exactly");
+    }
+    for (let position = 0; position < results.length; position += 1) {
+      const call = calls[position];
+      const result = results[position];
+      if (typeof call.id !== "string" || call.id.length === 0
+          || typeof result.tool_use_id !== "string" || result.tool_use_id.length === 0) {
+        fail("tool-use and tool-result ids must be non-empty strings");
+      }
+      // This is the only rewritten field. The assistant call id comes from
+      // the exact replayed response immediately preceding this result.
+      result.tool_use_id = call.id;
+    }
+  }
+  return value;
+}
+"#;
+
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "openjiuwen",
     "openjiuwen",
@@ -31,6 +83,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_final_response_failure(final_response_failure)
 .with_native_tool_transport()
 .with_artifact_specs(ARTIFACTS)
+.with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_collection(collect)
 .with_process(process);
 
@@ -227,6 +280,60 @@ mod tests {
     use super::command;
     use crate::agents::{ArtifactOwner, CollectionContext, CommandContext};
     use crate::benchmark::BenchmarkConfig;
+
+    #[test]
+    fn tape_wire_extension_rewrites_only_a_complete_adjacent_tool_pair() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-openjiuwen-wire-extension-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("extension.mjs"), super::TAPE_WIRE_EXTENSION).unwrap();
+        std::fs::write(
+            root.join("test.mjs"),
+            r#"import { normalizeRequest } from "./extension.mjs";
+const valid = {
+  url: "/v1/messages",
+  body: { messages: [
+    { role: "assistant", content: [{ type: "tool_use", id: "recorded", name: "read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "regenerated", content: [{ type: "text", text: "ok" }] }] },
+  ] },
+};
+if (normalizeRequest(valid).messages[1].content[0].tool_use_id !== "recorded") throw new Error("valid rewrite failed");
+const invalid = [
+  { url: "/v1/messages", body: { messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: [] }] }] } },
+  { url: "/v1/messages", body: { messages: [
+    { role: "assistant", content: [{ type: "tool_use", id: "x", name: "read", input: {} }, { type: "tool_use", id: "y", name: "write", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: [] }] },
+  ] } },
+  { url: "/v1/messages", body: { messages: [
+    { role: "assistant", content: [{ type: "tool_use", id: "x", name: "read", input: {} }, { type: "text", text: "reordered" }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: [] }] },
+  ] } },
+  { url: "/v1/messages", body: { messages: [
+    { role: "assistant", content: [{ type: "tool_use", id: "", name: "read", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: [] }] },
+  ] } },
+];
+for (const request of invalid) {
+  let rejected = false;
+  try { normalizeRequest(request); } catch { rejected = true; }
+  if (!rejected) throw new Error("malformed tool pair was accepted");
+}
+"#,
+        )
+        .unwrap();
+        let output = std::process::Command::new("node")
+            .arg(root.join("test.mjs"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn native_tool_recording_is_collected_from_the_frozen_guest_artifact() {
