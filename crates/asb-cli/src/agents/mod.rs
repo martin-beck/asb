@@ -1066,11 +1066,12 @@ mod tests {
 
     #[test]
     fn native_tool_transport_requires_an_explicit_adapter_capability() {
-        assert!(
-            all()
-                .iter()
-                .all(|adapter| !adapter.supports_native_tool_transport())
-        );
+        let capable = all()
+            .iter()
+            .filter(|adapter| adapter.supports_native_tool_transport())
+            .map(|adapter| adapter.id())
+            .collect::<Vec<_>>();
+        assert_eq!(capable, vec!["openhands"]);
         let adapter = find("codex").unwrap();
         assert!(select_process(adapter, "not-executed", None).is_ok());
     }
