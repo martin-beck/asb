@@ -89,8 +89,10 @@ fn download_uncached(
     )))?;
     #[cfg(not(target_os = "linux"))]
     let curl = PathBuf::from("curl");
+    let discovered_total = discover_content_length(scope, &curl, source, staging, options);
     let headers = staging.with_extension(format!("headers-{}", tools::runtime::unique_id()));
-    let download = super::super::transfer::Download::start(staging, &headers, options.kind);
+    let download =
+        super::super::transfer::Download::start(staging, &headers, options.kind, discovered_total);
     let mut step = scope.prepare(curl, Purpose::Download, options.kind)?;
     step.command_mut()
         .args([
@@ -128,6 +130,53 @@ fn download_uncached(
         )).into());
     }
     Ok(())
+}
+
+/// Discover a direct source size before starting its transfer. Prefer a normal
+/// HEAD response; when an origin omits that metadata, ask for a single byte
+/// and use its `Content-Range` total. Both probes are bounded, best-effort and
+/// never change the later download's validation or failure behavior.
+fn discover_content_length(
+    scope: &mut ProcessScope,
+    curl: &Path,
+    source: &str,
+    staging: &Path,
+    options: &Options<'_>,
+) -> Option<u64> {
+    let headers = staging.with_extension(format!("probe-headers-{}", tools::runtime::unique_id()));
+    let body = staging.with_extension(format!("probe-body-{}", tools::runtime::unique_id()));
+    let probe = |range: bool, scope: &mut ProcessScope| -> Option<u64> {
+        let mut step = scope.prepare(curl, Purpose::Probe, options.kind).ok()?;
+        let command = step.command_mut();
+        command.args([
+            "--disable",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "15",
+            "--dump-header",
+        ]);
+        command.arg(&headers).arg("--output").arg(&body);
+        if range {
+            command.args(["--range", "0-0", "--max-filesize", "1"]);
+        } else {
+            command.arg("--head");
+        }
+        command.arg(source).stdin(Stdio::null());
+        let _ = scope.run(step);
+        super::super::transfer::content_length(&headers)
+    };
+    let result = probe(false, scope).or_else(|| {
+        let _ = fs::remove_file(&headers);
+        let _ = fs::remove_file(&body);
+        probe(true, scope)
+    });
+    let _ = fs::remove_file(headers);
+    let _ = fs::remove_file(body);
+    result.filter(|total| *total <= options.limit)
 }
 
 /// A user-owned, content-verified cache for ASB's direct archive downloads.

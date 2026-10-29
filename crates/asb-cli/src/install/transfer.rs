@@ -163,9 +163,17 @@ impl Drop for Activity {
 }
 
 impl Download {
-    pub(crate) fn start(destination: &Path, headers: &Path, label: &str) -> Self {
+    pub(crate) fn start(
+        destination: &Path,
+        headers: &Path,
+        label: &str,
+        discovered_total: Option<u64>,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let state = Arc::new(Mutex::new(Progress::default()));
+        let state = Arc::new(Mutex::new(Progress {
+            total_bytes: discovered_total,
+            ..Progress::default()
+        }));
         let worker = thread::Builder::new()
             .name("asb-download-progress".into())
             .spawn({
@@ -174,7 +182,7 @@ impl Download {
                 let destination = destination.to_path_buf();
                 let headers = headers.to_path_buf();
                 let label = label.to_owned();
-                move || observe_download(stop, state, destination, headers, label)
+                move || observe_download(stop, state, destination, headers, label, discovered_total)
             })
             .ok();
         Self {
@@ -298,6 +306,7 @@ fn observe_download(
     destination: PathBuf,
     headers: PathBuf,
     label: String,
+    discovered_total: Option<u64>,
 ) {
     let interactive = io::stderr().is_terminal();
     let started = Instant::now();
@@ -309,7 +318,7 @@ fn observe_download(
         let completed = fs::metadata(&destination)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        let total = content_length(&headers);
+        let total = content_length(&headers).or(discovered_total);
         let elapsed = now.duration_since(previous_at);
         let speed = if elapsed.is_zero() {
             0
@@ -342,7 +351,7 @@ fn observe_download(
     let completed = fs::metadata(&destination)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
-    let total = content_length(&headers);
+    let total = content_length(&headers).or(discovered_total);
     let seconds = now.duration_since(started).as_secs_f64().max(0.001);
     let snapshot = Progress {
         completed_bytes: completed,
@@ -537,7 +546,10 @@ fn clear_snapshot_at(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
-fn content_length(headers: &Path) -> Option<u64> {
+/// Return the body length announced by the final HTTP response. A range
+/// response may omit `Content-Length` (which is just the one-byte range), so
+/// its complete `Content-Range` total is the fallback.
+pub(crate) fn content_length(headers: &Path) -> Option<u64> {
     let bytes = fs::read(headers).ok()?;
     let text = std::str::from_utf8(&bytes[..bytes.len().min(HEADER_LIMIT)]).ok()?;
     // `curl --dump-header` records every redirect response. Only the final
@@ -545,6 +557,7 @@ fn content_length(headers: &Path) -> Option<u64> {
     // means a streamed body with an unknown total, never a reason to borrow a
     // preceding redirect's length.
     let mut content_length = None;
+    let mut content_range = None;
     for line in text.lines().rev() {
         let line = line.trim();
         if line.starts_with("HTTP/") {
@@ -555,10 +568,16 @@ fn content_length(headers: &Path) -> Option<u64> {
         };
         if name.eq_ignore_ascii_case("content-length") {
             content_length = value.trim().parse::<u64>().ok();
-            break;
+        } else if name.eq_ignore_ascii_case("content-range") {
+            content_range = value
+                .trim()
+                .rsplit_once('/')
+                .and_then(|(_, total)| total.parse::<u64>().ok());
         }
     }
-    content_length.filter(|length| *length > 0)
+    content_range
+        .filter(|length| *length > 0)
+        .or_else(|| content_length.filter(|length| *length > 0))
 }
 
 fn bytes(value: u64) -> String {
@@ -643,6 +662,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(content_length(&path), None);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn content_length_uses_final_range_total_when_head_length_is_unavailable() {
+        let path = std::env::temp_dir().join(format!(
+            "asb-progress-range-length-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        fs::write(
+            &path,
+            "HTTP/2 206\r\ncontent-length: 1\r\ncontent-range: bytes 0-0/1048576\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(content_length(&path), Some(1_048_576));
         fs::remove_file(path).unwrap();
     }
 

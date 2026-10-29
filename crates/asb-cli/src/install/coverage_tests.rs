@@ -560,7 +560,7 @@ fn download_contract(root: &Path) {
     assert_eq!(
         fs::read_to_string(root.join("download-invocations")).unwrap(),
         format!(
-            "1 https://fixture.invalid/success\n1 https://fixture.invalid/failure\n1 {private_source}\n1 https://fixture.invalid/oversize\n"
+            "0 https://fixture.invalid/success\n1 https://fixture.invalid/success\n1 https://fixture.invalid/success\n0 https://fixture.invalid/failure\n1 https://fixture.invalid/failure\n1 https://fixture.invalid/failure\n0 {private_source}\n1 {private_source}\n1 {private_source}\n0 https://fixture.invalid/oversize\n1 https://fixture.invalid/oversize\n1 https://fixture.invalid/oversize\n"
         )
     );
     fs::remove_file(root.join("bin/curl")).unwrap();
