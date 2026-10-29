@@ -132,6 +132,10 @@ impl BatchRun<'_> {
                 measurement_dir: measurement_override.as_deref(),
                 cassette: self.cassette,
                 recording: self.recording.as_deref(),
+                provider_capture_path: (mode == Some(crate::tape::Mode::Record))
+                    .then_some(self.cassette)
+                    .flatten()
+                    .map(std::path::Path::new),
                 on_completion: Some(&observer),
                 reused: self.reused,
                 ..Default::default()
