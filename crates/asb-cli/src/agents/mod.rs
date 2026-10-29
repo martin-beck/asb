@@ -297,6 +297,10 @@ pub(crate) struct AgentArtifacts {
     /// Compact native interaction index.  Referenced payloads remain private
     /// capture blobs and are never copied into user-facing output.
     pub native_trace: Option<Vec<u8>>,
+    /// A complete adapter-owned native-tool exchange stream.  The runner
+    /// validates and seals it as the cassette track's private native sidecar;
+    /// it never enters result JSON, logs, or reports.
+    pub native_tool_sidecar: Option<Vec<u8>>,
     /// Adapter-owned, bounded private sidecars retained only in the selected
     /// cassette track.  They are never rendered in run output or reports.
     pub sealed_artifacts: Vec<SealedArtifact>,
