@@ -175,10 +175,7 @@ impl ModuleDescriptor {
                 .is_none_or(|h| bounded(&h.id) && bounded(&h.package))
             && match self.support {
                 SupportLevel::OfficialAdapter => {
-                    self.dataset.is_some()
-                        && self.harness.is_some()
-                        && self.protocol.environment == EnvironmentKind::LocalDocker
-                        && score_policy
+                    self.dataset.is_some() && self.harness.is_some() && score_policy
                 }
                 SupportLevel::ReferenceSmoke => {
                     self.dataset.is_none()

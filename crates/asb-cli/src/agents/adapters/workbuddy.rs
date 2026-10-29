@@ -1,10 +1,64 @@
 use super::{CommandContext, CommandSpec, PreparationContext, PromptDelivery, StaticAdapter};
 use crate::{Error, install::Recipe};
+
+// CodeBuddy restores these complete client defaults after resuming a
+// conversation, although its initial request omits them. This adapter-owned
+// opaque wire extension keeps that client-local resume state out of cassette
+// identity only for WorkBuddy's exact envelope; arbitrary provider requests
+// and partial explicit settings remain replay-significant.
+const TAPE_WIRE_EXTENSION: &str = r#"
+export function normalizeRequest(request) {
+  const value = request?.body;
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || !Array.isArray(value.messages)) return value;
+  const workBuddyMessage = value.messages.some((message) =>
+    message && typeof message === "object" && !Array.isArray(message)
+      && typeof message.agent === "string"
+      && typeof message.conversationRequestId === "string",
+  );
+  const extraVars = value.extra_vars;
+  const exactExtraVars = extraVars && typeof extraVars === "object" && !Array.isArray(extraVars)
+    && Object.keys(extraVars).length === 1 && typeof extraVars.initiator === "string";
+  const completeDefaults = typeof value.cache_retention === "string"
+    && exactExtraVars
+    && typeof value.max_tokens === "string"
+    && typeof value.reasoning_effort === "string"
+    && typeof value.reasoning_summary === "string"
+    && typeof value.temperature === "number"
+    && typeof value.verbosity === "string";
+  if (!workBuddyMessage) return value;
+  for (const message of value.messages) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) continue;
+    // CodeBuddy regenerates these per-message continuation identifiers. They
+    // are client bookkeeping, not model-visible message content or tool data.
+    if (typeof message.conversationRequestId === "string") {
+      message.conversationRequestId = "<asb-workbuddy-conversation-request>";
+    }
+    if (typeof message.messageId === "string") {
+      message.messageId = "<asb-workbuddy-message>";
+    }
+    if (typeof message.entryId === "string") {
+      message.entryId = "<asb-workbuddy-entry>";
+    }
+    if (typeof message.traceId === "string") {
+      message.traceId = "<asb-workbuddy-trace>";
+    }
+  }
+  if (!completeDefaults) return value;
+  for (const key of [
+    "cache_retention", "extra_vars", "max_tokens", "reasoning_effort",
+    "reasoning_summary", "temperature", "verbosity",
+  ]) delete value[key];
+  return value;
+}
+"#;
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "workbuddy",
     "codebuddy",
     Recipe::Npm {
-        package: "@tencent-ai/codebuddy-code@2.167.0",
+        // Pin the current CodeBuddy CLI release used by this adapter. ASB
+        // preserves its sealed local-tool replay semantics independently.
+        package: "@tencent-ai/codebuddy-code@2.178.1",
         executable: "codebuddy",
         manifest: None,
     },
@@ -13,15 +67,24 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_complete_tool_replay(prepare_tool_replay)
-.with_artifact_specs(&[super::super::ArtifactSpec {
-    namespace: "tool-replay",
-    filename: "local-tools.jsonl",
-    format: super::super::ArtifactFormat::JsonLines,
-}])
+.with_collection(collect_artifacts)
+.with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "tool-replay",
+        filename: "local-tools.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "mcp-trace",
+        filename: "workbuddy-mcp-metadata.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+])
 .with_replay_credential_vars(&["CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"])
 .with_state_environment_vars(&["CODEBUDDY_CONFIG_DIR"])
 .with_output_usage(output_usage)
-.with_step_count(step_count);
+.with_step_count(step_count)
+.with_tape_wire_extension(TAPE_WIRE_EXTENSION);
 
 fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
     // Use CodeBuddy's own active-agent history counter from its final result.
@@ -59,6 +122,10 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             // compaction point otherwise depends on local execution timing.
             "--autocompact".into(),
             "1m".into(),
+            // A tape run is an isolated attempt. Prevent CodeBuddy from
+            // restoring or retaining a process-external conversation whose
+            // post-tool continuation state is not part of the cassette.
+            "--no-session-persistence".into(),
             "-y".into(),
         ],
         prompt_delivery: PromptDelivery::Argument,
@@ -85,7 +152,12 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
-    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    let launch = super::super::tool_replay_mcp::with_metadata_trace(
+        super::super::tool_replay_mcp::launch(context, tape)?,
+        &context
+            .run_dir
+            .join("mcp-trace/workbuddy-mcp-metadata.jsonl"),
+    );
     let program = launch.program.to_str().ok_or_else(|| {
         Error::Run("ASB local-tool replay executable path is not valid UTF-8".into())
     })?;
@@ -131,6 +203,21 @@ fn prepare_tool_replay(
     Ok(())
 }
 
+fn collect_artifacts(
+    context: &super::super::CollectionContext<'_>,
+) -> super::super::AgentArtifacts {
+    let mut artifacts = super::super::AgentArtifacts::default();
+    if let Some(bytes) = context.frozen.bytes("workbuddy-mcp-metadata.jsonl") {
+        artifacts
+            .sealed_artifacts
+            .push(super::super::SealedArtifact {
+                kind: "workbuddy-mcp-metadata".into(),
+                bytes: bytes.to_vec(),
+            });
+    }
+    artifacts
+}
+
 fn configure(directory: &std::path::Path, model: &str, base_url: &str) -> Result<(), Error> {
     std::fs::create_dir_all(directory).map_err(|error| {
         Error::Run(format!(
@@ -156,6 +243,69 @@ fn configure(directory: &std::path::Path, model: &str, base_url: &str) -> Result
 mod tests {
     use super::*;
     use crate::agents::AgentAdapter;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    fn replay_request(session: &crate::tape::Session, body: &str) -> String {
+        let address = session
+            .url()
+            .trim_start_matches("http://")
+            .trim_end_matches("/v1");
+        let mut socket = TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            socket,
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    fn tape_resume_defaults_are_owned_by_workbuddy_extension() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-workbuddy-tape-defaults-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let cassette = root.join("record.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"role":"assistant","agent":"workbuddy","conversationRequestId":"0123456789abcdef0123456789abcdef","messageId":"0123456789abcdef0123456789abcdef","entryId":"0123456789abcdef0123456789abcdef","traceId":"0123456789abcdef0123456789abcdef","content":"work"}],"stream":true,"stream_options":{"include_usage":true},"tools":[{"type":"function"}]}"#;
+        let replayed = r#"{"model":"m","messages":[{"role":"assistant","agent":"workbuddy","conversationRequestId":"abcdef0123456789abcdef0123456789","messageId":"abcdef0123456789abcdef0123456789","entryId":"abcdef0123456789abcdef0123456789","traceId":"abcdef0123456789abcdef0123456789","content":"work"}],"stream":true,"stream_options":{"include_usage":true},"tools":[{"type":"function"}],"cache_retention":"default","extra_vars":{"initiator":"workbuddy"},"max_tokens":"8192","reasoning_effort":"medium","reasoning_summary":"auto","temperature":0,"verbosity":"normal"}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body":recorded},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = crate::tape::Session::start_for_agent(
+            crate::tape::Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("workbuddy"),
+        )
+        .unwrap();
+        assert!(replay_request(&session, replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let strict = crate::tape::Session::start_for_agent(
+            crate::tape::Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("opencode"),
+        )
+        .unwrap();
+        assert!(replay_request(&strict, replayed).contains("409 Conflict"));
+        assert!(strict.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn adapter_reports_final_native_turns_without_counting_snapshots() {
@@ -207,10 +357,13 @@ mod tests {
             mcp_servers: Vec::new(),
         };
         let spec = command(&CommandContext {
+            executable: "workbuddy",
             config: &config,
             endpoint: Some("http://127.0.0.1:3000/v1"),
             interface: Some(crate::endpoint::Interface::OpenAiResponses),
             prompt: "repair",
+            native_tool_mode: None,
+            native_tool: None,
         });
         assert_eq!(
             spec.args
@@ -218,6 +371,11 @@ mod tests {
                 .find(|pair| pair[0] == "--autocompact")
                 .map(|pair| pair[1].as_str()),
             Some("1m")
+        );
+        assert!(
+            spec.args
+                .iter()
+                .any(|argument| argument == "--no-session-persistence")
         );
     }
 
@@ -237,7 +395,13 @@ mod tests {
         let replay = root.join("replay.jsonl");
         let transcript = root.join("local-tools.jsonl");
         std::fs::write(&replay, "{}\n").unwrap();
-        std::fs::write(&transcript, "{\"schema_version\":1,\"events\":[]}\n").unwrap();
+        std::fs::write(
+            &transcript,
+            crate::agents::tool_replay::Transcript::default()
+                .encode()
+                .unwrap(),
+        )
+        .unwrap();
         ADAPTER
             .prepare(&mut PreparationContext {
                 command: &mut command,
@@ -276,6 +440,24 @@ mod tests {
         assert_eq!(
             mcp["mcpServers"]["asb-local-tools"]["args"][0],
             "__asb-tool-replay"
+        );
+        assert!(
+            mcp["mcpServers"]["asb-local-tools"]["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|argument| argument == "--metadata-trace")
+        );
+        assert!(
+            mcp["mcpServers"]["asb-local-tools"]["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|argument| {
+                    argument.as_str().is_some_and(|value| {
+                        value.ends_with("mcp-trace/workbuddy-mcp-metadata.jsonl")
+                    })
+                })
         );
         let _ = std::fs::remove_dir_all(root);
     }

@@ -27,12 +27,33 @@ pub(crate) fn runtime_inputs() -> Result<Vec<crate::runtime_inputs::Dependency>,
 pub struct Session(proxy::Chain);
 
 impl Session {
+    #[cfg(test)]
     pub fn start(
         mode: Mode,
         cassette: &Path,
         upstream: Option<&str>,
         respect_record_timings: bool,
         workspace: &Path,
+    ) -> Result<Self, Error> {
+        Self::start_for_agent(
+            mode,
+            cassette,
+            upstream,
+            respect_record_timings,
+            workspace,
+            None,
+        )
+    }
+
+    /// Start a tape session with an optional adapter-owned opaque wire
+    /// extension. The tape itself never interprets that extension's protocol.
+    pub fn start_for_agent(
+        mode: Mode,
+        cassette: &Path,
+        upstream: Option<&str>,
+        respect_record_timings: bool,
+        workspace: &Path,
+        agent: Option<&str>,
     ) -> Result<Self, Error> {
         if mode == Mode::Replay {
             require_replay_cassette(cassette)?;
@@ -42,6 +63,7 @@ impl Session {
             cassette: cassette.to_path_buf(),
             respect_record_timings,
             workspace: workspace.to_path_buf(),
+            wire_extension: agent.and_then(crate::agents::tape_wire_extension),
         };
         let mut configurations: HashMap<String, Box<dyn Any>> = HashMap::new();
         configurations.insert(proxy::adapters::llmtape::NAME.into(), Box::new(settings));

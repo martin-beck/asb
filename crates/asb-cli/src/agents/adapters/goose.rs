@@ -99,6 +99,10 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     let connection = context.connection;
     let key = connection.credential.as_deref().unwrap_or("asb-local");
+    // Session naming is an asynchronous, auxiliary provider request.  It has
+    // no bearing on a non-session benchmark result, yet it can race the first
+    // tool-bearing request and make an otherwise identical recording unreplayable.
+    context.command.env("GOOSE_DISABLE_SESSION_NAMING", "true");
     match connection.interface {
         crate::endpoint::Interface::AnthropicMessages => {
             context
@@ -202,6 +206,7 @@ mod tests {
         assert_eq!(env["OPENAI_HOST"], "http://127.0.0.1:4321");
         assert_eq!(env["OPENAI_BASE_PATH"], "/v1/chat/completions");
         assert_eq!(env["OPENAI_API_KEY"], "asb-replay");
+        assert_eq!(env["GOOSE_DISABLE_SESSION_NAMING"], "true");
     }
 
     #[test]
@@ -309,10 +314,13 @@ mod tests {
             mcp_servers: Vec::new(),
         };
         let spec = command(&CommandContext {
+            executable: "goose",
             config: &config,
             endpoint: Some("http://127.0.0.1:3000/v1"),
             interface: Some(crate::endpoint::Interface::OpenAiChat),
             prompt: "repair",
+            native_tool_mode: None,
+            native_tool: None,
         });
         assert_eq!(
             spec.args

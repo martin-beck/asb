@@ -11,9 +11,11 @@ mod hermes;
 mod mini_swe;
 mod opencode;
 mod openhands;
+pub(crate) mod openhands_native;
 mod openjiuwen;
 mod pi;
 mod qwen_code;
+pub(super) mod replay_artifacts;
 mod workbuddy;
 
 pub(super) static REGISTRY: &[&dyn AgentAdapter] = &[

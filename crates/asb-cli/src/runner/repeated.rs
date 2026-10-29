@@ -481,7 +481,7 @@ pub(crate) fn publish_campaign(prepared: Prepared) -> Result<PublishedCampaign, 
         options,
         parent,
         root,
-        plan,
+        mut plan,
         bytes,
         replay,
     } = prepared;
@@ -516,7 +516,7 @@ pub(crate) fn publish_campaign(prepared: Prepared) -> Result<PublishedCampaign, 
     publish_bytes(&root.join("plan.json"), &bytes)?;
     let (private_cassette, replay) = match replay {
         Some(PreparedReplay::Selected(mut selected)) => {
-            selected.stage(&root, &plan.replay_inputs)?;
+            selected.stage(&root, &mut plan.replay_inputs)?;
             (None, Some(selected))
         }
         Some(PreparedReplay::Legacy(legacy)) => (legacy.stage(&root, &plan)?, None),

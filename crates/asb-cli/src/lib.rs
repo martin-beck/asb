@@ -130,6 +130,12 @@ pub fn entry(args: Vec<OsString>) -> ExitCode {
     if args.first().is_some_and(|arg| arg == "__asb-tool-replay") {
         return agents::tool_replay_mcp::entry(&args[1..]);
     }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "__asb-openhands-native-bridge")
+    {
+        return agents::openhands_native_entry(&args[1..]);
+    }
     if args.first().is_some_and(|arg| arg == "__asb-mcp-relay") {
         return agents::mcp_relay::entry(&args[1..]);
     }

@@ -15,9 +15,35 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_complete_tool_replay(prepare_tool_replay)
 .with_replay_credential_vars(&["CONTINUE_API_KEY"])
 .with_state_environment_vars(&["CONTINUE_CONFIG", "CONTINUE_GLOBAL_DIR"])
+.with_artifact_specs(&[super::super::ArtifactSpec {
+    namespace: "tool-replay",
+    filename: "local-tools.jsonl",
+    format: super::super::ArtifactFormat::JsonLines,
+}])
 .with_collection(collect);
+
+const BUILT_IN_TOOLS: &[&str] = &[
+    "AskQuestion",
+    "Edit",
+    "Exit",
+    "Fetch",
+    "List",
+    "MultiEdit",
+    "Read",
+    "ReportFailure",
+    "Bash",
+    "Search",
+    "Status",
+    "Subagent",
+    "Skills",
+    "UploadArtifact",
+    "Diff",
+    "Checklist",
+    "Write",
+];
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
         program: "cn".into(),
@@ -43,12 +69,22 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     };
     let key = connection.credential.as_deref().unwrap_or("asb-local");
     let url = &connection.base_url;
+    let local_tools = context
+        .command
+        .get_envs()
+        .find_map(|(name, value)| (name == "ASB_CONTINUE_TOOL_REPLAY_COMMAND").then_some(value))
+        .flatten()
+        .map(|value| value.to_string_lossy().into_owned());
+    context
+        .command
+        .env_remove("ASB_CONTINUE_TOOL_REPLAY_COMMAND");
     configure(
         &directory,
         provider,
         context.model,
         url,
         "ASB_AGENT_API_KEY",
+        local_tools.as_deref(),
     )?;
     context
         .command
@@ -58,6 +94,33 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         .env("ASB_AGENT_API_KEY", key)
         .env("CONTINUE_API_BASE", url)
         .env("CONTINUE_MODEL", context.model);
+    Ok(())
+}
+
+/// Continue exposes its native filesystem and shell operations as a fixed
+/// built-in tool set. Tape-backed attempts exclude that set and configure the
+/// private ASB MCP server as the only local-action authority. This is adapter
+/// specific: the runner sees only the sealed transcript sidecar.
+fn prepare_tool_replay(
+    context: &mut PreparationContext<'_>,
+    tape: super::super::TapeContext<'_>,
+) -> Result<(), Error> {
+    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    let command = std::iter::once(launch.program.as_os_str())
+        .chain(launch.args.iter().map(std::ffi::OsString::as_os_str))
+        .map(|part| {
+            part.to_str().map(str::to_owned).ok_or_else(|| {
+                Error::Run("Continue local-tool command contains non-Unicode path data".into())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\u{1f}");
+    context
+        .command
+        .env("ASB_CONTINUE_TOOL_REPLAY_COMMAND", command);
+    for tool in BUILT_IN_TOOLS {
+        context.command.arg("--exclude").arg(tool);
+    }
     Ok(())
 }
 
@@ -141,6 +204,7 @@ fn configure(
     model: &str,
     base_url: &str,
     api_key_env: &str,
+    local_tools: Option<&str>,
 ) -> Result<(), Error> {
     std::fs::create_dir_all(directory).map_err(|error| {
         Error::Run(format!(
@@ -151,9 +215,30 @@ fn configure(
         .map_err(|error| Error::Run(format!("cannot render Continue model: {error}")))?;
     let base_url = serde_json::to_string(base_url)
         .map_err(|error| Error::Run(format!("cannot render Continue endpoint: {error}")))?;
-    let configuration = format!(
+    let mut configuration = format!(
         "name: ASB provider\nversion: 1.0.0\nmodels:\n  - name: {model}\n    provider: {provider}\n    model: {model}\n    apiBase: {base_url}\n    apiKey: ${{{{ secrets.//{api_key_env} }}}}\n"
     );
+    if let Some(command) = local_tools {
+        let mut command = command.split('\u{1f}');
+        let program = command
+            .next()
+            .filter(|program| !program.is_empty())
+            .ok_or_else(|| Error::Run("Continue local-tool command is empty".into()))?;
+        let program = serde_json::to_string(program)
+            .map_err(|error| Error::Run(format!("cannot render Continue MCP command: {error}")))?;
+        configuration
+            .push_str("mcpServers:\n  - name: asb_local_tools\n    type: stdio\n    command: ");
+        configuration.push_str(&program);
+        configuration.push_str("\n    args:\n");
+        for argument in command {
+            let argument = serde_json::to_string(argument).map_err(|error| {
+                Error::Run(format!("cannot render Continue MCP argument: {error}"))
+            })?;
+            configuration.push_str("      - ");
+            configuration.push_str(&argument);
+            configuration.push('\n');
+        }
+    }
     std::fs::write(directory.join("config.yaml"), configuration).map_err(|error| {
         Error::Run(format!(
             "cannot write Continue provider configuration: {error}"
@@ -164,6 +249,59 @@ fn configure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentAdapter;
+
+    #[test]
+    fn tape_backed_preparation_replaces_continue_built_ins_with_the_sealed_mcp() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-continue-tool-replay-{}-{}",
+            std::process::id(),
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiChat,
+            base_url: "http://127.0.0.1:4321/v1".into(),
+            credential: Some("asb-replay".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let mut command = std::process::Command::new("cn");
+        ADAPTER
+            .prepare(&mut PreparationContext {
+                command: &mut command,
+                model: "test-model",
+                connection: &connection,
+                workspace: &workspace,
+                runtime_dir: &root.join("runtime"),
+                run_dir: &run_dir,
+                mcp_servers: &[],
+                mcp_tape: None,
+                tape: Some(super::super::TapeContext {
+                    mode: crate::tape::Mode::Record,
+                    cassette: &root.join("recording.asb.zip"),
+                }),
+            })
+            .unwrap();
+        let config = std::fs::read_to_string(run_dir.join("continue/config/config.yaml")).unwrap();
+        assert!(config.contains("mcpServers:"));
+        assert!(config.contains("- name: asb_local_tools"));
+        assert!(config.contains("__asb-tool-replay"));
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        for tool in BUILT_IN_TOOLS {
+            assert!(
+                arguments
+                    .windows(2)
+                    .any(|pair| { pair[0] == "--exclude" && pair[1] == *tool })
+            );
+        }
+        assert!(run_dir.join("tool-replay/local-tools.jsonl").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn uses_provider_reported_per_message_usage_not_estimated_session_total() {
@@ -228,6 +366,7 @@ mod tests {
             "test-model",
             "http://127.0.0.1:3456/v1",
             "CLI2KEY_API_KEY",
+            None,
         )
         .expect("configuration succeeds");
         let text =

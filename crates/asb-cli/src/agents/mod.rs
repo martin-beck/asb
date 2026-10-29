@@ -31,6 +31,21 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Opaque adapter-owned code/data staged into an isolated guest runtime.
+/// The remote dispatcher validates paths and bytes but never interprets the
+/// adapter protocol carried by an asset.
+#[derive(Clone, Copy)]
+pub(crate) struct GuestPrivateAsset {
+    pub target: &'static str,
+    pub bytes: &'static [u8],
+}
+
+/// Dispatch the adapter-private OpenHands native bridge without exposing the
+/// adapter registry itself to unrelated CLI modules.
+pub(crate) fn openhands_native_entry(args: &[std::ffi::OsString]) -> std::process::ExitCode {
+    adapters::openhands_native::entry(args)
+}
+
 /// Versioned delivery of task inputs into an isolated coding-agent invocation.
 /// Bump when incompatible input/session semantics change, not for binary updates.
 pub(crate) const REPLAY_INPUT_CONTRACT: &str = "asb-agent-input-and-session-v1";
@@ -68,10 +83,17 @@ pub(crate) trait AgentAdapter: Sync {
         }
         Ok(inputs)
     }
+    /// Static adapter-private guest inputs required before client launch.
+    fn guest_private_assets(&self) -> &'static [GuestPrivateAsset] {
+        &[]
+    }
     /// Supported wire interfaces, in preference order.
     fn supported_endpoints(&self) -> &'static [Support];
     fn command(&self, context: &CommandContext<'_>) -> CommandSpec;
     fn prepare(&self, context: &mut PreparationContext<'_>) -> Result<(), Error>;
+    fn supports_native_tool_transport(&self) -> bool {
+        false
+    }
     fn process(&self, executable: &str) -> Result<crate::launch::ProcessLaunch, Error> {
         Ok(crate::launch::ProcessLaunch::new(executable))
     }
@@ -84,6 +106,12 @@ pub(crate) trait AgentAdapter: Sync {
     }
     fn replay_credential_vars(&self) -> &'static [&'static str] {
         &[]
+    }
+    /// Optional adapter-owned opaque provider-wire canonicalizer. The shared
+    /// tape transport invokes this extension without interpreting agent
+    /// protocol fields.
+    fn tape_wire_extension(&self) -> Option<&'static str> {
+        None
     }
     /// Whether this adapter can route every benchmark-exposed local tool
     /// through ASB's sealed recorder.  Callers must reject a requested tool
@@ -205,10 +233,47 @@ impl PreparationContext<'_> {
 }
 
 pub(crate) struct CommandContext<'a> {
+    /// Resolved project-local agent executable. Adapter-owned alternate SDK
+    /// launchers may derive their matching interpreter from this wrapper.
+    pub executable: &'a str,
     pub config: &'a BenchmarkConfig,
     pub endpoint: Option<&'a str>,
     pub interface: Option<Interface>,
     pub prompt: &'a str,
+    /// Requested adapter-owned native terminal tape direction.
+    pub native_tool_mode: Option<crate::tape::Mode>,
+    #[allow(
+        dead_code,
+        reason = "future native-capable adapters own launch configuration"
+    )]
+    pub native_tool: Option<NativeToolContext<'a>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct NativeToolContext<'a> {
+    #[allow(
+        dead_code,
+        reason = "future native-capable adapters own launch configuration"
+    )]
+    pub launch: &'a crate::cassette::NativeToolLaunch,
+    #[allow(
+        dead_code,
+        reason = "future native-capable adapters receive this private runtime path"
+    )]
+    pub path: &'a Path,
+}
+
+pub(crate) fn select_process(
+    adapter: &dyn AgentAdapter,
+    executable: &str,
+    native_tool: Option<NativeToolContext<'_>>,
+) -> Result<crate::launch::ProcessLaunch, Error> {
+    if native_tool.is_some() && !adapter.supports_native_tool_transport() {
+        return Err(Error::Run(
+            "selected agent does not support native tool replay transport".into(),
+        ));
+    }
+    adapter.process(executable)
 }
 
 pub(crate) struct CommandSpec {
@@ -253,6 +318,10 @@ pub(crate) struct AgentArtifacts {
     /// Compact native interaction index.  Referenced payloads remain private
     /// capture blobs and are never copied into user-facing output.
     pub native_trace: Option<Vec<u8>>,
+    /// A complete adapter-owned native-tool exchange stream.  The runner
+    /// validates and seals it as the cassette track's private native sidecar;
+    /// it never enters result JSON, logs, or reports.
+    pub native_tool_sidecar: Option<Vec<u8>>,
     /// Adapter-owned, bounded private sidecars retained only in the selected
     /// cassette track.  They are never rendered in run output or reports.
     pub sealed_artifacts: Vec<SealedArtifact>,
@@ -355,6 +424,10 @@ type CommandBuilder = for<'a> fn(&CommandContext<'a>) -> CommandSpec;
 type PreparationHook = for<'a> fn(&mut PreparationContext<'a>) -> Result<(), Error>;
 type ToolReplayHook = for<'a> fn(&mut PreparationContext<'a>, TapeContext<'a>) -> Result<(), Error>;
 type CollectionHook = for<'a> fn(&CollectionContext<'a>) -> AgentArtifacts;
+/// An adapter-selected extension which may attach its own bounded replay
+/// evidence to the opaque artifact envelope.  Static dispatch deliberately
+/// does not interpret adapter filenames or replay formats.
+type ArtifactCollectionHook = for<'a> fn(&CollectionContext<'a>, &mut AgentArtifacts);
 type UsageHook = fn(&str, &str, bool) -> crate::measurements::TokenUsage;
 type FinalResponseHook = fn(&str, &Path) -> Option<String>;
 type ProcessHook = fn(&str) -> Result<crate::launch::ProcessLaunch, Error>;
@@ -375,7 +448,10 @@ pub(super) struct StaticAdapter {
     complete_tool_replay: bool,
     mcp_servers: bool,
     mcp_relay: bool,
+    native_tool_transport: bool,
     collect: Option<CollectionHook>,
+    replay_artifacts: Option<ArtifactCollectionHook>,
+    lifecycle_artifacts: Option<ArtifactCollectionHook>,
     artifact_specs: &'static [ArtifactSpec],
     deterministic_extension: bool,
     output_usage: Option<UsageHook>,
@@ -385,9 +461,11 @@ pub(super) struct StaticAdapter {
     failure: Option<FailureHook>,
     response_failure: Option<ResponseFailureHook>,
     replay_credential_vars: &'static [&'static str],
+    tape_wire_extension: Option<&'static str>,
     state_environment_vars: &'static [&'static str],
     forwarded_invocation_environment_vars: &'static [&'static str],
     preferred_executables: Option<PreferredExecutablesHook>,
+    guest_private_assets: &'static [GuestPrivateAsset],
     execution_identity: ExecutionIdentity,
 }
 impl StaticAdapter {
@@ -410,7 +488,10 @@ impl StaticAdapter {
             complete_tool_replay: false,
             mcp_servers: false,
             mcp_relay: false,
+            native_tool_transport: false,
             collect: None,
+            replay_artifacts: None,
+            lifecycle_artifacts: Some(native_trace::collect_lifecycle_artifact),
             artifact_specs: &[],
             deterministic_extension: false,
             output_usage: None,
@@ -420,9 +501,11 @@ impl StaticAdapter {
             failure: None,
             response_failure: None,
             replay_credential_vars: &[],
+            tape_wire_extension: None,
             state_environment_vars: &[],
             forwarded_invocation_environment_vars: &[],
             preferred_executables: None,
+            guest_private_assets: &[],
             execution_identity: ExecutionIdentity::WorkloadDefault,
         }
     }
@@ -437,6 +520,7 @@ impl StaticAdapter {
     /// the adapter owns the client protocol and tool semantics.
     pub(super) const fn with_tool_replay(mut self, hook: ToolReplayHook) -> Self {
         self.tool_replay = Some(hook);
+        self.replay_artifacts = Some(adapters::replay_artifacts::collect_local_tool_transcript);
         self
     }
 
@@ -447,6 +531,7 @@ impl StaticAdapter {
     pub(super) const fn with_complete_tool_replay(mut self, hook: ToolReplayHook) -> Self {
         self.tool_replay = Some(hook);
         self.complete_tool_replay = true;
+        self.replay_artifacts = Some(adapters::replay_artifacts::collect_local_tool_transcript);
         self
     }
 
@@ -464,11 +549,25 @@ impl StaticAdapter {
         self
     }
 
+    /// Declares an adapter-owned, tested consumer for a sealed native sidecar.
+    pub(super) const fn with_native_tool_transport(mut self) -> Self {
+        self.native_tool_transport = true;
+        self
+    }
+
     pub(super) const fn with_preferred_executables(
         mut self,
         hook: PreferredExecutablesHook,
     ) -> Self {
         self.preferred_executables = Some(hook);
+        self
+    }
+
+    pub(super) const fn with_guest_private_assets(
+        mut self,
+        assets: &'static [GuestPrivateAsset],
+    ) -> Self {
+        self.guest_private_assets = assets;
         self
     }
 
@@ -522,6 +621,14 @@ impl StaticAdapter {
         self
     }
 
+    /// Supplies an adapter-private request canonicalizer to the generic tape
+    /// transport. The transport passes opaque request data and does not know
+    /// the extension's protocol vocabulary.
+    pub(super) const fn with_tape_wire_extension(mut self, source: &'static str) -> Self {
+        self.tape_wire_extension = Some(source);
+        self
+    }
+
     pub(super) const fn with_state_environment_vars(
         mut self,
         vars: &'static [&'static str],
@@ -544,6 +651,9 @@ impl StaticAdapter {
     }
 }
 impl AgentAdapter for StaticAdapter {
+    fn guest_private_assets(&self) -> &'static [GuestPrivateAsset] {
+        self.guest_private_assets
+    }
     fn state_environment_vars(&self) -> &'static [&'static str] {
         self.state_environment_vars
     }
@@ -598,6 +708,9 @@ impl AgentAdapter for StaticAdapter {
     fn replay_credential_vars(&self) -> &'static [&'static str] {
         self.replay_credential_vars
     }
+    fn tape_wire_extension(&self) -> Option<&'static str> {
+        self.tape_wire_extension
+    }
     fn supports_tool_replay(&self) -> bool {
         self.complete_tool_replay
     }
@@ -607,6 +720,9 @@ impl AgentAdapter for StaticAdapter {
     fn supports_mcp_relay(&self) -> bool {
         self.mcp_relay
     }
+    fn supports_native_tool_transport(&self) -> bool {
+        self.native_tool_transport
+    }
     fn forwarded_invocation_environment_vars(&self) -> &'static [&'static str] {
         self.forwarded_invocation_environment_vars
     }
@@ -615,20 +731,12 @@ impl AgentAdapter for StaticAdapter {
             .collect
             .map(|collect| collect(context))
             .unwrap_or_default();
-        if self.tool_replay.is_some() {
-            artifacts.local_tool_transcript = context
-                .frozen
-                .bytes("local-tools.jsonl")
-                .map(ToOwned::to_owned);
+        if let Some(collect) = self.replay_artifacts {
+            collect(context, &mut artifacts);
         }
-        if self.deterministic_extension {
-            artifacts.deterministic_manifest =
-                context.frozen.bytes("manifest.json").map(ToOwned::to_owned);
+        if let Some(collect) = self.lifecycle_artifacts {
+            collect(context, &mut artifacts);
         }
-        artifacts.native_trace = context
-            .frozen
-            .bytes("native-trace.jsonl")
-            .map(ToOwned::to_owned);
         artifacts
     }
     fn artifact_specs(&self) -> &'static [ArtifactSpec] {
@@ -683,6 +791,12 @@ pub(crate) fn names() -> impl Iterator<Item = &'static str> {
 }
 pub(crate) fn find(id: &str) -> Option<&'static dyn AgentAdapter> {
     REGISTRY.iter().copied().find(|adapter| adapter.id() == id)
+}
+
+/// Return an adapter-owned provider-wire extension without exposing its
+/// protocol semantics to the shared tape runner.
+pub(crate) fn tape_wire_extension(id: &str) -> Option<&'static str> {
+    find(id).and_then(AgentAdapter::tape_wire_extension)
 }
 
 /// Read explicit usage fields only; never infer token counts from text.
@@ -970,10 +1084,13 @@ mod tests {
         };
         for adapter in all() {
             let command = adapter.command(&CommandContext {
+                executable: adapter.executable(),
                 config: &config,
                 endpoint: Some("http://127.0.0.1:3000/v1"),
                 interface: Some(Interface::AnthropicMessages),
                 prompt: "repair",
+                native_tool_mode: None,
+                native_tool: None,
             });
             assert!(!command.program.is_empty(), "{}", adapter.id());
             assert!(!command.args.is_empty(), "{}", adapter.id());
@@ -1000,7 +1117,9 @@ mod tests {
         assert!(find("opencode").unwrap().supports_tool_replay());
         assert!(find("claude-code").unwrap().supports_tool_replay());
         assert!(find("cline").unwrap().supports_tool_replay());
+        assert!(find("continue").unwrap().supports_tool_replay());
         assert!(find("qwen-code").unwrap().supports_tool_replay());
+        assert!(find("hermes").unwrap().supports_tool_replay());
         assert!(!find("codex").unwrap().supports_tool_replay());
         assert!(!find("goose").unwrap().supports_tool_replay());
         assert!(find("codex").unwrap().supports_mcp_servers());
@@ -1008,22 +1127,55 @@ mod tests {
     }
 
     #[test]
-    fn complete_tool_replay_adapters_seal_their_local_tool_transcript() {
+    fn native_tool_transport_requires_an_explicit_adapter_capability() {
+        let capable = all()
+            .iter()
+            .filter(|adapter| adapter.supports_native_tool_transport())
+            .map(|adapter| adapter.id())
+            .collect::<Vec<_>>();
+        assert_eq!(capable, vec!["openhands", "openjiuwen", "hermes"]);
+        assert!(!find("pi").unwrap().supports_native_tool_transport());
+        let adapter = find("codex").unwrap();
+        assert!(select_process(adapter, "not-executed", None).is_ok());
+    }
+
+    #[test]
+    fn complete_tool_replay_adapters_declare_a_bounded_replay_sidecar() {
+        let local_sidecar = |adapter: &dyn AgentAdapter| {
+            adapter.artifact_specs().iter().any(|spec| {
+                spec.namespace == "tool-replay"
+                    && spec.filename == "local-tools.jsonl"
+                    && spec.format == ArtifactFormat::JsonLines
+            })
+        };
+        let native_sidecar = |adapter: &dyn AgentAdapter| {
+            adapter.artifact_specs().iter().any(|spec| {
+                spec.filename.contains("native-tool") && spec.format == ArtifactFormat::JsonLines
+            })
+        };
         for adapter in all()
             .iter()
             .copied()
             .filter(|adapter| adapter.supports_tool_replay())
         {
+            let complete_sidecar = if adapter.supports_native_tool_transport() {
+                native_sidecar(adapter)
+            } else {
+                local_sidecar(adapter)
+            };
             assert!(
-                adapter.artifact_specs().iter().any(|spec| {
-                    spec.namespace == "tool-replay"
-                        && spec.filename == "local-tools.jsonl"
-                        && spec.format == ArtifactFormat::JsonLines
-                }),
-                "{} advertises complete tool replay without sealing local-tools.jsonl",
+                complete_sidecar,
+                "{} advertises complete tool replay without its declared bounded sidecar",
                 adapter.id()
             );
         }
+        // Negative coverage: non-native adapters cannot satisfy the contract
+        // merely by declaring an unrelated native artifact, while native
+        // adapters are not required to pretend their transport is MCP/local.
+        assert!(local_sidecar(find("pi").unwrap()));
+        assert!(!native_sidecar(find("pi").unwrap()));
+        assert!(native_sidecar(find("openhands").unwrap()));
+        assert!(!local_sidecar(find("openhands").unwrap()));
     }
 
     #[test]

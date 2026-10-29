@@ -294,6 +294,17 @@ impl Source {
             )),
         }
     }
+
+    /// Read the selected sealed native-tool sidecar. Legacy JSONL has no
+    /// authority to manufacture a native replay capability.
+    pub fn read_native(&mut self, id: u64) -> Result<Vec<u8>, Error> {
+        match &mut self.storage {
+            Storage::Bundle(archive) => archive.read_native(id),
+            Storage::Legacy { .. } => Err(Error(
+                "legacy cassette has no sealed native-tool sidecar".into(),
+            )),
+        }
+    }
 }
 
 fn open_regular(path: &Path) -> Result<Option<File>, Error> {
