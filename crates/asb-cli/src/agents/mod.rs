@@ -343,6 +343,10 @@ pub(crate) struct SealedArtifact {
 
 pub(crate) struct CollectionContext<'a> {
     pub frozen: &'a FrozenArtifacts,
+    /// One recorder-owned provider capture handle. Generic lifecycle code
+    /// never reads or interprets its protocol bytes; an adapter may do so for
+    /// its own post-hook correlation.
+    pub provider_capture: Option<&'a Path>,
     pub run_dir: &'a Path,
     pub interface: Option<Interface>,
     pub anthropic_input_includes_cache: bool,
@@ -1133,7 +1137,7 @@ mod tests {
             .filter(|adapter| adapter.supports_native_tool_transport())
             .map(|adapter| adapter.id())
             .collect::<Vec<_>>();
-        assert_eq!(capable, vec!["openhands", "openjiuwen", "hermes"]);
+        assert_eq!(capable, vec!["codex", "openhands", "openjiuwen", "hermes"]);
         assert!(!find("pi").unwrap().supports_native_tool_transport());
         let adapter = find("codex").unwrap();
         assert!(select_process(adapter, "not-executed", None).is_ok());

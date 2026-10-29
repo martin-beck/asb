@@ -1334,6 +1334,152 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_openhands_generated_conversation_hierarchy() {
+        let root = test_root();
+        let cassette = root.join("openhands-conversation.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":[{"text":"saved /opt/asb-private/openhands/conversations/dc6652d07c19492ebea95849/subagents/b00423c915b64ed7a901"}]}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let replayed = recorded
+            .replace("dc6652d07c19492ebea95849", "c872afba840b4e508b9e3a98")
+            .replace("b00423c915b64ed7a901", "fd24f47432974e918a6c4b95");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_parent = replayed.replace("openhands", "other-hands");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &changed_parent).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        let non_hex = recorded.replace("b00423c915b64ed7a901", "user-selected");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &non_hex).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_openhands_terminal_filename_and_pytest_elapsed_renderer() {
+        let root = test_root();
+        let cassette = root.join("openhands-terminal-pytest.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":[{"text":"saved /opt/asb-private/openhands/conversations/<asb-openhands-conversation>/observations/terminal_output_c435ed15.txt\n\u001b[32m6 failed, 48 deselected\u001b[0m\u001b[32m in 0.41s\u001b[0m\nfinal result"}]}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let replayed = recorded
+            .replace("c435ed15", "c01585f6")
+            .replace("0.41s", "0.40s");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_count = replayed.replace("48 deselected", "47 deselected");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &changed_count).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        let changed_final = replayed.replace("final result", "changed final result");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &changed_final).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        let non_summary = replayed.replace("6 failed, 48 deselected", "native progress");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &non_summary).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_openjiuwen_ephemeral_shell_path_component() {
+        let root = test_root();
+        let cassette = root.join("openjiuwen-shell-path.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"content":[{"type":"text","text":"saved /tmp/agent/artifacts/bash_eb4149008"}]}],"temperature":0}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/messages", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let replayed = recorded.replace("eb4149008", "6c88783c4");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/messages", &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_text = replayed.replace("artifacts", "changed-artifacts");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/messages", &changed_text).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_structured_pytest_callable_address_renderer() {
+        let root = test_root();
+        let cassette = root.join("pytest-callable-address.jsonl");
+        // Escaped angle brackets ensure the raw-string normalizer cannot see
+        // this renderer; the structured string renderer is what is covered.
+        let recorded = r#"{"model":"m","messages":[{"content":"func = \u003cfunction call_runtest_hook.\u003clocals\u003e.\u003clambda\u003e at 0x7b230e429940\u003e\nwhen = call"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let replayed = recorded.replace("7b230e429940", "7d1484ce9940");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_callable = replayed.replace("call_runtest_hook", "call_other_hook");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_callable).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        let changed_final = replayed.replace("when = call", "when = setup");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_final).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_structured_pytest_testmaps_address_renderer() {
+        let root = test_root();
+        let cassette = root.join("pytest-testmaps-address.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"content":"self = \u003castropy.wcs.tests.test_wcs.TestMaps object at 0x7b230ebc51c0\u003e\nrequest = call"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let replayed = recorded.replace("7b230ebc51c0", "714a1dfbd670");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_class = replayed.replace("TestMaps", "OtherMaps");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_class).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        let changed_final = replayed.replace("request = call", "request = setup");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_final).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_opencode_completed_task_session_id() {
         let root = test_root();
         let cassette = root.join("opencode-task-session.jsonl");

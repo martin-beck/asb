@@ -56,7 +56,7 @@ export class CaptureSession {
     }
     const token = {
       recorded: false,
-      ordinal: this.accepted + 1,
+      sequence: this.accepted + 1,
       method: deliveryMethod(metadata.method),
       path: deliveryPath(metadata.path),
     };
@@ -107,10 +107,11 @@ export class CaptureSession {
       // response bodies, headers, credentials, or host paths here.
       if (this.deliveryFailures.length < 16) {
         this.deliveryFailures.push({
-          ordinal: token.ordinal,
+          sequence: token.sequence,
           method: token.method,
           path: token.path,
-          terminal: delivery?.terminal || "unsettled",
+          cause: ["close", "error", "handler_error", "undelivered"].includes(delivery?.terminal)
+            ? delivery.terminal : "undelivered",
         });
       }
     }
@@ -143,6 +144,7 @@ export class CaptureSession {
       accepted: this.accepted,
       completed: this.completed,
       failed: this.failed,
+      delivery_failures: this.deliveryFailures,
       inflight: 0,
       recorded: this.recorded,
       inference_requests: this.inferenceRequests,

@@ -341,6 +341,12 @@ fn import_guest_artifacts(
                 }
                 metadata.native_tool_sidecar = Some(bytes);
             }
+            crate::agents::driver::DEFERRED_COLLECTION_ARTIFACT => {
+                if metadata.deferred_collection.is_some() {
+                    return Err("guest deferred adapter collection was duplicated".into());
+                }
+                metadata.deferred_collection = Some(bytes);
+            }
             _ => metadata
                 .sealed_artifacts
                 .push(crate::agents::SealedArtifact {

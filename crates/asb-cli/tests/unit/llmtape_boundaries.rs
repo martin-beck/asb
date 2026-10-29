@@ -173,6 +173,58 @@ fn capture_evidence_and_retained_diagnostics_survive_independent_cleanup_failure
 }
 
 #[test]
+fn sealed_incomplete_capture_retains_only_its_private_receipt_scratch() {
+    use sha2::{Digest, Sha256};
+    let fixture = Fixture::new();
+    let output = fixture.0.join("capture.jsonl");
+    std::fs::write(&output, b"{}\n").unwrap();
+    let payload = std::fs::read(&output).unwrap();
+    let scratch = Scratch::create(&fixture.0).unwrap();
+    let retained = scratch.path.clone();
+    let receipt = scratch.path.join("capture.json");
+    std::fs::write(
+        &receipt,
+        serde_json::json!({
+            "schema_version":1,"mode":"record","pid":123,"nonce":"private-invocation",
+            "output":output,"accepted":1,"completed":0,"failed":1,"inflight":0,
+            "recorded":1,"inference_requests":1,"bytes":payload.len(),
+            "sha256":format!("{:x}",Sha256::digest(&payload)),"complete":false,
+            "delivery_failures":[{"sequence":1,"method":"POST","path":"/v1/messages","cause":"close"}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
+    child.wait().unwrap();
+    let mut session = RunningLlmtape {
+        child: Some(child),
+        builtin: true,
+        url: String::new(),
+        progress: None,
+        mismatch_evidence: None,
+        cassette: output.clone(),
+        mode: crate::tape::Mode::Record,
+        cleanup_confirmed: false,
+        capture_request: Some(crate::proxy::capture::Request {
+            receipt,
+            output,
+            nonce: "private-invocation".into(),
+            pid: 123,
+        }),
+        capture: None,
+        _scratch: scratch,
+    };
+    assert!(session.finish().is_ok());
+    assert!(
+        session
+            .capture_evidence()
+            .is_some_and(|capture| !capture.complete)
+    );
+    drop(session);
+    assert!(retained.is_dir());
+}
+
+#[test]
 fn existing_recording_destinations_are_refused_before_starting_a_proxy() {
     let fixture = Fixture::new();
     for kind in ["file", "directory", "dangling-link"] {

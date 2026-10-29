@@ -40,6 +40,11 @@ impl<'a> ConfiguredAttempt<'a> {
             project_root,
             project_config,
         } = admitted;
+        if options.recording.is_some() && options.mode != Some(tape::Mode::Record) {
+            return Err(Error::Run(
+                "recording attempt lost its selected record mode before adapter preparation".into(),
+            ));
+        }
         let publication_config = std::path::absolute(config_path).map_err(io_error)?;
         let measurement_path = options
             .measurement_dir
@@ -978,38 +983,70 @@ impl<'a> CompletedAttempt<'a> {
                     .unwrap_or_else(|| "agent artifact snapshot unavailable".into()),
             );
         }
-        let adapter_artifacts = if settled.evidence.guest.is_none() {
-            agents::find(&config.agent)
-                .map(|adapter| {
-                    adapter.collect(&agents::CollectionContext {
-                        frozen: &frozen,
-                        run_dir: &settled.evidence.run_dir,
-                        interface,
-                        anthropic_input_includes_cache:
-                            crate::providers::anthropic_input_includes_cache(&config.provider),
-                        mcp_servers: &config.mcp_servers,
-                        mcp_tape: context.mcp_tape_cassette.as_ref().map(|(mode, cassette)| {
-                            agents::McpTapeContext {
-                                mode: *mode,
-                                cassette: Some(cassette),
-                            }
-                        }),
-                    })
+        // Generic lifecycle transports only the recorder-owned handle. It
+        // does not read or interpret protocol bytes; the adapter owns that
+        // bounded correlation. The tape route is the direct-record fallback
+        // for legacy activation copies that did not retain the private field.
+        // Adapter-local tool recording is selected through the tool tape,
+        // not the provider tape. Preserve that opaque selected cassette for
+        // collection; the adapter alone reads and correlates its wire data.
+        let provider_capture = context
+            .tool_tape_cassette
+            .as_ref()
+            .and_then(|(mode, path)| (*mode == tape::Mode::Record).then_some(path.as_path()));
+        if context.options.mode == Some(tape::Mode::Record) && provider_capture.is_none() {
+            settled.issues.run_error(
+                "record collection lost the admitted tool-tape capture handle before adapter collection"
+                    .into(),
+            );
+        }
+        // Isolated guests return their frozen adapter state through the same
+        // receipt-backed artifact route used for sidecars.  This lets the
+        // host collect only after `settle` has closed and validated the outer
+        // provider tape.  The envelope is generic custody; adapters alone
+        // decode their own snapshots and provider wire data.
+        let deferred_frozen = settled
+            .evidence
+            .guest
+            .as_ref()
+            .and_then(|guest| guest.deferred_collection.as_deref())
+            .map(agents::FrozenArtifacts::from_deferred_collection_bytes)
+            .transpose();
+        if let Err(error) = deferred_frozen.as_ref() {
+            settled.issues.run_error(error.clone());
+        }
+        let collection_frozen = deferred_frozen
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .unwrap_or(&frozen);
+        let mut adapter_artifacts = agents::find(&config.agent)
+            .map(|adapter| {
+                adapter.collect(&agents::CollectionContext {
+                    frozen: collection_frozen,
+                    provider_capture,
+                    run_dir: &settled.evidence.run_dir,
+                    interface,
+                    anthropic_input_includes_cache:
+                        crate::providers::anthropic_input_includes_cache(&config.provider),
+                    mcp_servers: &config.mcp_servers,
+                    mcp_tape: context.mcp_tape_cassette.as_ref().map(|(mode, cassette)| {
+                        agents::McpTapeContext {
+                            mode: *mode,
+                            cassette: Some(cassette),
+                        }
+                    }),
                 })
-                .unwrap_or_default()
-        } else {
-            settled
-                .evidence
-                .guest
-                .as_ref()
-                .map(|guest| agents::AgentArtifacts {
-                    native_tool_sidecar: guest.native_tool_sidecar.clone(),
-                    sealed_artifacts: guest.sealed_artifacts.clone(),
-                    errors: guest.adapter_errors.clone(),
-                    ..Default::default()
-                })
-                .unwrap_or_default()
-        };
+            })
+            .unwrap_or_default();
+        if let Some(guest) = settled.evidence.guest.as_ref() {
+            adapter_artifacts
+                .sealed_artifacts
+                .extend(guest.sealed_artifacts.clone());
+            adapter_artifacts
+                .errors
+                .extend(guest.adapter_errors.clone());
+        }
         for error in &adapter_artifacts.errors {
             settled.issues.run_error(error.clone());
         }

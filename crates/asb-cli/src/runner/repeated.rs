@@ -665,6 +665,9 @@ pub(crate) fn execute(
             finished_path: batch_root.join("finished.json"),
             generation: None,
             cassette: batch_cassette.as_deref(),
+            provider_capture_path: recording
+                .as_ref()
+                .map(|_| super::recording::producer(&root, number, 1, config.concurrency)),
             recording: recording.clone(),
             reused: None,
         }

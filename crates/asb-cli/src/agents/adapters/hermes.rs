@@ -577,6 +577,7 @@ mod tests {
             );
             let artifacts = collect(&CollectionContext {
                 frozen: &frozen,
+                provider_capture: None,
                 run_dir: Path::new("/fixture"),
                 interface: None,
                 anthropic_input_includes_cache: false,
@@ -599,6 +600,7 @@ mod tests {
         );
         let artifacts = collect(&CollectionContext {
             frozen: &frozen,
+            provider_capture: None,
             run_dir: Path::new("/fixture"),
             interface: None,
             anthropic_input_includes_cache: false,
@@ -625,6 +627,7 @@ mod tests {
         );
         let artifacts = collect(&CollectionContext {
             frozen: &frozen,
+            provider_capture: None,
             run_dir: Path::new("/fixture"),
             interface: None,
             anthropic_input_includes_cache: false,
@@ -651,6 +654,7 @@ mod tests {
         );
         let artifacts = collect(&CollectionContext {
             frozen: &malformed,
+            provider_capture: None,
             run_dir: Path::new("/fixture"),
             interface: None,
             anthropic_input_includes_cache: false,
@@ -676,6 +680,7 @@ mod tests {
         );
         let artifacts = collect(&CollectionContext {
             frozen: &frozen,
+            provider_capture: None,
             run_dir: Path::new("/fixture"),
             interface: None,
             anthropic_input_includes_cache: false,
@@ -699,6 +704,7 @@ mod tests {
         )
         .unwrap();
         let artifacts = collect(&CollectionContext {
+            provider_capture: None,
             frozen: &super::super::super::FrozenArtifacts::for_test(
                 "usage.json",
                 serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap(),
