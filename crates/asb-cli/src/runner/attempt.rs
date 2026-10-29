@@ -88,6 +88,12 @@ impl<'a> ConfiguredAttempt<'a> {
             )
         });
         let network = project::network_project(&project_root);
+        // Keep the recorder-owned binding before constructing the context.
+        // `options` is also retained for the whole attempt, but collection
+        // must not recover the producer late from presentation or tape
+        // configuration.  This path is opaque here: adapters receive only
+        // its bounded bytes after the provider proxy has settled.
+        let provider_capture_path = options.provider_capture_path.map(PathBuf::from);
         let context = Context {
             config_path: config_path.into(),
             publication_config,
@@ -98,7 +104,7 @@ impl<'a> ConfiguredAttempt<'a> {
             policy,
             measurement_path,
             tape_cassette,
-            provider_capture_path: options.provider_capture_path.map(PathBuf::from),
+            provider_capture_path,
             tool_tape_cassette,
             mcp_tape_cassette,
             network: Some(network),
