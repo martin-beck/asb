@@ -258,6 +258,27 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
             Some(detail) => format!("Hermes {detail}"),
             None => "Hermes native terminal replay did not complete".into(),
         });
+        // Counts are adapter-private lifecycle metadata, not terminal request
+        // or response data.  Retain a tightly bounded replay cursor only when
+        // it is structurally valid, so a failed qualification can distinguish
+        // an unbound dispatch from a post-dispatch replay defect.
+        if mode == Some("replay") {
+            let consumed = progress
+                .get("invocations")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|value| *value <= 4_096);
+            let expected = progress
+                .get("expected_invocations")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|value| *value <= 4_096);
+            if let (Some(consumed), Some(expected)) = (consumed, expected)
+                && consumed <= expected
+            {
+                artifacts.errors.push(format!(
+                    "Hermes native terminal replay consumed {consumed} of {expected} calls"
+                ));
+            }
+        }
         return artifacts;
     }
     if mode == Some("record") {
@@ -523,6 +544,58 @@ mod tests {
         );
         let artifacts = collect(&CollectionContext {
             frozen: &frozen,
+            run_dir: Path::new("/fixture"),
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert_eq!(
+            artifacts.errors,
+            vec!["Hermes native terminal replay did not complete"]
+        );
+    }
+
+    #[test]
+    fn native_progress_exposes_only_bounded_replay_cursor_metadata() {
+        let frozen = crate::agents::artifacts::FrozenArtifacts::for_test(
+            "native-tool-progress.json",
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "replay",
+                "complete": false,
+                "invocations": 2,
+                "expected_invocations": 14,
+            }),
+        );
+        let artifacts = collect(&CollectionContext {
+            frozen: &frozen,
+            run_dir: Path::new("/fixture"),
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert_eq!(
+            artifacts.errors,
+            vec![
+                "Hermes native terminal replay did not complete",
+                "Hermes native terminal replay consumed 2 of 14 calls",
+            ]
+        );
+
+        let malformed = crate::agents::artifacts::FrozenArtifacts::for_test(
+            "native-tool-progress.json",
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "replay",
+                "complete": false,
+                "invocations": 9_999,
+                "expected_invocations": 1,
+            }),
+        );
+        let artifacts = collect(&CollectionContext {
+            frozen: &malformed,
             run_dir: Path::new("/fixture"),
             interface: None,
             anthropic_input_includes_cache: false,

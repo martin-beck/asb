@@ -50,11 +50,13 @@ def _request(command, background, timeout, _task_id, _session_id, force, workdir
     })
 
 
-def _write_progress(complete, error=None, invocations=0):
+def _write_progress(complete, error=None, invocations=0, expected_invocations=None):
     PROGRESS.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     document = {"schema_version": 1, "mode": MODE, "complete": complete, "invocations": invocations}
     if error is not None:
         document["error"] = error
+    if expected_invocations is not None:
+        document["expected_invocations"] = expected_invocations
     temporary = PROGRESS.with_suffix(".tmp")
     with open(temporary, "x", encoding="utf-8") as output:
         json.dump(document, output, separators=(",", ":"))
@@ -211,7 +213,12 @@ class Replayer:
 
     def close(self):
         complete = not self.failed and self.index == len(self.exchanges)
-        _write_progress(complete, None if complete else self.failure or "native terminal replay is incomplete", self.index)
+        _write_progress(
+            complete,
+            None if complete else self.failure or "native terminal replay is incomplete",
+            self.index,
+            len(self.exchanges),
+        )
 
 
 def _request_difference(expected, actual):
