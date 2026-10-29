@@ -173,26 +173,37 @@ if (process.env.ASB_TAPE_MODE === 'replay' &&
     (process.env.OPENROUTER_API_KEY !== 'asb-replay' || process.env.ANTHROPIC_API_KEY !== 'asb-replay')) {
   console.error('replay exposed a live credential'); process.exit(9);
 }
+async function invokeExtension(extension) {
+  return new Promise((resolve, reject) => {
+    const child = require('child_process').spawn('/bin/sh', ['-c', extension], {stdio:['pipe', 'pipe', 'pipe']});
+    let output = '';
+    let error = '';
+    child.stdout.on('data', chunk => {
+      output += chunk;
+    });
+    child.stderr.on('data', chunk => { error += chunk; });
+    child.on('error', reject);
+    child.on('close', () => output.includes('"content"') ? resolve() : reject(new Error(error)));
+    child.stdin.end(JSON.stringify({jsonrpc:'2.0', id:1, method:'tools/call', params:{name:'write_file', arguments:{path:'src/parser.py', content:"def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n"}}}) + '\n');
+  });
+}
+async function main() {
 if (process.env.ASB_TAPE_MODE) {
   const extensionIndex = process.argv.indexOf('--with-extension');
   if (extensionIndex < 0 || !process.argv.includes('--no-profile')) {
     console.error('Goose did not receive the private ASB extension'); process.exit(10);
   }
   const extension = process.argv[extensionIndex + 1];
-  const localTool = require('child_process').spawnSync('/bin/sh', ['-c', extension], {
-    input: JSON.stringify({jsonrpc:'2.0', id:1, method:'tools/call', params:{name:'write_file', arguments:{path:'src/parser.py', content:"def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n"}}}) + '\n',
-    encoding: 'utf8',
-  });
-  if (localTool.status !== 0 || !localTool.stdout.includes('"content"')) {
-    console.error('private local tool failed: ' + localTool.stderr); process.exit(11);
-  }
+  await invokeExtension(extension);
 } else {
   require('fs').writeFileSync('src/parser.py', "def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n");
 }
 const body = {model:'test-model', messages:[{role:'user', content:process.env.ASB_TEST_CHANGED ? 'changed' : 'test'}], tools:[{type:'function'}]};
-fetch(host + process.env.OPENAI_BASE_PATH, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})
-  .then(async r => { if (!r.ok) throw new Error(await r.text()); console.log('{"status":"ok"}'); })
-  .catch(e => { console.error(e); process.exitCode = 1; });
+const response = await fetch(host + process.env.OPENAI_BASE_PATH, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+if (!response.ok) throw new Error(await response.text());
+console.log('{"status":"ok"}');
+}
+main().catch(e => { console.error(e); process.exitCode = 1; });
 "##).unwrap();
     std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(root.join("benchmark.toml"), "agent='goose'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='test-model'\nconcurrency=1\n").unwrap();
@@ -220,6 +231,10 @@ fetch(host + process.env.OPENAI_BASE_PATH, {method:'POST',headers:{'content-type
     .unwrap();
     assert_eq!(archive.manifest().tracks.len(), 1);
     assert!(archive.manifest().tracks[0].complete);
+    assert!(
+        !archive.read_artifact(1, "local-tools").unwrap().is_empty(),
+        "Goose recording must retain its local-tool transcript for offline replay"
+    );
     let cassette = String::from_utf8(archive.read_track(1).unwrap()).unwrap();
     assert_eq!(cassette.lines().count(), 1);
     let before_replay = provider.requests.lock().unwrap().clone();
