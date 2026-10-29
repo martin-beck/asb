@@ -1512,6 +1512,7 @@ fn command_for_with_interface(
             endpoint: provider_base_url,
             interface,
             prompt,
+            native_tool: None,
         }));
     }
     let agent_names = agents::names().collect::<Vec<_>>();

@@ -201,6 +201,7 @@ mod tests {
             endpoint: Some("http://127.0.0.1:1/v1"),
             interface: Some(crate::endpoint::Interface::OpenAiResponses),
             prompt: "solve the fixture",
+            native_tool: None,
         });
         assert_eq!(spec.program, "hermes");
         assert_eq!(spec.args[0], "-z");
@@ -266,6 +267,7 @@ mod tests {
             endpoint: Some("http://127.0.0.1:1/v1"),
             interface: Some(crate::endpoint::Interface::OpenAiResponses),
             prompt: "solve the fixture",
+            native_tool: None,
         });
         assert!(spec.args.contains(&"asb-cli2key".into()));
         assert!(!spec.args.contains(&"openai-api".into()));
