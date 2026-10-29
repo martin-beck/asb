@@ -112,7 +112,6 @@ _native_alias = "openjiuwen-native-tools-1"
 _native_workspace = os.path.realpath(
     os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", "")
 ) if os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE") else ""
-_recorded_workspace = ""
 
 def _canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -137,7 +136,7 @@ def _normalize_workspace(value):
 
 def _materialize_workspace(value):
     if isinstance(value, str):
-        return value.replace(_recorded_workspace, _native_workspace) if _recorded_workspace else value
+        return value.replace("<asb-workspace>", _native_workspace) if _native_workspace else value
     if isinstance(value, list):
         return [_materialize_workspace(item) for item in value]
     if isinstance(value, dict):
@@ -165,12 +164,6 @@ def _replay_exchanges(events):
 
 if _replay_path:
     _native_events = _load_replay()
-    for _native_event in _native_events:
-        if _native_event.get("event") == "launch":
-            _encoded_workspace = _native_event.get("workspace_b64")
-            if isinstance(_encoded_workspace, str):
-                _recorded_workspace = base64.b64decode(_encoded_workspace).decode("utf-8")
-            break
 elif _record_path:
     os.makedirs(os.path.dirname(_record_path), exist_ok=True)
     _native_events = [
@@ -178,7 +171,6 @@ elif _record_path:
             "launch",
             session="openjiuwen-native-1",
             program_sha256=_digest(b"openjiuwen-native-tools-v2"),
-            workspace_b64=_payload(_native_workspace.encode("utf-8")),
         )),
         json.loads(_event("session_alias", alias=_native_alias, session="openjiuwen-native-1")),
     ]
@@ -237,7 +229,10 @@ try:
                 ))
             output = await original_invoke(self, inputs, **kwargs)
             if _record_path:
-                encoded = _canonical(output.model_dump())
+                # Keep the opaque sidecar portable across fresh replay
+                # workspaces. The foreground client still receives the live
+                # output; only the sealed replay artifact uses this marker.
+                encoded = _canonical(_normalize_workspace(output.model_dump()))
                 _native_events.extend([
                     json.loads(_event("poll", alias=_native_alias)),
                     json.loads(_event(
