@@ -112,12 +112,12 @@ function responseHeaders(headers) {
 }
 
 // A forwarded streamed provider reply is conclusive only when the upstream
-// body has a terminal SSE frame, this proxy has called `response.end`, and the
-// client did not abort its request. `handle` reaches this point only after its
-// async request-body iterator completed, which is the reliable body-complete
-// proof when this client immediately closes HTTP/1.1. This admits that normal
-// close pattern, but never promotes a partial stream or arbitrary close to a
-// completed capture.
+// body has a terminal SSE frame and this proxy has called `response.end`.
+// `handle` reaches this point only after its async request-body iterator
+// completed, which is the reliable clean-EOF/body-complete proof when this
+// client immediately closes HTTP/1.1. Node's later `aborted` flag is not: it
+// is set for that normal immediate-close pattern. This never promotes a
+// partial stream or arbitrary close to a completed capture.
 function completedSseResponse(response, body) {
   const contentType = String(response.headers["content-type"] || "").toLowerCase();
   if (!contentType.startsWith("text/event-stream") || !body.endsWith("\n")) return false;
@@ -1074,8 +1074,7 @@ const server = http.createServer((request, response) => {
   // both full capture and positive delivery, not merely an upstream EOF.
   const delivered = responseDelivery(response, () =>
     recording.completedSseResponse
-      && recording.responseEnded
-      && request.aborted !== true,
+      && recording.responseEnded,
   );
   activeCaptures.add(recording);
   recording.done = (async () => {
