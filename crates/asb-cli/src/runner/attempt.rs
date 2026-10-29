@@ -979,14 +979,10 @@ impl<'a> CompletedAttempt<'a> {
             );
         }
         let provider_capture = match context
-            .options
-            .recording
-            .zip(context.options.batch)
-            .map(|(recorder, batch)| {
-                opaque_provider_capture(
-                    &recorder.producer_path(batch.number(), context.options.replica.index),
-                )
-            })
+            .tape_cassette
+            .as_ref()
+            .filter(|(mode, _)| *mode == tape::Mode::Record)
+            .map(|(_, path)| opaque_provider_capture(path))
             .transpose()
         {
             Ok(binding) => binding,
