@@ -27,6 +27,8 @@ pub(crate) const LOCAL_TOOL_TRANSCRIPT_ARTIFACT: &str = "asb-local-tools";
 pub(crate) const DETERMINISTIC_MANIFEST_ARTIFACT: &str = "asb-determinism-manifest";
 pub(crate) const NATIVE_TRACE_ARTIFACT: &str = "asb-native-trace";
 pub(crate) const NATIVE_TOOL_SIDECAR_ARTIFACT: &str = "asb-native-tool-sidecar";
+/// Opaque adapter-owned workspace effects, transferred through guest receipts.
+pub(crate) const NATIVE_WORKSPACE_CAPSULE_ARTIFACT: &str = "asb-native-workspace-capsule";
 /// Generic, receipt-bound frozen adapter state.  It is restored only after
 /// the provider tape has settled, then interpreted by the owning adapter.
 pub(crate) const DEFERRED_COLLECTION_ARTIFACT: &str = "asb-deferred-adapter-collection";
