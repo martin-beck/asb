@@ -98,6 +98,61 @@ fn guest_tape_cassette(path: Option<&Path>) -> Result<Option<PathBuf>, String> {
     Ok(Some(Path::new("/opt/asb-private").join(name)))
 }
 
+/// Move an adapter-owned workspace capsule across the guest boundary without
+/// interpreting its bytes.  The remote layer only verifies host custody and
+/// supplies a fixed private target; the selected adapter owns the format and
+/// effects of that payload.
+fn stage_native_capsule(
+    capsule: Option<crate::workloads::session::NativeCapsule<'_>>,
+    artifact_output: &Path,
+    private_inputs: &mut Vec<PrivateInput>,
+) -> Result<crate::agents::driver::GuestCapsule, String> {
+    match capsule {
+        Some(crate::workloads::session::NativeCapsule::Record(destination)) => {
+            if destination.as_os_str().is_empty() {
+                return Err("guest native capsule destination is invalid".into());
+            }
+            Ok(crate::agents::driver::GuestCapsule {
+                mode: crate::agents::driver::GuestCapsuleMode::Record,
+                export: Some(crate::agents::driver::GuestCapsuleExport {
+                    target: "native-capsule.zip".into(),
+                }),
+            })
+        }
+        Some(crate::workloads::session::NativeCapsule::Replay(source)) => {
+            let metadata = std::fs::symlink_metadata(source)
+                .map_err(|_| "guest native capsule replay is unavailable".to_owned())?;
+            if !metadata.file_type().is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.len() > 16 * 1024 * 1024
+            {
+                return Err("guest native capsule replay is invalid or exceeds its bound".into());
+            }
+            let bytes = std::fs::read(source)
+                .map_err(|_| "guest native capsule replay is unavailable".to_owned())?;
+            if bytes.len() as u64 != metadata.len() {
+                return Err("guest native capsule replay changed before staging".into());
+            }
+            let staged = artifact_output.join("native-capsule.zip");
+            std::fs::write(&staged, &bytes)
+                .map_err(|error| format!("cannot stage guest native capsule replay: {error}"))?;
+            private_inputs.push(PrivateInput {
+                source: staged,
+                target: "native-capsule.zip".into(),
+                bytes: bytes.len() as u64,
+                sha256: crate::cassette::digest(&bytes),
+            });
+            Ok(crate::agents::driver::GuestCapsule {
+                mode: crate::agents::driver::GuestCapsuleMode::Replay,
+                export: Some(crate::agents::driver::GuestCapsuleExport {
+                    target: "native-capsule.zip".into(),
+                }),
+            })
+        }
+        None => Ok(crate::agents::driver::GuestCapsule::default()),
+    }
+}
+
 fn local_tool_sidecar(path: &Path) -> Result<PathBuf, String> {
     replay_sidecar(path, "local-tools", "jsonl")
 }
@@ -885,55 +940,11 @@ impl Session {
             &context.config.mcp_servers,
             context.mcp_mode == Some(crate::tape::Mode::Replay),
         )?;
-        // Capsule bytes remain opaque to remote dispatch. The selected adapter
-        // owns capture/apply semantics; this layer only stages verified bytes.
-        let capsule = match context.native_capsule() {
-            Some(crate::workloads::session::NativeCapsule::Record(destination)) => {
-                if destination.as_os_str().is_empty() {
-                    return Err("guest native capsule destination is invalid".into());
-                }
-                crate::agents::driver::GuestCapsule {
-                    mode: crate::agents::driver::GuestCapsuleMode::Record,
-                    export: Some(crate::agents::driver::GuestCapsuleExport {
-                        target: "native-capsule.zip".into(),
-                    }),
-                }
-            }
-            Some(crate::workloads::session::NativeCapsule::Replay(source)) => {
-                let metadata = std::fs::symlink_metadata(source)
-                    .map_err(|_| "guest native capsule replay is unavailable".to_owned())?;
-                if !metadata.file_type().is_file()
-                    || metadata.file_type().is_symlink()
-                    || metadata.len() > 16 * 1024 * 1024
-                {
-                    return Err(
-                        "guest native capsule replay is invalid or exceeds its bound".into(),
-                    );
-                }
-                let bytes = std::fs::read(source)
-                    .map_err(|_| "guest native capsule replay is unavailable".to_owned())?;
-                if bytes.len() as u64 != metadata.len() {
-                    return Err("guest native capsule replay changed before staging".into());
-                }
-                let staged = artifact_output.join("native-capsule.zip");
-                std::fs::write(&staged, &bytes).map_err(|error| {
-                    format!("cannot stage guest native capsule replay: {error}")
-                })?;
-                private_inputs.push(PrivateInput {
-                    source: staged,
-                    target: "native-capsule.zip".into(),
-                    bytes: bytes.len() as u64,
-                    sha256: crate::cassette::digest(&bytes),
-                });
-                crate::agents::driver::GuestCapsule {
-                    mode: crate::agents::driver::GuestCapsuleMode::Replay,
-                    export: Some(crate::agents::driver::GuestCapsuleExport {
-                        target: "native-capsule.zip".into(),
-                    }),
-                }
-            }
-            None => crate::agents::driver::GuestCapsule::default(),
-        };
+        let capsule = stage_native_capsule(
+            context.native_capsule(),
+            &artifact_output,
+            &mut private_inputs,
+        )?;
         let native_tool_launch = context
             .native_tool()
             .map(|(launch, source)| {
