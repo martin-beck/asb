@@ -296,7 +296,7 @@ function normalizeCassetteBody(body) {
     // offline replay is being driven.  Scope the replacement to this complete
     // fixed Codex envelope so a prompt or arbitrary tool result merely
     // mentioning a wall time remains cassette-significant.
-    .replace(/(Chunk ID: [^\n]*(?:\r?\n|\\n)Wall time: )\d+(?:\.\d+)? seconds(?=(?:\r?\n|\\n)Process exited with code \d+)/g, "$1<asb-wall-time> seconds")
+    .replace(/(Chunk ID: [^\n]*?(?:\r?\n|\\n)Wall time: )\d+(?:\.\d+)? seconds(?=(?:\r?\n|\\n)Process exited with code \d+)/g, "$1<asb-wall-time> seconds")
     // Normalize generated call identifiers, but retain the relationship
     // between distinct IDs in one request/response. OpenCode can receive
     // multiple tool calls in a streamed response; collapsing every ID into
