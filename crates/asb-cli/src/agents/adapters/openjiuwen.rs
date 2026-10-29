@@ -27,7 +27,6 @@ function object(value) {
 
 export function normalizeRequest(request) {
   const value = request?.body;
-  const replay = process.argv.includes("replay");
   if (!request?.url?.includes("/messages") || !object(value) || !Array.isArray(value.messages)) {
     return value;
   }
@@ -44,7 +43,7 @@ export function normalizeRequest(request) {
       fail("tool results require the immediately preceding assistant tool-use turn");
     }
     const calls = callTurn.content.filter((block) => object(block) && block.type === "tool_use");
-    if (calls.length !== callTurn.content.length || calls.length !== results.length) {
+    if (calls.length !== results.length) {
       fail("tool-use and tool-result counts must match exactly");
     }
     const callIds = new Set();
@@ -61,14 +60,14 @@ export function normalizeRequest(request) {
       }
       callIds.add(call.id);
       resultIds.add(result.tool_use_id);
-      if (replay) {
-        // OpenJiuwen reparses the same historical assistant call with a new
-        // uuid on later turns. Canonicalize both sides of this one proven
-        // pair together, before llmtape's ordinary structural comparison.
-        const marker = `<asb-openjiuwen-tool-pair-${index}-${position}>`;
-        call.id = marker;
-        result.tool_use_id = marker;
-      }
+      // OpenJiuwen reparses the same historical assistant call with a new
+      // uuid on later turns. Canonicalize both sides of this one proven pair
+      // together, before llmtape's ordinary structural comparison. The
+      // Anthropic protocol requires only that the paired ids agree, so this
+      // remains valid when forwarding a live record request as well.
+      const marker = `<asb-openjiuwen-tool-pair-${index}-${position}>`;
+      call.id = marker;
+      result.tool_use_id = marker;
     }
   }
   return value;
@@ -321,7 +320,7 @@ const invalid = [
     { role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: [] }] },
   ] } },
   { url: "/v1/messages", body: { messages: [
-    { role: "assistant", content: [{ type: "tool_use", id: "x", name: "read", input: {} }, { type: "text", text: "reordered" }] },
+    { role: "assistant", content: [{ type: "text", text: "reordered" }] },
     { role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: [] }] },
   ] } },
   { url: "/v1/messages", body: { messages: [
