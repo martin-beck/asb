@@ -271,8 +271,18 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
 /// post-tool hook runs.  Keep that adapter-specific envelope with the sealed
 /// native exchange, so replay can restore the exact hook result without
 /// attempting to reconstruct Codex's private serialization.
-fn bind_provider_tool_outputs(sidecar: &[u8], capture: &[u8]) -> Result<Vec<u8>, String> {
-    let capture = std::str::from_utf8(capture)
+fn bind_provider_tool_outputs(
+    sidecar: &[u8],
+    capture: &std::path::Path,
+) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::metadata(capture)
+        .map_err(|_| "Codex provider capture is unavailable".to_owned())?;
+    if metadata.len() > 256 * 1024 * 1024 {
+        return Err("Codex provider capture exceeds its bound".to_owned());
+    }
+    let capture =
+        std::fs::read(capture).map_err(|_| "Codex provider capture is unavailable".to_owned())?;
+    let capture = std::str::from_utf8(&capture)
         .map_err(|_| "Codex provider capture is not UTF-8".to_owned())?;
     let mut outputs = std::collections::BTreeMap::<String, Vec<u8>>::new();
     for line in capture.lines() {
@@ -959,13 +969,7 @@ mod tests {
         std::fs::write(root.join("capture.jsonl"), format!("{capture}\n")).unwrap();
         std::fs::write(
             &sidecar,
-            bind_provider_tool_outputs(
-                rows.as_bytes(),
-                std::fs::read(root.join("capture.jsonl"))
-                    .unwrap()
-                    .as_slice(),
-            )
-            .unwrap(),
+            bind_provider_tool_outputs(rows.as_bytes(), &root.join("capture.jsonl")).unwrap(),
         )
         .unwrap();
         assert_eq!(
