@@ -93,7 +93,7 @@ def _request(value):
     tool_input = value.get("tool_input")
     if not isinstance(name, str) or not name:
         raise RuntimeError("Codex native hook did not provide a tool name")
-    return _encode({"schema_version": 1, "kind": "codex-local-tool", "tool_name": name, "input": tool_input})
+    return _encode({"schema_version": 1, "kind": "codex-local-tool", "tool_name": name, "tool_use_id": _tool_id(value), "input": tool_input})
 
 
 def _tool_id(value):
