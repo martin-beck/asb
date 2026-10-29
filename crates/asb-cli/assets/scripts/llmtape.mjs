@@ -288,6 +288,39 @@ function normalizeHermesVerificationScriptPath(value) {
 function normalizeCassetteBody(body) {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
+  // CodeBuddy conditionally emits transport tuning fields on its first
+  // OpenAI-compatible request. They are not prompt or tool semantics, and a
+  // fresh replay process may omit them entirely. Keep the model, messages,
+  // tools, and every explicit tool result strict while removing only this
+  // client-local envelope variance from the cassette key.
+  try {
+    const parsed = JSON.parse(body);
+    const isWorkBuddy = Array.isArray(parsed.messages)
+      && parsed.messages.some((message) => JSON.stringify(message?.content || "").includes("You are CodeBuddy Code."));
+    if (isWorkBuddy) {
+      for (const field of [
+        "cache_retention",
+        "extra_vars",
+        "max_tokens",
+        "reasoning_effort",
+        "reasoning_summary",
+        "temperature",
+        "verbosity",
+      ]) delete parsed[field];
+      for (const message of parsed.messages) {
+        if (typeof message?.content === "string") {
+          message.content = message.content.replace(
+            /(<codebuddy_background_info>[\s\S]*?model named ).*?(\. The exact model ID is ).*?(?=\.(?:\n|$))/i,
+            "$1<asb-workbuddy-model>$2<asb-workbuddy-model>",
+          );
+        }
+      }
+      body = JSON.stringify(parsed);
+    }
+  } catch {
+    // The regular canonicalizer below retains malformed request bodies as
+    // strict byte strings.
+  }
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const callIdentifiers = new Map();
   const normalized = normalizeFunctionRenderingAddress(normalizePytestElapsed(
@@ -315,6 +348,7 @@ function normalizeCassetteBody(body) {
     // WorkBuddy derives a memory-project slug from the absolute workspace;
     // canonicalize that generated slug when record and replay roots differ.
     .replace(/srv-data-projects-[A-Za-z0-9_.-]+-(?:sweep-(?:record|replay)-[A-Za-z0-9_.-]+|workspaces(?:-replay)?-[A-Za-z0-9_.-]+)/g, "<asb-project-workspace>")
+    .replace(/srv-data-projects-[A-Za-z0-9_.-]+-results-asb-executions-[A-Za-z0-9-]+-batch-\d+-workspace/g, "<asb-project-workspace>")
     // Codex includes a diagnostic token count in shell-tool output. It is
     // derived from the rendered transcript and can change during replay; it
     // is not provider request semantics.
@@ -500,6 +534,17 @@ function normalizeCassetteBody(body) {
           && path[2] === "conversationRequestId"
           && key === "conversationRequestId") {
         return "<asb-workbuddy-conversation-request>";
+      }
+      // WorkBuddy also creates a per-process history message identifier. It
+      // addresses client telemetry only; the role, content, and tool history
+      // next to it remain cassette-significant.
+      if (typeof value === "string"
+          && path.length === 3
+          && path[0] === "messages"
+          && /^\d+$/.test(path[1])
+          && ["messageId", "requestModelId", "requestModelName"].includes(path[2])
+          && key === path[2]) {
+        return `<asb-workbuddy-${path[2]}>`;
       }
       if (typeof value === "string") {
         value = normalizeFunctionRenderingAddress(value);

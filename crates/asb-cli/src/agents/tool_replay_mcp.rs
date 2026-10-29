@@ -499,11 +499,26 @@ fn respond(
             {"name":"create_directory","description":"Create a directory inside the benchmark workspace.","inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}},
             {"name":"remove_file","description":"Remove a file inside the benchmark workspace.","inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}}
         ]}),
-        "tools/call" => call(
+        "tools/call" => match call(
             options,
             transcript,
             request.get("params").cloned().unwrap_or(Value::Null),
-        )?,
+        ) {
+            Ok(result) => result,
+            // A tool can legitimately fail (for example, the first test run
+            // of a bug-fix task).  Preserve that failure in the sealed
+            // transcript, but return it through MCP rather than terminating
+            // the server.  Clients such as WorkBuddy otherwise lose their
+            // stdio connection and cannot issue the follow-up inspection and
+            // repair calls that make a record/replay attempt useful.
+            Err(error) => {
+                return Ok(Some(json!({
+                    "jsonrpc":"2.0",
+                    "id":id,
+                    "error":{"code":-32000,"message":error.to_string()},
+                })));
+            }
+        },
         _ => {
             return Ok(Some(
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"method unavailable"}}),
@@ -990,7 +1005,12 @@ fn validate_command(argv: &[&str]) -> Result<(), Error> {
         "rg" | "grep" | "find" | "ls" | "cat" | "sed" | "head" | "tail" | "pwd" => true,
         "cargo" => matches!(first, "test" | "check" | "fmt"),
         "pytest" => true,
-        "python" | "python3" => argv.get(1) == Some(&"-m") && argv.get(2) == Some(&"pytest"),
+        // Bundled Python workloads instruct agents to run their standard
+        // library test suites.  Permit that fixed module invocation alongside
+        // pytest without allowing arbitrary Python source or shell escapes.
+        "python" | "python3" => {
+            argv.get(1) == Some(&"-m") && matches!(argv.get(2), Some(&"pytest") | Some(&"unittest"))
+        }
         _ => false,
     };
     allowed
@@ -1191,6 +1211,14 @@ mod tests {
     }
 
     #[test]
+    fn command_policy_allows_standard_library_python_test_discovery_only() {
+        assert!(validate_command(&["python3", "-m", "unittest", "discover"]).is_ok());
+        assert!(validate_command(&["python", "-m", "pytest", "-q"]).is_ok());
+        assert!(validate_command(&["python3", "script.py"]).is_err());
+        assert!(validate_command(&["python3", "-m", "pip", "install"]).is_err());
+    }
+
+    #[test]
     fn replay_returns_a_recorded_command_result_without_starting_a_process() {
         let root =
             std::env::temp_dir().join(format!("asb-mcp-command-replay-{}", std::process::id()));
@@ -1261,7 +1289,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_per_call_failure_is_published_before_the_service_exits() {
+    fn recorded_tool_failure_returns_an_mcp_error_and_keeps_the_service_usable() {
         let root = std::env::temp_dir().join(format!(
             "asb-mcp-pi-failure-publication-{}",
             crate::tools::runtime::unique_id()
@@ -1279,43 +1307,51 @@ mod tests {
             .unwrap()
             .set_len(MAX_COMMAND_SNAPSHOT_BYTES + 1)
             .unwrap();
+        std::fs::write(workspace.join("still-readable.txt"), "available\n").unwrap();
         let state = per_call_state_path(&run_dir, "pi-progress.json");
         publish_per_call_state(&state, 0, 0).unwrap();
-        let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_command\",\"arguments\":{\"argv\":[\"pwd\"]}}}\n";
+        let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_command\",\"arguments\":{\"argv\":[\"pwd\"]}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"still-readable.txt\"}}}\n";
         let record = Options {
             mode: Mode::Record,
             workspace: workspace.clone(),
             transcript: transcript.clone(),
             per_call_state: Some(state.clone()),
         };
-        let error =
-            run_with_io(record, &mut BufReader::new(&request[..]), &mut Vec::new()).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "local-tool command workspace exceeds snapshot byte bound"
-        );
+        let mut output = Vec::new();
+        run_with_io(record, &mut BufReader::new(&request[..]), &mut output).unwrap();
+        let responses = String::from_utf8(output.clone()).unwrap();
+        assert!(responses.contains("\"id\":1"));
+        assert!(responses.contains("\"id\":2"));
+        assert!(responses.contains("local-tool command workspace exceeds snapshot byte bound"));
+        assert!(responses.contains("available"), "{responses}");
         let bytes = std::fs::read(&transcript).unwrap();
         let recorded = Transcript::decode(&bytes).unwrap();
-        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded.len(), 2);
         assert_eq!(
-            serde_json::from_slice::<Value>(&bytes).unwrap()["failure"],
+            serde_json::from_slice::<Value>(bytes.split(|byte| *byte == b'\n').next().unwrap())
+                .unwrap()["failure"],
             "local-tool command workspace exceeds snapshot byte bound"
         );
         let recorded_state = read_per_call_state(&state).unwrap();
-        assert_eq!((recorded_state.cursor, recorded_state.events), (1, 1));
+        assert_eq!((recorded_state.cursor, recorded_state.events), (2, 2));
 
         // Replay initializes a fresh run-private cursor while retaining the
         // sealed event count from the recording.
-        publish_per_call_state(&state, 0, 1).unwrap();
+        publish_per_call_state(&state, 0, 2).unwrap();
         let replay = Options {
             mode: Mode::Replay,
             workspace: root.join("workspace-is-not-opened-during-replay"),
             transcript,
             per_call_state: Some(state),
         };
-        let replay_error =
-            run_with_io(replay, &mut BufReader::new(&request[..]), &mut Vec::new()).unwrap_err();
-        assert_eq!(replay_error.to_string(), error.to_string());
+        let mut replay_output = Vec::new();
+        run_with_io(
+            replay,
+            &mut BufReader::new(&request[..]),
+            &mut replay_output,
+        )
+        .unwrap();
+        assert_eq!(replay_output, output);
         verify_per_call_completion(&run_dir, None).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
