@@ -237,9 +237,15 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
         || complete != Some(true)
         || !matches!(mode, Some("record") | Some("replay"))
     {
+        let detail = progress
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| value.len() <= 160 && !value.chars().any(char::is_control))
+            .map(|value| format!(": {value}"))
+            .unwrap_or_default();
         artifacts
             .errors
-            .push("Codex native tool hook did not complete".into());
+            .push(format!("Codex native tool hook did not complete{detail}"));
         return artifacts;
     }
     if mode == Some("record") {
