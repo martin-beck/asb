@@ -380,6 +380,10 @@ function normalizeCassetteBody(body, url = "") {
     .replace(/original token count: \d+/g, "original token count: <asb-token-count>")
     .replace(/Total output lines: \d+/g, "Total output lines: <asb-line-count>")
     .replace(/codex-arg[A-Za-z0-9_-]+/g, "codex-arg<asb-random>")
+    // OpenJiuwen returns a process-local shell transcript basename through
+    // later Anthropic turns. Its hexadecimal suffix is regenerated for each
+    // client process; scope this to the exact slash-delimited component.
+    .replace(/(\/bash_)[0-9a-f]{8,}\b/gi, "$1<asb-openjiuwen-shell>")
     // OpenHands persists a generated conversation directory and its generated
     // immediate subagent directory in later provider history. These IDs are
     // created afresh for every agent process, so scope normalization to this
