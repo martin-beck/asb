@@ -577,6 +577,7 @@ mod tests {
             );
             let artifacts = collect(&CollectionContext {
                 frozen: &frozen,
+                provider_capture: None,
                 run_dir: Path::new("/fixture"),
                 interface: None,
                 anthropic_input_includes_cache: false,
@@ -599,6 +600,7 @@ mod tests {
         );
         let artifacts = collect(&CollectionContext {
             frozen: &frozen,
+            provider_capture: None,
             run_dir: Path::new("/fixture"),
             interface: None,
             anthropic_input_includes_cache: false,
@@ -625,6 +627,7 @@ mod tests {
         );
         let artifacts = collect(&CollectionContext {
             frozen: &frozen,
+            provider_capture: None,
             run_dir: Path::new("/fixture"),
             interface: None,
             anthropic_input_includes_cache: false,
@@ -651,6 +654,7 @@ mod tests {
         );
         let artifacts = collect(&CollectionContext {
             frozen: &malformed,
+            provider_capture: None,
             run_dir: Path::new("/fixture"),
             interface: None,
             anthropic_input_includes_cache: false,
@@ -676,6 +680,7 @@ mod tests {
         );
         let artifacts = collect(&CollectionContext {
             frozen: &frozen,
+            provider_capture: None,
             run_dir: Path::new("/fixture"),
             interface: None,
             anthropic_input_includes_cache: false,
