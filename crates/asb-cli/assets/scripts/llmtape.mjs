@@ -265,6 +265,15 @@ function normalizeFunctionRenderingAddress(value) {
   return value.replace(/(<function [^\n]*? at )0x[0-9a-f]+>/gi, "$1<asb-address>>");
 }
 
+// Python object reprs have the same process-local address volatility, but are
+// a distinct rendering form from callables.  Keep this intentionally narrow:
+// only a complete one-line `<qualified.name object at 0x...>` representation
+// is normalized; surrounding output and the object's rendered class remain
+// significant.
+function normalizeObjectRenderingAddress(value) {
+  return value.replace(/(<[^<>\n]+ object at )0x[0-9a-f]+>/gi, "$1<asb-address>>");
+}
+
 function normalizeCassetteBody(body) {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
@@ -471,6 +480,7 @@ function normalizeCassetteBody(body) {
       }
       if (typeof value === "string") {
         value = normalizeFunctionRenderingAddress(value);
+        value = normalizeObjectRenderingAddress(value);
         value = normalizeToolSearchOrdering(value);
         value = normalizeLsDiagnosticOrdering(value);
         const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");

@@ -1008,6 +1008,30 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_structured_python_object_address_rendering() {
+        let root = test_root();
+        let cassette = root.join("structured-python-object-address.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"projection: <astropy.wcs.wcsapi.wrappers.sliced_wcs.SlicedLowLevelWCS object at 0x74bf5f748880>\nsemantic result: resolved"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = r#"{"model":"m","input":[{"type":"function_call_output","output":"projection: <astropy.wcs.wcsapi.wrappers.sliced_wcs.SlicedLowLevelWCS object at 0x7028ccc89730>\nsemantic result: resolved"}]}"#;
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let semantic_object_change = replayed.replace("SlicedLowLevelWCS", "DifferentWCS");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(
+            request_to(&session, "/v1/responses", &semantic_object_change).contains("409 Conflict")
+        );
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_complete_testbed_search_block_ordering() {
         let root = test_root();
         let cassette = root.join("opencode-search-order.jsonl");
