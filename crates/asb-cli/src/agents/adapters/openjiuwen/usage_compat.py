@@ -12,6 +12,18 @@ import runpy
 import sys
 import json
 
+# Consume the adapter-private replay selector before importing OpenJiuwen.
+# Its package initialization may inspect argv while building provider features,
+# so record and replay must expose an identical upstream CLI shape.
+_record_path = os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_RECORD")
+_replay_path = None
+if "--asb-native-tool-replay" in sys.argv:
+    _index = sys.argv.index("--asb-native-tool-replay")
+    if _index + 1 >= len(sys.argv):
+        raise SystemExit("ASB OpenJiuwen native replay sidecar is missing")
+    _replay_path = sys.argv[_index + 1]
+    del sys.argv[_index:_index + 2]
+
 try:
     from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 except ImportError as error:
@@ -97,15 +109,6 @@ except ImportError:
 # layer seals it. Replaying one tool selectively is unsafe: a later direct
 # filesystem or shell call would otherwise execute against the replay
 # workspace and change the provider conversation.
-_record_path = os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_RECORD")
-_replay_path = None
-if "--asb-native-tool-replay" in sys.argv:
-    _index = sys.argv.index("--asb-native-tool-replay")
-    if _index + 1 >= len(sys.argv):
-        raise SystemExit("ASB OpenJiuwen native replay sidecar is missing")
-    _replay_path = sys.argv[_index + 1]
-    del sys.argv[_index:_index + 2]
-
 _native_events = []
 _native_cursor = 0
 _native_alias = "openjiuwen-native-tools-1"

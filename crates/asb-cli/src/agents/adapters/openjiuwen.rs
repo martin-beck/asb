@@ -1,5 +1,15 @@
-use super::{CommandContext, CommandSpec, PreparationContext, StaticAdapter};
+use super::{
+    AgentArtifacts, CollectionContext, CommandContext, CommandSpec, PreparationContext,
+    StaticAdapter,
+};
 use crate::{Error, install::Recipe};
+
+const ARTIFACTS: &[super::super::ArtifactSpec] = &[super::super::ArtifactSpec {
+    namespace: "openjiuwen",
+    filename: "native-tool-sidecar.jsonl",
+    format: super::super::ArtifactFormat::JsonLines,
+}];
+
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "openjiuwen",
     "openjiuwen",
@@ -20,6 +30,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_final_response(final_response)
 .with_final_response_failure(final_response_failure)
 .with_native_tool_transport()
+.with_artifact_specs(ARTIFACTS)
 .with_collection(collect)
 .with_process(process);
 
@@ -190,7 +201,7 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     );
     context.command.env(
         "ASB_OPENJIUWEN_NATIVE_TOOL_RECORD",
-        context.run_dir.join("openjiuwen-native-tools.jsonl"),
+        context.run_dir.join("openjiuwen/native-tool-sidecar.jsonl"),
     );
     let workspace = std::fs::canonicalize(context.workspace)
         .unwrap_or_else(|_| context.workspace.to_path_buf());
@@ -200,10 +211,12 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-fn collect(context: &crate::agents::CollectionContext<'_>) -> crate::agents::AgentArtifacts {
-    crate::agents::AgentArtifacts {
-        native_tool_sidecar: std::fs::read(context.run_dir.join("openjiuwen-native-tools.jsonl"))
-            .ok()
+fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
+    AgentArtifacts {
+        native_tool_sidecar: context
+            .frozen
+            .bytes("native-tool-sidecar.jsonl")
+            .map(ToOwned::to_owned)
             .filter(|bytes| !bytes.is_empty()),
         ..Default::default()
     }
@@ -212,8 +225,34 @@ fn collect(context: &crate::agents::CollectionContext<'_>) -> crate::agents::Age
 #[cfg(test)]
 mod tests {
     use super::command;
-    use crate::agents::CommandContext;
+    use crate::agents::{ArtifactOwner, CollectionContext, CommandContext};
     use crate::benchmark::BenchmarkConfig;
+
+    #[test]
+    fn native_tool_recording_is_collected_from_the_frozen_guest_artifact() {
+        let root =
+            std::env::temp_dir().join(format!("asb-openjiuwen-artifact-{}", std::process::id()));
+        let run = root.join("run");
+        let mut owner = ArtifactOwner::prepare(&run, super::ARTIFACTS).unwrap();
+        let sidecar = run.join("openjiuwen/native-tool-sidecar.jsonl");
+        std::fs::write(&sidecar, b"{\"event\":\"launch\"}\n").unwrap();
+        let frozen = owner.freeze();
+        assert!(!frozen.error);
+        let artifacts = super::collect(&CollectionContext {
+            frozen: &frozen,
+            provider_capture: None,
+            run_dir: &run,
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert_eq!(
+            artifacts.native_tool_sidecar.as_deref(),
+            Some(b"{\"event\":\"launch\"}\n".as_slice())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn missing_terminal_answer_is_an_adapter_policy_for_native_and_guest_results() {
@@ -415,6 +454,14 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         ] {
             std::fs::write(package.join(relative), "").unwrap();
         }
+        // The adapter-private replay selector must be removed before an
+        // upstream package import can inspect argv and alter its provider
+        // feature selection.
+        std::fs::write(
+            package.join("__init__.py"),
+            "import sys\nassert '--asb-native-tool-replay' not in sys.argv\n",
+        )
+        .unwrap();
         std::fs::write(
             package.join("core/foundation/llm/schema/message_chunk.py"),
             r#"
