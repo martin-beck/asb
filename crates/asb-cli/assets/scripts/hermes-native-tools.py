@@ -242,6 +242,28 @@ try:
                                 pty, notify_on_complete, watch_patterns)
 
     terminal_tool.terminal_tool = terminal
+    # The CLI can initialize the central registry before its tool module is
+    # consulted. Rebind that captured terminal entry too, so model dispatch
+    # reaches the same adapter-owned wrapper in record and replay.
+    from tools.registry import registry
+
+    def registered_terminal(args, **kw):
+        return terminal(
+            args.get("command"),
+            args.get("background", False),
+            args.get("timeout"),
+            kw.get("task_id"),
+            kw.get("session_id"),
+            False,
+            args.get("workdir"),
+            args.get("pty", False),
+            args.get("notify_on_complete", False),
+            args.get("watch_patterns"),
+        )
+
+    entry = registry._tools.get("terminal")
+    if entry is not None:
+        entry.handler = registered_terminal
     atexit.register(transport.close)
 
     # Hermes terminates its one-shot CLI through ``os._exit``.  That bypasses

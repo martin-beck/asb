@@ -440,6 +440,7 @@ mod tests {
             std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py")).unwrap();
         assert!(hook.contains("_task_id, _session_id"));
         assert!(!hook.contains("\"task_id\": task_id"));
+        assert!(hook.contains("entry.handler = registered_terminal"));
         let _ = std::fs::remove_dir_all(root);
     }
 
