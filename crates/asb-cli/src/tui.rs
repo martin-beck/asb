@@ -2957,14 +2957,13 @@ fn selected_trials(app: &App, choice: &ChoiceKey) -> Result<TrialSelection, Erro
 }
 
 fn selected_workload_trials(app: &App, choice: &ChoiceKey) -> Result<TrialSelection, Error> {
-    // A persisted workload trial-set is an explicit user selection and takes
-    // precedence over the interactive extension pane.
-    if matches!(choice, ChoiceKey::TrialSet { .. }) {
-        return selected_trials(app, choice);
-    }
     let Some(workload) = choice.workload() else {
         return Err(Error::Input("invalid workload selection identity".into()));
     };
+    // An adapter extension is the current wizard's explicit selection. A
+    // persisted trial-set only seeds that pane; it must not replace edits made
+    // in this invocation merely because workload discovery chose a TrialSet
+    // key for the one visible workload row.
     let Some(extension) = workloads::setup_extension(workload) else {
         return selected_trials(app, choice);
     };
@@ -3007,7 +3006,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::style::{Color, Style};
     use std::collections::BTreeSet;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::Instant;
 
     #[test]
@@ -3957,6 +3956,23 @@ mod tests {
         for pane in &mut app.panes[..4] {
             pane.selected[0] = true;
         }
+        // A trial-capable workload publishes the current extension pane, even
+        // when the workload row is a persisted trial set. Mirror the explicit
+        // all-trials selection made by the setup wizard.
+        app.panes[PaneKind::Extensions.index()] = Pane::new(
+            (0..2294)
+                .map(|index| Choice {
+                    label: format!("fixture-instance-{index}"),
+                    key: ChoiceKey::ExtensionValue {
+                        workload: "swe-bench".into(),
+                        extension: "trial".into(),
+                        value: format!("fixture-instance-{index}"),
+                    },
+                    availability: Availability::Available,
+                })
+                .collect(),
+        );
+        app.panes[PaneKind::Extensions.index()].selected.fill(true);
         let generated = generate_configs(&app).unwrap();
         assert_eq!(generated.tests, 2294);
         assert!(std::fs::metadata(&generated.sweep).unwrap().len() > 64 * 1024);
@@ -4403,7 +4419,21 @@ mod tests {
                 availability: Availability::Available,
             }]);
             app.panes[PaneKind::Models.index()].selected[0] = true;
-            app.panes[PaneKind::Workloads.index()] = Pane::new(vec![choice(workload)]);
+            let saved = root.join("workloads/saved.workload.toml");
+            std::fs::create_dir_all(saved.parent().unwrap()).unwrap();
+            std::fs::write(
+                &saved,
+                format!("workload = '{workload}'\n[[trials]]\nid = 'saved-trial'\n"),
+            )
+            .unwrap();
+            app.panes[PaneKind::Workloads.index()] = Pane::new(vec![Choice {
+                label: workload.into(),
+                key: ChoiceKey::TrialSet {
+                    workload: workload.into(),
+                    file: PathBuf::from("saved.workload.toml"),
+                },
+                availability: Availability::Available,
+            }]);
             app.panes[PaneKind::Workloads.index()].selected[0] = true;
             let Some(extension) = crate::workloads::setup_extension(workload) else {
                 // Reference-only adapters deliberately have no fabricated
