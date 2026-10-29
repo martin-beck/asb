@@ -561,7 +561,9 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         for relative in [
             "core/foundation/llm/schema",
             "core/foundation/tool",
+            "core/context_engine/context",
             "core/single_agent",
+            "core/single_agent/agents",
             "harness/cli/agent",
             "harness/tools/shell",
             "harness/tools",
@@ -575,7 +577,10 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
             "core/foundation/llm/__init__.py",
             "core/foundation/llm/schema/__init__.py",
             "core/foundation/tool/__init__.py",
+            "core/context_engine/__init__.py",
+            "core/context_engine/context/__init__.py",
             "core/single_agent/__init__.py",
+            "core/single_agent/agents/__init__.py",
             "harness/__init__.py",
             "harness/cli/__init__.py",
             "harness/cli/agent/__init__.py",
@@ -638,6 +643,15 @@ class Tool:
         )
         .unwrap();
         std::fs::write(
+            package.join("core/context_engine/context/context.py"),
+            r#"
+class Context:
+    def __init__(self): self.messages = []
+    async def add_messages(self, message): self.messages.append(message)
+"#,
+        )
+        .unwrap();
+        std::fs::write(
             package.join("core/single_agent/ability_manager.py"),
             r#"
 import os
@@ -664,7 +678,28 @@ class ToolMessage:
 "#,
         )
         .unwrap();
+        std::fs::write(
+            package.join("core/single_agent/agents/react_agent.py"),
+            r#"
+import asyncio
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
+class ReActAgent:
+    async def _execute_tool_call(self, _a, _b, _c, context, result, message):
+        # Keep this invocation active while its sibling enters the same
+        # context hook.  The adapter must not restore the original method
+        # until both concurrent calls finish.
+        if message.tool_call_id == "concurrent-second":
+            await asyncio.sleep(0.02)
+        results = await AbilityManager().execute(result, message)
+        for entry in results:
+            if isinstance(entry, tuple) and len(entry) == 2:
+                await context.add_messages(entry[1])
+        return results
+"#,
+        )
+        .unwrap();
         let tools = r#"
+import asyncio
 import os
 import json
 from openjiuwen.core.foundation.tool.schema import ToolOutput
@@ -674,6 +709,19 @@ class _Tool(Tool):
     def __init__(self):
         self._renders = 0
     async def invoke(self, inputs, **kwargs):
+        # Grep delegates to Glob in the real client.  The adapter sidecar
+        # must preserve this nested direct-tool relation even though replay
+        # returns Grep's captured outer result without running either tool.
+        if self.label == "grep" and inputs.get("nested"):
+            await GlobTool().invoke({"nested": inputs["nested"]})
+        # Two independent roots complete in the opposite order in which they
+        # were dispatched. Their task-local ancestry must remain root-level,
+        # and replay must use dispatch ordinal rather than sidecar append
+        # order.
+        if inputs.get("concurrent") == "first":
+            await asyncio.sleep(0.01)
+        elif inputs.get("concurrent") == "second":
+            await asyncio.sleep(0)
         with open(os.environ["ASB_TEST_NATIVE_EXECUTED"], "a", encoding="utf-8") as marker:
             marker.write(self.label + "\n")
         return ToolOutput(data={"tool": self.label, "inputs": inputs})
@@ -716,11 +764,14 @@ from openjiuwen.harness.tools.filesystem import ReadFileTool, WriteFileTool, Edi
 from openjiuwen.harness.tools.shell import BashTool
 from openjiuwen.harness.tools.code import CodeTool
 from openjiuwen.core.single_agent.ability_manager import AbilityManager, ToolMessage
+from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
+from openjiuwen.core.context_engine.context.context import Context
 async def main():
     agent, _tracker = factory.create_agent(None)
     assert agent._deep_config.enable_read_image_multimodal is False
     assert agent._deep_config.parallel_tool_calls is False
     result = []
+    context = Context()
     for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool):
         instance = tool()
         # A wrapped native tool can call another wrapped native tool before
@@ -730,7 +781,7 @@ async def main():
         inner_output = await inner.invoke({{"inner": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})
         # Nested direct exchange has no provider-visible final message.
         # Replay must consume it without inventing a rendering or history row.
-        output = await instance.invoke({{"value": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})
+        output = await instance.invoke({{"value": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label), "nested": tool.label if tool.label == "grep" else None}})
         # Final-message admission is provenance-based: a copied ToolOutput
         # has no private native marker and must not be guessed from payload.
         tool_call = type("ToolCall", (), {{"id": os.environ.get("ASB_TEST_TOOL_CALL_ID", tool.label)}})()
@@ -740,12 +791,24 @@ async def main():
         if os.environ.get("ASB_TEST_CHANGED_FINAL_PROVENANCE"):
             message_id = "changed-" + message_id
         message = ToolMessage(message_id, "live")
-        mixed = await AbilityManager().execute(output, message)
+        mixed = await ReActAgent()._execute_tool_call(None, None, None, context, output, message)
         assert mixed[0] == "non-tool"
         assert mixed[1][1].content == "unrelated-before"
         assert isinstance(mixed[2][1].tool_call_id, str)
         assert mixed[3][1].content == "unrelated-after"
         result.append(mixed[2][1].tool_call_id)
+    async def concurrent_root(label):
+        return await ReadFileTool().invoke({{"concurrent": label}})
+    await asyncio.gather(concurrent_root("first"), concurrent_root("second"))
+    async def concurrent_context(label):
+        tool = ReadFileTool()
+        output = await tool.invoke({{"context": label}})
+        tool_call = type("ToolCall", (), {{"id": "concurrent-" + label}})()
+        AbilityManager._render_tool_result(tool, tool_call, output)
+        return await ReActAgent()._execute_tool_call(
+            None, None, None, context, output, ToolMessage("concurrent-" + label, "live")
+        )
+    await asyncio.gather(concurrent_context("first"), concurrent_context("second"))
     print(json.dumps(result, sort_keys=True))
 asyncio.run(main())
 "#,
@@ -782,7 +845,16 @@ asyncio.run(main())
         );
         assert_eq!(
             std::fs::read_to_string(&marker).unwrap().lines().count(),
-            16
+            21
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sidecar)
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains(r#""event":"write""#))
+                .count(),
+            20,
+            "nested helper calls must not become independent replay exchanges"
         );
         std::fs::remove_file(&marker).unwrap();
         let replay = super::process(entry.to_str().unwrap())
@@ -812,6 +884,53 @@ asyncio.run(main())
         assert!(
             !marker.exists(),
             "native tool replay executed a direct tool"
+        );
+        let missing_nesting = root.join("native-missing-nesting.jsonl");
+        let remove_nesting = std::process::Command::new(python.trim())
+            .args([
+                "-c",
+                r#"import base64,hashlib,json,sys
+source,destination=sys.argv[1:]
+events=[]
+changed=False
+for line in open(source, encoding="utf-8"):
+    event=json.loads(line)
+    if not changed and event.get("event")=="write":
+        request=json.loads(base64.b64decode(event["request_b64"]))
+        del request["_asb_openjiuwen_invocation"]
+        raw=json.dumps(request,separators=(",",":"),sort_keys=True,ensure_ascii=False).encode()
+        event["request_b64"]=base64.b64encode(raw).decode()
+        event["request_sha256"]=hashlib.sha256(raw).hexdigest()
+        changed=True
+    events.append(event)
+assert changed
+with open(destination,"w",encoding="utf-8") as output:
+    for event in events:
+        output.write(json.dumps(event,separators=(",",":"))+"\n")
+"#,
+                sidecar.to_str().unwrap(),
+                missing_nesting.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(remove_nesting.status.success());
+        let malformed_nesting = super::process(entry.to_str().unwrap())
+            .unwrap()
+            .direct()
+            .arg("--asb-native-tool-replay")
+            .arg(&missing_nesting)
+            .env("PYTHONPATH", &root)
+            .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_TEST_WORKSPACE", &replay_workspace)
+            .env("ASB_TEST_RENDER_PREFIX", "replay:")
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
+            .output()
+            .unwrap();
+        assert!(!malformed_nesting.status.success());
+        assert!(
+            String::from_utf8_lossy(&malformed_nesting.stderr).contains("nesting metadata"),
+            "{}",
+            String::from_utf8_lossy(&malformed_nesting.stderr)
         );
         let tampered = root.join("native-tampered.jsonl");
         let tamper = std::process::Command::new(python.trim())
@@ -874,7 +993,7 @@ with open(destination,"w",encoding="utf-8") as output:
             .output()
             .unwrap();
         assert!(!extra.status.success());
-        assert!(String::from_utf8_lossy(&extra.stderr).contains("final tool message"));
+        assert!(String::from_utf8_lossy(&extra.stderr).contains("final"));
         let changed_provenance = super::process(entry.to_str().unwrap())
             .unwrap()
             .direct()
@@ -890,7 +1009,9 @@ with open(destination,"w",encoding="utf-8") as output:
             .unwrap();
         assert!(!changed_provenance.status.success());
         assert!(
-            String::from_utf8_lossy(&changed_provenance.stderr).contains("final history message")
+            String::from_utf8_lossy(&changed_provenance.stderr).contains("final native message"),
+            "{}",
+            String::from_utf8_lossy(&changed_provenance.stderr)
         );
         std::fs::remove_dir_all(root).unwrap();
     }
