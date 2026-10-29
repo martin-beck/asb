@@ -889,8 +889,7 @@ with open(destination,"w",encoding="utf-8") as output:
             .unwrap();
         assert!(!changed_provenance.status.success());
         assert!(
-            String::from_utf8_lossy(&changed_provenance.stderr)
-                .contains("left final tool messages unconsumed")
+            String::from_utf8_lossy(&changed_provenance.stderr).contains("final history message")
         );
         std::fs::remove_dir_all(root).unwrap();
     }
