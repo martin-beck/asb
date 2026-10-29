@@ -317,11 +317,18 @@ try:
                 ):
                     continue
                 if _replay_path:
-                    replayed = _replayed_output_events.get(id(_result))
-                    event = replayed[1] if replayed is not None and replayed[0] is _result else None
+                    # AbilityManager is the final model-message boundary.
+                    # OpenJiuwen may reconstruct its ToolOutput before this
+                    # point, so object identity cannot distinguish a valid
+                    # final result from its copy. Consume only the next sealed
+                    # final message; a missing or extra concrete ToolMessage
+                    # is a fail-closed sequence error.
+                    if _message_cursor >= len(final_outputs):
+                        raise RuntimeError("ASB OpenJiuwen native replay has an extra final tool message")
+                    event = final_outputs[_message_cursor]
                 else:
                     event = _owned_recorded_event(_result)
-                if event is None:
+                if event is None and not _replay_path:
                     # Upstream rails may reconstruct a ToolOutput before
                     # returning it. During replay the sealed final-message
                     # sequence is the only admissible candidate. During
@@ -358,10 +365,6 @@ try:
                     continue
                 envelope = json.loads(base64.b64decode(event["output_b64"]))
                 if _replay_path:
-                    if _message_cursor >= len(final_outputs):
-                        raise RuntimeError("ASB OpenJiuwen native replay has an extra final tool message")
-                    if event is not final_outputs[_message_cursor]:
-                        raise RuntimeError("ASB OpenJiuwen native replay final tool message is out of order")
                     final = envelope.get("message")
                     if not isinstance(final, dict) or not isinstance(final.get("tool_call_id"), str) or not isinstance(final.get("content"), str):
                         raise RuntimeError("ASB OpenJiuwen native replay final tool message is missing or out of order")
