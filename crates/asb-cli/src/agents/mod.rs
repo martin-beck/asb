@@ -31,6 +31,15 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Opaque adapter-owned code/data staged into an isolated guest runtime.
+/// The remote dispatcher validates paths and bytes but never interprets the
+/// adapter protocol carried by an asset.
+#[derive(Clone, Copy)]
+pub(crate) struct GuestPrivateAsset {
+    pub target: &'static str,
+    pub bytes: &'static [u8],
+}
+
 /// Dispatch the adapter-private OpenHands native bridge without exposing the
 /// adapter registry itself to unrelated CLI modules.
 pub(crate) fn openhands_native_entry(args: &[std::ffi::OsString]) -> std::process::ExitCode {
@@ -73,6 +82,10 @@ pub(crate) trait AgentAdapter: Sync {
             inputs.push(crate::runtime_inputs::Dependency::file(PathBuf::from(path)));
         }
         Ok(inputs)
+    }
+    /// Static adapter-private guest inputs required before client launch.
+    fn guest_private_assets(&self) -> &'static [GuestPrivateAsset] {
+        &[]
     }
     /// Supported wire interfaces, in preference order.
     fn supported_endpoints(&self) -> &'static [Support];
@@ -452,6 +465,7 @@ pub(super) struct StaticAdapter {
     state_environment_vars: &'static [&'static str],
     forwarded_invocation_environment_vars: &'static [&'static str],
     preferred_executables: Option<PreferredExecutablesHook>,
+    guest_private_assets: &'static [GuestPrivateAsset],
     execution_identity: ExecutionIdentity,
 }
 impl StaticAdapter {
@@ -491,6 +505,7 @@ impl StaticAdapter {
             state_environment_vars: &[],
             forwarded_invocation_environment_vars: &[],
             preferred_executables: None,
+            guest_private_assets: &[],
             execution_identity: ExecutionIdentity::WorkloadDefault,
         }
     }
@@ -545,6 +560,14 @@ impl StaticAdapter {
         hook: PreferredExecutablesHook,
     ) -> Self {
         self.preferred_executables = Some(hook);
+        self
+    }
+
+    pub(super) const fn with_guest_private_assets(
+        mut self,
+        assets: &'static [GuestPrivateAsset],
+    ) -> Self {
+        self.guest_private_assets = assets;
         self
     }
 
@@ -628,6 +651,9 @@ impl StaticAdapter {
     }
 }
 impl AgentAdapter for StaticAdapter {
+    fn guest_private_assets(&self) -> &'static [GuestPrivateAsset] {
+        self.guest_private_assets
+    }
     fn state_environment_vars(&self) -> &'static [&'static str] {
         self.state_environment_vars
     }
