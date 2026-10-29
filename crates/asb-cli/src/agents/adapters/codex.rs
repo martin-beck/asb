@@ -289,6 +289,8 @@ fn bind_provider_tool_outputs(
     // global output key.  Derive the newly appended result suffix from each
     // successive snapshot and bind it to the native hook's causal order.
     let mut prior = Vec::<(String, Vec<u8>)>::new();
+    let mut prior_calls = Vec::<String>::new();
+    let mut streamed_calls = false;
     let mut outputs = std::collections::VecDeque::<Vec<u8>>::new();
     for line in capture.lines() {
         let row: serde_json::Value = serde_json::from_str(line)
@@ -321,12 +323,39 @@ fn bind_provider_tool_outputs(
         if !current.starts_with(&prior) {
             return Err("Codex provider tool result history diverges".into());
         }
-        outputs.extend(
-            current[prior.len()..]
-                .iter()
-                .map(|(_, output)| output.clone()),
-        );
+        let appended = &current[prior.len()..];
+        if streamed_calls && appended.len() != prior_calls.len() {
+            return Err("Codex provider call/result sequence diverges".into());
+        }
+        if streamed_calls {
+            for (name, (_, output)) in prior_calls.iter().zip(appended) {
+                match name.as_str() {
+                    // Codex presents its native Bash lifecycle hook as the
+                    // Responses-compatible exec command. The native sidecar
+                    // owns only that causal stream.
+                    "exec_command" => outputs.push_back(output.clone()),
+                    // This provider operation resumes an already-owned
+                    // process; it has no PreToolUse native shell boundary.
+                    "write_stdin" => (),
+                    _ => {
+                        return Err(
+                            "Codex provider call is not replayable through the native hook".into(),
+                        );
+                    }
+                }
+            }
+        } else {
+            // Fixture/legacy captures without a streamed Responses envelope
+            // retain the historical conservative one-result-per-hook route.
+            outputs.extend(appended.iter().map(|(_, output)| output.clone()));
+        }
         prior = current;
+        let calls = provider_function_calls(&row)?;
+        streamed_calls |= calls.1;
+        prior_calls = calls.0;
+    }
+    if streamed_calls && !prior_calls.is_empty() {
+        return Err("Codex provider call has no following result".into());
     }
     let mut rows = sidecar
         .split_inclusive(|byte| *byte == b'\n')
@@ -396,6 +425,45 @@ fn bind_provider_tool_outputs(
         .join("\n")
         + "\n";
     Ok(encoded.into_bytes())
+}
+
+/// Return the function calls completed by one streamed Responses response.
+/// Their results appear as the newly appended cumulative input items of the
+/// next request, so this adapter-local sequence identifies native shell calls
+/// without interpreting generic tape data.
+fn provider_function_calls(row: &serde_json::Value) -> Result<(Vec<String>, bool), String> {
+    let Some(body) = row
+        .pointer("/response/body")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok((Vec::new(), false));
+    };
+    let mut calls = Vec::new();
+    for line in body.lines() {
+        let Some(payload) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let value: serde_json::Value = serde_json::from_str(payload)
+            .map_err(|_| "Codex provider response is invalid".to_owned())?;
+        if value.get("type").and_then(serde_json::Value::as_str)
+            != Some("response.output_item.done")
+        {
+            continue;
+        }
+        let Some(item) = value.get("item") else {
+            return Err("Codex provider response is invalid".into());
+        };
+        if item.get("type").and_then(serde_json::Value::as_str) == Some("function_call") {
+            calls.push(
+                item.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| "Codex provider function call is invalid".to_owned())?
+                    .to_owned(),
+            );
+        }
+    }
+    Ok((calls, true))
 }
 
 fn decode_base64(value: &str) -> Result<Vec<u8>, ()> {
@@ -1115,6 +1183,64 @@ mod tests {
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .collect::<Vec<_>>();
         assert_ne!(rows[1]["output_b64"], rows[3]["output_b64"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn provider_correlation_ignores_non_native_write_stdin_results() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-codex-provider-call-kinds-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let request = encode_base64(br#"{"tool_use_id":"call-1"}"#);
+        let sidecar = [
+            serde_json::json!({"event":"write","request_b64":request}),
+            serde_json::json!({"event":"output"}),
+            serde_json::json!({"event":"workspace_effect"}),
+        ]
+        .into_iter()
+        .map(|row| serde_json::to_string(&row).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n";
+        let response = |name: &str| {
+            format!(
+                "data: {}\n",
+                serde_json::json!({
+                    "type":"response.output_item.done",
+                    "item":{"type":"function_call","name":name}
+                })
+            )
+        };
+        let row = |input: serde_json::Value, response: String| {
+            serde_json::json!({
+                "request":{"body":serde_json::json!({"input":input}).to_string()},
+                "response":{"body":response}
+            })
+        };
+        let capture = root.join("capture.jsonl");
+        let first = row(serde_json::json!([]), response("exec_command"));
+        let second = row(
+            serde_json::json!([{"call_id":"same","output":"native"}]),
+            response("write_stdin"),
+        );
+        let third = row(
+            serde_json::json!([
+                {"call_id":"same","output":"native"},
+                {"call_id":"same","output":"stream"}
+            ]),
+            String::new(),
+        );
+        std::fs::write(&capture, format!("{first}\n{second}\n{third}\n")).unwrap();
+        let bound = bind_provider_tool_outputs(sidecar.as_bytes(), &capture).unwrap();
+        let rows = String::from_utf8(bound)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let output = decode_base64(rows[1]["output_b64"].as_str().unwrap()).unwrap();
+        assert_eq!(output, br#""native""#);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
