@@ -1092,6 +1092,7 @@ mod tests {
         assert!(find("claude-code").unwrap().supports_tool_replay());
         assert!(find("cline").unwrap().supports_tool_replay());
         assert!(find("qwen-code").unwrap().supports_tool_replay());
+        assert!(find("hermes").unwrap().supports_tool_replay());
         assert!(!find("codex").unwrap().supports_tool_replay());
         assert!(!find("goose").unwrap().supports_tool_replay());
         assert!(find("codex").unwrap().supports_mcp_servers());
@@ -1105,7 +1106,8 @@ mod tests {
             .filter(|adapter| adapter.supports_native_tool_transport())
             .map(|adapter| adapter.id())
             .collect::<Vec<_>>();
-        assert_eq!(capable, vec!["openhands", "openjiuwen"]);
+        assert_eq!(capable, vec!["openhands", "hermes", "openjiuwen"]);
+        assert!(!find("pi").unwrap().supports_native_tool_transport());
         let adapter = find("codex").unwrap();
         assert!(select_process(adapter, "not-executed", None).is_ok());
     }
@@ -1117,12 +1119,19 @@ mod tests {
             .copied()
             .filter(|adapter| adapter.supports_tool_replay())
         {
+            let sealed_local_transcript = adapter.artifact_specs().iter().any(|spec| {
+                spec.namespace == "tool-replay"
+                    && spec.filename == "local-tools.jsonl"
+                    && spec.format == ArtifactFormat::JsonLines
+            });
+            let sealed_native_sidecar = adapter.artifact_specs().iter().any(|spec| {
+                spec.namespace == "hermes"
+                    && spec.filename == "native-tool-sidecar.jsonl"
+                    && spec.format == ArtifactFormat::JsonLines
+            });
             assert!(
-                adapter
-                    .artifact_specs()
-                    .iter()
-                    .any(|spec| { spec.format == ArtifactFormat::JsonLines }),
-                "{} advertises complete tool replay without declaring a bounded replay sidecar",
+                sealed_local_transcript || sealed_native_sidecar,
+                "{} advertises complete tool replay without sealing local-tools.jsonl",
                 adapter.id()
             );
         }

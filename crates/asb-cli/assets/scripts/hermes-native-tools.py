@@ -1,0 +1,215 @@
+"""ASB-owned Hermes terminal-tool recorder/replayer.
+
+This module is imported by Python's standard ``sitecustomize`` hook before
+Hermes imports its tool registry.  It replaces the terminal tool entry point,
+not subprocess APIs: every recorded/replayed operation is an explicit Hermes
+terminal request and response.  The sidecar is private to an ASB attempt.
+"""
+import atexit
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+
+MODE = os.environ.get("ASB_HERMES_NATIVE_MODE", "")
+SIDECAR = Path(os.environ["ASB_HERMES_NATIVE_SIDECAR"])
+PROGRESS = Path(os.environ["ASB_HERMES_NATIVE_PROGRESS"])
+MAX_BYTES = 4 * 1024 * 1024
+MAX_PAYLOAD_BYTES = 512 * 1024
+SESSION = "terminal-1"
+
+
+def _encoded(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _digest(value):
+    return hashlib.sha256(value).hexdigest()
+
+
+def _request(command, background, timeout, task_id, force, workdir, pty, notify_on_complete, watch_patterns):
+    return _encoded({
+        "kind": "terminal",
+        "schema_version": 1,
+        "command": command,
+        "background": background,
+        "timeout": timeout,
+        "task_id": task_id,
+        "force": force,
+        "workdir": workdir,
+        "pty": pty,
+        "notify_on_complete": notify_on_complete,
+        "watch_patterns": watch_patterns,
+    })
+
+
+def _write_progress(complete, error=None):
+    PROGRESS.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    document = {"schema_version": 1, "mode": MODE, "complete": complete}
+    if error is not None:
+        document["error"] = error
+    temporary = PROGRESS.with_suffix(".tmp")
+    with open(temporary, "x", encoding="utf-8") as output:
+        json.dump(document, output, separators=(",", ":"))
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, PROGRESS)
+
+
+class Recorder:
+    def __init__(self):
+        try:
+            program = Path(sys.executable).read_bytes()
+        except OSError as error:
+            raise RuntimeError("cannot read Hermes interpreter for native recording") from error
+        SIDECAR.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.file = open(SIDECAR, "x", encoding="utf-8")
+        self.entries = []
+        self._event({"event": "launch", "session": "launch-1", "program_sha256": _digest(program)})
+        self._event({"event": "session_alias", "alias": SESSION, "session": "launch-1"})
+        self.complete = False
+        self.failed = False
+
+    def _event(self, event):
+        line = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+        if len(line.encode("utf-8")) > MAX_BYTES:
+            raise RuntimeError("Hermes native tool event exceeds the private sidecar bound")
+        self.file.write(line + "\n")
+        self.file.flush()
+        os.fsync(self.file.fileno())
+
+    def invoke(self, original, *args, **kwargs):
+        request = _request(*args, **kwargs)
+        if len(request) > MAX_PAYLOAD_BYTES:
+            self.failed = True
+            raise RuntimeError("Hermes terminal request exceeds the native replay bound")
+        self._event({"event": "poll", "alias": SESSION})
+        self._event({
+            "event": "write", "alias": SESSION,
+            "request_sha256": _digest(request),
+            "request_b64": base64.b64encode(request).decode("ascii"),
+        })
+        try:
+            output = original(*args, **kwargs)
+        except BaseException:
+            self.failed = True
+            raise
+        if not isinstance(output, str):
+            self.failed = True
+            raise RuntimeError("Hermes terminal tool returned a non-text response")
+        response = output.encode("utf-8")
+        if len(response) > MAX_PAYLOAD_BYTES:
+            self.failed = True
+            raise RuntimeError("Hermes terminal response exceeds the native replay bound")
+        self._event({
+            "event": "output", "alias": SESSION,
+            "response_sha256": _digest(response),
+            "output_b64": base64.b64encode(response).decode("ascii"),
+        })
+        self.entries.extend((request, response))
+        return output
+
+    def close(self):
+        if self.complete:
+            return
+        self.complete = True
+        try:
+            if self.failed:
+                _write_progress(False, "terminal tool did not settle")
+                return
+            self._event({"event": "exit", "alias": SESSION, "success": True})
+            effect = _digest(b"".join(self.entries))
+            self._event({"event": "workspace_effect", "sha256": effect})
+            _write_progress(True)
+        except BaseException:
+            _write_progress(False, "native sidecar finalization failed")
+        finally:
+            self.file.close()
+
+
+class Replayer:
+    def __init__(self):
+        try:
+            bytes_ = SIDECAR.read_bytes()
+        except OSError as error:
+            raise RuntimeError("Hermes native replay sidecar is unavailable") from error
+        if not bytes_ or len(bytes_) > MAX_BYTES or not bytes_.endswith(b"\n"):
+            raise RuntimeError("Hermes native replay sidecar is invalid")
+        try:
+            events = [json.loads(line) for line in bytes_.splitlines()]
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError("Hermes native replay sidecar is invalid") from error
+        if len(events) < 4:
+            raise RuntimeError("Hermes native replay sidecar is incomplete")
+        if events[0].get("event") != "launch" or events[1] != {
+            "event": "session_alias", "alias": SESSION, "session": "launch-1"
+        }:
+            raise RuntimeError("Hermes native replay sidecar has an unsupported session")
+        self.exchanges = []
+        index = 2
+        while index + 2 < len(events) and events[index] == {"event": "poll", "alias": SESSION}:
+            write, output = events[index + 1], events[index + 2]
+            if write.get("event") != "write" or write.get("alias") != SESSION:
+                raise RuntimeError("Hermes native replay sidecar is invalid")
+            if output.get("event") != "output" or output.get("alias") != SESSION:
+                raise RuntimeError("Hermes native replay sidecar is invalid")
+            try:
+                request = base64.b64decode(write["request_b64"], validate=True)
+                response = base64.b64decode(output["output_b64"], validate=True)
+            except (KeyError, ValueError) as error:
+                raise RuntimeError("Hermes native replay sidecar is invalid") from error
+            if write.get("request_sha256") != _digest(request) or output.get("response_sha256") != _digest(response):
+                raise RuntimeError("Hermes native replay sidecar digest is invalid")
+            self.exchanges.append((request, response))
+            index += 3
+        if events[index:index + 2] != [
+            {"event": "exit", "alias": SESSION, "success": True},
+            {"event": "workspace_effect", "sha256": events[index + 1].get("sha256") if index + 1 < len(events) else None},
+        ] or index + 2 != len(events):
+            raise RuntimeError("Hermes native replay sidecar is incomplete")
+        self.index = 0
+        self.failed = False
+
+    def invoke(self, _original, *args, **kwargs):
+        request = _request(*args, **kwargs)
+        if self.index >= len(self.exchanges) or self.exchanges[self.index][0] != request:
+            self.failed = True
+            raise RuntimeError("Hermes terminal request differs from its recording")
+        response = self.exchanges[self.index][1]
+        self.index += 1
+        try:
+            return response.decode("utf-8")
+        except UnicodeDecodeError as error:
+            self.failed = True
+            raise RuntimeError("Hermes terminal replay response is not text") from error
+
+    def close(self):
+        _write_progress(not self.failed and self.index == len(self.exchanges), None if not self.failed and self.index == len(self.exchanges) else "native terminal replay is incomplete")
+
+
+try:
+    # Hermes exposes file/code/process tools through its always-enabled core
+    # list even when `--toolsets terminal` is selected. They have no stable
+    # external interception API, so do not advertise them during a complete
+    # ASB tool recording/replay session.
+    import toolsets
+    toolsets._HERMES_CORE_TOOLS[:] = ["terminal"]
+    import tools.terminal_tool as terminal_tool
+    original = terminal_tool.terminal_tool
+    transport = Recorder() if MODE == "record" else Replayer() if MODE == "replay" else None
+    if transport is None:
+        raise RuntimeError("Hermes native tool mode is invalid")
+
+    def terminal(command, background=False, timeout=None, task_id=None, session_id=None, force=False,
+                 workdir=None, pty=False, notify_on_complete=False, watch_patterns=None):
+        return transport.invoke(original, command, background, timeout, task_id, force, workdir,
+                                pty, notify_on_complete, watch_patterns)
+
+    terminal_tool.terminal_tool = terminal
+    atexit.register(transport.close)
+except BaseException as error:
+    _write_progress(False, "native terminal transport initialization failed")
+    raise
