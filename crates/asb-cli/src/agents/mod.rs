@@ -1092,6 +1092,7 @@ mod tests {
         assert!(find("claude-code").unwrap().supports_tool_replay());
         assert!(find("cline").unwrap().supports_tool_replay());
         assert!(find("qwen-code").unwrap().supports_tool_replay());
+        assert!(find("hermes").unwrap().supports_tool_replay());
         assert!(!find("codex").unwrap().supports_tool_replay());
         assert!(!find("goose").unwrap().supports_tool_replay());
         assert!(find("codex").unwrap().supports_mcp_servers());
@@ -1105,27 +1106,49 @@ mod tests {
             .filter(|adapter| adapter.supports_native_tool_transport())
             .map(|adapter| adapter.id())
             .collect::<Vec<_>>();
-        assert_eq!(capable, vec!["openhands", "openjiuwen"]);
+        assert_eq!(capable, vec!["openhands", "openjiuwen", "hermes"]);
+        assert!(!find("pi").unwrap().supports_native_tool_transport());
         let adapter = find("codex").unwrap();
         assert!(select_process(adapter, "not-executed", None).is_ok());
     }
 
     #[test]
     fn complete_tool_replay_adapters_declare_a_bounded_replay_sidecar() {
+        let local_sidecar = |adapter: &dyn AgentAdapter| {
+            adapter.artifact_specs().iter().any(|spec| {
+                spec.namespace == "tool-replay"
+                    && spec.filename == "local-tools.jsonl"
+                    && spec.format == ArtifactFormat::JsonLines
+            })
+        };
+        let native_sidecar = |adapter: &dyn AgentAdapter| {
+            adapter.artifact_specs().iter().any(|spec| {
+                spec.filename.contains("native-tool") && spec.format == ArtifactFormat::JsonLines
+            })
+        };
         for adapter in all()
             .iter()
             .copied()
             .filter(|adapter| adapter.supports_tool_replay())
         {
+            let complete_sidecar = if adapter.supports_native_tool_transport() {
+                native_sidecar(adapter)
+            } else {
+                local_sidecar(adapter)
+            };
             assert!(
-                adapter
-                    .artifact_specs()
-                    .iter()
-                    .any(|spec| { spec.format == ArtifactFormat::JsonLines }),
-                "{} advertises complete tool replay without declaring a bounded replay sidecar",
+                complete_sidecar,
+                "{} advertises complete tool replay without its declared bounded sidecar",
                 adapter.id()
             );
         }
+        // Negative coverage: non-native adapters cannot satisfy the contract
+        // merely by declaring an unrelated native artifact, while native
+        // adapters are not required to pretend their transport is MCP/local.
+        assert!(local_sidecar(find("pi").unwrap()));
+        assert!(!native_sidecar(find("pi").unwrap()));
+        assert!(native_sidecar(find("openhands").unwrap()));
+        assert!(!local_sidecar(find("openhands").unwrap()));
     }
 
     #[test]
