@@ -254,7 +254,8 @@ pub(crate) fn run_with_diagnostics(
     // auxiliary replay artifacts.  A singleton campaign is semantically one
     // direct execution, but gives MCP relay and native capsule modes their
     // sealed sidecars without retaining an additional direct-run format.
-    let requires_artifact_campaign = options.mcp_mode.is_some()
+    let requires_artifact_campaign = options.mode == Some(tape::Mode::Record)
+        || options.mcp_mode.is_some()
         || options.native_capsule_record.is_some()
         || options.native_capsule_replay.is_some();
     if let Some(repeat) = options.repeat.or((bundled_replay
