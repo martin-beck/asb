@@ -289,6 +289,26 @@ function normalizeHermesVerificationScriptPath(value) {
   );
 }
 
+function normalizePytestCallableAddress(value) {
+  // pytest's call-runtest hook prints this complete callable repr in its
+  // diagnostic output. The pointer is ASLR/process-local rendering; retain
+  // the variable, callable identity, and all adjacent output.
+  return value.replace(
+    /(\bfunc = <function call_runtest_hook\.<locals>\.<lambda> at )0x[0-9a-f]+>/gi,
+    "$1<asb-pytest-callable-address>>",
+  );
+}
+
+function normalizePytestTestMapsAddress(value) {
+  // This exact pytest diagnostic renderer names its TestMaps fixture instance.
+  // Only CPython's process-local object address varies; the fixture and every
+  // adjacent diagnostic field remain part of the cassette key.
+  return value.replace(
+    /(\bself = <astropy\.wcs\.tests\.test_wcs\.TestMaps object at )0x[0-9a-f]+>/gi,
+    "$1<asb-pytest-testmaps-address>>",
+  );
+}
+
 function normalizeCassetteBody(body, url = "") {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
@@ -360,6 +380,19 @@ function normalizeCassetteBody(body, url = "") {
     .replace(/original token count: \d+/g, "original token count: <asb-token-count>")
     .replace(/Total output lines: \d+/g, "Total output lines: <asb-line-count>")
     .replace(/codex-arg[A-Za-z0-9_-]+/g, "codex-arg<asb-random>")
+    // OpenHands persists a generated conversation directory and its generated
+    // immediate subagent directory in later provider history. These IDs are
+    // created afresh for every agent process, so scope normalization to this
+    // exact private runtime hierarchy and retain every other path component.
+    .replace(/(\/openhands\/conversations\/)[0-9a-f]{8,}(?:\/subagents\/[0-9a-f]{8,})?/gi, "$1<asb-openhands-conversation>")
+    // OpenHands renders a separate generated terminal-output filename below
+    // its private conversation observation directory. Its digest is created
+    // for each process and is not tool result content.
+    .replace(/(\/openhands\/conversations\/<asb-openhands-conversation>\/observations\/terminal_output_)[0-9a-f]{8,}(\.txt\b)/gi, "$1<asb-openhands-terminal>$2")
+    // Pytest decorates its terminal summary with ANSI color resets. Preserve
+    // every status/count and trailing content, but replace only the elapsed
+    // renderer in a complete colored pytest summary.
+    .replace(/((?:\d+ (?:passed|failed|skipped|deselected|errors?)(?:, )?)+(?:\\u001b\[(?:0|3[12])m)* in )\d+(?:\.\d+)?s(?=\\u001b\[0m)/g, "$1<asb-pytest-elapsed>")
     // OpenCode includes its process-local delegated-task session ID in a
     // fixed completed-task envelope returned by its own tool dispatcher. The
     // ID is regenerated on replay, while the task state and result remain
@@ -578,7 +611,9 @@ function normalizeCassetteBody(body, url = "") {
             return match;
           });
         }
-        return normalizePytestElapsed(withoutGuidance);
+        return normalizePytestTestMapsAddress(normalizePytestCallableAddress(
+          normalizePytestElapsed(withoutGuidance),
+        ));
       }
       if (Array.isArray(value)) return value.map((item, index) => sort(item, String(index), [...path, String(index)]));
       if (value && typeof value === "object") {
