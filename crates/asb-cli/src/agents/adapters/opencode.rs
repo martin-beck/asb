@@ -13,6 +13,12 @@ const NPM_MANIFEST: &str = r#"{
 }
 "#;
 
+// OpenCode discovers locally configured MCP tools asynchronously. A short
+// startup budget can leave the first provider request tool-less, making a
+// recorded request shape impossible to replay deterministically. Keep this
+// readiness policy in the owning adapter configuration.
+const LOCAL_TOOL_STARTUP_TIMEOUT_MS: u64 = 60_000;
+
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "opencode",
     "opencode",
@@ -215,7 +221,12 @@ fn config(
     });
     if let Some(command) = tool_command {
         configuration["mcp"] = serde_json::json!({
-            "asb_local_tools": {"type":"local", "command":command}
+            "asb_local_tools": {
+                "type":"local",
+                "command":command,
+                "enabled":true,
+                "timeout":LOCAL_TOOL_STARTUP_TIMEOUT_MS
+            }
         });
         // The public OpenCode configuration exposes these as every built-in
         // executable/action tool.  Denying them leaves the sealed ASB MCP
@@ -261,6 +272,11 @@ mod tests {
         assert_eq!(
             config["mcp"]["asb_local_tools"]["command"],
             serde_json::json!(["asb-tool-replay-mcp", "--tape"])
+        );
+        assert_eq!(config["mcp"]["asb_local_tools"]["enabled"], true);
+        assert_eq!(
+            config["mcp"]["asb_local_tools"]["timeout"],
+            LOCAL_TOOL_STARTUP_TIMEOUT_MS
         );
         assert_eq!(config["permission"]["bash"], "deny");
         assert_eq!(config["permission"]["asb_local_tools_*"], "allow");
