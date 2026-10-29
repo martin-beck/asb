@@ -192,6 +192,11 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         "ASB_OPENJIUWEN_NATIVE_TOOL_RECORD",
         context.run_dir.join("openjiuwen-native-tools.jsonl"),
     );
+    let workspace = std::fs::canonicalize(context.workspace)
+        .unwrap_or_else(|_| context.workspace.to_path_buf());
+    context
+        .command
+        .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", workspace);
     Ok(())
 }
 
@@ -376,6 +381,165 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         assert_eq!(
             String::from_utf8_lossy(&output.stdout).trim(),
             "leftright 120 9 7 129"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_tool_replay_never_executes_any_built_in_direct_tool() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "asb-openjiuwen-native-replay-{}",
+            std::process::id()
+        ));
+        let package = root.join("openjiuwen");
+        for relative in [
+            "core/foundation/llm/schema",
+            "core/foundation/tool",
+            "harness/tools/shell",
+            "harness/tools",
+        ] {
+            std::fs::create_dir_all(package.join(relative)).unwrap();
+        }
+        for relative in [
+            "__init__.py",
+            "core/__init__.py",
+            "core/foundation/__init__.py",
+            "core/foundation/llm/__init__.py",
+            "core/foundation/llm/schema/__init__.py",
+            "core/foundation/tool/__init__.py",
+            "harness/__init__.py",
+            "harness/tools/__init__.py",
+            "harness/tools/shell/__init__.py",
+        ] {
+            std::fs::write(package.join(relative), "").unwrap();
+        }
+        std::fs::write(
+            package.join("core/foundation/llm/schema/message_chunk.py"),
+            r#"
+class AssistantMessageChunk:
+    usage_metadata = None
+    def __add__(self, other): return other
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("core/foundation/tool/schema.py"),
+            r#"
+class ToolOutput:
+    def __init__(self, success=True, data=None, error=None):
+        self.success, self.data, self.error = success, data or {}, error
+    def model_dump(self):
+        return {"success": self.success, "data": self.data, "error": self.error}
+    @classmethod
+    def model_validate(cls, value):
+        return cls(value["success"], value.get("data"), value.get("error"))
+"#,
+        )
+        .unwrap();
+        let tools = r#"
+import os
+from openjiuwen.core.foundation.tool.schema import ToolOutput
+class _Tool:
+    label = ""
+    async def invoke(self, inputs, **kwargs):
+        with open(os.environ["ASB_TEST_NATIVE_EXECUTED"], "a", encoding="utf-8") as marker:
+            marker.write(self.label + "\n")
+        return ToolOutput(data={"tool": self.label, "inputs": inputs})
+class ReadFileTool(_Tool): label = "read_file"
+class WriteFileTool(_Tool): label = "write_file"
+class EditFileTool(_Tool): label = "edit_file"
+class GlobTool(_Tool): label = "glob"
+class ListDirTool(_Tool): label = "list_dir"
+class GrepTool(_Tool): label = "grep"
+"#;
+        std::fs::write(package.join("harness/tools/filesystem.py"), tools).unwrap();
+        std::fs::write(
+            package.join("harness/tools/shell/__init__.py"),
+            format!("{}\nclass BashTool(_Tool): label = 'bash'\n", tools),
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("harness/tools/code.py"),
+            format!("{}\nclass CodeTool(_Tool): label = 'code'\n", tools),
+        )
+        .unwrap();
+        let python = std::process::Command::new("python3")
+            .args(["-c", "import sys; print(sys.executable)"])
+            .output()
+            .unwrap();
+        assert!(python.status.success());
+        let python = String::from_utf8(python.stdout).unwrap();
+        let entry = root.join("openjiuwen-native-test");
+        std::fs::write(
+            &entry,
+            format!(
+                r#"#!{}
+import asyncio, json
+import os
+from openjiuwen.harness.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool
+from openjiuwen.harness.tools.shell import BashTool
+from openjiuwen.harness.tools.code import CodeTool
+async def main():
+    result = []
+    for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool):
+        result.append((await tool().invoke({{"value": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})).model_dump())
+    print(json.dumps(result, sort_keys=True))
+asyncio.run(main())
+"#,
+                python.trim()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sidecar = root.join("native.jsonl");
+        let marker = root.join("executed");
+        let record_workspace = root.join("record-workspace");
+        let replay_workspace = root.join("replay-workspace");
+        let record = super::process(entry.to_str().unwrap())
+            .unwrap()
+            .direct()
+            .env("PYTHONPATH", &root)
+            .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_TEST_WORKSPACE", &record_workspace)
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_RECORD", &sidecar)
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &record_workspace)
+            .output()
+            .unwrap();
+        assert!(
+            record.status.success(),
+            "{}",
+            String::from_utf8_lossy(&record.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 8);
+        std::fs::remove_file(&marker).unwrap();
+        let replay = super::process(entry.to_str().unwrap())
+            .unwrap()
+            .direct()
+            .arg("--asb-native-tool-replay")
+            .arg(&sidecar)
+            .env("PYTHONPATH", &root)
+            .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_TEST_WORKSPACE", &replay_workspace)
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
+            .output()
+            .unwrap();
+        assert!(
+            replay.status.success(),
+            "{}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        let record_stdout = String::from_utf8(record.stdout)
+            .unwrap()
+            .replace(record_workspace.to_str().unwrap(), "<asb-workspace>");
+        let replay_stdout = String::from_utf8(replay.stdout)
+            .unwrap()
+            .replace(replay_workspace.to_str().unwrap(), "<asb-workspace>");
+        assert_eq!(record_stdout, replay_stdout);
+        assert!(
+            !marker.exists(),
+            "native tool replay executed a direct tool"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

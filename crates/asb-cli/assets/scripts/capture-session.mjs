@@ -3,9 +3,10 @@
 import * as fs from "node:fs";
 import { createHash } from "node:crypto";
 
-// Positive local transport handoff is the finish event, not peer application
-// consumption. Socket detachment can make writableFinished misleading on close.
-export function responseDelivery(response) {
+// Positive local transport handoff is normally the finish event. A caller may
+// additionally prove a complete framed response plus a clean request close;
+// socket detachment alone never makes writableFinished sufficient.
+export function responseDelivery(response, completedFrame = () => false) {
   return new Promise((resolve) => {
     let settled = false;
     const settle = (terminal) => {
@@ -15,12 +16,27 @@ export function responseDelivery(response) {
       // merely local queueing, whereas a close/error can discard the peer's
       // response. Keep the terminal reason so an incomplete recording can
       // retain a bounded diagnostic without recording bodies or headers.
-      resolve({ terminal, delivered: terminal === "finish" });
+      resolve({ terminal, delivered: terminal === "finish" || terminal === "framed_close" });
     };
     response.once("finish", () => settle("finish"));
-    response.once("close", () => settle("close"));
+    response.once("close", () => {
+      // A client can close an HTTP/1.1 connection immediately after consuming
+      // a complete framed stream, before Node emits `finish`. The caller must
+      // provide affirmative framing evidence; a bare writable/end state is
+      // still insufficient and remains an incomplete capture.
+      let complete = false;
+      try { complete = completedFrame() === true; } catch { /* fail closed */ }
+      settle(complete ? "framed_close" : "close");
+    });
     response.once("error", () => settle("error"));
   });
+}
+
+export function completedSseResponse(headers, body) {
+  const contentType = String(headers?.["content-type"] || "").toLowerCase();
+  if (!contentType.startsWith("text/event-stream") || !body.endsWith("\n")) return false;
+  return /(?:^|\n)event:[ \t]*message_stop[ \t]*(?:\n|$)/.test(body)
+    || /(?:^|\n)data:[ \t]*\[DONE\][ \t]*(?:\n|$)/.test(body);
 }
 
 export class CaptureSession {
