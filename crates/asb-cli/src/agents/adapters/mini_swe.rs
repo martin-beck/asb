@@ -195,6 +195,22 @@ class AsbTapeEnvironment(LocalEnvironment):
             event["effects"] = effects
         self._append(event)
 
+    def _record_failure(self, command, failure):
+        # `_effects` deliberately refuses oversized or non-text mutations.
+        # The rejected call remains causally observable: otherwise replay
+        # advances its provider tape and asks for a later, unrecorded tool
+        # result.  `failure` is selected only from this extension's bounded
+        # static errors, never from command output or a host exception.
+        event = {
+            "schema_version": 1,
+            "sequence": len(self._entries) + 1,
+            "tool": "mini-swe.bash",
+            "request": {"command": command},
+            "result": None,
+            "failure": failure,
+        }
+        self._append(event)
+
     def _root(self, cwd):
         root = Path(cwd or self.config.cwd or os.getcwd()).resolve()
         if not root.is_dir():
@@ -261,9 +277,19 @@ class AsbTapeEnvironment(LocalEnvironment):
             try:
                 output = super().execute(action, cwd, timeout=timeout)
             except Submitted as submitted:
-                self._record(command, {"submitted": list(submitted.messages)}, self._effects(root, before, self._snapshot(root)))
+                try:
+                    effects = self._effects(root, before, self._snapshot(root))
+                except RuntimeError as error:
+                    self._record_failure(command, str(error))
+                    raise
+                self._record(command, {"submitted": list(submitted.messages)}, effects)
                 raise
-            self._record(command, output, self._effects(root, before, self._snapshot(root)))
+            try:
+                effects = self._effects(root, before, self._snapshot(root))
+            except RuntimeError as error:
+                self._record_failure(command, str(error))
+                raise
+            self._record(command, output, effects)
             return output
         if self._position >= len(self._entries):
             raise RuntimeError("Mini-SWE replay requested an unrecorded local tool result")
@@ -276,6 +302,19 @@ class AsbTapeEnvironment(LocalEnvironment):
             or entry.get("request", {}).get("command") != command
         ):
             raise RuntimeError("Mini-SWE replay local tool command differs from the recording")
+        failure = entry.get("failure")
+        if failure is not None:
+            if (
+                not isinstance(failure, str)
+                or failure not in {
+                    "Mini-SWE local tool changed a non-text workspace file",
+                    "Mini-SWE local tool workspace effects exceed the bounded replay limit",
+                }
+                or entry.get("result") is not None
+                or entry.get("effects")
+            ):
+                raise RuntimeError("Mini-SWE replay local tool failure is malformed")
+            raise RuntimeError(failure)
         output = entry.get("result")
         if not isinstance(output, dict):
             raise RuntimeError("Mini-SWE replay local tool result is malformed")
@@ -463,6 +502,26 @@ mod tests {
     fn mini_swe_replays_the_client_submission_payload_without_retyping_it() {
         assert!(TOOL_TRANSPORT.contains("if not isinstance(submitted, list):"));
         assert!(!TOOL_TRANSPORT.contains("all(isinstance(item, str) for item in submitted)"));
+    }
+
+    #[test]
+    fn mini_swe_seals_bounded_workspace_effect_failures_for_exact_replay() {
+        assert!(TOOL_TRANSPORT.contains("def _record_failure(self, command, failure):"));
+        assert!(TOOL_TRANSPORT.contains("self._record_failure(command, str(error))"));
+        assert!(TOOL_TRANSPORT.contains("Mini-SWE replay local tool failure is malformed"));
+        assert!(
+            TOOL_TRANSPORT
+                .contains("Mini-SWE local tool workspace effects exceed the bounded replay limit")
+        );
+
+        let transcript = br#"{"schema_version":1,"sequence":1,"tool":"mini-swe.bash","request":{"command":"true"},"result":null,"failure":"Mini-SWE local tool workspace effects exceed the bounded replay limit"}
+"#;
+        assert_eq!(
+            crate::agents::tool_replay::Transcript::decode(transcript)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
