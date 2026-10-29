@@ -387,6 +387,15 @@ fn run_with_io(
                 if let (Some(trace), Some(sequence)) = (metadata_trace.as_mut(), request_trace) {
                     trace.response(sequence, "result", Some(&response))?;
                 }
+                // Some third-party clients stop a stdio extension as soon as
+                // they receive a tool result, without first closing stdin.
+                // Persist every successfully framed record-mode response so
+                // a client can never observe a causal result absent from the
+                // sealed transcript. This is transport lifecycle only: the
+                // adapter still owns tool selection and artifact meaning.
+                if options.mode == Mode::Record {
+                    publish_record_transcript(&options.transcript, &transcript.encode()?)?;
+                }
             } else if let (Some(trace), Some(sequence)) = (metadata_trace.as_mut(), request_trace) {
                 trace.response(sequence, "notification", None)?;
             }
@@ -489,14 +498,24 @@ fn publish_record_transcript(path: &Path, bytes: &[u8]) -> Result<(), Error> {
             "local-tool transcript is not a regular file".into(),
         ));
     }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(path)
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
         .map_err(|_| Error::Run("cannot publish local-tool transcript".into()))?;
     file.write_all(bytes).map_err(crate::io_error)?;
     file.sync_all().map_err(crate::io_error)?;
-    Ok(())
+    std::fs::rename(&temporary, path)
+        .map_err(|_| Error::Run("cannot publish local-tool transcript".into()))?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(crate::io_error)
 }
 
 fn options(args: &[OsString]) -> Result<Options, Error> {
@@ -1212,6 +1231,84 @@ fn required_path(request: &Value) -> Result<&str, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, Read};
+
+    struct InputThatChecksPublishedPrefix {
+        bytes: Vec<u8>,
+        cursor: usize,
+        transcript: std::path::PathBuf,
+        checked: bool,
+    }
+
+    impl Read for InputThatChecksPublishedPrefix {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            let available = self.fill_buf()?;
+            let count = available.len().min(output.len());
+            output[..count].copy_from_slice(&available[..count]);
+            self.consume(count);
+            Ok(count)
+        }
+    }
+
+    impl BufRead for InputThatChecksPublishedPrefix {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            if self.cursor < self.bytes.len() {
+                return Ok(&self.bytes[self.cursor..]);
+            }
+            if !self.checked {
+                self.checked = true;
+                assert_eq!(
+                    Transcript::decode(&std::fs::read(&self.transcript).unwrap())
+                        .unwrap()
+                        .len(),
+                    1,
+                    "the completed tool response must be durable before another request or EOF"
+                );
+            }
+            Ok(&[])
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.cursor = self.cursor.saturating_add(amount).min(self.bytes.len());
+        }
+    }
+
+    #[test]
+    fn record_publishes_each_framed_tool_response_before_stdio_eof() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-published-prefix-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let transcript = root.join("run/tool-replay/local-tools.jsonl");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(workspace.join("source.txt"), "available\n").unwrap();
+        std::fs::write(&transcript, Transcript::default().encode().unwrap()).unwrap();
+        let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"source.txt\"}}}\n";
+        let mut input = InputThatChecksPublishedPrefix {
+            bytes: request.to_vec(),
+            cursor: 0,
+            transcript: transcript.clone(),
+            checked: false,
+        };
+        let mut output = Vec::new();
+        run_with_io(
+            Options {
+                mode: Mode::Record,
+                workspace,
+                transcript,
+                per_call_state: None,
+                metadata_trace: None,
+            },
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+        assert!(input.checked);
+        assert!(!output.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn metadata_trace_retains_protocol_progress_without_payloads() {
