@@ -175,11 +175,15 @@ class Replayer:
             raise RuntimeError("Hermes native replay sidecar is incomplete")
         self.index = 0
         self.failed = False
+        self.failure = None
 
     def invoke(self, _original, *args, **kwargs):
         request = _request(*args, **kwargs)
         if self.index >= len(self.exchanges) or self.exchanges[self.index][0] != request:
             self.failed = True
+            expected = self.exchanges[self.index][0] if self.index < len(self.exchanges) else None
+            component = "sequence" if expected is None else _request_difference(expected, request)
+            self.failure = "native terminal request differs:" + component
             raise RuntimeError("Hermes terminal request differs from its recording")
         response = self.exchanges[self.index][1]
         self.index += 1
@@ -190,7 +194,21 @@ class Replayer:
             raise RuntimeError("Hermes terminal replay response is not text") from error
 
     def close(self):
-        _write_progress(not self.failed and self.index == len(self.exchanges), None if not self.failed and self.index == len(self.exchanges) else "native terminal replay is incomplete")
+        complete = not self.failed and self.index == len(self.exchanges)
+        _write_progress(complete, None if complete else self.failure or "native terminal replay is incomplete")
+
+
+def _request_difference(expected, actual):
+    """Return a bounded field name only; never retain a tool request value."""
+    try:
+        expected = json.loads(expected)
+        actual = json.loads(actual)
+    except (TypeError, ValueError):
+        return "encoding"
+    for field in ("command", "background", "timeout", "force", "workdir", "pty", "notify_on_complete", "watch_patterns"):
+        if expected.get(field) != actual.get(field):
+            return field
+    return "encoding"
 
 
 try:

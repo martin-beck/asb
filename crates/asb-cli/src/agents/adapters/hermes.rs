@@ -232,9 +232,28 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
         || complete != Some(true)
         || !matches!(mode, Some("record") | Some("replay"))
     {
-        artifacts
-            .errors
-            .push("Hermes native terminal replay did not complete".into());
+        let detail = progress
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| {
+                matches!(
+                    *value,
+                    "native terminal request differs:command"
+                        | "native terminal request differs:background"
+                        | "native terminal request differs:timeout"
+                        | "native terminal request differs:force"
+                        | "native terminal request differs:workdir"
+                        | "native terminal request differs:pty"
+                        | "native terminal request differs:notify_on_complete"
+                        | "native terminal request differs:watch_patterns"
+                        | "native terminal request differs:sequence"
+                        | "native terminal request differs:encoding"
+                )
+            });
+        artifacts.errors.push(match detail {
+            Some(detail) => format!("Hermes {detail}"),
+            None => "Hermes native terminal replay did not complete".into(),
+        });
         return artifacts;
     }
     if mode == Some("record") {
