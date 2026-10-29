@@ -989,7 +989,7 @@ impl<'a> CompletedAttempt<'a> {
             .tool_tape_cassette
             .as_ref()
             .and_then(|(mode, path)| (*mode == tape::Mode::Record).then_some(path.as_path()));
-        if context.options.tool_mode == Some(tape::Mode::Record) && provider_capture.is_none() {
+        if context.options.mode == Some(tape::Mode::Record) && provider_capture.is_none() {
             settled.issues.run_error(
                 "record collection lost the admitted tool-tape capture handle before adapter collection"
                     .into(),
