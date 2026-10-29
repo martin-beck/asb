@@ -156,7 +156,7 @@ async function replayResponse(response, interaction) {
 // the request deterministic for recording and replay.  This does not invent
 // tool calls; it only supplies the empty schema required for validation.
 function normalizeRequestBody(url, body) {
-  if (!body || (!url.includes("/messages") && !url.includes("/responses"))) return body;
+  if (!body || (!url.includes("/messages") && !url.includes("/responses") && !url.includes("/chat/completions"))) return body;
   try {
     const parsed = JSON.parse(body);
     let changed = false;
@@ -262,7 +262,7 @@ function normalizePytestElapsed(value) {
 function normalizeFunctionRenderingAddress(value) {
   // Callable names can include a nested `<locals>` segment, so stop only at
   // the fixed ` at 0x...>` suffix rather than at the first closing bracket.
-  return value.replace(/(<function [^\n]*? at )0x[0-9a-f]+>/gi, "$1<asb-address>>");
+  return value.replace(/((?:<|\\u003c)function [^\n]*? at )0x[0-9a-f]+(>|\\u003e)/gi, "$1<asb-address>$2");
 }
 
 // Python object reprs have the same process-local address volatility, but are
