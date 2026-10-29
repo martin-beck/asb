@@ -72,6 +72,9 @@ pub(crate) trait AgentAdapter: Sync {
     fn supported_endpoints(&self) -> &'static [Support];
     fn command(&self, context: &CommandContext<'_>) -> CommandSpec;
     fn prepare(&self, context: &mut PreparationContext<'_>) -> Result<(), Error>;
+    fn supports_native_tool_transport(&self) -> bool {
+        false
+    }
     fn process(&self, executable: &str) -> Result<crate::launch::ProcessLaunch, Error> {
         Ok(crate::launch::ProcessLaunch::new(executable))
     }
@@ -209,6 +212,38 @@ pub(crate) struct CommandContext<'a> {
     pub endpoint: Option<&'a str>,
     pub interface: Option<Interface>,
     pub prompt: &'a str,
+    #[allow(
+        dead_code,
+        reason = "future native-capable adapters own launch configuration"
+    )]
+    pub native_tool: Option<NativeToolContext<'a>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct NativeToolContext<'a> {
+    #[allow(
+        dead_code,
+        reason = "future native-capable adapters own launch configuration"
+    )]
+    pub launch: &'a crate::cassette::NativeToolLaunch,
+    #[allow(
+        dead_code,
+        reason = "future native-capable adapters receive this private runtime path"
+    )]
+    pub path: &'a Path,
+}
+
+pub(crate) fn select_process(
+    adapter: &dyn AgentAdapter,
+    executable: &str,
+    native_tool: Option<NativeToolContext<'_>>,
+) -> Result<crate::launch::ProcessLaunch, Error> {
+    if native_tool.is_some() && !adapter.supports_native_tool_transport() {
+        return Err(Error::Run(
+            "selected agent does not support native tool replay transport".into(),
+        ));
+    }
+    adapter.process(executable)
 }
 
 pub(crate) struct CommandSpec {
@@ -974,6 +1009,7 @@ mod tests {
                 endpoint: Some("http://127.0.0.1:3000/v1"),
                 interface: Some(Interface::AnthropicMessages),
                 prompt: "repair",
+                native_tool: None,
             });
             assert!(!command.program.is_empty(), "{}", adapter.id());
             assert!(!command.args.is_empty(), "{}", adapter.id());
@@ -1005,6 +1041,17 @@ mod tests {
         assert!(!find("goose").unwrap().supports_tool_replay());
         assert!(find("codex").unwrap().supports_mcp_servers());
         assert!(!find("pi").unwrap().supports_mcp_servers());
+    }
+
+    #[test]
+    fn native_tool_transport_requires_an_explicit_adapter_capability() {
+        assert!(
+            all()
+                .iter()
+                .all(|adapter| !adapter.supports_native_tool_transport())
+        );
+        let adapter = find("codex").unwrap();
+        assert!(select_process(adapter, "not-executed", None).is_ok());
     }
 
     #[test]

@@ -286,6 +286,7 @@ mod tests {
             endpoint: None,
             interface: None,
             prompt: "fixture prompt",
+            native_tool: None,
         });
         assert!(
             command
