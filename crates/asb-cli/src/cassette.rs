@@ -14,7 +14,8 @@ mod source;
 
 pub use archive::{Archive, Limits};
 pub use journal::{
-    ArtifactInput, ProofLimits, Publication, RecordingJournal, RecordingReservation, TrackEvidence,
+    ArtifactInput, NativeInput, ProofLimits, Publication, RecordingJournal, RecordingReservation,
+    TrackEvidence,
 };
 pub use provenance::{ImportedTrack, OriginPlan, RecordingSource, track_metadata_digest};
 pub use selection::{Metric, SelectionPlan, Selector};
@@ -27,7 +28,8 @@ pub use source::{LegacyTrack, Source};
 use std::fmt;
 
 /// Current manifest format. Unknown versions are refused, not guessed.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
+const MIN_SCHEMA_VERSION: u32 = 1;
 
 /// An actionable cassette-format, compatibility or selection error.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -146,11 +148,34 @@ pub struct Track {
     pub sha256: String,
     /// Optional normalized observations for selectors and presentation.
     pub statistics: Statistics,
+    /// Optional sealed native-tool interaction stream.  Its bytes stay private
+    /// to the cassette; this metadata is sufficient to reject absent, changed
+    /// or incomplete sidecars before a future native replay transport starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<NativeTrack>,
     /// Additional run-private evidence tied to this exact execution.  These
     /// payloads are deliberately catalogued with the provider transcript so a
     /// replay can never silently consume an unsealed sidecar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<Artifact>,
+}
+
+/// Bounded, opaque native-tool stream for one execution track.
+///
+/// This foundation intentionally does not define command, path, prompt, or
+/// output fields.  A future private ingress owns that schema and must supply a
+/// sealed JSONL stream through the journal in the same commit as its track.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTrack {
+    /// True only when the native ingress observed a terminal stream boundary.
+    pub complete: bool,
+    /// Exact count of newline-delimited opaque events.
+    pub events: u64,
+    /// Uncompressed JSONL length.
+    pub bytes: u64,
+    /// Digest of the exact uncompressed JSONL bytes.
+    pub sha256: String,
 }
 
 impl Track {
@@ -162,6 +187,16 @@ impl Track {
     /// Canonical archive entry for a named, sealed auxiliary payload.
     pub fn artifact_entry_name(&self, kind: &str) -> String {
         format!("artifacts/{}/{}.jsonl", self.id, kind)
+    }
+
+    /// Canonical archive entry for this track's sealed native sidecar.
+    pub fn native_entry_name(&self) -> String {
+        format!("native/{}.jsonl", self.id)
+    }
+
+    /// Whether the native sidecar can be consumed by a future replay transport.
+    pub fn native_replayable(&self) -> bool {
+        self.native.as_ref().is_some_and(|native| native.complete)
     }
 
     /// Complete failed attempts remain eligible, but known probe-only captures do
@@ -232,7 +267,7 @@ impl Manifest {
     /// Check schema, bounds, fingerprints and stable slot-to-track mapping.
     pub fn validate(&self, limits: Limits) -> Result<(), Error> {
         limits.validate()?;
-        if self.schema_version != SCHEMA_VERSION {
+        if !(MIN_SCHEMA_VERSION..=SCHEMA_VERSION).contains(&self.schema_version) {
             return Err(Error(format!(
                 "unsupported cassette schema version {}",
                 self.schema_version
@@ -278,6 +313,32 @@ impl Manifest {
                     "invalid cassette track {} identity, digest or size",
                     track.id
                 )));
+            }
+            if let Some(native) = &track.native {
+                if self.schema_version < 2
+                    || native.bytes > limits.max_track_bytes
+                    || native.events > native.bytes
+                    || !valid_digest(&native.sha256)
+                {
+                    return Err(Error(format!(
+                        "invalid cassette native sidecar for track {}",
+                        track.id
+                    )));
+                }
+                payload_entries = payload_entries
+                    .checked_add(1)
+                    .ok_or_else(|| Error("cassette payload entry count overflow".into()))?;
+                if payload_entries > limits.max_tracks {
+                    return Err(Error("cassette exceeds payload entry limit".into()));
+                }
+                bytes = bytes
+                    .checked_add(native.bytes)
+                    .ok_or_else(|| Error("cassette total length overflow".into()))?;
+                if bytes > limits.max_total_bytes {
+                    return Err(Error(
+                        "cassette exceeds total uncompressed size limit".into(),
+                    ));
+                }
             }
             bytes = bytes
                 .checked_add(track.bytes)

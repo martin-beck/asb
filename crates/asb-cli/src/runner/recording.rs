@@ -489,6 +489,7 @@ impl Recorder {
                     requests: capture.map(|capture| capture.inference_requests),
                     steps: result.steps,
                 },
+                native: None,
                 artifacts: Vec::new(),
             };
             let journal = state
@@ -990,6 +991,7 @@ mod tests {
                 bytes: 3,
                 sha256: crate::cassette::digest(b"{}\n"),
                 statistics: Statistics::default(),
+                native: None,
                 artifacts: Vec::new(),
             };
             let replacement_root = root.clone();
@@ -1129,6 +1131,7 @@ mod tests {
                 bytes: 3,
                 sha256: crate::cassette::digest(b"{}\n"),
                 statistics: Statistics::default(),
+                native: None,
                 artifacts: Vec::new(),
             };
             match mode {

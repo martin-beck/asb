@@ -390,6 +390,7 @@ fn manifest(count: u64) -> Manifest {
                     requests: Some(id),
                     steps: None,
                 },
+                native: None,
                 artifacts: Vec::new(),
             })
             .collect(),
@@ -491,6 +492,150 @@ fn journal_publishes_auxiliary_artifacts_with_the_track() {
 }
 
 #[test]
+fn native_sidecars_are_sealed_complete_and_published_with_the_track() {
+    let fixture = Fixture::new();
+    let destination = fixture.0.join("recording.zip");
+    let mut journal =
+        RecordingJournal::create(&destination, manifest(0), 1, Limits::default()).unwrap();
+    journal.begin(1, 1).unwrap();
+    let native_bytes = b"{\"event\":\"launch\"}\n";
+    let native = NativeTrack {
+        complete: true,
+        events: 1,
+        bytes: native_bytes.len() as u64,
+        sha256: digest(native_bytes),
+    };
+    let mut provider = b"{}\n".as_slice();
+    let mut source = native_bytes.as_slice();
+    journal
+        .commit_with_native(
+            manifest(1).tracks.remove(0),
+            &mut provider,
+            Vec::new(),
+            Some(NativeInput {
+                native: native.clone(),
+                source: &mut source,
+            }),
+        )
+        .unwrap();
+    journal.finalize().unwrap();
+    let mut archive = Archive::open(&destination, Limits::default()).unwrap();
+    assert_eq!(archive.manifest().tracks[0].native.as_ref(), Some(&native));
+    assert_eq!(archive.read_native(1).unwrap(), native_bytes);
+}
+
+#[test]
+fn native_sidecars_reject_orphan_duplicate_oversize_incomplete_and_mutated_payloads() {
+    let fixture = Fixture::new();
+    let native_bytes = b"{\"event\":\"launch\"}\n";
+    let native = NativeTrack {
+        complete: true,
+        events: 1,
+        bytes: native_bytes.len() as u64,
+        sha256: digest(native_bytes),
+    };
+    let plain = manifest(1);
+    let orphan = fixture.zip(
+        &plain,
+        &[
+            ("tracks/1.jsonl", b"{}\n".as_slice()),
+            ("native/1.jsonl", native_bytes.as_slice()),
+        ],
+    );
+    assert!(Archive::open(&orphan, Limits::default()).is_err());
+
+    let mut declared = manifest(1);
+    declared.tracks[0].native = Some(native.clone());
+    let mut legacy = declared.clone();
+    legacy.schema_version = 1;
+    assert!(legacy.validate(Limits::default()).is_err());
+    let duplicate = fixture.zip(
+        &declared,
+        &[
+            ("tracks/1.jsonl", b"{}\n".as_slice()),
+            ("native/1.jsonl", native_bytes.as_slice()),
+            ("native/2.jsonl", native_bytes.as_slice()),
+        ],
+    );
+    let mut duplicate_bytes = fs::read(&duplicate).unwrap();
+    replace_name(&mut duplicate_bytes, b"native/2.jsonl", b"native/1.jsonl");
+    fs::write(&duplicate, duplicate_bytes).unwrap();
+    assert!(Archive::open(&duplicate, Limits::default()).is_err());
+
+    let oversize_archive = fixture.zip(
+        &declared,
+        &[
+            ("tracks/1.jsonl", b"{}\n".as_slice()),
+            ("native/1.jsonl", native_bytes.as_slice()),
+        ],
+    );
+    assert!(
+        Archive::open(
+            &oversize_archive,
+            Limits {
+                max_track_bytes: native_bytes.len() as u64 - 1,
+                ..Limits::default()
+            },
+        )
+        .is_err()
+    );
+
+    let mut incomplete = declared.clone();
+    incomplete.tracks[0].native.as_mut().unwrap().complete = false;
+    let incomplete_archive = fixture.zip(
+        &incomplete,
+        &[
+            ("tracks/1.jsonl", b"{}\n".as_slice()),
+            ("native/1.jsonl", native_bytes.as_slice()),
+        ],
+    );
+    let mut archive = Archive::open(&incomplete_archive, Limits::default()).unwrap();
+    assert!(archive.read_native(1).is_err());
+
+    let mutated = fixture.zip(
+        &declared,
+        &[
+            ("tracks/1.jsonl", b"{}\n".as_slice()),
+            ("native/1.jsonl", b"{\"event\":\"broken\"}\n".as_slice()),
+        ],
+    );
+    let mut archive = Archive::open(&mutated, Limits::default()).unwrap();
+    assert!(archive.read_native(1).is_err());
+}
+
+#[test]
+fn journal_never_commits_a_track_when_its_native_sidecar_is_incomplete() {
+    let fixture = Fixture::new();
+    let destination = fixture.0.join("recording.zip");
+    let mut journal =
+        RecordingJournal::create(&destination, manifest(0), 1, Limits::default()).unwrap();
+    journal.begin(1, 1).unwrap();
+    let native_bytes = b"{\"event\":\"launch\"}";
+    let native = NativeTrack {
+        complete: true,
+        events: 1,
+        bytes: native_bytes.len() as u64,
+        sha256: digest(native_bytes),
+    };
+    let mut provider = b"{}\n".as_slice();
+    let mut source = native_bytes.as_slice();
+    assert!(
+        journal
+            .commit_with_native(
+                manifest(1).tracks.remove(0),
+                &mut provider,
+                Vec::new(),
+                Some(NativeInput {
+                    native,
+                    source: &mut source,
+                }),
+            )
+            .is_err()
+    );
+    assert!(journal.finalize().is_err());
+}
+
+#[test]
 fn probe_only_capture_is_inspectable_but_not_automatically_selected() {
     let mut catalogue = manifest(2);
     catalogue.tracks[0].statistics.requests = Some(0);
@@ -533,7 +678,7 @@ fn schema_identity_bounds_order_and_checked_slot_mapping() {
             .is_err()
     );
     let mutations: [fn(&mut Manifest); 11] = [
-        |m| m.schema_version = 2,
+        |m| m.schema_version = SCHEMA_VERSION + 1,
         |m| m.recording_id = "../elsewhere".into(),
         |m| m.concurrency = 65,
         |m| m.compatibility.prompt_sha256 = "G".repeat(64),
@@ -777,7 +922,7 @@ fn zip_rejects_bad_catalogue_methods_names_and_lengths() {
     );
     assert!(Archive::open(&path, Limits::default()).is_err());
     let mut wrong = m.clone();
-    wrong.schema_version = 2;
+    wrong.schema_version = SCHEMA_VERSION + 1;
     let path = fixture.zip(&wrong, &[("tracks/1.jsonl", b"{}\n")]);
     assert!(
         Archive::open(&path, Limits::default())
@@ -858,7 +1003,7 @@ fn public_selection_rejects_invalid_manifests_and_unallocatable_counts() {
     for field in ["schema", "duplicate", "unsorted", "zero", "compatibility"] {
         let mut invalid = original.clone();
         match field {
-            "schema" => invalid.schema_version = 2,
+            "schema" => invalid.schema_version = SCHEMA_VERSION + 1,
             "duplicate" => invalid.tracks[1] = invalid.tracks[0].clone(),
             "unsorted" => invalid.tracks.swap(0, 2),
             "zero" => invalid.tracks[0].id = 0,

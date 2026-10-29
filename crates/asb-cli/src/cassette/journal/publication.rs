@@ -338,6 +338,23 @@ impl RecordingJournal {
                     "staged payload is missing during ZIP publication".into(),
                 ));
             }
+            if let Some(native) = &track.native {
+                self.publication_fault.check("before-zip-native")?;
+                writer
+                    .start_file(track.native_entry_name(), options)
+                    .map_err(zip_error)?;
+                let copied = std::io::copy(
+                    &mut open_regular(&self.native_path(track.id), native.bytes)?
+                        .take(native.bytes.saturating_add(1)),
+                    &mut writer,
+                )
+                .map_err(io_error)?;
+                if copied != native.bytes {
+                    return Err(Error(
+                        "staged native sidecar changed while building ZIP".into(),
+                    ));
+                }
+            }
             for artifact in &track.artifacts {
                 self.publication_fault.check("before-zip-artifact")?;
                 writer
@@ -459,6 +476,12 @@ impl RecordingJournal {
                 ));
             }
         }
+        if let Some(native) = &track.native
+            && hash_file(&self.native_path(track.id), native.bytes)?
+                != (native.bytes, native.sha256.clone())
+        {
+            return Err(Error("staged native sidecar changed after freeze".into()));
+        }
         Ok(())
     }
 
@@ -488,6 +511,9 @@ impl RecordingJournal {
         }
         for track in &manifest.tracks {
             archive.read_track(track.id)?;
+            if track.native.is_some() {
+                archive.read_native(track.id)?;
+            }
             for artifact in &track.artifacts {
                 archive.read_artifact(track.id, &artifact.kind)?;
             }
@@ -578,6 +604,29 @@ impl RecordingJournal {
                         "could not remove sealed auxiliary recording payload {}: {error}",
                         path.display()
                     ));
+                }
+            }
+            if let Some(native) = &track.native {
+                let path = self.native_path(track.id);
+                let result = (|| {
+                    self.check_root_identity()?;
+                    self.publication_fault.check("before-payload-cleanup")?;
+                    if exists(&path)? {
+                        if hash_file(&path, native.bytes)? != (native.bytes, native.sha256.clone())
+                        {
+                            return Err(Error("staged native sidecar changed after freeze".into()));
+                        }
+                        fs::remove_file(&path).map_err(io_error)?;
+                        sync_directory(&self.root)?;
+                    }
+                    self.publication_fault.check("after-payload-cleanup")
+                })();
+                if let Err(error) = result {
+                    warnings.push(format!(
+                        "could not remove sealed native recording payload {}: {error}",
+                        path.display()
+                    ));
+                    return warnings;
                 }
             }
         }
