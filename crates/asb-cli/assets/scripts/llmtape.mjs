@@ -605,6 +605,7 @@ function stringFeatures(value) {
 }
 
 function jsonDifference(expected, actual, path = "$") {
+  if (expected === actual) return null;
   const expectedArray = Array.isArray(expected);
   const actualArray = Array.isArray(actual);
   if (expectedArray !== actualArray || typeof expected !== typeof actual || expected === null || actual === null) {

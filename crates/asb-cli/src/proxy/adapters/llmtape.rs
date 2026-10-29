@@ -1168,6 +1168,28 @@ mod tests {
     }
 
     #[test]
+    fn replay_accepts_equal_null_fields_and_rejects_a_changed_null() {
+        let root = test_root();
+        let cassette = root.join("null-fields.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"role":"assistant","content":null}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, recorded).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed = recorded.replace("null", "\"changed\"");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_progress_redacts_string_values_but_reports_shape() {
         let root = test_root();
         let cassette = cassette(&root);
