@@ -14,7 +14,7 @@ use std::path::Path;
 const DEFAULT_AGENT_TIMEOUT_SECONDS: f64 = 900.0;
 // Four adapter-owned sidecars plus the three fixed replay sidecars.  The
 // aggregate byte budget remains unchanged.
-const MAX_EXPORTED_ARTIFACTS: usize = 7;
+const MAX_EXPORTED_ARTIFACTS: usize = 8;
 const MAX_EXPORTED_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -280,7 +280,7 @@ fn import_guest_artifacts(
         let valid_filename = receipt
             .filename
             .strip_prefix("artifact-")
-            .is_some_and(|suffix| matches!(suffix, "0" | "1" | "2" | "3" | "4" | "5" | "6"));
+            .is_some_and(|suffix| matches!(suffix, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7"));
         let valid_digest = receipt.sha256.len() == 64
             && receipt
                 .sha256
@@ -332,6 +332,14 @@ fn import_guest_artifacts(
                     return Err("guest replay sidecar was duplicated in its result record".into());
                 }
                 metadata.native_trace = Some(bytes);
+            }
+            crate::agents::driver::NATIVE_TOOL_SIDECAR_ARTIFACT => {
+                if metadata.native_tool_sidecar.is_some() {
+                    return Err(
+                        "guest native-tool sidecar was duplicated in its result record".into(),
+                    );
+                }
+                metadata.native_tool_sidecar = Some(bytes);
             }
             _ => metadata
                 .sealed_artifacts
