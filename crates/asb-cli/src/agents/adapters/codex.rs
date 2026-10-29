@@ -249,9 +249,181 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
                 .push("Codex native tool recording is unavailable".into());
             return artifacts;
         };
-        artifacts.native_tool_sidecar = Some(sidecar.to_vec());
+        match bind_provider_tool_outputs(sidecar, &context.run_dir.join("capture.jsonl")) {
+            Ok(sidecar) => artifacts.native_tool_sidecar = Some(sidecar),
+            Err(error) => artifacts.errors.push(error),
+        }
     }
     artifacts
+}
+
+/// Codex serializes native command results into its provider protocol after a
+/// post-tool hook runs.  Keep that adapter-specific envelope with the sealed
+/// native exchange, so replay can restore the exact hook result without
+/// attempting to reconstruct Codex's private serialization.
+fn bind_provider_tool_outputs(
+    sidecar: &[u8],
+    capture: &std::path::Path,
+) -> Result<Vec<u8>, String> {
+    let capture = std::fs::read_to_string(capture)
+        .map_err(|error| format!("cannot read Codex provider capture: {error}"))?;
+    let mut outputs = std::collections::BTreeMap::<String, Vec<u8>>::new();
+    for line in capture.lines() {
+        let row: serde_json::Value = serde_json::from_str(line)
+            .map_err(|_| "Codex provider capture is invalid".to_owned())?;
+        let Some(body) = row
+            .pointer("/request/body")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let body: serde_json::Value = serde_json::from_str(body)
+            .map_err(|_| "Codex provider request body is invalid".to_owned())?;
+        for item in body
+            .get("input")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let (Some(id), Some(output)) = (
+                item.get("call_id").and_then(serde_json::Value::as_str),
+                item.get("output").and_then(serde_json::Value::as_str),
+            ) else {
+                continue;
+            };
+            if outputs
+                .insert(id.to_owned(), output.as_bytes().to_vec())
+                .is_some()
+            {
+                return Err("Codex provider capture repeats a native tool identity".into());
+            }
+        }
+    }
+    let mut rows = sidecar
+        .split_inclusive(|byte| *byte == b'\n')
+        .map(|line| {
+            serde_json::from_slice::<serde_json::Value>(line)
+                .map_err(|_| "Codex native sidecar is invalid".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut pending = None;
+    for row in &mut rows {
+        if row.get("event").and_then(serde_json::Value::as_str) == Some("write") {
+            let request = row
+                .get("request_b64")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "Codex native sidecar request is missing".to_owned())?;
+            let request = decode_base64(request)
+                .map_err(|_| "Codex native sidecar request is invalid".to_owned())?;
+            let request: serde_json::Value = serde_json::from_slice(&request)
+                .map_err(|_| "Codex native sidecar request is invalid".to_owned())?;
+            pending = Some(
+                request
+                    .get("tool_use_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "Codex native sidecar has no tool identity".to_owned())?
+                    .to_owned(),
+            );
+        } else if row.get("event").and_then(serde_json::Value::as_str) == Some("output") {
+            let id = pending
+                .take()
+                .ok_or_else(|| "Codex native sidecar output has no request".to_owned())?;
+            let output = outputs.remove(&id).ok_or_else(|| {
+                "Codex provider capture has no matching native tool result".to_owned()
+            })?;
+            let output = serde_json::to_vec(
+                &String::from_utf8(output)
+                    .map_err(|_| "Codex provider tool result is not UTF-8".to_owned())?,
+            )
+            .map_err(|_| "cannot encode Codex provider tool result".to_owned())?;
+            row["output_b64"] = serde_json::Value::String(encode_base64(&output));
+            row["response_sha256"] = serde_json::Value::String(crate::cassette::digest(&output));
+        }
+    }
+    if pending.is_some() || !outputs.is_empty() {
+        return Err("Codex native/provider tool result inventory does not match".into());
+    }
+    if rows
+        .last()
+        .and_then(|row| row.get("event"))
+        .and_then(serde_json::Value::as_str)
+        != Some("workspace_effect")
+    {
+        return Err("Codex native sidecar has no workspace effect".into());
+    }
+    let prefix = rows[..rows.len() - 1]
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "cannot encode Codex native sidecar".to_owned())?
+        .join("\n");
+    rows.last_mut().expect("checked sidecar effect")["sha256"] =
+        serde_json::Value::String(crate::cassette::digest(format!("{prefix}\n").as_bytes()));
+    let encoded = rows
+        .into_iter()
+        .map(|row| serde_json::to_string(&row))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "cannot encode Codex native sidecar".to_owned())?
+        .join("\n")
+        + "\n";
+    Ok(encoded.into_bytes())
+}
+
+fn decode_base64(value: &str) -> Result<Vec<u8>, ()> {
+    fn digit(byte: u8) -> Result<u8, ()> {
+        match byte {
+            b'A'..=b'Z' => Ok(byte - b'A'),
+            b'a'..=b'z' => Ok(byte - b'a' + 26),
+            b'0'..=b'9' => Ok(byte - b'0' + 52),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            _ => Err(()),
+        }
+    }
+    if !value.len().is_multiple_of(4) {
+        return Err(());
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 4 * 3);
+    for chunk in value.as_bytes().chunks_exact(4) {
+        let (a, b) = (digit(chunk[0])?, digit(chunk[1])?);
+        let (pad_c, pad_d) = (chunk[2] == b'=', chunk[3] == b'=');
+        if pad_c && !pad_d {
+            return Err(());
+        }
+        let c = if pad_c { 0 } else { digit(chunk[2])? };
+        let d = if pad_d { 0 } else { digit(chunk[3])? };
+        bytes.push((a << 2) | (b >> 4));
+        if !pad_c {
+            bytes.push((b << 4) | (c >> 2));
+        }
+        if !pad_d {
+            bytes.push((c << 6) | d);
+        }
+    }
+    Ok(bytes)
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0];
+        let b = *chunk.get(1).unwrap_or(&0);
+        let c = *chunk.get(2).unwrap_or(&0);
+        output.push(ALPHABET[(a >> 2) as usize] as char);
+        output.push(ALPHABET[((a & 3) << 4 | b >> 4) as usize] as char);
+        output.push(if chunk.len() > 1 {
+            ALPHABET[((b & 15) << 2 | c >> 6) as usize] as char
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            ALPHABET[(c & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    output
 }
 
 fn sandbox_args(value: Option<String>) -> Result<&'static [&'static str], Error> {
@@ -786,6 +958,17 @@ mod tests {
         );
         let rows = std::fs::read_to_string(&sidecar).unwrap();
         assert_eq!(rows.lines().count(), 7);
+        let capture = serde_json::json!({
+            "request": {"body": serde_json::json!({
+                "input": [{"call_id": "call-1", "output": "fixture"}]
+            }).to_string()}
+        });
+        std::fs::write(root.join("capture.jsonl"), format!("{capture}\n")).unwrap();
+        std::fs::write(
+            &sidecar,
+            bind_provider_tool_outputs(rows.as_bytes(), &root.join("capture.jsonl")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&std::fs::read(&progress).unwrap())
                 .unwrap()["complete"],
@@ -836,7 +1019,7 @@ mod tests {
             Some("PostToolUse")
         );
         assert_eq!(
-            replay_post["hookSpecificOutput"]["updatedMCPToolOutput"]["stdout"].as_str(),
+            replay_post["hookSpecificOutput"]["updatedMCPToolOutput"].as_str(),
             Some("fixture")
         );
         assert!(
