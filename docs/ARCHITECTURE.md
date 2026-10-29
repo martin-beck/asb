@@ -1677,6 +1677,13 @@ The journal stages that sidecar before the track's immutable commit, so a future
 native transport cannot consume an unsealed post-commit attachment. Schema 1
 recordings remain readable when they contain no native sidecar. Native ingress,
 event semantics and replay dispatch remain outside this storage contract.
+`NativeToolTransport` is the next private boundary: it consumes only a complete
+sealed sidecar and requires the exact bounded lifecycle `launch`, session alias,
+`poll`, `write`, `output`, `exit`, then one terminal workspace-effect digest.
+The sealed private stream retains bounded exact request/output bytes solely for
+replay, alongside aliases, terminal status and digests. Command arguments,
+paths, prompts and every native payload remain absent from manifests, public
+evidence and reports. No agent is wired to this transport yet.
 It neither starts providers nor changes workloads. Metadata parsing uses a
 validated bounded central-directory snapshot before enabling payload reads;
 selected entries receive CRC, length and SHA-256 validation. Its single-owner
