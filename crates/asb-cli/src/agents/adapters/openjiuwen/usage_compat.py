@@ -143,6 +143,20 @@ def _materialize_workspace(value):
         return {key: _materialize_workspace(item) for key, item in value.items()}
     return value
 
+def _request_shape(value):
+    if isinstance(value, str):
+        return {
+            "kind": "string",
+            "length": len(value),
+            "workspace_marker": "<asb-workspace>" in value,
+            "sha256": _digest(value.encode("utf-8")),
+        }
+    if isinstance(value, list):
+        return {"kind": "list", "items": [_request_shape(item) for item in value]}
+    if isinstance(value, dict):
+        return {"kind": "object", "fields": {key: _request_shape(item) for key, item in sorted(value.items())}}
+    return {"kind": type(value).__name__}
+
 def _load_replay():
     events = []
     with open(_replay_path, "r", encoding="utf-8") as source:
@@ -220,11 +234,15 @@ try:
                     write.get("alias") != _native_alias
                     or write.get("request_b64") != _payload(request)
                 ):
+                    expected_request = json.loads(base64.b64decode(write["request_b64"]))
+                    actual_request = json.loads(request)
                     raise RuntimeError(
                         "ASB OpenJiuwen native replay "
                         f"{tool_name} request differs from recording "
                         f"(expected_sha256={write.get('request_sha256')}, "
-                        f"actual_sha256={_digest(request)})"
+                        f"actual_sha256={_digest(request)}, "
+                        f"expected_shape={json.dumps(_request_shape(expected_request), sort_keys=True)}, "
+                        f"actual_shape={json.dumps(_request_shape(actual_request), sort_keys=True)})"
                     )
                 _native_cursor += 1
                 return ToolOutput.model_validate(_materialize_workspace(
