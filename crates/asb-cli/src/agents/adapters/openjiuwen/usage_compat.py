@@ -221,7 +221,10 @@ try:
                     or write.get("request_b64") != _payload(request)
                 ):
                     raise RuntimeError(
-                        f"ASB OpenJiuwen native replay {tool_name} request differs from recording"
+                        "ASB OpenJiuwen native replay "
+                        f"{tool_name} request differs from recording "
+                        f"(expected_sha256={write.get('request_sha256')}, "
+                        f"actual_sha256={_digest(request)})"
                     )
                 _native_cursor += 1
                 return ToolOutput.model_validate(_materialize_workspace(
