@@ -289,11 +289,31 @@ pub(crate) struct ExecutionContext<'a> {
     /// Exact selected provider-tape alias whose adjacent sealed MCP sidecars
     /// must be staged inside an isolated workload guest.
     pub mcp_tape_cassette: Option<&'a Path>,
+    /// Exact selected v2 native-tool sidecar plus payload-free authority.
+    /// The path is private runner state, never result evidence.
+    #[cfg(not(test))]
+    pub native_tool: Option<(&'a crate::cassette::NativeToolLaunch, &'a Path)>,
     pub measurements: Option<&'a mut crate::measurements::Session>,
     pub show_output: bool,
     /// Presentation is best-effort and deliberately cannot influence workload
     /// ownership, transport, or result custody.
     pub progress: Option<&'a mut dyn ExecutionProgress>,
+}
+
+impl<'a> ExecutionContext<'a> {
+    #[cfg(not(test))]
+    pub(crate) fn native_tool(
+        &self,
+    ) -> Option<(&crate::cassette::NativeToolLaunch, &Path)> {
+        self.native_tool
+    }
+
+    #[cfg(test)]
+    pub(crate) fn native_tool(
+        &self,
+    ) -> Option<(&crate::cassette::NativeToolLaunch, &Path)> {
+        None
+    }
 }
 
 /// A live, presentation-only view of an agent transcript. Both native child

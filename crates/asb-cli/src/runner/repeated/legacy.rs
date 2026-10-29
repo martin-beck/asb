@@ -126,6 +126,9 @@ impl Inspection {
                 local_tools: None,
                 deterministic_manifest: None,
                 native_trace: None,
+                native_tool: None,
+                #[cfg(not(test))]
+                native_tool_launch: None,
                 mcp_relays: Vec::new(),
                 bytes,
                 sha256,

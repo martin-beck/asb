@@ -165,6 +165,7 @@ impl Prepared {
                     local_tools,
                     deterministic_manifest,
                     native_trace,
+                    native_tool,
                     mcp_relays,
                 ) = if let Some(manifest) = self.source.manifest() {
                     let track = manifest.track(*id).map_err(input_error)?;
@@ -210,6 +211,10 @@ impl Prepared {
                             .iter()
                             .any(|artifact| artifact.kind == "native-trace")
                             .then(|| PathBuf::from(format!("inputs/native-trace-{id}.jsonl"))),
+                        track
+                            .native
+                            .as_ref()
+                            .map(|_| PathBuf::from(format!("inputs/native-tool-{id}.jsonl"))),
                         mcp_relays,
                     )
                 } else {
@@ -223,6 +228,7 @@ impl Prepared {
                         track.path.clone(),
                         track.bytes,
                         track.sha256.clone(),
+                        None,
                         None,
                         None,
                         None,
@@ -245,6 +251,9 @@ impl Prepared {
                     local_tools,
                     deterministic_manifest,
                     native_trace,
+                    native_tool,
+                    #[cfg(not(test))]
+                    native_tool_launch: None,
                     mcp_relays,
                     bytes,
                     sha256,
@@ -258,7 +267,7 @@ impl Prepared {
         Ok(inputs)
     }
 
-    pub fn stage(&mut self, root: &Path, inputs: &[ReplayInput]) -> Result<(), Error> {
+    pub fn stage(&mut self, root: &Path, inputs: &mut [ReplayInput]) -> Result<(), Error> {
         private_directory(&root.join("inputs"), false)?;
         for input in inputs {
             // One bounded payload at a time, and only unique selected IDs.
@@ -296,6 +305,35 @@ impl Prepared {
                     .read_artifact(input.track.expect("selected bundle track"), "native-trace")
                     .map_err(input_error)?;
                 publish_bytes(&root.join(native_trace), &bytes)?;
+            }
+            if let Some(native_tool) = &input.native_tool {
+                let bytes = self
+                    .source
+                    .read_native(input.track.expect("selected bundle track"))
+                    .map_err(input_error)?;
+                // Validate before publication. Later consumers receive only
+                // the payload-free launch descriptor.
+                #[cfg(not(test))]
+                let track = self
+                    .source
+                    .manifest()
+                    .and_then(|manifest| {
+                        manifest
+                            .track(input.track.expect("selected bundle track"))
+                            .ok()
+                    })
+                    .and_then(|track| track.native.clone())
+                    .ok_or_else(|| {
+                        Error::Input("selected native tool sidecar disappeared".into())
+                    })?;
+                #[cfg(not(test))]
+                {
+                    input.native_tool_launch = Some(
+                        crate::cassette::NativeToolTransport::launch_descriptor(track, &bytes)
+                            .map_err(input_error)?,
+                    );
+                }
+                publish_bytes(&root.join(native_tool), &bytes)?;
             }
             for relay in &input.mcp_relays {
                 let bytes = self
@@ -561,6 +599,7 @@ mod tests {
             local_tools: Some(PathBuf::from("inputs/local-tools-7.jsonl")),
             deterministic_manifest: None,
             native_trace: None,
+            native_tool: None,
             mcp_relays: Vec::new(),
             bytes: 2,
             sha256: "a".repeat(64),
@@ -591,6 +630,7 @@ mod tests {
             local_tools: Some(PathBuf::from("inputs/local-tools-1.jsonl")),
             deterministic_manifest: None,
             native_trace: None,
+            native_tool: None,
             mcp_relays: Vec::new(),
             bytes: 3,
             sha256: crate::cassette::digest(b"{}\n"),
@@ -620,6 +660,7 @@ mod tests {
             local_tools: None,
             deterministic_manifest: Some(PathBuf::from("inputs/determinism-manifest-7.json")),
             native_trace: None,
+            native_tool: None,
             mcp_relays: Vec::new(),
             bytes: 2,
             sha256: "a".repeat(64),
@@ -663,6 +704,7 @@ mod tests {
             local_tools: None,
             deterministic_manifest: None,
             native_trace: Some(PathBuf::from("inputs/native-trace-7.jsonl")),
+            native_tool: None,
             mcp_relays: Vec::new(),
             bytes: 2,
             sha256: "a".repeat(64),
@@ -700,6 +742,7 @@ mod tests {
             local_tools: None,
             deterministic_manifest: None,
             native_trace: Some(PathBuf::from("inputs/native-trace-7.jsonl")),
+            native_tool: None,
             mcp_relays: Vec::new(),
             bytes: 2,
             sha256: "a".repeat(64),
@@ -733,6 +776,7 @@ mod tests {
             local_tools: None,
             deterministic_manifest: None,
             native_trace: None,
+            native_tool: None,
             mcp_relays: vec![McpRelayInput {
                 id: "filesystem".into(),
                 bundle: PathBuf::from("inputs/mcp-relay-filesystem-7.jsonl"),
