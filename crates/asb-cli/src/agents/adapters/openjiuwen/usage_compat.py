@@ -253,7 +253,8 @@ try:
     )
     from openjiuwen.harness.tools.shell import BashTool
     from openjiuwen.harness.tools.code import CodeTool
-    from openjiuwen.core.foundation.tool.schema import Tool, ToolOutput
+    from openjiuwen.core.foundation.tool.base import Tool
+    from openjiuwen.core.foundation.tool.schema import ToolOutput
 
     _original_base_render = Tool.render_for_llm
 

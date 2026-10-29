@@ -498,6 +498,12 @@ class ToolOutput:
     @classmethod
     def model_validate(cls, value):
         return cls(value["success"], value.get("data"), value.get("error"))
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("core/foundation/tool/base.py"),
+            r#"
 class Tool:
     def render_for_llm(self, output):
         return "base:" + str(output.model_dump())
@@ -507,7 +513,8 @@ class Tool:
         let tools = r#"
 import os
 import json
-from openjiuwen.core.foundation.tool.schema import ToolOutput, Tool
+from openjiuwen.core.foundation.tool.schema import ToolOutput
+from openjiuwen.core.foundation.tool.base import Tool
 class _Tool(Tool):
     label = ""
     def __init__(self):
