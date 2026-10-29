@@ -99,15 +99,6 @@ fn prepare_native_tool_replay(
         crate::tape::Mode::Record => "record",
         crate::tape::Mode::Replay => "replay",
     };
-    std::fs::write(
-        &progress,
-        serde_json::json!({"schema_version":1,"mode":mode,"complete":false}).to_string(),
-    )
-    .map_err(|error| {
-        Error::Run(format!(
-            "cannot initialize Hermes tool replay receipt: {error}"
-        ))
-    })?;
     let sidecar = match tape.mode {
         crate::tape::Mode::Record => output.join("native-tool-sidecar.jsonl"),
         crate::tape::Mode::Replay => context.runtime_dir.join("native-tool-sidecar.jsonl"),
@@ -394,12 +385,10 @@ mod tests {
         assert!(env["PYTHONPATH"].contains("hermes-native-tools"));
         assert!(command.get_args().any(|argument| argument == "--toolsets"));
         assert!(command.get_args().any(|argument| argument == "terminal"));
-        let progress: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(run.join("hermes/native-tool-progress.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(progress["mode"], "record");
-        assert_eq!(progress["complete"], false);
+        // Declared artifacts are owned by the driver before the injected
+        // runtime creates them. Preparation must not pre-create a path in the
+        // adapter namespace, or the owner correctly treats it as foreign.
+        assert!(!run.join("hermes/native-tool-progress.json").exists());
         assert!(
             std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
                 .unwrap()
