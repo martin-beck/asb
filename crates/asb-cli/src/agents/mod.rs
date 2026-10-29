@@ -94,6 +94,12 @@ pub(crate) trait AgentAdapter: Sync {
     fn replay_credential_vars(&self) -> &'static [&'static str] {
         &[]
     }
+    /// Optional adapter-owned opaque provider-wire canonicalizer. The shared
+    /// tape transport invokes this extension without interpreting agent
+    /// protocol fields.
+    fn tape_wire_extension(&self) -> Option<&'static str> {
+        None
+    }
     /// Whether this adapter can route every benchmark-exposed local tool
     /// through ASB's sealed recorder.  Callers must reject a requested tool
     /// replay rather than silently allowing a client-owned tool to escape.
@@ -436,6 +442,7 @@ pub(super) struct StaticAdapter {
     failure: Option<FailureHook>,
     response_failure: Option<ResponseFailureHook>,
     replay_credential_vars: &'static [&'static str],
+    tape_wire_extension: Option<&'static str>,
     state_environment_vars: &'static [&'static str],
     forwarded_invocation_environment_vars: &'static [&'static str],
     preferred_executables: Option<PreferredExecutablesHook>,
@@ -474,6 +481,7 @@ impl StaticAdapter {
             failure: None,
             response_failure: None,
             replay_credential_vars: &[],
+            tape_wire_extension: None,
             state_environment_vars: &[],
             forwarded_invocation_environment_vars: &[],
             preferred_executables: None,
@@ -584,6 +592,14 @@ impl StaticAdapter {
         self
     }
 
+    /// Supplies an adapter-private request canonicalizer to the generic tape
+    /// transport. The transport passes opaque request data and does not know
+    /// the extension's protocol vocabulary.
+    pub(super) const fn with_tape_wire_extension(mut self, source: &'static str) -> Self {
+        self.tape_wire_extension = Some(source);
+        self
+    }
+
     pub(super) const fn with_state_environment_vars(
         mut self,
         vars: &'static [&'static str],
@@ -659,6 +675,9 @@ impl AgentAdapter for StaticAdapter {
     }
     fn replay_credential_vars(&self) -> &'static [&'static str] {
         self.replay_credential_vars
+    }
+    fn tape_wire_extension(&self) -> Option<&'static str> {
+        self.tape_wire_extension
     }
     fn supports_tool_replay(&self) -> bool {
         self.complete_tool_replay
@@ -740,6 +759,12 @@ pub(crate) fn names() -> impl Iterator<Item = &'static str> {
 }
 pub(crate) fn find(id: &str) -> Option<&'static dyn AgentAdapter> {
     REGISTRY.iter().copied().find(|adapter| adapter.id() == id)
+}
+
+/// Return an adapter-owned provider-wire extension without exposing its
+/// protocol semantics to the shared tape runner.
+pub(crate) fn tape_wire_extension(id: &str) -> Option<&'static str> {
+    find(id).and_then(AgentAdapter::tape_wire_extension)
 }
 
 /// Read explicit usage fields only; never infer token counts from text.
