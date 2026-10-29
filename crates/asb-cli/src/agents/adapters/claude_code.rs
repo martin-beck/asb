@@ -282,10 +282,12 @@ mod tests {
         )
         .unwrap();
         let command = ADAPTER.command(&CommandContext {
+            executable: "claude",
             config: &config,
             endpoint: None,
             interface: None,
             prompt: "fixture prompt",
+            native_tool: None,
         });
         assert!(
             command

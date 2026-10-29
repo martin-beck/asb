@@ -103,6 +103,9 @@ pub(crate) struct GuestRequest {
     /// relay sidecars. It is never inferred from a loopback provider endpoint.
     #[serde(default)]
     pub mcp_tape_cassette: Option<PathBuf>,
+    /// Payload-free authority for the fixed private native sidecar location.
+    #[serde(default)]
+    pub native_tool_launch: Option<crate::cassette::NativeToolLaunch>,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: f64,
     #[serde(default)]
@@ -491,13 +494,34 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         .to_str()
         .ok_or_else(|| Error::Input("task shell directory must be valid UTF-8".into()))?
         .to_owned();
+    let native_tool_path = request.runtime_dir.join("native-tool-sidecar.jsonl");
+    let native_tool = request
+        .native_tool_launch
+        .as_ref()
+        .map(|launch| {
+            launch
+                .validate_staged(&native_tool_path)
+                .map_err(|error| Error::Input(error.to_string()))?;
+            Ok(super::NativeToolContext {
+                launch,
+                path: &native_tool_path,
+            })
+        })
+        .transpose()?;
     let specification = adapter.command(&super::CommandContext {
+        executable: &program,
         config: &execution_config,
         endpoint: Some(&request.connection.base_url),
         interface: Some(request.connection.interface),
         prompt: &request.prompt,
+        native_tool,
     });
-    let mut command = adapter.process(&program)?.direct();
+    let process_program = if specification.program == adapter.executable() {
+        &program
+    } else {
+        &specification.program
+    };
+    let mut command = super::select_process(adapter, process_program, native_tool)?.direct();
     command.args(specification.args);
     let stdin_prompt = match specification.prompt_delivery {
         super::PromptDelivery::Argument => {

@@ -18,7 +18,7 @@ pub use journal::{
     ArtifactInput, NativeInput, ProofLimits, Publication, RecordingJournal, RecordingReservation,
     TrackEvidence,
 };
-pub use native::{NativeSession, NativeToolTransport};
+pub use native::{NativeSession, NativeToolLaunch, NativeToolTransport};
 pub use provenance::{ImportedTrack, OriginPlan, RecordingSource, track_metadata_digest};
 pub use selection::{Metric, SelectionPlan, Selector};
 use serde::{Deserialize, Serialize};

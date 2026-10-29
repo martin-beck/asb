@@ -4,8 +4,11 @@
 //! bounded aliases, exit observations and digests after validation; it never
 //! models command arguments, paths, prompts, request bodies or output bodies.
 use super::{Archive, Error, NativeTrack, valid_digest};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
+use std::path::Path;
 
 const MAX_EVENTS: u64 = 8_192;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
@@ -14,10 +17,81 @@ const MAX_PAYLOAD_BYTES: usize = 512 * 1024;
 const MAX_TOTAL_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 
 /// One validated native session lifecycle, without captured tool payloads.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeSession {
     alias: String,
     success: bool,
+}
+
+/// Serializable, payload-free launch authority for a staged private sidecar.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeToolLaunch {
+    native: NativeTrack,
+    launch_session: String,
+    workspace_effect_sha256: String,
+    sessions: Vec<NativeSession>,
+}
+
+impl NativeToolLaunch {
+    /// Validated private session identities for the selected sidecar.
+    pub fn sessions(&self) -> &[NativeSession] {
+        &self.sessions
+    }
+
+    /// Validate a staged owned sidecar without disclosing its pathname or bytes.
+    pub fn validate_staged(&self, path: &Path) -> Result<(), Error> {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options
+            .open(path)
+            .map_err(|_| Error("native tool sidecar is unavailable".into()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| Error("native tool sidecar is unavailable".into()))?;
+        if !metadata.is_file() || metadata.len() != self.native.bytes {
+            return Err(Error(
+                "native tool sidecar differs from its launch descriptor".into(),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(Error("native tool sidecar is not private".into()));
+            }
+        }
+        let mut bytes = Vec::new();
+        file.take(self.native.bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error("native tool sidecar cannot be read".into()))?;
+        let transport = NativeToolTransport::from_sidecar(&self.native, &bytes)?;
+        if transport.launch_session != self.launch_session
+            || transport.workspace_effect_sha256 != self.workspace_effect_sha256
+            || transport.sessions != self.sessions
+        {
+            return Err(Error(
+                "native tool sidecar differs from its launch descriptor".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Open the already-authorized private sidecar for one adapter-owned
+    /// transport.  Callers receive the decoded transport only after the
+    /// descriptor and owner-only staged file agree exactly.
+    pub fn open_staged(&self, path: &Path) -> Result<NativeToolTransport, Error> {
+        self.validate_staged(path)?;
+        let bytes =
+            std::fs::read(path).map_err(|_| Error("native tool sidecar is unavailable".into()))?;
+        NativeToolTransport::from_sidecar(&self.native, &bytes)
+    }
 }
 
 impl NativeSession {
@@ -52,6 +126,48 @@ struct NativeExchange {
 }
 
 impl NativeToolTransport {
+    /// Derive payload-free launch authority from one already selected sealed
+    /// sidecar. Callers retain bytes in a private owner-only staging file; this
+    /// descriptor intentionally contains no pathname or payload.
+    pub fn launch_descriptor(native: NativeTrack, bytes: &[u8]) -> Result<NativeToolLaunch, Error> {
+        let transport = Self::from_sidecar(&native, bytes)?;
+        Ok(NativeToolLaunch {
+            native,
+            launch_session: transport.launch_session,
+            workspace_effect_sha256: transport.workspace_effect_sha256,
+            sessions: transport.sessions,
+        })
+    }
+
+    /// Validate and stage a selected sidecar as an owner-only private runtime file.
+    pub fn stage_from_archive(
+        archive: &mut Archive,
+        track_id: u64,
+        destination: &Path,
+    ) -> Result<NativeToolLaunch, Error> {
+        let native = archive
+            .manifest()
+            .track(track_id)?
+            .native
+            .clone()
+            .ok_or_else(|| Error(format!("cassette track {track_id} has no native sidecar")))?;
+        let bytes = archive.read_native(track_id)?;
+        Self::from_sidecar(&native, &bytes)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(destination)
+            .map_err(|_| Error("cannot create private native tool sidecar".into()))?;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|_| Error("cannot stage private native tool sidecar".into()))?;
+        Self::launch_descriptor(native, &bytes)
+    }
     /// Read and validate the sealed native sidecar selected from an archive.
     pub fn from_archive(archive: &mut Archive, track_id: u64) -> Result<Self, Error> {
         let track = archive.manifest().track(track_id)?;

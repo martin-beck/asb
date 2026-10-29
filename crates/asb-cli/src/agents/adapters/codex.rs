@@ -492,10 +492,12 @@ mod tests {
         )
         .unwrap();
         let spec = command(&CommandContext {
+            executable: "codex",
             config: &config,
             endpoint: None,
             interface: None,
             prompt: "private fixture prompt",
+            native_tool: None,
         });
         assert_eq!(spec.prompt_delivery, PromptDelivery::Stdin);
         assert_eq!(spec.args.last().map(String::as_str), Some("-"));

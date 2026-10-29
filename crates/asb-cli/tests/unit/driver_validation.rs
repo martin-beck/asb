@@ -24,6 +24,7 @@ impl Fixture {
             tool_tape_cassette: None,
             mcp_mode: None,
             mcp_tape_cassette: None,
+            native_tool_launch: None,
             inherit_working_directory: false,
             process_lifetime: Default::default(),
             workload_owner: None,

@@ -768,6 +768,11 @@ impl<'a> ReadyAttempt<'a> {
                 options.replay_statistics(),
             )
             .display();
+            #[cfg(not(test))]
+            let native_tool = options
+                .native_tool_inputs
+                .and_then(|inputs| inputs.get(options.replica.index.checked_sub(1)?))
+                .and_then(|input| input.native_tool_launch().zip(input.native_tool.as_deref()));
             let isolated = prepared.workload.execute(
                 &mut workloads::ExecutionContext {
                     launch,
@@ -789,6 +794,8 @@ impl<'a> ReadyAttempt<'a> {
                     mcp_tape_cassette: mcp_tape_cassette
                         .as_ref()
                         .map(|(_, cassette)| cassette.as_path()),
+                    #[cfg(not(test))]
+                    native_tool,
                     measurements: prepared.measurements.as_mut(),
                     show_output,
                     progress: isolated_progress
