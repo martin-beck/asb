@@ -27,6 +27,7 @@ function object(value) {
 
 export function normalizeRequest(request) {
   const value = request?.body;
+  const replay = process.argv.includes("replay");
   if (!request?.url?.includes("/messages") || !object(value) || !Array.isArray(value.messages)) {
     return value;
   }
@@ -46,6 +47,8 @@ export function normalizeRequest(request) {
     if (calls.length !== callTurn.content.length || calls.length !== results.length) {
       fail("tool-use and tool-result counts must match exactly");
     }
+    const callIds = new Set();
+    const resultIds = new Set();
     for (let position = 0; position < results.length; position += 1) {
       const call = calls[position];
       const result = results[position];
@@ -53,9 +56,19 @@ export function normalizeRequest(request) {
           || typeof result.tool_use_id !== "string" || result.tool_use_id.length === 0) {
         fail("tool-use and tool-result ids must be non-empty strings");
       }
-      // This is the only rewritten field. The assistant call id comes from
-      // the exact replayed response immediately preceding this result.
-      result.tool_use_id = call.id;
+      if (callIds.has(call.id) || resultIds.has(result.tool_use_id)) {
+        fail("tool-use and tool-result ids must be unique within one pair");
+      }
+      callIds.add(call.id);
+      resultIds.add(result.tool_use_id);
+      if (replay) {
+        // OpenJiuwen reparses the same historical assistant call with a new
+        // uuid on later turns. Canonicalize both sides of this one proven
+        // pair together, before llmtape's ordinary structural comparison.
+        const marker = `<asb-openjiuwen-tool-pair-${index}-${position}>`;
+        call.id = marker;
+        result.tool_use_id = marker;
+      }
     }
   }
   return value;
@@ -299,7 +312,8 @@ const valid = {
     { role: "user", content: [{ type: "tool_result", tool_use_id: "regenerated", content: [{ type: "text", text: "ok" }] }] },
   ] },
 };
-if (normalizeRequest(valid).messages[1].content[0].tool_use_id !== "recorded") throw new Error("valid rewrite failed");
+if (normalizeRequest(valid).messages[0].content[0].id !== "<asb-openjiuwen-tool-pair-1-0>"
+    || valid.body.messages[1].content[0].tool_use_id !== "<asb-openjiuwen-tool-pair-1-0>") throw new Error("valid rewrite failed");
 const invalid = [
   { url: "/v1/messages", body: { messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: [] }] }] } },
   { url: "/v1/messages", body: { messages: [
@@ -314,6 +328,10 @@ const invalid = [
     { role: "assistant", content: [{ type: "tool_use", id: "", name: "read", input: {} }] },
     { role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: [] }] },
   ] } },
+  { url: "/v1/messages", body: { messages: [
+    { role: "assistant", content: [{ type: "tool_use", id: "x", name: "read", input: {} }, { type: "tool_use", id: "x", name: "write", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: [] }, { type: "tool_result", tool_use_id: "y", content: [] }] },
+  ] } },
 ];
 for (const request of invalid) {
   let rejected = false;
@@ -325,6 +343,7 @@ for (const request of invalid) {
         .unwrap();
         let output = std::process::Command::new("node")
             .arg(root.join("test.mjs"))
+            .arg("replay")
             .output()
             .unwrap();
         assert!(
