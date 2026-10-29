@@ -195,6 +195,7 @@ class Replayer:
             expected = self.exchanges[self.index][0] if self.index < len(self.exchanges) else None
             component = "sequence" if expected is None else _request_difference(expected, request)
             self.failure = "native terminal request differs:" + component
+            _write_progress(False, self.failure, self.index, len(self.exchanges))
             # A bounded field name is safe to retain in the private process
             # diagnostic; never write either tool request or response.
             print("ASB_HERMES_NATIVE_MISMATCH:" + component, file=sys.stderr, flush=True)
@@ -205,6 +206,15 @@ class Replayer:
             return json.dumps({"asb_native_mismatch": component}, separators=(",", ":"))
         response = self.exchanges[self.index][1]
         self.index += 1
+        # Persist a bounded cursor after every successful replayed call.  A
+        # provider-tape rejection can terminate Hermes before its exit hook,
+        # so finalization alone cannot prove how far the adapter dispatch got.
+        _write_progress(
+            False,
+            "native terminal replay in progress",
+            self.index,
+            len(self.exchanges),
+        )
         try:
             return response.decode("utf-8")
         except UnicodeDecodeError as error:

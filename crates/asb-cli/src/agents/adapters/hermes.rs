@@ -462,6 +462,7 @@ mod tests {
         assert!(hook.contains("_task_id, _session_id"));
         assert!(!hook.contains("\"task_id\": task_id"));
         assert!(hook.contains("entry.handler = registered_terminal"));
+        assert!(hook.contains("native terminal replay in progress"));
         // During an ASB native record/replay run, Hermes' generic oversized
         // terminal-output persistence would substitute a process-local
         // sandbox path into the next provider request.  The adapter keeps the
