@@ -72,6 +72,18 @@ def _request(command, background, timeout, _task_id, _session_id, force, workdir
     })
 
 
+def _process_request(args):
+    """Identity for a registry status action, excluding its ephemeral ID."""
+    return _encoded({
+        "kind": "process",
+        "schema_version": 1,
+        "action": args.get("action"),
+        "offset": args.get("offset", 0),
+        "limit": args.get("limit", 200),
+        "timeout": args.get("timeout"),
+    })
+
+
 def _write_progress(complete, error=None, invocations=0, expected_invocations=None):
     PROGRESS.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     document = {"schema_version": 1, "mode": MODE, "complete": complete, "invocations": invocations}
@@ -145,6 +157,33 @@ class Recorder:
             "response_sha256": _digest(response),
             "output_b64": base64.b64encode(response).decode("ascii"),
         })
+        self.entries.extend((request, response))
+        return output
+
+    def invoke_process(self, original, args, **kwargs):
+        request = _process_request(args)
+        if len(request) > MAX_PAYLOAD_BYTES:
+            self.failed = True
+            raise RuntimeError("Hermes process request exceeds the native replay bound")
+        self._event({"event": "poll", "alias": SESSION})
+        self._event({"event": "write", "alias": SESSION,
+            "request_sha256": _digest(request),
+            "request_b64": base64.b64encode(request).decode("ascii")})
+        try:
+            output = original(args, **kwargs)
+        except BaseException:
+            self.failed = True
+            raise
+        if not isinstance(output, str):
+            self.failed = True
+            raise RuntimeError("Hermes process tool returned a non-text response")
+        response = output.encode("utf-8")
+        if len(response) > MAX_PAYLOAD_BYTES:
+            self.failed = True
+            raise RuntimeError("Hermes process response exceeds the native replay bound")
+        self._event({"event": "output", "alias": SESSION,
+            "response_sha256": _digest(response),
+            "output_b64": base64.b64encode(response).decode("ascii")})
         self.entries.extend((request, response))
         return output
 
@@ -243,6 +282,25 @@ class Replayer:
             self.failed = True
             raise RuntimeError("Hermes terminal replay response is not text") from error
 
+    def invoke_process(self, _original, args, **kwargs):
+        request = _process_request(args)
+        if len(request) > MAX_PAYLOAD_BYTES:
+            self.failed = True
+            raise RuntimeError("Hermes process request exceeds the native replay bound")
+        if self.index >= len(self.exchanges) or self.exchanges[self.index][0] != request:
+            self.failed = True
+            self.failure = "native terminal request differs:sequence"
+            _write_progress(False, self.failure, self.index, len(self.exchanges))
+            return json.dumps({"asb_native_mismatch": "sequence"}, separators=(",", ":"))
+        response = self.exchanges[self.index][1]
+        self.index += 1
+        _write_progress(False, "native terminal replay in progress", self.index, len(self.exchanges))
+        try:
+            return response.decode("utf-8")
+        except UnicodeDecodeError as error:
+            self.failed = True
+            raise RuntimeError("Hermes process replay response is not text") from error
+
     def close(self):
         complete = not self.failed and self.index == len(self.exchanges)
         _write_progress(
@@ -307,6 +365,15 @@ try:
     entry = registry._tools.get("terminal")
     if entry is not None:
         entry.handler = registered_terminal
+
+    process_entry = registry._tools.get("process")
+    if process_entry is not None:
+        original_process = process_entry.handler
+
+        def registered_process(args, **kw):
+            return transport.invoke_process(original_process, args, **kw)
+
+        process_entry.handler = registered_process
 
     # Hermes normally persists a large terminal result into its ephemeral
     # sandbox and replaces it with a message containing that sandbox path.
