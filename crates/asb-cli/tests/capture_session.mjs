@@ -208,12 +208,42 @@ test("full append with a held transport write remains pending until destroy and 
 });
 
 test("only finish is positive even when a detached response claims writableFinished", async () => {
-  for (const finish of [false, true]) {
+  for (const terminal of ["close", "error", "finish"]) {
     const response = new EventEmitter();
     response.writableFinished = true;
     const delivered = responseDelivery(response);
-    if (finish) response.emit("finish");
+    response.emit(terminal);
     response.emit("close");
-    assert.equal(await delivered, finish);
+    const outcome = await delivered;
+    assert.equal(outcome.delivered, terminal === "finish");
+    assert.equal(outcome.terminal, terminal);
   }
+});
+
+test("incomplete records retain bounded terminal classifications without payloads", (t) => {
+  const { capture, receipt } = fixture(t);
+  const closed = capture.begin({ method: "POST", path: "/v1/messages" });
+  capture.append(closed, { response: "recorded" }, true);
+  capture.end(closed, { terminal: "close", delivered: false });
+  const errored = capture.begin({ method: "POST", path: "/v1/embeddings" });
+  capture.append(errored, { response: "recorded" }, false);
+  capture.end(errored, { terminal: "error", delivered: false });
+  const value = capture.finalize(receipt);
+  assert.equal(value.complete, false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(`${receipt}.delivery.json`)), {
+    schema_version: 1,
+    failures: [
+      { ordinal: 1, method: "POST", path: "/v1/messages", terminal: "close" },
+      { ordinal: 2, method: "POST", path: "/v1/embeddings", terminal: "error" },
+    ],
+  });
+});
+
+test("complete records do not retain a delivery sidecar", (t) => {
+  const { capture, receipt } = fixture(t);
+  const token = capture.begin({ method: "POST", path: "/v1/messages" });
+  capture.append(token, { response: "recorded" }, true);
+  capture.end(token, { terminal: "finish", delivered: true });
+  assert.equal(capture.finalize(receipt).complete, true);
+  assert.equal(fs.existsSync(`${receipt}.delivery.json`), false);
 });

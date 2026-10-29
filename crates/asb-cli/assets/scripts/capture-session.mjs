@@ -7,9 +7,19 @@ import { createHash } from "node:crypto";
 // consumption. Socket detachment can make writableFinished misleading on close.
 export function responseDelivery(response) {
   return new Promise((resolve) => {
-    response.once("finish", () => resolve(true));
-    response.once("close", () => resolve(false));
-    response.once("error", () => resolve(false));
+    let settled = false;
+    const settle = (terminal) => {
+      if (settled) return;
+      settled = true;
+      // `finish` is the only positive terminal state: writable/end state is
+      // merely local queueing, whereas a close/error can discard the peer's
+      // response. Keep the terminal reason so an incomplete recording can
+      // retain a bounded diagnostic without recording bodies or headers.
+      resolve({ terminal, delivered: terminal === "finish" });
+    };
+    response.once("finish", () => settle("finish"));
+    response.once("close", () => settle("close"));
+    response.once("error", () => settle("error"));
   });
 }
 
@@ -35,15 +45,21 @@ export class CaptureSession {
     this.publicationCleanupError = null;
     this.outputCleanupConfirmed = false;
     this.outputCloseError = null;
+    this.deliveryFailures = [];
   }
 
-  begin() {
+  begin(metadata = {}) {
     if (this.draining || this.finalized) return null;
     if (this.accepted >= 1_000_000) {
       this.poisoned = true;
       throw new Error("recording request count exceeds limit");
     }
-    const token = { recorded: false };
+    const token = {
+      recorded: false,
+      ordinal: this.accepted + 1,
+      method: deliveryMethod(metadata.method),
+      path: deliveryPath(metadata.path),
+    };
     this.accepted += 1;
     this.pending.add(token);
     return token;
@@ -79,11 +95,25 @@ export class CaptureSession {
     }
   }
 
-  end(token, delivered) {
+  end(token, delivery) {
     this.requirePending(token);
     this.pending.delete(token);
+    const delivered = delivery === true || delivery?.delivered === true;
     if (token.recorded && delivered) this.completed += 1;
-    else this.failed += 1;
+    else {
+      this.failed += 1;
+      // Retain at most sixteen terminal classifications. The cassette never
+      // receives this data, and there are deliberately no request bodies,
+      // response bodies, headers, credentials, or host paths here.
+      if (this.deliveryFailures.length < 16) {
+        this.deliveryFailures.push({
+          ordinal: token.ordinal,
+          method: token.method,
+          path: token.path,
+          terminal: delivery?.terminal || "unsettled",
+        });
+      }
+    }
   }
 
   drain() {
@@ -139,6 +169,23 @@ export class CaptureSession {
     } catch (error) {
       this.publicationCleanupError = error;
     }
+    if (!value.complete && this.deliveryFailures.length > 0) {
+      // This sidecar is private recorder scratch. It exists only for a
+      // failed/incomplete capture, so normal recordings retain no additional
+      // request metadata. Its create-new publication can never replace
+      // another diagnostic or change the authoritative receipt.
+      const diagnostic = `${receipt}.delivery.json`;
+      const diagnosticValue = {
+        schema_version: 1,
+        failures: this.deliveryFailures,
+      };
+      try {
+        this.io.writeFileSync(diagnostic, JSON.stringify(diagnosticValue), { flag: "wx", mode: 0o600 });
+      } catch {
+        // The receipt still truthfully marks this capture incomplete; callers
+        // retain its scratch directory even when optional diagnostics fail.
+      }
+    }
     return value;
   }
 
@@ -161,4 +208,17 @@ export class CaptureSession {
       }
     }
   }
+}
+
+function deliveryMethod(value) {
+  return typeof value === "string" && /^[A-Z]{1,16}$/.test(value) ? value : "UNKNOWN";
+}
+
+function deliveryPath(value) {
+  return typeof value === "string"
+    && value.startsWith("/")
+    && value.length <= 256
+    && !/[\r\n?#]/.test(value)
+    ? value
+    : "/";
 }
