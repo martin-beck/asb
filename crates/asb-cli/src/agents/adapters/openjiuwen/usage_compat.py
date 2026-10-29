@@ -431,7 +431,7 @@ try:
                 if (
                     not isinstance(envelope, dict)
                     or set(envelope) != {"tool_output", "rendered", "message"}
-                    or not isinstance(envelope["rendered"], str)
+                    or (envelope["rendered"] is not None and not isinstance(envelope["rendered"], str))
                 ):
                     raise RuntimeError(
                         "ASB OpenJiuwen native replay sidecar has no rendered tool result"
@@ -439,8 +439,9 @@ try:
                 result = ToolOutput.model_validate(_materialize_workspace(
                     envelope["tool_output"]
                 ))
-                rendered = _materialize_workspace(envelope["rendered"])
-                _replayed_renders[id(result)] = rendered
+                rendered = envelope["rendered"]
+                if isinstance(rendered, str):
+                    _replayed_renders[id(result)] = _materialize_workspace(rendered)
                 # Retain the result object with its event. ``id()`` alone is
                 # not a provenance marker: a reconstructed result can let a
                 # discarded object's id be reused before execute() runs.
@@ -512,11 +513,14 @@ def _seal_native_tool_sidecar():
             continue
         envelope = json.loads(base64.b64decode(event["output_b64"]))
         final = envelope.get("message")
-        if envelope.get("rendered") is None:
-            return
         if final is None:
             continue
-        if not isinstance(final, dict) or not isinstance(final.get("tool_call_id"), str) or not isinstance(final.get("content"), str):
+        if (
+            not isinstance(envelope.get("rendered"), str)
+            or not isinstance(final, dict)
+            or not isinstance(final.get("tool_call_id"), str)
+            or not isinstance(final.get("content"), str)
+        ):
             return
         final_messages += 1
     if final_messages == 0:

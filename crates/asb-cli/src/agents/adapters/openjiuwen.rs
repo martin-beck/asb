@@ -728,7 +728,8 @@ async def main():
         # is replayed but must not consume a final ToolMessage cursor.
         inner = ReadFileTool()
         inner_output = await inner.invoke({{"inner": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})
-        inner.render_for_llm(inner_output)
+        # Nested direct exchange has no provider-visible final message.
+        # Replay must consume it without inventing a rendering or history row.
         output = await instance.invoke({{"value": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})
         # Final-message admission is provenance-based: a copied ToolOutput
         # has no private native marker and must not be guessed from payload.
