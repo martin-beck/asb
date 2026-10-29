@@ -986,6 +986,128 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_structured_python_callable_address_rendering() {
+        let root = test_root();
+        let cassette = root.join("structured-python-callable-address.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"pytest diagnostic: <function call_runtest_hook.<locals>.<lambda> at 0x7a20954180d0>\nsemantic result: 70 passed"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = r#"{"model":"m","input":[{"type":"function_call_output","output":"pytest diagnostic: <function call_runtest_hook.<locals>.<lambda> at 0x7309033850d0>\nsemantic result: 70 passed"}]}"#;
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let semantic_change = replayed.replace("70 passed", "69 passed");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &semantic_change).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_chat_completion_python_callable_address_rendering() {
+        let root = test_root();
+        let cassette = root.join("chat-python-callable-address.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"role":"tool","content":"function = <function concatenate at 0x7cff052910f0>\nsemantic result: resolved"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = r#"{"model":"m","messages":[{"role":"tool","content":"function = <function concatenate at 0x74923cf2d0b0>\nsemantic result: resolved"}]}"#;
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/chat/completions", replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let semantic_change = replayed.replace("resolved", "failed");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(
+            request_to(&session, "/v1/chat/completions", &semantic_change).contains("409 Conflict")
+        );
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_escaped_chat_callable_address_rendering() {
+        let root = test_root();
+        let cassette = root.join("escaped-chat-python-callable-address.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"role":"tool","content":"function = \\u003cfunction concatenate at 0x7cff052910f0\\u003e\\nsemantic result: resolved"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = r#"{"model":"m","messages":[{"role":"tool","content":"function = \\u003cfunction concatenate at 0x74923cf2d0b0\\u003e\\nsemantic result: resolved"}]}"#;
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/chat/completions", replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let semantic_change = replayed.replace("resolved", "failed");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(
+            request_to(&session, "/v1/chat/completions", &semantic_change).contains("409 Conflict")
+        );
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_structured_python_object_address_rendering() {
+        let root = test_root();
+        let cassette = root.join("structured-python-object-address.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"projection: <astropy.wcs.wcsapi.wrappers.sliced_wcs.SlicedLowLevelWCS object at 0x74bf5f748880>\nsemantic result: resolved"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = r#"{"model":"m","input":[{"type":"function_call_output","output":"projection: <astropy.wcs.wcsapi.wrappers.sliced_wcs.SlicedLowLevelWCS object at 0x7028ccc89730>\nsemantic result: resolved"}]}"#;
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let semantic_object_change = replayed.replace("SlicedLowLevelWCS", "DifferentWCS");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(
+            request_to(&session, "/v1/responses", &semantic_object_change).contains("409 Conflict")
+        );
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_structured_hermes_verification_script_path() {
+        let root = test_root();
+        let cassette = root.join("structured-hermes-verification-script.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Temporary verification script: /opt/asb-private/agent-state/tmp/hermes-verify-nnolyulw.py\nAd-hoc verification passed."}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = r#"{"model":"m","input":[{"type":"function_call_output","output":"Temporary verification script: /opt/asb-private/agent-state/tmp/hermes-verify-fkdeg5vs.py\nAd-hoc verification passed."}]}"#;
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let filename_change =
+            replayed.replace("hermes-verify-fkdeg5vs.py", "hermes-check-fkdeg5vs.py");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &filename_change).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        let content_change = replayed.replace("verification passed", "verification failed");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &content_change).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_complete_testbed_search_block_ordering() {
         let root = test_root();
         let cassette = root.join("opencode-search-order.jsonl");

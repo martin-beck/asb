@@ -156,7 +156,7 @@ async function replayResponse(response, interaction) {
 // the request deterministic for recording and replay.  This does not invent
 // tool calls; it only supplies the empty schema required for validation.
 function normalizeRequestBody(url, body) {
-  if (!body || (!url.includes("/messages") && !url.includes("/responses"))) return body;
+  if (!body || (!url.includes("/messages") && !url.includes("/responses") && !url.includes("/chat/completions"))) return body;
   try {
     const parsed = JSON.parse(body);
     let changed = false;
@@ -255,13 +255,44 @@ function normalizePytestElapsed(value) {
   return value.replace(/(^|\\n|\r?\n)((?:\d+ (?:failed|passed|skipped|deselected|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1$2<asb-elapsed>");
 }
 
+// Python renders a callable's process-local address in its fixed repr.  This
+// is terminal presentation noise, not a tool result change.  Keep the exact
+// existing callable-rendering rule in one helper so it applies both before
+// parsing a request and after structured request strings have been decoded.
+function normalizeFunctionRenderingAddress(value) {
+  // Callable names can include a nested `<locals>` segment, so stop only at
+  // the fixed ` at 0x...>` suffix rather than at the first closing bracket.
+  return value.replace(/((?:<|\\u003c)function [^\n]*? at )0x[0-9a-f]+(>|\\u003e)/gi, "$1<asb-address>$2");
+}
+
+// Python object reprs have the same process-local address volatility, but are
+// a distinct rendering form from callables.  Keep this intentionally narrow:
+// only a complete one-line `<qualified.name object at 0x...>` representation
+// is normalized; surrounding output and the object's rendered class remain
+// significant.
+function normalizeObjectRenderingAddress(value) {
+  return value.replace(/(<[^<>\n]+ object at )0x[0-9a-f]+>/gi, "$1<asb-address>>");
+}
+
+// Hermes creates a one-shot verification script under its private temp root.
+// Its random basename is a run-local artifact path, not tool-result content.
+// Keep the rule confined to that exact Hermes filename convention; other temp
+// paths, filenames, extensions, and all surrounding output remain strict.
+function normalizeHermesVerificationScriptPath(value) {
+  return value.replace(
+    /\/opt\/asb-private\/agent-state\/tmp\/hermes-verify-[A-Za-z0-9]+\.py/g,
+    "<asb-hermes-verification-script>",
+  );
+}
+
 function normalizeCassetteBody(body) {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const callIdentifiers = new Map();
-  const normalized = normalizePytestElapsed(normalizeWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace)
-    .replaceAll(workspace || "\u0000", "<asb-workspace>"))
+  const normalized = normalizeFunctionRenderingAddress(normalizePytestElapsed(
+    normalizeWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace)
+      .replaceAll(workspace || "\u0000", "<asb-workspace>"))
     // Preserve distinct call IDs before the generic UUID normalizer below.
     // OpenCode uses `call-<uuid>` while some OpenAI-compatible clients use
     // `call_<uuid>`; both forms are provider-generated rather than prompt
@@ -321,11 +352,11 @@ function normalizeCassetteBody(body) {
     // retain all file contents, failure counts, and commands while replacing
     // only those run-local rendering details before cassette comparison.
     .replace(/\/opt\/asb-private\/agent-state\/data\/opencode\/tool-output\/tool_[A-Za-z0-9_-]+/g, "<asb-opencode-tool-output>")
-    .replace(/(<function [^\n>]+ at )0x[0-9a-f]+>/gi, "$1<asb-address>>")
+    .replace(/((?:\b\d+ (?:failed|passed|skipped|deselected|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1<asb-elapsed>")
     // pip's download progress embeds live transfer throughput and ETA after
     // the already-significant artifact size. Keep the package and byte count
     // strict while removing only transport timing from tool history.
-    .replace(/(\b\d+(?:\.\d+)?\/\d+(?:\.\d+)? (?:kB|MB|GB) )\d+(?:\.\d+)? (?:kB|MB|GB)\/s eta \d+:\d+:\d+/g, "$1<asb-transfer-rate> eta <asb-transfer-eta>"));
+    .replace(/(\b\d+(?:\.\d+)?\/\d+(?:\.\d+)? (?:kB|MB|GB) )\d+(?:\.\d+)? (?:kB|MB|GB)\/s eta \d+:\d+:\d+/g, "$1<asb-transfer-rate> eta <asb-transfer-eta>")));
   try {
     const structuredToolCallIdentifiers = new Map();
     const structuredContentBlockIdentifiers = new Map();
@@ -458,6 +489,9 @@ function normalizeCassetteBody(body) {
         return "<asb-workbuddy-conversation-request>";
       }
       if (typeof value === "string") {
+        value = normalizeFunctionRenderingAddress(value);
+        value = normalizeObjectRenderingAddress(value);
+        value = normalizeHermesVerificationScriptPath(value);
         value = normalizeToolSearchOrdering(value);
         value = normalizeLsDiagnosticOrdering(value);
         const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
