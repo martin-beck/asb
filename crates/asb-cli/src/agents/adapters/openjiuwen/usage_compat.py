@@ -116,6 +116,13 @@ _message_cursor = 0
 _history_cursor = 0
 _final_history = []
 _history_trace = []
+_history_trace_seen = set()
+
+def _trace_once(item):
+    key = (item["kind"], item["index"])
+    if key not in _history_trace_seen:
+        _history_trace_seen.add(key)
+        _history_trace.append(item)
 _recorded_outputs = {}
 _replayed_renders = {}
 _replayed_output_events = {}
@@ -352,6 +359,8 @@ try:
                         for item in trace
                     ):
                         raise RuntimeError("ASB OpenJiuwen native replay history trace is malformed")
+                    if len({(item["kind"], item["index"]) for item in trace}) != len(trace):
+                        raise RuntimeError("ASB OpenJiuwen native replay history trace is duplicated")
             if _replay_path and not isinstance(history, list):
                 raise RuntimeError("ASB OpenJiuwen native replay final history is missing")
             final_outputs = []
@@ -405,7 +414,7 @@ try:
                             raise RuntimeError("ASB OpenJiuwen native replay final history/native message disagrees")
                     message.tool_call_id = expected["tool_call_id"]
                     message.content = _materialize_workspace(expected["content"])
-                    _history_trace.append({"v": 1, "kind": "history", "index": _history_cursor,
+                    _trace_once({"v": 1, "kind": "history", "index": _history_cursor,
                         "id_sha256": _digest(message.tool_call_id.encode("utf-8")),
                         "content_sha256": _digest(message.content.encode("utf-8"))})
                     _history_cursor += 1
@@ -429,7 +438,7 @@ try:
         async def _invoke_with_native_replay(self, inputs, **kwargs):
             global _native_cursor
             request = _canonical({"tool": tool_name, "inputs": _normalize_workspace(inputs)})
-            _history_trace.append({"v": 1, "kind": "dispatch", "index": _native_cursor,
+            _trace_once({"v": 1, "kind": "dispatch", "index": _native_cursor,
                 "tool_sha256": _digest(tool_name.encode("utf-8")), "shape_sha256": _digest(request)})
             if _replay_path:
                 exchanges = _replay_exchanges(_native_events)
