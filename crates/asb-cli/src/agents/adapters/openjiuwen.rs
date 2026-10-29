@@ -507,12 +507,15 @@ import json
 from openjiuwen.core.foundation.tool.schema import ToolOutput
 class _Tool:
     label = ""
+    def __init__(self):
+        self._renders = 0
     async def invoke(self, inputs, **kwargs):
         with open(os.environ["ASB_TEST_NATIVE_EXECUTED"], "a", encoding="utf-8") as marker:
             marker.write(self.label + "\n")
         return ToolOutput(data={"tool": self.label, "inputs": inputs})
     def render_for_llm(self, output):
-        return os.environ["ASB_TEST_RENDER_PREFIX"] + json.dumps(output.model_dump(), sort_keys=True)
+        self._renders += 1
+        return os.environ["ASB_TEST_RENDER_PREFIX"] + str(self._renders) + ":" + json.dumps(output.model_dump(), sort_keys=True)
 class ReadFileTool(_Tool): label = "read_file"
 class WriteFileTool(_Tool): label = "write_file"
 class EditFileTool(_Tool): label = "edit_file"
@@ -560,7 +563,9 @@ async def main():
         # invocation and rendering. Exercise the adapter's stable value key,
         # rather than relying on Python object identity.
         output = type(output).model_validate(output.model_dump())
-        result.append(instance.render_for_llm(output))
+        first_render = instance.render_for_llm(output)
+        instance.render_for_llm(output)
+        result.append(first_render)
     print(json.dumps(result, sort_keys=True))
 asyncio.run(main())
 "#,

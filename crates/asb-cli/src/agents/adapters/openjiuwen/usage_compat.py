@@ -336,10 +336,15 @@ try:
                 output_event = _recorded_outputs_by_key.get(_output_key(tool_name, output))
             if output_event is not None:
                 envelope = json.loads(base64.b64decode(output_event["output_b64"]))
-                envelope["rendered"] = _normalize_workspace(rendered)
-                encoded = _canonical(envelope)
-                output_event["response_sha256"] = _digest(encoded)
-                output_event["output_b64"] = _payload(encoded)
+                # A tool result can be rendered more than once for status or
+                # tracing. Preserve the first model-facing rendering: later
+                # renderings can be stateful/truncated and must not replace
+                # the value that the recording sent to the provider.
+                if envelope["rendered"] is None:
+                    envelope["rendered"] = _normalize_workspace(rendered)
+                    encoded = _canonical(envelope)
+                    output_event["response_sha256"] = _digest(encoded)
+                    output_event["output_b64"] = _payload(encoded)
             return rendered
 
         tool_type.invoke = _invoke_with_native_replay
