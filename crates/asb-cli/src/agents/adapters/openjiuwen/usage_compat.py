@@ -282,6 +282,33 @@ try:
 
     Tool.render_for_llm = _base_render_with_native_replay
 
+    # AbilityManager is the final adapter-owned boundary before a native tool
+    # result becomes a provider message. Capture/replay here as well: upstream
+    # may route through a concrete renderer, its base fallback, or a copied
+    # ToolOutput, but this method owns the exact final model-facing bytes.
+    try:
+        from openjiuwen.core.single_agent.ability_manager import AbilityManager
+        _original_render_tool_result = AbilityManager._render_tool_result
+
+        @staticmethod
+        def _render_tool_result_with_native_replay(tool, tool_call, result):
+            replayed = _replayed_renders.get(id(result))
+            if replayed is None:
+                replayed = _replayed_renders_by_value.get(_output_value_key(result))
+            if replayed is not None:
+                return replayed
+            rendered = _original_render_tool_result(tool, tool_call, result)
+            output_event = _recorded_outputs.get(id(result))
+            if output_event is None:
+                output_event = _recorded_outputs_by_value.get(_output_value_key(result))
+            if output_event is not None:
+                _remember_recorded_render(output_event, rendered)
+            return rendered
+
+        AbilityManager._render_tool_result = _render_tool_result_with_native_replay
+    except ImportError:
+        pass
+
     def _wrap_native_tool(tool_name, tool_type):
         original_invoke = tool_type.invoke
         original_render = tool_type.render_for_llm

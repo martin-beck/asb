@@ -436,6 +436,7 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         for relative in [
             "core/foundation/llm/schema",
             "core/foundation/tool",
+            "core/single_agent",
             "harness/cli/agent",
             "harness/tools/shell",
             "harness/tools",
@@ -449,6 +450,7 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
             "core/foundation/llm/__init__.py",
             "core/foundation/llm/schema/__init__.py",
             "core/foundation/tool/__init__.py",
+            "core/single_agent/__init__.py",
             "harness/__init__.py",
             "harness/cli/__init__.py",
             "harness/cli/agent/__init__.py",
@@ -510,6 +512,16 @@ class Tool:
 "#,
         )
         .unwrap();
+        std::fs::write(
+            package.join("core/single_agent/ability_manager.py"),
+            r#"
+class AbilityManager:
+    @staticmethod
+    def _render_tool_result(tool, _tool_call, result):
+        return tool.render_for_llm(result)
+"#,
+        )
+        .unwrap();
         let tools = r#"
 import os
 import json
@@ -561,6 +573,7 @@ from openjiuwen.harness.cli.agent import factory
 from openjiuwen.harness.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool
 from openjiuwen.harness.tools.shell import BashTool
 from openjiuwen.harness.tools.code import CodeTool
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
 async def main():
     agent, _tracker = factory.create_agent(None)
     assert agent._deep_config.enable_read_image_multimodal is False
@@ -573,8 +586,8 @@ async def main():
         # invocation and rendering. Exercise the adapter's stable value key,
         # rather than relying on Python object identity.
         output = type(output).model_validate(output.model_dump())
-        first_render = instance.render_for_llm(output)
-        instance.render_for_llm(output)
+        first_render = AbilityManager._render_tool_result(instance, None, output)
+        AbilityManager._render_tool_result(instance, None, output)
         result.append(first_render)
     print(json.dumps(result, sort_keys=True))
 asyncio.run(main())
