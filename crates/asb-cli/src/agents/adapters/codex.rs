@@ -817,6 +817,27 @@ mod tests {
             .unwrap();
         assert!(emitted.status.success());
         assert_eq!(String::from_utf8(emitted.stdout).unwrap(), "fixture\n");
+        let replay_post = invoke_native_hook(
+            &script,
+            "replay",
+            &sidecar,
+            &progress,
+            &state,
+            "post",
+            Some(
+                r#"{"tool_name":"Bash","tool_use_id":"call-1","tool_response":"ignored-emitter-output"}"#,
+            ),
+        );
+        assert!(replay_post.status.success());
+        let replay_post: serde_json::Value = serde_json::from_slice(&replay_post.stdout).unwrap();
+        assert_eq!(
+            replay_post["hookSpecificOutput"]["hookEventName"].as_str(),
+            Some("PostToolUse")
+        );
+        assert_eq!(
+            replay_post["hookSpecificOutput"]["updatedMCPToolOutput"]["stdout"].as_str(),
+            Some("fixture")
+        );
         assert!(
             invoke_native_hook(
                 &script, "replay", &sidecar, &progress, &state, "finish", None
