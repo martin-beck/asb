@@ -220,6 +220,18 @@ test("only finish is positive even when a detached response claims writableFinis
   }
 });
 
+test("a close is positive only for an affirmed complete frame and clean request", async () => {
+  const response = new EventEmitter();
+  const delivered = responseDelivery(response, () => true);
+  response.emit("close");
+  assert.deepEqual(await delivered, { terminal: "framed_close", delivered: true });
+
+  const incomplete = new EventEmitter();
+  const rejected = responseDelivery(incomplete, () => false);
+  incomplete.emit("close");
+  assert.deepEqual(await rejected, { terminal: "close", delivered: false });
+});
+
 test("incomplete records retain bounded terminal classifications without payloads", (t) => {
   const { capture, receipt } = fixture(t);
   const closed = capture.begin({ method: "POST", path: "/v1/messages" });

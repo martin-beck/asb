@@ -90,10 +90,13 @@ try:
 except ImportError:
     pass
 
-# OpenJiuwen owns its grep implementation directly, rather than exposing an
-# MCP transport.  Record exactly its bounded tool result during a live run and
-# consume that exact result from ASB's sealed private sidecar during replay.
-# The wire payload is deliberately private: only ASB's cassette layer seals it.
+# OpenJiuwen owns its filesystem, shell, and code implementations directly,
+# rather than exposing an MCP transport. Record each bounded tool result during
+# a live run and consume that exact result from ASB's sealed private sidecar
+# during replay. The wire payload is deliberately private: only ASB's cassette
+# layer seals it. Replaying one tool selectively is unsafe: a later direct
+# filesystem or shell call would otherwise execute against the replay
+# workspace and change the provider conversation.
 _record_path = os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_RECORD")
 _replay_path = None
 if "--asb-native-tool-replay" in sys.argv:
@@ -105,7 +108,7 @@ if "--asb-native-tool-replay" in sys.argv:
 
 _native_events = []
 _native_cursor = 0
-_native_alias = "openjiuwen-grep-1"
+_native_alias = "openjiuwen-native-tools-1"
 
 def _canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -126,6 +129,18 @@ def _load_replay():
             events.append(json.loads(line))
     return events
 
+
+def _replay_exchanges(events):
+    """Return ordered write/output pairs and reject malformed sidecars."""
+    exchanges = []
+    for index, event in enumerate(events):
+        if event.get("event") != "write":
+            continue
+        if index + 1 >= len(events) or events[index + 1].get("event") != "output":
+            raise RuntimeError("ASB OpenJiuwen native replay sidecar has an incomplete exchange")
+        exchanges.append((event, events[index + 1]))
+    return exchanges
+
 if _replay_path:
     _native_events = _load_replay()
 elif _record_path:
@@ -135,36 +150,91 @@ elif _record_path:
         json.loads(_event("session_alias", alias=_native_alias, session="openjiuwen-native-1")),
     ]
 
+# Vector-memory requests and asynchronously-created subagents have state that
+# does not belong to this benchmark attempt (an embedding cache and scheduling
+# respectively).  They make the provider request order depend on leftovers
+# outside the sealed tape.  The normal interactive client keeps them; ASB's
+# record/replay launch profile deliberately uses only the selected foreground
+# agent and its sealed direct-tool sidecar.
+if _record_path or _replay_path:
+    try:
+        from openjiuwen.harness.cli.agent import factory as _agent_factory
+
+        _agent_factory._build_memory_rail = lambda _cfg: None
+        _agent_factory._build_subagents = lambda _model: []
+    except ImportError:
+        pass
+
 try:
-    from openjiuwen.harness.tools.filesystem import GrepTool
+    from openjiuwen.harness.tools.filesystem import (
+        EditFileTool,
+        GlobTool,
+        GrepTool,
+        ListDirTool,
+        ReadFileTool,
+        WriteFileTool,
+    )
+    from openjiuwen.harness.tools.shell import BashTool
+    from openjiuwen.harness.tools.code import CodeTool
     from openjiuwen.core.foundation.tool.schema import ToolOutput
 
-    _original_grep_invoke = GrepTool.invoke
+    def _wrap_native_tool(tool_name, tool_type):
+        original_invoke = tool_type.invoke
 
-    async def _grep_with_native_replay(self, inputs, **kwargs):
-        global _native_cursor
-        request = _canonical({"tool": "grep", "inputs": inputs})
-        if _replay_path:
-            exchanges = [event for event in _native_events if event.get("event") == "write"]
-            if _native_cursor >= len(exchanges):
-                raise RuntimeError("ASB OpenJiuwen native replay has no recorded grep request")
-            write = exchanges[_native_cursor]
-            output = _native_events[_native_events.index(write) + 1]
-            if write.get("alias") != _native_alias or write.get("request_b64") != _payload(request):
-                raise RuntimeError("ASB OpenJiuwen native replay grep request differs from recording")
-            _native_cursor += 1
-            return ToolOutput.model_validate(json.loads(base64.b64decode(output["output_b64"])))
-        output = await _original_grep_invoke(self, inputs, **kwargs)
-        if _record_path:
-            encoded = _canonical(output.model_dump())
-            _native_events.extend([
-                json.loads(_event("poll", alias=_native_alias)),
-                json.loads(_event("write", alias=_native_alias, request_sha256=_digest(request), request_b64=_payload(request))),
-                json.loads(_event("output", alias=_native_alias, response_sha256=_digest(encoded), output_b64=_payload(encoded))),
-            ])
-        return output
+        async def _invoke_with_native_replay(self, inputs, **kwargs):
+            global _native_cursor
+            request = _canonical({"tool": tool_name, "inputs": inputs})
+            if _replay_path:
+                exchanges = _replay_exchanges(_native_events)
+                if _native_cursor >= len(exchanges):
+                    raise RuntimeError(
+                        f"ASB OpenJiuwen native replay has no recorded {tool_name} request"
+                    )
+                write, output = exchanges[_native_cursor]
+                if (
+                    write.get("alias") != _native_alias
+                    or write.get("request_b64") != _payload(request)
+                ):
+                    raise RuntimeError(
+                        f"ASB OpenJiuwen native replay {tool_name} request differs from recording"
+                    )
+                _native_cursor += 1
+                return ToolOutput.model_validate(
+                    json.loads(base64.b64decode(output["output_b64"]))
+                )
+            output = await original_invoke(self, inputs, **kwargs)
+            if _record_path:
+                encoded = _canonical(output.model_dump())
+                _native_events.extend([
+                    json.loads(_event("poll", alias=_native_alias)),
+                    json.loads(_event(
+                        "write",
+                        alias=_native_alias,
+                        request_sha256=_digest(request),
+                        request_b64=_payload(request),
+                    )),
+                    json.loads(_event(
+                        "output",
+                        alias=_native_alias,
+                        response_sha256=_digest(encoded),
+                        output_b64=_payload(encoded),
+                    )),
+                ])
+            return output
 
-    GrepTool.invoke = _grep_with_native_replay
+        tool_type.invoke = _invoke_with_native_replay
+
+    for _tool_name, _tool_type in (
+        ("read_file", ReadFileTool),
+        ("write_file", WriteFileTool),
+        ("edit_file", EditFileTool),
+        ("glob", GlobTool),
+        ("list_dir", ListDirTool),
+        ("grep", GrepTool),
+        ("bash", BashTool),
+        ("code", CodeTool),
+    ):
+        _wrap_native_tool(_tool_name, _tool_type)
 except ImportError:
     pass
 
@@ -185,4 +255,4 @@ runpy.run_path(sys.argv[0], run_name="__main__")
 if _replay_path:
     _recorded_exchanges = sum(1 for event in _native_events if event.get("event") == "write")
     if _native_cursor != _recorded_exchanges:
-        raise SystemExit("ASB OpenJiuwen native replay left recorded grep exchanges unconsumed")
+        raise SystemExit("ASB OpenJiuwen native replay left recorded native tool exchanges unconsumed")

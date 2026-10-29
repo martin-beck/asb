@@ -111,6 +111,18 @@ function responseHeaders(headers) {
   return result;
 }
 
+// A forwarded streamed provider reply is conclusive only when the upstream
+// body has a terminal SSE frame, `response.end` has been called, and the
+// client did not abort its request. This admits the normal HTTP/1.1 pattern
+// where a client closes directly after consuming the final frame, but never
+// promotes a partial stream or arbitrary close to a completed capture.
+function completedSseResponse(response, body) {
+  const contentType = String(response.headers["content-type"] || "").toLowerCase();
+  if (!contentType.startsWith("text/event-stream") || !body.endsWith("\n")) return false;
+  return /(?:^|\n)event:\s*message_stop\s*(?:\n|$)/.test(body)
+    || /(?:^|\n)data:\s*\[DONE\]\s*(?:\n|$)/.test(body);
+}
+
 // Preserve server-sent event boundaries during replay.  Several agent CLIs
 // dispatch tool calls as soon as the terminating SSE event arrives; sending
 // the complete cassette body as one write can make those clients finish the
@@ -1017,6 +1029,7 @@ async function handle(request, response, recording) {
     appendFileSync(cassette, `${JSON.stringify(interaction)}\n`);
   }
   response.writeHead(recordedResponse.status, recordedResponse.headers);
+  if (recording) recording.completedSseResponse = completedSseResponse(recordedResponse, responseBody);
   response.end(responseBody);
 }
 
@@ -1046,10 +1059,21 @@ const server = http.createServer((request, response) => {
     response.end("recording is draining");
     return;
   }
-  const recording = { token, request, response, controller: new AbortController() };
+  const recording = {
+    token,
+    request,
+    response,
+    controller: new AbortController(),
+    completedSseResponse: false,
+  };
   // Subscribe before handle can finish or close a response. Completion requires
   // both full capture and positive delivery, not merely an upstream EOF.
-  const delivered = responseDelivery(response);
+  const delivered = responseDelivery(response, () =>
+    recording.completedSseResponse
+      && response.writableEnded === true
+      && request.complete === true
+      && request.aborted !== true,
+  );
   activeCaptures.add(recording);
   recording.done = (async () => {
     let delivery = { terminal: "unsettled", delivered: false };
