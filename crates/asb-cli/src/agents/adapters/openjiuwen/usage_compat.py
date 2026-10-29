@@ -109,6 +109,10 @@ if "--asb-native-tool-replay" in sys.argv:
 _native_events = []
 _native_cursor = 0
 _native_alias = "openjiuwen-native-tools-1"
+_native_workspace = os.path.realpath(
+    os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", "")
+) if os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE") else ""
+_recorded_workspace = ""
 
 def _canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -121,6 +125,24 @@ def _digest(value):
 
 def _payload(value):
     return base64.b64encode(value).decode("ascii")
+
+def _normalize_workspace(value):
+    if isinstance(value, str):
+        return value.replace(_native_workspace, "<asb-workspace>") if _native_workspace else value
+    if isinstance(value, list):
+        return [_normalize_workspace(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalize_workspace(item) for key, item in value.items()}
+    return value
+
+def _materialize_workspace(value):
+    if isinstance(value, str):
+        return value.replace(_recorded_workspace, _native_workspace) if _recorded_workspace else value
+    if isinstance(value, list):
+        return [_materialize_workspace(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _materialize_workspace(item) for key, item in value.items()}
+    return value
 
 def _load_replay():
     events = []
@@ -143,10 +165,21 @@ def _replay_exchanges(events):
 
 if _replay_path:
     _native_events = _load_replay()
+    for _native_event in _native_events:
+        if _native_event.get("event") == "launch":
+            _encoded_workspace = _native_event.get("workspace_b64")
+            if isinstance(_encoded_workspace, str):
+                _recorded_workspace = base64.b64decode(_encoded_workspace).decode("utf-8")
+            break
 elif _record_path:
     os.makedirs(os.path.dirname(_record_path), exist_ok=True)
     _native_events = [
-        json.loads(_event("launch", session="openjiuwen-native-1", program_sha256=_digest(b"openjiuwen-grep-v1"))),
+        json.loads(_event(
+            "launch",
+            session="openjiuwen-native-1",
+            program_sha256=_digest(b"openjiuwen-native-tools-v2"),
+            workspace_b64=_payload(_native_workspace.encode("utf-8")),
+        )),
         json.loads(_event("session_alias", alias=_native_alias, session="openjiuwen-native-1")),
     ]
 
@@ -183,7 +216,7 @@ try:
 
         async def _invoke_with_native_replay(self, inputs, **kwargs):
             global _native_cursor
-            request = _canonical({"tool": tool_name, "inputs": inputs})
+            request = _canonical({"tool": tool_name, "inputs": _normalize_workspace(inputs)})
             if _replay_path:
                 exchanges = _replay_exchanges(_native_events)
                 if _native_cursor >= len(exchanges):
@@ -199,9 +232,9 @@ try:
                         f"ASB OpenJiuwen native replay {tool_name} request differs from recording"
                     )
                 _native_cursor += 1
-                return ToolOutput.model_validate(
+                return ToolOutput.model_validate(_materialize_workspace(
                     json.loads(base64.b64decode(output["output_b64"]))
-                )
+                ))
             output = await original_invoke(self, inputs, **kwargs)
             if _record_path:
                 encoded = _canonical(output.model_dump())

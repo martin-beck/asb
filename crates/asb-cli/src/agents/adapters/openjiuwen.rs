@@ -192,6 +192,12 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         "ASB_OPENJIUWEN_NATIVE_TOOL_RECORD",
         context.run_dir.join("openjiuwen-native-tools.jsonl"),
     );
+    let workspace = std::fs::canonicalize(context.workspace)
+        .unwrap_or_else(|_| context.workspace.to_path_buf());
+    context.command.env(
+        "ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE",
+        workspace,
+    );
     Ok(())
 }
 
@@ -472,13 +478,14 @@ class GrepTool(_Tool): label = "grep"
             format!(
                 r#"#!{}
 import asyncio, json
+import os
 from openjiuwen.harness.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool
 from openjiuwen.harness.tools.shell import BashTool
 from openjiuwen.harness.tools.code import CodeTool
 async def main():
     result = []
     for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool):
-        result.append((await tool().invoke({{"value": tool.label}})).model_dump())
+        result.append((await tool().invoke({{"value": os.path.join(os.environ["ASB_TEST_WORKSPACE"], tool.label)}})).model_dump())
     print(json.dumps(result, sort_keys=True))
 asyncio.run(main())
 "#,
@@ -489,12 +496,16 @@ asyncio.run(main())
         std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
         let sidecar = root.join("native.jsonl");
         let marker = root.join("executed");
+        let record_workspace = root.join("record-workspace");
+        let replay_workspace = root.join("replay-workspace");
         let record = super::process(entry.to_str().unwrap())
             .unwrap()
             .direct()
             .env("PYTHONPATH", &root)
             .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_TEST_WORKSPACE", &record_workspace)
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_RECORD", &sidecar)
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &record_workspace)
             .output()
             .unwrap();
         assert!(record.status.success(), "{}", String::from_utf8_lossy(&record.stderr));
@@ -507,10 +518,18 @@ asyncio.run(main())
             .arg(&sidecar)
             .env("PYTHONPATH", &root)
             .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_TEST_WORKSPACE", &replay_workspace)
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
             .output()
             .unwrap();
         assert!(replay.status.success(), "{}", String::from_utf8_lossy(&replay.stderr));
-        assert_eq!(record.stdout, replay.stdout);
+        let record_stdout = String::from_utf8(record.stdout)
+            .unwrap()
+            .replace(record_workspace.to_str().unwrap(), "<asb-workspace>");
+        let replay_stdout = String::from_utf8(replay.stdout)
+            .unwrap()
+            .replace(replay_workspace.to_str().unwrap(), "<asb-workspace>");
+        assert_eq!(record_stdout, replay_stdout);
         assert!(!marker.exists(), "native tool replay executed a direct tool");
         std::fs::remove_dir_all(root).unwrap();
     }
