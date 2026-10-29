@@ -248,6 +248,13 @@ function normalizeLsDiagnosticOrdering(value) {
   return [...diagnostics.sort(), ...ordinary].join("\n");
 }
 
+function normalizePytestElapsedTime(value) {
+  return value.replace(
+    /((?:\b\d+ (?:failed|passed|skipped|deselected|errors?),? )+in )\d+(?:\.\d+)?s\b/g,
+    "$1<asb-elapsed>",
+  );
+}
+
 function normalizeCassetteBody(body) {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
@@ -452,6 +459,7 @@ function normalizeCassetteBody(body) {
         return "<asb-workbuddy-conversation-request>";
       }
       if (typeof value === "string") {
+        value = normalizePytestElapsedTime(value);
         value = normalizeToolSearchOrdering(value);
         value = normalizeLsDiagnosticOrdering(value);
         const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
