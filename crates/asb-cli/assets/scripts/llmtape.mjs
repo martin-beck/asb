@@ -310,7 +310,7 @@ function normalizeCassetteBody(body) {
     // only those run-local rendering details before cassette comparison.
     .replace(/\/opt\/asb-private\/agent-state\/data\/opencode\/tool-output\/tool_[A-Za-z0-9_-]+/g, "<asb-opencode-tool-output>")
     .replace(/(<function [^\n>]+ at )0x[0-9a-f]+>/gi, "$1<asb-address>>")
-    .replace(/((?:\b\d+ (?:failed|passed|skipped|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1<asb-elapsed>")
+    .replace(/((?:\b\d+ (?:failed|passed|skipped|deselected|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1<asb-elapsed>")
     // pip's download progress embeds live transfer throughput and ETA after
     // the already-significant artifact size. Keep the package and byte count
     // strict while removing only transport timing from tool history.

@@ -1056,15 +1056,13 @@ mod tests {
     fn replay_normalizes_pytest_elapsed_time_with_all_count_categories() {
         let root = test_root();
         let cassette = root.join("pytest-summary.jsonl");
-        let recorded =
-            r#"{"model":"m","messages":[{"content":"120 passed, 7 skipped, 6 errors in 1.44s"}]}"#;
+        let recorded = r#"{"model":"m","messages":[{"content":"120 passed, 7 skipped, 48 deselected, 6 errors in 1.44s"}]}"#;
         let line = serde_json::json!({
             "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
             "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
         });
         std::fs::write(&cassette, format!("{line}\n")).unwrap();
-        let replayed =
-            r#"{"model":"m","messages":[{"content":"120 passed, 7 skipped, 6 errors in 1.65s"}]}"#;
+        let replayed = r#"{"model":"m","messages":[{"content":"120 passed, 7 skipped, 48 deselected, 6 errors in 1.65s"}]}"#;
         let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
         assert!(request(&session, replayed).contains("200 OK"));
         session.stop().unwrap();
