@@ -606,6 +606,53 @@ mod tests {
     }
 
     #[test]
+    fn native_terminal_request_stabilizes_only_guest_local_workdirs() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-hermes-workdir-normalization-{}",
+            std::process::id()
+        ));
+        let work = root.join("guest");
+        let child = work.join("src");
+        let foreign = root.join("foreign");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&foreign).unwrap();
+        let probe = r#"
+import ast, os, sys
+source = sys.stdin.read()
+tree = ast.parse(source)
+nodes = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+nodes += [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_stable_workdir']
+namespace = {}
+exec(compile(ast.Module(body=nodes, type_ignores=[]), '<probe>', 'exec'), namespace)
+os.chdir(sys.argv[1])
+stable = namespace['_stable_workdir']
+assert stable(sys.argv[1]) == '.'
+assert stable(sys.argv[2]) == './src'
+assert stable(sys.argv[3]) == sys.argv[3]
+assert stable('src') == 'src'
+assert stable(None) is None
+"#;
+        let mut child_process = Command::new("python3")
+            .args(["-c", probe])
+            .arg(&work)
+            .arg(&child)
+            .arg(&foreign)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        child_process
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(NATIVE_TOOL_SITE_CUSTOMIZE.as_bytes())
+            .unwrap();
+        assert!(child_process.wait().unwrap().success());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn cli2key_command_uses_named_responses_provider() {
         let config = crate::benchmark::BenchmarkConfig {
             planning: None,
