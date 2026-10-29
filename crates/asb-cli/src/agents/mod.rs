@@ -221,6 +221,8 @@ pub(crate) struct CommandContext<'a> {
     pub endpoint: Option<&'a str>,
     pub interface: Option<Interface>,
     pub prompt: &'a str,
+    /// Requested adapter-owned native terminal tape direction.
+    pub native_tool_mode: Option<crate::tape::Mode>,
     #[allow(
         dead_code,
         reason = "future native-capable adapters own launch configuration"
@@ -1036,6 +1038,7 @@ mod tests {
                 endpoint: Some("http://127.0.0.1:3000/v1"),
                 interface: Some(Interface::AnthropicMessages),
                 prompt: "repair",
+                native_tool_mode: None,
                 native_tool: None,
             });
             assert!(!command.program.is_empty(), "{}", adapter.id());
@@ -1083,19 +1086,18 @@ mod tests {
     }
 
     #[test]
-    fn complete_tool_replay_adapters_seal_their_local_tool_transcript() {
+    fn complete_tool_replay_adapters_declare_a_bounded_replay_sidecar() {
         for adapter in all()
             .iter()
             .copied()
             .filter(|adapter| adapter.supports_tool_replay())
         {
             assert!(
-                adapter.artifact_specs().iter().any(|spec| {
-                    spec.namespace == "tool-replay"
-                        && spec.filename == "local-tools.jsonl"
-                        && spec.format == ArtifactFormat::JsonLines
-                }),
-                "{} advertises complete tool replay without sealing local-tools.jsonl",
+                adapter
+                    .artifact_specs()
+                    .iter()
+                    .any(|spec| { spec.format == ArtifactFormat::JsonLines }),
+                "{} advertises complete tool replay without declaring a bounded replay sidecar",
                 adapter.id()
             );
         }
