@@ -403,6 +403,11 @@ mod tests {
                 .unwrap()
                 .contains("task_id, session_id, force, workdir")
         );
+        assert!(
+            std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
+                .unwrap()
+                .contains("def closing_os_exit(code):")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

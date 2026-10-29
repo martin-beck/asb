@@ -211,6 +211,18 @@ try:
 
     terminal_tool.terminal_tool = terminal
     atexit.register(transport.close)
+
+    # Hermes terminates its one-shot CLI through ``os._exit``.  That bypasses
+    # Python's atexit handlers, so finalize the adapter-owned terminal stream
+    # at that boundary as well.  The delegate remains the real process exit;
+    # this hook only makes already-flushed adapter evidence terminal.
+    original_os_exit = os._exit
+
+    def closing_os_exit(code):
+        transport.close()
+        original_os_exit(code)
+
+    os._exit = closing_os_exit
 except BaseException as error:
     _write_progress(False, "native terminal transport initialization failed")
     raise
