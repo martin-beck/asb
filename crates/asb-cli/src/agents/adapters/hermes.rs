@@ -474,7 +474,11 @@ mod tests {
 
     #[test]
     fn native_terminal_tape_installs_a_private_recording_hook() {
-        let root = std::env::temp_dir().join(format!("asb-hermes-native-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "asb-hermes-native-{}-{}",
+            std::process::id(),
+            crate::tools::runtime::unique_id()
+        ));
         let run = root.join("run");
         let tape = root.join("provider.jsonl");
         let mut command = Command::new("hermes");
@@ -541,6 +545,16 @@ mod tests {
             std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
                 .unwrap()
                 .contains("def closing_os_exit(code):")
+        );
+        assert!(
+            std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
+                .unwrap()
+                .contains("def invoke_process(self, _original, args, **kwargs):")
+        );
+        assert!(
+            std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
+                .unwrap()
+                .contains("process_entry.handler = registered_process")
         );
         let hook =
             std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py")).unwrap();
