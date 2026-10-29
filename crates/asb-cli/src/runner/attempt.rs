@@ -986,12 +986,14 @@ impl<'a> CompletedAttempt<'a> {
                     .unwrap_or_else(|| "agent artifact snapshot unavailable".into()),
             );
         }
-        let provider_capture = match context
-            .provider_capture_path
-            .as_deref()
-            .map(opaque_provider_capture)
-            .transpose()
-        {
+        // Collection follows proxy settlement, where the generic lifecycle
+        // owns receipt-validated capture custody.  It deliberately chooses no
+        // wire fields: adapters receive only the bounded opaque producer
+        // bytes and interpret their own protocol records.
+        let provider_capture = match settled_provider_capture(
+            context.provider_capture_path.as_deref(),
+            &settled.proxy_evidence,
+        ) {
             Ok(binding) => binding,
             Err(error) => {
                 settled.issues.run_error(error.to_string());
@@ -1117,6 +1119,28 @@ fn opaque_provider_capture(path: &std::path::Path) -> Result<Vec<u8>, Error> {
         ));
     }
     Ok(bytes)
+}
+
+fn settled_provider_capture(
+    expected: Option<&std::path::Path>,
+    evidence: &crate::proxy::Evidence,
+) -> Result<Option<Vec<u8>>, Error> {
+    let mut captures = evidence.captures.iter();
+    let Some(capture) = captures.next() else {
+        return Ok(None);
+    };
+    if captures.next().is_some() {
+        return Err(Error::Run(
+            "provider capture binding is ambiguous after proxy settlement".into(),
+        ));
+    }
+    if expected.is_some_and(|path| path != capture.output) {
+        return Err(Error::Run(
+            "settled provider capture differs from the admitted recorder producer".into(),
+        ));
+    }
+    capture.validate()?;
+    opaque_provider_capture(&capture.output).map(Some)
 }
 
 struct PublicationResources {
@@ -1597,7 +1621,9 @@ impl Publication<'_, '_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_mcp_relay_capability, validate_mcp_server_capability};
+    use super::{
+        settled_provider_capture, validate_mcp_relay_capability, validate_mcp_server_capability,
+    };
     use crate::benchmark::{BenchmarkConfig, McpServerConfig};
 
     fn config(agent: &str) -> BenchmarkConfig {
@@ -1655,5 +1681,37 @@ mod tests {
         );
         validate_mcp_relay_capability(&config("codex"), Some(crate::tape::Mode::Replay))
             .expect("guest execution stages only the selected sealed relay bundle");
+    }
+
+    #[test]
+    fn settled_provider_capture_retains_the_receipt_validated_producer_for_collection() {
+        let root = std::env::temp_dir().join(
+            crate::workloads::TaskIdentity::local("settled-provider-capture", None).attempt_id,
+        );
+        std::fs::create_dir_all(&root).unwrap();
+        let producer = root.join("capture.jsonl");
+        let bytes = b"{}\n";
+        std::fs::write(&producer, bytes).unwrap();
+        let evidence = crate::proxy::Evidence {
+            captures: vec![crate::proxy::capture::CaptureEvidence {
+                adapter: "llmtape".into(),
+                output: producer.clone(),
+                complete: true,
+                accepted: 1,
+                completed: 1,
+                failed: 0,
+                recorded: 1,
+                inference_requests: 1,
+                bytes: bytes.len() as u64,
+                sha256: crate::cassette::digest(bytes),
+            }],
+            output_files: vec![producer.clone()],
+            cleanup_confirmed: true,
+        };
+        assert_eq!(
+            settled_provider_capture(Some(&producer), &evidence).unwrap(),
+            Some(bytes.to_vec())
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
