@@ -1134,6 +1134,7 @@ fn result() -> RunResult<'static> {
         tool_calls: Vec::new(),
         tool_calls_available: true,
         native_trace: None,
+        native_tool_sidecar: None,
         local_tool_transcript: None,
         deterministic_manifest: None,
         sealed_artifacts: Vec::new(),
