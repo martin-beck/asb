@@ -343,9 +343,10 @@ pub(crate) struct SealedArtifact {
 
 pub(crate) struct CollectionContext<'a> {
     pub frozen: &'a FrozenArtifacts,
-    /// One receipt-validated provider capture, retained only until adapter
-    /// collection. Generic lifecycle code treats these bytes as opaque.
-    pub provider_capture: Option<&'a [u8]>,
+    /// One recorder-owned provider capture handle. Generic lifecycle code
+    /// never reads or interprets its protocol bytes; an adapter may do so for
+    /// its own post-hook correlation.
+    pub provider_capture: Option<&'a Path>,
     pub run_dir: &'a Path,
     pub interface: Option<Interface>,
     pub anthropic_input_includes_cache: bool,
