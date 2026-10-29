@@ -32,6 +32,13 @@ export function responseDelivery(response, completedFrame = () => false) {
   });
 }
 
+export function completedSseResponse(headers, body) {
+  const contentType = String(headers?.["content-type"] || "").toLowerCase();
+  if (!contentType.startsWith("text/event-stream") || !body.endsWith("\n")) return false;
+  return /(?:^|\n)event:[ \t]*message_stop[ \t]*(?:\n|$)/.test(body)
+    || /(?:^|\n)data:[ \t]*\[DONE\][ \t]*(?:\n|$)/.test(body);
+}
+
 export class CaptureSession {
   constructor(output, identity, io = fs) {
     this.io = io;

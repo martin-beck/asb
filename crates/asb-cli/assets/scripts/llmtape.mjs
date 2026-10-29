@@ -9,7 +9,7 @@ import { performance } from "node:perf_hooks";
 import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { quiesceNetworkRequests, networkFetch } from "./network-fetch.mjs";
-import { CaptureSession, responseDelivery } from "./capture-session.mjs";
+import { CaptureSession, completedSseResponse, responseDelivery } from "./capture-session.mjs";
 import { normalizeWorkspacePaths } from "./tape-normalization.mjs";
 
 const MAX_BODY = 16 * 1024 * 1024;
@@ -118,12 +118,6 @@ function responseHeaders(headers) {
 // client immediately closes HTTP/1.1. Node's later `aborted` flag is not: it
 // is set for that normal immediate-close pattern. This never promotes a
 // partial stream or arbitrary close to a completed capture.
-function completedSseResponse(response, body) {
-  const contentType = String(response.headers["content-type"] || "").toLowerCase();
-  if (!contentType.startsWith("text/event-stream") || !body.endsWith("\n")) return false;
-  return /(?:^|\n)event:[ \t]*message_stop[ \t]*(?:\n|$)/.test(body)
-    || /(?:^|\n)data:[ \t]*\[DONE\][ \t]*(?:\n|$)/.test(body);
-}
 
 // Preserve server-sent event boundaries during replay.  Several agent CLIs
 // dispatch tool calls as soon as the terminating SSE event arrives; sending
@@ -1031,7 +1025,7 @@ async function handle(request, response, recording) {
     appendFileSync(cassette, `${JSON.stringify(interaction)}\n`);
   }
   response.writeHead(recordedResponse.status, recordedResponse.headers);
-  if (recording) recording.completedSseResponse = completedSseResponse(recordedResponse, responseBody);
+  if (recording) recording.completedSseResponse = completedSseResponse(recordedResponse.headers, responseBody);
   if (recording) recording.responseEnded = true;
   response.end(responseBody);
 }

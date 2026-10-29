@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { CaptureSession, responseDelivery } from "../assets/scripts/capture-session.mjs";
+import { CaptureSession, completedSseResponse, responseDelivery } from "../assets/scripts/capture-session.mjs";
 import { Writable } from "node:stream";
 import { EventEmitter } from "node:events";
 
@@ -230,6 +230,15 @@ test("a close is positive only for an affirmed complete frame and clean request"
   const rejected = responseDelivery(incomplete, () => false);
   incomplete.emit("close");
   assert.deepEqual(await rejected, { terminal: "close", delivered: false });
+});
+
+test("terminal SSE framing accepts horizontal whitespace but rejects partial streams", () => {
+  const headers = { "content-type": "text/event-stream; charset=utf-8" };
+  assert.equal(completedSseResponse(headers, "event: message_stop\ndata: {}\n"), true);
+  assert.equal(completedSseResponse(headers, "data: [DONE]\n"), true);
+  assert.equal(completedSseResponse(headers, "event: message_stop\ndata: {}"), false);
+  assert.equal(completedSseResponse(headers, "event: message_delta\ndata: {}\n"), false);
+  assert.equal(completedSseResponse({ "content-type": "application/json" }, "event: message_stop\n"), false);
 });
 
 test("incomplete records retain bounded terminal classifications without payloads", (t) => {
