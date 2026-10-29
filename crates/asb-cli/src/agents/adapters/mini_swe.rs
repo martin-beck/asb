@@ -497,6 +497,7 @@ mod tests {
         ] {
             std::fs::write(&trajectory, document).unwrap();
             let artifacts = collect(&CollectionContext {
+                provider_capture: None,
                 frozen: &serde_json::from_str(document)
                     .ok()
                     .map(|value| {
@@ -524,6 +525,7 @@ mod tests {
             .expect("trajectory exists");
 
         let artifacts = collect(&CollectionContext {
+            provider_capture: None,
             frozen: &super::super::super::FrozenArtifacts::for_test(
                 "trajectory.json",
                 serde_json::json!({"input_tokens":13,"output_tokens":21}),

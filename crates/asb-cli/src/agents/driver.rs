@@ -760,6 +760,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     let frozen = artifact_owner.freeze();
     let mut artifacts = adapter.collect(&super::CollectionContext {
         frozen: &frozen,
+        provider_capture: None,
         run_dir: &request.run_dir,
         interface: Some(request.connection.interface),
         anthropic_input_includes_cache: crate::providers::anthropic_input_includes_cache(

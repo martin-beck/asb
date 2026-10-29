@@ -249,7 +249,11 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
                 .push("Codex native tool recording is unavailable".into());
             return artifacts;
         };
-        match bind_provider_tool_outputs(sidecar, &context.run_dir.join("capture.jsonl")) {
+        match context
+            .provider_capture
+            .ok_or_else(|| "Codex provider capture binding is unavailable".to_owned())
+            .and_then(|capture| bind_provider_tool_outputs(sidecar, capture))
+        {
             Ok(sidecar) => artifacts.native_tool_sidecar = Some(sidecar),
             Err(error) => artifacts.errors.push(error),
         }
@@ -261,12 +265,9 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
 /// post-tool hook runs.  Keep that adapter-specific envelope with the sealed
 /// native exchange, so replay can restore the exact hook result without
 /// attempting to reconstruct Codex's private serialization.
-fn bind_provider_tool_outputs(
-    sidecar: &[u8],
-    capture: &std::path::Path,
-) -> Result<Vec<u8>, String> {
-    let capture = std::fs::read_to_string(capture)
-        .map_err(|error| format!("cannot read Codex provider capture: {error}"))?;
+fn bind_provider_tool_outputs(sidecar: &[u8], capture: &[u8]) -> Result<Vec<u8>, String> {
+    let capture = std::str::from_utf8(capture)
+        .map_err(|_| "Codex provider capture is not UTF-8".to_owned())?;
     let mut outputs = std::collections::BTreeMap::<String, Vec<u8>>::new();
     for line in capture.lines() {
         let row: serde_json::Value = serde_json::from_str(line)
@@ -651,6 +652,7 @@ mod tests {
 
         let artifacts = super::super::mcp_relay::collect_artifacts(&CollectionContext {
             frozen: &Default::default(),
+            provider_capture: None,
             run_dir: &run_dir,
             interface: None,
             anthropic_input_includes_cache: false,
@@ -966,7 +968,13 @@ mod tests {
         std::fs::write(root.join("capture.jsonl"), format!("{capture}\n")).unwrap();
         std::fs::write(
             &sidecar,
-            bind_provider_tool_outputs(rows.as_bytes(), &root.join("capture.jsonl")).unwrap(),
+            bind_provider_tool_outputs(
+                rows.as_bytes(),
+                std::fs::read(root.join("capture.jsonl"))
+                    .unwrap()
+                    .as_slice(),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(

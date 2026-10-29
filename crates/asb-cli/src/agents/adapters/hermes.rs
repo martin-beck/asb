@@ -699,6 +699,7 @@ mod tests {
         )
         .unwrap();
         let artifacts = collect(&CollectionContext {
+            provider_capture: None,
             frozen: &super::super::super::FrozenArtifacts::for_test(
                 "usage.json",
                 serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap(),

@@ -978,11 +978,19 @@ impl<'a> CompletedAttempt<'a> {
                     .unwrap_or_else(|| "agent artifact snapshot unavailable".into()),
             );
         }
+        let provider_capture = match opaque_provider_capture(&settled.proxy_evidence) {
+            Ok(binding) => binding,
+            Err(error) => {
+                settled.issues.run_error(error.to_string());
+                None
+            }
+        };
         let adapter_artifacts = if settled.evidence.guest.is_none() {
             agents::find(&config.agent)
                 .map(|adapter| {
                     adapter.collect(&agents::CollectionContext {
                         frozen: &frozen,
+                        provider_capture: provider_capture.as_deref(),
                         run_dir: &settled.evidence.run_dir,
                         interface,
                         anthropic_input_includes_cache:
@@ -1086,6 +1094,24 @@ impl<'a> CompletedAttempt<'a> {
             },
         }
     }
+}
+
+fn opaque_provider_capture(evidence: &crate::proxy::Evidence) -> Result<Option<Vec<u8>>, Error> {
+    if evidence.captures.is_empty() {
+        return Ok(None);
+    }
+    if evidence.captures.len() != 1 {
+        return Err(Error::Run("provider capture binding is ambiguous".into()));
+    }
+    let capture = &evidence.captures[0];
+    capture.validate()?;
+    let bytes = std::fs::read(&capture.output).map_err(crate::io_error)?;
+    if bytes.len() as u64 != capture.bytes || crate::cassette::digest(&bytes) != capture.sha256 {
+        return Err(Error::Run(
+            "provider capture binding receipt differs".into(),
+        ));
+    }
+    Ok(Some(bytes))
 }
 
 struct PublicationResources {
