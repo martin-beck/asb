@@ -17,6 +17,7 @@ import sys
 MODE = os.environ.get("ASB_HERMES_NATIVE_MODE", "")
 SIDECAR = Path(os.environ["ASB_HERMES_NATIVE_SIDECAR"])
 PROGRESS = Path(os.environ["ASB_HERMES_NATIVE_PROGRESS"])
+DIAGNOSTIC = Path(os.environ["ASB_HERMES_NATIVE_DIAGNOSTIC"]) if os.environ.get("ASB_HERMES_NATIVE_DIAGNOSTIC") else None
 MAX_BYTES = 4 * 1024 * 1024
 MAX_PAYLOAD_BYTES = 512 * 1024
 SESSION = "terminal-1"
@@ -60,6 +61,14 @@ def _write_progress(complete, error=None):
         output.flush()
         os.fsync(output.fileno())
     os.replace(temporary, PROGRESS)
+    if DIAGNOSTIC is not None:
+        DIAGNOSTIC.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        diagnostic_temporary = DIAGNOSTIC.with_suffix(".tmp")
+        with open(diagnostic_temporary, "x", encoding="utf-8") as output:
+            json.dump(document, output, separators=(",", ":"))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(diagnostic_temporary, DIAGNOSTIC)
 
 
 class Recorder:

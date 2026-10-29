@@ -94,6 +94,9 @@ fn prepare_native_tool_replay(
     // that claim, which prevents a preparation-time namespace collision.
     let output = context.run_dir.join("hermes");
     let progress = output.join("native-tool-progress.json");
+    let diagnostic = context
+        .runtime_dir
+        .join("hermes-native-tools/native-tool-diagnostic.json");
     let mode = match tape.mode {
         crate::tape::Mode::Record => "record",
         crate::tape::Mode::Replay => "replay",
@@ -118,7 +121,8 @@ fn prepare_native_tool_replay(
         .env("PYTHONPATH", python_path)
         .env("ASB_HERMES_NATIVE_MODE", mode)
         .env("ASB_HERMES_NATIVE_SIDECAR", sidecar)
-        .env("ASB_HERMES_NATIVE_PROGRESS", progress);
+        .env("ASB_HERMES_NATIVE_PROGRESS", progress)
+        .env("ASB_HERMES_NATIVE_DIAGNOSTIC", diagnostic);
     Ok(())
 }
 
