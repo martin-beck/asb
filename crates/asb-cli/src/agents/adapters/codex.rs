@@ -29,12 +29,12 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
         format: super::super::ArtifactFormat::JsonLines,
     },
     super::super::ArtifactSpec {
-        namespace: "codex",
+        namespace: "codex-native-sidecar",
         filename: "native-tool-sidecar.jsonl",
         format: super::super::ArtifactFormat::JsonLines,
     },
     super::super::ArtifactSpec {
-        namespace: "codex",
+        namespace: "codex-native-progress",
         filename: "native-tool-progress.json",
         format: super::super::ArtifactFormat::Json,
     },
@@ -161,12 +161,17 @@ fn prepare_tool_replay(
         crate::tape::Mode::Record => "record",
         crate::tape::Mode::Replay => "replay",
     };
-    let artifact_dir = context.run_dir.join("codex");
     let sidecar = match tape.mode {
-        crate::tape::Mode::Record => artifact_dir.join("native-tool-sidecar.jsonl"),
+        crate::tape::Mode::Record => context
+            .run_dir
+            .join("codex-native-sidecar")
+            .join("native-tool-sidecar.jsonl"),
         crate::tape::Mode::Replay => context.runtime_dir.join("native-tool-sidecar.jsonl"),
     };
-    let progress = artifact_dir.join("native-tool-progress.json");
+    let progress = context
+        .run_dir
+        .join("codex-native-progress")
+        .join("native-tool-progress.json");
     let state = context.runtime_dir.join("codex-native-hook-state.json");
     let command = hook_command(&hook)?;
     contents.push_str(&native_hook_configuration(&command)?);
@@ -689,7 +694,9 @@ mod tests {
                 .any(|argument| argument == "--dangerously-bypass-hook-trust")
         );
         assert!(
-            !root.join("codex/native-tool-progress.json").exists(),
+            !root
+                .join("codex-native-progress/native-tool-progress.json")
+                .exists(),
             "the adapter must leave its declared namespace for the owner"
         );
         let _ = std::fs::remove_dir_all(root);
