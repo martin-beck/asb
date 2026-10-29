@@ -399,6 +399,10 @@ type CommandBuilder = for<'a> fn(&CommandContext<'a>) -> CommandSpec;
 type PreparationHook = for<'a> fn(&mut PreparationContext<'a>) -> Result<(), Error>;
 type ToolReplayHook = for<'a> fn(&mut PreparationContext<'a>, TapeContext<'a>) -> Result<(), Error>;
 type CollectionHook = for<'a> fn(&CollectionContext<'a>) -> AgentArtifacts;
+/// An adapter-selected extension which may attach its own bounded replay
+/// evidence to the opaque artifact envelope.  Static dispatch deliberately
+/// does not interpret adapter filenames or replay formats.
+type ArtifactCollectionHook = for<'a> fn(&CollectionContext<'a>, &mut AgentArtifacts);
 type UsageHook = fn(&str, &str, bool) -> crate::measurements::TokenUsage;
 type FinalResponseHook = fn(&str, &Path) -> Option<String>;
 type ProcessHook = fn(&str) -> Result<crate::launch::ProcessLaunch, Error>;
@@ -421,6 +425,8 @@ pub(super) struct StaticAdapter {
     mcp_relay: bool,
     native_tool_transport: bool,
     collect: Option<CollectionHook>,
+    replay_artifacts: Option<ArtifactCollectionHook>,
+    lifecycle_artifacts: Option<ArtifactCollectionHook>,
     artifact_specs: &'static [ArtifactSpec],
     deterministic_extension: bool,
     output_usage: Option<UsageHook>,
@@ -457,6 +463,8 @@ impl StaticAdapter {
             mcp_relay: false,
             native_tool_transport: false,
             collect: None,
+            replay_artifacts: None,
+            lifecycle_artifacts: Some(native_trace::collect_lifecycle_artifact),
             artifact_specs: &[],
             deterministic_extension: false,
             output_usage: None,
@@ -483,6 +491,7 @@ impl StaticAdapter {
     /// the adapter owns the client protocol and tool semantics.
     pub(super) const fn with_tool_replay(mut self, hook: ToolReplayHook) -> Self {
         self.tool_replay = Some(hook);
+        self.replay_artifacts = Some(adapters::replay_artifacts::collect_local_tool_transcript);
         self
     }
 
@@ -493,6 +502,7 @@ impl StaticAdapter {
     pub(super) const fn with_complete_tool_replay(mut self, hook: ToolReplayHook) -> Self {
         self.tool_replay = Some(hook);
         self.complete_tool_replay = true;
+        self.replay_artifacts = Some(adapters::replay_artifacts::collect_local_tool_transcript);
         self
     }
 
@@ -670,20 +680,12 @@ impl AgentAdapter for StaticAdapter {
             .collect
             .map(|collect| collect(context))
             .unwrap_or_default();
-        if self.tool_replay.is_some() {
-            artifacts.local_tool_transcript = context
-                .frozen
-                .bytes("local-tools.jsonl")
-                .map(ToOwned::to_owned);
+        if let Some(collect) = self.replay_artifacts {
+            collect(context, &mut artifacts);
         }
-        if self.deterministic_extension {
-            artifacts.deterministic_manifest =
-                context.frozen.bytes("manifest.json").map(ToOwned::to_owned);
+        if let Some(collect) = self.lifecycle_artifacts {
+            collect(context, &mut artifacts);
         }
-        artifacts.native_trace = context
-            .frozen
-            .bytes("native-trace.jsonl")
-            .map(ToOwned::to_owned);
         artifacts
     }
     fn artifact_specs(&self) -> &'static [ArtifactSpec] {
