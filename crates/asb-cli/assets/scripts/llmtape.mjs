@@ -284,6 +284,11 @@ function normalizeCassetteBody(body) {
     .replace(/original token count: \d+/g, "original token count: <asb-token-count>")
     .replace(/Total output lines: \d+/g, "Total output lines: <asb-line-count>")
     .replace(/codex-arg[A-Za-z0-9_-]+/g, "codex-arg<asb-random>")
+    // OpenCode includes its process-local delegated-task session ID in a
+    // fixed completed-task envelope returned by its own tool dispatcher. The
+    // ID is regenerated on replay, while the task state and result remain
+    // provider input. Restrict normalization to that exact envelope.
+    .replace(/(<task id=\\?")ses_[A-Za-z0-9_-]+(\\?" state=\\?"completed\\?">)/g, "$1<asb-opencode-task-session>$2")
     // Codex's shell transport prefixes each captured command result with a
     // generated chunk identifier and wall-clock duration.  The duration is a
     // client-side rendering observation, not request semantics: the same

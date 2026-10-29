@@ -1098,6 +1098,29 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_opencode_completed_task_session_id() {
+        let root = test_root();
+        let cassette = root.join("opencode-task-session.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"content":"<task id=\"ses_record_123\" state=\"completed\">result</task>"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let replayed = recorded.replace("ses_record_123", "ses_replay_456");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_state = replayed.replace("completed", "failed");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_state).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_rejects_changed_body_and_extra_requests() {
         let root = test_root();
         let cassette = cassette(&root);
