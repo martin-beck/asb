@@ -17,11 +17,21 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_complete_tool_replay(prepare_tool_replay)
 .with_collection(collect)
-.with_artifact_specs(&[super::super::ArtifactSpec {
-    namespace: "tool-replay",
-    filename: "local-tools.jsonl",
-    format: super::super::ArtifactFormat::JsonLines,
-}])
+.with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "tool-replay",
+        filename: "local-tools.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        // Qwen restarts its private MCP child.  Its cursor is the bounded receipt
+        // that lets deferred host collection verify the sealed transcript after
+        // provider tape settlement.
+        namespace: "tool-replay",
+        filename: "persistent-progress.json",
+        format: super::super::ArtifactFormat::Json,
+    },
+])
 .with_output_usage(output_usage)
 .with_step_count(step_count)
 .with_final_response(final_response);
@@ -77,8 +87,8 @@ fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> 
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
-    match super::super::tool_replay_mcp::verify_persistent_per_call_completion(
-        context.run_dir,
+    match super::super::tool_replay_mcp::verify_persistent_per_call_completion_receipt(
+        context.frozen.document("persistent-progress.json"),
         context.frozen.bytes("local-tools.jsonl"),
     ) {
         Ok(()) => AgentArtifacts::default(),
@@ -180,6 +190,72 @@ mod tests {
     use super::*;
     use crate::agents::AgentAdapter;
 
+    fn frozen_collection_artifacts(
+        progress: serde_json::Value,
+        transcript: Vec<u8>,
+    ) -> crate::agents::FrozenArtifacts {
+        let envelope = serde_json::json!({
+            "schema_version": 1,
+            "documents": {"persistent-progress.json": progress},
+            "bytes": {"local-tools.jsonl": transcript},
+        });
+        crate::agents::FrozenArtifacts::from_deferred_collection_bytes(
+            &serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn deferred_collection_uses_the_exported_persistent_mcp_receipt() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-qwen-deferred-receipt-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let frozen = frozen_collection_artifacts(
+            serde_json::json!({"schema_version": 1, "cursor": 0, "events": 0}),
+            Vec::new(),
+        );
+        let artifacts = collect(&CollectionContext {
+            frozen: &frozen,
+            provider_capture: None,
+            run_dir: &root,
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert!(artifacts.errors.is_empty(), "{:?}", artifacts.errors);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn deferred_collection_rejects_an_unconsumed_persistent_mcp_receipt() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-qwen-deferred-receipt-reject-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let frozen = frozen_collection_artifacts(
+            serde_json::json!({"schema_version": 1, "cursor": 0, "events": 1}),
+            Vec::new(),
+        );
+        let artifacts = collect(&CollectionContext {
+            frozen: &frozen,
+            provider_capture: None,
+            run_dir: &root,
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert_eq!(
+            artifacts.errors,
+            ["local-tool replay left recorded events unconsumed"]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn tape_backed_preparation_uses_only_the_private_mcp_transport() {
         let root = std::env::temp_dir().join(format!(
@@ -232,6 +308,11 @@ mod tests {
             "__asb-tool-replay"
         );
         assert!(run_dir.join("tool-replay/local-tools.jsonl").is_file());
+        assert!(
+            run_dir
+                .join("tool-replay/persistent-progress.json")
+                .is_file()
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

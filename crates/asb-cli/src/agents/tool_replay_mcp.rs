@@ -243,11 +243,15 @@ pub(crate) fn verify_per_call_completion(
     verify_per_call_completion_at(run_dir, transcript, "pi-progress.json")
 }
 
-pub(crate) fn verify_persistent_per_call_completion(
-    run_dir: &Path,
+/// Verify a frozen per-call receipt after an isolated guest has returned its
+/// adapter-owned artifacts to the host.  The caller owns which receipt it
+/// requests; this utility validates only the common bounded cursor contract.
+pub(crate) fn verify_persistent_per_call_completion_receipt(
+    receipt: Option<&serde_json::Value>,
     transcript: Option<&[u8]>,
 ) -> Result<(), Error> {
-    verify_per_call_completion_at(run_dir, transcript, "persistent-progress.json")
+    let receipt = receipt.map(read_per_call_state_value).transpose()?;
+    verify_per_call_completion_receipt(receipt, transcript)
 }
 
 fn verify_per_call_completion_at(
@@ -256,17 +260,25 @@ fn verify_per_call_completion_at(
     state_name: &str,
 ) -> Result<(), Error> {
     let state = per_call_state_path(run_dir, state_name);
-    match (state.is_file(), transcript) {
-        (false, None) => Ok(()),
-        (false, Some(_)) => Err(Error::Run("local-tool progress is missing".into())),
-        (true, None) => {
-            let state = read_per_call_state(&state)?;
-            (state.cursor == state.events).then_some(()).ok_or_else(|| {
-                Error::Run("local-tool replay left recorded events unconsumed".into())
-            })
-        }
-        (true, Some(bytes)) => {
-            let state = read_per_call_state(&state)?;
+    let receipt = if state.is_file() {
+        Some(read_per_call_state(&state)?)
+    } else {
+        None
+    };
+    verify_per_call_completion_receipt(receipt, transcript)
+}
+
+fn verify_per_call_completion_receipt(
+    receipt: Option<PerCallState>,
+    transcript: Option<&[u8]>,
+) -> Result<(), Error> {
+    match (receipt, transcript) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err(Error::Run("local-tool progress is missing".into())),
+        (Some(state), None) => (state.cursor == state.events)
+            .then_some(())
+            .ok_or_else(|| Error::Run("local-tool replay left recorded events unconsumed".into())),
+        (Some(state), Some(bytes)) => {
             let transcript = Transcript::decode(bytes)?;
             if state.events == transcript.len() && state.cursor == transcript.len() {
                 Ok(())
@@ -435,6 +447,24 @@ fn read_per_call_state(path: &Path) -> Result<PerCallState, Error> {
         ));
     }
     let state: PerCallState = serde_json::from_slice(&bytes)
+        .map_err(|_| Error::Run("local-tool per-call progress is malformed".into()))?;
+    if state.schema_version != PER_CALL_STATE_SCHEMA_VERSION {
+        return Err(Error::Run(
+            "local-tool per-call progress has an unsupported schema".into(),
+        ));
+    }
+    Ok(state)
+}
+
+fn read_per_call_state_value(value: &serde_json::Value) -> Result<PerCallState, Error> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|_| Error::Run("local-tool per-call progress is malformed".into()))?;
+    if bytes.len() > 1024 {
+        return Err(Error::Run(
+            "local-tool per-call progress exceeds its bound".into(),
+        ));
+    }
+    let state: PerCallState = serde_json::from_value(value.clone())
         .map_err(|_| Error::Run("local-tool per-call progress is malformed".into()))?;
     if state.schema_version != PER_CALL_STATE_SCHEMA_VERSION {
         return Err(Error::Run(
@@ -1658,7 +1688,8 @@ mod tests {
         };
         assert_eq!(replay(first), first_recorded);
         assert_eq!(replay(second), second_recorded);
-        verify_persistent_per_call_completion(&run_dir, Some(&sealed)).unwrap();
+        let receipt = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        verify_persistent_per_call_completion_receipt(Some(&receipt), Some(&sealed)).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 
