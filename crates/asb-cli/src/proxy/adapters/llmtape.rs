@@ -1075,6 +1075,30 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_single_pytest_pass_summary_after_structured_canonicalization() {
+        let root = test_root();
+        let cassette = root.join("pytest-single-summary.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"content":"Internet access disabled\n......................................................................   [100%]\n70 passed in 0.38s\n","role":"tool"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = recorded.replace("0.38s", "0.37s");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let response = request(&session, &replayed);
+        let stop = session.stop();
+        assert!(response.contains("200 OK"), "{response}; {stop:?}");
+        stop.unwrap();
+
+        let changed_count = replayed.replace("70 passed", "71 passed");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_count).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_codex_shell_envelope_wall_time() {
         let root = test_root();
         let cassette = root.join("codex-shell-wall-time.jsonl");
