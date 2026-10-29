@@ -194,10 +194,9 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     );
     let workspace = std::fs::canonicalize(context.workspace)
         .unwrap_or_else(|_| context.workspace.to_path_buf());
-    context.command.env(
-        "ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE",
-        workspace,
-    );
+    context
+        .command
+        .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", workspace);
     Ok(())
 }
 
@@ -508,7 +507,11 @@ asyncio.run(main())
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &record_workspace)
             .output()
             .unwrap();
-        assert!(record.status.success(), "{}", String::from_utf8_lossy(&record.stderr));
+        assert!(
+            record.status.success(),
+            "{}",
+            String::from_utf8_lossy(&record.stderr)
+        );
         assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 8);
         std::fs::remove_file(&marker).unwrap();
         let replay = super::process(entry.to_str().unwrap())
@@ -522,7 +525,11 @@ asyncio.run(main())
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
             .output()
             .unwrap();
-        assert!(replay.status.success(), "{}", String::from_utf8_lossy(&replay.stderr));
+        assert!(
+            replay.status.success(),
+            "{}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
         let record_stdout = String::from_utf8(record.stdout)
             .unwrap()
             .replace(record_workspace.to_str().unwrap(), "<asb-workspace>");
@@ -530,7 +537,10 @@ asyncio.run(main())
             .unwrap()
             .replace(replay_workspace.to_str().unwrap(), "<asb-workspace>");
         assert_eq!(record_stdout, replay_stdout);
-        assert!(!marker.exists(), "native tool replay executed a direct tool");
+        assert!(
+            !marker.exists(),
+            "native tool replay executed a direct tool"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }
