@@ -22,7 +22,12 @@ use std::time::{Duration, Instant};
 
 const MAX_COMMAND_ARGUMENTS: usize = 32;
 const MAX_COMMAND_ARGUMENT_BYTES: usize = 4096;
-const MAX_COMMAND_OUTPUT: usize = 1024 * 1024;
+// A command result is represented twice in the MCP response: as compatible
+// text and as structured content.  Keep each captured stream well below the
+// 1 MiB framing/adapter capture boundary so a record-mode command that emits
+// a large result becomes a sealed, replayable tool failure instead of causing
+// the Pi extension's synchronous child to overflow and abandon its lease.
+const MAX_COMMAND_OUTPUT: usize = 128 * 1024;
 /// Command effects share the local-tool transcript's 1 MiB event ceiling.
 /// The snapshot itself retains metadata only; file content is read only for a
 /// changed regular UTF-8 file that must be reconstructed during replay.
@@ -1688,6 +1693,60 @@ mod tests {
         assert_eq!(replay_output, output);
         let receipt = serde_json::to_value(read_per_call_state(&state).unwrap()).unwrap();
         verify_persistent_per_call_completion_receipt(Some(&receipt), None).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn oversized_command_output_is_sealed_before_a_follow_up_per_call_service() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-command-output-bound-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let run_dir = root.join("run");
+        let transcript = run_dir.join("tool-replay/local-tools.jsonl");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(workspace.join("still-readable.txt"), "available\n").unwrap();
+        std::fs::write(&transcript, Transcript::default().encode().unwrap()).unwrap();
+        let state = per_call_state_path(&run_dir, "pi-progress.json");
+        publish_per_call_state(&state, 0, 0).unwrap();
+        let request = format!(
+            "{}\n{}\n",
+            json!({
+                "jsonrpc":"2.0",
+                "id":1,
+                "method":"tools/call",
+                "params":{"name":"run_command","arguments":{"argv":["sh","-c",format!("head -c {} /dev/zero", MAX_COMMAND_OUTPUT + 1)]}},
+            }),
+            json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{"name":"read_file","arguments":{"path":"still-readable.txt"}},
+            }),
+        );
+        let record = Options {
+            mode: Mode::Record,
+            workspace,
+            transcript: transcript.clone(),
+            per_call_state: Some(state.clone()),
+            metadata_trace: None,
+            allow_commuted_observations: false,
+        };
+        let mut output = Vec::new();
+        run_with_io(record, &mut BufReader::new(request.as_bytes()), &mut output).unwrap();
+        let responses = String::from_utf8(output).unwrap();
+        assert!(responses.contains("local-tool command output exceeds bound"));
+        assert!(responses.contains("available"));
+        assert_eq!(
+            Transcript::decode(&std::fs::read(&transcript).unwrap())
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(read_per_call_state(&state).unwrap().events, 2);
+        assert!(!state.with_extension("lock").exists());
         let _ = std::fs::remove_dir_all(root);
     }
 
