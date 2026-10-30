@@ -136,6 +136,9 @@ pub(crate) struct RunOptions<'a> {
     /// Opaque, recorder-owned provider capture selected before dispatch.
     pub provider_capture_path: Option<&'a Path>,
     pub repeat: Option<u64>,
+    /// Per-execution agent turn budget. This is enforced only by adapters
+    /// which explicitly declare support; unsupported adapters fail closed.
+    pub max_steps: Option<u64>,
     pub batch: Option<&'a repeated::BatchIdentity>,
     /// Exact selected native replay inputs for this batch.  This is private
     /// execution state and is never serialized into a plan or result.
@@ -1551,7 +1554,7 @@ fn command_for(
         )
         .map(|offer| offer.interface)
     });
-    command_for_with_interface(config, provider_base_url, prompt, interface)
+    command_for_with_interface(config, provider_base_url, prompt, interface, None)
 }
 
 fn command_for_with_interface(
@@ -1559,14 +1562,22 @@ fn command_for_with_interface(
     provider_base_url: Option<&str>,
     prompt: &str,
     interface: Option<crate::endpoint::Interface>,
+    max_steps: Option<u64>,
 ) -> Result<CommandSpec, Error> {
     if let Some(adapter) = agents::find(&config.agent) {
+        if max_steps.is_some() && !adapter.supports_max_steps() {
+            return Err(Error::Input(format!(
+                "agent `{}` does not support --max-steps; remove the flag or select an adapter with an enforced turn limit",
+                config.agent
+            )));
+        }
         return Ok(adapter.command(&agents::CommandContext {
             executable: adapter.executable(),
             config,
             endpoint: provider_base_url,
             interface,
             prompt,
+            max_steps,
             native_tool_mode: None,
             native_tool: None,
         }));

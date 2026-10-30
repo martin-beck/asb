@@ -227,7 +227,7 @@ _asb_config_file_complete() {
         fi
         case "$word" in
             --*=*) continue ;;
-            --repeat|--track|--seed|--cassette|--measurements|--cassette-root|--jobs|--max-active-attempts)
+            --repeat|--max-steps|--track|--seed|--cassette|--measurements|--cassette-root|--jobs|--max-active-attempts)
                 skip_value=1
                 continue
                 ;;
@@ -545,6 +545,7 @@ mod coverage_tests {
             }
             for flag in [
                 "--repeat",
+                "--max-steps",
                 "--track",
                 "--seed",
                 "--record",
