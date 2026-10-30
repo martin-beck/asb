@@ -16,6 +16,7 @@ asb setup --preset PRESET.toml [--output FILE]
 asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--trial INSTANCE] [--trial-set FILE] [--workspace DIR] [--output FILE]
 asb run CONFIG [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette FILE] [--json] [--measurements DIR]
 asb sweep SWEEP.toml [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette-root DIR] [--respect-record-timings] [--resume] [--json]
+asb sweep --preset PRESET.toml [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette-root DIR] [--json]
 asb compare BENCHMARK_OR_SWEEP.toml [--report]
 ```
 
@@ -466,6 +467,12 @@ the separate max-step controller when an execution-enforced cross-client cap is
 required.  `--output FILE` chooses the generated sweep name; all other setup
 selectors conflict with `--preset` so an experiment cannot be silently mixed
 with ad-hoc selections.
+
+`asb sweep --preset harnesstax.toml` is the one-command variant for an
+initialized project: it creates any missing preset requirements under the
+project, writes a fresh generated manifest below `.asb/preset-sweeps/`, and
+starts that sweep immediately. It never creates or modifies a project outside
+an existing `asb init` project.
 
 `asb run CONFIG --llm-record` runs fresh isolated workload executions through ASB's
 built-in local tape proxy and publishes a versioned ZIP cassette (by default

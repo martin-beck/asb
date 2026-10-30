@@ -8,6 +8,7 @@ use crate::project;
 use crate::providers;
 use crate::suggestions;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 pub struct SetupOptions {
     pub agent: Vec<String>,
@@ -38,6 +39,47 @@ pub fn setup_preset(
 /// Write a TOML benchmark configuration from parsed setup options.
 pub fn setup(options: SetupOptions, output: &mut dyn Write) -> Result<(), Error> {
     matrix::setup(options, output)
+}
+
+/// Materialize a repository-owned preset in an initialized project so it can
+/// immediately be executed as a sweep.
+///
+/// Unlike `asb setup --preset`, this owns a fresh internal output path.  The
+/// generated TOMLs remain in the project as the durable execution input and
+/// provenance for the resulting sweep.
+pub fn setup_preset_for_sweep(
+    name: &str,
+    quiet: bool,
+    output: &mut dyn Write,
+) -> Result<PathBuf, Error> {
+    let (root, _) = project::load(Path::new("."))?;
+    require_initialized_preset_project(&root, name)?;
+    let mut options = crate::presets::load(name)?;
+    let path = preset_sweep_path(&root, name, matrix::stamp());
+    options.output = Some(path.to_string_lossy().into_owned());
+    if quiet {
+        matrix::setup(options, &mut std::io::sink())?;
+    } else {
+        matrix::setup(options, output)?;
+    }
+    Ok(path)
+}
+
+fn require_initialized_preset_project(root: &Path, name: &str) -> Result<(), Error> {
+    if root.join(".asb/project.toml").is_file() {
+        Ok(())
+    } else {
+        Err(Error::Input(format!(
+            "project is not initialized; run `asb init` before `asb sweep --preset {name}`"
+        )))
+    }
+}
+
+fn preset_sweep_path(root: &Path, name: &str, stamp: u128) -> PathBuf {
+    let stem = name.strip_suffix(".toml").unwrap_or(name);
+    root.join(".asb")
+        .join("preset-sweeps")
+        .join(format!("{stem}-{stamp}.toml"))
 }
 
 /// Validate one selection before publishing any configuration in a matrix.
@@ -201,7 +243,29 @@ fn required(value: Option<String>) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SetupOptions, default_log_name, run_command_message, setup};
+    use super::{
+        SetupOptions, default_log_name, preset_sweep_path, require_initialized_preset_project,
+        run_command_message, setup,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn generated_preset_sweeps_stay_under_the_initialized_project() {
+        assert_eq!(
+            preset_sweep_path(Path::new("project"), "harnesstax.toml", 42),
+            Path::new("project/.asb/preset-sweeps/harnesstax-42.toml")
+        );
+    }
+
+    #[test]
+    fn preset_sweep_requires_a_managed_project() {
+        let root = std::env::temp_dir().join(format!("asb-preset-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let error = require_initialized_preset_project(&root, "harnesstax.toml").unwrap_err();
+        assert!(error.to_string().contains("asb init"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn setup_derives_log_name_from_configuration_stem() {
