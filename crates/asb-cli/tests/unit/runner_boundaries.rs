@@ -456,11 +456,36 @@ fn both_streams_are_forwarded_and_captured_without_losing_exit_status() {
 #[test]
 fn unknown_agent_command_retains_generic_contract_without_adapter_guessing() {
     let config:BenchmarkConfig=toml::from_str("agent='fixture-unique-executable'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\n").unwrap();
-    let command = command_for_with_interface(&config, None, "prompt", None).unwrap();
+    let command = command_for_with_interface(&config, None, "prompt", None, None).unwrap();
     assert_eq!(command.program, config.agent);
     assert!(command.args.is_empty());
     assert_eq!(
         command.prompt_delivery,
         crate::agents::PromptDelivery::Argument
     );
+}
+
+#[test]
+fn max_steps_is_applied_only_by_an_explicit_adapter_capability() {
+    let goose: BenchmarkConfig =
+        toml::from_str("agent='goose'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\n")
+            .unwrap();
+    let command = command_for_with_interface(&goose, None, "prompt", None, Some(9)).unwrap();
+    assert_eq!(
+        command
+            .args
+            .windows(2)
+            .find(|pair| pair[0] == "--max-turns")
+            .map(|pair| pair[1].as_str()),
+        Some("9")
+    );
+
+    let codex: BenchmarkConfig =
+        toml::from_str("agent='codex'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\n")
+            .unwrap();
+    let error = match command_for_with_interface(&codex, None, "prompt", None, Some(9)) {
+        Ok(_) => panic!("unsupported adapters must fail closed"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("does not support --max-steps"));
 }

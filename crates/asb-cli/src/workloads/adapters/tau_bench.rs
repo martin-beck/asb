@@ -2,7 +2,7 @@
 //! task by an environment and its one-based position, so those two values form
 //! the stable ASB trial identifier.
 use super::{SetupExtension, SourceBundle, WorkloadAdapter};
-use crate::workloads::Trial;
+use crate::workloads::{PreparationContext, Trial, WorkloadSession};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
@@ -64,6 +64,19 @@ impl WorkloadAdapter for TauBenchAdapter {
         installed_trials(directory)
     }
 
+    fn planning_catalog(
+        &self,
+        directory: &Path,
+    ) -> Result<Option<crate::workloads::PlanningCatalog>, String> {
+        let tasks = installed_trials(directory)?;
+        Ok(Some(crate::workloads::PlanningCatalog {
+            requirements: Default::default(),
+            dataset: dataset_identity(),
+            task_ids: tasks.into_iter().map(|task| task.id).collect(),
+            evaluation_kind: crate::workloads::KnownEvaluationKind::AdapterSmoke,
+        }))
+    }
+
     fn finalize_install(&self, directory: &Path) -> Result<(), String> {
         // Enumerate the actual pinned source once, then publish the immutable
         // installed catalog consumed by setup, CLI completion, and planning.
@@ -75,6 +88,35 @@ impl WorkloadAdapter for TauBenchAdapter {
 
     fn trial_ids(&self) -> Vec<Trial> {
         Vec::new()
+    }
+
+    fn prepare_task(
+        &self,
+        context: &PreparationContext<'_>,
+    ) -> Result<Box<dyn WorkloadSession>, String> {
+        self.prepare_source(context.workload_directory, context.workspace)?;
+        let trial = context
+            .trial
+            .ok_or_else(|| "tau-bench requires an installed trial selection".to_owned())?;
+        let selected = installed_trials(context.workload_directory)?
+            .into_iter()
+            .find(|candidate| candidate.id == trial)
+            .ok_or_else(|| format!("selected tau-bench trial `{trial}` is not installed"))?;
+        let prompt = format!(
+            "{}\n\nSelected installed τ-bench trial: {}\n{}\n",
+            super::super::load(context.workload, context.workload_directory)?,
+            selected.id,
+            selected.description
+        );
+        Ok(Box::new(
+            super::super::session::FileSession::new(
+                context,
+                prompt,
+                self.evaluator(),
+                self.evaluation_kind(context.workload),
+            )
+            .with_dataset(dataset_identity()),
+        ))
     }
 
     fn prepare_source(&self, workloads: &Path, workspace: &Path) -> Result<usize, String> {
@@ -231,6 +273,14 @@ fn valid_catalog_tasks(tasks: &[CatalogTask]) -> bool {
     actual == expected && tasks.iter().all(|task| !task.description.trim().is_empty())
 }
 
+fn dataset_identity() -> crate::workloads::session::DatasetIdentity {
+    crate::workloads::session::DatasetIdentity {
+        source: "sierra-research/tau-bench".into(),
+        revision: REVISION.into(),
+        split: "airline+retail".into(),
+    }
+}
+
 /// The pinned source represents every task as a four-space-indented mapping
 /// in its top-level `tasks` list.  We intentionally validate that precise
 /// source layout rather than executing a downloaded Python module.
@@ -275,6 +325,9 @@ mod tests {
         assert_eq!(trials.len(), AIRLINE_TASKS + RETAIL_TASKS);
         assert_eq!(trials.first().unwrap().id, "airline-1");
         assert_eq!(trials.last().unwrap().id, "retail-115");
+        let catalog = ADAPTER.planning_catalog(&root).unwrap().unwrap();
+        assert_eq!(catalog.task_ids.len(), AIRLINE_TASKS + RETAIL_TASKS);
+        assert!(catalog.task_ids.contains("retail-115"));
         assert!(tau.join("catalog.json").is_file());
         assert_eq!(ADAPTER.setup_extension().unwrap().id, "trial");
         let _ = fs::remove_dir_all(root);

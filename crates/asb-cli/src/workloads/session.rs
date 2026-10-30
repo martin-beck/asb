@@ -473,7 +473,14 @@ pub(crate) trait WorkloadSession {
         super::outcome::MetricPolicy::default()
     }
     fn module_descriptor(&self) -> Option<super::contracts::ModuleDescriptor> {
-        super::descriptor(&self.invocation().identity.workload)
+        // A reference-smoke adapter can still bind an installed task catalog
+        // to its session.  It must not attach a dataset-less module descriptor
+        // to that dataset-bearing identity, because doing so would falsely
+        // advertise an official module binding in recorded evidence.
+        super::descriptor(&self.invocation().identity.workload).filter(|module| {
+            module.support != super::contracts::SupportLevel::ReferenceSmoke
+                && module.dataset.as_ref() == self.invocation().identity.dataset.as_ref()
+        })
     }
     /// Adapter-owned evaluator artifacts that bind a historical task outcome.
     /// This is not a request to inspect unrelated project or host directories.
@@ -996,6 +1003,41 @@ mod tests {
         )
         .with_dataset(dataset.clone());
         assert_eq!(session.invocation().identity.dataset, Some(dataset));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reference_smoke_session_does_not_attach_a_datasetless_module() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-reference-dataset-{}",
+            TaskIdentity::local("fixture", None).attempt_id
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let context = PreparationContext {
+            verify_initial_material: false,
+            budgets: Default::default(),
+            on_allocation: None,
+            workload: "tau-bench",
+            trial: Some("retail-36"),
+            trial_set: None,
+            workload_directory: &root,
+            workspace: &root,
+            project_root: &root,
+            project_config: &crate::project::ProjectConfig::default(),
+        };
+        let session = FileSession::new_dynamic(
+            &context,
+            "answer".into(),
+            Box::new(|_, _, _| Ok(Evaluation::Passed)),
+            super::super::KnownEvaluationKind::AdapterSmoke,
+            Some(false),
+        )
+        .with_dataset(DatasetIdentity {
+            source: "sierra-research/tau-bench".into(),
+            revision: "revision".into(),
+            split: "airline+retail".into(),
+        });
+        assert!(session.module_descriptor().is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 }

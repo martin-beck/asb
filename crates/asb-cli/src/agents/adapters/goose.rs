@@ -30,7 +30,8 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     filename: "local-tools.jsonl",
     format: super::super::ArtifactFormat::JsonLines,
 }])
-.with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"]);
+.with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"])
+.with_max_steps();
 
 fn distribution() -> Result<(&'static str, &'static str), Error> {
     Ok(match std::env::consts::ARCH {
@@ -78,6 +79,7 @@ fn guest_assets(
     }])
 }
 fn command(context: &CommandContext<'_>) -> CommandSpec {
+    let max_turns = context.max_steps.unwrap_or(16);
     CommandSpec {
         program: "goose".into(),
         args: vec![
@@ -94,7 +96,7 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             // A single turn cannot complete even the bundled fixture: Goose
             // needs one turn to inspect and another to edit/test. Keep the
             // bound finite while allowing a normal agent trajectory.
-            "16".into(),
+            max_turns.to_string(),
             "--output-format".into(),
             "json".into(),
             "-t".into(),
@@ -141,7 +143,13 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
-    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    // Goose may submit independent MCP observations from one assistant turn
+    // in a different order on replay.  The sealed transcript still requires
+    // an exact request/result match, and workspace effects remain barriers;
+    // only an effect-free observation run may commute.
+    let launch = super::super::tool_replay_mcp::allow_commuted_observations(
+        super::super::tool_replay_mcp::launch(context, tape)?,
+    );
     let extension = std::iter::once(launch.program.as_os_str())
         .chain(launch.args.iter().map(std::ffi::OsString::as_os_str))
         .map(shell_quote)
@@ -300,6 +308,7 @@ mod tests {
             .expect("private extension");
         assert!(extension.contains("__asb-tool-replay"));
         assert!(extension.contains("--workspace"));
+        assert!(extension.contains("--allow-commuted-observations"));
         assert!(!environment(&command).contains_key("ASB_TOOL_REPLAY_MODE"));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -326,6 +335,7 @@ mod tests {
             endpoint: Some("http://127.0.0.1:3000/v1"),
             interface: Some(crate::endpoint::Interface::OpenAiChat),
             prompt: "repair",
+            max_steps: None,
             native_tool_mode: None,
             native_tool: None,
         });
@@ -340,6 +350,41 @@ mod tests {
             spec.args
                 .windows(2)
                 .any(|pair| pair[0] == "--system" && pair[1].contains("exactly one tool call"))
+        );
+    }
+
+    #[test]
+    fn requested_step_budget_overrides_the_default_turn_limit() {
+        let config = crate::benchmark::BenchmarkConfig {
+            planning: None,
+            agent: "goose".into(),
+            workload: "bug-fix".into(),
+            provider: "cli2key".into(),
+            model: "test-model".into(),
+            concurrency: 1,
+            trial_set: None,
+            trial: None,
+            workspace: "workspace".into(),
+            log_file: "run.log".into(),
+            measurements: None,
+            mcp_servers: Vec::new(),
+        };
+        let spec = command(&CommandContext {
+            executable: "goose",
+            config: &config,
+            endpoint: Some("http://127.0.0.1:3000/v1"),
+            interface: Some(crate::endpoint::Interface::OpenAiChat),
+            prompt: "repair",
+            max_steps: Some(7),
+            native_tool_mode: None,
+            native_tool: None,
+        });
+        assert_eq!(
+            spec.args
+                .windows(2)
+                .find(|pair| pair[0] == "--max-turns")
+                .map(|pair| pair[1].as_str()),
+            Some("7")
         );
     }
 }
