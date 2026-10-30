@@ -426,6 +426,7 @@ mod tests {
             endpoint: Some("http://127.0.0.1:1/v1"),
             interface: Some(crate::endpoint::Interface::OpenAiResponses),
             prompt: "solve the fixture",
+            max_steps: None,
             native_tool_mode: None,
             native_tool: None,
         });
@@ -688,6 +689,7 @@ assert stable(None) is None
             endpoint: Some("http://127.0.0.1:1/v1"),
             interface: Some(crate::endpoint::Interface::OpenAiResponses),
             prompt: "solve the fixture",
+            max_steps: None,
             native_tool_mode: None,
             native_tool: None,
         });

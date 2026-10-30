@@ -765,6 +765,11 @@ impl<'a> ReadyAttempt<'a> {
         let config_path = context.config_path.as_path();
         let config = &context.config;
         let options = context.options;
+        if options.max_steps.is_some() && crate::planning::resolve(config)?.backend != "native" {
+            return Err(Error::Input(
+                "--max-steps currently supports native agent execution only; this workload uses a remote execution backend".into(),
+            ));
+        }
         let project_root = &context.project_root;
         let project_config = &context.project_config;
         let tape_cassette = &context.tape_cassette;
@@ -894,6 +899,7 @@ impl<'a> ReadyAttempt<'a> {
                         provider_credentials,
                         tape_url,
                         tape_mode,
+                        max_steps: options.max_steps,
                         tool_tape_mode: tool_tape_cassette.as_ref().map(|(mode, _)| *mode),
                         tool_tape_cassette: tool_tape_cassette
                             .as_ref()
