@@ -162,58 +162,17 @@ fn prepare_tool_replay(
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
-    let mut artifacts = super::super::mcp_relay::collect_artifacts(context);
-    let Some(progress) = context.frozen.document("native-tool-progress.json") else {
-        // Tape runs disable Codex's unreplaceable native tools in favour of
-        // the sealed MCP transport. No native receipt is expected when the
-        // model uses only that replayable route.
-        return artifacts;
-    };
-    let complete = progress
-        .get("complete")
-        .and_then(serde_json::Value::as_bool);
-    let mode = progress.get("mode").and_then(serde_json::Value::as_str);
-    if progress
-        .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-        != Some(1)
-        || complete != Some(true)
-        || !matches!(mode, Some("record") | Some("replay"))
-    {
-        let detail = progress
-            .get("error")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| value.len() <= 160 && !value.chars().any(char::is_control))
-            .map(|value| format!(": {value}"))
-            .unwrap_or_default();
-        artifacts
-            .errors
-            .push(format!("Codex native tool hook did not complete{detail}"));
-        return artifacts;
-    }
-    if mode == Some("record") {
-        let Some(sidecar) = context.frozen.bytes("native-tool-sidecar.jsonl") else {
-            artifacts
-                .errors
-                .push("Codex native tool recording is unavailable".into());
-            return artifacts;
-        };
-        match context
-            .provider_capture
-            .ok_or_else(|| "Codex provider capture binding is unavailable".to_owned())
-            .and_then(|capture| bind_provider_tool_outputs(sidecar, capture))
-        {
-            Ok(sidecar) => artifacts.native_tool_sidecar = Some(sidecar),
-            Err(error) => artifacts.errors.push(error),
-        }
-    }
-    artifacts
+    // Preserve the runner's provider-capture ownership boundary. Codex tape
+    // mode intentionally records tool effects only through the MCP relay.
+    let _ = context.provider_capture;
+    super::super::mcp_relay::collect_artifacts(context)
 }
 
 /// Codex serializes native command results into its provider protocol. Keep
 /// that adapter-specific envelope with the sealed native exchange: its replay
 /// shim extracts the completed-shell payload and exit status before Codex
 /// renders a fresh volatile envelope.
+#[cfg(test)]
 fn bind_provider_tool_outputs(
     sidecar: &[u8],
     capture: &std::path::Path,
@@ -374,6 +333,7 @@ fn bind_provider_tool_outputs(
 /// Their results appear as the newly appended cumulative input items of the
 /// next request, so this adapter-local sequence identifies native shell calls
 /// without interpreting generic tape data.
+#[cfg(test)]
 fn provider_function_calls(row: &serde_json::Value) -> Result<(Vec<String>, bool), String> {
     let Some(body) = row
         .pointer("/response/body")
@@ -415,6 +375,7 @@ fn provider_function_calls(row: &serde_json::Value) -> Result<(Vec<String>, bool
     Ok((calls, true))
 }
 
+#[cfg(test)]
 fn decode_base64(value: &str) -> Result<Vec<u8>, ()> {
     fn digit(byte: u8) -> Result<u8, ()> {
         match byte {
@@ -449,6 +410,7 @@ fn decode_base64(value: &str) -> Result<Vec<u8>, ()> {
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn encode_base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
