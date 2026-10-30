@@ -525,6 +525,41 @@ pub(crate) fn ensure_execution_requirements(
     diagnostic
 }
 
+/// Ensure one auxiliary project-local tool through the same installer used by
+/// explicit CLI and TUI installation requests.
+///
+/// Report publication uses this for its static HTTP server.  Keeping this
+/// small entry point here means callers do not need to know recipe layouts or
+/// reproduce installation, locking, diagnostics, or cache behavior.
+pub(crate) fn ensure_project_tool(
+    id: &str,
+    root: &Path,
+    project_config: &project::ProjectConfig,
+    output: &mut dyn std::io::Write,
+) -> Result<(), Error> {
+    let tools_root = project::resolve(root, &project_config.tools_dir);
+    if tool_installed_locally(id, &tools_root) {
+        return Ok(());
+    }
+    let context =
+        OperationContext::new(root, project_config).map_err(InstallFailure::into_public)?;
+    let mut progress = |_percent: u8, _stage: ProgressStage| {};
+    let result = tool_in(
+        &context,
+        ToolInstallOptions {
+            name: id.to_owned(),
+            source: None,
+            dir: Some(tools_root),
+            dry_run: false,
+        },
+        output,
+        &mut progress,
+    );
+    let diagnostic = context.report_diagnostics(output);
+    result.map_err(InstallFailure::into_public)?;
+    diagnostic
+}
+
 fn execution_tool_ids(config: &BenchmarkConfig) -> Vec<String> {
     [&config.agent, &config.provider]
         .into_iter()

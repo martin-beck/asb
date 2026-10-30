@@ -1,7 +1,7 @@
 //! Offline HTML/SVG reports for benchmark configurations and sweeps.
 
-use crate::Error;
 use crate::benchmark_paths::{benchmark_stem, checked_benchmark_reference};
+use crate::{Error, http_server};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -116,6 +116,15 @@ pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Er
     let publisher = publication::Publisher::begin(&prepared.data.request.comparison_dir, files)?;
     rendering::render(publisher.stage(), &prepared)?;
     let published = publisher.commit()?;
+    let traces = prepared
+        .data
+        .rows
+        .iter()
+        .flat_map(|benchmark| benchmark.artifact_sources.iter())
+        .filter_map(|(name, source)| name.ends_with(".perfetto-trace").then_some(source.clone()))
+        .collect();
+    let server = http_server::start_for_report(&published.report, traces, output)?;
+    rewrite_perfetto_links(&published.report, &server)?;
     writeln!(
         output,
         "Compared {} benchmarks; wrote {} graphs, report.html, and {}",
@@ -131,38 +140,70 @@ pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Er
     if published.recoverable_fallback {
         writeln!(output,"Report published using recoverable replacement, not atomic exchange; a brief destination-absence/crash window was possible. The previous report backup was retained.").map_err(|error|published.confirmation_error(error))?;
     }
-    writeln!(
-        output,
-        "Result report: {}",
-        local_file_url(&published.report)
-    )
-    .map_err(|error| published.confirmation_error(error))?;
-    for (label, href) in collector_report_links(&prepared) {
+    writeln!(output, "Result report: {}", server.report_url())
+        .map_err(|error| published.confirmation_error(error))?;
+    for (label, href) in collector_report_links(&prepared, &server) {
         writeln!(output, "{label}: {href}").map_err(|error| published.confirmation_error(error))?;
     }
     Ok(published.report)
 }
 
-fn local_file_url(path: &Path) -> String {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let path = path.to_string_lossy().replace('\\', "/");
-    let path = percent_encode_path(&path);
-    if path.starts_with('/') {
-        format!("file://{path}")
-    } else {
-        format!("file:///{path}")
-    }
-}
-
-fn collector_report_links(prepared: &PreparedReport) -> BTreeSet<(String, String)> {
+fn collector_report_links(
+    prepared: &PreparedReport,
+    server: &http_server::ServerInfo,
+) -> BTreeSet<(String, String)> {
     prepared
         .data
         .rows
         .iter()
         .flat_map(|benchmark| benchmark.artifact_sources.iter())
-        .flat_map(|(name, source)| crate::collectors::report_artifact_links(name, source))
-        .map(|link| (link.label.to_owned(), link.href))
+        .flat_map(|(name, source)| {
+            let server = server.trace_url(source);
+            crate::collectors::report_artifact_links(name, source)
+                .into_iter()
+                .map(move |link| {
+                    let href = if link.label == "Perfetto UI" {
+                        server
+                            .as_ref()
+                            .map(|trace| perfetto_ui_url(trace))
+                            .unwrap_or(link.href)
+                    } else {
+                        link.href
+                    };
+                    (link.label.to_owned(), href)
+                })
+        })
         .collect()
+}
+
+fn rewrite_perfetto_links(report: &Path, server: &http_server::ServerInfo) -> Result<(), Error> {
+    let mut html = fs::read_to_string(report).map_err(crate::io_error)?;
+    for trace in server.traces() {
+        let Some(served) = server.trace_url(trace) else {
+            continue;
+        };
+        let old = perfetto_file_ui_url(trace);
+        html = html.replace(&old, &perfetto_ui_url(&served));
+    }
+    fs::write(report, html).map_err(crate::io_error)
+}
+
+fn perfetto_ui_url(trace_url: &str) -> String {
+    format!(
+        "https://ui.perfetto.dev/#!/?url={}",
+        percent_encode(trace_url)
+    )
+}
+
+fn perfetto_file_ui_url(trace: &Path) -> String {
+    let path = trace.canonicalize().unwrap_or_else(|_| trace.to_path_buf());
+    let path = path.to_string_lossy().replace('\\', "/");
+    let file_url = if path.starts_with('/') {
+        format!("file://{}", percent_encode_path(&path))
+    } else {
+        format!("file:///{}", percent_encode_path(&path))
+    };
+    perfetto_ui_url(&file_url)
 }
 
 fn percent_encode(value: &str) -> String {
@@ -1820,8 +1861,8 @@ mod tests {
         let mut output = Vec::new();
         run(root.join("sweep.toml").to_str().unwrap(), &mut output).unwrap();
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("Result report: file://"));
-        assert!(output.contains("Perfetto UI: https://ui.perfetto.dev/#!/?url=file%3A%2F%2F"));
+        assert!(output.contains("Result report: http://203.0.113.10:39000/report.html"));
+        assert!(output.contains("Perfetto UI: https://ui.perfetto.dev/#!/?url=http%3A%2F%2F203.0.113.10%3A39000%2Ftraces%2F0.perfetto-trace"));
         let comparison: Value = serde_json::from_str(
             &std::fs::read_to_string(root.join("results/sweep-comparison/comparison.json"))
                 .unwrap(),
@@ -1858,7 +1899,7 @@ mod tests {
         assert!(html.contains("100.0% (1/1)"));
         assert!(html.contains("No upstream task resolution was measured"));
         assert!(html.contains("Open in Perfetto UI"));
-        assert!(html.contains("https://ui.perfetto.dev/#!/?url=file%3A%2F%2F"));
+        assert!(html.contains("https://ui.perfetto.dev/#!/?url=http%3A%2F%2F203.0.113.10%3A39000%2Ftraces%2F0.perfetto-trace"));
         let _ = std::fs::remove_dir_all(root);
     }
     #[test]

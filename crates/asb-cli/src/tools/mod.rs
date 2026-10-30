@@ -8,6 +8,7 @@ pub(crate) mod bpftrace;
 mod cli2key;
 mod flamegraph;
 mod harbor;
+mod http;
 mod iostat;
 mod livecodebench;
 mod mpstat;
@@ -264,6 +265,7 @@ static REGISTRY: &[&dyn ToolAdapter] = &[
     &swebench::ADAPTER,
     &terminal_bench::ADAPTER,
     &harbor::ADAPTER,
+    &http::ADAPTER,
 ];
 pub(crate) fn all() -> &'static [&'static dyn ToolAdapter] {
     REGISTRY

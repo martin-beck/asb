@@ -23,6 +23,7 @@ pub(crate) mod fixture_namespace;
 pub(crate) mod fixture_writer;
 #[cfg(unix)]
 mod helper_exchange;
+mod http_server;
 mod install;
 mod launch;
 #[cfg(all(test, target_os = "linux"))]
@@ -154,6 +155,9 @@ pub fn entry(args: Vec<OsString>) -> ExitCode {
     }
     if args.first().is_some_and(|arg| arg == "__asb-install") {
         return install::operation::entry(&args[1..]);
+    }
+    if args.first().is_some_and(|arg| arg == "__asb-http-server") {
+        return http_server::entry(&args[1..]);
     }
     // Do not retain either global stream lock over dispatch. Install transfer
     // observers render from owned worker threads and are joined before the

@@ -278,6 +278,35 @@ repair command.
 Install Perfetto locally with `asb tool install perfetto`. It installs both the
 project-local Tracebox collector and the project-local Perfetto trace processor.
 
+### Share a generated report and Perfetto trace
+
+ASB uses the small, pinned `http-server` package as a project-local report
+server.  Install it explicitly with:
+
+```sh
+asb tool install http
+```
+
+It is also installed automatically when a normal `asb run`, `asb sweep`, or
+`asb compare` publishes a report.  The server exposes only the staged
+`report.html`, its graph assets, and that report's Perfetto traces; it never
+serves the project directory.  ASB chooses a free port, prints the public
+report URL and public Perfetto UI URL, and stops the server one hour after its
+last report or trace request.  Start or stop the current project's server
+manually with:
+
+```sh
+asb tool http start
+asb tool http stop
+```
+
+On hosts behind NAT, or when the route-derived address is not the address
+other machines should use, set the public address before running or comparing:
+
+```sh
+ASB_HTTP_PUBLIC_HOST=203.0.113.10 asb compare benchmark.toml
+```
+
 The `system` collector records bounded, non-secret host metadata in
 `system.json`: CPU model/vendor and Arm implementer/part identifiers,
 package/core/thread topology, governors and frequency limits, NUMA node count,

@@ -1,7 +1,8 @@
 //! The single typed argument parser for the `asb` executable.
 
 use super::{
-    CliError, Error, completion, config, install, models, project, runner, sweep, tape, tui,
+    CliError, Error, completion, config, http_server, install, models, project, runner, sweep,
+    tape, tui,
 };
 use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand};
 use std::ffi::OsString;
@@ -316,6 +317,10 @@ pub(crate) fn run_with_interactive(
                     }
                 })
             }
+            ToolCommand::Http(args) => match args.command {
+                HttpCommand::Start => http_server::start_manual(stdout),
+                HttpCommand::Stop => http_server::stop_manual(stdout),
+            },
         },
         Some(CommandLine::Workload(options)) => match options.command {
             Some(WorkloadCommand::List(args)) => install::workload_list(args.into(), stdout),
@@ -957,9 +962,23 @@ struct ToolArgs {
 enum ToolCommand {
     List(ToolListArgs),
     Install(ToolInstallArgs),
+    /// Serve the latest report and its Perfetto traces from this project.
+    Http(HttpArgs),
 }
 #[derive(Debug, Args, Default)]
 struct ToolListArgs {}
+#[derive(Debug, Args)]
+struct HttpArgs {
+    #[command(subcommand)]
+    command: HttpCommand,
+}
+#[derive(Debug, Subcommand)]
+enum HttpCommand {
+    /// Start or replace this project's report server.
+    Start,
+    /// Stop this project's report server.
+    Stop,
+}
 #[derive(Debug, Args)]
 struct WorkloadArgs {
     /// Workload whose installed trials will be listed.
