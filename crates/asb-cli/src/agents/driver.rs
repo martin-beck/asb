@@ -599,6 +599,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         endpoint: Some(&request.connection.base_url),
         interface: Some(request.connection.interface),
         prompt: &request.prompt,
+        max_steps: None,
         native_tool_mode: request.tool_tape_cassette.as_ref().map(|_| {
             if request.tool_replay {
                 crate::tape::Mode::Replay

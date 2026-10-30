@@ -405,8 +405,13 @@ pub(crate) fn protocol_fingerprint_with_dispatch(
 ) -> Result<ExecutionPlanFingerprint, Error> {
     resolve_snapshot(config, !policy.collectors.is_empty(), Some(policy))?;
     let admission = admission.map(RecordedAdmission::from);
+    // Reference-smoke adapters deliberately carry no official module binding.
+    // Their installed catalogs can select an exercise, but must not turn that
+    // exercise into a replay protocol contract for an official benchmark.
+    let module = workloads::descriptor(&config.workload)
+        .filter(|module| module.support != workloads::contracts::SupportLevel::ReferenceSmoke);
     protocol_fingerprint_core(
-        workloads::descriptor(&config.workload).as_ref(),
+        module.as_ref(),
         policy,
         effective,
         replica_concurrency,

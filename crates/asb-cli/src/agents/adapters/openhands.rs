@@ -153,11 +153,32 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
             &value,
             context.anthropic_input_includes_cache,
         ));
+        artifacts.steps = conversation_steps(&value);
     }
     if let Some(sidecar) = context.frozen.bytes("native-tool-sidecar.jsonl") {
         artifacts.native_tool_sidecar = Some(sidecar.to_vec());
     }
     artifacts
+}
+
+/// OpenHands records one token-usage item for each completed LiteLLM call.
+/// Keep this aligned with `conversation_usage`: malformed parallel metric
+/// arrays yield no count instead of a partial one.
+fn conversation_steps(value: &serde_json::Value) -> Option<u64> {
+    let metrics = value.pointer("/stats/usage_to_metrics")?.as_object()?;
+    let mut steps = 0_u64;
+    for metric in metrics.values() {
+        let calls = metric.get("token_usages")?.as_array()?;
+        if metric
+            .get("response_latencies")
+            .and_then(|value| value.as_array())
+            .is_some_and(|latencies| latencies.len() != calls.len())
+        {
+            return None;
+        }
+        steps = steps.checked_add(u64::try_from(calls.len()).ok()?)?;
+    }
+    (steps > 0).then_some(steps)
 }
 
 fn conversation_usage(
@@ -269,6 +290,7 @@ mod tests {
             endpoint: Some("http://127.0.0.1:4242/v1"),
             interface: Some(crate::endpoint::Interface::OpenAiChat),
             prompt: "solve the fixture",
+            max_steps: None,
             native_tool_mode: Some(crate::tape::Mode::Record),
             native_tool: None,
         });
@@ -429,12 +451,14 @@ except RuntimeError as error:
             ),
             (Some(26), Some(6), Some(9), Some(32))
         );
+        assert_eq!(conversation_steps(&doc), Some(3));
     }
 
     #[test]
     fn incomplete_metrics_and_empty_initial_stats_are_unknown() {
         let doc = serde_json::json!({"stats":{"usage_to_metrics":{"agent":{"response_latencies":[{},{}],"token_usages":[{"prompt_tokens":10,"completion_tokens":3}]}}}});
         assert_eq!(conversation_usage(&doc, false).total_tokens, None);
+        assert_eq!(conversation_steps(&doc), None);
         let empty = serde_json::json!({"stats":{"usage_to_metrics":{"agent":{"response_latencies":[],"token_usages":[]}}}});
         assert_eq!(conversation_usage(&empty, false).total_tokens, None);
     }

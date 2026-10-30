@@ -23,6 +23,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_mcp_relay()
 .with_native_tool_transport()
 .with_collection(collect)
+.with_step_count(step_count)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
         namespace: "tool-replay",
@@ -63,6 +64,24 @@ fn preferred_executables(root: &std::path::Path) -> Vec<std::path::PathBuf> {
             .join(target)
             .join("bin/codex"),
     ]
+}
+
+/// Codex's JSONL stream emits one completed `agent_message` item for each
+/// completed model turn. Tool lifecycle records are deliberately excluded:
+/// they describe local actions, not agent steps.
+fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
+    let steps = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| {
+            event.get("type").and_then(|value| value.as_str()) == Some("item.completed")
+                && event.pointer("/item/type").and_then(|value| value.as_str())
+                    == Some("agent_message")
+        })
+        .count()
+        .try_into()
+        .ok()?;
+    (steps > 0).then_some(steps)
 }
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
@@ -538,6 +557,19 @@ mod tests {
     use std::io::Write;
 
     #[test]
+    fn counts_completed_agent_messages_not_tool_lifecycle_events() {
+        let output = concat!(
+            "{\"type\":\"turn.started\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"mcp_tool_call\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\"}}\n",
+            "{\"type\":\"turn.completed\"}\n"
+        );
+        assert_eq!(step_count(output, ""), Some(2));
+        assert_eq!(step_count("{\"type\":\"turn.completed\"}\n", ""), None);
+    }
+
+    #[test]
     fn provider_function_calls_accepts_the_sse_done_sentinel() {
         let row = serde_json::json!({
             "response": {"body": concat!(
@@ -815,6 +847,7 @@ mod tests {
             endpoint: None,
             interface: None,
             prompt: "private fixture prompt",
+            max_steps: None,
             native_tool_mode: None,
             native_tool: None,
         });

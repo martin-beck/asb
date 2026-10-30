@@ -222,6 +222,7 @@ pub(crate) fn run_with_interactive(
                     track: options.track,
                     replay_seed: options.seed,
                     repeat: options.repeat.or(options.record.then_some(1)),
+                    max_steps: options.max_steps,
                     json: options.json,
                     show_output: options.show_output,
                     quiet_output: !options.verbose,
@@ -273,6 +274,7 @@ pub(crate) fn run_with_interactive(
                 &options.path,
                 sweep::Options {
                     repeat: options.repeat,
+                    max_steps: options.max_steps,
                     track: options.track,
                     seed: options.seed,
                     json: options.json,
@@ -806,6 +808,9 @@ struct RunArgs {
     /// Sequential batches of fresh isolated executions at configured concurrency.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=65533))]
     repeat: Option<u64>,
+    /// Maximum model/tool turns the selected agent may take. Unsupported agents are rejected before launch.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=65533))]
+    max_steps: Option<u64>,
     /// Replay one track ID, or min|max|median:tokens|duration|requests.
     #[arg(long)]
     track: Option<crate::cassette::Selector>,
@@ -866,6 +871,9 @@ struct SweepArgs {
     /// Sequential fresh batches per configuration, at its configured concurrency.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=65533))]
     repeat: Option<u64>,
+    /// Maximum model/tool turns per benchmark execution. Unsupported agents are rejected before launch.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=65533))]
+    max_steps: Option<u64>,
     /// Replay one track ID, or min|max|median:tokens|duration|requests.
     #[arg(long)]
     track: Option<crate::cassette::Selector>,
