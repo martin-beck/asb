@@ -4,6 +4,7 @@ use super::{
 };
 use crate::{Error, install::Recipe};
 
+#[cfg(test)]
 const NATIVE_HOOKS: &str = include_str!("../../../assets/scripts/codex-native-hooks.py");
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "codex",
@@ -143,79 +144,21 @@ fn prepare_tool_replay(
     servers.insert("asb_tool_replay".into(), toml::Value::Table(server));
     let mut root = toml::map::Map::new();
     root.insert("mcp_servers".into(), toml::Value::Table(servers));
-    let mut contents = toml::to_string(&toml::Value::Table(root)).map_err(|error| {
+    let contents = toml::to_string(&toml::Value::Table(root)).map_err(|error| {
         Error::Run(format!(
             "cannot serialize Codex local-tool replay configuration: {error}"
         ))
     })?;
-    let hook_dir = context.runtime_dir.join("codex-native-hooks");
-    std::fs::create_dir_all(&hook_dir).map_err(|error| {
-        Error::Run(format!(
-            "cannot create Codex native hook directory: {error}"
-        ))
-    })?;
-    let hook = hook_dir.join("hook.py");
-    std::fs::write(&hook, NATIVE_HOOKS)
-        .map_err(|error| Error::Run(format!("cannot write Codex native hook: {error}")))?;
-    let mode = match tape.mode {
-        crate::tape::Mode::Record => "record",
-        crate::tape::Mode::Replay => "replay",
-    };
-    let sidecar = match tape.mode {
-        crate::tape::Mode::Record => context
-            .run_dir
-            .join("codex-native-sidecar")
-            .join("native-tool-sidecar.jsonl"),
-        crate::tape::Mode::Replay => context.runtime_dir.join("native-tool-sidecar.jsonl"),
-    };
-    let progress = context
-        .run_dir
-        .join("codex-native-progress")
-        .join("native-tool-progress.json");
-    let state = context.runtime_dir.join("codex-native-hook-state.json");
-    let command = hook_command(&hook)?;
-    contents.push_str(&native_hook_configuration(&command)?);
     std::fs::write(directory.join("asb-tool-replay.toml"), contents).map_err(|error| {
         Error::Run(format!(
             "cannot write Codex local-tool replay configuration: {error}"
         ))
     })?;
-    // Retain Codex's built-in workspace shell. Some Responses-compatible
-    // providers do not surface configured MCP tools to the model; disabling
-    // the shell in that case leaves a coding benchmark unable to read, edit,
-    // or test its assigned repository. The workload guest remains the
-    // execution boundary, while the tape still records the provider turns.
-    context
-        .command
-        .arg("--dangerously-bypass-hook-trust")
-        .env("ASB_CODEX_NATIVE_MODE", mode)
-        .env("ASB_CODEX_NATIVE_SIDECAR", sidecar)
-        .env("ASB_CODEX_NATIVE_PROGRESS", progress)
-        .env("ASB_CODEX_NATIVE_STATE", state);
+    // Tape runs disable Codex's native shell and use this sealed MCP server
+    // as their sole tool transport. Do not register native lifecycle hooks:
+    // Codex invokes them for MCP calls too, which would falsely create a
+    // second native-tool recording for an already sealed MCP exchange.
     Ok(())
-}
-
-/// Codex currently exposes local shell and patch calls through its documented
-/// lifecycle hooks. The adapter owns their payload schema and the replay shim;
-/// the runner sees only the completed opaque native sidecar.
-fn hook_command(path: &std::path::Path) -> Result<String, Error> {
-    let value = path
-        .to_str()
-        .ok_or_else(|| Error::Run("Codex native hook path is not valid UTF-8".into()))?;
-    if value.contains(['\0', '\n', '\r']) {
-        return Err(Error::Run("Codex native hook path is unsafe".into()));
-    }
-    Ok(format!("python3 '{}'", value.replace('\'', "'\\\"'\\\"'")))
-}
-
-fn native_hook_configuration(command: &str) -> Result<String, Error> {
-    let quoted = |operation| toml::Value::String(format!("{command} {operation}")).to_string();
-    Ok(format!(
-        "\n[[hooks.PreToolUse]]\nmatcher = \".*\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = {}\n\n[[hooks.PostToolUse]]\nmatcher = \".*\"\n[[hooks.PostToolUse.hooks]]\ntype = \"command\"\ncommand = {}\n\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = {}\n",
-        quoted("pre"),
-        quoted("post"),
-        quoted("finish"),
-    ))
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
@@ -981,12 +924,10 @@ mod tests {
         );
         assert_eq!(config["model"].as_str(), Some("fixture-model"));
         assert_eq!(config["features"]["shell_tool"].as_bool(), Some(false));
-        assert_eq!(
-            config["hooks"]["PreToolUse"][0]["matcher"].as_str(),
-            Some(".*")
-        );
+        assert!(config.get("hooks").is_none());
         assert!(
-            args.iter()
+            !args
+                .iter()
                 .any(|argument| argument == "--dangerously-bypass-hook-trust")
         );
         assert!(
