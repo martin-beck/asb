@@ -439,11 +439,67 @@ fn configure_host_capabilities(
         let mut reader = std::io::stdin().lock();
         let mut executor = host_setup::SystemExecutor;
         let mut policy = host_setup::Policy::new(&mut reader, &mut executor);
+        configure_docker_socket_access_with(output, yes, &mut policy, current_effective_uid())?;
         configure_host_capabilities_with(output, yes, &mut policy, |setting| {
             let proc_name = setting.strip_prefix("kernel.").unwrap_or(setting);
             fs::read_to_string(format!("/proc/sys/kernel/{proc_name}")).ok()
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+fn current_effective_uid() -> Option<u32> {
+    fs::read_to_string("/proc/self/status")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+#[cfg(target_os = "linux")]
+fn configure_docker_socket_access_with(
+    output: &mut dyn std::io::Write,
+    yes: bool,
+    policy: &mut host_setup::Policy<'_>,
+    uid: Option<u32>,
+) -> Result<(), Error> {
+    use host_setup::{FailurePolicy, Operation, Request, Requirement};
+    if !Path::new("/var/run/docker.sock").exists() {
+        return Ok(());
+    }
+    let Some(uid) = uid else {
+        writeln!(output, "Host capability setup: could not determine the current user ID; Docker socket access was not changed.")
+            .map_err(super::io_error)?;
+        return Ok(());
+    };
+    let selector = format!("u:{uid}:rw");
+    let request = Request {
+        heading: "Host capability setup can grant this invoking user temporary Docker socket access:",
+        explanation: "This applies an ACL to /var/run/docker.sock for the current numeric user ID only. It permits local Docker workloads and normally resets when Docker restarts; it does not change group membership or sudoers.",
+        operations: vec![Operation::command(
+            &["setfacl", "-m", &selector, "/var/run/docker.sock"],
+            true,
+        )],
+        requirement: Requirement::AllowInteractive,
+        failure: FailurePolicy::Continue,
+    };
+    match policy.approve(output, yes, request)? {
+        host_setup::Decision::Approved(approved) => {
+            if policy.execute(approved).first() == Some(&true) {
+                writeln!(output, "Host capability setup: granted temporary Docker socket access to UID {uid}.")
+                    .map_err(super::io_error)?;
+            } else {
+                writeln!(output, "Host capability setup: could not grant Docker socket access; Docker workloads remain unavailable.")
+                    .map_err(super::io_error)?;
+            }
+        }
+        host_setup::Decision::Declined => writeln!(output, "Host capability setup: Docker socket access unchanged by user request.").map_err(super::io_error)?,
+        host_setup::Decision::Unavailable => writeln!(output, "Host capability setup: Docker socket access was not changed because sudo is unavailable.").map_err(super::io_error)?,
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
