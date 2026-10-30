@@ -579,9 +579,23 @@ class HarborTask:
         status = "not_created"
         try:
             if self.interrupted and self.journal is not None:
-                status = "preservation_failed"
-                self.journal.preserve(self.client)
-                status = "stopped-preserved"
+                # Compose can allocate a project network before failing to
+                # create the first service.  There is no agent-visible state
+                # to preserve until the main workspace and invocation exist;
+                # keeping that empty network would eventually exhaust
+                # Docker's default address pools across failed starts.
+                if self.environment is not None and self.workspace is None and self.invocation is None:
+                    status = "cleanup_failed"
+                    self.wait(self.environment._run_docker_compose_command(
+                        ["down", "--timeout", "2", "--volumes", "--remove-orphans"]), 120)
+                    if self.client.containers.list(all=True, filters={"label":"com.docker.compose.project=" + self.attempt}):
+                        raise ExecutionError("official Harbor startup containers could not be completely removed")
+                    self.journal.cleanup_images(self.client)
+                    status = "removed-before-agent"
+                else:
+                    status = "preservation_failed"
+                    self.journal.preserve(self.client)
+                    status = "stopped-preserved"
             elif self.environment is not None:
                 status = "cleanup_failed"
                 # Do not use SDK stop(delete=True): it removes shared local
