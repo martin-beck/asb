@@ -709,8 +709,6 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             "quiescent guest execution cannot declare retained ownership".into(),
         ));
     }
-    fs::create_dir_all(&request.run_dir)
-        .map_err(|error| Error::Io(format!("cannot create private guest artifacts: {error}")))?;
     let capsule_replay = match request.capsule.mode {
         GuestCapsuleMode::Replay => {
             let export = request.capsule.export.as_ref().ok_or_else(|| {

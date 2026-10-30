@@ -443,8 +443,29 @@ exit 93
         &std::fs::read(project.0.join("private/attempt/agent-result.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(result["steps"], 4);
-    assert_eq!(result["token_usage"]["total_tokens"], 42);
+    // The isolated guest exports its adapter-owned frozen evidence.  The host
+    // controller reconstructs that receipt and lets Hermes derive public
+    // steps/usage after the boundary; the private guest result must not claim
+    // those controller-owned fields itself.
+    assert_eq!(result["steps"], serde_json::Value::Null);
+    assert_eq!(
+        result["token_usage"]["total_tokens"],
+        serde_json::Value::Null
+    );
+    let receipt = result["exported_artifacts"]
+        .as_array()
+        .and_then(|receipts| receipts.first())
+        .expect("one deferred adapter collection receipt");
+    assert_eq!(receipt["kind"], "asb-deferred-adapter-collection");
+    let artifact = project
+        .0
+        .join("private/attempt/exports")
+        .join(receipt["filename"].as_str().expect("receipt filename"));
+    let frozen: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(artifact).unwrap()).unwrap();
+    assert_eq!(frozen["documents"]["usage.json"]["api_calls"], 4);
+    assert_eq!(frozen["documents"]["usage.json"]["input_tokens"], 31);
+    assert_eq!(frozen["documents"]["usage.json"]["output_tokens"], 11);
     assert!(!project.0.join("private/attempt/hermes/usage.json").exists());
 }
 
