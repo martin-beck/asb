@@ -67,6 +67,7 @@ struct Options {
     /// only method, request ordinal, ID shape, framing and response state;
     /// request parameters, tool arguments and tool results never enter it.
     metadata_trace: Option<PathBuf>,
+    allow_commuted_observations: bool,
 }
 
 /// A restarted client may briefly overlap its old and new stdio MCP children.
@@ -122,6 +123,13 @@ const PER_CALL_STATE_SCHEMA_VERSION: u32 = 1;
 pub(crate) struct Launch {
     pub program: std::path::PathBuf,
     pub args: Vec<std::ffi::OsString>,
+}
+
+/// Enable only for clients that dispatch independent MCP requests concurrently.
+/// Effects remain strictly ordered by the transcript implementation.
+pub(crate) fn allow_commuted_observations(mut launch: Launch) -> Launch {
+    launch.args.push("--allow-commuted-observations".into());
+    launch
 }
 
 pub(crate) fn launch(
@@ -524,8 +532,13 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
     let mut transcript = None;
     let mut per_call_state = None;
     let mut metadata_trace = None;
+    let mut allow_commuted_observations = false;
     let mut values = args.iter();
     while let Some(flag) = values.next() {
+        if flag == "--allow-commuted-observations" {
+            allow_commuted_observations = true;
+            continue;
+        }
         let value = values
             .next()
             .ok_or_else(|| Error::Input("invalid local-tool MCP arguments".into()))?;
@@ -552,6 +565,7 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
             .ok_or_else(|| Error::Input("local-tool MCP transcript is required".into()))?,
         per_call_state,
         metadata_trace,
+        allow_commuted_observations,
     })
 }
 
@@ -734,7 +748,12 @@ fn call(options: &Options, transcript: &mut Transcript, params: Value) -> Result
         .unwrap_or_else(|| json!({}));
     let request = canonical_request(tool, request)?;
     let result = if options.mode == Mode::Replay {
-        transcript.replay(&options.workspace, tool, &request)?
+        transcript.replay_with_commuted_observations(
+            &options.workspace,
+            tool,
+            &request,
+            options.allow_commuted_observations,
+        )?
     } else {
         let recorded = match execute(&options.workspace, tool, &request) {
             Ok((result, effects)) => Event {
@@ -1300,6 +1319,7 @@ mod tests {
                 transcript,
                 per_call_state: None,
                 metadata_trace: None,
+                allow_commuted_observations: false,
             },
             &mut input,
             &mut output,
@@ -1335,6 +1355,7 @@ mod tests {
                 transcript,
                 per_call_state: None,
                 metadata_trace: Some(trace.clone()),
+                allow_commuted_observations: false,
             },
             &mut BufReader::new(input.as_bytes()),
             &mut output,
@@ -1570,6 +1591,7 @@ mod tests {
             transcript: root.join("record.jsonl"),
             per_call_state: None,
             metadata_trace: None,
+            allow_commuted_observations: false,
         };
         let mut transcript = Transcript::default();
         let recorded = call(&record, &mut transcript, request.clone()).unwrap();
@@ -1580,6 +1602,7 @@ mod tests {
             transcript: root.join("replay.jsonl"),
             per_call_state: None,
             metadata_trace: None,
+            allow_commuted_observations: false,
         };
         let replayed = call(&replay_options, &mut replay, request).unwrap();
         assert_eq!(recorded, replayed);
@@ -1607,6 +1630,7 @@ mod tests {
             transcript: root.join("record.jsonl"),
             per_call_state: None,
             metadata_trace: None,
+            allow_commuted_observations: false,
         };
         let mut transcript = Transcript::default();
         let recorded = call(&record, &mut transcript, request.clone()).unwrap_err();
@@ -1625,6 +1649,7 @@ mod tests {
             transcript: root.join("replay.jsonl"),
             per_call_state: None,
             metadata_trace: None,
+            allow_commuted_observations: false,
         };
         let mut replayed = Transcript::decode(&bytes).unwrap();
         let replay_error = call(&replay, &mut replayed, request).unwrap_err();
@@ -1663,6 +1688,7 @@ mod tests {
             transcript: transcript.clone(),
             per_call_state: Some(state.clone()),
             metadata_trace: None,
+            allow_commuted_observations: false,
         };
         let mut output = Vec::new();
         run_with_io(record, &mut BufReader::new(&request[..]), &mut output).unwrap();
@@ -1691,6 +1717,7 @@ mod tests {
             transcript,
             per_call_state: Some(state.clone()),
             metadata_trace: None,
+            allow_commuted_observations: false,
         };
         let mut replay_output = Vec::new();
         run_with_io(
@@ -1733,6 +1760,7 @@ mod tests {
                     transcript: transcript.clone(),
                     per_call_state: Some(state.clone()),
                     metadata_trace: None,
+                    allow_commuted_observations: false,
                 },
                 &mut BufReader::new(request),
                 &mut output,
@@ -1758,6 +1786,7 @@ mod tests {
                     transcript: transcript.clone(),
                     per_call_state: Some(state.clone()),
                     metadata_trace: None,
+                    allow_commuted_observations: false,
                 },
                 &mut BufReader::new(request),
                 &mut output,
@@ -1813,6 +1842,7 @@ mod tests {
             transcript: root.join("record.jsonl"),
             per_call_state: None,
             metadata_trace: None,
+            allow_commuted_observations: false,
         };
         let mut transcript = Transcript::default();
         let recorded = call(&record, &mut transcript, request.clone()).unwrap();
@@ -1834,6 +1864,7 @@ mod tests {
                 transcript: replay_root.join("replay.jsonl"),
                 per_call_state: None,
                 metadata_trace: None,
+                allow_commuted_observations: false,
             },
             &mut replay,
             request,
@@ -1894,6 +1925,7 @@ mod tests {
             transcript: root.join("record.jsonl"),
             per_call_state: None,
             metadata_trace: None,
+            allow_commuted_observations: false,
         };
         let mut transcript = Transcript::default();
         let recorded = call(
@@ -1910,6 +1942,7 @@ mod tests {
                 transcript: root.join("replay.jsonl"),
                 per_call_state: None,
                 metadata_trace: None,
+                allow_commuted_observations: false,
             },
             &mut replay,
             json!({"name":"run_command","arguments":{"argv":["pwd"],"_meta":{"client":"changed"}}}),
