@@ -141,7 +141,13 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
-    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    // Goose may submit independent MCP observations from one assistant turn
+    // in a different order on replay.  The sealed transcript still requires
+    // an exact request/result match, and workspace effects remain barriers;
+    // only an effect-free observation run may commute.
+    let launch = super::super::tool_replay_mcp::allow_commuted_observations(
+        super::super::tool_replay_mcp::launch(context, tape)?,
+    );
     let extension = std::iter::once(launch.program.as_os_str())
         .chain(launch.args.iter().map(std::ffi::OsString::as_os_str))
         .map(shell_quote)
@@ -300,6 +306,7 @@ mod tests {
             .expect("private extension");
         assert!(extension.contains("__asb-tool-replay"));
         assert!(extension.contains("--workspace"));
+        assert!(extension.contains("--allow-commuted-observations"));
         assert!(!environment(&command).contains_key("ASB_TOOL_REPLAY_MODE"));
         let _ = std::fs::remove_dir_all(root);
     }
