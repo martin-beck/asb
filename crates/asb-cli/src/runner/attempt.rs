@@ -998,6 +998,11 @@ struct ResultFacts {
     provider_cleanup_error: Option<String>,
     artifact_evidence: Vec<String>,
 }
+
+fn sealed_step_count(guest: Option<u64>, adapter: Option<u64>) -> Option<u64> {
+    guest.or(adapter)
+}
+
 impl<'a> CompletedAttempt<'a> {
     fn finalize(
         self,
@@ -1291,21 +1296,25 @@ impl ResultFacts {
             token_usage,
             guest.as_ref().map(|metadata| metadata.token_usage.clone()),
         );
-        let steps = if let Some(metadata) = guest.as_ref() {
-            metadata.steps
-        } else {
-            adapter_artifacts.steps.or_else(|| {
-                capture_complete
-                    .then(|| {
-                        crate::usage::steps_from_agent(
-                            &config.agent,
-                            &bounded(&child.stdout),
-                            &bounded(&child.stderr),
-                        )
-                    })
-                    .flatten()
-            })
-        };
+        // A remote guest can complete without exposing a parseable stdout
+        // transcript. Its host-side adapter collection is sealed after the
+        // guest returns, so retain the guest counter when present but fall
+        // back to that adapter-owned terminal artifact when it is absent.
+        let steps = sealed_step_count(
+            guest.as_ref().and_then(|metadata| metadata.steps),
+            adapter_artifacts.steps,
+        )
+        .or_else(|| {
+            capture_complete
+                .then(|| {
+                    crate::usage::steps_from_agent(
+                        &config.agent,
+                        &bounded(&child.stdout),
+                        &bounded(&child.stderr),
+                    )
+                })
+                .flatten()
+        });
         // Tool-call evidence is parsed from provider responses retained by the
         // llmtape proxy. Agent stdout/stderr are presentation streams only.
         let tool_calls = tape_cassette
@@ -1651,7 +1660,7 @@ impl Publication<'_, '_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_mcp_relay_capability, validate_mcp_server_capability};
+    use super::{sealed_step_count, validate_mcp_relay_capability, validate_mcp_server_capability};
     use crate::benchmark::{BenchmarkConfig, McpServerConfig};
 
     fn config(agent: &str) -> BenchmarkConfig {
@@ -1709,5 +1718,12 @@ mod tests {
         );
         validate_mcp_relay_capability(&config("codex"), Some(crate::tape::Mode::Replay))
             .expect("guest execution stages only the selected sealed relay bundle");
+    }
+
+    #[test]
+    fn sealed_adapter_steps_fill_an_absent_guest_counter_without_replacing_one() {
+        assert_eq!(sealed_step_count(None, Some(3)), Some(3));
+        assert_eq!(sealed_step_count(Some(2), Some(3)), Some(2));
+        assert_eq!(sealed_step_count(None, None), None);
     }
 }
