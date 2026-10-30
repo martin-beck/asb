@@ -431,6 +431,7 @@ for (const request of invalid) {
             endpoint: Some("http://127.0.0.1:3000/v1"),
             interface: Some(crate::endpoint::Interface::AnthropicMessages),
             prompt: "repair",
+            max_steps: None,
             native_tool_mode: None,
             native_tool: None,
         });
