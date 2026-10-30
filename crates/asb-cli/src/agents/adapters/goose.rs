@@ -25,12 +25,36 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_tool_replay(prepare_tool_replay)
+.with_step_count(step_count)
 .with_artifact_specs(&[super::super::ArtifactSpec {
     namespace: "tool-replay",
     filename: "local-tools.jsonl",
     format: super::super::ArtifactFormat::JsonLines,
 }])
 .with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"]);
+
+/// Goose's JSON output is preceded by its terminal banner.  Count only the
+/// assistant messages that carry provider inference metadata, rather than
+/// banner text, user/tool responses, or locally synthesized messages.
+fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
+    let start = stdout.find('{')?;
+    let value = serde_json::Deserializer::from_str(&stdout[start..])
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()?;
+    let steps = value
+        .get("messages")?
+        .as_array()?
+        .iter()
+        .filter(|message| {
+            message.get("role").and_then(|value| value.as_str()) == Some("assistant")
+                && message.pointer("/metadata/inference").is_some()
+        })
+        .count()
+        .try_into()
+        .ok()?;
+    (steps > 0).then_some(steps)
+}
 
 fn distribution() -> Result<(&'static str, &'static str), Error> {
     Ok(match std::env::consts::ARCH {
@@ -185,6 +209,19 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    #[test]
+    fn counts_only_assistant_messages_with_provider_inference() {
+        let output = r#"banner
+{"messages":[
+ {"role":"user"},
+ {"role":"assistant","metadata":{"inference":{"provider":"openai"}}},
+ {"role":"assistant","metadata":{}},
+ {"role":"assistant","metadata":{"inference":{"provider":"openai"}}}
+]}"#;
+        assert_eq!(step_count(output, ""), Some(2));
+        assert_eq!(step_count("banner\n{\"messages\":[]}", ""), None);
     }
 
     #[test]
