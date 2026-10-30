@@ -5,6 +5,7 @@
 
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::Path;
 
 const MAX_EVENTS: usize = 16_384;
@@ -67,8 +68,21 @@ fn collect_response(
     following: &[Value],
     calls: &mut Vec<ToolCall>,
 ) {
+    // Call identifiers are only unique within a provider response.  llmtape
+    // deliberately normalizes each response independently, so a cassette can
+    // legitimately contain `<asb-call-1>` in many distinct turns.  Keep the
+    // de-duplication boundary here: it removes repeated SSE fragments without
+    // collapsing real calls from later responses.
+    let mut response_call_ids = HashSet::new();
     if let Ok(value) = serde_json::from_str::<Value>(response) {
-        collect(&value, timestamp, following, false, calls);
+        collect(
+            &value,
+            timestamp,
+            following,
+            false,
+            &mut response_call_ids,
+            calls,
+        );
         return;
     }
     // Streaming providers put JSON values in SSE `data:` lines.  The same
@@ -81,7 +95,14 @@ fn collect_response(
         if line != "[DONE]"
             && let Ok(value) = serde_json::from_str::<Value>(line)
         {
-            collect(&value, timestamp, following, true, calls);
+            collect(
+                &value,
+                timestamp,
+                following,
+                true,
+                &mut response_call_ids,
+                calls,
+            );
         }
     }
 }
@@ -91,6 +112,7 @@ fn collect(
     timestamp: Option<u128>,
     following: &[Value],
     streamed: bool,
+    response_call_ids: &mut HashSet<String>,
     calls: &mut Vec<ToolCall>,
 ) {
     if calls.len() >= MAX_EVENTS {
@@ -99,13 +121,28 @@ fn collect(
     match value {
         Value::Array(values) => {
             for value in values {
-                collect(value, timestamp, following, streamed, calls);
+                collect(
+                    value,
+                    timestamp,
+                    following,
+                    streamed,
+                    response_call_ids,
+                    calls,
+                );
             }
         }
         Value::Object(object) => {
             if let Some(values) = object.get("tool_calls").and_then(Value::as_array) {
                 for value in values {
-                    record(value, "tool_call", timestamp, following, streamed, calls);
+                    record(
+                        value,
+                        "tool_call",
+                        timestamp,
+                        following,
+                        streamed,
+                        response_call_ids,
+                        calls,
+                    );
                 }
                 return;
             }
@@ -116,6 +153,7 @@ fn collect(
                     timestamp,
                     following,
                     streamed,
+                    response_call_ids,
                     calls,
                 );
                 return;
@@ -128,12 +166,20 @@ fn collect(
                     timestamp,
                     following,
                     streamed,
+                    response_call_ids,
                     calls,
                 );
                 return;
             }
             for value in object.values() {
-                collect(value, timestamp, following, streamed, calls);
+                collect(
+                    value,
+                    timestamp,
+                    following,
+                    streamed,
+                    response_call_ids,
+                    calls,
+                );
             }
         }
         _ => {}
@@ -146,6 +192,7 @@ fn record(
     timestamp: Option<u128>,
     following: &[Value],
     streamed: bool,
+    response_call_ids: &mut HashSet<String>,
     calls: &mut Vec<ToolCall>,
 ) {
     if calls.len() >= MAX_EVENTS {
@@ -174,7 +221,7 @@ fn record(
     // provider call once, not once per chunk.
     if id
         .as_ref()
-        .is_some_and(|id| calls.iter().any(|call| call.id.as_deref() == Some(id)))
+        .is_some_and(|id| !response_call_ids.insert(id.clone()))
     {
         return;
     }
@@ -394,6 +441,26 @@ mod tests {
         assert!(calls[0].classes.contains(&"shell.command".into()));
         assert_eq!(calls[1].name.as_deref(), Some("read"));
         assert_eq!(calls[1].id, None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn counts_reused_normalized_ids_in_distinct_provider_responses() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-tool-call-response-scope-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("tape.jsonl");
+        std::fs::write(&path, concat!(
+            r#"{"request":{"body":"{}"},"response":{"body":"{\"type\":\"tool_call\",\"id\":\"<asb-call-1>\",\"name\":\"read_file\",\"arguments\":\"{}\"}"},"timing":{"response_observed_unix_ms":120}}"#, "\n",
+            r#"{"request":{"body":"{}"},"response":{"body":"{\"type\":\"tool_call\",\"id\":\"<asb-call-1>\",\"name\":\"write_file\",\"arguments\":\"{}\"}"},"timing":{"response_observed_unix_ms":140}}"#, "\n",
+        )).unwrap();
+
+        let calls = from_cassette(&path);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name.as_deref(), Some("read_file"));
+        assert_eq!(calls[1].name.as_deref(), Some("write_file"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
