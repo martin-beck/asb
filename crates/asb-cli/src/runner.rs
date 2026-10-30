@@ -1121,8 +1121,13 @@ fn run_measured_agent_with_launch_progress(
     }
     match result {
         Ok(captured) => {
+            let only_truncated = captured.only_transcript_truncated();
             issues.output_error = captured.output_error;
-            if let Some(error) = captured.capture_error {
+            // A full bounded presentation buffer is not a broken capture:
+            // the process exited and both pipes were drained.  Keep its
+            // truncation marker in the private capture result, but reserve
+            // completion-blocking errors for a stream fault or drain timeout.
+            if !only_truncated && let Some(error) = captured.capture_error {
                 issues.capture_error = Some(error.clone());
                 issues.run_error(error);
             }

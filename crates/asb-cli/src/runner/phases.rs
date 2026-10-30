@@ -128,8 +128,7 @@ impl ExecutionEvidence {
         issues: &AttemptIssues,
         guest: Option<&agents::driver::GuestResult>,
     ) -> bool {
-        issues.capture_error.is_none()
-            && guest.is_none_or(|metadata| !metadata.transcript_truncated)
+        issues.capture_error.is_none() && guest.is_none_or(durable_guest_presentation)
     }
 
     pub fn agent_outcome(
@@ -200,6 +199,29 @@ impl ExecutionEvidence {
             failure: agent_failure,
         }
     }
+}
+
+/// A bounded isolated-guest presentation stream is not a failed capture when
+/// the guest has independently sealed its terminal result.  Pipe failures and
+/// unquiesced trees still remain completion blockers.
+fn durable_guest_presentation(metadata: &agents::driver::GuestResult) -> bool {
+    durable_guest_presentation_parts(
+        metadata.transcript_truncated,
+        metadata.tree_quiesced,
+        metadata.artifact_error.is_none(),
+        metadata.execution_failure.is_none(),
+        metadata.exit_code,
+    )
+}
+
+fn durable_guest_presentation_parts(
+    truncated: bool,
+    tree_quiesced: bool,
+    artifact_settled: bool,
+    execution_ok: bool,
+    exit_code: Option<i32>,
+) -> bool {
+    !truncated || (tree_quiesced && artifact_settled && execution_ok && exit_code == Some(0))
 }
 
 /// Resources that must survive execution and, for adapter-owned services,
