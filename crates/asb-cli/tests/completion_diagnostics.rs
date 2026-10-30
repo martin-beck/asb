@@ -371,6 +371,11 @@ fn isolated_real_warning_writer_failure_preserves_grade_and_the_primary_error() 
             OsString::from(command),
             OsString::from(config),
             OsString::from("--json"),
+            // The ordinary CLI is concise by default.  This fault-injection
+            // fixture specifically verifies that verbose diagnostics retain
+            // each primary execution failure when the presentation writer
+            // subsequently breaks.
+            OsString::from("--verbose"),
         ],
         &mut output,
         &mut errors,
@@ -476,7 +481,7 @@ fn isolated_parallel_sweep_retains_both_admitted_failures_when_output_breaks() {
     }
     let mut output = Broken { writes: 0 };
     let mut errors = Vec::new();
-    let args = ["sweep", "sweep.toml", "--jobs", "2", "--json"].map(OsString::from);
+    let args = ["sweep", "sweep.toml", "--jobs", "2", "--json", "--verbose"].map(OsString::from);
     assert_ne!(asb_cli::run(&args, &mut output, &mut errors), 0);
     assert_eq!(
         output.writes, 1,
