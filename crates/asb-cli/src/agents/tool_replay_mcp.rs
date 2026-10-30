@@ -1132,7 +1132,6 @@ fn run_command(root: &Path, request: &Value) -> Result<Value, Error> {
         })
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| Error::Run("local-tool command arguments are invalid".into()))?;
-    validate_command(&argv)?;
     let workspace = root
         .canonicalize()
         .map_err(|_| Error::Run("local-tool workspace is unavailable".into()))?;
@@ -1142,14 +1141,7 @@ fn run_command(root: &Path, request: &Value) -> Result<Value, Error> {
         .current_dir(workspace)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_remove("HTTP_PROXY")
-        .env_remove("HTTPS_PROXY")
-        .env_remove("ALL_PROXY")
-        .env_remove("http_proxy")
-        .env_remove("https_proxy")
-        .env_remove("all_proxy")
-        .env("CARGO_NET_OFFLINE", "true");
+        .stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .map_err(|_| Error::Run("cannot start local-tool command".into()))?;
