@@ -2798,7 +2798,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_cli2key_uses_json_event_mode_without_single_response_exit() {
+    fn pi_cli2key_uses_compact_print_mode_with_adapter_summary() {
         let config = BenchmarkConfig {
             planning: None,
             agent: "pi".into(),
@@ -2819,11 +2819,8 @@ mod tests {
         assert_eq!(command.args[0], "--provider");
         assert_eq!(command.args[1], "asb");
         assert!(command.args.contains(&"--mode".into()));
-        assert!(command.args.contains(&"json".into()));
-        assert!(
-            !command.args.contains(&"--print".into()),
-            "Pi JSON mode must retain the agent loop after tool calls"
-        );
+        assert!(command.args.contains(&"text".into()));
+        assert!(command.args.contains(&"--print".into()));
         assert_eq!(
             command.prompt_delivery,
             crate::agents::PromptDelivery::Argument
