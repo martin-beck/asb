@@ -3571,3 +3571,27 @@ fn check_full_entry_disposition(
         assert_eq!(row["status"], "evaluation-pending");
     }
 }
+#[test]
+fn durable_guest_presentation_requires_more_than_a_truncated_stream() {
+    for (tree_quiesced, artifact_settled, execution_ok, exit_code, accepted) in [
+        (true, true, true, Some(0), true),
+        (false, true, true, Some(0), false),
+        (true, false, true, Some(0), false),
+        (true, true, false, Some(0), false),
+        (true, true, true, Some(1), false),
+    ] {
+        assert_eq!(
+            super::durable_guest_presentation_parts(
+                true,
+                tree_quiesced,
+                artifact_settled,
+                execution_ok,
+                exit_code,
+            ),
+            accepted,
+        );
+    }
+    assert!(super::durable_guest_presentation_parts(
+        false, false, false, false, None
+    ));
+}
