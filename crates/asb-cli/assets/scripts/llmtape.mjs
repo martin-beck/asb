@@ -477,6 +477,19 @@ function normalizeCassetteBody(body, url = "") {
     // extension. It neither identifies the adapter nor interprets its fields.
     const extensionValue = agentWireExtension?.normalizeRequest?.({ url, body: parsed });
     const canonical = extensionValue === undefined ? parsed : extensionValue;
+    // `normalizeRequestBody` adds this transport policy before forwarding a
+    // Codex request upstream.  It is intentionally absent from the cassette
+    // key: old cassettes predate the policy, and a caller cannot opt out while
+    // a sealed local-tool tape is active.  The model, prompt, and every tool
+    // result remain part of the key.
+    if (url.includes("/responses")
+        && canonical
+        && typeof canonical === "object"
+        && canonical.client_metadata
+        && typeof canonical.client_metadata === "object"
+        && Object.hasOwn(canonical.client_metadata, "x-codex-installation-id")) {
+      delete canonical.parallel_tool_calls;
+    }
     const structuredToolCallIdentifiers = new Map();
     const structuredContentBlockIdentifiers = new Map();
     const canonicalToolCallIdentifier = (identifier) => {
