@@ -155,7 +155,13 @@ fn all_five_catalogs_accept_explicit_instances_and_reject_missing_or_unknown_bef
                 json!({"id":id,"description":"synthetic selection only","repo":"fixture/repository",
                     "base_commit":"b".repeat(40),"metadata":metadata,"metadata_sha256":"c".repeat(64)})
             } else {
-                let definition = format!("source/tasks/{id}");
+                // Terminal-Bench 2.0 keeps task definitions at the pinned
+                // repository root; 1.0 and 2.1 use the `tasks/` subdirectory.
+                let definition = if workload == "terminal-bench-2.0" {
+                    format!("source/{id}")
+                } else {
+                    format!("source/tasks/{id}")
+                };
                 std::fs::create_dir_all(project.0.join("catalogs").join(workload).join(&definition)).unwrap();
                 json!({"id":id,"description":"synthetic selection only","instruction":"fixture","definition":definition})
             }
