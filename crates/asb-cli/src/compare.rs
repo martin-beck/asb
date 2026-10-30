@@ -140,8 +140,12 @@ pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Er
     if published.recoverable_fallback {
         writeln!(output,"Report published using recoverable replacement, not atomic exchange; a brief destination-absence/crash window was possible. The previous report backup was retained.").map_err(|error|published.confirmation_error(error))?;
     }
-    writeln!(output, "Result report: {}", server.report_url())
-        .map_err(|error| published.confirmation_error(error))?;
+    writeln!(
+        output,
+        "Result report: {}",
+        server.report_url(&published.report)
+    )
+    .map_err(|error| published.confirmation_error(error))?;
     for (label, href) in collector_report_links(&prepared, &server) {
         writeln!(output, "{label}: {href}").map_err(|error| published.confirmation_error(error))?;
     }
@@ -1861,8 +1865,8 @@ mod tests {
         let mut output = Vec::new();
         run(root.join("sweep.toml").to_str().unwrap(), &mut output).unwrap();
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("Result report: http://203.0.113.10:39000/report.html"));
-        assert!(output.contains("Perfetto UI: https://ui.perfetto.dev/#!/?url=http%3A%2F%2F203.0.113.10%3A39000%2Ftraces%2F0.perfetto-trace"));
+        assert!(output.contains("Result report: file://"));
+        assert!(output.contains("Perfetto UI: https://ui.perfetto.dev/#!/?url=file%3A%2F%2F"));
         let comparison: Value = serde_json::from_str(
             &std::fs::read_to_string(root.join("results/sweep-comparison/comparison.json"))
                 .unwrap(),
@@ -1899,7 +1903,7 @@ mod tests {
         assert!(html.contains("100.0% (1/1)"));
         assert!(html.contains("No upstream task resolution was measured"));
         assert!(html.contains("Open in Perfetto UI"));
-        assert!(html.contains("https://ui.perfetto.dev/#!/?url=http%3A%2F%2F203.0.113.10%3A39000%2Ftraces%2F0.perfetto-trace"));
+        assert!(html.contains("https://ui.perfetto.dev/#!/?url=file%3A%2F%2F"));
         let _ = std::fs::remove_dir_all(root);
     }
     #[test]

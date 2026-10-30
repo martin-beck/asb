@@ -5,7 +5,7 @@
 //! owns only port selection, per-project state, idle expiry and process
 //! termination; it never exposes the project directory itself.
 
-use crate::{Error, install, project, tools};
+use crate::{Error, project, tools};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -37,19 +37,26 @@ struct State {
 
 /// URLs served by this project's current report server.
 pub(crate) struct ServerInfo {
-    base: String,
+    base: Option<String>,
     traces: Vec<PathBuf>,
 }
 impl ServerInfo {
-    pub(crate) fn report_url(&self) -> String {
-        format!("{}/report.html", self.base)
+    pub(crate) fn report_url(&self, report: &Path) -> String {
+        self.base
+            .as_ref()
+            .map(|base| format!("{base}/report.html"))
+            .unwrap_or_else(|| local_file_url(report))
     }
     pub(crate) fn trace_url(&self, trace: &Path) -> Option<String> {
         let trace = trace.canonicalize().ok()?;
         self.traces
             .iter()
             .position(|item| item == &trace)
-            .map(|index| format!("{}/traces/{index}.perfetto-trace", self.base))
+            .and_then(|index| {
+                self.base
+                    .as_ref()
+                    .map(|base| format!("{base}/traces/{index}.perfetto-trace"))
+            })
     }
     pub(crate) fn traces(&self) -> &[PathBuf] {
         &self.traces
@@ -62,6 +69,12 @@ pub(crate) fn start_for_report(
     output: &mut dyn Write,
 ) -> Result<ServerInfo, Error> {
     let (root, config) = project::load(report)?;
+    if tools::resolve("http", &root, &config.tools_dir).is_none() {
+        return Ok(ServerInfo {
+            base: None,
+            traces: canonical_traces(traces),
+        });
+    }
     start(&root, &config, report, traces, output)
 }
 
@@ -72,7 +85,7 @@ pub(crate) fn start_manual(output: &mut dyn Write) -> Result<(), Error> {
     writeln!(
         output,
         "HTTP report server: {}\nServes only the generated report and its Perfetto traces; stops one hour after the last request.",
-        server.report_url()
+        server.report_url(&report)
     )
     .map_err(crate::io_error)
 }
@@ -92,7 +105,7 @@ fn start(
     config: &project::ProjectConfig,
     report: &Path,
     traces: Vec<PathBuf>,
-    output: &mut dyn Write,
+    _output: &mut dyn Write,
 ) -> Result<ServerInfo, Error> {
     let report = report.canonicalize().map_err(crate::io_error)?;
     if report.file_name().and_then(|name| name.to_str()) != Some("report.html") {
@@ -103,18 +116,13 @@ fn start(
     let traces = canonical_traces(traces);
     if cfg!(test) {
         return Ok(ServerInfo {
-            base: "http://203.0.113.10:39000".into(),
+            base: Some("http://203.0.113.10:39000".into()),
             traces,
         });
     }
-    if tools::resolve("http", root, &config.tools_dir).is_none() {
-        writeln!(output, "Installing project-local HTTP report server…")
-            .map_err(crate::io_error)?;
-        install::ensure_project_tool("http", root, config, output)?;
-    }
     let executable = tools::resolve("http", root, &config.tools_dir).ok_or_else(|| {
         Error::Run(
-            "project-local HTTP report server installation did not publish an executable".into(),
+            "project-local HTTP report server is not installed; run `asb tool install http` or install it from the setup TUI".into(),
         )
     })?;
     let path = state_path(root);
@@ -150,7 +158,7 @@ fn start(
             && ready.pid.is_some()
         {
             return Ok(ServerInfo {
-                base: base_url(&ready.public_host, ready.port),
+                base: Some(base_url(&ready.public_host, ready.port)),
                 traces: ready.traces,
             });
         }
@@ -460,6 +468,29 @@ fn base_url(host: &str, port: u16) -> String {
         host.into()
     };
     format!("http://{host}:{port}")
+}
+
+fn local_file_url(path: &Path) -> String {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path = path.to_string_lossy().replace('\\', "/");
+    let path = percent_encode_path(&path);
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
+}
+
+fn percent_encode_path(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'.' | b'-' | b'_' | b'~' => {
+                vec![byte as char]
+            }
+            other => format!("%{other:02X}").chars().collect(),
+        })
+        .collect()
 }
 
 #[cfg(test)]

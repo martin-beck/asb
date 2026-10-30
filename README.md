@@ -287,8 +287,9 @@ server.  Install it explicitly with:
 asb tool install http
 ```
 
-It is also installed automatically when a normal `asb run`, `asb sweep`, or
-`asb compare` publishes a report.  The server exposes only the staged
+When it is installed, normal `asb run`, `asb sweep`, and `asb compare` use it
+for the printed report and Perfetto UI URLs. Without it, ASB retains the local
+`file://` report and trace URLs. The server exposes only the staged
 `report.html`, its graph assets, and that report's Perfetto traces; it never
 serves the project directory.  ASB chooses a free port, prints the public
 report URL and public Perfetto UI URL, and stops the server one hour after its
