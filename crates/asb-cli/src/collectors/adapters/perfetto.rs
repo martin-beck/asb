@@ -408,41 +408,16 @@ fn execution_composition_graph(source_rows: &[ReportRow<'_>]) -> Option<ReportGr
     })
 }
 
-/// Return the official local-file Perfetto UI URL only for a nonempty trace.
+/// Return the bare official Perfetto UI URL only for a nonempty trace.
+///
+/// Perfetto deliberately does not receive a trace path here: users upload the
+/// separately published trace themselves, whether it is a project-local file
+/// or an HTTP download.
 fn perfetto_ui_url(name: &str, trace: &Path) -> Option<String> {
     if !name.ends_with(".perfetto-trace") || !trace.is_file() || trace.metadata().ok()?.len() == 0 {
         return None;
     }
-    let path = trace.canonicalize().unwrap_or_else(|_| trace.to_path_buf());
-    let path = path.to_string_lossy().replace('\\', "/");
-    let file_url = if path.starts_with('/') {
-        format!("file://{}", percent_encode_path(&path))
-    } else {
-        format!("file:///{}", percent_encode_path(&path))
-    };
-    Some(format!(
-        "https://ui.perfetto.dev/#!/?url={}",
-        percent_encode(&file_url)
-    ))
-}
-
-fn percent_encode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                char::from(byte).to_string()
-            }
-            _ => format!("%{byte:02X}"),
-        })
-        .collect()
-}
-fn percent_encode_path(value: &str) -> String {
-    value
-        .split('/')
-        .map(percent_encode)
-        .collect::<Vec<_>>()
-        .join("/")
+    Some("https://ui.perfetto.dev/".into())
 }
 
 #[cfg(test)]
@@ -450,7 +425,7 @@ mod report_tests {
     use super::*;
 
     #[test]
-    fn report_links_keep_a_local_trace_local_and_encode_its_path() {
+    fn report_links_use_the_bare_perfetto_ui_for_a_nonempty_trace() {
         let root = std::env::temp_dir().join(format!(
             "asb perfetto trace {}",
             std::time::SystemTime::now()
@@ -462,10 +437,7 @@ mod report_tests {
         let trace = root.join("capture #1.perfetto-trace");
         fs::write(&trace, b"trace").expect("trace");
         let url = perfetto_ui_url("capture #1.perfetto-trace", &trace).expect("usable trace URL");
-        assert!(url.starts_with("https://ui.perfetto.dev/#!/?url=file%3A%2F%2F"));
-        assert!(url.contains("asb%2520perfetto%2520trace"));
-        assert!(url.contains("capture%2520%25231.perfetto-trace"));
-        assert!(!url.contains(trace.to_string_lossy().as_ref()));
+        assert_eq!(url, "https://ui.perfetto.dev/");
         assert!(perfetto_ui_url("metrics.json", &trace).is_none());
         fs::write(&trace, b"").expect("empty trace");
         assert!(perfetto_ui_url("capture.perfetto-trace", &trace).is_none());
