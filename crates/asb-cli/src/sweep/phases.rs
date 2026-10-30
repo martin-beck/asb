@@ -427,6 +427,15 @@ impl<'a> ActivatedSweep<'a> {
                             execution.config_path(index).display().to_string(),
                             error.to_string(),
                         );
+                        if self.options.continue_after_failures.is_some_and(|limit| {
+                            failures
+                                .iter()
+                                .map(|(_, configs)| configs.len())
+                                .sum::<usize>()
+                                > limit
+                        }) {
+                            break;
+                        }
                     }
                     if output.failed() {
                         failure = output.error();
@@ -439,13 +448,27 @@ impl<'a> ActivatedSweep<'a> {
                 failure
             } else {
                 let mut started = 0;
+                let continued_failures =
+                    std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let failure_budget = self.options.continue_after_failures;
+                let stopping_failures = continued_failures.clone();
                 scheduler::run_with_resources_stopping_on(
                     self.scheduling,
                     &self.weights,
                     self.plan.resources,
                     &self.reservations,
                     |index| Ok(execution.run(index)),
-                    |report| report.output_error.is_some() || report.stop_admission,
+                    |report| {
+                        if report.result.is_err() {
+                            let failures = stopping_failures
+                                .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                                + 1;
+                            if failure_budget.is_some_and(|limit| failures > limit) {
+                                return true;
+                            }
+                        }
+                        report.output_error.is_some() || report.stop_admission
+                    },
                     |event| {
                         match event {
                             scheduler::Event::Started(index) => {
@@ -616,9 +639,18 @@ impl SettledSweep<'_> {
                 .iter()
                 .map(|(_, configs)| configs.len())
                 .sum::<usize>();
+            let continued = options
+                .continue_after_failures
+                .map_or_else(String::new, |limit| {
+                    if limit == usize::MAX {
+                        " (continued after these failures)".into()
+                    } else {
+                        format!(" (continued with failure budget {limit})")
+                    }
+                });
             let mut details = if !options.quiet_output {
                 format!(
-                    "sweep completed with {failed} failed benchmark(s): {}",
+                    "sweep completed with {failed} failed benchmark(s){continued}: {}",
                     failures
                         .iter()
                         .map(|(error, configs)| format!("{}: {error}", configs.join(", ")))
@@ -627,7 +659,7 @@ impl SettledSweep<'_> {
                 )
             } else {
                 format!(
-                    "sweep completed with {failed} failed benchmark(s); rerun with --verbose for diagnostics"
+                    "sweep completed with {failed} failed benchmark(s){continued}; rerun with --verbose for diagnostics"
                 )
             };
             if let Some(error) = comparison_error {

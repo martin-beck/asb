@@ -288,7 +288,10 @@ pub(crate) fn run_with_interactive(
                     cassette_root: options.cassette_root.as_deref().map(std::path::Path::new),
                     jobs: usize::from(options.jobs),
                     max_active_attempts: options.max_active_attempts.map(usize::from),
-                    resume: options.resume,
+                    resume: options.resume || options.continue_after_failures.is_some(),
+                    continue_after_failures: options
+                        .continue_after_failures
+                        .map(|value| value.unwrap_or(usize::MAX)),
                     reconcile_completed: options.reconcile_completed,
                     import_grades: options.import_grades,
                     recover_recording: options.recover_recording,
@@ -881,6 +884,9 @@ struct SweepArgs {
     /// Reuse validated completed groups and run untouched configurations; incomplete groups require recovery.
     #[arg(long)]
     resume: bool,
+    /// Continue an interrupted sweep. Optionally stop after this many failed benchmarks; without a value, continue after any number of failures.
+    #[arg(long = "continue", num_args = 0..=1, value_name = "FAILED")]
+    continue_after_failures: Option<Option<usize>>,
     /// Finish an already frozen union publication/ledger; never execute agents or evaluators.
     #[arg(long, requires_all = ["resume", "record"], conflicts_with_all = ["import_grades", "reconcile_completed", "repeat", "track", "seed", "show_output", "cassette_root", "respect_record_timings", "max_active_attempts"])]
     recover_recording: bool,
@@ -1273,5 +1279,15 @@ mod tests {
         .expect("bpftrace profile selection parses");
         Cli::try_parse_from(["asb", "workload", "terminal-bench-1.0", "trials"])
             .expect("workload trial listing parses");
+    }
+
+    #[test]
+    fn sweep_continue_accepts_an_optional_failure_budget() {
+        for args in [
+            vec!["asb", "sweep", "suite.toml", "--continue"],
+            vec!["asb", "sweep", "suite.toml", "--continue", "3"],
+        ] {
+            Cli::try_parse_from(args).expect("continue sweep option parses");
+        }
     }
 }

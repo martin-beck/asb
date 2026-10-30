@@ -66,6 +66,9 @@ pub(crate) struct Options<'a> {
     pub jobs: usize,
     pub max_active_attempts: Option<usize>,
     pub resume: bool,
+    /// Maximum failed configurations tolerated while continuing. `None` keeps
+    /// the existing fail-after-summary behaviour.
+    pub continue_after_failures: Option<usize>,
     pub reconcile_completed: bool,
     pub import_grades: bool,
     pub recover_recording: bool,
@@ -92,6 +95,7 @@ impl Default for Options<'_> {
             jobs: 1,
             max_active_attempts: None,
             resume: false,
+            continue_after_failures: None,
             reconcile_completed: false,
             import_grades: false,
             recover_recording: false,
