@@ -20,6 +20,11 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_collection(collect)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
+        namespace: "summary",
+        filename: "pi-summary.json",
+        format: super::super::ArtifactFormat::Json,
+    },
+    super::super::ArtifactSpec {
         namespace: "tool-replay",
         filename: "local-tools.jsonl",
         format: super::super::ArtifactFormat::JsonLines,
@@ -88,7 +93,57 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
     // corresponding manifest selection.  The generic dispatcher only seals
     // the opaque bytes returned in AgentArtifacts.
     artifacts.deterministic_manifest = context.frozen.bytes("manifest.json").map(ToOwned::to_owned);
+    if let Some(summary) = context.frozen.document("pi-summary.json") {
+        match summary_artifacts(summary) {
+            Ok(summary) => {
+                artifacts.token_usage = summary.token_usage;
+                artifacts.steps = summary.steps;
+            }
+            Err(error) => artifacts.errors.push(error),
+        }
+    }
     artifacts
+}
+
+struct SummaryArtifacts {
+    token_usage: Option<crate::measurements::TokenUsage>,
+    steps: Option<u64>,
+}
+
+/// Pi's JSON output includes complete tool-result payloads.  The adapter
+/// writes this deliberately small terminal summary instead, so normal output
+/// capture remains bounded without discarding token or turn accounting.
+fn summary_artifacts(document: &serde_json::Value) -> Result<SummaryArtifacts, String> {
+    let field = |name| document.get(name).and_then(serde_json::Value::as_u64);
+    if document
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+        || document
+            .get("completed")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        return Err("Pi terminal summary is malformed or incomplete".into());
+    }
+    let steps = field("steps").ok_or_else(|| "Pi terminal summary has no step count".to_owned())?;
+    let input = field("input_tokens")
+        .ok_or_else(|| "Pi terminal summary has no input token count".to_owned())?;
+    let output = field("output_tokens")
+        .ok_or_else(|| "Pi terminal summary has no output token count".to_owned())?;
+    let cached = field("cached_tokens");
+    Ok(SummaryArtifacts {
+        token_usage: Some(
+            crate::measurements::TokenUsage {
+                input_tokens: Some(input),
+                output_tokens: Some(output),
+                cached_tokens: cached,
+                ..Default::default()
+            }
+            .with_derived_total(),
+        ),
+        steps: Some(steps),
+    })
 }
 
 #[cfg(test)]
@@ -116,6 +171,71 @@ mod execution_tests {
         .collect::<Vec<_>>()
         .join("\n");
         assert!(execution_failure(&output, "").is_none());
+    }
+
+    #[test]
+    fn compact_terminal_summary_preserves_steps_and_token_dimensions() {
+        let artifacts = super::summary_artifacts(&serde_json::json!({
+            "schema_version": 1,
+            "completed": true,
+            "steps": 3,
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "cached_tokens": 5,
+        }))
+        .unwrap();
+        assert_eq!(artifacts.steps, Some(3));
+        let usage = artifacts.token_usage.unwrap();
+        assert_eq!(usage.input_tokens, Some(11));
+        assert_eq!(usage.output_tokens, Some(7));
+        assert_eq!(usage.cached_tokens, Some(5));
+        assert_eq!(usage.total_tokens, Some(18));
+    }
+
+    #[test]
+    fn incomplete_or_partial_terminal_summary_is_rejected() {
+        for summary in [
+            serde_json::json!({"schema_version": 1, "completed": false}),
+            serde_json::json!({"schema_version": 1, "completed": true, "steps": 1}),
+            serde_json::json!({"schema_version": 2, "completed": true, "steps": 1,
+                "input_tokens": 1, "output_tokens": 1}),
+        ] {
+            assert!(super::summary_artifacts(&summary).is_err());
+        }
+    }
+
+    #[test]
+    fn collection_uses_the_sealed_compact_summary_when_text_output_is_used() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-pi-summary-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let frozen = crate::agents::FrozenArtifacts::from_deferred_collection_bytes(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "documents": {"pi-summary.json": {
+                    "schema_version": 1, "completed": true, "steps": 2,
+                    "input_tokens": 13, "output_tokens": 5, "cached_tokens": 3,
+                }},
+                "bytes": {},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let artifacts = super::collect(&super::super::CollectionContext {
+            frozen: &frozen,
+            provider_capture: None,
+            run_dir: &root,
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert!(artifacts.errors.is_empty(), "{:?}", artifacts.errors);
+        assert_eq!(artifacts.steps, Some(2));
+        assert_eq!(artifacts.token_usage.unwrap().total_tokens, Some(18));
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 
@@ -226,8 +346,9 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             "asb".into(),
             "--model".into(),
             context.config.model.clone(),
+            "--print".into(),
             "--mode".into(),
-            "json".into(),
+            "text".into(),
         ],
         prompt_delivery: PromptDelivery::Argument,
     }
@@ -252,8 +373,73 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         &connection.base_url,
         api,
         "ASB_AGENT_API_KEY",
-    )
+    )?;
+    prepare_summary(context)
 }
+
+fn prepare_summary(context: &mut PreparationContext<'_>) -> Result<(), Error> {
+    // Keep executable setup outside the sealed artifact namespace. Only the
+    // compact JSON summary below is owned, frozen, and retained as evidence.
+    let extension = context.runtime_dir.join("pi/asb-summary.mjs");
+    let parent = extension
+        .parent()
+        .expect("Pi summary extension has a parent");
+    std::fs::create_dir_all(parent)
+        .map_err(|error| Error::Run(format!("cannot create Pi summary directory: {error}")))?;
+    std::fs::write(&extension, SUMMARY_EXTENSION)
+        .map_err(|error| Error::Run(format!("cannot write Pi summary extension: {error}")))?;
+    let extension = extension
+        .to_str()
+        .ok_or_else(|| Error::Run("Pi summary extension path is not valid UTF-8".into()))?;
+    let summary = context.run_dir.join("summary/pi-summary.json");
+    context
+        .command
+        .args(["--no-extensions", "--extension", extension]);
+    context.command.env("ASB_PI_SUMMARY_PATH", summary);
+    Ok(())
+}
+
+const SUMMARY_EXTENSION: &str = r#"
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+
+const destination = process.env.ASB_PI_SUMMARY_PATH;
+let steps = 0;
+let input = 0;
+let output = 0;
+let cached = 0;
+let cacheKnown = true;
+
+function number(value) { return Number.isSafeInteger(value) && value >= 0 ? value : undefined; }
+function publish() {
+  if (!destination) throw new Error("ASB Pi summary destination is unavailable");
+  const summary = { schema_version: 1, completed: true, steps, input_tokens: input, output_tokens: output };
+  if (cacheKnown) summary.cached_tokens = cached;
+  mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
+  const temporary = `${destination}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify(summary), { mode: 0o600 });
+  renameSync(temporary, destination);
+}
+
+export default function(pi) {
+  pi.on("turn_end", (event) => {
+    const message = event?.message;
+    if (message?.role !== "assistant") return;
+    steps += 1;
+    const usage = event?.usage ?? message?.usage;
+    const inTokens = number(usage?.input);
+    const outTokens = number(usage?.output);
+    if (inTokens === undefined || outTokens === undefined) return;
+    input += inTokens;
+    output += outTokens;
+    const cacheRead = number(usage?.cacheRead);
+    const cacheWrite = number(usage?.cacheWrite);
+    if (cacheRead === undefined || cacheWrite === undefined) cacheKnown = false;
+    else { input += cacheRead + cacheWrite; cached += cacheRead; }
+  });
+  pi.on("agent_end", () => publish());
+}
+"#;
 
 /// Pi's extension API can register tools but cannot substitute a result for a
 /// built-in tool after it has run.  Tape-backed executions therefore disable
