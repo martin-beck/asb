@@ -443,6 +443,12 @@ fn provider_function_calls(row: &serde_json::Value) -> Result<(Vec<String>, bool
         let Some(payload) = line.strip_prefix("data: ") else {
             continue;
         };
+        // OpenRouter terminates streamed Responses exchanges with the standard
+        // SSE sentinel. It carries no provider item, so it is not a malformed
+        // Codex response and must not invalidate an otherwise sealed capture.
+        if payload == "[DONE]" {
+            continue;
+        }
         let value: serde_json::Value = serde_json::from_str(payload)
             .map_err(|_| "Codex provider response is invalid".to_owned())?;
         if value.get("type").and_then(serde_json::Value::as_str)
@@ -613,6 +619,21 @@ mod tests {
     use super::*;
     use crate::agents::{AgentAdapter, CollectionContext};
     use std::io::Write;
+
+    #[test]
+    fn provider_function_calls_accepts_the_sse_done_sentinel() {
+        let row = serde_json::json!({
+            "response": {"body": concat!(
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"exec_command\"}}\n",
+                "data: [DONE]\n"
+            )}
+        });
+        assert_eq!(
+            provider_function_calls(&row).unwrap(),
+            (vec!["exec_command".into()], true)
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn native_package_preference_is_owned_here_and_explicit_source_still_wins() {
