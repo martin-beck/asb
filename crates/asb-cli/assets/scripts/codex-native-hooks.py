@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 MAX_BYTES = 4 * 1024 * 1024
@@ -206,6 +207,31 @@ def _response_text(value):
     return text, code if isinstance(code, int) else 0
 
 
+def _replay_command_result(value):
+    """Return the original shell payload behind Codex's rendered envelope.
+
+    Codex's current PostToolUse hook schema deliberately does not accept an
+    output replacement.  Replaying the complete provider-facing envelope as
+    a command's stdout would therefore make Codex render that envelope a
+    second time.  For the one documented completed-shell envelope, retain the
+    original payload and status; Codex then recreates its own volatile chunk
+    and wall-time header.  Unknown response shapes remain literal output so
+    that replay never silently invents a result format.
+    """
+    text, fallback_code = _response_text(value)
+    match = re.fullmatch(
+        r"Chunk ID: [^\r\n]+\r?\n"
+        r"Wall time: \d+(?:\.\d+)? seconds\r?\n"
+        r"Process exited with code (-?\d+)\r?\n"
+        r"(?:Original token count: \d+\r?\n)?(.*)",
+        text,
+        flags=re.DOTALL,
+    )
+    if not match:
+        return text, fallback_code
+    return match.group(2) or "", int(match.group(1))
+
+
 def _replay_post(value):
     identifier = _tool_id(value)
 
@@ -221,12 +247,11 @@ def _replay_post(value):
             raise RuntimeError("Codex native replay response is unavailable") from error
         del state["pending"][identifier]
         _save_state(state)
-        # Codex serializes a tool result after the native command returns.  A
-        # replayed command alone cannot reproduce that wrapper exactly.  Its
-        # documented post-tool hook accepts the original structured result,
-        # so restore that adapter-owned value before Codex prepares the next
-        # provider request.
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedMCPToolOutput": response}}, separators=(",", ":")))
+        # Codex validates PostToolUse output but does not permit an output
+        # replacement there.  The inert replay command already emits the
+        # adapter-owned payload; this hook only seals its matching lifecycle
+        # transition.  In particular, do not emit `updatedMCPToolOutput`:
+        # current Codex releases reject that unsupported field.
 
     _with_lock(operation)
 
@@ -238,7 +263,7 @@ def _emit(index):
         response = json.loads(base64.b64decode(encoded).decode("utf-8"))
     except (IndexError, KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RuntimeError("Codex native replay response is unavailable") from error
-    text, code = _response_text(response)
+    text, code = _replay_command_result(response)
     sys.stdout.write(text)
     raise SystemExit(code)
 

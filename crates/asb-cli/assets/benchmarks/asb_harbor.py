@@ -1,4 +1,4 @@
-"""Original Terminal-Bench 2.1 sessions using Harbor's environment and verifier.
+"""Pinned Terminal-Bench 2.x sessions using Harbor's environment and verifier.
 
 No Harbor agent or model is instantiated. ASB's shared guest driver executes
 the selected client, while the pinned SDK owns environment setup and grading.
@@ -29,7 +29,7 @@ from asb_harness import (quiet_sdk, restore_task_networks, original_networks,
 
 # An SDK package alone is not a workload contract. Additional profiles need
 # pinned catalog provenance, task-shape and reward/retained-grading contracts.
-HARBOR_PROFILES = frozenset({"terminal-bench-2.1"})
+HARBOR_PROFILES = frozenset({"terminal-bench-2.0", "terminal-bench-2.1"})
 
 
 def harbor_profile(workload):
@@ -579,9 +579,23 @@ class HarborTask:
         status = "not_created"
         try:
             if self.interrupted and self.journal is not None:
-                status = "preservation_failed"
-                self.journal.preserve(self.client)
-                status = "stopped-preserved"
+                # Compose can allocate a project network before failing to
+                # create the first service.  There is no agent-visible state
+                # to preserve until the main workspace and invocation exist;
+                # keeping that empty network would eventually exhaust
+                # Docker's default address pools across failed starts.
+                if self.environment is not None and self.workspace is None and self.invocation is None:
+                    status = "cleanup_failed"
+                    self.wait(self.environment._run_docker_compose_command(
+                        ["down", "--timeout", "2", "--volumes", "--remove-orphans"]), 120)
+                    if self.client.containers.list(all=True, filters={"label":"com.docker.compose.project=" + self.attempt}):
+                        raise ExecutionError("official Harbor startup containers could not be completely removed")
+                    self.journal.cleanup_images(self.client)
+                    status = "removed-before-agent"
+                else:
+                    status = "preservation_failed"
+                    self.journal.preserve(self.client)
+                    status = "stopped-preserved"
             elif self.environment is not None:
                 status = "cleanup_failed"
                 # Do not use SDK stop(delete=True): it removes shared local

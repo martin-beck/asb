@@ -4,6 +4,7 @@ use super::{
 };
 use crate::{Error, install::Recipe};
 
+#[cfg(test)]
 const NATIVE_HOOKS: &str = include_str!("../../../assets/scripts/codex-native-hooks.py");
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "codex",
@@ -117,7 +118,9 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
-    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    let launch = super::super::tool_replay_mcp::allow_commuted_observations(
+        super::super::tool_replay_mcp::launch(context, tape)?,
+    );
     let directory = context.runtime_dir.join("codex/config");
     std::fs::create_dir_all(&directory).map_err(|error| {
         Error::Run(format!(
@@ -143,134 +146,35 @@ fn prepare_tool_replay(
     servers.insert("asb_tool_replay".into(), toml::Value::Table(server));
     let mut root = toml::map::Map::new();
     root.insert("mcp_servers".into(), toml::Value::Table(servers));
-    let mut contents = toml::to_string(&toml::Value::Table(root)).map_err(|error| {
+    let contents = toml::to_string(&toml::Value::Table(root)).map_err(|error| {
         Error::Run(format!(
             "cannot serialize Codex local-tool replay configuration: {error}"
         ))
     })?;
-    let hook_dir = context.runtime_dir.join("codex-native-hooks");
-    std::fs::create_dir_all(&hook_dir).map_err(|error| {
-        Error::Run(format!(
-            "cannot create Codex native hook directory: {error}"
-        ))
-    })?;
-    let hook = hook_dir.join("hook.py");
-    std::fs::write(&hook, NATIVE_HOOKS)
-        .map_err(|error| Error::Run(format!("cannot write Codex native hook: {error}")))?;
-    let mode = match tape.mode {
-        crate::tape::Mode::Record => "record",
-        crate::tape::Mode::Replay => "replay",
-    };
-    let sidecar = match tape.mode {
-        crate::tape::Mode::Record => context
-            .run_dir
-            .join("codex-native-sidecar")
-            .join("native-tool-sidecar.jsonl"),
-        crate::tape::Mode::Replay => context.runtime_dir.join("native-tool-sidecar.jsonl"),
-    };
-    let progress = context
-        .run_dir
-        .join("codex-native-progress")
-        .join("native-tool-progress.json");
-    let state = context.runtime_dir.join("codex-native-hook-state.json");
-    let command = hook_command(&hook)?;
-    contents.push_str(&native_hook_configuration(&command)?);
     std::fs::write(directory.join("asb-tool-replay.toml"), contents).map_err(|error| {
         Error::Run(format!(
             "cannot write Codex local-tool replay configuration: {error}"
         ))
     })?;
-    // Retain Codex's built-in workspace shell. Some Responses-compatible
-    // providers do not surface configured MCP tools to the model; disabling
-    // the shell in that case leaves a coding benchmark unable to read, edit,
-    // or test its assigned repository. The workload guest remains the
-    // execution boundary, while the tape still records the provider turns.
-    context
-        .command
-        .arg("--dangerously-bypass-hook-trust")
-        .env("ASB_CODEX_NATIVE_MODE", mode)
-        .env("ASB_CODEX_NATIVE_SIDECAR", sidecar)
-        .env("ASB_CODEX_NATIVE_PROGRESS", progress)
-        .env("ASB_CODEX_NATIVE_STATE", state);
+    // Tape runs disable Codex's native shell and use this sealed MCP server
+    // as their sole tool transport. Do not register native lifecycle hooks:
+    // Codex invokes them for MCP calls too, which would falsely create a
+    // second native-tool recording for an already sealed MCP exchange.
     Ok(())
 }
 
-/// Codex currently exposes local shell and patch calls through its documented
-/// lifecycle hooks. The adapter owns their payload schema and the replay shim;
-/// the runner sees only the completed opaque native sidecar.
-fn hook_command(path: &std::path::Path) -> Result<String, Error> {
-    let value = path
-        .to_str()
-        .ok_or_else(|| Error::Run("Codex native hook path is not valid UTF-8".into()))?;
-    if value.contains(['\0', '\n', '\r']) {
-        return Err(Error::Run("Codex native hook path is unsafe".into()));
-    }
-    Ok(format!("python3 '{}'", value.replace('\'', "'\\\"'\\\"'")))
-}
-
-fn native_hook_configuration(command: &str) -> Result<String, Error> {
-    let quoted = |operation| toml::Value::String(format!("{command} {operation}")).to_string();
-    Ok(format!(
-        "\n[[hooks.PreToolUse]]\nmatcher = \".*\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = {}\n\n[[hooks.PostToolUse]]\nmatcher = \".*\"\n[[hooks.PostToolUse.hooks]]\ntype = \"command\"\ncommand = {}\n\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = {}\n",
-        quoted("pre"),
-        quoted("post"),
-        quoted("finish"),
-    ))
-}
-
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
-    let mut artifacts = super::super::mcp_relay::collect_artifacts(context);
-    let Some(progress) = context.frozen.document("native-tool-progress.json") else {
-        artifacts
-            .errors
-            .push("Codex native tool hook did not publish a completion receipt".into());
-        return artifacts;
-    };
-    let complete = progress
-        .get("complete")
-        .and_then(serde_json::Value::as_bool);
-    let mode = progress.get("mode").and_then(serde_json::Value::as_str);
-    if progress
-        .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-        != Some(1)
-        || complete != Some(true)
-        || !matches!(mode, Some("record") | Some("replay"))
-    {
-        let detail = progress
-            .get("error")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| value.len() <= 160 && !value.chars().any(char::is_control))
-            .map(|value| format!(": {value}"))
-            .unwrap_or_default();
-        artifacts
-            .errors
-            .push(format!("Codex native tool hook did not complete{detail}"));
-        return artifacts;
-    }
-    if mode == Some("record") {
-        let Some(sidecar) = context.frozen.bytes("native-tool-sidecar.jsonl") else {
-            artifacts
-                .errors
-                .push("Codex native tool recording is unavailable".into());
-            return artifacts;
-        };
-        match context
-            .provider_capture
-            .ok_or_else(|| "Codex provider capture binding is unavailable".to_owned())
-            .and_then(|capture| bind_provider_tool_outputs(sidecar, capture))
-        {
-            Ok(sidecar) => artifacts.native_tool_sidecar = Some(sidecar),
-            Err(error) => artifacts.errors.push(error),
-        }
-    }
-    artifacts
+    // Preserve the runner's provider-capture ownership boundary. Codex tape
+    // mode intentionally records tool effects only through the MCP relay.
+    let _ = context.provider_capture;
+    super::super::mcp_relay::collect_artifacts(context)
 }
 
-/// Codex serializes native command results into its provider protocol after a
-/// post-tool hook runs.  Keep that adapter-specific envelope with the sealed
-/// native exchange, so replay can restore the exact hook result without
-/// attempting to reconstruct Codex's private serialization.
+/// Codex serializes native command results into its provider protocol. Keep
+/// that adapter-specific envelope with the sealed native exchange: its replay
+/// shim extracts the completed-shell payload and exit status before Codex
+/// renders a fresh volatile envelope.
+#[cfg(test)]
 fn bind_provider_tool_outputs(
     sidecar: &[u8],
     capture: &std::path::Path,
@@ -431,6 +335,7 @@ fn bind_provider_tool_outputs(
 /// Their results appear as the newly appended cumulative input items of the
 /// next request, so this adapter-local sequence identifies native shell calls
 /// without interpreting generic tape data.
+#[cfg(test)]
 fn provider_function_calls(row: &serde_json::Value) -> Result<(Vec<String>, bool), String> {
     let Some(body) = row
         .pointer("/response/body")
@@ -443,6 +348,12 @@ fn provider_function_calls(row: &serde_json::Value) -> Result<(Vec<String>, bool
         let Some(payload) = line.strip_prefix("data: ") else {
             continue;
         };
+        // OpenRouter terminates streamed Responses exchanges with the standard
+        // SSE sentinel. It carries no provider item, so it is not a malformed
+        // Codex response and must not invalidate an otherwise sealed capture.
+        if payload == "[DONE]" {
+            continue;
+        }
         let value: serde_json::Value = serde_json::from_str(payload)
             .map_err(|_| "Codex provider response is invalid".to_owned())?;
         if value.get("type").and_then(serde_json::Value::as_str)
@@ -466,6 +377,7 @@ fn provider_function_calls(row: &serde_json::Value) -> Result<(Vec<String>, bool
     Ok((calls, true))
 }
 
+#[cfg(test)]
 fn decode_base64(value: &str) -> Result<Vec<u8>, ()> {
     fn digit(byte: u8) -> Result<u8, ()> {
         match byte {
@@ -500,6 +412,7 @@ fn decode_base64(value: &str) -> Result<Vec<u8>, ()> {
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn encode_base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -562,11 +475,21 @@ fn configure(
     } else {
         ""
     };
+    let replay_configuration_path = directory.join("asb-tool-replay.toml");
     let replay_configuration =
-        std::fs::read_to_string(directory.join("asb-tool-replay.toml")).unwrap_or_default();
+        std::fs::read_to_string(&replay_configuration_path).unwrap_or_default();
+    // Current Codex lifecycle hooks can observe native tools but cannot
+    // replace a native function-tool result. When the tape profile is active,
+    // expose only ASB's sealed MCP tool transport, which owns record/replay.
+    // Ordinary live runs retain Codex's complete native tool set.
+    let replay_features = if replay_configuration_path.is_file() {
+        "shell_tool = false\n"
+    } else {
+        ""
+    };
     let mcp_configuration = declared_mcp_configuration(mcp_servers, mcp_tape, run_dir)?;
     let configuration = format!(
-        "model = {model}\nmodel_provider = \"asb_provider\"\nweb_search = \"disabled\"\n\n[features]\napps = false\nplugins = false\nenable_mcp_apps = false\n\n[model_providers.asb_provider]\nname = \"ASB provider\"\nbase_url = {base_url}\n{key}wire_api = \"responses\"\nrequires_openai_auth = false\n\n{mcp_configuration}{replay_configuration}"
+        "model = {model}\nmodel_provider = \"asb_provider\"\nweb_search = \"disabled\"\n\n[features]\napps = false\nplugins = false\nenable_mcp_apps = false\n{replay_features}\n[model_providers.asb_provider]\nname = \"ASB provider\"\nbase_url = {base_url}\n{key}wire_api = \"responses\"\nrequires_openai_auth = false\n\n{mcp_configuration}{replay_configuration}"
     );
     std::fs::write(directory.join("config.toml"), configuration).map_err(|error| {
         Error::Run(format!(
@@ -613,6 +536,21 @@ mod tests {
     use super::*;
     use crate::agents::{AgentAdapter, CollectionContext};
     use std::io::Write;
+
+    #[test]
+    fn provider_function_calls_accepts_the_sse_done_sentinel() {
+        let row = serde_json::json!({
+            "response": {"body": concat!(
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"exec_command\"}}\n",
+                "data: [DONE]\n"
+            )}
+        });
+        assert_eq!(
+            provider_function_calls(&row).unwrap(),
+            (vec!["exec_command".into()], true)
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn native_package_preference_is_owned_here_and_explicit_source_still_wins() {
@@ -931,12 +869,6 @@ mod tests {
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(
-            !args
-                .windows(2)
-                .any(|pair| pair == ["--disable", "shell_tool"]),
-            "the workspace shell must remain available when a provider does not expose MCP tools"
-        );
         let config: toml::Value = toml::from_str(
             &std::fs::read_to_string(root.join("codex/config/config.toml")).unwrap(),
         )
@@ -955,12 +887,11 @@ mod tests {
             Some("mcp-filesystem")
         );
         assert_eq!(config["model"].as_str(), Some("fixture-model"));
-        assert_eq!(
-            config["hooks"]["PreToolUse"][0]["matcher"].as_str(),
-            Some(".*")
-        );
+        assert_eq!(config["features"]["shell_tool"].as_bool(), Some(false));
+        assert!(config.get("hooks").is_none());
         assert!(
-            args.iter()
+            !args
+                .iter()
                 .any(|argument| argument == "--dangerously-bypass-hook-trust")
         );
         assert!(
@@ -1048,7 +979,7 @@ mod tests {
         assert_eq!(rows.lines().count(), 7);
         let capture = serde_json::json!({
             "request": {"body": serde_json::json!({
-                "input": [{"call_id": "call-1", "output": "fixture"}]
+                "input": [{"call_id": "call-1", "output": "Chunk ID: recorded\nWall time: 0.2164 seconds\nProcess exited with code 0\nOriginal token count: 7\nfixture"}]
             }).to_string()}
         });
         // Provider request snapshots can retain the same already-completed
@@ -1115,15 +1046,7 @@ mod tests {
             ),
         );
         assert!(replay_post.status.success());
-        let replay_post: serde_json::Value = serde_json::from_slice(&replay_post.stdout).unwrap();
-        assert_eq!(
-            replay_post["hookSpecificOutput"]["hookEventName"].as_str(),
-            Some("PostToolUse")
-        );
-        assert_eq!(
-            replay_post["hookSpecificOutput"]["updatedMCPToolOutput"].as_str(),
-            Some("fixture")
-        );
+        assert!(replay_post.stdout.is_empty());
         assert!(
             invoke_native_hook(
                 &script, "replay", &sidecar, &progress, &state, "finish", None

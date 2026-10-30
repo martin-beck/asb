@@ -15,6 +15,7 @@ const ADAPTER: TerminalBenchAdapter = TerminalBenchAdapter {
     engine: crate::workloads::adapters::terminal_bench::ORIGINAL_ENGINE,
     version: "fixture-sdk",
     expected_tasks: 1,
+    tasks_root: "tasks",
 };
 #[cfg(unix)]
 #[test]

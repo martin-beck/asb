@@ -68,6 +68,27 @@ class HarborTests(unittest.TestCase):
                 self.assertEqual(calls,["logs",["down","--timeout","2","--volumes","--remove-orphans"]])
                 self.assertTrue(task.loop.is_closed())
 
+    def test_failed_start_removes_empty_owned_compose_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = subject.HarborTask(Mock(), "catalog", "instance", root)
+            task.interrupted = True
+            calls = []
+            class Environment:
+                async def _run_docker_compose_command(self, arguments):
+                    calls.append(arguments)
+            task.environment = Environment()
+            task.journal = Mock()
+            task.client.containers.list.return_value = []
+
+            task.__exit__(RuntimeError, RuntimeError("startup failed"), None)
+
+            self.assertEqual(calls, [["down", "--timeout", "2", "--volumes", "--remove-orphans"]])
+            task.journal.cleanup_images.assert_called_once_with(task.client)
+            task.journal.preserve.assert_not_called()
+            self.assertEqual(json.loads((root / "task-cleanup.json").read_text())["status"], "removed-before-agent")
+            self.assertTrue(task.loop.is_closed())
+
     def test_unavailable_prebuilt_image_uses_original_source_with_one_shared_budget(self):
         with tempfile.TemporaryDirectory() as directory:
             public = Path(directory)
