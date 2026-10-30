@@ -702,7 +702,7 @@ fn respond(
         "tools/list" => json!({"tools":[
             {"name":"list_directory","description":"List direct non-symlink entries inside the benchmark workspace.","inputSchema":{"type":"object","properties":{"path":{"type":"string"}}}},
             {"name":"search_text","description":"Search bounded UTF-8 source text inside the benchmark workspace.","inputSchema":{"type":"object","required":["query"],"properties":{"path":{"type":"string"},"query":{"type":"string"}}}},
-            {"name":"run_command","description":"Run an allowlisted read-only workspace command without a shell. Results are sealed for replay.","inputSchema":{"type":"object","required":["argv"],"properties":{"argv":{"type":"array","items":{"type":"string"}}}}},
+            {"name":"run_command","description":"Run a bounded workspace command. Results and workspace effects are sealed for replay.","inputSchema":{"type":"object","required":["argv"],"properties":{"argv":{"type":"array","items":{"type":"string"}}}}},
             {"name":"read_file","description":"Read a UTF-8 file inside the benchmark workspace.","inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}},
             {"name":"write_file","description":"Create or replace a UTF-8 file inside the benchmark workspace.","inputSchema":{"type":"object","required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}}},
             {"name":"create_directory","description":"Create a directory inside the benchmark workspace.","inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}},
@@ -1199,39 +1199,6 @@ fn run_command(root: &Path, request: &Value) -> Result<Value, Error> {
     }))
 }
 
-fn validate_command(argv: &[&str]) -> Result<(), Error> {
-    if argv.iter().skip(1).any(|argument| {
-        Path::new(argument).is_absolute()
-            || Path::new(argument)
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
-    }) {
-        return Err(Error::Run(
-            "local-tool command argument escapes the workspace".into(),
-        ));
-    }
-    let first = argv.get(1).copied().unwrap_or_default();
-    let allowed = match argv[0] {
-        "git" => matches!(
-            first,
-            "status" | "diff" | "show" | "log" | "grep" | "ls-files" | "rev-parse"
-        ),
-        "rg" | "grep" | "find" | "ls" | "cat" | "sed" | "head" | "tail" | "pwd" => true,
-        "cargo" => matches!(first, "test" | "check" | "fmt"),
-        "pytest" => true,
-        // Bundled Python workloads instruct agents to run their standard
-        // library test suites.  Permit that fixed module invocation alongside
-        // pytest without allowing arbitrary Python source or shell escapes.
-        "python" | "python3" => {
-            argv.get(1) == Some(&"-m") && matches!(argv.get(2), Some(&"pytest") | Some(&"unittest"))
-        }
-        _ => false,
-    };
-    allowed
-        .then_some(())
-        .ok_or_else(|| Error::Run("local-tool command is not allowlisted".into()))
-}
-
 fn required_path(request: &Value) -> Result<&str, Error> {
     request
         .get("path")
@@ -1545,29 +1512,29 @@ mod tests {
     }
 
     #[test]
-    fn read_only_commands_are_bounded_and_reject_escape_or_mutation() {
+    fn commands_are_bounded_and_workspace_effects_are_sealed() {
         let root = std::env::temp_dir().join(format!("asb-mcp-command-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let result = run_command(&root, &json!({"argv":["pwd"]})).unwrap();
+        let (result, effects) = execute(
+            &root,
+            "run_command",
+            &json!({"argv":["sh","-c","printf repaired > changed.txt"]}),
+        )
+        .unwrap();
         assert!(result["success"].as_bool().unwrap());
-        assert!(
-            result["stdout"]
-                .as_str()
-                .unwrap()
-                .contains(root.to_str().unwrap())
+        assert_eq!(
+            effects,
+            vec![Effect::WriteText {
+                path: "changed.txt".into(),
+                content: "repaired".into(),
+            }]
         );
-        assert!(run_command(&root, &json!({"argv":["cat","/etc/passwd"]})).is_err());
-        assert!(run_command(&root, &json!({"argv":["git","commit"]})).is_err());
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn command_policy_allows_standard_library_python_test_discovery_only() {
-        assert!(validate_command(&["python3", "-m", "unittest", "discover"]).is_ok());
-        assert!(validate_command(&["python", "-m", "pytest", "-q"]).is_ok());
-        assert!(validate_command(&["python3", "script.py"]).is_err());
-        assert!(validate_command(&["python3", "-m", "pip", "install"]).is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.join("changed.txt")).unwrap(),
+            "repaired"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
