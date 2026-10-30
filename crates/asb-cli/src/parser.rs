@@ -180,7 +180,13 @@ pub(crate) fn run_with_interactive(
         }
         Some(CommandLine::Setup(options)) => match options.mode {
             Some(SetupMode::Tui) => tui::setup(options.input.as_deref(), options.last, stdout),
-            None => config::setup(options.into(), stdout),
+            None => {
+                if let Some(preset) = options.preset.as_deref() {
+                    config::setup_preset(preset, options.output.clone(), stdout)
+                } else {
+                    config::setup(options.into(), stdout)
+                }
+            }
         },
         Some(CommandLine::Run(options)) => {
             let tape = match tape_selection(TapeFlags::from_run(&options)) {
@@ -759,6 +765,9 @@ struct SetupArgs {
     concurrency: Option<usize>,
     #[arg(long, value_hint = clap::ValueHint::DirPath)]
     workspace: Option<String>,
+    /// Repository-owned preset in the bundled presets directory.
+    #[arg(long, value_name = "PRESET.toml", conflicts_with_all = ["agent", "workload", "trial", "trial_set", "provider", "model", "measure", "concurrency", "workspace"])]
+    preset: Option<String>,
     /// Benchmark TOML for one selection; sweep TOML for repeated selections.
     #[arg(long, value_hint = clap::ValueHint::FilePath)]
     output: Option<String>,
