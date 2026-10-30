@@ -221,9 +221,9 @@ fn native_hook_configuration(command: &str) -> Result<String, Error> {
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
     let mut artifacts = super::super::mcp_relay::collect_artifacts(context);
     let Some(progress) = context.frozen.document("native-tool-progress.json") else {
-        artifacts
-            .errors
-            .push("Codex native tool hook did not publish a completion receipt".into());
+        // Tape runs disable Codex's unreplaceable native tools in favour of
+        // the sealed MCP transport. No native receipt is expected when the
+        // model uses only that replayable route.
         return artifacts;
     };
     let complete = progress
@@ -267,10 +267,10 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
     artifacts
 }
 
-/// Codex serializes native command results into its provider protocol after a
-/// post-tool hook runs.  Keep that adapter-specific envelope with the sealed
-/// native exchange, so replay can restore the exact hook result without
-/// attempting to reconstruct Codex's private serialization.
+/// Codex serializes native command results into its provider protocol. Keep
+/// that adapter-specific envelope with the sealed native exchange: its replay
+/// shim extracts the completed-shell payload and exit status before Codex
+/// renders a fresh volatile envelope.
 fn bind_provider_tool_outputs(
     sidecar: &[u8],
     capture: &std::path::Path,
@@ -568,11 +568,21 @@ fn configure(
     } else {
         ""
     };
+    let replay_configuration_path = directory.join("asb-tool-replay.toml");
     let replay_configuration =
-        std::fs::read_to_string(directory.join("asb-tool-replay.toml")).unwrap_or_default();
+        std::fs::read_to_string(&replay_configuration_path).unwrap_or_default();
+    // Current Codex lifecycle hooks can observe native tools but cannot
+    // replace a native function-tool result. When the tape profile is active,
+    // expose only ASB's sealed MCP tool transport, which owns record/replay.
+    // Ordinary live runs retain Codex's complete native tool set.
+    let replay_features = if replay_configuration_path.is_file() {
+        "shell_tool = false\n"
+    } else {
+        ""
+    };
     let mcp_configuration = declared_mcp_configuration(mcp_servers, mcp_tape, run_dir)?;
     let configuration = format!(
-        "model = {model}\nmodel_provider = \"asb_provider\"\nweb_search = \"disabled\"\n\n[features]\napps = false\nplugins = false\nenable_mcp_apps = false\n\n[model_providers.asb_provider]\nname = \"ASB provider\"\nbase_url = {base_url}\n{key}wire_api = \"responses\"\nrequires_openai_auth = false\n\n{mcp_configuration}{replay_configuration}"
+        "model = {model}\nmodel_provider = \"asb_provider\"\nweb_search = \"disabled\"\n\n[features]\napps = false\nplugins = false\nenable_mcp_apps = false\n{replay_features}\n[model_providers.asb_provider]\nname = \"ASB provider\"\nbase_url = {base_url}\n{key}wire_api = \"responses\"\nrequires_openai_auth = false\n\n{mcp_configuration}{replay_configuration}"
     );
     std::fs::write(directory.join("config.toml"), configuration).map_err(|error| {
         Error::Run(format!(
@@ -952,12 +962,6 @@ mod tests {
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(
-            !args
-                .windows(2)
-                .any(|pair| pair == ["--disable", "shell_tool"]),
-            "the workspace shell must remain available when a provider does not expose MCP tools"
-        );
         let config: toml::Value = toml::from_str(
             &std::fs::read_to_string(root.join("codex/config/config.toml")).unwrap(),
         )
@@ -976,6 +980,7 @@ mod tests {
             Some("mcp-filesystem")
         );
         assert_eq!(config["model"].as_str(), Some("fixture-model"));
+        assert_eq!(config["features"]["shell_tool"].as_bool(), Some(false));
         assert_eq!(
             config["hooks"]["PreToolUse"][0]["matcher"].as_str(),
             Some(".*")
@@ -1069,7 +1074,7 @@ mod tests {
         assert_eq!(rows.lines().count(), 7);
         let capture = serde_json::json!({
             "request": {"body": serde_json::json!({
-                "input": [{"call_id": "call-1", "output": "fixture"}]
+                "input": [{"call_id": "call-1", "output": "Chunk ID: recorded\nWall time: 0.2164 seconds\nProcess exited with code 0\nOriginal token count: 7\nfixture"}]
             }).to_string()}
         });
         // Provider request snapshots can retain the same already-completed
@@ -1136,15 +1141,7 @@ mod tests {
             ),
         );
         assert!(replay_post.status.success());
-        let replay_post: serde_json::Value = serde_json::from_slice(&replay_post.stdout).unwrap();
-        assert_eq!(
-            replay_post["hookSpecificOutput"]["hookEventName"].as_str(),
-            Some("PostToolUse")
-        );
-        assert_eq!(
-            replay_post["hookSpecificOutput"]["updatedMCPToolOutput"].as_str(),
-            Some("fixture")
-        );
+        assert!(replay_post.stdout.is_empty());
         assert!(
             invoke_native_hook(
                 &script, "replay", &sidecar, &progress, &state, "finish", None
