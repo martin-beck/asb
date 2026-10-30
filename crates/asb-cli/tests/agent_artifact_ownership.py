@@ -129,6 +129,29 @@ def native_result_directory(root, index):
     return root / "results" / "benchmark-runs" / f"run-{index:03}"
 
 
+def deferred_collection(run, record):
+    """Read the guest's one sealed adapter-collection receipt.
+
+    Isolated guests cannot safely interpret an adapter's raw evidence after it
+    crosses the process boundary.  They export the generic frozen envelope;
+    the host-side adapter collects the final answer, usage and steps only after
+    it has validated the receipt.  Keep this fixture at that boundary rather
+    than accidentally asserting controller-owned fields in the guest record.
+    """
+    receipts = record["exported_artifacts"]
+    assert len(receipts) == 1, receipts
+    receipt = receipts[0]
+    assert receipt["kind"] == "asb-deferred-adapter-collection", receipt
+    filename = receipt["filename"]
+    assert filename == "artifact-0", receipt
+    artifact = run / "exports" / filename
+    assert artifact.is_file() and not artifact.is_symlink(), artifact
+    payload = json.loads(artifact.read_text())
+    assert payload["schema_version"] == 1, payload
+    assert set(payload) == {"schema_version", "documents", "bytes"}, payload
+    return payload
+
+
 def native(scenario="normal"):
     root, config = project("native-"+scenario)
     config_path = root / "benchmark.toml"
@@ -224,12 +247,25 @@ def guest(scenario="normal"):
             assert (root / "private/runtime-0/agent-state/home/foreign.json").read_text() == '{"answer":"foreign bytes"}'
             assert (root / "private/runtime-0/attempt/mini-swe/trajectory.json").is_symlink()
         return
-    assert records[0]["final_response"] == "src/cli.py src/registry.py lookup", records[0]
-    assert records[0]["token_usage"]["total_tokens"] == 34, records[0]
-    assert records[0]["steps"] == 4, records[0]
+    first = deferred_collection(root / "private/runtime-0/attempt", records[0])
+    # The direct guest result deliberately contains no adapter-interpreted
+    # fields.  Its host controller reconstructs this exact frozen document and
+    # asks the Mini-SWE adapter to derive the public answer, usage and steps.
+    assert records[0]["final_response"] is None, records[0]
+    assert records[0]["token_usage"]["total_tokens"] is None, records[0]
+    assert records[0]["steps"] is None, records[0]
+    trajectory = first["documents"]["trajectory.json"]
+    assert trajectory["messages"][0]["content"] == "src/cli.py src/registry.py lookup", trajectory
+    assert trajectory["messages"][0]["extra"]["response"]["usage"] == {
+        "prompt_tokens": 13, "completion_tokens": 21
+    }, trajectory
+    assert trajectory["info"]["model_stats"]["api_calls"] == 4, trajectory
     assert records[1]["final_response"] is None, ("guest B inherited A answer", records[1])
     assert records[1]["token_usage"]["total_tokens"] is None, "guest B inherited A usage"
     assert records[1]["steps"] is None, "guest B inherited A steps"
+    second = deferred_collection(root / "private/runtime-1/attempt", records[1])
+    assert second["documents"] == {}, "guest B inherited A adapter evidence"
+    assert second["bytes"] == {}, "guest B inherited A opaque evidence"
     if scenario == "cleanup":
         assert "scratch settlement failed" in records[0]["artifact_error"]
         assert records[0]["tree_quiesced"] is True
