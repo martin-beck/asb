@@ -458,9 +458,10 @@ reviewed experiment matrix without downloading a catalog or accepting an
 arbitrary host path.  Run `asb setup --preset harnesstax.toml` from an
 initialized project to install the declared local requirements and write all
 benchmark TOMLs plus one sweep manifest.  The HarnessTax preset records the
-published three harnesses, two 30-task cohorts, concurrency one and three
-repetitions.  It depends on the official `terminal-bench-2.0` workload being
-available.  Its declared 100-step methodology is retained in the preset; use
+published three harnesses, two 30-task cohorts, one shared OpenRouter
+`deepseek/deepseek-v4.1-flash` model, concurrency one and three repetitions.
+It depends on the official `terminal-bench-2.0` workload being available. Its
+declared 100-step methodology is retained in the preset; use
 the separate max-step controller when an execution-enforced cross-client cap is
 required.  `--output FILE` chooses the generated sweep name; all other setup
 selectors conflict with `--preset` so an experiment cannot be silently mixed
