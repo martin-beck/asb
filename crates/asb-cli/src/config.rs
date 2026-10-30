@@ -22,6 +22,19 @@ pub struct SetupOptions {
     pub output: Option<String>,
 }
 
+/// Expand a repository-owned, machine-readable benchmark preset.
+pub fn setup_preset(
+    name: &str,
+    output_path: Option<String>,
+    output: &mut dyn Write,
+) -> Result<(), Error> {
+    let mut options = crate::presets::load(name)?;
+    if output_path.is_some() {
+        options.output = output_path;
+    }
+    matrix::setup(options, output)
+}
+
 /// Write a TOML benchmark configuration from parsed setup options.
 pub fn setup(options: SetupOptions, output: &mut dyn Write) -> Result<(), Error> {
     matrix::setup(options, output)
