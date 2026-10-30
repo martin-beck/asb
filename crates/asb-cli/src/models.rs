@@ -11,10 +11,10 @@ use std::process::{Command, Stdio};
 mod transport;
 
 const MAX_CATALOG: usize = 32 * 1024 * 1024;
-// Cassettes are bounded inputs, but multi-step agent runs can legitimately
-// exceed the former 16 MiB limit (for example Workbuddy/SWE-bench). Keep a
-// finite ceiling while allowing those recorded runs to be replayed.
-const MAX_CASSETTE_BYTES: u64 = 64 * 1024 * 1024;
+// Cassettes are bounded inputs, but multi-step tool-using agent runs can
+// legitimately exceed 64 MiB. Keep this aligned with the bounded cassette
+// evidence policy while admitting recorded SWE-bench-sized tracks.
+const MAX_CASSETTE_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ModelInfo {
@@ -183,7 +183,7 @@ pub fn ensure_replay_model_recorded(cassette: &Path, model: &str) -> Result<(), 
         ))
     })?;
     if metadata.len() > MAX_CASSETTE_BYTES {
-        return Err(Error::Input("replay cassette exceeds 64 MiB".into()));
+        return Err(Error::Input("replay cassette exceeds 256 MiB".into()));
     }
     let text = std::fs::read_to_string(cassette).map_err(|error| {
         Error::Input(format!(
@@ -1063,7 +1063,7 @@ mod tests {
                 ensure_replay_model_recorded(path, "test-model")
                     .unwrap_err()
                     .to_string()
-                    .contains("64 MiB")
+                    .contains("256 MiB")
             );
         });
     }
