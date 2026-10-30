@@ -430,7 +430,7 @@ fn scoped(values: &[String], scope: &str) -> Vec<String> {
     result
 }
 
-fn stamp() -> u128 {
+pub(super) fn stamp() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

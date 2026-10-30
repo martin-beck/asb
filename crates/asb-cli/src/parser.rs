@@ -270,8 +270,28 @@ pub(crate) fn run_with_interactive(
                     "--respect-record-timings requires --replay or --llm-replay; recording always stores response delays",
                 );
             }
+            let generated_preset = match options.preset.as_deref() {
+                Some(preset) => {
+                    match config::setup_preset_for_sweep(preset, options.json, stdout) {
+                        Ok(path) => Some(path),
+                        Err(error) => return fail(stderr, &error.to_string()),
+                    }
+                }
+                None => None,
+            };
+            let path = generated_preset
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .or(options.path.clone())
+                .expect("clap requires either a sweep path or a preset");
+            if generated_preset.is_some()
+                && !options.json
+                && let Err(error) = writeln!(stdout, "Starting generated preset sweep: {}", path)
+            {
+                return fail(stderr, &io_error(error).to_string());
+            }
             sweep::run_with_options(
-                &options.path,
+                &path,
                 sweep::Options {
                     repeat: options.repeat,
                     max_steps: options.max_steps,
@@ -866,11 +886,15 @@ struct RunArgs {
 #[derive(Debug, Args)]
 #[command(
     group(ArgGroup::new("record-direction").args(["record", "llm_record", "tool_record", "mcp_record"]).multiple(true).conflicts_with("replay-direction")),
-    group(ArgGroup::new("replay-direction").args(["replay", "llm_replay", "tool_replay", "mcp_replay"]).multiple(true))
+    group(ArgGroup::new("replay-direction").args(["replay", "llm_replay", "tool_replay", "mcp_replay"]).multiple(true)),
+    group(ArgGroup::new("sweep-input").args(["path", "preset"]).required(true).multiple(false))
 )]
 struct SweepArgs {
-    #[arg(value_name = "SWEEP", value_hint = clap::ValueHint::FilePath)]
-    path: String,
+    #[arg(value_name = "SWEEP", value_hint = clap::ValueHint::FilePath, group = "sweep-input")]
+    path: Option<String>,
+    /// Materialize a repository-owned preset in this initialized project, then run its sweep.
+    #[arg(long, value_name = "PRESET.toml", group = "sweep-input")]
+    preset: Option<String>,
     /// Sequential fresh batches per configuration, at its configured concurrency.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=65533))]
     repeat: Option<u64>,
@@ -1308,5 +1332,22 @@ mod tests {
         ] {
             Cli::try_parse_from(args).expect("continue sweep option parses");
         }
+    }
+
+    #[test]
+    fn sweep_preset_is_an_alternative_to_a_manifest_path() {
+        Cli::try_parse_from(["asb", "sweep", "--preset", "harnesstax.toml"])
+            .expect("preset sweep parses");
+        assert!(Cli::try_parse_from(["asb", "sweep"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "asb",
+                "sweep",
+                "existing-sweep.toml",
+                "--preset",
+                "harnesstax.toml",
+            ])
+            .is_err()
+        );
     }
 }
