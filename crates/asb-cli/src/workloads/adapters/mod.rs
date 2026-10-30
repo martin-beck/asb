@@ -52,6 +52,7 @@ mod swe_rebench;
 mod tau_bench;
 mod terminal_bench;
 mod terminal_bench_1_0;
+mod terminal_bench_2_0;
 mod terminal_bench_2_1;
 
 pub(super) use source_catalog::SourceCatalogAdapter;
@@ -300,6 +301,7 @@ static REGISTRY: &[&dyn WorkloadAdapter] = &[
     &swe_rebench::ADAPTER,
     &tau_bench::ADAPTER,
     &terminal_bench_1_0::ADAPTER,
+    &terminal_bench_2_0::ADAPTER,
     &terminal_bench_2_1::ADAPTER,
 ];
 

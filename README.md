@@ -561,6 +561,7 @@ are:
 | `swe-bench-lite` | 300 test instances | SWE-bench harness |
 | `swe-bench-verified` | 500 test instances | SWE-bench harness |
 | `terminal-bench-1.0` | 80 original tasks | Original Terminal-Bench SDK |
+| `terminal-bench-2.0` | 89 original tasks | Harbor |
 | `terminal-bench-2.1` | 89 original tasks | Harbor |
 
 These integrations run the selected ASB agent/provider/model in isolated task

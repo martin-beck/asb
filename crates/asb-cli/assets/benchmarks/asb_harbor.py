@@ -1,4 +1,4 @@
-"""Original Terminal-Bench 2.1 sessions using Harbor's environment and verifier.
+"""Pinned Terminal-Bench 2.x sessions using Harbor's environment and verifier.
 
 No Harbor agent or model is instantiated. ASB's shared guest driver executes
 the selected client, while the pinned SDK owns environment setup and grading.
@@ -29,7 +29,7 @@ from asb_harness import (quiet_sdk, restore_task_networks, original_networks,
 
 # An SDK package alone is not a workload contract. Additional profiles need
 # pinned catalog provenance, task-shape and reward/retained-grading contracts.
-HARBOR_PROFILES = frozenset({"terminal-bench-2.1"})
+HARBOR_PROFILES = frozenset({"terminal-bench-2.0", "terminal-bench-2.1"})
 
 
 def harbor_profile(workload):

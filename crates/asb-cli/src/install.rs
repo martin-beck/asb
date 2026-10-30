@@ -2055,6 +2055,7 @@ mod tests {
                 "swe-rebench",
                 "tau-bench",
                 "terminal-bench-1.0",
+                "terminal-bench-2.0",
                 "terminal-bench-2.1",
             ]
         );
@@ -2064,7 +2065,7 @@ mod tests {
                 "{:x}",
                 Sha256::digest(serde_json::to_vec(&sources).unwrap())
             ),
-            "3d8a74f1935d9f7ae5bf1bdee27f56b975c0a124633d40b2a934f1763e02b77a",
+            "d54b48513f72dd34cbc6428d045db839cbb14b0130724a6dd91d69584069180e",
             "installation names/order/URLs changed from the original registry"
         );
         let mut names = std::collections::BTreeSet::new();

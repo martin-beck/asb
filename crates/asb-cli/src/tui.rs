@@ -4108,7 +4108,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_external_workload_variant_reopens_before_it_is_installed() {
+    fn saved_terminal_bench_2_0_variant_reopens_before_it_is_installed() {
         let root = std::env::temp_dir().join(format!(
             "asb-tui-preselect-external-variant-{}",
             std::process::id()
@@ -4118,7 +4118,7 @@ mod tests {
         let input = root.join("saved.toml");
         std::fs::write(
             &input,
-            "agent='pi'\nprovider='openrouter'\nmodel='configured-model'\nworkload='terminal-bench-2.1'\ntrial='smoke'\nconcurrency=1\n",
+            "agent='pi'\nprovider='openrouter'\nmodel='configured-model'\nworkload='terminal-bench-2.0'\ntrial='smoke'\nconcurrency=1\n",
         )
         .unwrap();
 
@@ -4127,14 +4127,14 @@ mod tests {
         assert!(
             app.pane(PaneKind::Workloads)
                 .selected_choices()
-                .any(|choice| choice.key.workload() == Some("terminal-bench-2.1"))
+                .any(|choice| choice.key.workload() == Some("terminal-bench-2.0"))
         );
         assert_eq!(
             app.pane(PaneKind::Workloads)
                 .choices
                 .iter()
-                .find(|choice| choice.key.workload() == Some("terminal-bench-2.1"))
-                .expect("registered external variant")
+                .find(|choice| choice.key.workload() == Some("terminal-bench-2.0"))
+                .expect("registered Terminal-Bench 2.0 variant")
                 .availability,
             Availability::Missing
         );
@@ -4145,7 +4145,7 @@ mod tests {
                     matches!(
                         &choice.key,
                         ChoiceKey::ExtensionValue { workload, value, .. }
-                            if workload == "terminal-bench-2.1" && value == "smoke"
+                            if workload == "terminal-bench-2.0" && value == "smoke"
                     )
                 })
         );
@@ -4347,6 +4347,60 @@ mod tests {
         app.refresh_extensions().unwrap();
         assert!(app.panes[PaneKind::Extensions.index()].choices.is_empty());
         assert!(!app.navigation_order().contains(&PaneKind::Extensions));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn installed_terminal_bench_2_0_trials_are_selectable_in_the_tui() {
+        let root =
+            std::env::temp_dir().join(format!("asb-tui-terminal-bench-2-0-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let installed = root.join("workloads/terminal-bench-2.0");
+        for index in 0..89 {
+            std::fs::create_dir_all(installed.join(format!("source/fixture-{index}"))).unwrap();
+        }
+        let tasks = (0..89)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("fixture-{index}"),
+                    "description": "fixture task",
+                    "instruction": "public fixture instruction",
+                    "definition": format!("source/fixture-{index}"),
+                })
+            })
+            .collect::<Vec<_>>();
+        std::fs::write(installed.join("source-manifest.json"), "{}").unwrap();
+        std::fs::write(
+            installed.join("catalog.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "workload": "terminal-bench-2.0",
+                "dataset": {"source":"harbor-framework/terminal-bench-2", "revision":"2fd12b88aafdd04a52c298e3940bcb189f9766d6", "split":"repository-root-tasks"},
+                "sdk": {"package":"harbor", "version":"0.24.0"},
+                "source_sha256": "a".repeat(64),
+                "archive_sha256": "b".repeat(64),
+                "tasks": tasks,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut app = App::new(root.clone(), ProjectConfig::default());
+        let workload = app.panes[PaneKind::Workloads.index()]
+            .choices
+            .iter()
+            .position(|choice| choice.key.workload() == Some("terminal-bench-2.0"))
+            .unwrap();
+        app.panes[PaneKind::Workloads.index()].selected[workload] = true;
+        app.refresh_extensions().unwrap();
+        assert!(
+            app.panes[PaneKind::Extensions.index()]
+                .choices
+                .iter()
+                .any(|choice| {
+                    matches!(&choice.key, ChoiceKey::ExtensionValue { workload, value, .. }
+                if workload == "terminal-bench-2.0" && value == "fixture-0")
+                })
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

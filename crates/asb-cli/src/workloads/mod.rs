@@ -1236,6 +1236,7 @@ mod tests {
                 "terminal-bench",
                 "asb_terminal_bench_1.py",
             ),
+            ("terminal-bench-2.0", "harbor", "asb_harbor.py"),
             ("terminal-bench-2.1", "harbor", "asb_harbor.py"),
         ] {
             let tool = context.tool_root(sdk);
@@ -1268,7 +1269,13 @@ mod tests {
                     .contains("selected agent has no installation adapter")
             );
             assert!(helper.is_file());
-            if sdk != "swebench" || workload == "swe-bench" {
+            // Terminal-Bench 2.0 and 2.1 deliberately share the Harbor helper,
+            // just as the SWE variants share theirs.  Only the first variant is
+            // expected to materialize a previously absent helper.
+            if matches!(
+                workload,
+                "swe-bench" | "terminal-bench-1.0" | "terminal-bench-2.0"
+            ) {
                 assert!(!before);
             }
         }
