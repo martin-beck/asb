@@ -290,6 +290,7 @@ mod tests {
             endpoint: Some("http://127.0.0.1:4242/v1"),
             interface: Some(crate::endpoint::Interface::OpenAiChat),
             prompt: "solve the fixture",
+            max_steps: None,
             native_tool_mode: Some(crate::tape::Mode::Record),
             native_tool: None,
         });

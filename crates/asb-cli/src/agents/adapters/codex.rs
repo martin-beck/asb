@@ -847,6 +847,7 @@ mod tests {
             endpoint: None,
             interface: None,
             prompt: "private fixture prompt",
+            max_steps: None,
             native_tool_mode: None,
             native_tool: None,
         });

@@ -245,6 +245,7 @@ pub(super) fn prepare(
             entry.configuration.clone(),
             repeat,
             runner::RunOptions {
+                max_steps: options.max_steps,
                 json: options.json,
                 show_output: options.show_output,
                 quiet_output: options.quiet_output,

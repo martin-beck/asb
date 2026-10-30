@@ -90,6 +90,10 @@ pub(crate) trait AgentAdapter: Sync {
     /// Supported wire interfaces, in preference order.
     fn supported_endpoints(&self) -> &'static [Support];
     fn command(&self, context: &CommandContext<'_>) -> CommandSpec;
+    /// Whether this adapter turns `--max-steps` into a client-enforced limit.
+    fn supports_max_steps(&self) -> bool {
+        false
+    }
     fn prepare(&self, context: &mut PreparationContext<'_>) -> Result<(), Error>;
     fn supports_native_tool_transport(&self) -> bool {
         false
@@ -260,6 +264,7 @@ pub(crate) struct CommandContext<'a> {
     pub endpoint: Option<&'a str>,
     pub interface: Option<Interface>,
     pub prompt: &'a str,
+    pub max_steps: Option<u64>,
     /// Requested adapter-owned native terminal tape direction.
     pub native_tool_mode: Option<crate::tape::Mode>,
     #[allow(
@@ -475,6 +480,7 @@ pub(super) struct StaticAdapter {
     mcp_servers: bool,
     mcp_relay: bool,
     native_tool_transport: bool,
+    max_steps: bool,
     native_workspace_capsule: Option<(WorkspaceCapsuleCaptureHook, WorkspaceCapsuleApplyHook)>,
     collect: Option<CollectionHook>,
     replay_artifacts: Option<ArtifactCollectionHook>,
@@ -516,6 +522,7 @@ impl StaticAdapter {
             mcp_servers: false,
             mcp_relay: false,
             native_tool_transport: false,
+            max_steps: false,
             native_workspace_capsule: None,
             collect: None,
             replay_artifacts: None,
@@ -580,6 +587,13 @@ impl StaticAdapter {
     /// Declares an adapter-owned, tested consumer for a sealed native sidecar.
     pub(super) const fn with_native_tool_transport(mut self) -> Self {
         self.native_tool_transport = true;
+        self
+    }
+
+    /// Declares that the adapter maps ASB's requested step budget to a
+    /// client-enforced turn limit.
+    pub(super) const fn with_max_steps(mut self) -> Self {
+        self.max_steps = true;
         self
     }
 
@@ -752,6 +766,9 @@ impl AgentAdapter for StaticAdapter {
     }
     fn supports_tool_replay(&self) -> bool {
         self.complete_tool_replay
+    }
+    fn supports_max_steps(&self) -> bool {
+        self.max_steps
     }
     fn supports_mcp_servers(&self) -> bool {
         self.mcp_servers
@@ -1145,6 +1162,7 @@ mod tests {
                 endpoint: Some("http://127.0.0.1:3000/v1"),
                 interface: Some(Interface::AnthropicMessages),
                 prompt: "repair",
+                max_steps: None,
                 native_tool_mode: None,
                 native_tool: None,
             });

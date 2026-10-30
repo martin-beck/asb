@@ -70,8 +70,13 @@ pub(crate) fn describe(
     catalog: Option<&PlanningCatalog>,
 ) -> Result<TaskSelection, String> {
     if let Some(catalog) = catalog {
+        // A reference-smoke adapter may expose an installed task population
+        // without claiming an official dataset/module contract.  Bind the
+        // catalog for selection in that case, while retaining the strict
+        // dataset identity check for modules that do declare one.
         if super::descriptor(workload)
-            .is_some_and(|module| module.dataset.as_ref() != Some(&catalog.dataset))
+            .and_then(|module| module.dataset)
+            .is_some_and(|dataset| dataset != catalog.dataset)
         {
             return Err("installed dataset differs from the owning module descriptor".into());
         }
@@ -163,6 +168,31 @@ mod tests {
             .unwrap_err()
             .contains("descriptor")
         );
+    }
+
+    #[test]
+    fn reference_smoke_catalogs_remain_selectable_without_an_official_binding() {
+        let catalog = PlanningCatalog {
+            requirements: Default::default(),
+            dataset: DatasetIdentity {
+                source: "sierra-research/tau-bench".into(),
+                revision: "a".repeat(40),
+                split: "airline+retail".into(),
+            },
+            task_ids: ["retail-36".into()].into_iter().collect(),
+            evaluation_kind: crate::workloads::KnownEvaluationKind::AdapterSmoke,
+        };
+        let selection = describe(
+            "tau-bench",
+            Some("retail-36"),
+            None,
+            Path::new("."),
+            Some(&catalog),
+        )
+        .unwrap();
+        assert!(selection.module.is_none());
+        assert_eq!(selection.dataset, Some(catalog.dataset));
+        assert_eq!(selection.task_id, "retail-36");
     }
 
     #[test]

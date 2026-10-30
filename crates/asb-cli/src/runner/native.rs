@@ -7,6 +7,7 @@ pub(super) struct NativeRoute<'a> {
     pub provider_credentials: Option<(&'a str, &'a str)>,
     pub tape_url: Option<&'a str>,
     pub tape_mode: Option<tape::Mode>,
+    pub max_steps: Option<u64>,
     pub tool_tape_mode: Option<tape::Mode>,
     pub tool_tape_cassette: Option<&'a Path>,
     pub mcp_tape_mode: Option<tape::Mode>,
@@ -59,6 +60,7 @@ impl NativePlan<'_> {
             provider_credentials,
             tape_url,
             tape_mode,
+            max_steps,
             tool_tape_mode,
             tool_tape_cassette,
             mcp_tape_mode,
@@ -96,6 +98,7 @@ impl NativePlan<'_> {
                 .or(provider_endpoint),
             prompt,
             connection.as_ref().map(|connection| connection.interface),
+            max_steps,
         )?;
         let mut program = specification.program;
         match agents::execution_lookup(&config.agent, project_root, &project_config.tools_dir) {
@@ -365,6 +368,7 @@ mod tests {
                     provider_credentials: None,
                     tape_url: Some("http://127.0.0.1:1"),
                     tape_mode: Some(tape::Mode::Replay),
+                    max_steps: None,
                     tool_tape_mode: None,
                     tool_tape_cassette: None,
                     mcp_tape_mode: None,
@@ -489,6 +493,7 @@ mod tests {
                 provider_credentials: None,
                 tape_url: Some("http://127.0.0.1:1"),
                 tape_mode: Some(tape::Mode::Replay),
+                max_steps: None,
                 tool_tape_mode: None,
                 tool_tape_cassette: None,
                 mcp_tape_mode: None,

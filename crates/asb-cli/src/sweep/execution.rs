@@ -182,6 +182,7 @@ impl Execution<'_> {
             isolated_path.to_string_lossy().as_ref(),
             runner::RunOptions {
                 policy: entry.policy.as_ref(),
+                max_steps: self.options.max_steps,
                 json: self.options.json,
                 show_output: self.options.show_output,
                 quiet_output: self.options.quiet_output,
