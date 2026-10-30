@@ -371,7 +371,16 @@ esac"#,
         if let Some((expected_progress, expected_calls)) = expected_steps {
             assert_eq!(progress, expected_progress);
             let calls = fs::read_to_string(root.join("calls")).unwrap_or_default();
-            assert_eq!(calls.lines().count(), expected_calls, "{calls}");
+            // The shared bounded downloader may make a HEAD and a one-byte
+            // range probe to discover a truthful progress total. They are
+            // best-effort observations, not bpftrace installation stages;
+            // retain the established assertion over the actual transfer,
+            // extraction, configuration, and build operations.
+            let installer_calls = calls
+                .lines()
+                .filter(|line| !line.contains(" --max-time "))
+                .count();
+            assert_eq!(installer_calls, expected_calls, "{calls}");
             assert!(!tool.join("build/src/bpftrace").exists());
             assert!(!tool.join("bin/bpftrace").exists());
             assert!(!tool.join("bpftrace-compatibility.json").exists());
