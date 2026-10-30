@@ -35,6 +35,7 @@ mod output_lock;
 mod owned_fd_exec;
 mod parser;
 mod planning;
+mod presets;
 mod process_cleanup;
 mod process_gate;
 mod process_termination;

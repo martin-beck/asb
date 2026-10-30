@@ -1,0 +1,50 @@
+# HarnessTax (https://harnesstax.github.io/) reproduction matrix.
+# This is a declared methodology preset, not a claim that ASB reproduces the
+# published measurements: exact agent/provider versions and pricing must be
+# recorded with each run.  The `max_steps` field records the study's 100-turn
+# cap; generic runtime enforcement is provided by ASB's separate max-step
+# controller feature.
+schema_version = 1
+agents = ["claude-code", "codex", "pi"]
+providers = ["openrouter"]
+models = [
+  "openrouter=anthropic/claude-fable-5",
+  "openrouter=anthropic/claude-opus-4.8",
+  "openrouter=anthropic/claude-sonnet-4.6",
+  "openrouter=anthropic/claude-haiku-4.5",
+  "openrouter=openai/gpt-5.6-sol",
+  "openrouter=openai/gpt-5.6-luna",
+  "openrouter=moonshotai/kimi-k3",
+]
+concurrency = 1
+repeat = 3
+max_steps = 100
+
+[[workloads]]
+id = "swe-bench-lite"
+trials = [
+  "astropy__astropy-7746", "django__django-11019", "django__django-11564",
+  "django__django-11620", "django__django-11630", "django__django-11815",
+  "django__django-12308", "django__django-12497", "django__django-12747",
+  "django__django-14608", "django__django-15400", "django__django-15819",
+  "matplotlib__matplotlib-24334", "matplotlib__matplotlib-25433", "psf__requests-1963",
+  "pylint-dev__pylint-5859", "pytest-dev__pytest-5103", "pytest-dev__pytest-5495",
+  "scikit-learn__scikit-learn-13241", "scikit-learn__scikit-learn-14983",
+  "sphinx-doc__sphinx-10325", "sphinx-doc__sphinx-8435", "sympy__sympy-11400",
+  "sympy__sympy-14024", "sympy__sympy-14817", "sympy__sympy-15345",
+  "sympy__sympy-16792", "sympy__sympy-20154", "sympy__sympy-20590", "sympy__sympy-23117",
+]
+
+[[workloads]]
+id = "terminal-bench-2.0"
+trials = [
+  "adaptive-rejection-sampler", "build-cython-ext", "build-pmars", "code-from-image",
+  "compile-compcert", "configure-git-webserver", "constraints-scheduling",
+  "feal-linear-cryptanalysis", "financial-document-processor", "fix-code-vulnerability",
+  "fix-git", "gcode-to-text", "headless-terminal", "make-doom-for-mips",
+  "merge-diff-arc-agi-task", "multi-source-data-merger", "nginx-request-logging",
+  "openssl-selfsigned-cert", "path-tracing", "path-tracing-reverse", "pypi-server",
+  "query-optimize", "regex-log", "reshard-c4-data", "sam-cell-seg",
+  "sparql-university", "sqlite-db-truncate", "torch-tensor-parallelism",
+  "train-fasttext", "video-processing",
+]
