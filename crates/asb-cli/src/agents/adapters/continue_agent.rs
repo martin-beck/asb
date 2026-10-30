@@ -138,10 +138,27 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
             context.interface == Some(crate::endpoint::Interface::AnthropicMessages)
                 && !context.anthropic_input_includes_cache,
         )),
-        steps: None,
+        steps: session_steps(&value),
         final_response: None,
         ..Default::default()
     }
+}
+
+/// Continue persists one provider usage object per completed assistant turn.
+/// Treat a missing assistant usage object as incomplete evidence rather than
+/// reporting a partial step count.
+fn session_steps(value: &serde_json::Value) -> Option<u64> {
+    let history = value.get("history")?.as_array()?;
+    let mut steps = 0_u64;
+    for item in history {
+        let message = item.get("message")?;
+        if message.get("role").and_then(|value| value.as_str()) != Some("assistant") {
+            continue;
+        }
+        message.get("usage")?;
+        steps = steps.checked_add(1)?;
+    }
+    (steps > 0).then_some(steps)
 }
 
 fn session_usage(
@@ -322,6 +339,8 @@ mod tests {
         );
         let incomplete = serde_json::json!({"usage":{"promptTokens":9999,"completionTokens":999},"history":[{"message":{"role":"assistant","usage":{"prompt_tokens":10,"completion_tokens":3}}},{"message":{"role":"assistant"}}]});
         assert_eq!(session_usage(&incomplete, false).total_tokens, None);
+        assert_eq!(session_steps(&document), Some(2));
+        assert_eq!(session_steps(&incomplete), None);
     }
 
     #[test]
