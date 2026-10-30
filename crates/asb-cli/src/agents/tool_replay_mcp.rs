@@ -42,6 +42,18 @@ const MAX_COMMAND_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MCP_READ_BYTES: usize = 48 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
 const STAGED_RUNTIME_EXECUTABLE: &str = "/opt/asb-runtime/asb";
+/// Bump only when a provider-visible local-tool definition or its execution
+/// semantics changes. A replay must use the same protocol that shaped its
+/// recorded provider requests; this is not a compatibility normalizer.
+const LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v2-bounded-commands";
+const TOOL_PROTOCOL_ARTIFACT: &str = "tool-protocol";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ToolProtocol {
+    schema_version: u32,
+    protocol: String,
+}
 
 pub(crate) fn entry(args: &[OsString]) -> std::process::ExitCode {
     match run(args) {
@@ -183,6 +195,86 @@ pub(crate) fn launch(
             transcript.into_os_string(),
         ],
     })
+}
+
+/// Bind an adapter's recorded provider request shape to the exact local-tool
+/// protocol before the adapter is allowed to start. This makes a changed
+/// tools/list definition a direct replay admission failure, rather than a
+/// sequence of provider-side 409 mismatches.
+pub(crate) fn prepare_protocol_artifact(
+    context: &PreparationContext<'_>,
+    tape: TapeContext<'_>,
+) -> Result<(), Error> {
+    let path = protocol_artifact_path(context, tape)?;
+    match tape.mode {
+        crate::tape::Mode::Record => {
+            let bytes = protocol_bytes()?;
+            std::fs::write(&path, bytes).map_err(|error| {
+                Error::Run(format!(
+                    "cannot publish local-tool protocol identity: {error}"
+                ))
+            })
+        }
+        crate::tape::Mode::Replay => {
+            let bytes = std::fs::read(&path).map_err(|_| {
+                Error::Run(
+                    "this replay requires its sealed local-tool protocol identity; record the benchmark again before replaying it".into(),
+                )
+            })?;
+            verify_protocol_bytes(&bytes)
+        }
+    }
+}
+
+pub(crate) fn verify_protocol_bytes(bytes: &[u8]) -> Result<(), Error> {
+    let manifest: ToolProtocol = serde_json::from_slice(bytes)
+        .map_err(|_| Error::Run("sealed local-tool protocol identity is malformed".into()))?;
+    if manifest.schema_version != 1 || manifest.protocol != LOCAL_TOOL_PROTOCOL {
+        return Err(Error::Run(
+            "sealed local-tool protocol differs from this ASB build; replay requires the recorded tool definition and execution semantics".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn protocol_bytes() -> Result<Vec<u8>, Error> {
+    serde_json::to_vec(&ToolProtocol {
+        schema_version: 1,
+        protocol: LOCAL_TOOL_PROTOCOL.into(),
+    })
+    .map_err(|_| Error::Run("cannot encode local-tool protocol identity".into()))
+}
+
+fn protocol_artifact_path(
+    context: &PreparationContext<'_>,
+    tape: TapeContext<'_>,
+) -> Result<PathBuf, Error> {
+    match tape.mode {
+        crate::tape::Mode::Record => Ok(context
+            .run_dir
+            .join("tool-replay")
+            .join(format!("{TOOL_PROTOCOL_ARTIFACT}.json"))),
+        crate::tape::Mode::Replay => {
+            let name = tape
+                .cassette
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    Error::Run("replay cassette has no valid private filename".into())
+                })?;
+            let suffix = name
+                .strip_prefix("replay")
+                .and_then(|suffix| suffix.strip_suffix(".jsonl"))
+                .ok_or_else(|| {
+                    Error::Run("replay cassette has an invalid private filename".into())
+                })?;
+            let parent = tape
+                .cassette
+                .parent()
+                .ok_or_else(|| Error::Run("replay cassette has no private directory".into()))?;
+            Ok(parent.join(format!("{TOOL_PROTOCOL_ARTIFACT}{suffix}.json")))
+        }
+    }
 }
 
 /// Add a run-private, payload-free MCP progress trace to an otherwise normal
@@ -2082,5 +2174,16 @@ mod tests {
         .to_string();
         assert!(error.contains("sealed local-tool transcript"), "{error}");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn protocol_identity_rejects_changed_provider_visible_tool_definitions() {
+        verify_protocol_bytes(&protocol_bytes().unwrap()).unwrap();
+        let error = verify_protocol_bytes(
+            br#"{"schema_version":1,"protocol":"asb-local-tools-v1-read-only"}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("differs from this ASB build"), "{error}");
     }
 }

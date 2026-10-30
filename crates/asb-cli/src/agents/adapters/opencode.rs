@@ -1,4 +1,7 @@
-use super::{CommandContext, CommandSpec, PreparationContext, PromptDelivery, StaticAdapter};
+use super::{
+    AgentArtifacts, CollectionContext, CommandContext, CommandSpec, PreparationContext,
+    PromptDelivery, StaticAdapter,
+};
 use crate::{Error, install::Recipe};
 
 // OpenCode's Bedrock integration currently resolves two AWS SDK entries whose
@@ -36,11 +39,19 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_complete_tool_replay(prepare_tool_replay)
-.with_artifact_specs(&[super::super::ArtifactSpec {
-    namespace: "tool-replay",
-    filename: "local-tools.jsonl",
-    format: super::super::ArtifactFormat::JsonLines,
-}])
+.with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "tool-replay",
+        filename: "local-tools.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "tool-replay",
+        filename: "tool-protocol.json",
+        format: super::super::ArtifactFormat::Json,
+    },
+])
+.with_collection(collect)
 .with_output_usage(output_usage)
 .with_step_count(step_count)
 .with_state_environment_vars(&[
@@ -171,6 +182,7 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
+    super::super::tool_replay_mcp::prepare_protocol_artifact(context, tape)?;
     let launch = super::super::tool_replay_mcp::launch(context, tape)?;
     let command = std::iter::once(launch.program)
         .chain(launch.args.into_iter().map(std::path::PathBuf::from))
@@ -187,6 +199,23 @@ fn prepare_tool_replay(
             .map_err(|_| Error::Run("cannot encode OpenCode local-tool command".into()))?,
     );
     Ok(())
+}
+
+fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
+    let mut artifacts = AgentArtifacts::default();
+    if let Some(bytes) = context.frozen.bytes("tool-protocol.json") {
+        if let Err(error) = super::super::tool_replay_mcp::verify_protocol_bytes(bytes) {
+            artifacts.errors.push(error.to_string());
+        } else {
+            artifacts
+                .sealed_artifacts
+                .push(super::super::SealedArtifact {
+                    kind: "tool-protocol".into(),
+                    bytes: bytes.to_vec(),
+                });
+        }
+    }
+    artifacts
 }
 
 fn tool_replay(context: &PreparationContext<'_>) -> Result<Option<Vec<String>>, Error> {
