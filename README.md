@@ -12,6 +12,7 @@ asb workload install WORKLOAD|SOURCE.txt|URL
 asb workload tui
 asb provider models [PROVIDER] [--free]
 asb setup tui
+asb setup --preset PRESET.toml [--output FILE]
 asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--trial INSTANCE] [--trial-set FILE] [--workspace DIR] [--output FILE]
 asb run CONFIG [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette FILE] [--json] [--measurements DIR]
 asb sweep SWEEP.toml [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette-root DIR] [--respect-record-timings] [--resume] [--json]
@@ -419,6 +420,21 @@ in the configured workload directory. `--workload all` includes bundled,
 registered external and locally defined workloads; it does not install missing
 workloads or bypass their trial-selection requirements. Paths (`--output`,
 `--workspace`) and the single numeric `--concurrency` are not selection options.
+
+### Reproducible setup presets
+
+Repository-owned presets under `presets/` are compiled into ASB and expand a
+reviewed experiment matrix without downloading a catalog or accepting an
+arbitrary host path.  Run `asb setup --preset harnesstax.toml` from an
+initialized project to install the declared local requirements and write all
+benchmark TOMLs plus one sweep manifest.  The HarnessTax preset records the
+published three harnesses, two 30-task cohorts, concurrency one and three
+repetitions.  It depends on the official `terminal-bench-2.0` workload being
+available.  Its declared 100-step methodology is retained in the preset; use
+the separate max-step controller when an execution-enforced cross-client cap is
+required.  `--output FILE` chooses the generated sweep name; all other setup
+selectors conflict with `--preset` so an experiment cannot be silently mixed
+with ad-hoc selections.
 
 `asb run CONFIG --llm-record` runs fresh isolated workload executions through ASB's
 built-in local tape proxy and publishes a versioned ZIP cassette (by default
