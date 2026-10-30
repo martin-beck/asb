@@ -89,6 +89,11 @@ pub(crate) struct ReplayInput {
     /// Historical or provider-only recordings legitimately omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_tools: Option<PathBuf>,
+    /// Adapter-owned local-tool protocol identity staged beside its selected
+    /// replay track. It lets a client reject a changed tool definition before
+    /// emitting provider requests that can never match the recording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_protocol: Option<PathBuf>,
     /// A verified deterministic-execution manifest staged beside its replay
     /// track. Adapters consume it only when they selected that extension.
     #[serde(default, skip_serializing_if = "Option::is_none")]

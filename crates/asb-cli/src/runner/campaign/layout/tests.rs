@@ -166,6 +166,7 @@ fn plan(mode: ExecutionMode, concurrency: usize, repeat: u64, measured: bool) ->
                 source: format!("/project/legacy-{replica}.jsonl").into(),
                 private: format!("inputs/recording-{}.jsonl", replica + 1).into(),
                 local_tools: None,
+                tool_protocol: None,
                 deterministic_manifest: None,
                 native_trace: None,
                 native_tool: None,

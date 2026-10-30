@@ -163,6 +163,7 @@ impl Prepared {
                     sha256,
                     complete,
                     local_tools,
+                    tool_protocol,
                     deterministic_manifest,
                     native_trace,
                     native_tool,
@@ -202,6 +203,11 @@ impl Prepared {
                         track
                             .artifacts
                             .iter()
+                            .any(|artifact| artifact.kind == "tool-protocol")
+                            .then(|| PathBuf::from(format!("inputs/tool-protocol-{id}.json"))),
+                        track
+                            .artifacts
+                            .iter()
                             .any(|artifact| artifact.kind == "determinism-manifest")
                             .then(|| {
                                 PathBuf::from(format!("inputs/determinism-manifest-{id}.json"))
@@ -233,6 +239,7 @@ impl Prepared {
                         None,
                         None,
                         None,
+                        None,
                         Vec::new(),
                     )
                 };
@@ -249,6 +256,7 @@ impl Prepared {
                     source: path,
                     private: PathBuf::from(format!("inputs/track-{id}.jsonl")),
                     local_tools,
+                    tool_protocol,
                     deterministic_manifest,
                     native_trace,
                     native_tool,
@@ -288,6 +296,13 @@ impl Prepared {
                     .read_artifact(input.track.expect("selected bundle track"), "local-tools")
                     .map_err(input_error)?;
                 publish_bytes(&root.join(local_tools), &bytes)?;
+            }
+            if let Some(protocol) = &input.tool_protocol {
+                let bytes = self
+                    .source
+                    .read_artifact(input.track.expect("selected bundle track"), "tool-protocol")
+                    .map_err(input_error)?;
+                publish_bytes(&root.join(protocol), &bytes)?;
             }
             if let Some(manifest) = &input.deterministic_manifest {
                 let bytes = self
@@ -446,6 +461,7 @@ pub(super) fn stage_selected(
         };
         fs::hard_link(root.join(&input.private), &destination).map_err(crate::io_error)?;
         stage_local_tools(root, input, &destination, slot.replica, concurrency)?;
+        stage_tool_protocol(root, input, &destination)?;
         stage_determinism_manifest(root, input, &destination, slot.replica, concurrency)?;
         stage_native_trace(root, input, &destination, slot.replica, concurrency)?;
         stage_mcp_relays(root, input, &destination)?;
@@ -515,6 +531,14 @@ fn stage_local_tools(
     };
     let destination = replay_sidecar(destination, "local-tools", "jsonl")?;
     fs::hard_link(root.join(local_tools), destination).map_err(crate::io_error)
+}
+
+fn stage_tool_protocol(root: &Path, input: &ReplayInput, destination: &Path) -> Result<(), Error> {
+    let Some(protocol) = &input.tool_protocol else {
+        return Ok(());
+    };
+    let destination = replay_sidecar(destination, "tool-protocol", "json")?;
+    fs::hard_link(root.join(protocol), destination).map_err(crate::io_error)
 }
 
 /// Keep sidecar names coupled to the precise replay payload they describe.
@@ -603,6 +627,7 @@ mod tests {
             source: PathBuf::from("sealed.asb.zip"),
             private: PathBuf::from("inputs/track-7.jsonl"),
             local_tools: Some(PathBuf::from("inputs/local-tools-7.jsonl")),
+            tool_protocol: None,
             deterministic_manifest: None,
             native_trace: None,
             native_tool: None,
@@ -634,6 +659,7 @@ mod tests {
             source: root.join("source"),
             private: PathBuf::from("inputs/track-1.jsonl"),
             local_tools: Some(PathBuf::from("inputs/local-tools-1.jsonl")),
+            tool_protocol: None,
             deterministic_manifest: None,
             native_trace: None,
             native_tool: None,
@@ -651,6 +677,37 @@ mod tests {
     }
 
     #[test]
+    fn tool_protocol_identity_is_linked_beside_its_selected_replay_track() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-replay-tool-protocol-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        fs::create_dir_all(root.join("inputs")).unwrap();
+        fs::create_dir_all(root.join("batch")).unwrap();
+        fs::write(root.join("inputs/tool-protocol-1.json"), b"{}\n").unwrap();
+        let input = ReplayInput {
+            complete: Some(true),
+            track: Some(1),
+            source: root.join("source"),
+            private: PathBuf::from("inputs/track-1.jsonl"),
+            local_tools: None,
+            tool_protocol: Some(PathBuf::from("inputs/tool-protocol-1.json")),
+            deterministic_manifest: None,
+            native_trace: None,
+            native_tool: None,
+            mcp_relays: Vec::new(),
+            bytes: 3,
+            sha256: crate::cassette::digest(b"{}\n"),
+        };
+        stage_tool_protocol(&root, &input, &root.join("batch/replay.jsonl")).unwrap();
+        assert_eq!(
+            fs::read(root.join("batch/tool-protocol.json")).unwrap(),
+            b"{}\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn deterministic_manifest_is_linked_beside_its_selected_replay_track() {
         let root =
             std::env::temp_dir().join(format!("asb-replay-determinism-{}", std::process::id()));
@@ -664,6 +721,7 @@ mod tests {
             source: PathBuf::from("sealed.asb.zip"),
             private: PathBuf::from("inputs/track-7.jsonl"),
             local_tools: None,
+            tool_protocol: None,
             deterministic_manifest: Some(PathBuf::from("inputs/determinism-manifest-7.json")),
             native_trace: None,
             native_tool: None,
@@ -708,6 +766,7 @@ mod tests {
             source: PathBuf::from("sealed.asb.zip"),
             private: PathBuf::from("inputs/track-7.jsonl"),
             local_tools: None,
+            tool_protocol: None,
             deterministic_manifest: None,
             native_trace: Some(PathBuf::from("inputs/native-trace-7.jsonl")),
             native_tool: None,
@@ -746,6 +805,7 @@ mod tests {
             source: PathBuf::from("sealed.asb.zip"),
             private: PathBuf::from("inputs/track-7.jsonl"),
             local_tools: None,
+            tool_protocol: None,
             deterministic_manifest: None,
             native_trace: Some(PathBuf::from("inputs/native-trace-7.jsonl")),
             native_tool: None,
@@ -780,6 +840,7 @@ mod tests {
             source: PathBuf::from("sealed.asb.zip"),
             private: PathBuf::from("inputs/track-7.jsonl"),
             local_tools: None,
+            tool_protocol: None,
             deterministic_manifest: None,
             native_trace: None,
             native_tool: None,
