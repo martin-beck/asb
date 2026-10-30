@@ -103,6 +103,8 @@ mod tests {
     fn harnesstax_is_a_bounded_machine_readable_matrix() {
         let preset = load("harnesstax.toml").expect("preset loads");
         assert_eq!(preset.agent, ["claude-code", "codex", "pi"]);
+        assert_eq!(preset.provider, ["openrouter"]);
+        assert_eq!(preset.model, ["openrouter=deepseek/deepseek-v4.1-flash"]);
         assert_eq!(preset.workload, ["swe-bench-lite", "terminal-bench-2.0"]);
         assert_eq!(preset.trial.len(), 60);
         assert_eq!(preset.concurrency, Some(1));
