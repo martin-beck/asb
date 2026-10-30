@@ -192,22 +192,26 @@ impl WorkloadAdapter for LiveCodeBenchAdapter {
         );
         let project_root = context.project_root.to_path_buf();
         let task_id = task.id.clone();
-        Ok(Box::new(FileSession::new_dynamic(
-            context,
-            task.prompt.clone(),
-            Box::new(move |_, _, response| {
-                evaluate(
-                    &tool,
-                    &catalog_path,
-                    &source,
-                    &project_root,
-                    &task_id,
-                    response,
-                )
-            }),
-            KnownEvaluationKind::UpstreamHarness,
-            None,
-        )))
+        let dataset = catalog_data.dataset.clone();
+        Ok(Box::new(
+            FileSession::new_dynamic(
+                context,
+                task.prompt.clone(),
+                Box::new(move |_, _, response| {
+                    evaluate(
+                        &tool,
+                        &catalog_path,
+                        &source,
+                        &project_root,
+                        &task_id,
+                        response,
+                    )
+                }),
+                KnownEvaluationKind::UpstreamHarness,
+                None,
+            )
+            .with_dataset(dataset),
+        ))
     }
 
     fn prepare_source(&self, _workloads: &Path, _workspace: &Path) -> Result<usize, String> {

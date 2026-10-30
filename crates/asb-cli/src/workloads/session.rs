@@ -557,6 +557,15 @@ impl FileSession {
         )
     }
 
+    /// Bind this adapter-owned session to the installed dataset selected by the
+    /// workload catalog.  Dynamic evaluators need this just as much as remote
+    /// sessions: recordings must not mix a module descriptor for one dataset
+    /// with a task identity that omits it.
+    pub fn with_dataset(mut self, dataset: DatasetIdentity) -> Self {
+        self.invocation.identity.dataset = Some(dataset);
+        self
+    }
+
     fn with_evaluator(
         context: &PreparationContext<'_>,
         prompt: String,
@@ -950,6 +959,43 @@ mod tests {
         assert_eq!(session.baseline_passed(), Some(false));
         assert_eq!(session.evaluate("accepted"), Ok(Evaluation::Passed));
         assert_eq!(session.invocation().identity.task_id, "task-1");
+        assert!(session.invocation().identity.dataset.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dynamic_session_can_bind_its_catalog_dataset() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-dynamic-dataset-{}",
+            TaskIdentity::local("fixture", None).attempt_id
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let context = PreparationContext {
+            verify_initial_material: false,
+            budgets: Default::default(),
+            on_allocation: None,
+            workload: "adapter-fixture",
+            trial: Some("task-1"),
+            trial_set: None,
+            workload_directory: &root,
+            workspace: &root,
+            project_root: &root,
+            project_config: &crate::project::ProjectConfig::default(),
+        };
+        let dataset = DatasetIdentity {
+            source: "fixture/source".into(),
+            revision: "revision".into(),
+            split: "test".into(),
+        };
+        let session = FileSession::new_dynamic(
+            &context,
+            "answer".into(),
+            Box::new(|_, _, _| Ok(Evaluation::Passed)),
+            super::super::KnownEvaluationKind::UpstreamHarness,
+            Some(false),
+        )
+        .with_dataset(dataset.clone());
+        assert_eq!(session.invocation().identity.dataset, Some(dataset));
         let _ = std::fs::remove_dir_all(root);
     }
 }
