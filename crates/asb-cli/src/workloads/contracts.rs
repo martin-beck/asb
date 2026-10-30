@@ -204,6 +204,7 @@ mod tests {
             "swe-bench-lite",
             "swe-bench-verified",
             "terminal-bench-1.0",
+            "terminal-bench-2.0",
             "terminal-bench-2.1",
         ] {
             let profile = super::super::descriptor(id).unwrap();

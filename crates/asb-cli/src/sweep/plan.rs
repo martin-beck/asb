@@ -512,6 +512,7 @@ mod tests {
             ("swe-bench-lite", 300),
             ("swe-bench-verified", 500),
             ("terminal-bench-1.0", 80),
+            ("terminal-bench-2.0", 89),
             ("terminal-bench-2.1", 89),
         ];
         let mut manifest = SweepFile {
