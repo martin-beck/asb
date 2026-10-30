@@ -1,7 +1,7 @@
 //! Offline HTML/SVG reports for benchmark configurations and sweeps.
 
-use crate::Error;
 use crate::benchmark_paths::{benchmark_stem, checked_benchmark_reference};
+use crate::{Error, http_server};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -106,6 +106,32 @@ pub fn run(path: &str, output: &mut dyn Write) -> Result<(), Error> {
     generate(path, output).map(|_| ())
 }
 
+/// Generate a report while retaining normal run/sweep output discipline.
+///
+/// Automatic comparison must still tell the user where the shareable report
+/// and Perfetto views are.  The quiet execution paths deliberately omit the
+/// chart summary, backups, and installer chatter, so relay only those stable
+/// public links.
+pub(crate) fn run_links(path: &str, output: &mut dyn Write) -> Result<(), Error> {
+    let mut generated = Vec::new();
+    generate(path, &mut generated)?;
+    write_public_links(&generated, output)
+}
+
+fn write_public_links(generated: &[u8], output: &mut dyn Write) -> Result<(), Error> {
+    let generated = std::str::from_utf8(generated)
+        .map_err(|error| Error::Io(format!("comparison emitted invalid UTF-8: {error}")))?;
+    for line in generated.lines().filter(|line| {
+        line.starts_with("Result report: ")
+            || line.starts_with("Perfetto trace download: ")
+            || line.starts_with("Perfetto trace file: ")
+            || line.starts_with("Perfetto UI: ")
+    }) {
+        writeln!(output, "{line}").map_err(crate::io_error)?;
+    }
+    Ok(())
+}
+
 /// Generate an offline report for either a benchmark or a sweep manifest.
 pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Error> {
     let loaded = source::load(path)?;
@@ -116,6 +142,14 @@ pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Er
     let publisher = publication::Publisher::begin(&prepared.data.request.comparison_dir, files)?;
     rendering::render(publisher.stage(), &prepared)?;
     let published = publisher.commit()?;
+    let traces = prepared
+        .data
+        .rows
+        .iter()
+        .flat_map(|benchmark| benchmark.artifact_sources.iter())
+        .filter_map(|(name, source)| name.ends_with(".perfetto-trace").then_some(source.clone()))
+        .collect();
+    let server = http_server::start_for_report(&published.report, traces, output)?;
     writeln!(
         output,
         "Compared {} benchmarks; wrote {} graphs, report.html, and {}",
@@ -134,24 +168,26 @@ pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Er
     writeln!(
         output,
         "Result report: {}",
-        local_file_url(&published.report)
+        server.report_url(&published.report)
     )
     .map_err(|error| published.confirmation_error(error))?;
     for (label, href) in collector_report_links(&prepared) {
         writeln!(output, "{label}: {href}").map_err(|error| published.confirmation_error(error))?;
     }
-    Ok(published.report)
-}
-
-fn local_file_url(path: &Path) -> String {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let path = path.to_string_lossy().replace('\\', "/");
-    let path = percent_encode_path(&path);
-    if path.starts_with('/') {
-        format!("file://{path}")
-    } else {
-        format!("file:///{path}")
+    for trace in server.traces() {
+        if let Some(url) = server.trace_url(trace) {
+            writeln!(output, "Perfetto trace download: {url}")
+                .map_err(|error| published.confirmation_error(error))?;
+        } else {
+            writeln!(output, "Perfetto trace file: {}", trace.display())
+                .map_err(|error| published.confirmation_error(error))?;
+        }
     }
+    if !server.traces().is_empty() {
+        writeln!(output, "Perfetto UI: https://ui.perfetto.dev/")
+            .map_err(|error| published.confirmation_error(error))?;
+    }
+    Ok(published.report)
 }
 
 fn collector_report_links(prepared: &PreparedReport) -> BTreeSet<(String, String)> {
@@ -161,29 +197,9 @@ fn collector_report_links(prepared: &PreparedReport) -> BTreeSet<(String, String
         .iter()
         .flat_map(|benchmark| benchmark.artifact_sources.iter())
         .flat_map(|(name, source)| crate::collectors::report_artifact_links(name, source))
+        .filter(|link| link.label != "Perfetto UI")
         .map(|link| (link.label.to_owned(), link.href))
         .collect()
-}
-
-fn percent_encode(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(char::from(byte));
-            }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    encoded
-}
-
-fn percent_encode_path(value: &str) -> String {
-    value
-        .split('/')
-        .map(percent_encode)
-        .collect::<Vec<_>>()
-        .join("/")
 }
 /// Invoke the platform opener without a shell; report paths are never commands.
 pub(crate) fn open_report(path: &Path) -> Result<(), Error> {
@@ -487,7 +503,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             .filter(|link| link.label == "Perfetto UI")
             .map(|link| {
                 format!(
-                    "<p class=\"perfetto-link\"><strong>Perfetto trace</strong><a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open in Perfetto UI</a></p>",
+                    "<p class=\"perfetto-link\"><strong>Perfetto trace</strong><a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open Perfetto UI and upload this trace</a></p>",
                     escape(&link.href),
                 )
             })
@@ -1202,9 +1218,24 @@ mod pipeline_tests;
 mod tests {
     use super::GraphNames;
     use super::run;
+    use super::write_public_links;
     use serde_json::{Value, json};
     use std::collections::{BTreeMap, BTreeSet};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn quiet_comparison_relays_only_shareable_links() {
+        let mut output = Vec::new();
+        write_public_links(
+            b"Installing project-local HTTP report server...\nCompared 1 benchmarks\nResult report: http://198.51.100.7:4000/report.html\nPerfetto trace download: http://198.51.100.7:4000/traces/0.perfetto-trace\nPerfetto UI: https://ui.perfetto.dev/\n",
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "Result report: http://198.51.100.7:4000/report.html\nPerfetto trace download: http://198.51.100.7:4000/traces/0.perfetto-trace\nPerfetto UI: https://ui.perfetto.dev/\n"
+        );
+    }
 
     #[test]
     fn dispatch_provenance_is_not_a_numeric_measurement() {
@@ -1492,7 +1523,12 @@ mod tests {
         assert!(!report.contains("run.json"));
         assert!(report.contains("Perfetto metric SVG"));
         assert!(report.contains("<p class=\"perfetto-link\"><strong>Perfetto trace</strong>"));
-        assert_eq!(report.matches("Open in Perfetto UI").count(), 1);
+        assert_eq!(
+            report
+                .matches("Open Perfetto UI and upload this trace")
+                .count(),
+            1
+        );
         assert!(
             report.find("Perfetto trace").unwrap() < report.find("Run artifacts").unwrap(),
             "the dedicated Perfetto link precedes the generic artifact disclosure"
@@ -1821,7 +1857,9 @@ mod tests {
         run(root.join("sweep.toml").to_str().unwrap(), &mut output).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("Result report: file://"));
-        assert!(output.contains("Perfetto UI: https://ui.perfetto.dev/#!/?url=file%3A%2F%2F"));
+        assert!(output.contains("Perfetto trace file: "));
+        assert!(output.contains("Perfetto UI: https://ui.perfetto.dev/"));
+        assert!(!output.contains("#!/?url="));
         let comparison: Value = serde_json::from_str(
             &std::fs::read_to_string(root.join("results/sweep-comparison/comparison.json"))
                 .unwrap(),
@@ -1857,8 +1895,9 @@ mod tests {
         assert!(html.contains("Not measured"));
         assert!(html.contains("100.0% (1/1)"));
         assert!(html.contains("No upstream task resolution was measured"));
-        assert!(html.contains("Open in Perfetto UI"));
-        assert!(html.contains("https://ui.perfetto.dev/#!/?url=file%3A%2F%2F"));
+        assert!(html.contains("Open Perfetto UI and upload this trace"));
+        assert!(html.contains("https://ui.perfetto.dev/\""));
+        assert!(!html.contains("#!/?url="));
         let _ = std::fs::remove_dir_all(root);
     }
     #[test]

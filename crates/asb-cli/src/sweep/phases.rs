@@ -627,8 +627,10 @@ impl SettledSweep<'_> {
         }
         #[cfg(all(test, unix))]
         tests::before_comparison(Path::new(&source));
-        let comparison_error = if options.json || options.quiet_output || output.failed() {
+        let comparison_error = if options.json || output.failed() {
             compare::run(&source, &mut std::io::sink()).err()
+        } else if options.quiet_output {
+            compare::run_links(&source, output).err()
         } else {
             compare::run(&source, output).err()
         };
