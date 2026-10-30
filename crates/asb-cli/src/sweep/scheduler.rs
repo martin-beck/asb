@@ -628,4 +628,29 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn bounded_failure_budget_stops_new_claims_after_the_limit() {
+        let failed = AtomicUsize::new(0);
+        let mut started = Vec::new();
+        run_with_resources_stopping_on(
+            Scheduling::new(1, Some(1), &[1; 4]).unwrap(),
+            &[1; 4],
+            None,
+            &[crate::planning::Resources::default(); 4],
+            |index| Ok(index < 2),
+            |success| !success && failed.fetch_add(1, Ordering::SeqCst) + 1 > 1,
+            |event| {
+                if let Event::Started(index) = event {
+                    started.push(index);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        // One failure is tolerated; the second is observed and prevents only
+        // subsequent claims.
+        assert_eq!(started, vec![0, 1, 2, 3]);
+        assert_eq!(failed.load(Ordering::SeqCst), 2);
+    }
 }
