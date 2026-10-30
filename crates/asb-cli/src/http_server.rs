@@ -532,4 +532,22 @@ mod tests {
         );
         assert!(!args.iter().any(|argument| argument == "-v"));
     }
+
+    #[test]
+    fn report_urls_use_files_until_the_explicit_server_is_available() {
+        let report = Path::new("/tmp/asb-report.html");
+        let local = ServerInfo {
+            base: None,
+            traces: Vec::new(),
+        };
+        assert_eq!(local.report_url(report), "file:///tmp/asb-report.html");
+        let served = ServerInfo {
+            base: Some("http://203.0.113.10:39000".into()),
+            traces: Vec::new(),
+        };
+        assert_eq!(
+            served.report_url(report),
+            "http://203.0.113.10:39000/report.html"
+        );
+    }
 }

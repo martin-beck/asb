@@ -106,6 +106,30 @@ pub fn run(path: &str, output: &mut dyn Write) -> Result<(), Error> {
     generate(path, output).map(|_| ())
 }
 
+/// Generate a report while retaining normal run/sweep output discipline.
+///
+/// Automatic comparison must still tell the user where the shareable report
+/// and Perfetto views are.  The quiet execution paths deliberately omit the
+/// chart summary, backups, and installer chatter, so relay only those stable
+/// public links.
+pub(crate) fn run_links(path: &str, output: &mut dyn Write) -> Result<(), Error> {
+    let mut generated = Vec::new();
+    generate(path, &mut generated)?;
+    write_public_links(&generated, output)
+}
+
+fn write_public_links(generated: &[u8], output: &mut dyn Write) -> Result<(), Error> {
+    let generated = std::str::from_utf8(generated)
+        .map_err(|error| Error::Io(format!("comparison emitted invalid UTF-8: {error}")))?;
+    for line in generated
+        .lines()
+        .filter(|line| line.starts_with("Result report: ") || line.starts_with("Perfetto UI: "))
+    {
+        writeln!(output, "{line}").map_err(crate::io_error)?;
+    }
+    Ok(())
+}
+
 /// Generate an offline report for either a benchmark or a sweep manifest.
 pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Error> {
     let loaded = source::load(path)?;
@@ -1247,9 +1271,24 @@ mod pipeline_tests;
 mod tests {
     use super::GraphNames;
     use super::run;
+    use super::write_public_links;
     use serde_json::{Value, json};
     use std::collections::{BTreeMap, BTreeSet};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn quiet_comparison_relays_only_shareable_links() {
+        let mut output = Vec::new();
+        write_public_links(
+            b"Installing project-local HTTP report server...\nCompared 1 benchmarks\nResult report: http://198.51.100.7:4000/report.html\nPerfetto UI: https://ui.perfetto.dev/example\n",
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "Result report: http://198.51.100.7:4000/report.html\nPerfetto UI: https://ui.perfetto.dev/example\n"
+        );
+    }
 
     #[test]
     fn dispatch_provenance_is_not_a_numeric_measurement() {

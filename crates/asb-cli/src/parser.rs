@@ -247,7 +247,7 @@ pub(crate) fn run_with_interactive(
                 } else if options.verbose {
                     super::compare::generate(&report_path, stdout).map(|_| ())
                 } else {
-                    super::compare::generate(&report_path, &mut std::io::sink()).map(|_| ())
+                    super::compare::run_links(&report_path, stdout)
                 }
             })
         }
