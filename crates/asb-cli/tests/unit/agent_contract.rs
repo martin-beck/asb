@@ -59,6 +59,7 @@ fn static_adapter_defaults_are_empty_and_preparation_command_hooks_are_called() 
         endpoint: None,
         interface: None,
         prompt: "fixture prompt",
+        max_steps: None,
         native_tool_mode: None,
         native_tool: None,
     });
