@@ -91,6 +91,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_replay_credential_vars(&["OPENJIUWEN_API_KEY"])
 .with_output_usage(output_usage)
+.with_step_count(step_count)
 .with_final_response(final_response)
 .with_final_response_failure(final_response_failure)
 .with_native_tool_transport()
@@ -228,6 +229,23 @@ fn output_usage(
     }
 }
 
+/// OpenJiuwen emits one `llm_usage` record after every completed model call.
+/// Do not count output or answer records: they can be streamed fragments of
+/// the same model step.
+fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
+    let steps = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| {
+            event.get("type").and_then(|value| value.as_str()) == Some("llm_usage")
+                && event.pointer("/payload/usage_metadata").is_some()
+        })
+        .count()
+        .try_into()
+        .ok()?;
+    (steps > 0).then_some(steps)
+}
+
 fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> {
     let mut text = String::new();
     let mut answer = String::new();
@@ -289,9 +307,21 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
 
 #[cfg(test)]
 mod tests {
-    use super::command;
+    use super::{command, step_count};
     use crate::agents::{ArtifactOwner, CollectionContext, CommandContext};
     use crate::benchmark::BenchmarkConfig;
+
+    #[test]
+    fn counts_usage_records_as_completed_model_steps() {
+        let output = concat!(
+            "{\"type\":\"llm_output\",\"payload\":\"fragment\"}\n",
+            "{\"type\":\"llm_usage\",\"payload\":{\"usage_metadata\":{}}}\n",
+            "{\"type\":\"answer\",\"payload\":\"done\"}\n",
+            "{\"type\":\"llm_usage\",\"payload\":{\"usage_metadata\":{}}}\n"
+        );
+        assert_eq!(step_count(output, ""), Some(2));
+        assert_eq!(step_count("{\"type\":\"answer\"}\n", ""), None);
+    }
 
     #[test]
     fn tape_wire_extension_rewrites_only_a_complete_adjacent_tool_pair() {
