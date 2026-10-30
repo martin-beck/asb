@@ -1292,7 +1292,8 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
         "success_rate": result.success_rate,
         "elapsed_ms": result.elapsed_ms,
         "steps": result.steps,
-        "tool_call_count": result.tool_calls.len(),
+        "tool_calls_available": result.tool_calls_available,
+        "tool_call_count": result.tool_calls_available.then_some(result.tool_calls.len()),
         "token_usage": result.token_usage,
     });
     if let Some(execution) = &result.execution {
@@ -1321,7 +1322,10 @@ fn render_human(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Er
         result.success_rate.map_or_else(|| "unavailable".into(), |value| format!("{value:.3}")),
         result.elapsed_ms,
         format_token(result.steps),
-        result.tool_calls.len(),
+        result
+            .tool_calls_available
+            .then_some(result.tool_calls.len())
+            .map_or_else(|| "unknown".into(), |count| count.to_string()),
         format_token(result.token_usage.input_tokens),
         format_token(result.token_usage.output_tokens),
         format_token(result.token_usage.cached_tokens),
@@ -2619,6 +2623,22 @@ mod tests {
         assert!(text.contains("total_tokens=7"));
         assert!(!text.contains("done"));
         assert!(!text.starts_with('{'));
+    }
+
+    #[test]
+    fn unavailable_tool_call_evidence_is_not_rendered_as_zero() {
+        let mut result = result();
+        result.tool_calls_available = false;
+        let mut output = Vec::new();
+        render_human(&result, &mut output).expect("human rendering succeeds");
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("tool_calls=unknown"));
+
+        let mut json = Vec::new();
+        render_json(&result, &mut json).expect("json rendering succeeds");
+        let value: serde_json::Value = serde_json::from_slice(&json).expect("valid json");
+        assert_eq!(value["tool_calls_available"], false);
+        assert!(value["tool_call_count"].is_null());
     }
 
     #[test]
