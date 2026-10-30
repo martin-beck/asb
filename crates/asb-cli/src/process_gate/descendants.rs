@@ -226,7 +226,17 @@ fn signal_and_reap_owned_child(pid: u32, signal: Option<i32>) -> io::Result<()> 
     // this numeric wait cannot target a reused PID.  Reap that residual zombie
     // before the supervisor's child-list loop decides it must stay alive.
     let mut status = 0;
-    let reaped = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+    // A lifecycle-traced child reports its exit through the ptrace wait
+    // domain.  `waitpid` without `__WALL` cannot consume that exact zombie,
+    // leaving the gate in its bounded quiescence loop forever even though the
+    // pidfd ownership proof above already established it is ours.
+    let reaped = unsafe {
+        libc::waitpid(
+            pid as libc::pid_t,
+            &mut status,
+            libc::WNOHANG | libc::__WALL,
+        )
+    };
     if reaped < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ECHILD) {
         return Err(io::Error::last_os_error());
     }
@@ -414,6 +424,61 @@ mod tests {
         assert!(result.is_ok());
         assert!(reaped);
         assert_eq!(owner_wait.unwrap_err().raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
+    fn ptraced_exited_child_is_reaped_from_the_wall_wait_domain() {
+        // The native lifecycle tracer creates this same ownership shape: the
+        // direct child is ours, but its final wait status is delivered through
+        // the ptrace wait domain.  A normal waitpid(WNOHANG) leaves it as a
+        // zombie, which in turn keeps the exclusive gate's child census nonempty.
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            if unsafe {
+                libc::ptrace(
+                    libc::PTRACE_TRACEME,
+                    0,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            } != 0
+            {
+                unsafe { libc::_exit(127) };
+            }
+            unsafe { libc::raise(libc::SIGSTOP) };
+            unsafe { libc::_exit(0) };
+        }
+        assert!(
+            child > 0,
+            "fork fixture failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(child, &mut status, libc::__WALL) },
+            child,
+            "could not observe ptrace stop: {}",
+            std::io::Error::last_os_error()
+        );
+        assert!(libc::WIFSTOPPED(status));
+        assert_eq!(
+            unsafe {
+                libc::ptrace(
+                    libc::PTRACE_CONT,
+                    child,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            },
+            0,
+            "could not continue ptraced child: {}",
+            std::io::Error::last_os_error()
+        );
+        let identity = pin(child as u32);
+        assert!(exited(&identity, 3000), "ptraced child did not exit");
+        signal_and_reap_owned_child(child as u32, None).unwrap();
+        assert!(was_reaped(&identity));
     }
 
     #[test]
