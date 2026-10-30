@@ -759,7 +759,7 @@ pub(crate) fn execute(
     if !options.json && options.quiet_output {
         writeln!(
             output,
-            "Benchmarks: succeeded={completed_executions} failed={}",
+            "Executions: completed={completed_executions} incomplete={}",
             total.saturating_sub(completed_executions),
         )
         .map_err(io_error)?;
@@ -780,7 +780,10 @@ pub(crate) fn execute(
             )))
         } else {
             Err(Error::Run(format!(
-                "benchmark execution failed: {} of {total} execution(s) completed; rerun with --verbose for diagnostics",
+                "benchmark execution failed: {}; {} of {total} execution(s) completed; rerun with --verbose for retained evidence paths",
+                first_reason
+                    .as_deref()
+                    .unwrap_or("incomplete execution evidence"),
                 completed_executions,
             )))
         }
