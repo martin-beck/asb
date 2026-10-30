@@ -118,7 +118,9 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
-    let launch = super::super::tool_replay_mcp::launch(context, tape)?;
+    let launch = super::super::tool_replay_mcp::allow_commuted_observations(
+        super::super::tool_replay_mcp::launch(context, tape)?,
+    );
     let directory = context.runtime_dir.join("codex/config");
     std::fs::create_dir_all(&directory).map_err(|error| {
         Error::Run(format!(

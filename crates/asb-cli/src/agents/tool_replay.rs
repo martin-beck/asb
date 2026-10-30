@@ -108,18 +108,31 @@ impl Transcript {
         Ok(transcript)
     }
 
-    /// Consume exactly the next causally-recorded request, then apply only its
-    /// declared workspace effects.  A replay never invokes the original tool.
-    pub(crate) fn replay(
+    /// Restore independently dispatched observations in the order in which an
+    /// agent returns them to its model. Only a contiguous run of effect-free
+    /// turns may commute; any workspace effect remains a strict barrier.
+    pub(crate) fn replay_with_commuted_observations(
         &mut self,
         root: &Path,
         tool: &str,
         request: &Value,
+        allow_commuted_observations: bool,
     ) -> Result<Value, Error> {
-        let event = self.events.get(self.cursor).ok_or_else(|| {
+        let current = self.events.get(self.cursor).ok_or_else(|| {
             Error::Run("local-tool replay has no remaining recorded event".into())
         })?;
-        if event.tool != tool || &event.request != request {
+        let matching_index = if current.tool == tool && &current.request == request {
+            Some(self.cursor)
+        } else if allow_commuted_observations {
+            self.events[self.cursor..]
+                .iter()
+                .take_while(|event| event.effects.is_empty())
+                .position(|event| event.tool == tool && &event.request == request)
+                .map(|offset| self.cursor + offset)
+        } else {
+            None
+        };
+        let Some(index) = matching_index else {
             let digest = |value: &Value| {
                 let bytes = serde_json::to_vec(value).unwrap_or_default();
                 format!("{:x}", Sha256::digest(bytes))
@@ -127,12 +140,14 @@ impl Transcript {
             return Err(Error::Run(format!(
                 "local-tool replay request differs from its causal recording \
                      (expected tool {}, arguments sha256 {}; actual tool {}, arguments sha256 {})",
-                event.tool,
-                digest(&event.request),
+                current.tool,
+                digest(&current.request),
                 tool,
                 digest(request),
             )));
-        }
+        };
+        self.events[self.cursor..=index].rotate_right(1);
+        let event = &self.events[self.cursor];
         for effect in &event.effects {
             apply(root, effect)?;
         }
@@ -460,15 +475,19 @@ mod tests {
         let mut recorded = Transcript::default();
         recorded.record(event(1)).unwrap();
         let mut replay = Transcript::decode(&recorded.encode().unwrap()).unwrap();
-        let root = std::env::temp_dir().join(format!("asb-local-tool-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "asb-local-tool-{}-causal-effects",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         assert_eq!(
             replay
-                .replay(
+                .replay_with_commuted_observations(
                     &root,
                     "write_file",
-                    &serde_json::json!({"path":"answer.txt"})
+                    &serde_json::json!({"path":"answer.txt"}),
+                    false,
                 )
                 .unwrap(),
             serde_json::json!({"ok":true})
@@ -480,6 +499,85 @@ mod tests {
         replay.finish().unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn replay_can_commute_effect_free_observations_but_not_effects() {
+        let mut transcript = Transcript::default();
+        transcript
+            .record(Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                tool: "search_text".into(),
+                request: serde_json::json!({"path":"src","query":"needle"}),
+                result: serde_json::json!({"matches":[]}),
+                failure: None,
+                effects: Vec::new(),
+            })
+            .unwrap();
+        transcript
+            .record(Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: 2,
+                tool: "read_file".into(),
+                request: serde_json::json!({"path":"src/main.rs"}),
+                result: serde_json::json!({"text":"recorded","truncated":false}),
+                failure: None,
+                effects: Vec::new(),
+            })
+            .unwrap();
+        transcript.record(event(3)).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "asb-local-tool-{}-commuted-observations",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(
+            transcript
+                .replay_with_commuted_observations(
+                    &root,
+                    "read_file",
+                    &serde_json::json!({"path":"src/main.rs"}),
+                    true,
+                )
+                .unwrap(),
+            serde_json::json!({"text":"recorded","truncated":false})
+        );
+        assert!(
+            transcript
+                .replay_with_commuted_observations(
+                    &root,
+                    "write_file",
+                    &serde_json::json!({"path":"answer.txt"}),
+                    true,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            transcript
+                .replay_with_commuted_observations(
+                    &root,
+                    "search_text",
+                    &serde_json::json!({"path":"src","query":"needle"}),
+                    true,
+                )
+                .unwrap(),
+            serde_json::json!({"matches":[]})
+        );
+        assert_eq!(
+            transcript
+                .replay_with_commuted_observations(
+                    &root,
+                    "write_file",
+                    &serde_json::json!({"path":"answer.txt"}),
+                    true,
+                )
+                .unwrap(),
+            serde_json::json!({"ok":true})
+        );
+        transcript.finish().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
     #[test]
     fn replay_rejects_reordered_or_escaping_effects() {
         let mut transcript = Transcript::default();
@@ -487,7 +585,7 @@ mod tests {
         let root = std::env::temp_dir();
         assert!(
             transcript
-                .replay(&root, "other", &serde_json::json!({}))
+                .replay_with_commuted_observations(&root, "other", &serde_json::json!({}), false)
                 .is_err()
         );
         let mut bad = event(1);
@@ -501,10 +599,11 @@ mod tests {
         };
         assert!(
             replay
-                .replay(
+                .replay_with_commuted_observations(
                     &root,
                     "write_file",
-                    &serde_json::json!({"path":"answer.txt"})
+                    &serde_json::json!({"path":"answer.txt"}),
+                    false,
                 )
                 .is_err()
         );
@@ -549,10 +648,11 @@ mod tests {
         };
         assert!(
             transcript
-                .replay(
+                .replay_with_commuted_observations(
                     &root,
                     "write_file",
-                    &serde_json::json!({"path":"answer.txt"})
+                    &serde_json::json!({"path":"answer.txt"}),
+                    false,
                 )
                 .is_err()
         );

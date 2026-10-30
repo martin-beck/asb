@@ -1334,6 +1334,29 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_codex_mcp_result_render_time() {
+        let root = test_root();
+        let cassette = root.join("codex-mcp-result-time.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Wall time: 0.2164 seconds\nOutput:\n{\"sealed\":true}"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let replayed = recorded.replace("0.2164", "0.1995");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let changed_metadata = replayed.replace("true", "false");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &changed_metadata).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_openhands_generated_conversation_hierarchy() {
         let root = test_root();
         let cassette = root.join("openhands-conversation.jsonl");
