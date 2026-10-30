@@ -8,4 +8,5 @@ pub(super) static ADAPTER: TerminalBenchAdapter = TerminalBenchAdapter {
     engine: super::terminal_bench::HARBOR_ENGINE,
     version: "0.24.0",
     expected_tasks: 89,
+    tasks_root: "tasks",
 };

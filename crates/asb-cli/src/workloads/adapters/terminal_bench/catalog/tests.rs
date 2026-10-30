@@ -12,6 +12,7 @@ const ADAPTER: TerminalBenchAdapter = TerminalBenchAdapter {
     engine: crate::workloads::adapters::terminal_bench::ORIGINAL_ENGINE,
     version: "fixture-version",
     expected_tasks: 2,
+    tasks_root: "tasks",
 };
 struct Fixture(PathBuf);
 impl Fixture {

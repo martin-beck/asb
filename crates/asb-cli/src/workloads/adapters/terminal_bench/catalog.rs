@@ -170,7 +170,7 @@ pub(super) fn read(adapter: &TerminalBenchAdapter, directory: &Path) -> Result<C
             || task.description.len() > 1024
             || task.instruction.trim().is_empty()
             || task.instruction.len() > 64 * 1024
-            || task.definition != format!("source/tasks/{}", task.id)
+            || task.definition != task_definition(adapter, &task.id)
             || !root.join(&task.definition).is_dir()
             || !root
                 .join(&task.definition)
@@ -181,6 +181,14 @@ pub(super) fn read(adapter: &TerminalBenchAdapter, directory: &Path) -> Result<C
         }
     }
     Ok(catalog)
+}
+
+pub(super) fn task_definition(adapter: &TerminalBenchAdapter, id: &str) -> String {
+    if adapter.tasks_root.is_empty() {
+        format!("source/{id}")
+    } else {
+        format!("source/{}/{id}", adapter.tasks_root)
+    }
 }
 
 fn publish(path: &Path, content: &str) -> Result<(), Error> {

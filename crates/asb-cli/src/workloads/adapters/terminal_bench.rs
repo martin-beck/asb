@@ -22,6 +22,8 @@ pub(super) struct TerminalBenchAdapter {
     pub engine: super::official_engine::EngineBinding,
     pub version: &'static str,
     pub expected_tasks: usize,
+    /// Empty means task definitions are at the pinned repository root.
+    pub tasks_root: &'static str,
 }
 
 impl super::WorkloadAdapter for TerminalBenchAdapter {
@@ -183,6 +185,7 @@ mod tests {
     fn every_registered_terminal_bench_version_exposes_an_official_trial_catalog() {
         for adapter in [
             &super::super::terminal_bench_1_0::ADAPTER as &dyn WorkloadAdapter,
+            &super::super::terminal_bench_2_0::ADAPTER,
             &super::super::terminal_bench_2_1::ADAPTER,
         ] {
             let extension = adapter.setup_extension().expect("trial extension");
@@ -195,6 +198,7 @@ mod tests {
     fn both_original_terminal_adapters_describe_public_selection_before_execution() {
         for adapter in [
             &super::super::terminal_bench_1_0::ADAPTER,
+            &super::super::terminal_bench_2_0::ADAPTER,
             &super::super::terminal_bench_2_1::ADAPTER,
         ] {
             let root = std::env::temp_dir()
@@ -202,8 +206,8 @@ mod tests {
             let installed = root.join(adapter.id);
             let tasks = (0..adapter.expected_tasks).map(|index| {
                 let id = format!("fixture-{index}");
-                std::fs::create_dir_all(installed.join(format!("source/tasks/{id}"))).unwrap();
-                json!({"id":id,"description":"selection fixture","instruction":"not exported to the plan","definition":format!("source/tasks/fixture-{index}")})
+                std::fs::create_dir_all(installed.join(super::catalog::task_definition(adapter, &id))).unwrap();
+                json!({"id":id,"description":"selection fixture","instruction":"not exported to the plan","definition":super::catalog::task_definition(adapter, &format!("fixture-{index}"))})
             }).collect::<Vec<_>>();
             std::fs::write(installed.join("source-manifest.json"), "{}").unwrap();
             std::fs::write(installed.join("catalog.json"), serde_json::to_vec(&json!({

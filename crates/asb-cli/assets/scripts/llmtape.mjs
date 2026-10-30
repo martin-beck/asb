@@ -194,6 +194,20 @@ function normalizeRequestBody(url, body) {
         changed = true;
       }
     }
+    // Codex may launch several MCP calls concurrently even though it feeds
+    // their completed results back to the Responses conversation in model-call
+    // order. A sealed local-tool tape records the actual operations, so ask
+    // the Responses provider for one Codex tool call at a time while a tape
+    // proxy is active. This is a protocol option, not a prompt mutation, and
+    // it is scoped to Codex's fixed client metadata envelope.
+    if (url.includes("/responses")
+        && parsed.client_metadata
+        && typeof parsed.client_metadata === "object"
+        && Object.hasOwn(parsed.client_metadata, "x-codex-installation-id")
+        && parsed.parallel_tool_calls !== false) {
+      parsed.parallel_tool_calls = false;
+      changed = true;
+    }
     if (url.includes("/messages") && parsed.temperature === undefined) {
       // Keep record/replay agent trajectories stable when a CLI leaves the
       // provider's sampling default unspecified.
@@ -421,6 +435,10 @@ function normalizeCassetteBody(body, url = "") {
     // status text and every other byte of the result.
     .replace(/(Chunk ID: [^\n]*?(?:\r?\n|\\n)Wall time: )\d+(?:\.\d+)? seconds(?=(?:\r?\n|\\n)Process exited with code \d+)/g, "$1<asb-wall-time> seconds")
     .replace(/(Chunk ID: [^\n]*?(?:\r?\n|\\n)Wall time: )\d+(?:\.\d+)? seconds((?:\r?\n|\\n)Process running with session ID )\d+/g, "$1<asb-wall-time> seconds$2<asb-session>")
+    // Codex also prepends a stopwatch to its MCP result renderer. The
+    // following structured Metadata payload is the actual sealed tool result;
+    // retain it byte-for-byte while removing only the local render duration.
+    .replace(/(Tool result: )\d+(?:\.\d+)? seconds(?=(?:\r?\n|\\n)Metadata:)/g, "$1<asb-tool-time> seconds")
     // Normalize generated call identifiers, but retain the relationship
     // between distinct IDs in one request/response. OpenCode can receive
     // multiple tool calls in a streamed response; collapsing every ID into
@@ -459,6 +477,19 @@ function normalizeCassetteBody(body, url = "") {
     // extension. It neither identifies the adapter nor interprets its fields.
     const extensionValue = agentWireExtension?.normalizeRequest?.({ url, body: parsed });
     const canonical = extensionValue === undefined ? parsed : extensionValue;
+    // `normalizeRequestBody` adds this transport policy before forwarding a
+    // Codex request upstream.  It is intentionally absent from the cassette
+    // key: old cassettes predate the policy, and a caller cannot opt out while
+    // a sealed local-tool tape is active.  The model, prompt, and every tool
+    // result remain part of the key.
+    if (url.includes("/responses")
+        && canonical
+        && typeof canonical === "object"
+        && canonical.client_metadata
+        && typeof canonical.client_metadata === "object"
+        && Object.hasOwn(canonical.client_metadata, "x-codex-installation-id")) {
+      delete canonical.parallel_tool_calls;
+    }
     const structuredToolCallIdentifiers = new Map();
     const structuredContentBlockIdentifiers = new Map();
     const canonicalToolCallIdentifier = (identifier) => {
@@ -601,6 +632,15 @@ function normalizeCassetteBody(body, url = "") {
         return `<asb-workbuddy-${path[2]}>`;
       }
       if (typeof value === "string") {
+        // Codex wraps an MCP response in a client-generated duration line.
+        // `input[*].output` is the Responses wire field reserved for tool
+        // results, so this cannot normalize a user prompt or tool argument.
+        if (path.length === 3 && path[0] === "input" && /^\d+$/.test(path[1])
+            && path[2] === "output" && key === "output") {
+          value = value
+            .replace(/^(Tool (?:result|time): )\d+(?:\.\d+)? seconds(?=\r?\n)/, "$1<asb-tool-time> seconds")
+            .replace(/^(Wall time: )\d+(?:\.\d+)? seconds(?=\r?\nOutput:)/, "$1<asb-wall-time> seconds");
+        }
         value = normalizeFunctionRenderingAddress(value);
         value = normalizeObjectRenderingAddress(value);
         value = normalizeHermesVerificationScriptPath(value);

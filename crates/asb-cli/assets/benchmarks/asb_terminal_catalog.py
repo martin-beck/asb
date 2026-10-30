@@ -23,6 +23,10 @@ SPECS = {
         "revision": "7131e4375048a0e408a8fb404b5f499d726b695b", "split": "tasks",
         "count": 89, "package": "harbor", "version": "0.24.0",
         "source_sha256": "778363800cf869d98b2b2bffdfba79439671851050788e8130b83fcbb79cf1d4"},
+    "terminal-bench-2.0": {"source": "harbor-framework/terminal-bench-2",
+        "revision": "2fd12b88aafdd04a52c298e3940bcb189f9766d6", "split": "repository-root-tasks",
+        "count": 89, "package": "harbor", "version": "0.24.0",
+        "source_sha256": "f8e210f04e196de4e7d800116c50ed60f78287e6942314f7231bdec4fa902479"},
 }
 MAX_TREE = 512 * 1024**2
 MAX_FILE = 128 * 1024**2
@@ -102,7 +106,7 @@ def catalog(workload, source_root):
     observed = importlib.metadata.version(spec["package"])
     if observed != spec["version"]:
         raise CatalogError("installed evaluator SDK does not match the workload recipe")
-    tasks = source_root / "tasks"
+    tasks = source_root / "tasks" if (source_root / "tasks").is_dir() else source_root
     if workload == "terminal-bench-1.0":
         ids = read_json(Path(__file__).with_name("terminal_bench_1_tasks.json"))
         from terminal_bench.handlers.trial_handler import Task
@@ -124,8 +128,9 @@ def catalog(workload, source_root):
         instruction, difficulty = parse(tasks / task_id)
         if not isinstance(instruction, str) or not instruction.strip() or len(instruction.encode()) > 64 * 1024:
             raise CatalogError("official task instruction is empty or exceeds 64 KiB")
+        definition = f"source/tasks/{task_id}" if tasks != source_root else f"source/{task_id}"
         result.append({"id": task_id, "description": f"{task_id} ({difficulty})"[:1024],
-                       "instruction": instruction, "definition": f"source/tasks/{task_id}"})
+                       "instruction": instruction, "definition": definition})
     return {"schema_version": 1, "workload": workload,
             "dataset": {key: spec[key] for key in ["source", "revision", "split"]},
             "sdk": {"package": spec["package"], "version": observed}, "tasks": result}

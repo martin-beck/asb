@@ -398,6 +398,7 @@ mod tests {
             ("swe-bench-lite", "swebench"),
             ("swe-bench-verified", "swebench"),
             ("terminal-bench-1.0", "terminal-bench"),
+            ("terminal-bench-2.0", "harbor"),
             ("terminal-bench-2.1", "harbor"),
         ] {
             let directory = fixture.root.join("custom-tools").join(tool);
