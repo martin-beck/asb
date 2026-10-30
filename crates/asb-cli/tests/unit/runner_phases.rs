@@ -594,18 +594,18 @@ fn native_and_guest_apply_the_same_adapter_terminal_answer_policy() {
 }
 
 #[test]
-fn truncated_guest_transcript_is_incomplete_without_discarding_guest_metadata() {
+fn durable_truncated_guest_transcript_keeps_its_sealed_terminal_metadata() {
     let mut execution = evidence(0, true);
     {
         let metadata = execution.guest.as_mut().expect("guest evidence");
         metadata.transcript_truncated = true;
         assert_eq!(metadata.final_response.as_deref(), Some("submission"));
     }
-    assert!(!ExecutionEvidence::capture_complete(
+    assert!(ExecutionEvidence::capture_complete(
         &AttemptIssues::default(),
         execution.guest.as_ref()
     ));
-    execution.capture_complete = false;
+    execution.capture_complete = true;
     let agent = execution.agent_outcome("pi", Path::new("."), None);
     assert!(agent.failure.is_none());
     assert_eq!(agent.final_response.as_deref(), Some("submission"));
@@ -2510,16 +2510,23 @@ fn full_entry_child(case: &str) {
         return;
     }
     if capture_case {
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains(if case.contains("read-failure") {
-                    "capture failed"
-                } else {
-                    "capture limit"
-                })
-        );
+        if !case.contains("read-failure") && !case.contains("false") {
+            result.expect("a sealed terminal guest result may outlive its bounded presentation");
+            assert_eq!(std::fs::read_to_string(counter).unwrap(), "called\n");
+            assert_eq!(
+                calls.borrow().as_slice(),
+                ["evaluate", "finish", "provider-finish"]
+            );
+            return;
+        }
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains(if case.contains("read-failure") {
+            "capture failed"
+        } else if case.contains("false") {
+            "unresolved"
+        } else {
+            "capture limit"
+        }));
         assert_eq!(std::fs::read_to_string(counter).unwrap(), "called\n");
         assert_eq!(
             calls.borrow().as_slice(),
@@ -2532,7 +2539,14 @@ fn full_entry_child(case: &str) {
                 .unwrap();
         for record in [&log, &measured] {
             assert_eq!(record["status"], "failed");
-            assert_eq!(record["failure_kind"], "run_error");
+            assert_eq!(
+                record["failure_kind"],
+                if case.contains("false") {
+                    "workload_check_failed"
+                } else {
+                    "run_error"
+                }
+            );
             assert_eq!(
                 record["benchmark_outcome"]["evaluation"]["status"],
                 "completed"
@@ -2561,6 +2575,9 @@ fn full_entry_child(case: &str) {
                         .contains("cassette")
                 );
             }
+        }
+        if case.contains("false") {
+            return;
         }
         assert_eq!(observer.completed.load(Ordering::SeqCst), 0);
         assert!(!root.join(".asb-completions").exists());
@@ -3225,17 +3242,35 @@ fn check_unmeasured_capture_sweep(
         cassette_root: Some(&tapes),
         ..Default::default()
     };
-    let error =
-        crate::sweep::run_with_options(manifest.to_str().unwrap(), options, &mut Vec::new())
-            .unwrap_err()
-            .to_string();
-    assert!(error.contains("capture limit"), "{error}");
+    let result =
+        crate::sweep::run_with_options(manifest.to_str().unwrap(), options, &mut Vec::new());
+    if !case.contains("read-failure") && !case.contains("false") {
+        result.expect("a sealed terminal guest result may outlive its bounded presentation");
+        assert_eq!(std::fs::read_to_string(counter).unwrap(), "called\n");
+        return;
+    }
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains(if case.contains("false") {
+            "unresolved"
+        } else {
+            "capture limit"
+        }),
+        "{error}"
+    );
     let results = root.join("sweep-results");
     let directory = results.join("000-benchmark");
     let log_bytes = std::fs::read(directory.join("run.log")).unwrap();
     let log: serde_json::Value = serde_json::from_slice(&log_bytes).unwrap();
     assert_eq!(log["status"], "failed");
-    assert_eq!(log["failure_kind"], "run_error");
+    assert_eq!(
+        log["failure_kind"],
+        if case.contains("false") {
+            "workload_check_failed"
+        } else {
+            "run_error"
+        }
+    );
     assert_eq!(log["workload_resource_disposition"], "not-required");
     assert!(log["workload_artifacts"].is_array());
     assert_eq!(
@@ -3251,6 +3286,9 @@ fn check_unmeasured_capture_sweep(
         );
     } else {
         assert_eq!(log["workload_success"], !case.contains("false"));
+    }
+    if case.contains("false") {
+        return;
     }
     assert!(!directory.join("measurements").exists());
     assert!(!directory.join(".asb-completions").exists());
@@ -3570,4 +3608,28 @@ fn check_full_entry_disposition(
     } else {
         assert_eq!(row["status"], "evaluation-pending");
     }
+}
+#[test]
+fn durable_guest_presentation_requires_more_than_a_truncated_stream() {
+    for (tree_quiesced, artifact_settled, execution_ok, exit_code, accepted) in [
+        (true, true, true, Some(0), true),
+        (false, true, true, Some(0), false),
+        (true, false, true, Some(0), false),
+        (true, true, false, Some(0), false),
+        (true, true, true, Some(1), false),
+    ] {
+        assert_eq!(
+            super::durable_guest_presentation_parts(
+                true,
+                tree_quiesced,
+                artifact_settled,
+                execution_ok,
+                exit_code,
+            ),
+            accepted,
+        );
+    }
+    assert!(super::durable_guest_presentation_parts(
+        false, false, false, false, None
+    ));
 }
