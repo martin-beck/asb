@@ -236,6 +236,7 @@ pub(super) fn load(path: &str) -> Result<LoadedReport, Error> {
             )?);
         }
     }
+    apply_openrouter_pricing(&request, &mut rows)?;
     let mut previews = BTreeMap::new();
     for row in &rows {
         if row.result_source == ResultSource::RecoveredOfficialGrade {
@@ -294,11 +295,69 @@ fn load_campaign_sweep(request: Request) -> Result<LoadedReport, Error> {
         previews.extend(artifacts);
     }
     campaign::verify_proofs(&proofs)?;
+    apply_openrouter_pricing(&request, &mut rows)?;
     Ok(LoadedReport {
         request,
         rows,
         previews,
     })
+}
+
+/// Derive a cost estimate from the price schedule captured when this sweep
+/// started. Report generation never contacts a live provider.
+fn apply_openrouter_pricing(request: &Request, rows: &mut [BenchmarkData]) -> Result<(), Error> {
+    let path = request.sweep_results.join("openrouter-pricing.json");
+    let text = match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(Error::Input(format!(
+                "cannot inspect OpenRouter pricing snapshot {}: {error}",
+                path.display()
+            )));
+        }
+        Ok(_) => read_text(&path, "OpenRouter pricing snapshot")?,
+    };
+    let snapshot: Value = serde_json::from_str(&text)
+        .map_err(|_| Error::Input("invalid OpenRouter pricing snapshot".into()))?;
+    let models = snapshot
+        .get("models")
+        .and_then(Value::as_object)
+        .ok_or_else(|| Error::Input("OpenRouter pricing snapshot has no models".into()))?;
+    for row in rows.iter_mut().filter(|row| row.provider == "openrouter") {
+        let Some(pricing) = models.get(&row.model).and_then(Value::as_object) else {
+            continue;
+        };
+        if let Some(estimate) = openrouter_cost(pricing, &row.metrics) {
+            row.metrics.insert("estimated_cost_usd".into(), estimate);
+        }
+    }
+    Ok(())
+}
+
+fn openrouter_cost(
+    pricing: &serde_json::Map<String, Value>,
+    metrics: &BTreeMap<String, f64>,
+) -> Option<f64> {
+    let rate = |name: &str| {
+        pricing.get(name).and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+        })
+    };
+    let tokens = |name: &str| metrics.get(name).copied();
+    let input = tokens("token_usage.input_tokens").zip(rate("prompt"));
+    let output = tokens("token_usage.output_tokens").zip(rate("completion"));
+    let cached =
+        tokens("token_usage.cached_tokens").zip(rate("cache_read").or_else(|| rate("cacheRead")));
+    let observed = input.is_some() || output.is_some() || cached.is_some();
+    let estimate = input
+        .into_iter()
+        .chain(output)
+        .chain(cached)
+        .map(|(count, price)| count * price)
+        .sum::<f64>();
+    (observed && estimate.is_finite()).then_some(estimate)
 }
 struct Configuration {
     index: usize,
@@ -1138,4 +1197,32 @@ fn load_collectors(
         }
     }
     Ok((series, host_metadata, components, documents))
+}
+
+#[cfg(test)]
+mod pricing_tests {
+    use super::*;
+
+    #[test]
+    fn retained_openrouter_prices_estimate_input_output_and_cached_tokens() {
+        let pricing = serde_json::json!({
+            "prompt": "0.000002",
+            "completion": "0.000004",
+            "cache_read": "0.0000005"
+        });
+        let metrics = BTreeMap::from([
+            ("token_usage.input_tokens".into(), 100.0),
+            ("token_usage.output_tokens".into(), 25.0),
+            ("token_usage.cached_tokens".into(), 40.0),
+        ]);
+        let estimate = openrouter_cost(pricing.as_object().unwrap(), &metrics).unwrap();
+        assert!((estimate - 0.00032).abs() < 1e-12);
+    }
+
+    #[test]
+    fn absent_token_breakdown_does_not_invent_a_cost() {
+        let pricing = serde_json::json!({"prompt": "0.000002"});
+        let metrics = BTreeMap::from([("token_usage.total_tokens".into(), 100.0)]);
+        assert!(openrouter_cost(pricing.as_object().unwrap(), &metrics).is_none());
+    }
 }
