@@ -1717,7 +1717,7 @@ fetch(target, {method:'POST',headers:{'content-type':'application/json'},body:JS
 #[cfg(unix)]
 #[test]
 fn hermes_replay_routes_responses_and_collects_usage_ledger() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     let project = replay_project(1);
     project.write(
         "benchmark.toml",
@@ -1761,6 +1761,12 @@ fetch(process.env.OPENAI_BASE_URL.replace(/\/$/, '') + '/responses', {method:'PO
         std::fs::Permissions::from_mode(0o755),
     )
     .unwrap();
+    // Hermes is a Python adapter. Keep the explicit `bin` launcher used by
+    // this fixture, while supplying the recipe's required venv interpreter
+    // for execution-plan runtime-input validation.
+    let python = project.0.join(".asb-tools/hermes/venv/bin/python");
+    std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+    symlink("../../../../.asb/python/venv/bin/python", &python).unwrap();
     let result = replay(
         &project,
         "success",
