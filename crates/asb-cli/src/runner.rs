@@ -3,6 +3,7 @@ mod attempt;
 mod batch;
 pub(crate) use batch::{dataset_fingerprint, replay_protocol_fingerprint};
 pub(crate) mod campaign;
+mod compaction;
 mod completion;
 pub(crate) mod diagnostics;
 pub(crate) mod disposition;
@@ -145,6 +146,10 @@ pub(crate) struct RunOptions<'a> {
     #[cfg_attr(test, allow(dead_code))]
     pub native_tool_inputs: Option<&'a [&'a campaign::ReplayInput]>,
     pub verify_initial_material: bool,
+    /// Sweep preflight already validated the exact project-local installation
+    /// requirements for this fresh run population. Direct and resumed runs
+    /// leave this false and revalidate before execution.
+    pub requirements_prepared: bool,
     pub preparation_gate: Option<&'a batch::Gate>,
     pub launch_gate: Option<&'a batch::Gate>,
     pub policy: Option<&'a crate::planning::ResolvedPlan>,
@@ -555,10 +560,12 @@ fn run_dispatched(
     let _preparation = RUNTIME_PREPARATION
         .lock()
         .map_err(|_| Error::Run("shared runtime preparation failed; retry the sweep".into()))?;
-    let mut messages = Vec::new();
-    crate::install::ensure_execution_requirements(&config, config_path, &mut messages)?;
-    if !options.json {
-        output.write_all(&messages).map_err(io_error)?;
+    if !options.requirements_prepared {
+        let mut messages = Vec::new();
+        crate::install::ensure_execution_requirements(&config, config_path, &mut messages)?;
+        if !options.json {
+            output.write_all(&messages).map_err(io_error)?;
+        }
     }
     let gate = (options.verify_initial_material && options.preparation_gate.is_none())
         .then(|| batch::Gate::new(config.concurrency, None, Duration::from_secs(1800)))
