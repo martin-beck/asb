@@ -863,7 +863,7 @@ fn write_state_timeline_svg(
     };
     let query = format!(
         "{} SELECT utid,tid,ts,dur,state,COALESCE(io_wait,-1) FROM clipped WHERE utid IN (SELECT DISTINCT utid FROM clipped ORDER BY utid LIMIT 64) ORDER BY utid,ts LIMIT 4096",
-        state_summary::scope(pid, trace_id)
+        state_summary::timeline_scope(pid, trace_id)
     );
     let output = processor_query(processor, trace, &query)
         .map_err(|e| format!("cannot extract Perfetto state timeline: {e}"))?;
