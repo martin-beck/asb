@@ -36,7 +36,7 @@ pub(crate) struct ToolCall {
 }
 
 pub(crate) fn from_cassette(path: &Path) -> Vec<ToolCall> {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(text) = crate::models::read_replay_cassette(path) else {
         return Vec::new();
     };
     let interactions = text
@@ -393,6 +393,29 @@ fn is_tool_kind(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn ignores_tool_calls_from_a_symlinked_cassette() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "asb-tool-call-symlink-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("target.jsonl");
+        let link = root.join("cassette.jsonl");
+        std::fs::write(
+            &target,
+            r#"{"request":{"body":"{}"},"response":{"body":"{\"type\":\"tool_call\",\"name\":\"bash\"}"}}"#,
+        )
+        .unwrap();
+        symlink(&target, &link).unwrap();
+        assert!(from_cassette(&link).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn extracts_only_provider_response_calls_with_timestamp_duration_and_classes() {
         let root = std::env::temp_dir().join(format!(

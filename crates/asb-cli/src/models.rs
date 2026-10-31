@@ -4,7 +4,7 @@ use crate::Error;
 use crate::providers;
 use crate::suggestions;
 use serde_json::Value;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -15,6 +15,67 @@ const MAX_CATALOG: usize = 32 * 1024 * 1024;
 // legitimately exceed 64 MiB. Keep this aligned with the bounded cassette
 // evidence policy while admitting recorded SWE-bench-sized tracks.
 const MAX_CASSETTE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Read replay input exactly once through a bounded, regular-file-only path.
+/// FIFOs and symlinks are rejected before any potentially blocking read.
+pub(crate) fn read_replay_cassette(path: &Path) -> Result<String, Error> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        Error::Input(format!(
+            "cannot inspect replay cassette {}: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(Error::Input(
+            "replay cassette must be a regular file".into(),
+        ));
+    }
+    if metadata.len() > MAX_CASSETTE_BYTES {
+        return Err(Error::Input("replay cassette exceeds 256 MiB".into()));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // The inspection above is intentionally repeated after opening, but
+        // O_NOFOLLOW closes the remaining symlink-swap window on Unix.
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).map_err(|error| {
+        Error::Input(format!(
+            "cannot read replay cassette {}: {error}",
+            path.display()
+        ))
+    })?;
+    let opened = file.metadata().map_err(|error| {
+        Error::Input(format!(
+            "cannot inspect replay cassette {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !opened.is_file() {
+        return Err(Error::Input(
+            "replay cassette must be a regular file".into(),
+        ));
+    }
+    if opened.len() > MAX_CASSETTE_BYTES {
+        return Err(Error::Input("replay cassette exceeds 256 MiB".into()));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_CASSETTE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            Error::Input(format!(
+                "cannot read replay cassette {}: {error}",
+                path.display()
+            ))
+        })?;
+    if bytes.len() as u64 > MAX_CASSETTE_BYTES {
+        return Err(Error::Input("replay cassette exceeds 256 MiB".into()));
+    }
+    String::from_utf8(bytes).map_err(|_| Error::Input("replay cassette is not UTF-8".into()))
+}
 
 /// Capture OpenRouter's published per-token price schedule for a sweep.
 ///
@@ -220,21 +281,7 @@ pub fn ensure_tool_capable(
 /// request for the selected model.  Tool usage is an adapter/runtime property,
 /// not a requirement of every valid provider recording.
 pub fn ensure_replay_model_recorded(cassette: &Path, model: &str) -> Result<(), Error> {
-    let metadata = std::fs::metadata(cassette).map_err(|error| {
-        Error::Input(format!(
-            "cannot inspect replay cassette {}: {error}",
-            cassette.display()
-        ))
-    })?;
-    if metadata.len() > MAX_CASSETTE_BYTES {
-        return Err(Error::Input("replay cassette exceeds 256 MiB".into()));
-    }
-    let text = std::fs::read_to_string(cassette).map_err(|error| {
-        Error::Input(format!(
-            "cannot read replay cassette {}: {error}",
-            cassette.display()
-        ))
-    })?;
+    let text = read_replay_cassette(cassette)?;
     for line in text.lines() {
         let value: Value = serde_json::from_str(line)
             .map_err(|_| Error::Input("replay cassette contains invalid JSONL".into()))?;
@@ -268,12 +315,7 @@ pub fn ensure_replay_model_recorded(cassette: &Path, model: &str) -> Result<(), 
 pub(crate) fn replay_interface(
     cassette: &Path,
 ) -> Result<Option<crate::endpoint::Interface>, Error> {
-    let text = std::fs::read_to_string(cassette).map_err(|error| {
-        Error::Input(format!(
-            "cannot read replay cassette {}: {error}",
-            cassette.display()
-        ))
-    })?;
+    let text = read_replay_cassette(cassette)?;
     for line in text.lines() {
         let value: Value = serde_json::from_str(line)
             .map_err(|_| Error::Input("replay cassette contains invalid JSONL".into()))?;
@@ -1110,6 +1152,42 @@ mod tests {
                     .contains("256 MiB")
             );
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_reader_rejects_symlinks_and_fifos_before_reading() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "asb-replay-input-type-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("recording.jsonl");
+        let link = root.join("recording-link.jsonl");
+        std::fs::write(&target, "{\"request\":{}}\n").unwrap();
+        symlink(&target, &link).unwrap();
+        assert!(
+            read_replay_cassette(&link)
+                .unwrap_err()
+                .to_string()
+                .contains("regular file")
+        );
+
+        let fifo = root.join("recording.fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(
+            read_replay_cassette(&fifo)
+                .unwrap_err()
+                .to_string()
+                .contains("regular file")
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
