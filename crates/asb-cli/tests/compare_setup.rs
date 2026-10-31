@@ -57,6 +57,7 @@ impl Project {
             ("perf", "perf"),
             ("perfetto", "tracebox"),
             ("bpftrace", "bpftrace"),
+            ("flamegraph", "flamegraph"),
         ]);
     }
     #[cfg(unix)]
