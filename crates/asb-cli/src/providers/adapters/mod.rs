@@ -118,6 +118,10 @@ pub(super) trait ProviderAdapter: Sync {
     fn catalog_headers(&self, key: &str) -> Vec<String> {
         vec![format!("Authorization: Bearer {key}")]
     }
+    /// Provider-owned metadata captured before a fresh sweep starts.
+    fn pricing_snapshot(&self) -> Result<Option<(&'static str, serde_json::Value)>, crate::Error> {
+        Ok(None)
+    }
 }
 
 macro_rules! adapter {

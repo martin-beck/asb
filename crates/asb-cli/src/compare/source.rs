@@ -315,10 +315,22 @@ fn apply_openrouter_pricing(request: &Request, rows: &mut [BenchmarkData]) -> Re
                 path.display()
             )));
         }
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(Error::Input(
+                "OpenRouter pricing snapshot must be a regular file".into(),
+            ));
+        }
         Ok(_) => read_text(&path, "OpenRouter pricing snapshot")?,
     };
     let snapshot: Value = serde_json::from_str(&text)
         .map_err(|_| Error::Input("invalid OpenRouter pricing snapshot".into()))?;
+    if snapshot.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || snapshot.get("provider").and_then(Value::as_str) != Some("openrouter")
+    {
+        return Err(Error::Input(
+            "invalid OpenRouter pricing snapshot schema".into(),
+        ));
+    }
     let models = snapshot
         .get("models")
         .and_then(Value::as_object)
@@ -346,10 +358,13 @@ fn openrouter_cost(
         })
     };
     let tokens = |name: &str| metrics.get(name).copied();
-    let input = tokens("token_usage.input_tokens").zip(rate("prompt"));
+    let cached_tokens = tokens("token_usage.cached_tokens");
+    let input = tokens("token_usage.input_tokens")
+        .map(|input| input - cached_tokens.unwrap_or(0.0))
+        .filter(|input| *input >= 0.0)
+        .zip(rate("prompt"));
     let output = tokens("token_usage.output_tokens").zip(rate("completion"));
-    let cached =
-        tokens("token_usage.cached_tokens").zip(rate("cache_read").or_else(|| rate("cacheRead")));
+    let cached = cached_tokens.zip(rate("cache_read").or_else(|| rate("cacheRead")));
     let observed = input.is_some() || output.is_some() || cached.is_some();
     let estimate = input
         .into_iter()
@@ -1216,7 +1231,7 @@ mod pricing_tests {
             ("token_usage.cached_tokens".into(), 40.0),
         ]);
         let estimate = openrouter_cost(pricing.as_object().unwrap(), &metrics).unwrap();
-        assert!((estimate - 0.00032).abs() < 1e-12);
+        assert!((estimate - 0.00024).abs() < 1e-12);
     }
 
     #[test]

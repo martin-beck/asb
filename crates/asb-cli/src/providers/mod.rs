@@ -240,6 +240,13 @@ pub fn credential(name: &str) -> Option<String> {
     read_key_file(Path::new(&home).join(format!(".api_key_{}", spec.name)))
 }
 
+/// Ask a provider adapter for its current pricing metadata, if it publishes one.
+pub(crate) fn pricing_snapshot(
+    provider: &str,
+) -> Result<Option<(&'static str, serde_json::Value)>, Error> {
+    adapters::find(provider).map_or(Ok(None), |adapter| adapter.pricing_snapshot())
+}
+
 fn credential_inputs(spec: &ProviderSpec) -> Vec<crate::runtime_inputs::Dependency> {
     let Some(variable) = spec.credential else {
         return Vec::new();

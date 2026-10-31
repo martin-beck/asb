@@ -48,6 +48,10 @@ adapter!(
                     crate::models::is_zero_price(pricing.get("prompt"))
                         && crate::models::is_zero_price(pricing.get("completion"))
                 })
+    },
+    fn pricing_snapshot(&self) -> Result<Option<(&'static str, serde_json::Value)>, crate::Error> {
+        crate::models::openrouter_pricing_snapshot()
+            .map(|snapshot| Some(("openrouter-pricing.json", snapshot)))
     }
 );
 
