@@ -142,6 +142,19 @@ pub(in crate::sweep) fn reporting_reference(
     }
     let allocation: Allocation = read_private(&path)?;
     let intent: Value = read_private(&start)?;
+    // Start intents are durable records.  Compare their typed, canonical
+    // representation rather than raw JSON so a newly introduced defaulted
+    // configuration field does not invalidate an otherwise identical older
+    // intent.  Deserialization remains strict and rejects unknown fields.
+    let recorded_entry: PlannedBenchmark = serde_json::from_value(
+        intent
+            .get("entry")
+            .cloned()
+            .ok_or_else(|| invalid("grade import has no original configuration"))?,
+    )
+    .map_err(|_| invalid("grade import has invalid original configuration"))?;
+    let recorded_entry = serde_json::to_value(recorded_entry)
+        .map_err(|_| invalid("cannot encode original configuration"))?;
     if !replica.valid()
         || replica.total != entry.configuration.concurrency
         || allocation.configuration != index
@@ -154,7 +167,7 @@ pub(in crate::sweep) fn reporting_reference(
         || allocation.intent_id.len() > 128
         || intent["schema_version"] != 1
         || intent["scope"] != "replica-execution-intent"
-        || intent["entry"]
+        || recorded_entry
             != serde_json::to_value(entry).map_err(|_| invalid("cannot encode selection"))?
     {
         return Err(invalid(
