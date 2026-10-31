@@ -101,9 +101,12 @@ fn run_with_changed_request(root: &Path, endpoint: &str, args: &[&str], changed:
     // and supply that answer. This keeps the production binary's fail-closed
     // non-interactive behavior covered rather than adding a test-only bypass.
     let mut command_line = shell_quote(env!("CARGO_BIN_EXE_asb"));
-    for argument in args {
+    for (index, argument) in args.iter().enumerate() {
         command_line.push(' ');
         command_line.push_str(&shell_quote(argument));
+        if index == 0 && *argument == "init" {
+            command_line.push_str(" --yes");
+        }
     }
     let mut command = Command::new("script");
     command
@@ -124,12 +127,19 @@ fn run_with_changed_request(root: &Path, endpoint: &str, args: &[&str], changed:
         command.env("ASB_TEST_CHANGED", "1");
     }
     let mut child = command.spawn().expect("ASB starts in a PTY");
-    child
-        .stdin
-        .take()
-        .expect("PTY launcher has stdin")
-        .write_all(b"y\n")
-        .expect("answer capacity confirmation");
+    // Only benchmark execution asks for capacity confirmation.  Sending an
+    // affirmative answer to `init` would instead authorize optional host
+    // setup, which can invoke an interactive privileged operation on a CI
+    // host.  Init therefore uses its documented `--yes` mode above.  Run and
+    // sweep still need the affirmative capacity-confirmation answer.
+    if matches!(args.first(), Some(&"run" | &"sweep")) {
+        child
+            .stdin
+            .take()
+            .expect("PTY launcher has stdin")
+            .write_all(b"y\n")
+            .expect("answer capacity confirmation");
+    }
     child.wait_with_output().expect("ASB exits")
 }
 
