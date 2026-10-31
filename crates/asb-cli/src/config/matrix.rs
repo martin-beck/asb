@@ -191,6 +191,7 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
                             workspace: options.workspace.clone(),
                             output: options.output.clone(),
                             retention: options.retention.clone(),
+                            repeat: None,
                         };
                         let config = configuration(selection)?;
                         if validated_trials.insert(config.trial.clone()) {
@@ -207,13 +208,14 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
             }
         }
     }
+    let manifest_repeat = options.repeat;
     let configs = configs.into_configs();
     if repeated || configs.len() > 1 {
         let path = options
             .output
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join(format!("asb-sweep-{}.toml", stamp())));
-        publish_sweep(&path, configs, output)?;
+        publish_sweep_with_repeat(&path, configs, manifest_repeat, output)?;
     } else {
         let config = &configs[0];
         let text = render(config)?;
@@ -476,7 +478,16 @@ pub(crate) fn publish_sweep(
     configs: Vec<BenchmarkConfig>,
     output: &mut dyn Write,
 ) -> Result<(), Error> {
-    publish_sweep_with_progress(path, configs, output, &mut |_, _| {})
+    publish_sweep_with_repeat(path, configs, None, output)
+}
+
+fn publish_sweep_with_repeat(
+    path: &Path,
+    configs: Vec<BenchmarkConfig>,
+    repeat: Option<u64>,
+    output: &mut dyn Write,
+) -> Result<(), Error> {
+    publish_sweep_with_progress_and_repeat(path, configs, repeat, output, &mut |_, _| {})
 }
 
 /// Publish a sweep while reporting each durable benchmark configuration and
@@ -488,7 +499,17 @@ pub(crate) fn publish_sweep_with_progress(
     output: &mut dyn Write,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<(), Error> {
-    let prepared = prepared::Sweep::new(path, configs)?;
+    publish_sweep_with_progress_and_repeat(path, configs, None, output, progress)
+}
+
+fn publish_sweep_with_progress_and_repeat(
+    path: &Path,
+    configs: Vec<BenchmarkConfig>,
+    repeat: Option<u64>,
+    output: &mut dyn Write,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<(), Error> {
+    let prepared = prepared::Sweep::new_with_repeat(path, configs, repeat)?;
     if fs::symlink_metadata(path).is_ok() {
         return Err(Error::Input(format!(
             "sweep {} already exists; choose a new --output filename",

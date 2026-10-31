@@ -38,6 +38,8 @@ pub(crate) const MAX_CONFIGS: usize = 65536;
 pub(crate) struct SweepFile {
     pub configs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<crate::planning::Resources>,
 }
 
@@ -140,7 +142,6 @@ pub(crate) fn run_with_options(
     options: Options<'_>,
     output: &mut dyn Write,
 ) -> Result<(), Error> {
-    let Options { json, mode, .. } = options;
     if options.reconcile_completed && !options.resume {
         return Err(Error::Input(
             "--reconcile-completed requires --resume; original results were not replaced".into(),
@@ -148,6 +149,11 @@ pub(crate) fn run_with_options(
     }
     let sweep_path = Path::new(path);
     let sweep = read_manifest(sweep_path)?;
+    let options = Options {
+        repeat: options.repeat.or(sweep.repeat),
+        ..options
+    };
+    let Options { json, mode, .. } = options;
     let parent = sweep_path.parent().unwrap_or_else(|| Path::new("."));
     let stem = sweep_path
         .file_stem()
@@ -490,6 +496,7 @@ mod tests {
             let text = toml::to_string(&super::SweepFile {
                 resources: None,
                 configs,
+                repeat: None,
             })
             .unwrap();
             if count >= 2294 {
@@ -520,6 +527,7 @@ mod tests {
             toml::to_string(&super::SweepFile {
                 resources: None,
                 configs,
+                repeat: None,
             })
             .unwrap(),
         )

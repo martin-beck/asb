@@ -220,6 +220,7 @@ mod tests {
             workspace: None,
             output: None,
             retention: crate::benchmark::RetentionConfig::default(),
+            repeat: None,
         };
         expand(&mut options).unwrap();
         assert_eq!(

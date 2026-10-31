@@ -194,6 +194,7 @@ fn temporary_imports_are_ignored_but_malformed_identity_slots_fail_before_inspec
 fn invalid_or_unbound_original_results_cannot_be_imported() {
     let fixture = Fixture::new();
     let manifest = super::super::SweepFile {
+        repeat: None,
         resources: None,
         configs: vec![],
     };
@@ -236,6 +237,7 @@ fn no_grade_import_reports_unknown_metrics_in_both_output_formats() {
         }),
     );
     let manifest = super::super::SweepFile {
+        repeat: None,
         resources: None,
         configs: vec![],
     };

@@ -43,6 +43,7 @@ impl Fixture {
         fs::write(
             root.join("sweep.toml"),
             toml::to_string(&super::super::SweepFile {
+                repeat: None,
                 configs: references,
                 resources: None,
             })
