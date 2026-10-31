@@ -45,6 +45,12 @@ def component_targets(paths: list[str]) -> tuple[str, ...]:
                 stem = relative.stem
                 if stem in {"lib", "main"}:
                     shared = True
+                elif stem == "runner":
+                    # `runner.rs` is the façade. Its direct unit namespace
+                    # exercises its option wiring without making every PR
+                    # rerun the slow real-process phase matrix; that remains
+                    # a serial post-merge qualification.
+                    targets.add("lib:runner::tests::")
                 else:
                     targets.add(f"lib:{stem}::")
             elif relative.parts[0] in {"agents", "collectors", "compare", "install", "providers", "runner", "sweep", "tui", "workloads"}:
