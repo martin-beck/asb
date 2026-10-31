@@ -11,13 +11,32 @@ pub(super) struct Summary {
 }
 
 pub(super) fn scope(pid: u32, trace_id: &str) -> String {
+    scoped_scope(pid, trace_id, None)
+}
+
+/// Scope used only by the rendered timeline.  The SVG deliberately presents
+/// at most 64 lanes, so constrain the source rows before materializing the
+/// potentially very large thread-state relation.  The full state summary
+/// continues to use [`scope`] and therefore accounts for every observed
+/// thread.
+pub(super) fn timeline_scope(pid: u32, trace_id: &str) -> String {
+    scoped_scope(pid, trace_id, Some(64))
+}
+
+fn scoped_scope(pid: u32, trace_id: &str, thread_limit: Option<usize>) -> String {
     // Prevent SQLite from repeatedly expanding the recursive process census
     // for each scheduler-state row on fork-heavy workloads.
     let scope = perfetto_scope_sql(pid, trace_id)
         .replace("tree(upid) AS (", "tree(upid) AS MATERIALIZED (")
         .replace(", bounds AS (", ", bounds AS MATERIALIZED (");
+    let threads = match thread_limit {
+        Some(limit) => {
+            format!("SELECT utid,tid FROM thread WHERE upid IN tree ORDER BY utid LIMIT {limit}")
+        }
+        None => "SELECT utid,tid FROM thread WHERE upid IN tree".into(),
+    };
     format!(
-        "{scope}, scoped_threads AS MATERIALIZED (SELECT utid,tid FROM thread WHERE upid IN tree), clipped AS MATERIALIZED (SELECT th.utid,th.tid,MAX(st.ts,b.start_ts) AS ts,MIN(st.ts+st.dur,b.end_ts)-MAX(st.ts,b.start_ts) AS dur,st.state,st.io_wait FROM scoped_threads th JOIN thread_state st ON st.utid=th.utid CROSS JOIN bounds b WHERE st.dur>0 AND st.ts<b.end_ts AND st.ts+st.dur>b.start_ts)"
+        "{scope}, scoped_threads AS MATERIALIZED ({threads}), clipped AS MATERIALIZED (SELECT th.utid,th.tid,MAX(st.ts,b.start_ts) AS ts,MIN(st.ts+st.dur,b.end_ts)-MAX(st.ts,b.start_ts) AS dur,st.state,st.io_wait FROM scoped_threads th JOIN thread_state st ON st.utid=th.utid CROSS JOIN bounds b WHERE st.dur>0 AND st.ts<b.end_ts AND st.ts+st.dur>b.start_ts)"
     )
 }
 
@@ -196,6 +215,15 @@ mod tests {
         assert_eq!(metrics["uninterruptible_sleep_ms"], 5.0);
         assert_eq!(metrics["io_wait_observed_ms"], 6.0);
         assert!(metrics["io_wait_ms"].is_null());
+    }
+
+    #[test]
+    fn timeline_scope_bounds_source_threads_but_summary_scope_is_complete() {
+        let summary = scope(42, "fixture");
+        let timeline = timeline_scope(42, "fixture");
+        assert!(!summary.contains("ORDER BY utid LIMIT 64"));
+        assert!(timeline.contains("ORDER BY utid LIMIT 64"));
+        assert!(timeline.contains("clipped AS MATERIALIZED"));
     }
 
     #[test]
