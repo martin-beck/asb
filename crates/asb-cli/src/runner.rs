@@ -3,6 +3,7 @@ mod attempt;
 mod batch;
 pub(crate) use batch::{dataset_fingerprint, replay_protocol_fingerprint};
 pub(crate) mod campaign;
+mod compaction;
 mod completion;
 pub(crate) mod diagnostics;
 pub(crate) mod disposition;

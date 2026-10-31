@@ -1532,10 +1532,22 @@ impl Publication<'_, '_> {
         );
         let measurement_completion = phases::finish_measurements(measurement_session, result)
             .with_artifact_evidence(&artifact_evidence);
+        // A compact attempt may release only its ASB-created task workspace.
+        // Installed adapters, downloaded workloads, cassettes, logs and
+        // collector captures remain project inputs or sealed evidence.
+        let compact_workspace = super::compaction::eligible(
+            config.retention.compact_completed_attempts,
+            result.disposition.success,
+            workload_cleanup_confirmed && proxy_evidence.cleanup_confirmed,
+            result.workload_resource_disposition,
+        );
         // This private record preserves evaluator outcomes, including unresolved
         // tasks. Its absence never changes a benchmark grade or blocks execution;
         // a future continuation must also validate its input and evidence seals.
-        let mut completion_outputs = vec![workspace.clone()];
+        let mut completion_outputs = (!compact_workspace)
+            .then(|| workspace.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
         if let Some(path) = measurement_path.as_ref() {
             completion_outputs.push(path.clone());
         }
@@ -1573,9 +1585,11 @@ impl Publication<'_, '_> {
                 },
             ) {
                 Ok(record) => {
+                    let mut completion_sealed = true;
                     if let Some(observer) = options.on_completion
                         && let Err(error) = observer.completed(options.replica, &record)
                     {
+                        completion_sealed = false;
                         let destination = observer.evidence_destination(options.replica);
                         let warning = diagnostics::Warning::new(
                             diagnostics::Stage::Replica,
@@ -1588,6 +1602,24 @@ impl Publication<'_, '_> {
                         } else {
                             warning.source_outcome()
                         });
+                    }
+                    // A failed checkpoint publication is intentionally enough
+                    // to preserve the workspace: resume/reconciliation may
+                    // still require it.  Direct runs have their completion
+                    // record as the durable publication boundary.
+                    if compact_workspace && completion_sealed {
+                        let completion_directory =
+                            completion::directory(&context.publication_config, &config.log_file);
+                        if let Err(error) =
+                            super::compaction::remove_workspace(&workspace, &completion_directory)
+                        {
+                            continuation_warnings.push(diagnostics::Warning::new(
+                                diagnostics::Stage::Outcome,
+                                config_path,
+                                &completion_directory,
+                                &error,
+                            ));
+                        }
                     }
                 }
                 Err(error) => continuation_warnings.push(diagnostics::Warning::new(
