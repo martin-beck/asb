@@ -219,6 +219,20 @@ impl Inspection {
                     "repeat must be positive and its concurrency product at most 65533".into(),
                 )
             })?;
+        // Repeated campaigns bypass the one-shot native command builder until
+        // after their durable campaign plan has been prepared.  Validate this
+        // capability here as well, so `--max-steps` can never be accepted and
+        // then silently omitted for an adapter that has no client-enforced
+        // turn limit.
+        if options.max_steps.is_some()
+            && crate::agents::find(&config.agent)
+                .is_some_and(|adapter| !adapter.supports_max_steps())
+        {
+            return Err(Error::Input(format!(
+                "agent `{}` does not support --max-steps; remove the flag or select an adapter with an enforced turn limit",
+                config.agent
+            )));
+        }
         if options.on_completion.is_some()
             || options.replica.index != 1
             || options.replica.total != 1
@@ -1626,6 +1640,32 @@ mod tests {
             .set_len(64 * 1024 * 1024 + 1)
             .unwrap();
         assert!(legacy::transfer_input(&large, &mut std::io::sink()).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repeated_campaign_rejects_an_unsupported_max_step_limit_before_preparation() {
+        let (root, config, path) = planning_fixture();
+        let result = Inspection::prepare_selected(
+            &path,
+            config,
+            1,
+            RunOptions {
+                max_steps: Some(100),
+                ..Default::default()
+            },
+            Some(&root.join("campaigns")),
+            None,
+        );
+        let error = match result {
+            Ok(_) => panic!("unsupported max-step limit unexpectedly prepared a campaign"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "agent `pi` does not support --max-steps; remove the flag or select an adapter with an enforced turn limit"
+        );
+        assert!(!root.join("campaigns").exists());
         fs::remove_dir_all(root).unwrap();
     }
 }
