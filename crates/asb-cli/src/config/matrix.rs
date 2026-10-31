@@ -365,6 +365,11 @@ fn prepare_missing_installables(
 /// tools.  Some collectors (for example Perfetto) are themselves installable
 /// tools, while others only contribute dependencies such as `perf`.
 fn collector_installables(selected: &[String]) -> Vec<String> {
+    let selected = if selected.is_empty() {
+        measurements::available_collectors()
+    } else {
+        selected.to_vec()
+    };
     let selected = selected
         .iter()
         .filter_map(|name| {
@@ -517,5 +522,20 @@ mod tests {
         assert!(tools.contains(&"flamegraph".to_owned()));
         assert!(tools.contains(&"bpftrace".to_owned()));
         assert!(tools.contains(&"perf".to_owned()));
+    }
+
+    #[test]
+    fn default_collectors_install_their_project_local_dependencies() {
+        let tools = collector_installables(&[]);
+        for tool in [
+            "bpftrace",
+            "flamegraph",
+            "iostat",
+            "mpstat",
+            "perf",
+            "perfetto",
+        ] {
+            assert!(tools.contains(&tool.to_owned()), "missing {tool}");
+        }
     }
 }

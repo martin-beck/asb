@@ -280,8 +280,8 @@ pub(crate) fn run_with_interactive(
                 None => None,
             };
             let path = generated_preset
-                .as_deref()
-                .map(|path| path.to_string_lossy().into_owned())
+                .as_ref()
+                .map(|preset| preset.path.to_string_lossy().into_owned())
                 .or(options.path.clone())
                 .expect("clap requires either a sweep path or a preset");
             if generated_preset.is_some()
@@ -293,7 +293,9 @@ pub(crate) fn run_with_interactive(
             sweep::run_with_options(
                 &path,
                 sweep::Options {
-                    repeat: options.repeat,
+                    repeat: options
+                        .repeat
+                        .or(generated_preset.as_ref().map(|preset| preset.repeat)),
                     max_steps: options.max_steps,
                     track: options.track,
                     seed: options.seed,

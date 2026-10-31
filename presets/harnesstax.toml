@@ -13,6 +13,11 @@ models = ["openrouter=deepseek/deepseek-v4.1-flash"]
 concurrency = 1
 repeat = 3
 max_steps = 100
+measurements = [
+  "agent-memory", "agent-workers", "cpu-accounting", "system", "mpstat",
+  "iostat", "perf", "perfetto", "flamegraph", "bpftrace", "bpftrace:all",
+  "tool-calls",
+]
 
 [[workloads]]
 id = "swe-bench-lite"
