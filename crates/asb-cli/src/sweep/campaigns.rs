@@ -257,6 +257,10 @@ pub(super) fn prepare(
                 track: options.track,
                 replay_seed: if *bundle { seed } else { options.seed },
                 respect_record_timings: options.respect_record_timings,
+                // PreparedSweep warmed this fresh population before campaign
+                // construction, so each repeated task must not revalidate the
+                // same shared installations.
+                requirements_prepared: true,
                 policy: entry.policy.as_ref(),
                 ..Default::default()
             },
