@@ -68,6 +68,7 @@ pub(crate) fn load(name: &str) -> Result<SetupOptions, Error> {
         workspace: None,
         output: None,
         retention: preset.retention,
+        repeat: Some(preset.repeat),
     })
 }
 

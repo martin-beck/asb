@@ -14,6 +14,7 @@ pub(super) fn load(path: &str) -> Result<LoadedReport, Error> {
         single: true,
         sweep: crate::sweep::SweepFile {
             configs: vec!["benchmark.toml".into()],
+            repeat: None,
             resources: None,
         },
         sweep_results: layout.root.clone(),

@@ -404,6 +404,7 @@ mod tests {
             )
             .unwrap();
             let manifest = crate::sweep::SweepFile {
+                repeat: None,
                 configs: vec![reference],
                 resources: None,
             };

@@ -115,6 +115,7 @@ impl Request {
         let sweep = if single {
             crate::sweep::SweepFile {
                 resources: None,
+                repeat: None,
                 configs: vec![
                     sweep_path
                         .file_name()

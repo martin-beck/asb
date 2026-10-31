@@ -56,6 +56,7 @@ pub(in crate::sweep::checkpoint) fn published_concurrency(
     let mut plan = plan::build(
         &root,
         &SweepFile {
+            repeat: None,
             configs: refs,
             resources: None,
         },

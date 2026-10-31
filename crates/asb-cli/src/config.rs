@@ -22,6 +22,8 @@ pub struct SetupOptions {
     pub workspace: Option<String>,
     pub output: Option<String>,
     pub retention: RetentionConfig,
+    /// Repeat default persisted when this setup produces a sweep manifest.
+    pub repeat: Option<u64>,
 }
 
 /// A materialized preset sweep together with its declared execution defaults.
@@ -107,6 +109,7 @@ fn configuration(options: SetupOptions) -> Result<BenchmarkConfig, Error> {
         workspace,
         output: destination,
         retention,
+        repeat: _,
     } = options;
     let (_, project_config) = project::load(std::path::Path::new("."))?;
     let agent = required(agent.into_iter().next())?;
@@ -337,6 +340,7 @@ mod tests {
             workspace: None,
             output: None,
             retention: crate::benchmark::RetentionConfig::default(),
+            repeat: None,
         }
     }
 
