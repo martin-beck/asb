@@ -2843,7 +2843,8 @@ fn concurrent_bpftrace_sudo_help_and_sweep_failures_are_reported_once() {
     project.write("suite.toml", "configs=['first.toml','second.toml']\n");
     // A missing replay cassette is validated before collector admission. This
     // fixture exercises the collector preflight, so execute its normal path.
-    let result = project.command_with_env(&["sweep", "suite.toml"], &[("PATH", &path)]);
+    let result =
+        project.command_with_env(&["sweep", "suite.toml", "--verbose"], &[("PATH", &path)]);
     let error = stderr(&result);
     expect_failure(&result, "2 failed benchmark(s)");
     assert_eq!(
@@ -4958,7 +4959,9 @@ fn tool_and_workload_downloads_use_the_project_proxy() {
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(12);
         let mut paths = Vec::new();
-        while paths.len() < 2 && Instant::now() < deadline {
+        // Each direct transfer first probes the remote size, then downloads
+        // the bounded payload through the same configured proxy.
+        while paths.len() < 4 && Instant::now() < deadline {
             let (mut stream, _) = match listener.accept() {
                 Ok(pair) => pair,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -4998,7 +5001,7 @@ fn tool_and_workload_downloads_use_the_project_proxy() {
     let requests = server.join().unwrap();
     expect_success(&tool);
     expect_success(&workload);
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 4);
     assert!(
         requests
             .iter()
