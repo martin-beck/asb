@@ -42,6 +42,7 @@ pub(super) struct PreparedSweep<'a> {
     backup: PathBuf,
     replay_inputs: Option<PathBuf>,
     replay_sources: Vec<PathBuf>,
+    pricing_snapshots: Vec<(String, serde_json::Value)>,
     restore_recordings: bool,
     mode: PreparedMode,
     _output_lock: lock::OutputLock,
@@ -175,6 +176,14 @@ impl<'a> PreparedSweep<'a> {
                 )?;
             }
         }
+        // Fetch dynamic price schedules while the prior results directory is
+        // still untouched. A transient catalog failure is preflight failure,
+        // not a reason to rotate a user's completed output into history.
+        let pricing_snapshots = if options.resume {
+            Vec::new()
+        } else {
+            capture_pricing_snapshots(&plan)?
+        };
         let old_results = parent.join(format!("{stem}-results")).canonicalize().ok();
         let relocated_input = if mode == Some(crate::tape::Mode::Replay) {
             cassette_root
@@ -236,6 +245,7 @@ impl<'a> PreparedSweep<'a> {
             backup,
             replay_inputs,
             replay_sources,
+            pricing_snapshots,
             restore_recordings: cassette_root.is_none()
                 || relocated_input
                     .as_ref()
@@ -266,23 +276,12 @@ impl<'a> PreparedSweep<'a> {
             }
             PreparedMode::Fresh => {
                 plan::fresh_results(&self.parent, &self.stem, &self.plan)?;
-                // Price estimates must be reproducible: capture the complete
-                // OpenRouter schedule before any live attempt starts and let
-                // comparison consume this retained file offline.
-                let providers = self
-                    .plan
-                    .entries
-                    .iter()
-                    .map(|entry| entry.configuration.provider.as_str())
-                    .collect::<BTreeSet<_>>();
-                for provider in providers {
-                    if crate::providers::credential(provider).is_none() {
-                        continue;
-                    }
-                    if let Some((name, pricing)) = crate::providers::pricing_snapshot(provider)? {
-                        crate::evidence::write_json(&self.results.join(name), &pricing)
-                            .map_err(Error::Io)?;
-                    }
+                // The values were fetched during preflight, before this
+                // activation moved any historical results. Retain exactly
+                // those values for offline comparison.
+                for (name, pricing) in &self.pricing_snapshots {
+                    crate::evidence::write_json(&self.results.join(name), pricing)
+                        .map_err(Error::Io)?;
                 }
                 if let Some(prepared) = self.campaigns {
                     campaigns = Some(prepared.publish(&self.results)?);
@@ -350,6 +349,28 @@ impl<'a> PreparedSweep<'a> {
             _output_lock: self._output_lock,
         })
     }
+}
+
+fn capture_pricing_snapshots(
+    plan: &plan::SweepPlan,
+) -> Result<Vec<(String, serde_json::Value)>, Error> {
+    #[cfg(all(test, unix))]
+    tests::before_pricing_snapshot()?;
+    let providers = plan
+        .entries
+        .iter()
+        .map(|entry| entry.configuration.provider.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut snapshots = Vec::new();
+    for provider in providers {
+        if crate::providers::credential(provider).is_none() {
+            continue;
+        }
+        if let Some((name, pricing)) = crate::providers::pricing_snapshot(provider)? {
+            snapshots.push((name.to_owned(), pricing));
+        }
+    }
+    Ok(snapshots)
 }
 
 #[cfg(all(test, unix))]

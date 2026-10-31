@@ -10,7 +10,14 @@ thread_local! {static FAIL_INITIAL: std::cell::Cell<bool> = const {std::cell::Ce
 thread_local! {static FAIL_COMPARE: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};}
 thread_local! {static ACTIVE: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};}
 thread_local! {static FAIL_FINAL: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};}
+thread_local! {static FAIL_PRICING: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};}
 thread_local! {static RESERVATION_FAULT: std::cell::Cell<Option<&'static str>> = const {std::cell::Cell::new(None)};}
+pub(super) fn before_pricing_snapshot() -> Result<(), Error> {
+    if FAIL_PRICING.get() {
+        return Err(Error::Run("fixture pricing snapshot unavailable".into()));
+    }
+    Ok(())
+}
 pub(super) fn before_input_finish(results: &Path) {
     if FAIL_FINAL.get() {
         let input = results.join(".checkpoint/inputs.json");
@@ -110,6 +117,7 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
             "campaign-reservation-first",
             "campaign-reservation-last",
             "campaign-admission",
+            "pricing-preflight",
         ] {
             // The real capacity probe is intentionally exercised elsewhere.
             // This fixture has a separate assertion surface: continuation and
@@ -192,7 +200,7 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
     }
     let manifest = root.join("sweep.toml");
     std::fs::write(&manifest, "configs=['a.toml','b.toml']\n").unwrap();
-    if case == "history" {
+    if case == "history" || case == "pricing-preflight" {
         std::fs::create_dir(root.join("sweep-results")).unwrap();
         std::fs::write(root.join("sweep-results/old-sentinel"), "preserved").unwrap();
     }
@@ -286,6 +294,7 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
     FAIL_INITIAL.set(case == "initial");
     FAIL_COMPARE.set(case == "benchmark-output-compare");
     FAIL_FINAL.set(case == "json-final-seal");
+    FAIL_PRICING.set(case == "pricing-preflight");
     let mut writer = Writer {
         bytes: Vec::new(),
         first: case == "initial" || case == "history",
@@ -308,6 +317,21 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
     );
     assert!(lock::OutputLock::acquire(root, "sweep").is_ok());
     assert!(outcome.is_err(), "{case}");
+    if case == "pricing-preflight" {
+        assert!(
+            outcome
+                .unwrap_err()
+                .to_string()
+                .contains("fixture pricing snapshot unavailable")
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("sweep-results/old-sentinel")).unwrap(),
+            "preserved"
+        );
+        assert!(!root.join("sweep-history").exists());
+        assert!(!counter.exists());
+        return;
+    }
     let diagnostic = outcome.as_ref().err().map(ToString::to_string);
     if case == "resume-mode" {
         assert!(
