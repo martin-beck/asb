@@ -32,8 +32,51 @@ struct Workload {
     trials: Vec<String>,
 }
 
+/// Execution defaults declared by a repository-owned preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SweepDefaults {
+    pub(crate) repeat: u64,
+}
+
 /// Load one registered preset without consulting the network or project state.
 pub(crate) fn load(name: &str) -> Result<SetupOptions, Error> {
+    let preset = parse(name)?;
+    Ok(SetupOptions {
+        agent: preset.agents,
+        workload: preset
+            .workloads
+            .iter()
+            .map(|workload| workload.id.clone())
+            .collect(),
+        trial: preset
+            .workloads
+            .iter()
+            .flat_map(|workload| {
+                workload
+                    .trials
+                    .iter()
+                    .map(move |trial| format!("{}={trial}", workload.id))
+            })
+            .collect(),
+        trial_set: Vec::new(),
+        provider: preset.providers,
+        model: preset.models,
+        measure: preset.measurements,
+        concurrency: Some(preset.concurrency),
+        workspace: None,
+        output: None,
+    })
+}
+
+/// Load the run-time defaults without coupling them to generated TOMLs.
+pub(crate) fn sweep_defaults(name: &str) -> Result<SweepDefaults, Error> {
+    let preset = parse(name)?;
+    Ok(SweepDefaults {
+        repeat: preset.repeat,
+    })
+}
+
+fn parse(name: &str) -> Result<Preset, Error> {
     if name.contains('/') || name.contains('\\') || name != "harnesstax.toml" {
         return Err(Error::Input(format!(
             "unknown preset `{name}`; available presets: harnesstax.toml"
@@ -62,42 +105,17 @@ pub(crate) fn load(name: &str) -> Result<SetupOptions, Error> {
             "bundled preset `{name}` has an empty required selection or zero repeat/concurrency"
         )));
     }
-    // `max_steps` is retained as experiment methodology in the preset.  It is
-    // intentionally not translated to an adapter command here: ASB currently
-    // has no uniform live step-cap protocol across these three independent
-    // harnesses.  The separate max-step controller feature owns enforcement.
+    // The method's step cap is retained as reproducibility metadata. It is
+    // not forwarded automatically until every selected harness has a verified,
+    // equivalent native turn-limit flag. Passing it now would make the preset
+    // fail closed before any benchmark starts.
     let _ = preset.max_steps;
-    let options = SetupOptions {
-        agent: preset.agents,
-        workload: preset
-            .workloads
-            .iter()
-            .map(|workload| workload.id.clone())
-            .collect(),
-        trial: preset
-            .workloads
-            .iter()
-            .flat_map(|workload| {
-                workload
-                    .trials
-                    .iter()
-                    .map(move |trial| format!("{}={trial}", workload.id))
-            })
-            .collect(),
-        trial_set: Vec::new(),
-        provider: preset.providers,
-        model: preset.models,
-        measure: preset.measurements,
-        concurrency: Some(preset.concurrency),
-        workspace: None,
-        output: None,
-    };
-    Ok(options)
+    Ok(preset)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::load;
+    use super::{load, sweep_defaults};
 
     #[test]
     fn harnesstax_is_a_bounded_machine_readable_matrix() {
@@ -108,6 +126,12 @@ mod tests {
         assert_eq!(preset.workload, ["swe-bench-lite", "terminal-bench-2.0"]);
         assert_eq!(preset.trial.len(), 60);
         assert_eq!(preset.concurrency, Some(1));
+        assert_eq!(preset.measure.len(), 12);
+        assert!(preset.measure.contains(&"bpftrace:all".to_owned()));
+        assert_eq!(
+            sweep_defaults("harnesstax.toml").expect("defaults load"),
+            super::SweepDefaults { repeat: 3 }
+        );
     }
 
     #[test]

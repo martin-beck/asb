@@ -23,6 +23,12 @@ pub struct SetupOptions {
     pub output: Option<String>,
 }
 
+/// A materialized preset sweep together with its declared execution defaults.
+pub(crate) struct PresetSweep {
+    pub(crate) path: PathBuf,
+    pub(crate) repeat: u64,
+}
+
 /// Expand a repository-owned, machine-readable benchmark preset.
 pub fn setup_preset(
     name: &str,
@@ -47,13 +53,14 @@ pub fn setup(options: SetupOptions, output: &mut dyn Write) -> Result<(), Error>
 /// Unlike `asb setup --preset`, this owns a fresh internal output path.  The
 /// generated TOMLs remain in the project as the durable execution input and
 /// provenance for the resulting sweep.
-pub fn setup_preset_for_sweep(
+pub(crate) fn setup_preset_for_sweep(
     name: &str,
     quiet: bool,
     output: &mut dyn Write,
-) -> Result<PathBuf, Error> {
+) -> Result<PresetSweep, Error> {
     let (root, _) = project::load(Path::new("."))?;
     require_initialized_preset_project(&root, name)?;
+    let defaults = crate::presets::sweep_defaults(name)?;
     let mut options = crate::presets::load(name)?;
     let path = preset_sweep_path(&root, name, matrix::stamp());
     options.output = Some(path.to_string_lossy().into_owned());
@@ -62,7 +69,10 @@ pub fn setup_preset_for_sweep(
     } else {
         matrix::setup(options, output)?;
     }
-    Ok(path)
+    Ok(PresetSweep {
+        path,
+        repeat: defaults.repeat,
+    })
 }
 
 fn require_initialized_preset_project(root: &Path, name: &str) -> Result<(), Error> {
