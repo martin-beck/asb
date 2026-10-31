@@ -194,6 +194,7 @@ impl Execution<'_> {
                 mcp_mode: self.options.mcp_mode,
                 cassette: cassette.as_deref().and_then(Path::to_str),
                 respect_record_timings: self.options.respect_record_timings,
+                requirements_prepared: !self.options.resume,
                 on_completion: observer
                     .as_ref()
                     .map(|observer| observer as &dyn runner::replica::CompletionObserver),
