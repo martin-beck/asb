@@ -185,6 +185,7 @@ impl SweepPlan {
                 .map(|entry| entry.reference.clone())
                 .collect(),
             resources: snapshot.resources,
+            repeat: None,
         };
         let configurations = snapshot
             .entries
@@ -516,6 +517,7 @@ mod tests {
             ("terminal-bench-2.1", 89),
         ];
         let mut manifest = SweepFile {
+            repeat: None,
             resources: None,
             configs: Vec::new(),
         };
@@ -600,6 +602,7 @@ mod tests {
             )
             .unwrap();
             SweepFile {
+                repeat: None,
                 resources: None,
                 configs: vec!["one.toml".into(), "two.toml".into()],
             }

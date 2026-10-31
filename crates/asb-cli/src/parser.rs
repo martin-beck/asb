@@ -819,6 +819,7 @@ impl From<SetupArgs> for config::SetupOptions {
             workspace: value.workspace,
             output: value.output,
             retention: crate::benchmark::RetentionConfig::default(),
+            repeat: None,
         }
     }
 }
