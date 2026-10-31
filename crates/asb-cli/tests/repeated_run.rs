@@ -1201,7 +1201,7 @@ fn bundled_recording_uses_fresh_default_and_stable_repeated_slots_even_with_json
 }
 
 #[test]
-fn complete_llm_recording_survives_incomplete_agent_output_without_authorizing_continuation() {
+fn complete_llm_recording_keeps_a_drained_truncated_transcript_replayable() {
     let project = Project::new();
     project.config(2);
     fs::write(
@@ -1211,14 +1211,14 @@ fn complete_llm_recording_survives_incomplete_agent_output_without_authorizing_c
     .unwrap();
     let provider = RecordingProvider::new();
     let output = record(&project, &provider, Some("2"));
-    assert!(!output.status.success());
-    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(output.status.success());
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 4);
     let rows = records(&output.stdout);
     let summaries: Vec<_> = rows
         .iter()
         .filter(|row| row.get("task").is_some())
         .collect();
-    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries.len(), 4);
     assert!(
         summaries
             .iter()
@@ -1228,7 +1228,7 @@ fn complete_llm_recording_survives_incomplete_agent_output_without_authorizing_c
         .iter()
         .find(|summary| summary["replica_index"] == 1)
         .unwrap();
-    assert_eq!(incomplete["process_success"], false);
+    assert_eq!(incomplete["process_success"], true);
     assert_eq!(
         summaries
             .iter()
@@ -1236,12 +1236,7 @@ fn complete_llm_recording_survives_incomplete_agent_output_without_authorizing_c
             .unwrap()["process_success"],
         true
     );
-    assert!(
-        incomplete["failure_reason"]
-            .as_str()
-            .unwrap()
-            .contains("capture")
-    );
+    assert!(incomplete["failure_reason"].is_null());
     assert_eq!(incomplete["token_usage"]["total_tokens"], 5);
     assert!(incomplete["steps"].is_null());
     let root = PathBuf::from(
@@ -1254,8 +1249,8 @@ fn complete_llm_recording_survives_incomplete_agent_output_without_authorizing_c
     .parent()
     .unwrap()
     .to_path_buf();
-    assert!(!root.join("batch-2").exists());
-    assert!(!root.join("batch-1/outcomes/1.json").exists());
+    assert!(root.join("batch-2").exists());
+    assert!(root.join("batch-1/outcomes/1.json").is_file());
     let log = records(&fs::read(root.join("batch-1/run-concurrency-1.jsonl")).unwrap());
     assert_eq!(log.last().unwrap()["exit_code"], 0);
     let archive = asb_cli::cassette::Archive::open(
@@ -1263,8 +1258,8 @@ fn complete_llm_recording_survives_incomplete_agent_output_without_authorizing_c
         asb_cli::cassette::Limits::default(),
     )
     .unwrap();
-    assert_eq!(archive.manifest().tracks.len(), 2);
-    assert_eq!(archive.manifest().tracks[0].process_success, Some(false));
+    assert_eq!(archive.manifest().tracks.len(), 4);
+    assert_eq!(archive.manifest().tracks[0].process_success, Some(true));
     for track in &archive.manifest().tracks {
         assert!(track.complete && track.automatically_selectable());
         assert_eq!(track.statistics.tokens, Some(5));
@@ -1400,7 +1395,7 @@ fn missing_optional_outcome_keeps_grade_but_stops_repeated_batch_admission() {
 }
 
 #[test]
-fn incomplete_capture_preserves_file_grades_but_cannot_admit_another_batch() {
+fn truncated_capture_preserves_file_grades_and_allows_the_next_batch() {
     for grade in [true, false] {
         let project = Project::new();
         project.config(2);
@@ -1417,36 +1412,28 @@ fn incomplete_capture_preserves_file_grades_but_cannot_admit_another_batch() {
             .unwrap();
         }
         let output = project.run("2");
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("capture limit"));
+        assert_eq!(output.status.success(), grade);
         let rows = records(&output.stdout);
         let summaries: Vec<_> = rows
             .iter()
             .filter(|row| row.get("task").is_some())
             .collect();
-        assert_eq!(summaries.len(), 2, "the admitted sibling must finish");
-        let failed = summaries
+        assert_eq!(summaries.len(), 4, "both continued batches must finish");
+        let truncated = summaries
             .iter()
             .find(|row| row["execution"]["replica"] == 1)
             .unwrap();
-        // Whole-stream agent success is unknown after incomplete capture even
-        // though the independent file evaluator still returns its own grade.
-        assert_eq!(failed["process_success"], false);
-        assert_eq!(failed["workload_success"], grade);
-        assert_eq!(failed["failure_kind"], "run_error");
-        assert_eq!(failed["workload_resource_disposition"], "not-required");
-        assert!(
-            failed["failure_reason"]
-                .as_str()
-                .unwrap()
-                .contains("capture limit")
-        );
+        // A bounded transcript prefix does not make an otherwise drained
+        // execution incomplete; its independent evaluator result remains
+        // authoritative.
+        assert_eq!(truncated["process_success"], true);
+        assert_eq!(truncated["workload_success"], grade);
         let campaign = PathBuf::from(rows[0]["path"].as_str().unwrap())
             .parent()
             .unwrap()
             .to_path_buf();
-        assert!(!campaign.join("batch-2").exists());
-        assert!(!campaign.join("batch-1/outcomes/1.json").exists());
+        assert!(campaign.join("batch-2").exists());
+        assert!(campaign.join("batch-1/outcomes/1.json").is_file());
         assert!(campaign.join("batch-1/outcomes/2.json").is_file());
         assert!(!campaign.join(".checkpoint").exists());
         let log: Value = serde_json::from_slice(
@@ -1454,28 +1441,27 @@ fn incomplete_capture_preserves_file_grades_but_cannot_admit_another_batch() {
         )
         .unwrap();
         assert_eq!(log["workload_success"], grade);
-        assert_eq!(log["failure_kind"], "run_error");
         assert_eq!(
             log["workload_resource_disposition"],
-            failed["workload_resource_disposition"]
+            truncated["workload_resource_disposition"]
         );
-        assert_eq!(log["workload_artifacts"], failed["workload_artifacts"]);
+        assert_eq!(log["workload_artifacts"], truncated["workload_artifacts"]);
         let finished: Value =
             serde_json::from_slice(&fs::read(campaign.join("finished.json")).unwrap()).unwrap();
-        assert_eq!(finished["stopped"], true);
+        assert_eq!(finished["stopped"], false);
         assert_eq!(
             fs::read_to_string(project.0.join("attempts.jsonl"))
                 .unwrap()
                 .lines()
                 .count(),
-            2
+            4
         );
-        assert!(!project.0.join("barrier-2-1").exists());
+        assert!(project.0.join("barrier-2-1").exists());
         let private = campaign.join("batch-1/.asb-completions");
         for entry in fs::read_dir(private).unwrap() {
             let record: Value =
                 serde_json::from_slice(&fs::read(entry.unwrap().path()).unwrap()).unwrap();
-            assert_ne!(record["summary"]["execution"]["replica"], 1);
+            assert!(record["summary"]["execution"]["replica"].is_u64());
         }
     }
 }
@@ -1720,7 +1706,7 @@ fn repeats_fresh_batches_preserve_users_collect_all_outcomes_and_continue_ordina
     let out = String::from_utf8_lossy(&output.stdout);
     let err = String::from_utf8_lossy(&output.stderr);
     assert!(
-        err.contains("1 failed batch(es)"),
+        err.contains("exit status: 7") && err.contains("failed"),
         "stdout={out} stderr={err}"
     );
     let attempts = records(&fs::read(project.0.join("attempts.jsonl")).unwrap());
