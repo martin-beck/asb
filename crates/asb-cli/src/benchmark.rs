@@ -40,6 +40,14 @@ pub struct BenchmarkConfig {
     pub log_file: String,
     #[serde(default)]
     pub measurements: Option<MeasurementConfig>,
+    /// Explicit storage policy for completed, independently graded attempts.
+    ///
+    /// The default retains the existing recovery-oriented behavior.  Compact
+    /// mode never deletes an incomplete or uncertain attempt: it requires the
+    /// workload adapter to report that its owned execution resources were
+    /// removed after durable grading artifacts were written.
+    #[serde(default)]
+    pub retention: RetentionConfig,
     /// Explicit stdio MCP servers made available to an adapter that supports
     /// ordinary MCP configuration.  The command remains an argument array;
     /// ASB never routes it through a shell.
@@ -49,6 +57,17 @@ pub struct BenchmarkConfig {
         deserialize_with = "deserialize_mcp_servers"
     )]
     pub(crate) mcp_servers: Vec<McpServerConfig>,
+}
+
+/// Storage policy for one benchmark execution.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetentionConfig {
+    /// Release completed task containers/workspaces after their official grade
+    /// and bounded evidence have been retained.  Failed or uncertain attempts
+    /// remain preserved for recovery and inspection.
+    #[serde(default)]
+    pub compact_completed_attempts: bool,
 }
 
 /// A named, bounded stdio MCP server declaration.
@@ -193,6 +212,24 @@ mod tests {
         )
         .expect("positive concurrency parses");
         assert_eq!(config.concurrency, 3);
+    }
+
+    #[test]
+    fn compact_retention_is_opt_in_and_rejects_unknown_fields() {
+        let default: BenchmarkConfig = toml::from_str(
+            "agent='fixture'\nworkload='bug-fix'\nprovider='fixture'\nmodel='fixture'\n",
+        )
+        .unwrap();
+        assert!(!default.retention.compact_completed_attempts);
+        let compact: BenchmarkConfig = toml::from_str(
+            "agent='fixture'\nworkload='bug-fix'\nprovider='fixture'\nmodel='fixture'\n[retention]\ncompact_completed_attempts=true\n",
+        )
+        .unwrap();
+        assert!(compact.retention.compact_completed_attempts);
+        assert!(toml::from_str::<BenchmarkConfig>(
+            "agent='fixture'\nworkload='bug-fix'\nprovider='fixture'\nmodel='fixture'\n[retention]\nunknown=true\n"
+        )
+        .is_err());
     }
 
     #[test]

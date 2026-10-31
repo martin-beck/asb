@@ -364,6 +364,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            retention: Default::default(),
             mcp_servers: Vec::new(),
         };
         let spec = command(&CommandContext {
@@ -404,6 +405,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            retention: Default::default(),
             mcp_servers: Vec::new(),
         };
         let spec = command(&CommandContext {

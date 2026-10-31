@@ -4,7 +4,7 @@
 //! ASB usable without a source checkout while retaining the reviewable TOML
 //! documents under the repository `presets/` directory.
 
-use crate::{Error, config::SetupOptions};
+use crate::{Error, benchmark::RetentionConfig, config::SetupOptions};
 use serde::Deserialize;
 
 const HARNESSTAX: &str = include_str!("../../../presets/harnesstax.toml");
@@ -23,6 +23,8 @@ struct Preset {
     measurements: Vec<String>,
     #[serde(default)]
     max_steps: Option<u64>,
+    #[serde(default)]
+    retention: RetentionConfig,
 }
 
 #[derive(Deserialize)]
@@ -65,6 +67,7 @@ pub(crate) fn load(name: &str) -> Result<SetupOptions, Error> {
         concurrency: Some(preset.concurrency),
         workspace: None,
         output: None,
+        retention: preset.retention,
     })
 }
 
@@ -128,6 +131,7 @@ mod tests {
         assert_eq!(preset.concurrency, Some(1));
         assert_eq!(preset.measure.len(), 12);
         assert!(preset.measure.contains(&"bpftrace:all".to_owned()));
+        assert!(preset.retention.compact_completed_attempts);
         assert_eq!(
             sweep_defaults("harnesstax.toml").expect("defaults load"),
             super::SweepDefaults { repeat: 3 }

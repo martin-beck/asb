@@ -282,6 +282,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "benchmark.log".into(),
             measurements: None,
+            retention: Default::default(),
             mcp_servers: Vec::new(),
         };
         let specification = command(&CommandContext {

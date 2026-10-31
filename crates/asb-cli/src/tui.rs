@@ -2909,6 +2909,7 @@ fn prepare_configs(app: &App) -> Result<(usize, PathBuf, Vec<BenchmarkConfig>), 
                                 directory: "measurements".into(),
                                 collectors: measures.clone(),
                             }),
+                            retention: crate::benchmark::RetentionConfig::default(),
                             mcp_servers: Vec::new(),
                         };
                         configs.push(config)?;

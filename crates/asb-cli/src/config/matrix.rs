@@ -190,6 +190,7 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
                             concurrency: options.concurrency,
                             workspace: options.workspace.clone(),
                             output: options.output.clone(),
+                            retention: options.retention.clone(),
                         };
                         let config = configuration(selection)?;
                         if validated_trials.insert(config.trial.clone()) {

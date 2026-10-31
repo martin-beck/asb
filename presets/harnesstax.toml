@@ -19,6 +19,11 @@ measurements = [
   "tool-calls",
 ]
 
+[retention]
+# Preserve grading evidence and all selected measurements, while releasing each
+# successfully graded private task workspace/container before the next attempt.
+compact_completed_attempts = true
+
 [[workloads]]
 id = "swe-bench-lite"
 trials = [

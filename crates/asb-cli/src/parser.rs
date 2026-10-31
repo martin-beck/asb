@@ -818,6 +818,7 @@ impl From<SetupArgs> for config::SetupOptions {
             concurrency: value.concurrency,
             workspace: value.workspace,
             output: value.output,
+            retention: crate::benchmark::RetentionConfig::default(),
         }
     }
 }

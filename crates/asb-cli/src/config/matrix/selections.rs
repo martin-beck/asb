@@ -219,6 +219,7 @@ mod tests {
             concurrency: None,
             workspace: None,
             output: None,
+            retention: crate::benchmark::RetentionConfig::default(),
         };
         expand(&mut options).unwrap();
         assert_eq!(

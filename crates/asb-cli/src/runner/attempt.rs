@@ -1682,6 +1682,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            retention: Default::default(),
             mcp_servers: vec![McpServerConfig {
                 id: "filesystem".into(),
                 program: "mcp-filesystem".into(),
