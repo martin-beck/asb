@@ -145,22 +145,40 @@ fn process(
             .borrow_mut()
             .marker_verified = true;
     }
+    let analysis_warning = session
+        .state::<PerfettoState>()
+        .borrow()
+        .trace
+        .as_deref()
+        .and_then(analysis_budget_warning);
     {
         let state = session.state::<PerfettoState>();
         let mut state = state.borrow_mut();
-        state.capture_warning = match (session.tool_dir.as_ref(), state.trace.as_ref()) {
-            (Some(tools), Some(trace)) => verify_trace_coverage(
-                &tools.join("perfetto/bin/trace_processor_shell"),
-                trace,
-                session.trace_id(),
-            )
-            .err(),
-            _ => Some(
-                "Perfetto capture coverage cannot be verified: trace or processor is missing."
+        state.analysis_warning = analysis_warning;
+        if state.analysis_warning.is_some() {
+            // The trace was closed and retained, but neither its coverage nor
+            // its derived scope can be safely established without loading it
+            // in the upstream processor. Do not publish either as known.
+            state.capture_warning = Some(
+                "Perfetto capture completeness was not verified because this trace exceeds the safe post-processing input limit."
                     .into(),
-            ),
-        };
-        state.capture_complete = state.capture_warning.is_none();
+            );
+            state.capture_complete = false;
+        } else {
+            state.capture_warning = match (session.tool_dir.as_ref(), state.trace.as_ref()) {
+                (Some(tools), Some(trace)) => verify_trace_coverage(
+                    &tools.join("perfetto/bin/trace_processor_shell"),
+                    trace,
+                    session.trace_id(),
+                )
+                .err(),
+                _ => Some(
+                    "Perfetto capture coverage cannot be verified: trace or processor is missing."
+                        .into(),
+                ),
+            };
+            state.capture_complete = state.capture_warning.is_none();
+        }
     }
     result.metrics = session.perfetto_trace_metrics();
     (result.series, result.timestamps) = session.perfetto_trace_series();
@@ -199,6 +217,7 @@ fn finish(session: &mut measurements::Session) -> Result<(), String> {
             "scope_warning": state.scope_warning,
             "capture_complete": state.capture_complete,
             "capture_warning": state.capture_warning,
+            "analysis_warning": state.analysis_warning,
         }),
     )?;
     write_perfetto_metric_svgs(
@@ -212,7 +231,9 @@ fn finish(session: &mut measurements::Session) -> Result<(), String> {
         session.tool_dir.as_deref(),
         state.pid,
     ) {
-        if !state.capture_complete {
+        if let Some(warning) = state.analysis_warning.as_deref() {
+            write_timeline_notice(&session.dir, &format!("Timeline unavailable: {warning}"))?;
+        } else if !state.capture_complete {
             write_timeline_notice(
                 &session.dir,
                 "Timeline unavailable: incomplete or lossy Perfetto capture; inspect perfetto-tracepoints.json.",
@@ -477,9 +498,28 @@ struct PerfettoState {
     marker_warning: Option<String>,
     scope_warning: Option<String>,
     capture_warning: Option<String>,
+    analysis_warning: Option<String>,
     capture_complete: bool,
     tracepoint_count: u64,
     metrics: BTreeMap<String, f64>,
+}
+
+// Trace Processor builds an in-memory database for the entire capture before
+// it can apply ASB's process-tree scope.  A busy shared host can therefore
+// turn a modest-looking trace into multi-gigabyte post-processing pressure.
+// Keep the native trace (the authoritative collector artifact), but bound the
+// optional derived metrics, series, and SVG timeline before invoking it.
+const MAX_TRACE_PROCESSOR_INPUT_BYTES: u64 = 128 * 1024 * 1024;
+
+fn analysis_budget_warning(trace: &Path) -> Option<String> {
+    let size = trace.metadata().ok()?.len();
+    (size > MAX_TRACE_PROCESSOR_INPUT_BYTES).then(|| {
+        format!(
+            "Derived Perfetto analysis was skipped because the retained trace is {} MiB, above the {} MiB post-processing limit. The complete native trace is retained for Perfetto UI inspection.",
+            size / (1024 * 1024),
+            MAX_TRACE_PROCESSOR_INPUT_BYTES / (1024 * 1024),
+        )
+    })
 }
 
 fn wait_for_capture_ready(collector: &mut Collector, timeout: Duration) -> Result<(), String> {
@@ -694,6 +734,9 @@ impl measurements::Session {
             trace.metadata().map_or(0, |metadata| metadata.len()) as f64,
         );
         metrics.insert("perfetto.tracepoints".into(), state.tracepoint_count as f64);
+        if state.analysis_warning.is_some() {
+            return metrics;
+        }
         if !state.capture_complete {
             return metrics;
         }
@@ -737,6 +780,9 @@ impl measurements::Session {
         let mut timestamps = BTreeMap::new();
         let state = self.state::<PerfettoState>();
         let state = state.borrow();
+        if state.analysis_warning.is_some() {
+            return (series, timestamps);
+        }
         if !state.capture_complete {
             return (series, timestamps);
         }

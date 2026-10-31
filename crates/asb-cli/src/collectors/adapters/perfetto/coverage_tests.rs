@@ -330,6 +330,66 @@ fn timeline_notices_handle_missing_failed_empty_and_malformed_processor_output()
     assert!(session.perfetto_trace_series().0.is_empty());
 }
 
+#[test]
+fn oversized_trace_retains_base_metrics_without_starting_post_processing() {
+    let fixture = Fixture::new();
+    let trace = fixture.0.join("oversized.perfetto-trace");
+    let file = fs::File::create(&trace).unwrap();
+    file.set_len(MAX_TRACE_PROCESSOR_INPUT_BYTES + 1).unwrap();
+    let warning = analysis_budget_warning(&trace).unwrap();
+    assert!(warning.contains("complete native trace is retained"));
+
+    let mut session = fixture.session();
+    let state = session.state::<PerfettoState>();
+    let mut state = state.borrow_mut();
+    state.trace = Some(trace);
+    state.capture_complete = true;
+    state.tracepoint_count = 3;
+    state.analysis_warning = Some(warning);
+    drop(state);
+    let metrics = session.perfetto_trace_metrics();
+    assert_eq!(metrics["perfetto.tracepoints"], 3.0);
+    assert!(metrics.contains_key("perfetto.trace_bytes"));
+    assert!(session.perfetto_trace_series().0.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn oversized_trace_skips_processor_during_collector_processing() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let fixture = Fixture::new();
+    let trace = fixture.0.join("oversized-processing.perfetto-trace");
+    fs::File::create(&trace)
+        .unwrap()
+        .set_len(MAX_TRACE_PROCESSOR_INPUT_BYTES + 1)
+        .unwrap();
+    let invoked = fixture.0.join("processor-invoked");
+    fixture.processor(&format!("touch {}", invoked.display()));
+    let mut session = fixture.session();
+    session.tool_dir = Some(fixture.0.join("tools"));
+    session.state::<PerfettoState>().borrow_mut().trace = Some(trace);
+    let status = std::process::ExitStatus::from_raw(0);
+    let result = ADAPTER
+        .process(
+            &mut session,
+            &ProcessContext::new(
+                "perfetto",
+                &status,
+                ["", ""],
+                [&fixture.1[0], &fixture.1[1]],
+            ),
+        )
+        .unwrap();
+    assert_eq!(result.metrics["perfetto.tracepoints"], 0.0);
+    assert!(!invoked.exists());
+    let state = session.state::<PerfettoState>();
+    let state = state.borrow();
+    assert!(!state.capture_complete);
+    assert!(state.analysis_warning.is_some());
+    assert!(state.capture_warning.is_some());
+}
+
 #[cfg(unix)]
 #[test]
 fn missing_capture_context_remains_diagnostic_and_owned_svg_errors_propagate() {
