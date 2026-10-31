@@ -27,9 +27,11 @@ pub(super) fn source_bound(config: &BenchmarkConfig) -> Result<(), Error> {
         workspace,
         log_file,
         measurements,
+        retention,
         mcp_servers,
     } = config;
     let _: &usize = concurrency;
+    let _: &bool = &retention.compact_completed_attempts;
     for value in [agent, workload, provider, model, workspace, log_file] {
         string(value)?;
     }
@@ -250,6 +252,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "benchmark.log".into(),
             measurements: None,
+            retention: Default::default(),
             mcp_servers: Vec::new(),
         }
     }

@@ -467,6 +467,13 @@ installs their project-local tool dependencies. It depends on the official
 harnesstax.toml` applies the declared three repetitions. Its declared 100-step
 methodology is retained in the preset; use the separate max-step controller
 only after selecting agents with an enforced, equivalent turn-limit protocol.
+The preset also enables compact completed-attempt retention: ASB keeps the
+configuration, official grading evidence, result records and selected
+measurement outputs, while releasing a successfully settled private task
+workspace/container before the next attempt. Failed or uncertain attempts are
+never compacted. This turns task-workspace capacity into a concurrent peak in
+the disk preflight; it does not discard retained Perfetto traces or other
+selected measurement evidence.
 `--output FILE` chooses the generated sweep name; all other setup
 selectors conflict with `--preset` so an experiment cannot be silently mixed
 with ad-hoc selections.

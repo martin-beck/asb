@@ -85,17 +85,28 @@ pub(crate) fn benchmark(
     let collector_mib = collectors
         .into_iter()
         .fold(0u64, |total, id| total.saturating_add(collector_mib(id)));
-    let per_attempt = BASE_PER_ATTEMPT_MIB
+    let non_workspace_per_attempt = BASE_PER_ATTEMPT_MIB
         .saturating_add(PROVIDER_SESSION_MIB)
         .saturating_add(agent_mib(&config.agent))
-        .saturating_add(workload)
         .saturating_add(collector_mib)
         .saturating_add(mode_mib(mode));
+    // A compact configuration retains the official grade, submission and
+    // measurement evidence, but releases each successfully settled private
+    // task workspace before the next repetition.  Its workspace reservation
+    // is therefore a concurrent peak, not a cumulative retained population.
+    // Failed or uncertain attempts deliberately remain preserved; the global
+    // safety factor covers that bounded exception without claiming deletion.
+    let workspace_attempts = if config.retention.compact_completed_attempts {
+        u64::try_from(config.concurrency).unwrap_or(u64::MAX)
+    } else {
+        attempts
+    };
     Estimate {
         // A factor of two covers retained partial evidence, tool logs, output
         // growth and task sources that exceed their declared disk envelope.
-        required_mib: per_attempt
+        required_mib: non_workspace_per_attempt
             .saturating_mul(attempts)
+            .saturating_add(workload.saturating_mul(workspace_attempts))
             .saturating_mul(SAFETY_NUMERATOR)
             .saturating_add(REPORT_OVERHEAD_MIB),
         attempts,
@@ -284,6 +295,22 @@ mod tests {
         assert_eq!(live.attempts, 2);
         assert_eq!(recording.attempts, 6);
         assert!(recording.required_mib > live.required_mib * 3);
+    }
+
+    #[test]
+    fn compact_retention_reserves_workspace_only_for_concurrent_attempts() {
+        let mut retained = config();
+        retained.concurrency = 2;
+        let compact = BenchmarkConfig {
+            retention: crate::benchmark::RetentionConfig {
+                compact_completed_attempts: true,
+            },
+            ..retained.clone()
+        };
+        let retained = benchmark(&retained, None, 3, None);
+        let compact = benchmark(&compact, None, 3, None);
+        assert_eq!(retained.attempts, compact.attempts);
+        assert!(compact.required_mib < retained.required_mib);
     }
 
     #[test]

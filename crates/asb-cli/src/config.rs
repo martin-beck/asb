@@ -2,7 +2,7 @@
 
 use super::Error;
 use crate::agents;
-use crate::benchmark::{BenchmarkConfig, MeasurementConfig};
+use crate::benchmark::{BenchmarkConfig, MeasurementConfig, RetentionConfig};
 use crate::measurements;
 use crate::project;
 use crate::providers;
@@ -21,6 +21,7 @@ pub struct SetupOptions {
     pub concurrency: Option<usize>,
     pub workspace: Option<String>,
     pub output: Option<String>,
+    pub retention: RetentionConfig,
 }
 
 /// A materialized preset sweep together with its declared execution defaults.
@@ -105,6 +106,7 @@ fn configuration(options: SetupOptions) -> Result<BenchmarkConfig, Error> {
         concurrency,
         workspace,
         output: destination,
+        retention,
     } = options;
     let (_, project_config) = project::load(std::path::Path::new("."))?;
     let agent = required(agent.into_iter().next())?;
@@ -166,6 +168,7 @@ fn configuration(options: SetupOptions) -> Result<BenchmarkConfig, Error> {
                 crate::collectors::expand_dependencies(&measure)
             },
         }),
+        retention,
         mcp_servers: Vec::new(),
     };
     // Reject static endpoint mismatches before publishing a configuration.
@@ -300,6 +303,14 @@ mod tests {
     }
 
     #[test]
+    fn setup_carries_compact_retention_into_the_written_configuration() {
+        let mut selection = options("pi", "cli2key", "gpt-6.1-sol");
+        selection.retention.compact_completed_attempts = true;
+        let config = super::configuration(selection).expect("configuration succeeds");
+        assert!(config.retention.compact_completed_attempts);
+    }
+
+    #[test]
     fn setup_rejects_unbounded_concurrency_before_writing_configuration() {
         let mut selection = options("pi", "cli2key", "fixture");
         selection.concurrency = Some(usize::MAX);
@@ -325,6 +336,7 @@ mod tests {
             concurrency: None,
             workspace: None,
             output: None,
+            retention: crate::benchmark::RetentionConfig::default(),
         }
     }
 

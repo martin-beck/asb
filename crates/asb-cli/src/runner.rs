@@ -2724,6 +2724,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            retention: Default::default(),
             mcp_servers: Vec::new(),
         };
         let command = command_for(&config, Some("http://127.0.0.1:3456/v1"), "prompt")
@@ -2751,6 +2752,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            retention: Default::default(),
             mcp_servers: Vec::new(),
         };
         let mini = command_for(&base, Some("http://127.0.0.1:3456/v1"), "prompt").unwrap();
@@ -2816,6 +2818,7 @@ mod tests {
                 workspace: "workspace".into(),
                 log_file: "run.log".into(),
                 measurements: None,
+                retention: Default::default(),
                 mcp_servers: Vec::new(),
             };
             let command = command_for(&config, Some("http://127.0.0.1:3456/v1"), "prompt")
@@ -2847,6 +2850,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            retention: Default::default(),
             mcp_servers: Vec::new(),
         };
         let command = command_for(&config, Some("http://127.0.0.1:3456/v1"), "prompt")
@@ -3008,6 +3012,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            retention: Default::default(),
             mcp_servers: Vec::new(),
         };
         let command = command_for(&config, None, "prompt").expect("known agent");
@@ -3038,6 +3043,7 @@ mod tests {
             workspace: "workspace".into(),
             log_file: "run.log".into(),
             measurements: None,
+            retention: Default::default(),
             mcp_servers: Vec::new(),
         };
         let error = match command_for(&config, None, "prompt") {

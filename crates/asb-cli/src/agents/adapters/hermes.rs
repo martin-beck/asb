@@ -418,6 +418,7 @@ mod tests {
             workspace: "./asb-workspace".into(),
             log_file: "benchmark.log".into(),
             measurements: None,
+            retention: Default::default(),
             mcp_servers: Vec::new(),
         };
         let spec = command(&CommandContext {
@@ -681,6 +682,7 @@ assert stable(None) is None
             workspace: "./asb-workspace".into(),
             log_file: "benchmark.log".into(),
             measurements: None,
+            retention: Default::default(),
             mcp_servers: Vec::new(),
         };
         let spec = command(&CommandContext {
