@@ -1218,6 +1218,34 @@ fn load_collectors(
 mod pricing_tests {
     use super::*;
 
+    fn pricing_request(root: &Path) -> Request {
+        Request {
+            path: root.join("sweep.toml").display().to_string(),
+            parent: root.to_path_buf(),
+            single: false,
+            sweep: crate::sweep::SweepFile {
+                resources: None,
+                repeat: None,
+                configs: Vec::new(),
+            },
+            sweep_results: root.to_path_buf(),
+            comparison_dir: root.join("comparison"),
+            plan: None,
+            campaign: None,
+            configurations: BTreeMap::new(),
+        }
+    }
+
+    fn pricing_fixture(check: impl FnOnce(&Path)) {
+        let root = std::env::temp_dir().join(format!(
+            "asb-pricing-snapshot-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        check(&root);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn retained_openrouter_prices_estimate_input_output_and_cached_tokens() {
         let pricing = serde_json::json!({
@@ -1239,5 +1267,40 @@ mod pricing_tests {
         let pricing = serde_json::json!({"prompt": "0.000002"});
         let metrics = BTreeMap::from([("token_usage.total_tokens".into(), 100.0)]);
         assert!(openrouter_cost(pricing.as_object().unwrap(), &metrics).is_none());
+    }
+
+    #[test]
+    fn retained_pricing_rejects_an_unrecognized_snapshot_schema() {
+        pricing_fixture(|root| {
+            std::fs::write(
+                root.join("openrouter-pricing.json"),
+                r#"{"schema_version":2,"provider":"untrusted","models":{}}"#,
+            )
+            .unwrap();
+            let error = apply_openrouter_pricing(&pricing_request(root), &mut [])
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("invalid OpenRouter pricing snapshot schema"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_pricing_rejects_a_symlinked_snapshot() {
+        use std::os::unix::fs::symlink;
+
+        pricing_fixture(|root| {
+            let target = root.join("untrusted-pricing.json");
+            std::fs::write(
+                &target,
+                r#"{"schema_version":1,"provider":"openrouter","models":{}}"#,
+            )
+            .unwrap();
+            symlink(&target, root.join("openrouter-pricing.json")).unwrap();
+            let error = apply_openrouter_pricing(&pricing_request(root), &mut [])
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("must be a regular file"));
+        });
     }
 }
