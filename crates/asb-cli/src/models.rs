@@ -16,6 +16,50 @@ const MAX_CATALOG: usize = 32 * 1024 * 1024;
 // evidence policy while admitting recorded SWE-bench-sized tracks.
 const MAX_CASSETTE_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Capture OpenRouter's published per-token price schedule for a sweep.
+///
+/// The result deliberately preserves the provider's machine-readable pricing
+/// fields rather than converting money through floating point.  Comparison
+/// later derives an estimate only from this retained snapshot, never from a
+/// newer live catalog.
+pub(crate) fn openrouter_pricing_snapshot() -> Result<Value, Error> {
+    let spec = providers::model_spec("openrouter")
+        .ok_or_else(|| Error::Input("OpenRouter provider is unavailable".into()))?;
+    let url = spec
+        .url_for_model(None)
+        .ok_or_else(|| Error::Input("OpenRouter model catalog endpoint is unavailable".into()))?;
+    let body = fetch_pages(spec, &url)?;
+    pricing_snapshot_from_catalog(&body, &url)
+}
+
+fn pricing_snapshot_from_catalog(body: &[u8], source: &str) -> Result<Value, Error> {
+    let catalog: Value = serde_json::from_slice(body)
+        .map_err(|_| Error::Input("OpenRouter returned invalid model JSON".into()))?;
+    let entries = catalog
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::Input("OpenRouter model catalog has no model list".into()))?;
+    let mut models = serde_json::Map::new();
+    for entry in entries {
+        let Some(id) = entry.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let pricing = entry.get("pricing").cloned().unwrap_or(Value::Null);
+        models.insert(id.to_owned(), pricing);
+    }
+    Ok(serde_json::json!({
+        "schema_version": 1,
+        "provider": "openrouter",
+        "source": source,
+        "captured_unix_seconds": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| Error::Run("system clock precedes Unix epoch".into()))?
+            .as_secs(),
+        "pricing_unit": "USD per token",
+        "models": models,
+    }))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ModelInfo {
     id: String,
@@ -1245,5 +1289,18 @@ mod tests {
     fn unsupported_provider_suggests_a_close_match() {
         let error = discover("openruter", false).expect_err("typo rejected");
         assert!(error.to_string().contains("did you mean `openrouter`?"));
+    }
+
+    #[test]
+    fn openrouter_pricing_snapshot_preserves_each_model_schedule() {
+        let snapshot = pricing_snapshot_from_catalog(
+            br#"{"data":[{"id":"vendor/one","pricing":{"prompt":"0.000001","completion":"0.000002","cache_read":"0.0000001"}},{"id":"vendor/free","pricing":{"prompt":"0","completion":"0"}}]}"#,
+            "https://example.invalid/models",
+        )
+        .expect("pricing snapshot");
+        assert_eq!(snapshot["schema_version"], 1);
+        assert_eq!(snapshot["provider"], "openrouter");
+        assert_eq!(snapshot["models"]["vendor/one"]["prompt"], "0.000001");
+        assert_eq!(snapshot["models"]["vendor/free"]["completion"], "0");
     }
 }

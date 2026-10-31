@@ -266,6 +266,23 @@ impl<'a> PreparedSweep<'a> {
             }
             PreparedMode::Fresh => {
                 plan::fresh_results(&self.parent, &self.stem, &self.plan)?;
+                // Price estimates must be reproducible: capture the complete
+                // OpenRouter schedule before any live attempt starts and let
+                // comparison consume this retained file offline.
+                if self
+                    .plan
+                    .entries
+                    .iter()
+                    .any(|entry| entry.configuration.provider == "openrouter")
+                    && crate::providers::credential("openrouter").is_some()
+                {
+                    let pricing = crate::models::openrouter_pricing_snapshot()?;
+                    crate::evidence::write_json(
+                        &self.results.join("openrouter-pricing.json"),
+                        &pricing,
+                    )
+                    .map_err(Error::Io)?;
+                }
                 if let Some(prepared) = self.campaigns {
                     campaigns = Some(prepared.publish(&self.results)?);
                     #[cfg(all(test, unix))]
