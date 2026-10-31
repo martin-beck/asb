@@ -19,6 +19,12 @@ class ComponentTargetTests(unittest.TestCase):
             ("test:offline_cli",),
         )
 
+    def test_runner_facade_uses_bounded_direct_unit_tests(self):
+        self.assertEqual(
+            component_targets(["crates/asb-cli/src/runner.rs"]),
+            ("lib:runner::tests::",),
+        )
+
     def test_shared_source_keeps_cross_command_smoke_coverage(self):
         self.assertEqual(
             component_targets(["crates/asb-cli/src/lib.rs"]),

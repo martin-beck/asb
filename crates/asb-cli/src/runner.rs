@@ -225,11 +225,15 @@ pub(crate) fn run_with_diagnostics(
             .or((options.mode == Some(tape::Mode::Record))
                 .then_some(derived_capsule.as_deref())
                 .flatten()),
-        native_capsule_replay: options
-            .native_capsule_replay
-            .or((options.mode == Some(tape::Mode::Replay))
+        native_capsule_replay: options.native_capsule_replay.or_else(|| {
+            // LLM replay is independently useful.  Only opt into the
+            // conventional workspace sidecar when the recorder produced
+            // one; an explicit --native-capsule-replay remains strict.
+            (options.mode == Some(tape::Mode::Replay))
                 .then_some(derived_capsule.as_deref())
-                .flatten()),
+                .flatten()
+                .filter(|path| Path::new(path).exists())
+        }),
         ..options
     };
     if options.native_capsule_record.is_some()
