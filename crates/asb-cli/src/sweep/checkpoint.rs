@@ -43,9 +43,6 @@ impl Root {
         }
     }
     pub(super) fn executable() -> Result<Self, Error> {
-        #[cfg(target_os = "linux")]
-        let path = PathBuf::from(format!("/proc/{}/exe", std::process::id()));
-        #[cfg(not(target_os = "linux"))]
         let path = std::env::current_exe().map_err(crate::io_error)?;
         Ok(Self {
             name: "asb-executable".into(),
@@ -708,6 +705,17 @@ fn fill_random(_: &mut [u8]) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn executable_root_is_a_durable_path_not_a_process_lifetime_alias() {
+        let root = Root::executable().unwrap();
+        assert_eq!(root.name, "asb-executable");
+        assert!(root.direct_file);
+        assert!(!root.bind_location);
+        assert!(root.path.is_file());
+        #[cfg(target_os = "linux")]
+        assert!(!root.path.starts_with("/proc/"));
+    }
 
     #[test]
     fn accepts_the_supported_bounded_fingerprint_node_limit() {
