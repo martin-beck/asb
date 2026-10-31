@@ -525,6 +525,36 @@ pub(crate) fn ensure_execution_requirements(
     diagnostic
 }
 
+/// The project-local installation inputs for one executable benchmark.
+///
+/// This is intentionally narrower than `BenchmarkConfig`: a trial, model,
+/// output path, workspace, retention policy, and repetition do not change a
+/// project-local tool or workload installation.  Sweep preflight uses the key
+/// to avoid repeatedly hashing/verifying an unchanged shared archive for each
+/// task in a workload family.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct ExecutionRequirements {
+    tools: Vec<String>,
+    workload: String,
+    collectors: Vec<String>,
+}
+
+pub(crate) fn execution_requirements(config: &BenchmarkConfig) -> ExecutionRequirements {
+    let mut collectors = config
+        .measurements
+        .as_ref()
+        .filter(|value| value.enabled)
+        .map(|value| value.collectors.clone())
+        .unwrap_or_default();
+    collectors.sort();
+    collectors.dedup();
+    ExecutionRequirements {
+        tools: execution_tool_ids(config),
+        workload: config.workload.clone(),
+        collectors,
+    }
+}
+
 fn execution_tool_ids(config: &BenchmarkConfig) -> Vec<String> {
     [&config.agent, &config.provider]
         .into_iter()
@@ -1742,6 +1772,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(execution_tool_ids(&endpoint_only), ["pi"]);
+    }
+
+    #[test]
+    fn execution_requirements_deduplicate_trials_but_not_install_inputs() {
+        let base: BenchmarkConfig = toml::from_str(
+            "agent='pi'\nprovider='cli2key'\nmodel='one'\nworkload='swe-bench-lite'\ntrial='task-a'\nlog_file='first.log'\n[measurements]\nenabled=true\ndirectory='first-measurements'\ncollectors=['perfetto','mpstat']\n",
+        )
+        .unwrap();
+        let same_install: BenchmarkConfig = toml::from_str(
+            "agent='pi'\nprovider='cli2key'\nmodel='two'\nworkload='swe-bench-lite'\ntrial='task-b'\nworkspace='other-workspace'\nlog_file='second.log'\n[measurements]\nenabled=true\ndirectory='second-measurements'\ncollectors=['mpstat','perfetto']\n",
+        )
+        .unwrap();
+        let different_workload: BenchmarkConfig = toml::from_str(
+            "agent='pi'\nprovider='cli2key'\nmodel='two'\nworkload='terminal-bench-2.0'\n",
+        )
+        .unwrap();
+        let different_collector: BenchmarkConfig = toml::from_str(
+            "agent='pi'\nprovider='cli2key'\nmodel='two'\nworkload='swe-bench-lite'\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['iostat']\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            execution_requirements(&base),
+            execution_requirements(&same_install)
+        );
+        assert_ne!(
+            execution_requirements(&base),
+            execution_requirements(&different_workload)
+        );
+        assert_ne!(
+            execution_requirements(&base),
+            execution_requirements(&different_collector)
+        );
     }
 
     #[test]

@@ -148,9 +148,7 @@ impl<'a> PreparedSweep<'a> {
         let mut prepared_workloads = BTreeSet::new();
         for entry in plan.entries.iter().filter(|_| !options.resume) {
             let (root, project) = crate::project::load(&parent.join(&entry.reference))?;
-            let preparation_key = toml::to_string(&entry.configuration).map_err(|error| {
-                Error::Input(format!("cannot encode benchmark preparation: {error}"))
-            })?;
+            let preparation_key = crate::install::execution_requirements(&entry.configuration);
             if prepared_execution.insert((root.clone(), preparation_key)) {
                 let mut messages = Vec::new();
                 crate::install::ensure_execution_requirements(

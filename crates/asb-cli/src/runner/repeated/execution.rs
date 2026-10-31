@@ -131,6 +131,7 @@ impl BatchRun<'_> {
                 native_capsule_replay: self.options.native_capsule_replay.as_deref(),
                 respect_record_timings: self.plan.respect_record_timings,
                 policy: Some(&policy),
+                requirements_prepared: self.options.requirements_prepared,
                 batch: Some(&self.identity),
                 native_tool_inputs: (!native_tool_inputs.is_empty())
                     .then_some(native_tool_inputs.as_slice()),
@@ -304,6 +305,7 @@ pub(crate) fn continue_campaign(
         json,
         show_output,
         quiet_output: false,
+        requirements_prepared: false,
         policy: policy.cloned(),
         measurement_override: plan.measurement_storage
             == Some(super::super::campaign::MeasurementStorage::Override),
