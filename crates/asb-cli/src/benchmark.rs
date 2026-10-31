@@ -43,9 +43,9 @@ pub struct BenchmarkConfig {
     /// Explicit storage policy for completed, independently graded attempts.
     ///
     /// The default retains the existing recovery-oriented behavior.  Compact
-    /// mode never deletes an incomplete or uncertain attempt: it requires the
-    /// workload adapter to report that its owned execution resources were
-    /// removed after durable grading artifacts were written.
+    /// mode never deletes an incomplete, failed, or uncertain attempt: it
+    /// requires a successful grade, confirmed workload/proxy settlement, and
+    /// a durable completion record before releasing ASB's isolated workspace.
     #[serde(default)]
     pub retention: RetentionConfig,
     /// Explicit stdio MCP servers made available to an adapter that supports
