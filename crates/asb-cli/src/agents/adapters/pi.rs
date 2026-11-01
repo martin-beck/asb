@@ -128,6 +128,18 @@ fn summary_artifacts(document: &serde_json::Value) -> Result<SummaryArtifacts, S
         return Err("Pi terminal summary is malformed or incomplete".into());
     }
     let steps = field("steps").ok_or_else(|| "Pi terminal summary has no step count".to_owned())?;
+    if let Some(value) = document.get("usage_complete") {
+        match value.as_bool() {
+            Some(false) => {
+                return Ok(SummaryArtifacts {
+                    token_usage: None,
+                    steps: Some(steps),
+                });
+            }
+            Some(true) => {}
+            None => return Err("Pi terminal summary has an invalid usage completeness flag".into()),
+        }
+    }
     let input = field("input_tokens")
         .ok_or_else(|| "Pi terminal summary has no input token count".to_owned())?;
     let output = field("output_tokens")
@@ -191,6 +203,73 @@ mod execution_tests {
         assert_eq!(usage.output_tokens, Some(7));
         assert_eq!(usage.cached_tokens, Some(5));
         assert_eq!(usage.total_tokens, Some(18));
+    }
+
+    #[test]
+    fn extension_reports_incomplete_usage_without_losing_steps() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-pi-usage-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let extension = root.join("summary.mjs");
+        std::fs::write(&extension, super::SUMMARY_EXTENSION).unwrap();
+        let harness = root.join("test.mjs");
+        std::fs::write(&harness, r#"
+import extension from './summary.mjs';
+const handlers = {};
+extension({on(name, handler) { handlers[name] = handler; }});
+handlers.turn_end({message:{role:'assistant',usage:{input:10,output:3,cacheRead:2,cacheWrite:1}}});
+if (process.argv[2] === 'incomplete') handlers.turn_end({message:{role:'assistant',usage:{input:4}}});
+handlers.agent_end();
+"#).unwrap();
+        for mode in ["complete", "incomplete"] {
+            let summary_path = root.join(format!("{mode}.json"));
+            let result = std::process::Command::new("node")
+                .arg(&harness)
+                .arg(mode)
+                .env("ASB_PI_SUMMARY_PATH", &summary_path)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let value = serde_json::from_slice(&std::fs::read(summary_path).unwrap()).unwrap();
+            let parsed = super::summary_artifacts(&value).unwrap();
+            if mode == "complete" {
+                assert_eq!(parsed.steps, Some(1));
+                let usage = parsed.token_usage.unwrap();
+                assert_eq!(
+                    (usage.input_tokens, usage.output_tokens, usage.cached_tokens),
+                    (Some(13), Some(3), Some(2))
+                );
+            } else {
+                assert_eq!(parsed.steps, Some(2));
+                assert!(parsed.token_usage.is_none());
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn output_usage_accepts_typed_turns_but_ignores_task_output() {
+        let typed = r#"{"type":"turn_end","message":{"usage":{"input":10,"output":3,"cacheRead":2,"cacheWrite":1}}}"#;
+        let parsed = super::output_usage(typed, "", false);
+        assert_eq!(
+            (
+                parsed.input_tokens,
+                parsed.output_tokens,
+                parsed.cached_tokens
+            ),
+            (Some(13), Some(3), Some(2))
+        );
+        let task =
+            r#"{"type":"tool_result","output":{"usage":{"input_tokens":999,"output_tokens":99}}}"#;
+        let parsed = super::output_usage(task, "", false);
+        assert!(parsed.input_tokens.is_none());
+        assert!(parsed.output_tokens.is_none());
     }
 
     #[test]
@@ -301,6 +380,8 @@ fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::Tok
     let mut cache_complete = true;
     for event in stdout
         .lines()
+        .chain(stderr.lines())
+        .map(|line| line.strip_prefix("event: ").unwrap_or(line))
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
     {
         if event.get("type").and_then(|v| v.as_str()) != Some("turn_end") {
@@ -336,7 +417,7 @@ fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::Tok
         }
         sum.with_derived_total()
     } else {
-        crate::usage::usage_from_text(&format!("{stdout}\n{stderr}"))
+        Default::default()
     }
 }
 fn command(context: &CommandContext<'_>) -> CommandSpec {
@@ -410,12 +491,15 @@ let input = 0;
 let output = 0;
 let cached = 0;
 let cacheKnown = true;
+let usageComplete = true;
 
 function number(value) { return Number.isSafeInteger(value) && value >= 0 ? value : undefined; }
 function publish() {
   if (!destination) throw new Error("ASB Pi summary destination is unavailable");
-  const summary = { schema_version: 1, completed: true, steps, input_tokens: input, output_tokens: output };
-  if (cacheKnown) summary.cached_tokens = cached;
+  const complete = usageComplete && steps > 0;
+  const summary = { schema_version: 1, completed: true, steps, usage_complete: complete };
+  if (complete) { summary.input_tokens = input; summary.output_tokens = output; }
+  if (complete && cacheKnown) summary.cached_tokens = cached;
   mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
   const temporary = `${destination}.${process.pid}.tmp`;
   writeFileSync(temporary, JSON.stringify(summary), { mode: 0o600 });
@@ -430,7 +514,7 @@ export default function(pi) {
     const usage = event?.usage ?? message?.usage;
     const inTokens = number(usage?.input);
     const outTokens = number(usage?.output);
-    if (inTokens === undefined || outTokens === undefined) return;
+    if (inTokens === undefined || outTokens === undefined) { usageComplete = false; return; }
     input += inTokens;
     output += outTokens;
     const cacheRead = number(usage?.cacheRead);
