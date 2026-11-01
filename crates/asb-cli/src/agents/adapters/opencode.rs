@@ -77,7 +77,7 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
 }
 
 fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
-    let mut texts = std::collections::HashMap::<String, String>::new();
+    let mut texts = std::collections::HashMap::<String, Vec<(Option<String>, String)>>::new();
     let mut final_answer = None;
     for event in output
         .lines()
@@ -93,7 +93,18 @@ fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
                     part.and_then(|p| p.get("text")).and_then(|v| v.as_str()),
                 ) {
                     if !text.trim().is_empty() {
-                        texts.insert(id.to_owned(), text.to_owned());
+                        let parts = texts.entry(id.to_owned()).or_default();
+                        let part_id = part
+                            .and_then(|p| p.get("id"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned);
+                        if let Some(existing) = part_id.as_ref().and_then(|id| {
+                            parts.iter_mut().find(|(key, _)| key.as_ref() == Some(id))
+                        }) {
+                            existing.1 = text.to_owned();
+                        } else {
+                            parts.push((part_id, text.to_owned()));
+                        }
                     }
                 }
                 final_answer = None;
@@ -108,12 +119,22 @@ fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
                         if !reason.is_empty()
                             && !matches!(reason, "tool-calls" | "unknown" | "content-filter") =>
                     {
-                        texts.get(id).cloned()
+                        texts.get(id).map(|parts| {
+                            parts
+                                .iter()
+                                .map(|(_, text)| text.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
                     }
                     _ => None,
                 };
+                texts.clear();
             }
-            Some("step_start" | "tool_use" | "error") => final_answer = None,
+            Some("step_start" | "tool_use" | "error") => {
+                texts.clear();
+                final_answer = None;
+            }
             _ => {}
         }
     }
@@ -337,6 +358,21 @@ mod tests {
         let tools = r#"{"type":"step_finish","part":{"messageID":"m1","reason":"tool-calls"}}"#;
         let wrong = r#"{"type":"step_finish","part":{"messageID":"m2","reason":"stop"}}"#;
         let path = std::path::Path::new(".");
+        let start = r#"{"type":"step_start","part":{"messageID":"m1"}}"#;
+        assert!(
+            super::final_response(&format!("{text}\n{tools}\n{start}\n{finish}"), path).is_none()
+        );
+        let update1 = r#"{"type":"text","part":{"id":"p1","messageID":"m1","text":"old"}}"#;
+        let update2 = r#"{"type":"text","part":{"id":"p1","messageID":"m1","text":"new"}}"#;
+        assert_eq!(
+            super::final_response(&format!("{update1}\n{update2}\n{finish}"), path).as_deref(),
+            Some("new")
+        );
+        let second = r#"{"type":"text","part":{"messageID":"m1","text":"second"}}"#;
+        assert_eq!(
+            super::final_response(&format!("{text}\n{second}\n{finish}"), path).as_deref(),
+            Some("answer\nsecond")
+        );
         assert_eq!(
             super::final_response(&format!("{text}\n{finish}"), path).as_deref(),
             Some("answer")
