@@ -38,6 +38,19 @@ struct State {
     pid: Option<u32>,
     #[serde(default)]
     control: Option<Control>,
+    #[serde(default)]
+    owner_identity: Option<ProcessIdentity>,
+    #[serde(default)]
+    server_identity: Option<ProcessIdentity>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ProcessIdentity {
+    pid: u32,
+    boot_id: String,
+    start_time: u64,
+    #[serde(default)]
+    pid_namespace: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -155,6 +168,8 @@ fn start(
         traces,
         pid: None,
         control: None,
+        owner_identity: None,
+        server_identity: None,
     };
     let private_state = root
         .join(".asb")
@@ -287,6 +302,11 @@ fn serve(
         state.port = port;
         state.pid = Some(child.id());
         state.control = Some(control_address.clone());
+        #[cfg(target_os = "linux")]
+        {
+            state.owner_identity = process_identity(std::process::id()).ok();
+            state.server_identity = process_identity(child.id()).ok();
+        }
         if let Err(error) = write_state(state_path, &state) {
             let _ = child.kill();
             let _ = child.wait();
@@ -418,11 +438,138 @@ fn wait_for_ready(
 }
 
 fn stop(state_path: &Path, state: &State) -> Result<(), Error> {
-    if state.pid.is_some() {
-        stop_owned(state.control.as_ref())?;
+    if state.pid.is_some()
+        && let Err(error) = stop_owned(state.control.as_ref())
+        && !definitely_settled(state)
+    {
+        return Err(error);
     }
     let _ = fs::remove_file(state_path);
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn process_identity(pid: u32) -> std::io::Result<ProcessIdentity> {
+    let pid_namespace = current_pid_namespace()?;
+    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+        .trim()
+        .to_owned();
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let fields = stat
+        .rsplit_once(')')
+        .ok_or_else(|| std::io::Error::other("malformed process stat"))?
+        .1;
+    let start_time = fields
+        .split_whitespace()
+        .nth(19)
+        .ok_or_else(|| std::io::Error::other("missing process start time"))?
+        .parse()
+        .map_err(|_| std::io::Error::other("invalid process start time"))?;
+    Ok(ProcessIdentity {
+        pid,
+        boot_id,
+        start_time,
+        pid_namespace: Some(pid_namespace),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn checked_pid_namespace(
+    process_id: u32,
+    proc_stat: &str,
+    namespace: &Path,
+) -> std::io::Result<String> {
+    let visible = proc_stat
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<u32>().ok());
+    if visible != Some(process_id) {
+        return Err(std::io::Error::other(
+            "proc mount does not match the current PID namespace",
+        ));
+    }
+    namespace
+        .to_str()
+        .filter(|value| value.starts_with("pid:[") && value.ends_with(']'))
+        .map(str::to_owned)
+        .ok_or_else(|| std::io::Error::other("cannot identify PID namespace"))
+}
+
+#[cfg(target_os = "linux")]
+fn current_pid_namespace() -> std::io::Result<String> {
+    checked_pid_namespace(
+        std::process::id(),
+        &fs::read_to_string("/proc/self/stat")?,
+        &fs::read_link("/proc/self/ns/pid")?,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn identity_gone(identity: &ProcessIdentity) -> bool {
+    if identity.pid_namespace.as_deref() != current_pid_namespace().ok().as_deref()
+        || identity.pid_namespace.is_none()
+    {
+        return false;
+    }
+    let boot = match fs::read_to_string("/proc/sys/kernel/random/boot_id") {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    if boot.trim() != identity.boot_id {
+        return true;
+    }
+    let stat = match fs::read_to_string(format!("/proc/{}/stat", identity.pid)) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    let Some((_, tail)) = stat.rsplit_once(')') else {
+        return false;
+    };
+    let mut fields = tail.split_whitespace();
+    let state = fields.next();
+    let start = fields.nth(18).and_then(|value| value.parse::<u64>().ok());
+    match start {
+        Some(start) if start != identity.start_time => true,
+        Some(_) => matches!(state, Some("Z" | "X")),
+        None => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn definitely_settled(state: &State) -> bool {
+    let (Some(owner), Some(server)) = (&state.owner_identity, &state.server_identity) else {
+        return false;
+    };
+    if state.pid != Some(server.pid)
+        || owner.pid <= 1
+        || server.pid <= 1
+        || owner.pid == server.pid
+        || owner.boot_id.is_empty()
+        || owner.boot_id != server.boot_id
+        || owner.pid_namespace.is_none()
+        || owner.pid_namespace != server.pid_namespace
+    {
+        return false;
+    }
+    if !identity_gone(owner) {
+        return false;
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if identity_gone(server) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn definitely_settled(_: &State) -> bool {
+    false
 }
 
 fn stop_owned(control: Option<&Control>) -> Result<(), Error> {
@@ -746,6 +893,184 @@ fn percent_encode_path(value: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_process_identity_requires_an_exact_live_instance() {
+        let Ok(current) = process_identity(std::process::id()) else {
+            let unknown = ProcessIdentity {
+                pid: std::process::id(),
+                boot_id: String::new(),
+                start_time: 0,
+                pid_namespace: None,
+            };
+            assert!(!identity_gone(&unknown));
+            return;
+        };
+        assert!(!identity_gone(&current));
+        let mut reused = current.clone();
+        reused.start_time = reused.start_time.saturating_add(1);
+        assert!(identity_gone(&reused));
+        let mut previous_boot = current;
+        previous_boot.boot_id = "previous-boot".into();
+        assert!(identity_gone(&previous_boot));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pid_namespace_and_proc_mount_must_match() {
+        assert!(checked_pid_namespace(5, "4 (fixture) S", Path::new("pid:[42]")).is_err());
+        assert!(checked_pid_namespace(5, "5 (fixture) S", Path::new("pid:[42]")).is_ok());
+        let Ok(mut identity) = process_identity(std::process::id()) else {
+            return;
+        };
+        identity.start_time += 1;
+        identity.pid_namespace = Some("pid:[999999999999]".into());
+        assert!(!identity_gone(&identity));
+        identity.pid_namespace = None;
+        assert!(!identity_gone(&identity));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nested_pid_namespace_cannot_retire_host_process_identity() {
+        const FIXTURE: &str = "ASB_HTTP_HOST_PID_IDENTITY";
+        const MISMATCH: &str = "ASB_HTTP_MISMATCHED_PROC";
+        if std::env::var_os(MISMATCH).is_some() {
+            assert!(
+                current_pid_namespace().is_err(),
+                "a host proc mount must not authorize nested PID lookups"
+            );
+            return;
+        }
+        if let Ok(encoded) = std::env::var(FIXTURE) {
+            let identity: ProcessIdentity = serde_json::from_str(&encoded).unwrap();
+            assert_ne!(
+                identity.pid_namespace.as_deref(),
+                Some(current_pid_namespace().unwrap().as_str())
+            );
+            assert!(
+                !identity_gone(&identity),
+                "an inaccessible host PID is not proof of exit"
+            );
+            return;
+        }
+        let Ok(identity) = process_identity(std::process::id()) else {
+            return;
+        };
+        let output = match Command::new("unshare")
+            .args([
+                "--user",
+                "--map-root-user",
+                "--pid",
+                "--fork",
+                "--mount-proc",
+            ])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "http_server::tests::nested_pid_namespace_cannot_retire_host_process_identity",
+                "--nocapture",
+            ])
+            .env(FIXTURE, serde_json::to_string(&identity).unwrap())
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("cannot start namespace fixture: {error}"),
+        };
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success()
+            && (stderr.contains("Operation not permitted") || stderr.contains("Permission denied"))
+        {
+            eprintln!("nested PID namespace fixture unavailable: {stderr}");
+            return;
+        }
+        assert!(
+            output.status.success(),
+            "namespace fixture failed: {stderr} {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let mismatch = Command::new("unshare")
+            .args(["--user", "--map-root-user", "--pid", "--fork"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "http_server::tests::nested_pid_namespace_cannot_retire_host_process_identity",
+                "--nocapture",
+            ])
+            .env(MISMATCH, "1")
+            .output()
+            .unwrap();
+        assert!(
+            mismatch.status.success(),
+            "mismatched proc fixture failed: {} {}",
+            String::from_utf8_lossy(&mismatch.stderr),
+            String::from_utf8_lossy(&mismatch.stdout)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stopped_wrapper_and_server_are_not_settled() {
+        if process_identity(std::process::id()).is_err() {
+            return;
+        }
+        struct Children(Vec<std::process::Child>);
+        impl Drop for Children {
+            fn drop(&mut self) {
+                for child in &mut self.0 {
+                    let _ = Command::new("kill")
+                        .args(["-CONT", &child.id().to_string()])
+                        .status();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let mut children = Children(vec![
+            Command::new("sleep").arg("30").spawn().unwrap(),
+            Command::new("sleep").arg("30").spawn().unwrap(),
+        ]);
+        let owner = process_identity(children.0[0].id()).unwrap();
+        let server = process_identity(children.0[1].id()).unwrap();
+        for child in &mut children.0 {
+            assert!(
+                Command::new("kill")
+                    .args(["-STOP", &child.id().to_string()])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let status = fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
+                if status.lines().any(|line| {
+                    line.starts_with("State:") && line.split_whitespace().nth(1) == Some("T")
+                }) {
+                    break;
+                }
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert!(!identity_gone(&owner));
+        assert!(!identity_gone(&server));
+        let state = State {
+            schema_version: 1,
+            generation: None,
+            port: 0,
+            public_host: String::new(),
+            executable: PathBuf::new(),
+            publication: PathBuf::new(),
+            traces: vec![],
+            pid: Some(server.pid),
+            control: None,
+            owner_identity: Some(owner),
+            server_identity: Some(server),
+        };
+        assert!(!definitely_settled(&state));
+    }
+
     #[test]
     fn foreign_listener_cannot_make_an_unrelated_server_child_ready() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -796,7 +1121,7 @@ mod tests {
         let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
         fs::create_dir_all(root.join(".asb")).unwrap();
         let mut sentinel = Command::new("sleep").arg("30").spawn().unwrap();
-        let state = State {
+        let mut state = State {
             schema_version: 1,
             generation: Some("stale".into()),
             port: 1,
@@ -806,10 +1131,16 @@ mod tests {
             traces: vec![],
             pid: Some(sentinel.id()),
             control: None,
+            owner_identity: process_identity(std::process::id()).ok(),
+            server_identity: process_identity(sentinel.id()).ok(),
         };
         let path = state_path(&root);
         write_state(&path, &state).unwrap();
         let result = stop(&path, &state);
+        if let Some(owner) = state.owner_identity.as_mut() {
+            owner.start_time += 1;
+        }
+        let dead_owner_live_server = stop(&path, &state);
         std::thread::sleep(Duration::from_millis(50));
         let still_running = sentinel.try_wait().unwrap().is_none();
         let state_preserved = path.exists();
@@ -817,6 +1148,10 @@ mod tests {
         let _ = sentinel.wait();
         fs::remove_dir_all(root).unwrap();
         assert!(result.is_err());
+        assert!(
+            dead_owner_live_server.is_err(),
+            "a surviving server must retain state"
+        );
         assert!(
             still_running,
             "stale PID must not signal an unrelated process"
@@ -841,6 +1176,8 @@ mod tests {
             traces: vec![],
             pid: None,
             control: None,
+            owner_identity: None,
+            server_identity: None,
         };
         let old = make("old");
         let new = make("new");
