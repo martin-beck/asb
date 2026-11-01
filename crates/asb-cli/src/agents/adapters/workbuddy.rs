@@ -130,35 +130,36 @@ fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::TokenUsage {
+fn output_usage(stdout: &str, _stderr: &str, _: bool) -> crate::measurements::TokenUsage {
     fn result(value: &serde_json::Value) -> Option<crate::measurements::TokenUsage> {
         match value {
             serde_json::Value::Array(events) => events.iter().rev().find_map(result),
             serde_json::Value::Object(event)
                 if event.get("type").and_then(|v| v.as_str()) == Some("result") =>
             {
-                event.get("usage").map(super::super::usage_fields)
+                Some(
+                    event
+                        .get("usage")
+                        .or_else(|| event.get("rawUsage"))
+                        .map(crate::usage::usage_from_json)
+                        .unwrap_or_default(),
+                )
             }
             _ => None,
         }
     }
-    fn native_event(value: &serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::Array(events) => events.iter().any(native_event),
-            serde_json::Value::Object(event) => matches!(
-                event.get("type").and_then(|v| v.as_str()),
-                Some("result" | "message")
-            ),
-            _ => false,
-        }
-    }
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout)
-        && native_event(&value)
-    {
-        // Do not parse task or tool contents if a native result has no usage.
-        return result(&value).unwrap_or_default().with_derived_total();
-    }
-    crate::usage::usage_from_text(&format!("{stdout}\n{stderr}")).with_derived_total()
+    serde_json::from_str::<serde_json::Value>(stdout)
+        .ok()
+        .and_then(|v| result(&v))
+        .or_else(|| {
+            stdout
+                .lines()
+                .rev()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find_map(|event| result(&event))
+        })
+        .unwrap_or_default()
+        .with_derived_total()
 }
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
@@ -334,6 +335,28 @@ mod tests {
         assert!(!super::output_usage(output, "", false).any());
     }
 
+    #[test]
+    fn unrelated_message_usage_is_not_final_result_usage() {
+        let output = concat!(
+            "{\"type\":\"message\",\"content\":\"{\\\"usage\\\":{\\\"input_tokens\\\":999,\\\"output_tokens\\\":888}}\"}\n",
+            "{\"type\":\"result\",\"usage\":{\"input_tokens\":10,\"output_tokens\":3}}\n"
+        );
+        let usage = crate::usage::from_sources("openrouter", "workbuddy", output, "", None);
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (Some(10), Some(3), Some(13))
+        );
+    }
+
+    #[test]
+    fn incomplete_latest_result_does_not_reuse_earlier_usage() {
+        let output = concat!(
+            "{\"type\":\"result\",\"usage\":{\"input_tokens\":10,\"output_tokens\":3}}\n",
+            "{\"type\":\"result\",\"result\":\"done\"}\n",
+        );
+        let usage = crate::usage::from_sources("openrouter", "workbuddy", output, "", None);
+        assert_eq!(usage.total_tokens, None);
+    }
     use super::*;
     use crate::agents::AgentAdapter;
     use std::io::{Read, Write};
