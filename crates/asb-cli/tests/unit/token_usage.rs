@@ -72,3 +72,56 @@ fn usage_artifacts_are_bounded_and_missing_data_is_unavailable() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn registered_agents_own_their_output_usage_schema() {
+    for agent in crate::agents::all() {
+        assert!(
+            agent.output_usage("", "", false).is_some(),
+            "{} lacks an output usage hook",
+            agent.id()
+        );
+    }
+}
+
+#[test]
+fn unregistered_agent_output_is_not_interpreted_as_usage() {
+    let usage = from_sources(
+        "unknown",
+        "unregistered-agent",
+        r#"{"usage":{"input_tokens":123,"output_tokens":456}}"#,
+        "",
+        None,
+    );
+    assert!(!usage.any());
+}
+
+#[test]
+fn adapter_without_usage_hook_does_not_parse_task_output() {
+    struct Unowned;
+    impl crate::agents::AgentAdapter for Unowned {
+        fn id(&self) -> &'static str {
+            "unowned"
+        }
+        fn executable(&self) -> &'static str {
+            unreachable!()
+        }
+        fn recipe(&self) -> crate::install::Recipe {
+            unreachable!()
+        }
+        fn supported_endpoints(&self) -> &'static [crate::endpoint::Support] {
+            unreachable!()
+        }
+        fn command(&self, _: &crate::agents::CommandContext<'_>) -> crate::agents::CommandSpec {
+            unreachable!()
+        }
+        fn prepare(
+            &self,
+            _: &mut crate::agents::PreparationContext<'_>,
+        ) -> Result<(), crate::Error> {
+            unreachable!()
+        }
+    }
+    let output = r#"{"usage":{"input_tokens":123,"output_tokens":456}}"#;
+    assert!(!adapter_output_usage(Some(&Unowned), output, output, false).any());
+}
