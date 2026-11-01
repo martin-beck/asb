@@ -2132,7 +2132,7 @@ fn full_entry_child(case: &str) {
         };
         std::fs::write(&agent, format!("#!{}\nrequire('node:fs').appendFileSync({counter_js},'called\\n');fetch(process.env.OPENAI_BASE_URL+'/chat/completions',{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify({body})}}).then(async r=>{{if(!r.ok)throw new Error('fixture request failed');await r.text();{capture_js}console.log(JSON.stringify({response}));{ending}}}).catch(error=>{{console.error('fixture replay request failed:',error);process.exitCode=9;}});\n", node.display())).unwrap();
         if artifact_case || (phase_case && !phase_continuation) {
-            let trajectory = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1", "info":{"model_stats":{"api_calls":4}},
+            let trajectory = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1", "info":{"exit_status":"Submitted","submission":answer,"model_stats":{"api_calls":4}},
                 "messages":[{"role":"assistant","content":answer,
                 "extra":{"response":{"usage":{"prompt_tokens":13,"completion_tokens":21}}}}]});
             std::fs::write(&agent, format!("#!{}\nconst fs=require('node:fs');fs.appendFileSync({counter_js},'called\\n');const out=process.argv[process.argv.indexOf('--output')+1];fs.writeFileSync(out,JSON.stringify({trajectory}));fetch(process.env.OPENAI_BASE_URL+'/chat/completions',{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify({body})}}).then(async r=>{{if(!r.ok)throw Error('fixture replay');await r.text();}}).catch(()=>{{process.exitCode=9;}});\n", node.display())).unwrap();
