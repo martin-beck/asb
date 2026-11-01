@@ -8,6 +8,8 @@ mod fixture_writer;
 #[cfg(unix)]
 #[path = "support/python_prerequisite.rs"]
 mod python_prerequisite;
+#[path = "support/setup_installables.rs"]
+mod setup_installables;
 mod support;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -665,6 +667,7 @@ fn invalid_run_and_sweep_flags_fail_before_execution() {
 fn setup_writes_a_parseable_user_selected_configuration() {
     let project = Project::new();
     project.init();
+    setup_installables::seed(&project.0);
     let result = project.command(&[
         "setup",
         "--agent",

@@ -265,6 +265,13 @@ mod tests {
     };
     use std::path::Path;
 
+    mod setup_installables {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/setup_installables.rs"
+        ));
+    }
+
     #[test]
     fn generated_preset_sweeps_stay_under_the_initialized_project() {
         assert_eq!(
@@ -299,6 +306,31 @@ mod tests {
 
     #[test]
     fn setup_writes_default_concurrency() {
+        const CHILD: &str = "ASB_SETUP_DEFAULT_CONCURRENCY_FIXTURE";
+        if std::env::var_os(CHILD).is_none() {
+            let root = std::env::temp_dir().join(format!(
+                "asb-setup-default-{}",
+                crate::tools::runtime::unique_id()
+            ));
+            std::fs::create_dir_all(root.join(".asb")).unwrap();
+            std::fs::write(
+                root.join(".asb/project.toml"),
+                toml::to_string(&crate::project::ProjectConfig::default()).unwrap(),
+            )
+            .unwrap();
+            std::fs::create_dir_all(root.join("workloads")).unwrap();
+            crate::workloads::populate(&root.join("workloads")).unwrap();
+            setup_installables::seed(&root);
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .current_dir(&root)
+                .env(CHILD, "1")
+                .args(["--exact", "config::tests::setup_writes_default_concurrency"])
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&root);
+            assert!(output.status.success(), "child setup fixture failed");
+            return;
+        }
         let mut output = Vec::new();
         setup(options("pi", "cli2key", "gpt-6.1-sol"), &mut output).expect("setup succeeds");
         let text = String::from_utf8(output).expect("setup is UTF-8");
