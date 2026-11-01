@@ -34,13 +34,81 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_collection(collect)
 .with_bridge_entry(super::openhands_native::entry)
 .with_bridge_aliases(&["__asb-openhands-native-bridge"])
-.with_output_usage(output_usage);
+.with_output_usage(output_usage)
+.with_final_response(final_response);
 
 // The CLI emits individual events, including arbitrary observation content;
 // per-call usage comes from conversation state or the provider cassette.
 fn output_usage(_: &str, _: &str, _: bool) -> crate::measurements::TokenUsage {
     Default::default()
 }
+// OpenHands headless JSON is the SDK event stream. Its finish action and
+// agent MessageEvent are the SDK's final-response sources.
+fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
+    let events = output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    for event in events.iter().rev() {
+        // Native replay's result follows SDK events and supersedes them,
+        // including when its answer is null or missing.
+        if event.get("type").and_then(|v| v.as_str()) == Some("result") {
+            return event
+                .get("text")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_owned);
+        }
+        let kind = event.get("kind").and_then(|v| v.as_str());
+        let source = event.get("source").and_then(|v| v.as_str());
+        if matches!(
+            kind,
+            Some("ConversationErrorEvent" | "UserRejectObservation" | "AgentErrorEvent")
+        ) || (kind == Some("MessageEvent")
+            && (source == Some("user")
+                || event.pointer("/llm_message/role").and_then(|v| v.as_str()) == Some("user")))
+        {
+            return None;
+        }
+        if source != Some("agent") {
+            continue;
+        }
+        match kind {
+            Some("ActionEvent") => {
+                if event.get("tool_name").and_then(|v| v.as_str()) != Some("finish")
+                    || event.pointer("/action/kind").and_then(|v| v.as_str())
+                        != Some("FinishAction")
+                {
+                    return None;
+                }
+                return event
+                    .pointer("/action/message")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .map(str::to_owned);
+            }
+            Some("MessageEvent") => {
+                if event.pointer("/llm_message/role").and_then(|v| v.as_str()) != Some("assistant")
+                {
+                    return None;
+                }
+                let parts = event.pointer("/llm_message/content")?.as_array()?;
+                let answer = parts
+                    .iter()
+                    .filter(|part| part.get("type").and_then(|v| v.as_str()) == Some("text"))
+                    .filter_map(|part| part.get("text").and_then(|v| v.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("");
+                return (!answer.trim().is_empty()).then_some(answer);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     if let Some(mode) = context.native_tool_mode {
         let native = context.native_tool;
@@ -244,6 +312,75 @@ fn conversation_usage(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn finish_action_message_is_final_answer() {
+        use crate::agents::AgentAdapter;
+        let event = r#"{"kind":"ActionEvent","source":"agent","tool_name":"finish","action":{"kind":"FinishAction","message":"answer"}}"#;
+        let path = std::path::Path::new(".");
+        assert_eq!(
+            super::ADAPTER.final_response(event, path).as_deref(),
+            Some("answer")
+        );
+        let text = r#"{"kind":"MessageEvent","source":"agent","llm_message":{"role":"assistant","content":[{"type":"text","text":"plain answer"}]}}"#;
+        assert_eq!(
+            super::ADAPTER.final_response(text, path).as_deref(),
+            Some("plain answer")
+        );
+        let tool = r#"{"kind":"ActionEvent","source":"agent","tool_name":"terminal","action":{"message":"tool data"}}"#;
+        let launcher = r#"{"type":"result","text":"native answer"}"#;
+        assert_eq!(
+            super::ADAPTER.final_response(launcher, path).as_deref(),
+            Some("native answer")
+        );
+        let user = r#"{"kind":"MessageEvent","source":"user","llm_message":{"role":"user","content":[{"type":"text","text":"prompt"}]}}"#;
+        assert!(super::ADAPTER.final_response(user, path).is_none());
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{event}\n{user}"), path)
+                .is_none()
+        );
+        let feedback = r#"{"kind":"MessageEvent","source":"environment","llm_message":{"role":"user","content":[{"type":"text","text":"retry"}]}}"#;
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{event}\n{feedback}"), path)
+                .is_none()
+        );
+        let no_result = r#"{"type":"result","text":null}"#;
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{event}\n{no_result}"), path)
+                .is_none()
+        );
+        assert_eq!(
+            super::ADAPTER
+                .final_response(&format!("{event}\n{launcher}"), path)
+                .as_deref(),
+            Some("native answer")
+        );
+        let agent_error = r#"{"kind":"AgentErrorEvent","source":"agent","error":"finish failed","tool_name":"finish","action_id":"a"}"#;
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{event}\n{agent_error}"), path)
+                .is_none()
+        );
+        let rejected = r#"{"kind":"UserRejectObservation","source":"environment","tool_name":"finish","action_id":"a"}"#;
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{event}\n{rejected}"), path)
+                .is_none()
+        );
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{text}\n{tool}"), path)
+                .is_none()
+        );
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{event}\n{{"), path)
+                .is_none()
+        );
+    }
+
     #[test]
     fn tool_event_content_is_not_usage_when_state_is_missing() {
         let output = r#"{"kind":"ObservationEvent","content":"{\"usage\":{\"input_tokens\":999,\"output_tokens\":888}}"}"#;
