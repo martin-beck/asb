@@ -28,6 +28,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_tool_replay(prepare_tool_replay)
 .with_step_count(step_count)
 .with_output_usage(output_usage)
+.with_final_response(final_response)
 .with_artifact_specs(&[super::super::ArtifactSpec {
     namespace: "tool-replay",
     filename: "local-tools.jsonl",
@@ -35,6 +36,56 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 }])
 .with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"])
 .with_max_steps();
+
+// Goose JSON mode emits a pretty-printed conversation summary after the run.
+fn final_response(output: &str, _: &Path) -> Option<String> {
+    let mut summary = None;
+    for (index, _) in output.match_indices('{') {
+        let Some(Ok(document)) = serde_json::Deserializer::from_str(&output[index..])
+            .into_iter::<serde_json::Value>()
+            .next()
+        else {
+            continue;
+        };
+        if document
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .is_some()
+            && document
+                .get("metadata")
+                .and_then(|v| v.as_object())
+                .is_some()
+        {
+            // Ambiguous summary documents are not attributable to this run.
+            if summary.is_some() {
+                return None;
+            }
+            summary = Some(document);
+        }
+    }
+    let summary = summary?;
+    if summary.pointer("/metadata/status").and_then(|v| v.as_str()) != Some("completed") {
+        return None;
+    }
+    let message = summary.get("messages")?.as_array()?.last()?;
+    if message.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+        return None;
+    }
+    let content = message.get("content")?.as_array()?;
+    if content
+        .iter()
+        .any(|part| part.get("type").and_then(|v| v.as_str()) == Some("toolRequest"))
+    {
+        return None;
+    }
+    let text = content
+        .iter()
+        .filter(|part| part.get("type").and_then(|v| v.as_str()) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(|v| v.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
 
 /// Goose's JSON mode emits accumulated usage in the top-level metadata of
 /// its conversation summary. Message content is arbitrary task data.
@@ -227,6 +278,34 @@ fn shell_quote(value: &std::ffi::OsStr) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn completed_goose_summary_supplies_final_answer() {
+        use crate::agents::AgentAdapter;
+        let output = "{\n  \"messages\": [{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}],\n  \"metadata\": {\"status\":\"completed\"}\n}";
+        let path = std::path::Path::new(".");
+        assert_eq!(
+            super::ADAPTER.final_response(output, path).as_deref(),
+            Some("answer")
+        );
+        let failed = output.replace("completed", "error");
+        assert!(super::ADAPTER.final_response(&failed, path).is_none());
+        let user = output.replace("assistant", "user");
+        assert!(super::ADAPTER.final_response(&user, path).is_none());
+        let tool = r#"{"messages":[{"role":"assistant","content":[{"type":"text","text":"intermediate"},{"type":"toolRequest"}]}],"metadata":{"status":"completed"}}"#;
+        assert!(super::ADAPTER.final_response(tool, path).is_none());
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{output}\n{output}"), path)
+                .is_none()
+        );
+        assert_eq!(
+            super::ADAPTER
+                .final_response(&format!("diagnostic\n{output}"), path)
+                .as_deref(),
+            Some("answer")
+        );
+    }
+
     use super::*;
     use crate::agents::AgentAdapter;
     use std::collections::HashMap;
