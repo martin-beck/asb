@@ -375,6 +375,15 @@ fn write_bundle_with(
     output: &Path,
     before_publish: impl FnOnce(),
 ) -> Result<(), Error> {
+    write_bundle_with_hooks(directory, output, before_publish, || {})
+}
+
+fn write_bundle_with_hooks(
+    directory: &Path,
+    output: &Path,
+    before_publish: impl FnOnce(),
+    after_publish: impl FnOnce(),
+) -> Result<(), Error> {
     if output.exists() {
         return Err(Error::Run(
             "MCP relay bundle destination already exists".into(),
@@ -390,22 +399,25 @@ fn write_bundle_with(
         .filter(|name| !name.is_empty() && *name != "." && *name != "..")
         .ok_or_else(|| Error::Run("MCP relay bundle destination is invalid".into()))?;
     let bytes = bundle_recording(directory)?;
-    let stage = reserve_file(parent, name, "mcp-bundle")?;
-    let result = (|| {
-        write_reserved(&stage, &bytes)?;
+    let (stage, mut owner) = reserve_file(parent, name, "mcp-bundle")?;
+    (|| {
+        owner.write_all(&bytes).map_err(crate::io_error)?;
+        owner.sync_all().map_err(crate::io_error)?;
         before_publish();
-        fs::hard_link(&stage, output)
-            .map_err(|_| Error::Run("cannot publish MCP relay bundle without overwrite".into()))?;
-        fs::remove_file(&stage).map_err(|error| {
+        let (detached, quarantine) = detach_stage(&stage, &owner)?;
+        fs::hard_link(&detached, output)
+            .map_err(|error| publication_error("MCP relay bundle", output, &detached, error))?;
+        after_publish();
+        fs::remove_file(&detached).map_err(|error| {
             Error::Run(format!(
-                "MCP relay bundle was published, but staging cleanup failed: {error}"
+                "MCP relay bundle was published at {}, but staging cleanup failed: {error}; inspect retained staging {}",
+                output.display(), detached.display()
             ))
+        })?;
+        fs::remove_dir(&quarantine).map_err(|error| {
+            published_cleanup_error("MCP relay bundle", output, &quarantine, error)
         })
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&stage);
-    }
-    result
+    })()
 }
 
 fn read_bundle(path: &Path) -> Result<Vec<u8>, Error> {
@@ -534,26 +546,33 @@ fn materialize_bundle_with(
         .filter(|name| !name.is_empty() && *name != "." && *name != "..")
         .ok_or_else(|| Error::Run("MCP replay recording name is invalid".into()))?;
     let stage = reserve_stage(parent, name)?;
-    let result = (|| {
-        fs::create_dir(stage.join("payloads")).map_err(crate::io_error)?;
+    let owner = open_stage(&stage).map_err(crate::io_error)?;
+    if !same_stage(&owner, &stage) {
+        return Err(Error::Run(format!(
+            "MCP replay stage changed while opening {}; preserve existing evidence",
+            stage.display()
+        )));
+    }
+    let owned_root = owned_directory_path(&owner, &stage);
+    (|| {
+        fs::create_dir(owned_root.join("payloads")).map_err(crate::io_error)?;
+        let payload_owner = open_stage(&owned_root.join("payloads")).map_err(crate::io_error)?;
+        let owned_payloads = owned_directory_path(&payload_owner, &stage.join("payloads"));
         let index = mcp_transcript::canonicalize(&bundle.transcript.encode()?)?;
-        write_new(&stage.join("index.jsonl"), &index)?;
+        write_new(&owned_root.join("index.jsonl"), &index)?;
         for (digest, payload) in &bundle.payloads {
-            write_new(
-                &stage.join("payloads").join(format!("{digest}.json")),
-                payload,
-            )?;
+            write_new(&owned_payloads.join(format!("{digest}.json")), payload)?;
         }
         before_publish();
-        rename_directory_noreplace(&stage, destination).map_err(|_| {
-            Error::Run("cannot publish complete MCP replay recording without overwrite".into())
+        let (detached, quarantine) = detach_stage(&stage, &owner)?;
+        rename_directory_noreplace(&detached, destination).map_err(|error| {
+            publication_error("MCP replay recording", destination, &detached, error)
+        })?;
+        fs::remove_dir(&quarantine).map_err(|error| {
+            published_cleanup_error("MCP replay recording", destination, &quarantine, error)
         })?;
         Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&stage);
-    }
-    result
+    })()
 }
 
 fn encode_bundle(
@@ -684,13 +703,50 @@ fn decode_bundle_record(line: &str) -> Result<BundleRecord, Error> {
         .map_err(|_| Error::Run("MCP relay bundle record is malformed".into()))
 }
 
+fn publication_error(
+    label: &str,
+    destination: &Path,
+    stage: &Path,
+    error: std::io::Error,
+) -> Error {
+    let outcome = if error.kind() == std::io::ErrorKind::AlreadyExists {
+        "was not published because the destination already exists"
+    } else {
+        "publication outcome is unconfirmed"
+    };
+    Error::Run(format!(
+        "{label} {outcome} at {}: {error}; inspect retained staging {} before retrying",
+        destination.display(),
+        stage.display()
+    ))
+}
+
+fn published_cleanup_error(
+    label: &str,
+    destination: &Path,
+    stage: &Path,
+    error: std::io::Error,
+) -> Error {
+    Error::Run(format!(
+        "{label} was published at {}, but staging cleanup failed: {error}; inspect retained staging {}",
+        destination.display(),
+        stage.display()
+    ))
+}
+
 fn reserve_stage(parent: &Path, name: &str) -> Result<PathBuf, Error> {
     for attempt in 0..128_u16 {
         let stage = parent.join(format!(
             ".{name}.mcp-replay-{0}-{attempt}",
             std::process::id()
         ));
-        match fs::create_dir(&stage) {
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&stage) {
             Ok(()) => return Ok(stage),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(crate::io_error(error)),
@@ -699,6 +755,153 @@ fn reserve_stage(parent: &Path, name: &str) -> Result<PathBuf, Error> {
     Err(Error::Run(
         "cannot reserve MCP replay recording destination".into(),
     ))
+}
+
+/// Detach the exposed stage into a fresh private namespace before checking its
+/// identity. A substituted entry is restored without replacement when possible.
+fn detach_stage(stage: &Path, owner: &fs::File) -> Result<(PathBuf, PathBuf), Error> {
+    let parent = stage
+        .parent()
+        .ok_or_else(|| Error::Run("MCP stage has no parent".into()))?;
+    let quarantine = parent.join(format!(
+        ".asb-mcp-detached-{}",
+        crate::tools::runtime::unique_id()
+    ));
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&quarantine).map_err(crate::io_error)?;
+    let detached = quarantine.join("stage");
+    if let Err(error) = fs::rename(stage, &detached) {
+        let _ = fs::remove_dir(&quarantine);
+        return Err(Error::Run(format!(
+            "cannot detach MCP stage; existing evidence preserved: {error}"
+        )));
+    }
+    if !same_stage(owner, &detached) {
+        let restored = rename_directory_noreplace(&detached, stage).is_ok();
+        if restored {
+            let _ = fs::remove_dir(&quarantine);
+        }
+        return Err(Error::Run(if restored {
+            format!(
+                "MCP stage identity changed; replacement restored at {}; preserve existing evidence",
+                stage.display()
+            )
+        } else {
+            format!(
+                "MCP stage identity changed; replacement retained at {}; preserve existing evidence",
+                detached.display()
+            )
+        }));
+    }
+    Ok((detached, quarantine))
+}
+
+#[cfg(unix)]
+fn same_stage(owner: &fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    owner
+        .metadata()
+        .ok()
+        .zip(fs::symlink_metadata(path).ok())
+        .is_some_and(|(a, b)| {
+            a.dev() == b.dev() && a.ino() == b.ino() && a.file_type() == b.file_type()
+        })
+}
+
+#[cfg(unix)]
+fn open_stage(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(path)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn open_stage(path: &Path) -> std::io::Result<fs::File> {
+    fs::File::open(path)
+}
+
+#[cfg(windows)]
+fn open_stage(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const BACKUP_SEMANTICS: u32 = 0x02000000;
+    const OPEN_REPARSE_POINT: u32 = 0x00200000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(BACKUP_SEMANTICS | OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn same_stage(owner: &fs::File, path: &Path) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    #[repr(C)]
+    struct Info {
+        attributes: u32,
+        creation: [u32; 2],
+        access: [u32; 2],
+        write: [u32; 2],
+        volume: u32,
+        size_high: u32,
+        size_low: u32,
+        links: u32,
+        index_high: u32,
+        index_low: u32,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(handle: *mut std::ffi::c_void, info: *mut Info) -> i32;
+    }
+    fn identity(file: &fs::File) -> Option<(u32, u32, u32)> {
+        let mut info = std::mem::MaybeUninit::<Info>::uninit();
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) } == 0 {
+            return None;
+        }
+        let info = unsafe { info.assume_init() };
+        Some((info.volume, info.index_high, info.index_low))
+    }
+    open_stage(path)
+        .ok()
+        .and_then(|file| identity(&file))
+        .zip(identity(owner))
+        .is_some_and(|(actual, expected)| actual == expected)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_stage(owner: &fs::File, path: &Path) -> bool {
+    owner
+        .metadata()
+        .ok()
+        .zip(fs::symlink_metadata(path).ok())
+        .is_some_and(|(a, b)| {
+            a.file_type() == b.file_type()
+                && a.len() == b.len()
+                && a.created().ok() == b.created().ok()
+                && a.modified().ok() == b.modified().ok()
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn owned_directory_path(owner: &fs::File, fallback: &Path) -> PathBuf {
+    use std::os::fd::AsRawFd;
+    let pinned = PathBuf::from(format!("/proc/self/fd/{}", owner.as_raw_fd()));
+    if pinned.is_dir() {
+        pinned
+    } else {
+        fallback.to_path_buf()
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn owned_directory_path(_: &fs::File, fallback: &Path) -> PathBuf {
+    fallback.to_path_buf()
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -760,17 +963,21 @@ fn rename_directory_noreplace(_: &Path, _: &Path) -> std::io::Result<()> {
     ))
 }
 
-fn reserve_file(parent: &Path, name: &str, purpose: &str) -> Result<PathBuf, Error> {
+fn reserve_file(parent: &Path, name: &str, purpose: &str) -> Result<(PathBuf, fs::File), Error> {
     for attempt in 0..128_u16 {
         let stage = parent.join(format!(
             ".{name}.{purpose}-{0}-{attempt}",
             std::process::id()
         ));
-        match OpenOptions::new().write(true).create_new(true).open(&stage) {
-            Ok(file) => {
-                drop(file);
-                return Ok(stage);
-            }
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&stage) {
+            Ok(file) => return Ok((stage, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(crate::io_error(error)),
         }
@@ -784,16 +991,6 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
-        .map_err(crate::io_error)?;
-    file.write_all(bytes).map_err(crate::io_error)?;
-    file.sync_all().map_err(crate::io_error)
-}
-
-fn write_reserved(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .truncate(true)
         .open(path)
         .map_err(crate::io_error)?;
     file.write_all(bytes).map_err(crate::io_error)?;
@@ -1030,9 +1227,13 @@ fn forward_messages<ClientWrite: Write, ServerWrite: Write>(
 struct Recorder {
     target: PathBuf,
     stage: PathBuf,
+    stage_owner: fs::File,
+    payload_owner: fs::File,
+    owned_files: Vec<(PathBuf, fs::File)>,
+    published: bool,
+    retain_stage: bool,
     transcript: mcp_transcript::Transcript,
     payload_bytes: u64,
-    published: bool,
 }
 
 impl Recorder {
@@ -1056,15 +1257,34 @@ impl Recorder {
                 ".{name}.mcp-record-{}-{attempt}",
                 std::process::id()
             ));
-            match fs::create_dir(&stage) {
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&stage) {
                 Ok(()) => {
-                    fs::create_dir(stage.join("payloads")).map_err(crate::io_error)?;
+                    let stage_owner = open_stage(&stage).map_err(crate::io_error)?;
+                    if !same_stage(&stage_owner, &stage) {
+                        return Err(Error::Run(format!(
+                            "MCP recording stage changed while opening {}; preserve existing evidence",
+                            stage.display()
+                        )));
+                    }
+                    let payload_path = owned_directory_path(&stage_owner, &stage).join("payloads");
+                    fs::create_dir(&payload_path).map_err(crate::io_error)?;
+                    let payload_owner = open_stage(&payload_path).map_err(crate::io_error)?;
                     return Ok(Self {
                         target: target.to_path_buf(),
                         stage,
+                        stage_owner,
+                        payload_owner,
+                        owned_files: Vec::new(),
+                        published: false,
+                        retain_stage: false,
                         transcript: mcp_transcript::Transcript::default(),
                         payload_bytes: 0,
-                        published: false,
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -1083,13 +1303,17 @@ impl Recorder {
         relative_millis: u64,
         payload: &[u8],
     ) -> Result<(), Error> {
+        if !same_stage(&self.stage_owner, &self.stage) {
+            return Err(Error::Run(
+                "MCP recording stage identity changed; preserve existing evidence".into(),
+            ));
+        }
         self.transcript
             .record(direction, framing, relative_millis, payload)?;
         let reference = mcp_transcript::payload_ref(payload);
-        let path = self
-            .stage
-            .join("payloads")
-            .join(format!("{}.json", reference.sha256));
+        let filename = format!("{}.json", reference.sha256);
+        let path =
+            owned_directory_path(&self.payload_owner, &self.stage.join("payloads")).join(&filename);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_file() => {
                 if fs::read(&path).map_err(crate::io_error)? != payload {
@@ -1112,10 +1336,12 @@ impl Recorder {
                 let mut file = OpenOptions::new()
                     .write(true)
                     .create_new(true)
-                    .open(path)
+                    .open(&path)
                     .map_err(crate::io_error)?;
                 file.write_all(payload).map_err(crate::io_error)?;
                 file.sync_all().map_err(crate::io_error)?;
+                self.owned_files
+                    .push((PathBuf::from("payloads").join(filename), file));
             }
             Err(error) => return Err(crate::io_error(error)),
         }
@@ -1123,28 +1349,83 @@ impl Recorder {
     }
 
     fn finish(&mut self) -> Result<(), Error> {
+        if !same_stage(&self.stage_owner, &self.stage) {
+            return Err(Error::Run(
+                "MCP recording stage identity changed; preserve existing evidence".into(),
+            ));
+        }
         let bytes = mcp_transcript::canonicalize(&self.transcript.encode()?)?;
-        let index = self.stage.join("index.jsonl");
+        let index = owned_directory_path(&self.stage_owner, &self.stage).join("index.jsonl");
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(index)
+            .open(&index)
             .map_err(crate::io_error)?;
         file.write_all(&bytes).map_err(crate::io_error)?;
         file.sync_all().map_err(crate::io_error)?;
-        rename_directory_noreplace(&self.stage, &self.target).map_err(|_| {
-            Error::Run("cannot publish complete MCP relay recording without overwrite".into())
-        })?;
+        self.owned_files.push((PathBuf::from("index.jsonl"), file));
+        let (detached, quarantine) = detach_stage(&self.stage, &self.stage_owner)?;
+        self.stage = detached;
+        if let Err(error) = rename_directory_noreplace(&self.stage, &self.target) {
+            self.retain_stage = true;
+            return Err(publication_error(
+                "MCP relay recording",
+                &self.target,
+                &self.stage,
+                error,
+            ));
+        }
         self.published = true;
+        fs::remove_dir(&quarantine).map_err(|error| {
+            published_cleanup_error("MCP relay recording", &self.target, &quarantine, error)
+        })?;
         Ok(())
     }
 }
 
 impl Drop for Recorder {
     fn drop(&mut self) {
-        if !self.published {
-            let _ = fs::remove_dir_all(&self.stage);
+        if self.published || self.retain_stage {
+            return;
         }
+        let Ok((detached, quarantine)) = detach_stage(&self.stage, &self.stage_owner) else {
+            return;
+        };
+        if !same_stage(&self.payload_owner, &detached.join("payloads")) {
+            return;
+        }
+        let expected_root = 1 + usize::from(
+            self.owned_files
+                .iter()
+                .any(|(path, _)| path == Path::new("index.jsonl")),
+        );
+        let expected_payloads = self
+            .owned_files
+            .iter()
+            .filter(|(path, _)| path.starts_with("payloads"))
+            .count();
+        if fs::read_dir(&detached).ok().map(|entries| entries.count()) != Some(expected_root)
+            || fs::read_dir(detached.join("payloads"))
+                .ok()
+                .map(|entries| entries.count())
+                != Some(expected_payloads)
+            || self
+                .owned_files
+                .iter()
+                .any(|(path, owner)| !same_stage(owner, &detached.join(path)))
+        {
+            return;
+        }
+        for (path, _) in &self.owned_files {
+            if fs::remove_file(detached.join(path)).is_err() {
+                return;
+            }
+        }
+        if fs::remove_dir(detached.join("payloads")).is_err() || fs::remove_dir(&detached).is_err()
+        {
+            return;
+        }
+        let _ = fs::remove_dir(quarantine);
     }
 }
 
@@ -1155,6 +1436,164 @@ mod tests {
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
 
+    fn retained_stage(error: &Error) -> PathBuf {
+        let text = error.to_string();
+        let path = text
+            .split_once("inspect retained staging ")
+            .expect("retained path in error")
+            .1
+            .split(" before retrying")
+            .next()
+            .unwrap();
+        PathBuf::from(path)
+    }
+
+    #[test]
+    fn post_publication_cleanup_failure_names_published_output_and_retained_stage() {
+        let record = replay_recording("cleanup-after-publish");
+        let parent = record.parent().unwrap();
+        let output = parent.join("published.jsonl");
+        let error = write_bundle_with_hooks(
+            &record,
+            &output,
+            || {},
+            || {
+                let quarantine = fs::read_dir(parent)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| {
+                        path.file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .starts_with(".asb-mcp-detached-")
+                    })
+                    .unwrap();
+                fs::write(quarantine.join("foreign"), "preserve").unwrap();
+            },
+        )
+        .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains(&format!("was published at {}", output.display())));
+        assert!(output.is_file());
+        assert_eq!(
+            fs::read_to_string(retained_stage(&error).join("foreign")).unwrap(),
+            "preserve"
+        );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn opening_stage_rejects_a_directory_symlink() {
+        let root = record_dir("stage-link");
+        let parent = root.parent().unwrap();
+        let foreign = parent.join("foreign");
+        fs::create_dir(&foreign).unwrap();
+        std::os::unix::fs::symlink(&foreign, &root).unwrap();
+        assert!(open_stage(&root).is_err());
+        assert!(foreign.is_dir());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn replaced_bundle_stage_is_not_published_or_deleted() {
+        let record = replay_recording("bundle-stage-swap");
+        let parent = record.parent().unwrap();
+        let output = parent.join("racing.jsonl");
+        let mut foreign = None;
+        let result = write_bundle_with(&record, &output, || {
+            let stage = fs::read_dir(parent)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .contains(".mcp-bundle-")
+                })
+                .unwrap();
+            fs::rename(&stage, parent.join("held-original")).unwrap();
+            fs::write(&stage, "foreign").unwrap();
+            foreign = Some(stage);
+        });
+        assert!(result.is_err());
+        assert!(!output.exists());
+        assert_eq!(fs::read_to_string(foreign.unwrap()).unwrap(), "foreign");
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn replaced_replay_stage_is_not_published_or_deleted() {
+        let record = replay_recording("replay-stage-swap");
+        let bundle = bundle_recording(&record).unwrap();
+        let parent = record.parent().unwrap();
+        let output = parent.join("replay");
+        let mut foreign = None;
+        let result = materialize_bundle_with(&bundle, &output, || {
+            let stage = fs::read_dir(parent)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .contains(".mcp-replay-")
+                })
+                .unwrap();
+            fs::rename(&stage, parent.join("held-original")).unwrap();
+            fs::create_dir(&stage).unwrap();
+            fs::write(stage.join("foreign"), "foreign").unwrap();
+            foreign = Some(stage);
+        });
+        assert!(result.is_err());
+        assert!(!output.exists());
+        assert_eq!(
+            fs::read_to_string(foreign.unwrap().join("foreign")).unwrap(),
+            "foreign"
+        );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn replaced_recorder_stage_is_preserved_on_error() {
+        let target = record_dir("record-stage-swap");
+        let mut recorder = Recorder::new(&target).unwrap();
+        let stage = recorder.stage.clone();
+        fs::rename(&stage, stage.with_extension("held-original")).unwrap();
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("foreign"), "foreign").unwrap();
+        assert!(recorder.finish().is_err());
+        drop(recorder);
+        assert!(!target.exists());
+        assert_eq!(
+            fs::read_to_string(stage.join("foreign")).unwrap(),
+            "foreign"
+        );
+        fs::remove_dir_all(target.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn recorder_cleanup_preserves_unexpected_stage_entries() {
+        let target = record_dir("record-stage-unexpected");
+        let recorder = Recorder::new(&target).unwrap();
+        fs::write(recorder.stage.join("foreign"), "preserve").unwrap();
+        drop(recorder);
+        let retained = fs::read_dir(target.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".asb-mcp-detached-")
+            })
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(retained.join("stage/foreign")).unwrap(),
+            "preserve"
+        );
+        fs::remove_dir_all(target.parent().unwrap()).unwrap();
+    }
+
     #[test]
     fn concurrent_bundle_destination_is_never_overwritten() {
         let record = replay_recording("bundle-racing-destination");
@@ -1162,7 +1601,9 @@ mod tests {
         let result = write_bundle_with(&record, &output, || {
             fs::write(&output, "other writer").unwrap()
         });
-        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("was not published"));
+        assert!(retained_stage(&error).is_file());
         assert_eq!(fs::read_to_string(&output).unwrap(), "other writer");
         fs::remove_dir_all(record.parent().unwrap()).unwrap();
     }
@@ -1172,9 +1613,12 @@ mod tests {
         let target = record_dir("record-racing-destination");
         let mut recorder = Recorder::new(&target).unwrap();
         fs::create_dir(&target).unwrap();
-        assert!(recorder.finish().is_err());
+        let error = recorder.finish().unwrap_err();
+        assert!(error.to_string().contains("was not published"));
+        let retained = retained_stage(&error);
         assert!(fs::read_dir(&target).unwrap().next().is_none());
         drop(recorder);
+        assert!(retained.join("index.jsonl").is_file());
         fs::remove_dir_all(target.parent().unwrap()).unwrap();
     }
 
@@ -1184,7 +1628,9 @@ mod tests {
         let bundle = bundle_recording(&record).unwrap();
         let target = record.parent().unwrap().join("replay");
         let result = materialize_bundle_with(&bundle, &target, || fs::create_dir(&target).unwrap());
-        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("was not published"));
+        assert!(retained_stage(&error).join("index.jsonl").is_file());
         assert!(fs::read_dir(&target).unwrap().next().is_none());
         fs::remove_dir_all(record.parent().unwrap()).unwrap();
     }
