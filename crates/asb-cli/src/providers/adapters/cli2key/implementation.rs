@@ -197,44 +197,30 @@ impl Bridge {
             Error::Run("cli2key bridge startup coordination failed; retry the run".into())
         })?;
         let host = std::env::var("CODEX_BRIDGE_HOST").unwrap_or_else(|_| "127.0.0.1".into());
-        let port = match std::env::var("CODEX_BRIDGE_PORT") {
-            Ok(value) => value,
-            Err(std::env::VarError::NotPresent) => free_port()?.to_string(),
+        let requested_port = match std::env::var("CODEX_BRIDGE_PORT") {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
             Err(_) => return Err(Error::Run("CODEX_BRIDGE_PORT must be valid UTF-8".into())),
         };
-        let port_number = port.parse::<u16>().map_err(|_| {
-            Error::Run("CODEX_BRIDGE_PORT must be an integer from 1 to 65535".into())
-        })?;
-        if port_number == 0 {
-            return Err(Error::Run(
-                "CODEX_BRIDGE_PORT must be an integer from 1 to 65535".into(),
-            ));
-        }
+        let requested_port = requested_port
+            .map(|port| {
+                port.parse::<u16>()
+                    .ok()
+                    .filter(|value| *value != 0)
+                    .ok_or_else(|| {
+                        Error::Run("CODEX_BRIDGE_PORT must be an integer from 1 to 65535".into())
+                    })
+            })
+            .transpose()?;
         let client_host = if host == "0.0.0.0" || host == "::" {
             "127.0.0.1"
         } else {
             host.as_str()
         };
+        let (mut resources, discovered_key, port_number) =
+            start_bridge_with(executable, &host, requested_port, free_port)?;
         let base_url = format!("http://{client_host}:{port_number}/v1");
-        let mut command = Command::new(executable);
-        crate::project::apply_network_proxy(&mut command, std::path::Path::new("."))?;
-        command
-            .arg("serve")
-            .env("CODEX_BRIDGE_HOST", &host)
-            .env("CODEX_BRIDGE_PORT", &port)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null());
-        let mut resources = LocalResources {
-            owner: Some(custody::Local::new().map_err(Error::Run)?),
-            files: None,
-        };
         let result: Result<(String, String), Error> = (|| {
-            let discovered_key = resources
-                .owner
-                .as_mut()
-                .expect("live owner")
-                .spawn_bridge(&mut command)
-                .map_err(Error::Run)?;
             let api_key = std::env::var("CLI2KEY_API_KEY")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
@@ -295,6 +281,60 @@ impl Bridge {
     }
 }
 
+fn start_bridge_with(
+    executable: &str,
+    host: &str,
+    requested: Option<u16>,
+    mut allocate: impl FnMut() -> Result<u16, Error>,
+) -> Result<(LocalResources, String, u16), Error> {
+    const ATTEMPTS: usize = 3;
+    for attempt in 0..ATTEMPTS {
+        let port = match requested {
+            Some(port) => port,
+            None => allocate()?,
+        };
+        let mut command = Command::new(executable);
+        crate::project::apply_network_proxy(&mut command, std::path::Path::new("."))?;
+        command
+            .arg("serve")
+            .env("CODEX_BRIDGE_HOST", host)
+            .env("CODEX_BRIDGE_PORT", port.to_string())
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
+        let mut resources = LocalResources {
+            owner: Some(custody::Local::new().map_err(Error::Run)?),
+            files: None,
+        };
+        match resources
+            .owner
+            .as_mut()
+            .expect("live owner")
+            .spawn_bridge(&mut command)
+        {
+            Ok(key) => return Ok((resources, key, port)),
+            Err(reason) => {
+                if let Err(cleanup) = resources.finish() {
+                    return Err(Error::Run(format!("{reason}; {cleanup}")));
+                }
+                let occupied = TcpListener::bind((host, port))
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::AddrInUse);
+                if requested.is_none() && occupied && attempt + 1 < ATTEMPTS {
+                    continue;
+                }
+                let detail = if occupied {
+                    format!(
+                        "; port {port} is in use; unset CODEX_BRIDGE_PORT or choose a free port and retry"
+                    )
+                } else {
+                    String::new()
+                };
+                return Err(Error::Run(format!("{reason}{detail}")));
+            }
+        }
+    }
+    unreachable!("the final attempt returns")
+}
+
 fn free_port() -> Result<u16, Error> {
     TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .and_then(|listener| listener.local_addr())
@@ -339,6 +379,59 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::normalize_endpoint;
+
+    #[cfg(unix)]
+    #[test]
+    fn occupied_automatic_bridge_port_retries_without_using_foreign_listener() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("bridge");
+        std::fs::write(&script, "#!/usr/bin/python3\nimport os,socket,time\ns=socket.socket()\ns.bind((os.environ['CODEX_BRIDGE_HOST'],int(os.environ['CODEX_BRIDGE_PORT'])))\ns.listen()\nprint('Codex Bridge API key: owned-fixture',flush=True)\ntime.sleep(30)\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let foreign = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let foreign_port = foreign.local_addr().unwrap().port();
+        let mut calls = 0;
+        let (mut resources, key, selected) =
+            super::start_bridge_with(script.to_str().unwrap(), "127.0.0.1", None, || {
+                calls += 1;
+                if calls == 1 {
+                    Ok(foreign_port)
+                } else {
+                    super::free_port()
+                }
+            })
+            .unwrap();
+        assert_eq!(calls, 2);
+        assert_ne!(selected, foreign_port);
+        assert_eq!(key, "owned-fixture");
+        foreign.set_nonblocking(true).unwrap();
+        assert_eq!(
+            foreign.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        resources.finish().unwrap();
+        let mut attempts = 0;
+        let failure = super::start_bridge_with(script.to_str().unwrap(), "127.0.0.1", None, || {
+            attempts += 1;
+            Ok(foreign_port)
+        })
+        .err()
+        .unwrap();
+        assert_eq!(attempts, 3);
+        assert!(failure.to_string().contains("port") && failure.to_string().contains("in use"));
+        let failure = super::start_bridge_with(
+            script.to_str().unwrap(),
+            "127.0.0.1",
+            Some(foreign_port),
+            || panic!("explicit port must not allocate another port"),
+        )
+        .err()
+        .unwrap();
+        assert!(failure.to_string().contains("in use"));
+        drop(foreign);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn concurrent_proxy_modules_are_private_and_cleanup_is_owned() {
