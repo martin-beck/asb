@@ -3,6 +3,8 @@ use super::{
     PromptDelivery, StaticAdapter,
 };
 use crate::{Error, install::Recipe};
+const TOOL_PROGRESS_FILENAME: &str = "persistent-progress.json";
+
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "qwen-code",
     "qwen",
@@ -28,7 +30,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
         // that lets deferred host collection verify the sealed transcript after
         // provider tape settlement.
         namespace: "tool-replay",
-        filename: "persistent-progress.json",
+        filename: TOOL_PROGRESS_FILENAME,
         format: super::super::ArtifactFormat::Json,
     },
 ])
@@ -88,7 +90,7 @@ fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> 
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
     match super::super::tool_replay_mcp::verify_persistent_per_call_completion_receipt(
-        context.frozen.document("persistent-progress.json"),
+        context.frozen.document(TOOL_PROGRESS_FILENAME),
         context.frozen.bytes("local-tools.jsonl"),
     ) {
         Ok(()) => AgentArtifacts::default(),
@@ -155,7 +157,8 @@ fn prepare_tool_replay(
 ) -> Result<(), Error> {
     // Qwen may replace the configured stdio MCP child after a tool response.
     // Keep the sealed transcript and replay cursor across those restarts.
-    let launch = super::super::tool_replay_mcp::persistent_per_call_launch(context, tape)?;
+    let launch =
+        super::super::tool_replay_mcp::per_call_launch(context, tape, TOOL_PROGRESS_FILENAME)?;
     let directory = context.runtime_dir.join("qwen-code");
     std::fs::create_dir_all(&directory)
         .map_err(|error| Error::Run(format!("cannot create Qwen local-tool directory: {error}")))?;

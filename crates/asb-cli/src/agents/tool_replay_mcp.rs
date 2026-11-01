@@ -287,33 +287,16 @@ pub(crate) fn with_metadata_trace(mut launch: Launch, path: &Path) -> Launch {
     launch
 }
 
-/// Some clients restart their private MCP service between tool calls. Persist
-/// the bounded transcript and replay cursor across those short-lived processes.
-/// Pi invokes one private service process per local tool call because its
-/// extension host can leave a long-lived child unread.  Persist only the
-/// bounded transcript cursor between those short-lived processes; the service
-/// still owns every tool operation and does not introduce a daemon.
+/// Persist a bounded per-call transcript cursor under the owning adapter's
+/// selected state filename when its client restarts the private MCP service.
 pub(crate) fn per_call_launch(
-    context: &PreparationContext<'_>,
-    tape: TapeContext<'_>,
-) -> Result<Launch, Error> {
-    per_call_launch_at(context, tape, "pi-progress.json")
-}
-
-/// Qwen restarts its private MCP child independently of Pi.  Its progress
-/// must therefore not occupy Pi's established per-call state path.
-pub(crate) fn persistent_per_call_launch(
-    context: &PreparationContext<'_>,
-    tape: TapeContext<'_>,
-) -> Result<Launch, Error> {
-    per_call_launch_at(context, tape, "persistent-progress.json")
-}
-
-fn per_call_launch_at(
     context: &PreparationContext<'_>,
     tape: TapeContext<'_>,
     state_name: &str,
 ) -> Result<Launch, Error> {
+    if !valid_progress_filename(state_name) {
+        return Err(Error::Run("local-tool progress filename is invalid".into()));
+    }
     let mut launch = launch(context, tape)?;
     let state = per_call_state_path(context.run_dir, state_name);
     let transcript = launch
@@ -332,6 +315,11 @@ fn per_call_launch_at(
         .args
         .extend(["--per-call-state".into(), state.into_os_string()]);
     Ok(launch)
+}
+
+fn valid_progress_filename(name: &str) -> bool {
+    let mut parts = Path::new(name).components();
+    matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none()
 }
 
 fn per_call_state_path(run_dir: &Path, name: &str) -> PathBuf {
@@ -1305,6 +1293,19 @@ fn required_path(request: &Value) -> Result<&str, Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn adapter_progress_names_are_single_local_components() {
+        for name in [
+            "pi-progress.json",
+            "persistent-progress.json",
+            "another-adapter.json",
+        ] {
+            assert!(super::valid_progress_filename(name), "{name}");
+        }
+        for name in ["", ".", "..", "../state", "nested/state", "/absolute"] {
+            assert!(!super::valid_progress_filename(name), "{name}");
+        }
+    }
     use super::*;
     use std::io::{BufRead, Read};
 
