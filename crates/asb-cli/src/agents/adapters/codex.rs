@@ -87,12 +87,47 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
 }
 
 fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::TokenUsage {
-    let mut usage =
-        crate::usage::usage_from_text(stdout).merge(crate::usage::usage_from_text(stderr));
+    let mut structured = crate::measurements::TokenUsage::default();
+    let mut seen = false;
+    let mut cache_complete = true;
+    for event in stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    {
+        if event.get("type").and_then(|value| value.as_str()) != Some("turn.completed") {
+            continue;
+        }
+        let Some(value) = event.get("usage") else {
+            return Default::default();
+        };
+        let usage = super::super::usage_fields(value);
+        if usage.input_tokens.is_none() || usage.output_tokens.is_none() {
+            return Default::default();
+        }
+        cache_complete &= usage.cached_tokens.is_some();
+        structured = structured.add(usage);
+        seen = true;
+    }
+    if seen {
+        if !cache_complete {
+            structured.cached_tokens = None;
+        }
+        return structured.with_derived_total();
+    }
+    // Preserve legacy human-readable output while never descending into a
+    // structured event's task and tool payloads.
+    let mut usage = crate::measurements::TokenUsage::default();
     for text in [stdout, stderr] {
+        let legacy = text
+            .lines()
+            .filter(|line| serde_json::from_str::<serde_json::Value>(line).is_err())
+            .collect::<Vec<_>>()
+            .join("\n");
+        usage = usage.merge(crate::usage::usage_from_text(&legacy));
         let mut lines = text.lines();
         while let Some(line) = lines.next() {
-            if line.to_ascii_lowercase().contains("tokens used")
+            if serde_json::from_str::<serde_json::Value>(line).is_err()
+                && line.to_ascii_lowercase().contains("tokens used")
                 && let Some(value) = lines
                     .next()
                     .and_then(|next| next.trim().replace(',', "").parse::<u64>().ok())
@@ -102,6 +137,51 @@ fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::Tok
         }
     }
     usage.with_derived_total()
+}
+
+#[cfg(test)]
+mod token_attribution_tests {
+    use super::output_usage;
+
+    #[test]
+    fn tool_output_usage_cannot_override_completed_turn_usage() {
+        let output = concat!(
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"aggregated_output\":\"{\\\"usage\\\":{\\\"input_tokens\\\":999,\\\"output_tokens\\\":888}}\"}}\n",
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":4,\"output_tokens\":3}}\n"
+        );
+        let usage = output_usage(output, "", false);
+        assert_eq!(
+            (
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cached_tokens,
+                usage.total_tokens
+            ),
+            (Some(10), Some(3), Some(4), Some(13))
+        );
+    }
+
+    #[test]
+    fn typed_turns_sum_and_missing_usage_is_unknown() {
+        let first = r#"{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":3,"cached_input_tokens":4}}"#;
+        let second = r#"{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":2,"cached_input_tokens":1}}"#;
+        let usage = output_usage(&format!("{first}\n{second}"), "", false);
+        assert_eq!(
+            (
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cached_tokens,
+                usage.total_tokens
+            ),
+            (Some(15), Some(5), Some(5), Some(20))
+        );
+        let missing = r#"{"type":"turn.completed","usage":{"input_tokens":5}}"#;
+        let usage = output_usage(&format!("{first}\n{missing}"), "", false);
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (None, None, None)
+        );
+    }
 }
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
