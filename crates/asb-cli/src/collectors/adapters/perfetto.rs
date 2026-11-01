@@ -4,6 +4,7 @@ use super::super::{
 };
 use crate::measurements;
 mod bootstrap;
+mod project;
 mod service;
 mod state_summary;
 use service::Service;
@@ -18,6 +19,23 @@ impl CollectorAdapter for PerfettoCollector {
     fn private_service_entry(&self, args: &[std::ffi::OsString]) -> Option<std::process::ExitCode> {
         Some(bootstrap::entry(args))
     }
+    fn configure_project(
+        &self,
+        root: &Path,
+        output: &mut dyn std::io::Write,
+        yes: bool,
+        config: &mut crate::project::ProjectConfig,
+    ) -> Result<(), crate::Error> {
+        let instances = project::configure(root, output, yes)?;
+        if !instances.is_empty() {
+            config.perfetto_instances = instances;
+        }
+        Ok(())
+    }
+    fn lock_project_reset(&self, root: &Path) -> Result<Vec<std::fs::File>, crate::Error> {
+        project::lock_for_reset(root)
+    }
+
     fn estimated_disk_mib(&self) -> u64 {
         1024
     }

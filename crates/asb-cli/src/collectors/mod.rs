@@ -254,6 +254,20 @@ pub(crate) trait CollectorAdapter: Sync {
     fn private_service_entry(&self, _: &[std::ffi::OsString]) -> Option<std::process::ExitCode> {
         None
     }
+    /// Configure collector-owned host capabilities during project setup.
+    fn configure_project(
+        &self,
+        _: &Path,
+        _: &mut dyn std::io::Write,
+        _: bool,
+        _: &mut crate::project::ProjectConfig,
+    ) -> Result<(), crate::Error> {
+        Ok(())
+    }
+    /// Hold collector admission and active-service leases throughout reset.
+    fn lock_project_reset(&self, _: &Path) -> Result<Vec<std::fs::File>, crate::Error> {
+        Ok(Vec::new())
+    }
     /// Conservative per-attempt retained capture estimate.
     fn estimated_disk_mib(&self) -> u64 {
         128
@@ -463,6 +477,43 @@ pub(crate) trait CollectorAdapter: Sync {
 pub(crate) fn all() -> &'static [&'static dyn CollectorAdapter] {
     adapters::REGISTRY
 }
+
+pub(crate) fn configure_project(
+    root: &Path,
+    output: &mut dyn std::io::Write,
+    yes: bool,
+    config: &mut crate::project::ProjectConfig,
+) -> Result<(), crate::Error> {
+    configure_project_for(all(), root, output, yes, config)
+}
+
+fn configure_project_for(
+    adapters: &[&dyn CollectorAdapter],
+    root: &Path,
+    output: &mut dyn std::io::Write,
+    yes: bool,
+    config: &mut crate::project::ProjectConfig,
+) -> Result<(), crate::Error> {
+    for adapter in adapters {
+        adapter.configure_project(root, output, yes, config)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn lock_project_reset(root: &Path) -> Result<Vec<std::fs::File>, crate::Error> {
+    lock_project_reset_for(all(), root)
+}
+
+fn lock_project_reset_for(
+    adapters: &[&dyn CollectorAdapter],
+    root: &Path,
+) -> Result<Vec<std::fs::File>, crate::Error> {
+    let mut leases = Vec::new();
+    for adapter in adapters {
+        leases.extend(adapter.lock_project_reset(root)?);
+    }
+    Ok(leases)
+}
 pub(crate) fn find(id: &str) -> Option<&'static dyn CollectorAdapter> {
     all().iter().copied().find(|collector| collector.id() == id)
 }
@@ -578,6 +629,65 @@ pub(crate) fn selected_or_environment(id: &str, selected: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_hooks_are_dispatched_and_reset_leases_remain_held() {
+        struct Fixture;
+        impl CollectorAdapter for Fixture {
+            fn id(&self) -> &'static str {
+                "fixture"
+            }
+            fn configure_project(
+                &self,
+                _: &Path,
+                output: &mut dyn std::io::Write,
+                yes: bool,
+                config: &mut crate::project::ProjectConfig,
+            ) -> Result<(), crate::Error> {
+                assert!(yes);
+                writeln!(output, "fixture configured").unwrap();
+                config.perfetto_instances = vec!["fixture-slot".into()];
+                Ok(())
+            }
+            fn lock_project_reset(&self, root: &Path) -> Result<Vec<std::fs::File>, crate::Error> {
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(root.join("fixture.lease"))
+                    .unwrap();
+                file.try_lock().unwrap();
+                Ok(vec![file])
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "asb-collector-hooks-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let adapters: &[&dyn CollectorAdapter] = &[&Fixture];
+        let mut config = crate::project::ProjectConfig::default();
+        let mut output = Vec::new();
+        configure_project_for(adapters, &root, &mut output, true, &mut config).unwrap();
+        assert_eq!(config.perfetto_instances, ["fixture-slot"]);
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("fixture configured")
+        );
+        let leases = lock_project_reset_for(adapters, &root).unwrap();
+        let other = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join("fixture.lease"))
+            .unwrap();
+        assert!(other.try_lock().is_err());
+        drop(leases);
+        other.try_lock().unwrap();
+        drop(other);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn registry_preserves_metadata_and_shutdown_policy_for_every_adapter() {

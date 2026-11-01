@@ -8,7 +8,6 @@ use std::process::Command;
 
 #[cfg(target_os = "linux")]
 mod host_setup;
-pub(crate) mod perfetto;
 
 thread_local! {
     static NETWORK_PROJECT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
@@ -296,13 +295,12 @@ pub fn init(
         .map_err(|error| Error::Io(format!("cannot create project configuration: {error}")))?;
     let (proxy, omitted_credentials) = NetworkProxy::detect(&|name| std::env::var(name).ok());
     let cgroup_parent = configure_host_capabilities(output, yes)?;
-    let perfetto_instances = perfetto::configure(&root, output, yes)?;
-    let config = ProjectConfig {
+    let mut config = ProjectConfig {
         proxy,
         cgroup_parent,
-        perfetto_instances,
         ..ProjectConfig::default()
     };
+    crate::collectors::configure_project(&root, output, yes, &mut config)?;
     fs::create_dir_all(resolve(&root, &config.tools_dir))
         .map_err(|error| Error::Io(format!("cannot create tools directory: {error}")))?;
     fs::create_dir_all(resolve(&root, &config.workloads_dir))
@@ -421,10 +419,7 @@ pub fn configure_host(
     let (_, mut config) = load(&root)?;
     initialized_config_path(&root)?;
     config.cgroup_parent = configure_host_capabilities(output, yes)?.or(config.cgroup_parent);
-    let instances = perfetto::configure(&root, output, yes)?;
-    if !instances.is_empty() {
-        config.perfetto_instances = instances;
-    }
+    crate::collectors::configure_project(&root, output, yes, &mut config)?;
     let text = toml::to_string_pretty(&config).map_err(|error| Error::Input(error.to_string()))?;
     write_configuration(&path, text.as_bytes(), || {})
         .map_err(|error| Error::Io(format!("cannot update project capabilities: {error}")))?;
@@ -631,7 +626,10 @@ fn configure_host_capabilities_with(
 }
 
 #[cfg(target_os = "linux")]
-fn request_sudo_consent(output: &mut dyn std::io::Write, yes: bool) -> Result<bool, Error> {
+pub(crate) fn request_sudo_consent(
+    output: &mut dyn std::io::Write,
+    yes: bool,
+) -> Result<bool, Error> {
     host_setup::consent(&mut std::io::stdin().lock(), output, yes)
 }
 
@@ -824,7 +822,7 @@ fn clean_project(root: &Path, config_path: &Path) -> Result<PathBuf, Error> {
     reject_symlink(config_path)?;
     // Stable admission coordination excludes new slots throughout the move;
     // existing instance leases additionally exclude active/crash-cleanup services.
-    let _tracing_leases = perfetto::lock_for_reset(root)?;
+    let _collector_leases = crate::collectors::lock_project_reset(root)?;
     let cleanup_root = root.join(CLEANUP_DIR);
     reject_symlink(&cleanup_root)?;
     fs::create_dir_all(&cleanup_root)

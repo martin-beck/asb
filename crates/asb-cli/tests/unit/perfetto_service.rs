@@ -86,7 +86,7 @@ fn admission_rejects_missing_foreign_locked_and_symlinked_instances_without_trac
             .unwrap()
             .contains("does not belong to this project")
     );
-    let instances = crate::project::perfetto::instance_names(&fixture.0).unwrap();
+    let instances = super::super::project::instance_names(&fixture.0).unwrap();
     fixture.configuration(instances.clone());
     let leases = instances
         .iter()
@@ -145,7 +145,7 @@ fn admission_rejects_missing_foreign_locked_and_symlinked_instances_without_trac
 #[test]
 fn cached_registry_service_is_reused_only_with_identical_executable() {
     let fixture = Fixture::new();
-    fixture.configuration(crate::project::perfetto::instance_names(&fixture.0).unwrap());
+    fixture.configuration(super::super::project::instance_names(&fixture.0).unwrap());
     let children = Arc::new(Mutex::new(Vec::new()));
     let lease = File::create(fixture.0.join("cached.lease")).unwrap();
     let service = Arc::new(fixture.service(children, lease));
