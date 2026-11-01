@@ -87,6 +87,23 @@ fn chat_cassette(calls: usize) -> Fixture {
 }
 
 #[test]
+fn unregistered_agent_output_is_not_usage_but_cassette_is() {
+    let output = r#"{"usage":{"input_tokens":999,"output_tokens":888}}"#;
+    let unknown = token_usage_from_sources("openrouter", "unregistered-agent", output, "", None);
+    assert!(!unknown.any());
+    let cassette = chat_cassette(2);
+    let usage = token_usage_from_sources(
+        "openrouter",
+        "unregistered-agent",
+        output,
+        "",
+        Some(&cassette.0),
+    );
+    assert_eq!(usage.source.as_deref(), Some("cassette"));
+    assert_usage(usage, 20, 6, Some(8));
+}
+
+#[test]
 fn qwen_code_uses_the_final_cumulative_summary_once() {
     let output = concat!(
         "{\"type\":\"message\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}\n",
