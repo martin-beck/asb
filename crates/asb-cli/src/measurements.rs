@@ -373,9 +373,32 @@ struct StoppedCollector {
 }
 
 /// A measurement session owns all optional collector processes for one run.
+// Keep directory ownership while a timed-out worker still owns its captures.
+fn retain_owner_until_worker_exit<T: Send + 'static>(
+    handle: std::thread::JoinHandle<T>,
+    owner: Option<std::sync::Arc<crate::output_lock::OutputLock>>,
+) {
+    if let Some(owner) = owner {
+        let fallback = owner.clone();
+        if std::thread::Builder::new()
+            .name("asb-measurement-custody".into())
+            .spawn(move || {
+                let _ = handle.join();
+                drop(owner);
+            })
+            .is_err()
+        {
+            // If a custody thread cannot start, retain ownership rather than
+            // allowing another run to write while the worker is still active.
+            std::mem::forget(fallback);
+        }
+    }
+}
+
 pub struct Session {
     adapters: Vec<&'static dyn collectors::CollectorAdapter>,
     pub(crate) dir: PathBuf,
+    _directory_owner: std::sync::Arc<crate::output_lock::OutputLock>,
     pub(crate) project_root: Option<PathBuf>,
     pub(crate) tool_dir: Option<PathBuf>,
     pub(crate) cgroup_parent: Option<PathBuf>,
@@ -424,7 +447,9 @@ impl Drop for Session {
             collector.producer.request_stop();
         }
         for collector in &mut self.collectors {
-            let _ = collector.producer.stop_before(deadline);
+            let _ = collector
+                .producer
+                .stop_before_with_owner(deadline, Some(self._directory_owner.clone()));
         }
         self.collectors.clear();
         if self.run_started && !self.run_finishing {
@@ -537,6 +562,20 @@ impl Session {
                 shell_quote(&dir.to_string_lossy())
             )
         })?;
+        // Distinct configured names can resolve to the same physical output
+        // directory. Hold one owner through collector teardown and publication
+        // so separate runs or symlinked replicas cannot replace each other's
+        // measurements.
+        let physical_dir = fs::canonicalize(dir).map_err(|error| {
+            format!(
+                "cannot resolve measurements directory {}: {error}",
+                dir.display()
+            )
+        })?;
+        let directory_owner = crate::output_lock::OutputLock::acquire(
+            &physical_dir.join(".asb-measurement-session.lock"),
+            "another measurement session owns this directory; choose a separate measurements directory",
+        )?;
         check_measurement_directory(dir)?;
         // Privilege and tracefs checks must complete before any agent process
         // is prepared. This prevents a partially measured benchmark run.
@@ -546,6 +585,7 @@ impl Session {
         let mut session = Self {
             adapters,
             dir: dir.to_path_buf(),
+            _directory_owner: std::sync::Arc::new(directory_owner),
             project_root: project_root.map(Path::to_path_buf),
             tool_dir: tool_dir.map(Path::to_path_buf),
             cgroup_parent: cgroup_parent.map(Path::to_path_buf),
@@ -941,7 +981,9 @@ impl Session {
             collector.producer.request_stop();
         }
         for mut collector in collectors {
-            let mut completion = collector.producer.stop_before(deadline);
+            let mut completion = collector
+                .producer
+                .stop_before_with_owner(deadline, Some(self._directory_owner.clone()));
             if completion.capture_complete
                 && !collector
                     .adapter
@@ -1481,6 +1523,70 @@ fn clock_ticks_per_second() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn aliased_measurement_directories_cannot_have_simultaneous_sessions() {
+        use std::os::unix::fs::symlink;
+        const CHILD: &str = "ASB_MEASUREMENT_ALIAS_CHILD";
+        let start = |path: &Path| {
+            Session::start_with_adapters(path, &[], None, None, Vec::new(), false, None)
+        };
+        if let Some(root) = std::env::var_os(CHILD) {
+            assert!(start(&PathBuf::from(root).join("second")).is_err());
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "asb-measurement-alias-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        fs::create_dir_all(root.join("actual")).unwrap();
+        symlink(root.join("actual"), root.join("first")).unwrap();
+        symlink(root.join("actual"), root.join("second")).unwrap();
+        let first = start(&root.join("first")).unwrap();
+        let second = start(&root.join("second"));
+        assert!(
+            second.is_err(),
+            "aliased replicas must not share a measurement session"
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "measurements::tests::aliased_measurement_directories_cannot_have_simultaneous_sessions"])
+            .env(CHILD, &root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "child contention check failed");
+        drop(first);
+        drop(start(&root.join("second")).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn timed_out_worker_keeps_directory_owned_until_it_exits() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-measurement-custody-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let lock = root.join("lock");
+        let owner =
+            std::sync::Arc::new(crate::output_lock::OutputLock::acquire(&lock, "busy").unwrap());
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            wait.recv().unwrap();
+        });
+        retain_owner_until_worker_exit(worker, Some(owner.clone()));
+        drop(owner);
+        assert!(crate::output_lock::OutputLock::acquire(&lock, "busy").is_err());
+        release.send(()).unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok(lock) = crate::output_lock::OutputLock::acquire(&lock, "busy") {
+                drop(lock);
+                break;
+            }
+            assert!(Instant::now() < deadline, "worker custody did not release");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
     use crate::usage::{
         from_sources as token_usage_from_sources, steps_from_agent as steps_from_sources,
     };

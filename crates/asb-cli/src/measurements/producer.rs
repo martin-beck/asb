@@ -197,23 +197,32 @@ impl Producer {
         }
     }
     pub fn stop_before(&mut self, deadline: Instant) -> Completion {
+        self.stop_before_with_owner(deadline, None)
+    }
+    pub(super) fn stop_before_with_owner(
+        &mut self,
+        deadline: Instant,
+        owner: Option<Arc<crate::output_lock::OutputLock>>,
+    ) -> Completion {
         if let Some(completion) = &self.completion {
             return completion.clone();
         }
         let completion = match self.active.take() {
             #[cfg(target_os = "linux")]
-            Some(Active::Process(mut process)) => process.settle_before(deadline),
-            Some(Active::Snapshot(snapshot)) => match snapshot.stop_before(deadline) {
-                Ok(()) => Completion {
-                    exit: None,
-                    guardian_cleanup_confirmed: None,
-                    capture_complete: true,
-                    interruption_requested: false,
-                    interruption_acknowledged: false,
-                    error: None,
-                },
-                Err(error) => Completion::failed(None, error),
-            },
+            Some(Active::Process(mut process)) => process.settle_before(deadline, owner),
+            Some(Active::Snapshot(snapshot)) => {
+                match snapshot.stop_before_with_owner(deadline, owner) {
+                    Ok(()) => Completion {
+                        exit: None,
+                        guardian_cleanup_confirmed: None,
+                        capture_complete: true,
+                        interruption_requested: false,
+                        interruption_acknowledged: false,
+                        error: None,
+                    },
+                    Err(error) => Completion::failed(None, error),
+                }
+            }
             None => Completion::failed(
                 None,
                 "collector ownership already transferred; settlement unconfirmed",
@@ -258,7 +267,11 @@ struct Process {
 }
 #[cfg(target_os = "linux")]
 impl Process {
-    fn settle_before(&mut self, deadline: Instant) -> Completion {
+    fn settle_before(
+        &mut self,
+        deadline: Instant,
+        owner: Option<Arc<crate::output_lock::OutputLock>>,
+    ) -> Completion {
         self.stop.store(true, Ordering::Release);
         let Some(handle) = self.handle.take() else {
             return Completion::failed(None, "collector worker custody is unconfirmed");
@@ -267,6 +280,7 @@ impl Process {
             std::thread::sleep(Duration::from_millis(5));
         }
         if !handle.is_finished() {
+            super::retain_owner_until_worker_exit(handle, owner);
             let mut completion = Completion::failed(
                 None,
                 "collector settlement deadline exceeded; existing worker retains guardian and raw capture custody",
