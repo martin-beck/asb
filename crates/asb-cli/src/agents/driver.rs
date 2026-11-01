@@ -898,7 +898,12 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         workload_owner: request.workload_owner,
         schema_version: 1,
         exit_code: output.status.code(),
-        final_response: super::final_response(&request.config.agent, &stdout, &workspace),
+        final_response: adapter.final_response_with_artifacts(
+            &stdout,
+            &frozen,
+            &workspace,
+            !transcript_truncated,
+        ),
         token_usage: usage,
         steps: super::find(&request.config.agent)
             .and_then(|adapter| adapter.step_count(&stdout, &stderr)),

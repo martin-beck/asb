@@ -131,11 +131,27 @@ impl ExecutionEvidence {
         issues.capture_error.is_none() && guest.is_none_or(durable_guest_presentation)
     }
 
+    #[cfg(test)]
     pub fn agent_outcome(
         &self,
         agent: &str,
         workspace: &Path,
         artifact_response: Option<&str>,
+    ) -> AgentOutcome {
+        self.agent_outcome_with_artifacts(
+            agent,
+            workspace,
+            artifact_response,
+            &agents::FrozenArtifacts::default(),
+        )
+    }
+
+    pub fn agent_outcome_with_artifacts(
+        &self,
+        agent: &str,
+        workspace: &Path,
+        artifact_response: Option<&str>,
+        frozen: &agents::FrozenArtifacts,
     ) -> AgentOutcome {
         // Prefer the agent's structured final response when deciding whether a
         // zero-exit process succeeded. Tool output can legitimately contain a
@@ -143,19 +159,57 @@ impl ExecutionEvidence {
         // scanning that whole transcript would incorrectly fail the run.
         let child = &self.output;
         let guest = &self.guest;
-        let stdout = if self.capture_complete {
-            bounded(&child.stdout)
-        } else {
-            String::new()
-        };
         let final_response = match guest.as_ref() {
-            Some(metadata) => metadata
-                .final_response
-                .clone()
-                .or_else(|| artifact_response.map(str::to_owned)),
-            None => artifact_response
-                .map(str::to_owned)
-                .or_else(|| agents::final_response(agent, &stdout, workspace)),
+            Some(metadata) => match agents::find(agent) {
+                Some(adapter) if adapter.uses_artifact_final_response() => metadata
+                    .final_response
+                    .as_ref()
+                    .filter(|answer| {
+                        metadata
+                            .deferred_collection
+                            .as_deref()
+                            .and_then(|bytes| {
+                                agents::FrozenArtifacts::from_deferred_collection_bytes(bytes).ok()
+                            })
+                            .is_some_and(|guest_frozen| {
+                                adapter.validate_guest_artifact_answer(answer, &guest_frozen)
+                            })
+                    })
+                    .cloned(),
+                _ => metadata
+                    .final_response
+                    .clone()
+                    .or_else(|| artifact_response.map(str::to_owned)),
+            },
+            None => {
+                let adapter = agents::find(agent);
+                if adapter.is_some_and(|adapter| adapter.uses_artifact_final_response()) {
+                    adapter.and_then(|adapter| {
+                        adapter.final_response_with_artifacts(
+                            &String::from_utf8_lossy(&child.stdout),
+                            frozen,
+                            workspace,
+                            self.capture_complete,
+                        )
+                    })
+                } else {
+                    artifact_response.map(str::to_owned).or_else(|| {
+                        adapter.and_then(|adapter| {
+                            let stdout = if self.capture_complete {
+                                bounded(&child.stdout)
+                            } else {
+                                String::new()
+                            };
+                            adapter.final_response_with_artifacts(
+                                &stdout,
+                                frozen,
+                                workspace,
+                                self.capture_complete,
+                            )
+                        })
+                    })
+                }
+            }
         };
         let adapter_failure = guest
             .as_ref()

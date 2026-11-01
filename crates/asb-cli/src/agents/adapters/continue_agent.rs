@@ -19,39 +19,53 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_complete_tool_replay(prepare_tool_replay)
 .with_replay_credential_vars(&["CONTINUE_API_KEY"])
 .with_state_environment_vars(&["CONTINUE_CONFIG", "CONTINUE_GLOBAL_DIR"])
-.with_artifact_specs(&[super::super::ArtifactSpec {
-    namespace: "tool-replay",
-    filename: "local-tools.jsonl",
-    format: super::super::ArtifactFormat::JsonLines,
-}])
+.with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "tool-replay",
+        filename: "local-tools.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "continue",
+        filename: "session.json",
+        format: super::super::ArtifactFormat::JsonSingleton {
+            directories: &["config", "sessions"],
+            ignored_name: "sessions.json",
+            project: project_session,
+        },
+    },
+])
 .with_collection(collect)
 .with_output_usage(output_usage)
-.with_final_response(final_response);
+.with_final_response(final_response)
+.with_artifact_final_response(final_response_with_session)
+.with_guest_artifact_answer(validate_guest_answer);
+
+fn compaction_status(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let status = object.get("status").and_then(|v| v.as_str());
+    let message = object.get("message").and_then(|v| v.as_str());
+    match (status, message) {
+        (Some("info"), Some("Auto-compacting triggered")) => {
+            object.len() == 3
+                && object
+                    .get("contextUsage")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s.ends_with('%'))
+        }
+        (Some("success"), Some("Auto-compacted successfully"))
+        | (Some("warning"), Some("Auto-compaction failed, continuing without compaction")) => {
+            object.len() == 2
+        }
+        _ => false,
+    }
+}
 
 // Continue emits optional auto-compaction status objects before its final
 // JSON value. Reject ambiguous status-only output rather than grade it.
 fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
-    fn compaction_status(value: &serde_json::Value) -> bool {
-        let Some(object) = value.as_object() else {
-            return false;
-        };
-        let status = object.get("status").and_then(|v| v.as_str());
-        let message = object.get("message").and_then(|v| v.as_str());
-        match (status, message) {
-            (Some("info"), Some("Auto-compacting triggered")) => {
-                object.len() == 3
-                    && object
-                        .get("contextUsage")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|s| s.ends_with('%'))
-            }
-            (Some("success"), Some("Auto-compacted successfully"))
-            | (Some("warning"), Some("Auto-compaction failed, continuing without compaction")) => {
-                object.len() == 2
-            }
-            _ => false,
-        }
-    }
     let mut stream = serde_json::Deserializer::from_str(output).into_iter::<serde_json::Value>();
     let mut previous_end = 0;
     let mut result = None;
@@ -73,6 +87,125 @@ fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
         };
     }
     result
+}
+
+// Preserve only identity, assistant usage and the final message needed for
+// cross-checking; do not copy prompts or tool transcripts into evidence.
+fn project_session(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let id = value.get("sessionId")?.as_str()?;
+    let history = value.get("history")?.as_array()?;
+    if history.len() > 4096 {
+        return None;
+    }
+    let mut reduced = Vec::with_capacity(history.len());
+    for (i, item) in history.iter().enumerate() {
+        let message = item.get("message")?;
+        let role = message.get("role")?.as_str()?;
+        let mut selected = serde_json::Map::new();
+        selected.insert("role".into(), role.into());
+        if role == "assistant"
+            && let Some(usage) = message.get("usage")
+        {
+            selected.insert("usage".into(), usage.clone());
+        }
+        if i + 1 == history.len() && role == "assistant" {
+            if let Some(content) = message.get("content") {
+                selected.insert("content".into(), content.clone());
+            }
+            if let Some(calls) = message.get("toolCalls") {
+                let pending = calls.as_array().is_none_or(|items| !items.is_empty());
+                selected.insert(
+                    "toolCalls".into(),
+                    if pending {
+                        serde_json::json!([null])
+                    } else {
+                        serde_json::json!([])
+                    },
+                );
+            }
+        }
+        reduced.push(serde_json::json!({"message":selected}));
+    }
+    Some(serde_json::json!({"sessionId":id,"history":reduced}))
+}
+
+fn validated_session(frozen: &super::super::FrozenArtifacts) -> Option<&serde_json::Value> {
+    let snapshot = frozen.document("session.json")?;
+    let filename = snapshot.get("filename")?.as_str()?;
+    let doc = snapshot.get("document")?;
+    let id = doc.get("sessionId")?.as_str()?;
+    if id.len() != 36
+        || !id.bytes().enumerate().all(|(i, byte)| {
+            if [8, 13, 18, 23].contains(&i) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+        || filename.strip_suffix(".json") != Some(id)
+    {
+        return None;
+    }
+    Some(doc)
+}
+
+fn final_response_with_session(
+    stdout: &str,
+    frozen: &super::super::FrozenArtifacts,
+    _: &std::path::Path,
+    complete: bool,
+) -> Option<String> {
+    if !complete {
+        return None;
+    }
+    verified_session_answer(stdout, validated_session(frozen)?)
+}
+
+fn validate_guest_answer(answer: &str, frozen: &super::super::FrozenArtifacts) -> bool {
+    session_raw_answer(validated_session(frozen)).is_some_and(|raw| raw == answer)
+}
+
+fn session_raw_answer(session: Option<&serde_json::Value>) -> Option<&str> {
+    let message = session?
+        .get("history")?
+        .as_array()?
+        .last()?
+        .get("message")?;
+    if message.get("role")?.as_str()? != "assistant" {
+        return None;
+    }
+    if message
+        .get("toolCalls")
+        .is_some_and(|calls| calls.as_array().is_none_or(|items| !items.is_empty()))
+    {
+        return None;
+    }
+    let raw = message.get("content")?.as_str()?.trim();
+    (!raw.is_empty()).then_some(raw)
+}
+
+/// Cross-check Continue's emitted value against the final tool-free session
+/// message before using the raw answer. Absence or disagreement is unknown.
+fn verified_session_answer(stdout: &str, session: &serde_json::Value) -> Option<String> {
+    let raw = session_raw_answer(Some(session))?;
+    let mut pending = None;
+    let mut count = 0usize;
+    for value in serde_json::Deserializer::from_str(stdout).into_iter::<serde_json::Value>() {
+        let value = value.ok()?;
+        if let Some(previous) = pending.replace(value)
+            && !compaction_status(&previous)
+        {
+            return None;
+        }
+        count += 1;
+        if count > 1024 {
+            return None;
+        }
+    }
+    let actual = pending?;
+    let expected = serde_json::from_str::<serde_json::Value>(raw).unwrap_or_else(|_| serde_json::json!({"response":raw,"status":"success","note":"Response was not valid JSON, so it was wrapped in a JSON object"}));
+    let matches = actual == expected;
+    matches.then(|| raw.to_owned())
 }
 
 // Headless JSON output is the model's answer, not a usage event. Usage comes
@@ -144,6 +277,8 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     )?;
     context
         .command
+        .env_remove("CONTINUE_CLI_TEST")
+        .env_remove("CONTINUE_CLI_TEST_SESSION_ID")
         .env("CONTINUE_CONFIG", directory.join("config.yaml"))
         .env("CONTINUE_GLOBAL_DIR", &directory)
         .env("CONTINUE_API_KEY", key)
@@ -181,20 +316,16 @@ fn prepare_tool_replay(
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
-    let sessions = context.run_dir.join("continue/config/sessions");
-    let Some(value) = super::super::single_usage_document(&sessions, |path| {
-        path.extension().is_some_and(|s| s == "json")
-            && path.file_name().is_some_and(|s| s != "sessions.json")
-    }) else {
+    let Some(value) = validated_session(context.frozen) else {
         return AgentArtifacts::default();
     };
     AgentArtifacts {
         token_usage: Some(session_usage(
-            &value,
+            value,
             context.interface == Some(crate::endpoint::Interface::AnthropicMessages)
                 && !context.anthropic_input_includes_cache,
         )),
-        steps: session_steps(&value),
+        steps: session_steps(value),
         final_response: None,
         ..Default::default()
     }
@@ -321,6 +452,124 @@ fn configure(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn singleton_session_freeze_and_guest_transfer_keep_only_needed_data() {
+        use crate::agents::AgentAdapter;
+        for mode in ["missing", "multiple", "valid", "long", "oversized"] {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/continue-singleton-tests")
+                .join(crate::workloads::TaskIdentity::local("continue", None).attempt_id);
+            std::fs::create_dir_all(&root).unwrap();
+            let mut owner =
+                crate::agents::ArtifactOwner::prepare(&root, super::ADAPTER.artifact_specs())
+                    .unwrap();
+            let sessions = root.join("continue/config/sessions");
+            assert!(sessions.is_dir());
+            if mode != "missing" {
+                let id = "00112233-4455-6677-8899-aabbccddeeff";
+                let prompt = if mode == "long" {
+                    "SECRET_PROMPT".repeat(100_000)
+                } else {
+                    "SECRET_PROMPT".to_owned()
+                };
+                let doc = serde_json::json!({"sessionId":id,"history":[
+                    {"message":{"role":"user","content":prompt}},
+                    {"message":{"role":"assistant","content":"intermediate","toolCalls":[{"secret":"SECRET_TOOL"}]}},
+                    {"message":{"role":"assistant","content":"answer","usage":{"inputTokens":4}}}
+                ]});
+                std::fs::write(sessions.join(format!("{id}.json")), doc.to_string()).unwrap();
+                if mode == "oversized" {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(sessions.join(format!("{id}.json")))
+                        .unwrap()
+                        .set_len(16 * 1024 * 1024 + 1)
+                        .unwrap();
+                }
+                if mode == "multiple" {
+                    std::fs::write(sessions.join("other.json"), "{}").unwrap();
+                }
+            }
+            let frozen = owner.freeze();
+            assert_eq!(frozen.error, mode == "oversized");
+            if mode == "oversized" {
+                assert!(frozen.diagnostic().unwrap().contains("16 MiB"));
+            }
+            assert_eq!(
+                frozen.document("session.json").is_some(),
+                mode == "valid" || mode == "long"
+            );
+            let encoded = frozen.deferred_collection_bytes().unwrap();
+            let text = String::from_utf8_lossy(&encoded);
+            assert!(!text.contains("SECRET_PROMPT") && !text.contains("SECRET_TOOL"));
+            let restored =
+                crate::agents::FrozenArtifacts::from_deferred_collection_bytes(&encoded).unwrap();
+            if mode == "valid" || mode == "long" {
+                assert_eq!(
+                    super::session_raw_answer(super::validated_session(&restored)),
+                    Some("answer")
+                );
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn session_cross_check_returns_only_raw_matching_final_answer() {
+        let stdout = r#"{"response":"answer","status":"success","note":"Response was not valid JSON, so it was wrapped in a JSON object"}"#;
+        let doc = serde_json::json!({"history":[{"message":{"role":"user","content":"prompt"}},{"message":{"role":"assistant","content":"answer"}}]});
+        assert_eq!(
+            super::verified_session_answer(stdout, &doc).as_deref(),
+            Some("answer")
+        );
+        let status = r#"{"status":"success","message":"Auto-compacted successfully"}"#;
+        let status_doc =
+            serde_json::json!({"history":[{"message":{"role":"assistant","content":status}}]});
+        assert_eq!(
+            super::verified_session_answer(status, &status_doc).as_deref(),
+            Some(status)
+        );
+        let null_doc =
+            serde_json::json!({"history":[{"message":{"role":"assistant","content":"null"}}]});
+        assert_eq!(
+            super::verified_session_answer("null", &null_doc).as_deref(),
+            Some("null")
+        );
+        assert!(
+            !super::verified_session_answer(stdout, &doc)
+                .unwrap()
+                .contains("success")
+        );
+        for doc in [
+            serde_json::json!({"history":[]}),
+            serde_json::json!({"history":[{"message":{"role":"assistant","content":"different"}}]}),
+            serde_json::json!({"history":[{"message":{"role":"user","content":"answer"}}]}),
+            serde_json::json!({"history":[{"message":{"role":"assistant","content":"answer","toolCalls":[{}]}}]}),
+        ] {
+            assert!(super::verified_session_answer(stdout, &doc).is_none());
+        }
+        let json = serde_json::json!({"history":[{"message":{"role":"assistant","content":"{\"key\": 2}"}}]});
+        assert_eq!(
+            super::verified_session_answer(r#"{"key":2}"#, &json).as_deref(),
+            Some("{\"key\": 2}")
+        );
+    }
+
+    #[test]
+    fn session_check_consumes_complete_large_stdout() {
+        let doc =
+            serde_json::json!({"history":[{"message":{"role":"assistant","content":"answer"}}]});
+        let status = serde_json::json!({"status":"info","message":"Auto-compacting triggered","contextUsage":format!("{}%", "0".repeat(1_050_000))});
+        let stdout = format!(
+            "{status}\n{}",
+            serde_json::json!({"response":"answer","status":"success","note":"Response was not valid JSON, so it was wrapped in a JSON object"})
+        );
+        assert_eq!(
+            super::verified_session_answer(&stdout, &doc).as_deref(),
+            Some("answer")
+        );
+        assert!(super::verified_session_answer(&format!("{stdout}\n\"extra\""), &doc).is_none());
+    }
+
     #[test]
     fn json_answer_is_available_for_grading() {
         use crate::agents::AgentAdapter;
@@ -457,17 +706,14 @@ mod tests {
     }
 
     #[test]
-    fn refuses_ambiguous_or_missing_run_sessions() {
-        let root = std::env::temp_dir().join(format!("asb-continue-token-{}", std::process::id()));
-        let directory = root.join("continue/config/sessions");
-        std::fs::create_dir_all(&directory).unwrap();
-        let doc = r#"{"history":[{"message":{"role":"assistant","usage":{"prompt_tokens":10,"completion_tokens":3}}}]}"#;
-        std::fs::write(directory.join("first.json"), doc).unwrap();
-        std::fs::write(directory.join("sessions.json"), "[]").unwrap();
+    fn collection_uses_validated_frozen_session() {
+        let id = "12345678-1234-1234-1234-123456789abc";
+        let snapshot = serde_json::json!({"filename":format!("{id}.json"),"document":{"sessionId":id,"history":[{"message":{"role":"assistant","usage":{"prompt_tokens":10,"completion_tokens":3}}}]}});
+        let frozen = super::super::super::FrozenArtifacts::for_test("session.json", snapshot);
         let context = CollectionContext {
-            frozen: &Default::default(),
+            frozen: &frozen,
             provider_capture: None,
-            run_dir: &root,
+            run_dir: std::path::Path::new("."),
             interface: None,
             anthropic_input_includes_cache: false,
             mcp_servers: &[],
@@ -477,9 +723,21 @@ mod tests {
             collect(&context).token_usage.unwrap().total_tokens,
             Some(13)
         );
-        std::fs::write(directory.join("second.json"), doc).unwrap();
+        let missing = super::super::super::FrozenArtifacts::default();
+        let context = CollectionContext {
+            frozen: &missing,
+            ..context
+        };
         assert!(collect(&context).token_usage.is_none());
-        std::fs::remove_dir_all(root).unwrap();
+        let bad = super::super::super::FrozenArtifacts::for_test(
+            "session.json",
+            serde_json::json!({"filename":"other.json","document":{"sessionId":id,"history":[]}}),
+        );
+        let context = CollectionContext {
+            frozen: &bad,
+            ..context
+        };
+        assert!(collect(&context).token_usage.is_none());
     }
 
     #[test]

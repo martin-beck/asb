@@ -195,6 +195,30 @@ fn evidence(exit: i32, guest: bool) -> ExecutionEvidence {
 }
 
 #[test]
+fn continue_answer_requires_guest_receipt_and_host_session_even_with_other_answers() {
+    let mut guest = evidence(0, true);
+    for receipt in [None, Some(b"not a receipt".to_vec())] {
+        guest.guest.as_mut().unwrap().deferred_collection = receipt;
+        let result = guest.agent_outcome_with_artifacts(
+            "continue",
+            Path::new("."),
+            Some("unverified host answer"),
+            &agents::FrozenArtifacts::default(),
+        );
+        assert_eq!(result.final_response, None);
+    }
+    let mut host = evidence(0, false);
+    host.output.stdout = br#""submission""#.to_vec();
+    let result = host.agent_outcome_with_artifacts(
+        "continue",
+        Path::new("."),
+        Some("unverified host answer"),
+        &agents::FrozenArtifacts::default(),
+    );
+    assert_eq!(result.final_response, None);
+}
+
+#[test]
 fn native_guest_grade_and_cleanup_matrix_preserves_independent_facts() {
     // Each completed process, even an unsuccessful one, reaches the evaluator
     // exactly once. Instrumentation and cleanup never rewrite its grade.

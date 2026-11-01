@@ -18,19 +18,50 @@ pub(crate) struct ArtifactSpec {
 /// JSON is the historical default.  JSONL is used only for the causal
 /// local-tool transcript, whose individual events are validated by its owning
 /// replay module before it enters a cassette.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy)]
 pub(crate) enum ArtifactFormat {
     Json,
     JsonLines,
     /// Bounded private UTF-8 text, interpreted only by the owning adapter.
     Text,
+    /// A single bounded JSON file inside a freshly claimed nested directory.
+    JsonSingleton {
+        directories: &'static [&'static str],
+        ignored_name: &'static str,
+        project: fn(&serde_json::Value) -> Option<serde_json::Value>,
+    },
 }
+
+impl PartialEq for ArtifactFormat {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Json, Self::Json)
+            | (Self::JsonLines, Self::JsonLines)
+            | (Self::Text, Self::Text) => true,
+            (
+                Self::JsonSingleton {
+                    directories: a,
+                    ignored_name: b,
+                    project: c,
+                },
+                Self::JsonSingleton {
+                    directories: x,
+                    ignored_name: y,
+                    project: z,
+                },
+            ) => a == x && b == y && std::ptr::fn_addr_eq(*c, *z),
+            _ => false,
+        }
+    }
+}
+impl Eq for ArtifactFormat {}
 
 struct OwnedFile {
     path: PathBuf,
     format: ArtifactFormat,
     namespace: File,
     directory: Observation,
+    singleton: Option<SingletonDirectory>,
     observed: Option<Observation>,
     snapshot: Option<Vec<u8>>,
     retain: bool,
@@ -40,6 +71,13 @@ struct OwnedFile {
     before_move: Option<Box<dyn FnOnce() + Send>>,
     #[cfg(test)]
     snapshot_sync_failure: bool,
+}
+
+struct SingletonDirectory {
+    path: PathBuf,
+    directories: Vec<(std::ffi::OsString, File, Observation)>,
+    ignored_name: &'static str,
+    project: fn(&serde_json::Value) -> Option<serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -242,6 +280,186 @@ fn unchanged(a: &Observation, b: &Observation) -> bool {
             .is_some_and(|(a, b)| a == b)
 }
 
+/// Snapshot exactly one JSON document from a freshly pinned directory.
+/// Missing, ambiguous, oversized, and malformed session data stay unavailable.
+fn snapshot_singleton(
+    namespace: &File,
+    source: &SingletonDirectory,
+) -> std::io::Result<Option<(Option<serde_json::Value>, Vec<u8>)>> {
+    fn verify_chain(namespace: &File, source: &SingletonDirectory) -> std::io::Result<()> {
+        let mut parent = namespace;
+        for (name, held, expected) in &source.directories {
+            let current = open_child(parent, name, false)?;
+            let current = Observation::read(&current)?;
+            if !current.metadata.is_dir() || !same_identity(&current, expected) {
+                return Err(std::io::Error::other("artifact namespace replaced"));
+            }
+            parent = held;
+        }
+        Ok(())
+    }
+    verify_chain(namespace, source)?;
+    let directory = &source.directories.last().expect("validated directories").1;
+    let names = list_singleton_candidates(directory, &source.path, source.ignored_name)?;
+    if names.len() != 1 {
+        return Ok(None);
+    }
+    let filename = names[0].to_str().filter(|name| name.ends_with(".json"));
+    let Some(filename) = filename else {
+        return Ok(None);
+    };
+    let file = match open_child(directory, &names[0], false) {
+        Ok(file) => file,
+        Err(_) => return Ok(None),
+    };
+    let before = Observation::read(&file)?;
+    const PROJECTED_LIMIT: u64 = 1024 * 1024;
+    if !before.metadata.is_file() {
+        return Ok(None);
+    }
+    if before.metadata.len() > LIMIT {
+        return Err(std::io::Error::other(
+            "session exceeds the 16 MiB capture limit; shorten the task or session",
+        ));
+    }
+    let mut bytes = Vec::new();
+    (&file).take(LIMIT + 1).read_to_end(&mut bytes)?;
+    let after = Observation::read(&file)?;
+    if bytes.len() as u64 > LIMIT {
+        return Err(std::io::Error::other(
+            "session exceeds the 16 MiB capture limit; shorten the task or session",
+        ));
+    }
+    if !unchanged(&before, &after) {
+        return Ok(None);
+    }
+    verify_chain(namespace, source)?;
+    let current = match open_child(directory, &names[0], false) {
+        Ok(file) => file,
+        Err(_) => return Ok(None),
+    };
+    if !unchanged(&before, &Observation::read(&current)?) {
+        return Ok(None);
+    }
+    if list_singleton_candidates(directory, &source.path, source.ignored_name)? != names {
+        return Ok(None);
+    }
+    let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Ok(None);
+    };
+    let Some(document) = (source.project)(&document) else {
+        return Ok(None);
+    };
+    let envelope = serde_json::json!({"filename": filename, "document": document});
+    let bytes = serde_json::to_vec(&envelope).map_err(std::io::Error::other)?;
+    // Deferred evidence encodes this byte vector again; keep that envelope
+    // below the transfer bound even in the worst case of escaped text.
+    if bytes.len() as u64 > PROJECTED_LIMIT {
+        return Err(std::io::Error::other(
+            "session answer or usage exceeds the 1 MiB transfer limit; shorten the response",
+        ));
+    }
+    Ok(Some((Some(envelope), bytes)))
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn list_singleton_candidates(
+    directory: &File,
+    _: &Path,
+    ignored: &str,
+) -> std::io::Result<Vec<std::ffi::OsString>> {
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    use std::os::unix::ffi::OsStringExt;
+    let file = open_child(directory, std::ffi::OsStr::new("."), false)?;
+    let fd = file.into_raw_fd();
+    // SAFETY: fdopendir takes ownership of this independent directory handle.
+    let ptr = unsafe { libc::fdopendir(fd) };
+    let Some(ptr) = std::ptr::NonNull::new(ptr) else {
+        let error = std::io::Error::last_os_error();
+        drop(unsafe { File::from_raw_fd(fd) });
+        return Err(error);
+    };
+    struct Directory(std::ptr::NonNull<libc::DIR>);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            unsafe {
+                libc::closedir(self.0.as_ptr());
+            }
+        }
+    }
+    let stream = Directory(ptr);
+    let mut names = Vec::new();
+    let mut count = 0usize;
+    loop {
+        errno::set_errno(errno::Errno(0));
+        // SAFETY: stream is live, and the copied name is consumed before readdir.
+        let entry = unsafe { libc::readdir(stream.0.as_ptr()) };
+        if entry.is_null() {
+            let error = errno::errno();
+            if error.0 != 0 {
+                return Err(error.into());
+            }
+            break;
+        }
+        let bytes = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if matches!(bytes, b"." | b"..") {
+            continue;
+        }
+        count += 1;
+        if count > 256 || bytes.len() > 255 {
+            return Ok(Vec::new());
+        }
+        if bytes == ignored.as_bytes() || !bytes.ends_with(b".json") {
+            continue;
+        }
+        names.push(std::ffi::OsString::from_vec(bytes.to_vec()));
+    }
+    names.sort();
+    Ok(names)
+}
+
+#[cfg(windows)]
+fn list_singleton_candidates(
+    directory: &File,
+    path: &Path,
+    ignored: &str,
+) -> std::io::Result<Vec<std::ffi::OsString>> {
+    let before = Observation::read(directory)?;
+    let path_before = Observation::read(&open_regular_or_directory(path)?)?;
+    if !same_identity(&before, &path_before) {
+        return Err(std::io::Error::other("artifact namespace replaced"));
+    }
+    let mut names = Vec::new();
+    for (index, item) in fs::read_dir(path)?.enumerate() {
+        if index >= 256 {
+            return Ok(Vec::new());
+        }
+        let name = item?.file_name();
+        let Some(text) = name.to_str() else {
+            return Ok(Vec::new());
+        };
+        if text != ignored && text.ends_with(".json") {
+            names.push(name);
+        }
+    }
+    let path_after = Observation::read(&open_regular_or_directory(path)?)?;
+    if !same_identity(&before, &path_after) {
+        return Err(std::io::Error::other("artifact namespace replaced"));
+    }
+    names.sort();
+    Ok(names)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn list_singleton_candidates(
+    _: &File,
+    _: &Path,
+    _: &str,
+) -> std::io::Result<Vec<std::ffi::OsString>> {
+    Ok(Vec::new())
+}
+
 impl ArtifactOwner {
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
@@ -283,13 +501,58 @@ impl ArtifactOwner {
                     )
                 })?;
             }
-            let namespace = open_regular_or_directory(&directory).map_err(crate::io_error)?;
+            let namespace = if matches!(spec.format, ArtifactFormat::JsonSingleton { .. }) {
+                open_singleton_namespace(&directory)
+            } else {
+                open_regular_or_directory(&directory)
+            }
+            .map_err(crate::io_error)?;
             let metadata = Observation::read(&namespace).map_err(crate::io_error)?;
+            let singleton = if let ArtifactFormat::JsonSingleton {
+                directories,
+                ignored_name,
+                project,
+            } = spec.format
+            {
+                assert!(!directories.is_empty() && directories.len() <= 4);
+                let mut path = directory.clone();
+                let mut pinned = Vec::new();
+                for component in directories {
+                    assert!(
+                        !component.is_empty()
+                            && *component != "."
+                            && *component != ".."
+                            && component
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                    );
+                    path.push(component);
+                    let parent = pinned.last().map_or(&namespace, |(_, file, _)| file);
+                    let handle = create_owned_subdir(parent, std::ffi::OsStr::new(component))
+                        .map_err(crate::io_error)?;
+                    let observation = Observation::read(&handle).map_err(crate::io_error)?;
+                    if !observation.metadata.is_dir() {
+                        return Err(crate::Error::Run(
+                            "cannot claim singleton artifact directory".into(),
+                        ));
+                    }
+                    pinned.push(((*component).into(), handle, observation));
+                }
+                Some(SingletonDirectory {
+                    path,
+                    directories: pinned,
+                    ignored_name,
+                    project,
+                })
+            } else {
+                None
+            };
             owner.files.push(OwnedFile {
                 path: directory.join(spec.filename),
                 format: spec.format,
                 namespace,
                 directory: metadata,
+                singleton,
                 observed: None,
                 snapshot: None,
                 retain: false,
@@ -328,6 +591,9 @@ impl ArtifactOwner {
                 if let Some(hook) = owned.before_open.take() {
                     hook();
                 }
+                if let Some(source) = owned.singleton.as_ref() {
+                    return snapshot_singleton(&owned.namespace, source);
+                }
                 let file = match open_owned(owned, false) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                     other => other?,
@@ -356,6 +622,7 @@ impl ArtifactOwner {
                         .map(|document| Some((Some(document), bytes)))
                         .map_err(|_| std::io::Error::other("malformed artifact JSON")),
                     ArtifactFormat::JsonLines => Ok(Some((None, bytes))),
+                    ArtifactFormat::JsonSingleton { .. } => unreachable!("singleton handled above"),
                     ArtifactFormat::Text => {
                         if std::str::from_utf8(&bytes).is_err() {
                             Err(std::io::Error::other("malformed artifact UTF-8"))
@@ -390,6 +657,12 @@ impl ArtifactOwner {
                     let reason = match error.to_string().as_str() {
                         "artifact namespace replaced" => "namespace replaced",
                         "artifact exceeds bound" => "size bound exceeded",
+                        "session exceeds the 16 MiB capture limit; shorten the task or session" => {
+                            "session exceeds the 16 MiB capture limit; shorten the task or session"
+                        }
+                        "session answer or usage exceeds the 1 MiB transfer limit; shorten the response" => {
+                            "session answer or usage exceeds the 1 MiB transfer limit; shorten the response"
+                        }
                         "artifact changed or exceeds bound" => "snapshot changed or exceeded bound",
                         "malformed artifact JSON" => "malformed JSON",
                         "malformed artifact UTF-8" => "malformed UTF-8",
@@ -605,6 +878,45 @@ fn open_owned(owned: &OwnedFile, delete: bool) -> std::io::Result<File> {
         let _ = delete;
         open_regular_or_directory(&owned.path)
     }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn create_owned_subdir(parent: &File, name: &std::ffi::OsStr) -> std::io::Result<File> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let c_name = std::ffi::CString::new(name.as_bytes())?;
+    // SAFETY: parent is pinned and c_name is one validated path component.
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), c_name.as_ptr(), 0o700) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    open_child(parent, name, false)
+}
+
+#[cfg(windows)]
+fn create_owned_subdir(parent: &File, name: &std::ffi::OsStr) -> std::io::Result<File> {
+    windows_child(parent, name, 0xc010_0000, 2, 0x0020_0021)
+}
+
+#[cfg(windows)]
+fn open_singleton_namespace(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .access_mode(0xc010_0000)
+        .custom_flags(0x0200_0000 | 0x0020_0000)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_singleton_namespace(path: &Path) -> std::io::Result<File> {
+    open_regular_or_directory(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_owned_subdir(_: &File, _: &std::ffi::OsStr) -> std::io::Result<File> {
+    Err(std::io::Error::other(
+        "pinned directory creation unavailable",
+    ))
 }
 
 #[cfg(unix)]
