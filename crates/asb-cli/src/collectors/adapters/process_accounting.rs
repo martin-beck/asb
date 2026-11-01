@@ -4,6 +4,7 @@
 //! observation strategy used when delegated cgroup-v2 accounting is absent.
 
 use crate::measurements::ProcessIdentity;
+use std::collections::BTreeMap;
 use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,38 +17,49 @@ pub(super) struct Sample {
     pub runqueue_ns: u64,
 }
 
-#[derive(Clone, Copy, Default)]
+type Identity = (u32, u64);
+const MAX_OBSERVED_PROCESSES: usize = 100_000;
+
+#[derive(Default)]
 struct Accounting {
-    first: Sample,
-    latest: Sample,
-    initialized: bool,
+    previous: BTreeMap<Identity, Sample>,
+    total: Sample,
+    invalid: bool,
 }
 
 impl Accounting {
-    fn update(&mut self, sample: Sample) {
-        if !self.initialized {
-            self.first = sample;
-            self.initialized = true;
+    fn update(&mut self, processes: BTreeMap<Identity, Sample>) {
+        for (identity, sample) in processes {
+            let previous = self.previous.get(&identity).copied().unwrap_or_default();
+            if !self.previous.contains_key(&identity)
+                && self.previous.len() == MAX_OBSERVED_PROCESSES
+            {
+                self.invalid = true;
+                return;
+            }
+            self.total.user_ticks = self
+                .total
+                .user_ticks
+                .saturating_add(sample.user_ticks.saturating_sub(previous.user_ticks));
+            self.total.system_ticks = self
+                .total
+                .system_ticks
+                .saturating_add(sample.system_ticks.saturating_sub(previous.system_ticks));
+            self.total.io_delay_ticks = self.total.io_delay_ticks.saturating_add(
+                sample
+                    .io_delay_ticks
+                    .saturating_sub(previous.io_delay_ticks),
+            );
+            self.total.runqueue_ns = self
+                .total
+                .runqueue_ns
+                .saturating_add(sample.runqueue_ns.saturating_sub(previous.runqueue_ns));
+            self.previous.insert(identity, sample);
         }
-        self.latest = sample;
     }
 
-    fn delta(self) -> Sample {
-        Sample {
-            user_ticks: self.latest.user_ticks.saturating_sub(self.first.user_ticks),
-            system_ticks: self
-                .latest
-                .system_ticks
-                .saturating_sub(self.first.system_ticks),
-            io_delay_ticks: self
-                .latest
-                .io_delay_ticks
-                .saturating_sub(self.first.io_delay_ticks),
-            runqueue_ns: self
-                .latest
-                .runqueue_ns
-                .saturating_sub(self.first.runqueue_ns),
-        }
+    fn delta(&self) -> Option<Sample> {
+        (!self.invalid).then_some(self.total)
     }
 }
 
@@ -60,11 +72,13 @@ pub(super) struct Sampler {
 impl Sampler {
     pub(super) fn start(root: ProcessIdentity, interval_ms: u64) -> Option<Self> {
         let initial = read_tree(root)?;
+        if initial.len() > MAX_OBSERVED_PROCESSES {
+            return None;
+        }
         let (stop, receiver) = std::sync::mpsc::channel();
         let accounting = Arc::new(Mutex::new(Accounting {
-            first: initial,
-            latest: initial,
-            initialized: true,
+            previous: initial,
+            ..Accounting::default()
         }));
         let thread_accounting = Arc::clone(&accounting);
         let handle = std::thread::Builder::new()
@@ -102,7 +116,7 @@ impl Sampler {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-        self.accounting.lock().ok().map(|state| state.delta())
+        self.accounting.lock().ok().and_then(|state| state.delta())
     }
 }
 
@@ -115,12 +129,11 @@ impl Drop for Sampler {
     }
 }
 
-fn read_tree(root: ProcessIdentity) -> Option<Sample> {
+fn read_tree(root: ProcessIdentity) -> Option<BTreeMap<Identity, Sample>> {
     if !root.matches() {
         return None;
     }
-    let mut total = Sample::default();
-    let mut observed = false;
+    let mut processes = BTreeMap::new();
     for pid in crate::measurements::process_tree_pids(root.pid) {
         let Some(identity) = ProcessIdentity::read(pid) else {
             continue;
@@ -134,13 +147,9 @@ fn read_tree(root: ProcessIdentity) -> Option<Sample> {
         if !identity.in_tree(root) {
             continue;
         }
-        total.user_ticks = total.user_ticks.saturating_add(sample.user_ticks);
-        total.system_ticks = total.system_ticks.saturating_add(sample.system_ticks);
-        total.io_delay_ticks = total.io_delay_ticks.saturating_add(sample.io_delay_ticks);
-        total.runqueue_ns = total.runqueue_ns.saturating_add(sample.runqueue_ns);
-        observed = true;
+        processes.insert((identity.pid, identity.start_time_ticks), sample);
     }
-    (observed && root.matches()).then_some(total)
+    (!processes.is_empty() && root.matches()).then_some(processes)
 }
 
 fn read_process(pid: u32) -> Option<Sample> {
@@ -204,20 +213,29 @@ mod tests {
 
     #[test]
     fn accounting_saturates_when_a_kernel_counter_resets() {
-        let mut accounting = Accounting::default();
-        accounting.update(Sample {
+        let initial = Sample {
             user_ticks: 10,
             system_ticks: 20,
             io_delay_ticks: 3,
             runqueue_ns: 100,
-        });
-        accounting.update(Sample {
-            user_ticks: 14,
-            system_ticks: 28,
-            io_delay_ticks: 5,
-            runqueue_ns: 160,
-        });
-        let delta = accounting.delta();
+        };
+        let mut accounting = Accounting {
+            previous: [((1, 10), initial)].into(),
+            ..Accounting::default()
+        };
+        accounting.update(
+            [(
+                (1, 10),
+                Sample {
+                    user_ticks: 14,
+                    system_ticks: 28,
+                    io_delay_ticks: 5,
+                    runqueue_ns: 160,
+                },
+            )]
+            .into(),
+        );
+        let delta = accounting.delta().unwrap();
         assert_eq!(
             (
                 delta.user_ticks,
@@ -227,8 +245,8 @@ mod tests {
             ),
             (4, 8, 2, 60)
         );
-        accounting.update(Sample::default());
-        let delta = accounting.delta();
+        accounting.update([((1, 10), Sample::default())].into());
+        let delta = accounting.delta().unwrap();
         assert_eq!(
             (
                 delta.user_ticks,
@@ -236,7 +254,73 @@ mod tests {
                 delta.io_delay_ticks,
                 delta.runqueue_ns
             ),
-            (0, 0, 0, 0)
+            (4, 8, 2, 60)
         );
+    }
+
+    #[test]
+    fn observed_worker_cpu_survives_exit_and_pid_reuse() {
+        let mut accounting = Accounting {
+            previous: [(
+                (1, 10),
+                Sample {
+                    user_ticks: 10,
+                    ..Sample::default()
+                },
+            )]
+            .into(),
+            ..Accounting::default()
+        };
+        accounting.update(
+            [
+                (
+                    (1, 10),
+                    Sample {
+                        user_ticks: 12,
+                        ..Sample::default()
+                    },
+                ),
+                (
+                    (2, 20),
+                    Sample {
+                        user_ticks: 7,
+                        ..Sample::default()
+                    },
+                ),
+            ]
+            .into(),
+        );
+        assert_eq!(accounting.delta().unwrap().user_ticks, 9);
+        accounting.update(
+            [(
+                (1, 10),
+                Sample {
+                    user_ticks: 13,
+                    ..Sample::default()
+                },
+            )]
+            .into(),
+        );
+        assert_eq!(accounting.delta().unwrap().user_ticks, 10);
+        accounting.update(
+            [
+                (
+                    (1, 10),
+                    Sample {
+                        user_ticks: 14,
+                        ..Sample::default()
+                    },
+                ),
+                (
+                    (2, 21),
+                    Sample {
+                        user_ticks: 3,
+                        ..Sample::default()
+                    },
+                ),
+            ]
+            .into(),
+        );
+        assert_eq!(accounting.delta().unwrap().user_ticks, 14);
     }
 }
