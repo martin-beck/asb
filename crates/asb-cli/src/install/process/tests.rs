@@ -657,12 +657,32 @@ fn explicit_operation_proxy_snapshot_is_not_replaced_by_foreign_network_scope() 
     let environments = |command: &std::process::Command| {
         command
             .get_envs()
+            .filter(|(key, _)| {
+                key.to_str().is_some_and(|name| {
+                    matches!(
+                        name.to_ascii_lowercase().as_str(),
+                        "http_proxy"
+                            | "https_proxy"
+                            | "all_proxy"
+                            | "socks_proxy"
+                            | "no_proxy"
+                            | "node_use_env_proxy"
+                    )
+                })
+            })
             .map(|(key, value)| (key.to_owned(), value.map(std::ffi::OsStr::to_owned)))
             .collect::<Vec<_>>()
     };
     assert!(
         environments(&step.command) == environments(&expected),
         "the explicit operation proxy snapshot was not used; values omitted to protect environment credentials"
+    );
+    #[cfg(target_os = "linux")]
+    assert!(
+        step.command
+            .get_envs()
+            .any(|(key, value)| key == "ASB_GATE_INSTALL_LOCK_FDS" && value.is_none()),
+        "the gated launch must clear inherited lock descriptor metadata"
     );
     assert!(
         crate::project::load(&foreign)
