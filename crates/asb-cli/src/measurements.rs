@@ -12,7 +12,7 @@ mod snapshot;
 pub(crate) use producer::command as producer_command;
 pub(crate) use producer::{Completion as ProducerCompletion, Policy as ProducerPolicy, Producer};
 use snapshot::ProcessTreeSnapshot;
-pub(crate) use snapshot::SnapshotCommand;
+pub(crate) use snapshot::{SnapshotCommand, bounded_version};
 #[cfg(test)]
 mod coverage_tests;
 pub use cohort::ExecutionCohort;
