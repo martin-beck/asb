@@ -24,11 +24,13 @@ pub(crate) fn from_sources(
 ) -> TokenUsage {
     let mut usage = usage_from_environment(provider, agent);
     let inclusive = crate::providers::anthropic_input_includes_cache(provider);
-    let specialized = crate::agents::find(agent)
-        .and_then(|adapter| adapter.output_usage(stdout, stderr, inclusive));
-    let output_usage = specialized
-        .clone()
-        .unwrap_or_else(|| usage_from_text(stdout).merge(usage_from_text(stderr)));
+    let output_usage = match crate::agents::find(agent) {
+        Some(adapter) => adapter
+            .output_usage(stdout, stderr, inclusive)
+            .unwrap_or_else(|| usage_from_text(stdout).merge(usage_from_text(stderr))),
+        // A caller without a registered adapter has no output schema.
+        None => TokenUsage::default(),
+    };
     let mut cassette_usage = TokenUsage::default();
     if let Some(path) = cassette
         && let Ok(text) = read_bounded_text(path, 16 * 1024 * 1024)
