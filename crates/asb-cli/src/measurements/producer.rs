@@ -581,6 +581,36 @@ mod tests {
     }
 
     #[test]
+    fn timed_out_producer_retains_measurement_directory_until_settled() {
+        let fixture = Fixture::new();
+        let reached = Arc::new(AtomicBool::new(false));
+        FAULT.with(|slot| {
+            *slot.borrow_mut() = Some(Fault {
+                kind: "read",
+                reached: reached.clone(),
+                release: fixture.release.clone(),
+            });
+        });
+        let lock = fixture.path.join("directory.lock");
+        let owner = Arc::new(crate::output_lock::OutputLock::acquire(&lock, "busy").unwrap());
+        let mut producer = fixture.spawn(
+            "import signal\nprint('READY',flush=True)\nsignal.pause()\n",
+            None,
+            false,
+        );
+        until(|| reached.load(Ordering::Acquire));
+        let completion = producer.stop_before_with_owner(
+            Instant::now() + Duration::from_millis(30),
+            Some(owner.clone()),
+        );
+        assert!(!completion.capture_complete);
+        drop(owner);
+        assert!(crate::output_lock::OutputLock::acquire(&lock, "busy").is_err());
+        fixture.release.store(true, Ordering::Release);
+        until(|| crate::output_lock::OutputLock::acquire(&lock, "busy").is_ok());
+    }
+
+    #[test]
     fn graceful_flush_drains_both_pipes_before_complete_capture() {
         let fixture = Fixture::new();
         let script = "import signal,sys\ndef done(*_):\n sys.stdout.write('O'*196608);sys.stdout.flush()\n sys.stderr.write('E'*196608);sys.stderr.flush()\n sys.exit(7)\nsignal.signal(signal.SIGINT,done)\nprint('READY',flush=True)\nsignal.pause()\n";
