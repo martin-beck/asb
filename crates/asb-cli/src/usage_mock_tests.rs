@@ -224,6 +224,22 @@ fn incomplete_completed_turn_does_not_yield_partial_totals() {
 }
 
 #[test]
+fn pi_incomplete_turns_defer_to_complete_cassette_usage() {
+    let output = concat!(
+        "{\"type\":\"turn_end\",\"usage\":{\"input\":10,\"output\":3,\"cacheRead\":2}}\n",
+        "{\"type\":\"turn_end\",\"usage\":{\"input\":10}}\n",
+    );
+    let without_cassette = token_usage_from_sources("openrouter", "pi", output, "", None);
+    assert!(without_cassette.input_tokens.is_none());
+    assert!(without_cassette.output_tokens.is_none());
+    assert!(without_cassette.total_tokens.is_none());
+    let cassette = chat_cassette(2);
+    let usage = token_usage_from_sources("openrouter", "pi", output, "", Some(&cassette.0));
+    assert_eq!(usage.source.as_deref(), Some("cassette"));
+    assert_usage(usage, 20, 6, Some(8));
+}
+
+#[test]
 fn workbuddy_pretty_printed_result_counts_one_usage_record() {
     let output = "[\n  {\n    \"type\": \"message\",\n    \"usage\": {\"inputTokens\":10,\"outputTokens\":3,\"totalTokens\":13}\n  },\n  {\n    \"type\": \"result\",\n    \"usage\": {\"input_tokens\":10,\"output_tokens\":3,\"cache_read_input_tokens\":0}\n  }\n]\n";
     assert_usage(

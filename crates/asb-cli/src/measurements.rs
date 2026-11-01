@@ -2005,9 +2005,9 @@ mod tests {
             (
                 "pi",
                 r#"event: {"type":"turn_end","usage":{"input":7,"output":3,"total":10,"cacheRead":2}}"#,
-                7,
+                9,
                 3,
-                10,
+                12,
             ),
             (
                 "qwen-code",
