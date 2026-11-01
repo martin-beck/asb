@@ -759,9 +759,12 @@ fn run_concurrent(
 }
 
 #[cfg(test)]
+type ReplicaTestRendezvous = std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
+
+#[cfg(test)]
 thread_local! {
     static REPLICA_SPAWN_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
-    static REPLICA_TEST_RENDEZVOUS: std::cell::RefCell<Option<std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>> = const { std::cell::RefCell::new(None) };
+    static REPLICA_TEST_RENDEZVOUS: std::cell::RefCell<Option<ReplicaTestRendezvous>> = const { std::cell::RefCell::new(None) };
 }
 
 fn injected_replica_spawn_failure(index: usize) -> bool {
