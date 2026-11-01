@@ -986,13 +986,6 @@ pub(super) fn structured_final_response(output: &str) -> Option<String> {
     })
 }
 
-pub(super) fn structured_final_response_document(output: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(output)
-        .ok()
-        .and_then(|value| final_text_from_event(&value))
-        .or_else(|| structured_final_response(output))
-}
-
 fn final_text_from_event(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::Array(values) => values.iter().rev().find_map(final_text_from_event),
