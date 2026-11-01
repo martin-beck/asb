@@ -1474,59 +1474,15 @@ fn process_successful_with_final_response(
 
 fn process_failure_reason(
     status: &std::process::ExitStatus,
-    stdout: &[u8],
-    stderr: &[u8],
-    final_response: Option<&str>,
+    _stdout: &[u8],
+    _stderr: &[u8],
+    _final_response: Option<&str>,
 ) -> Option<String> {
-    let transcript = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(stdout),
-        String::from_utf8_lossy(stderr)
-    );
-    // Once a structured final response exists, inspect that response only.
-    // Earlier command output is diagnostic evidence, not the agent outcome.
-    let output = final_response.unwrap_or(&transcript);
-    let has_completion_evidence = final_response.is_some()
-        || output.contains("Agent finished")
-        || output.contains("Saved trajectory to '.asb-mini-swe.traj.json'")
-        || output.contains("Saved trajectory to \".asb-mini-swe.traj.json\"");
-    // Provider diagnostics can be printed by workload tools or quoted in a
-    // successful answer. Only adapter-owned terminal events can attribute them.
-    let cannot_run_tests = [
-        "I can’t run tests",
-        "I can't run tests",
-        "I cannot run tests",
-    ]
-    .iter()
-    .any(|marker| output.contains(marker));
-    let has_refusal_marker = [
-        "can't inspect",
-        "cannot inspect",
-        "don't have access to the terminal",
-        "do not have access to the terminal",
-        "no terminal or filesystem",
-        "workspace is read-only",
-        "workspace appears to be read-only",
-        "unable to modify files",
-        "can't modify files",
-        "cannot modify files",
-    ]
-    .iter()
-    .any(|marker| output.contains(marker));
-    if !status.success() {
-        Some(format!(
+    (!status.success()).then(|| {
+        format!(
             "agent exited unsuccessfully ({status}); inspect the benchmark log for agent output"
-        ))
-    } else if (final_response.is_some() || !has_completion_evidence) && cannot_run_tests {
-        Some(
-            "agent reported it could not run tests; inspect the benchmark log and test environment"
-                .into(),
         )
-    } else if (final_response.is_some() || !has_completion_evidence) && has_refusal_marker {
-        Some("agent reported it could not access the terminal or workspace, or could not modify files; inspect the benchmark log and permissions".into())
-    } else {
-        None
-    }
+    })
 }
 
 // Direct and gated children retain explicit custody on every return path.
@@ -3066,37 +3022,15 @@ mod tests {
     }
 
     #[test]
-    fn zero_exit_tool_refusals_are_not_successes() {
-        let status = std::process::Command::new("true")
-            .status()
-            .expect("true exists");
-        assert!(!super::process_successful(
-            &status,
-            b"I can't run tests or inspect src/parser.py because I do not have access to the terminal",
-            b""
-        ));
-        assert!(!super::process_successful(
-            &status,
-            b"The workspace appears to be read-only; I can't modify files",
-            b""
-        ));
+    fn untrusted_refusal_words_do_not_imply_process_failure() {
+        let status = std::process::Command::new("true").status().unwrap();
+        for output in ["I can't run tests", "The workspace appears to be read-only"] {
+            assert!(super::process_successful(&status, output.as_bytes(), b""));
+        }
     }
 
     #[test]
     fn agent_failure_reasons_are_specific_without_exposing_transcript() {
-        let status = std::process::Command::new("true").status().unwrap();
-        for (output, expected) in [
-            ("I can't run tests secret-value", "could not run tests"),
-            (
-                "workspace is read-only secret-value",
-                "could not access the terminal or workspace",
-            ),
-        ] {
-            let reason =
-                super::process_failure_reason(&status, output.as_bytes(), b"", None).unwrap();
-            assert!(reason.contains(expected), "{reason}");
-            assert!(!reason.contains("secret-value"));
-        }
         let failed_status = std::process::Command::new("false").status().unwrap();
         let reason = super::process_failure_reason(
             &failed_status,
@@ -3144,7 +3078,7 @@ mod tests {
             b"",
             Some("Updated the implementation and verified the supplied test passes."),
         ));
-        assert!(!super::process_successful_with_final_response(
+        assert!(super::process_successful_with_final_response(
             &status,
             b"Tool output",
             b"",

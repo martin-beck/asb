@@ -27,8 +27,18 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_state_environment_vars(&["CLAUDE_CONFIG_DIR"])
 .with_unprivileged_execution()
 .with_output_usage(output_usage)
+.with_final_response(final_response)
+.with_final_response_failure(super::terminal_refusal)
 .with_execution_failure(execution_failure)
 .with_step_count(step_count);
+
+fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
+    let event: serde_json::Value = serde_json::from_str(output.trim()).ok()?;
+    if event.get("type").and_then(|value| value.as_str()) != Some("result") {
+        return None;
+    }
+    super::super::final_text_from_event(&event)
+}
 
 fn execution_failure(stdout: &str, _: &str) -> Option<String> {
     let event: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
@@ -294,6 +304,28 @@ mod tests {
         assert_eq!(
             ADAPTER.step_count(r#"[{"type":"result","num_turns":3},{"type":"result"}]"#, ""),
             None
+        );
+    }
+
+    #[test]
+    fn only_result_documents_supply_claude_terminal_answers() {
+        let root = std::path::Path::new(".");
+        assert!(
+            ADAPTER
+                .final_response(
+                    r#"{"type":"assistant","role":"assistant","content":"I can't run tests"}"#,
+                    root
+                )
+                .is_none()
+        );
+        assert_eq!(
+            ADAPTER
+                .final_response(
+                    r#"{"type":"result","is_error":false,"result":"I can't run tests"}"#,
+                    root
+                )
+                .as_deref(),
+            Some("I can't run tests")
         );
     }
 
