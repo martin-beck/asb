@@ -102,7 +102,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_process(process);
 
 fn final_response_failure(response: Option<&str>) -> Option<String> {
-    response.is_none().then(|| "OpenJiuwen exited without a final response; the last event appears to be an unexecuted tool call. Retry with a compatible OpenJiuwen client or inspect the benchmark log.".into())
+    response.is_none().then(|| "OpenJiuwen exited without a final response. Inspect the benchmark log for the terminal event or error.".into())
 }
 
 /// Launch the installed Python entry point with a narrow, in-process fix for
