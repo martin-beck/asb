@@ -49,7 +49,7 @@ class NativeTerminalExecutor(ToolExecutor):
             from openhands.tools.terminal.impl import TerminalExecutor
             self._delegate = TerminalExecutor(working_dir=os.getcwd(), terminal_type="subprocess")
         self._bridge = subprocess.Popen(
-            [bridge, "__asb-openhands-native-bridge", "--mode", mode,
+            [bridge, "__asb-agent-bridge", "openhands", "--mode", mode,
              "--sidecar", sidecar, "--launch-json", launch_json],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
             text=True, encoding="utf-8",

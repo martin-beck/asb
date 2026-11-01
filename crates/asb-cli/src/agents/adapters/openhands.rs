@@ -31,7 +31,9 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_complete_tool_replay(prepare_native_tool_replay)
 .with_native_tool_transport()
 .with_artifact_specs(ARTIFACTS)
-.with_collection(collect);
+.with_collection(collect)
+.with_bridge_entry(super::openhands_native::entry)
+.with_bridge_aliases(&["__asb-openhands-native-bridge"]);
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     if let Some(mode) = context.native_tool_mode {
         let native = context.native_tool;
@@ -363,7 +365,7 @@ mod tests {
         assert!(!SDK_LAUNCHER.contains("register_tool("));
         assert!(!SDK_LAUNCHER.contains("setattr("));
         assert!(SDK_LAUNCHER.contains("def main()"));
-        assert!(SDK_LAUNCHER.contains("__asb-openhands-native-bridge"));
+        assert!(SDK_LAUNCHER.contains("__asb-agent-bridge\", \"openhands"));
         assert!(!SDK_LAUNCHER.contains("native-tool-sidecar.jsonl"));
         // The SDK persists its supplied agent during construction. The bridge
         // owns process handles, so it must be attached only afterwards to the
