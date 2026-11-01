@@ -77,14 +77,22 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
 }
 
 fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
-    let mut texts = std::collections::HashMap::<String, Vec<(Option<String>, String)>>::new();
+    let mut texts =
+        std::collections::HashMap::<(String, String), Vec<(Option<String>, String)>>::new();
     let mut final_answer = None;
-    for event in output
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-    {
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        // A truncated or malformed native stream cannot prove completion.
+        let event = serde_json::from_str::<serde_json::Value>(line).ok()?;
         let kind = event.get("type").and_then(|v| v.as_str());
         let part = event.get("part");
+        let event_session = event.get("sessionID").and_then(|v| v.as_str());
+        let part_session = part
+            .and_then(|p| p.get("sessionID"))
+            .and_then(|v| v.as_str());
+        if event_session.zip(part_session).is_some_and(|(a, b)| a != b) {
+            return None;
+        }
+        let session = event_session.or(part_session).unwrap_or_default();
         match kind {
             Some("text") => {
                 if let (Some(id), Some(text)) = (
@@ -93,7 +101,9 @@ fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
                     part.and_then(|p| p.get("text")).and_then(|v| v.as_str()),
                 ) {
                     if !text.trim().is_empty() {
-                        let parts = texts.entry(id.to_owned()).or_default();
+                        let parts = texts
+                            .entry((session.to_owned(), id.to_owned()))
+                            .or_default();
                         let part_id = part
                             .and_then(|p| p.get("id"))
                             .and_then(|v| v.as_str())
@@ -119,13 +129,15 @@ fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
                         if !reason.is_empty()
                             && !matches!(reason, "tool-calls" | "unknown" | "content-filter") =>
                     {
-                        texts.get(id).map(|parts| {
-                            parts
-                                .iter()
-                                .map(|(_, text)| text.as_str())
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        })
+                        texts
+                            .get(&(session.to_owned(), id.to_owned()))
+                            .map(|parts| {
+                                parts
+                                    .iter()
+                                    .map(|(_, text)| text.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            })
                     }
                     _ => None,
                 };
@@ -358,6 +370,17 @@ mod tests {
         let tools = r#"{"type":"step_finish","part":{"messageID":"m1","reason":"tool-calls"}}"#;
         let wrong = r#"{"type":"step_finish","part":{"messageID":"m2","reason":"stop"}}"#;
         let path = std::path::Path::new(".");
+        assert!(super::final_response(&format!("{text}\n{finish}\n{{"), path).is_none());
+        let session_text = r#"{"type":"text","sessionID":"s1","part":{"sessionID":"s1","messageID":"m1","text":"answer"}}"#;
+        let other_session_finish = r#"{"type":"step_finish","sessionID":"s2","part":{"sessionID":"s2","messageID":"m1","reason":"stop"}}"#;
+        assert!(
+            super::final_response(&format!("{session_text}\n{other_session_finish}"), path)
+                .is_none()
+        );
+        let mismatched_session = r#"{"type":"step_finish","sessionID":"s1","part":{"sessionID":"s2","messageID":"m1","reason":"stop"}}"#;
+        assert!(
+            super::final_response(&format!("{session_text}\n{mismatched_session}"), path).is_none()
+        );
         let start = r#"{"type":"step_start","part":{"messageID":"m1"}}"#;
         assert!(
             super::final_response(&format!("{text}\n{tools}\n{start}\n{finish}"), path).is_none()
