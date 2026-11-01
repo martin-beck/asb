@@ -297,8 +297,13 @@ impl Collector {
             captures,
         })
     }
-    pub(crate) fn startup_failure(mut self, reason: String) -> String {
-        let completion = self.producer.stop();
+    pub(crate) fn startup_failure(
+        mut self,
+        reason: String,
+        owner: std::sync::Arc<crate::output_lock::OutputLock>,
+    ) -> String {
+        let deadline = Instant::now() + self.producer.stop_budget();
+        let completion = self.producer.stop_before_with_owner(deadline, Some(owner));
         let raw = format!(
             "raw captures retained at {} and {}",
             self.captures[0].path().display(),
@@ -398,7 +403,7 @@ fn retain_owner_until_worker_exit<T: Send + 'static>(
 pub struct Session {
     adapters: Vec<&'static dyn collectors::CollectorAdapter>,
     pub(crate) dir: PathBuf,
-    _directory_owner: std::sync::Arc<crate::output_lock::OutputLock>,
+    pub(crate) _directory_owner: std::sync::Arc<crate::output_lock::OutputLock>,
     pub(crate) project_root: Option<PathBuf>,
     pub(crate) tool_dir: Option<PathBuf>,
     pub(crate) cgroup_parent: Option<PathBuf>,

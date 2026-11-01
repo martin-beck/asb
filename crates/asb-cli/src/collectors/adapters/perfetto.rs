@@ -648,9 +648,10 @@ impl measurements::Session {
             Ok(mut collector) => {
                 if let Err(error) = wait_for_capture_ready(&mut collector, Duration::from_secs(35))
                 {
-                    return Err(collector.startup_failure(format!(
-                        "Perfetto did not report that tracing is ready: {error}"
-                    )));
+                    return Err(collector.startup_failure(
+                        format!("Perfetto did not report that tracing is ready: {error}"),
+                        self._directory_owner.clone(),
+                    ));
                 }
                 self.collectors.push(collector);
                 // Register the child before validating the live marker, so
