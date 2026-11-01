@@ -25,7 +25,55 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     format: super::super::ArtifactFormat::JsonLines,
 }])
 .with_collection(collect)
-.with_output_usage(output_usage);
+.with_output_usage(output_usage)
+.with_final_response(final_response);
+
+// Continue emits optional auto-compaction status objects before its final
+// JSON value. Reject ambiguous status-only output rather than grade it.
+fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
+    fn compaction_status(value: &serde_json::Value) -> bool {
+        let Some(object) = value.as_object() else {
+            return false;
+        };
+        let status = object.get("status").and_then(|v| v.as_str());
+        let message = object.get("message").and_then(|v| v.as_str());
+        match (status, message) {
+            (Some("info"), Some("Auto-compacting triggered")) => {
+                object.len() == 3
+                    && object
+                        .get("contextUsage")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s.ends_with('%'))
+            }
+            (Some("success"), Some("Auto-compacted successfully"))
+            | (Some("warning"), Some("Auto-compaction failed, continuing without compaction")) => {
+                object.len() == 2
+            }
+            _ => false,
+        }
+    }
+    let mut stream = serde_json::Deserializer::from_str(output).into_iter::<serde_json::Value>();
+    let mut previous_end = 0;
+    let mut result = None;
+    while let Some(value) = stream.next() {
+        let value = value.ok()?;
+        let end = stream.byte_offset();
+        let raw = output.get(previous_end..end)?.trim();
+        previous_end = end;
+        if result.is_some() {
+            return None;
+        }
+        if compaction_status(&value) {
+            continue;
+        }
+        result = match value {
+            serde_json::Value::String(answer) if !answer.trim().is_empty() => Some(answer),
+            serde_json::Value::String(_) | serde_json::Value::Null => return None,
+            _ => Some(raw.to_owned()),
+        };
+    }
+    result
+}
 
 // Headless JSON output is the model's answer, not a usage event. Usage comes
 // from the private session's assistant messages or a provider cassette.
@@ -273,6 +321,46 @@ fn configure(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn json_answer_is_available_for_grading() {
+        use crate::agents::AgentAdapter;
+        let output = r#"{"response":"answer", "status":"success"}"#;
+        let path = std::path::Path::new(".");
+        assert_eq!(
+            super::ADAPTER.final_response(output, path).as_deref(),
+            Some(output)
+        );
+        let json = r#"{"arbitrary":[1,2],"role":"tool"}"#;
+        assert_eq!(
+            super::ADAPTER.final_response(json, path).as_deref(),
+            Some(json)
+        );
+        assert_eq!(
+            super::ADAPTER
+                .final_response(r#""plain answer""#, path)
+                .as_deref(),
+            Some("plain answer")
+        );
+        let status =
+            r#"{"status":"info","message":"Auto-compacting triggered","contextUsage":"95%"}"#;
+        let done = r#"{"status":"success","message":"Auto-compacted successfully"}"#;
+        assert!(super::ADAPTER.final_response(status, path).is_none());
+        assert_eq!(
+            super::ADAPTER
+                .final_response(&format!("{status}\n{done}\n{output}"), path)
+                .as_deref(),
+            Some(output)
+        );
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{output}\n{done}"), path)
+                .is_none()
+        );
+        for invalid in ["", "null", "not JSON", "{\"response\":"] {
+            assert!(super::ADAPTER.final_response(invalid, path).is_none());
+        }
+    }
+
     #[test]
     fn json_answer_is_not_usage_when_session_is_missing() {
         let answer = r#"{"usage":{"input_tokens":999,"output_tokens":888}}"#;
