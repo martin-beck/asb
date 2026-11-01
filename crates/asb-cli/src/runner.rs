@@ -1482,20 +1482,8 @@ fn process_failure_reason(
         || output.contains("Agent finished")
         || output.contains("Saved trajectory to '.asb-mini-swe.traj.json'")
         || output.contains("Saved trajectory to \".asb-mini-swe.traj.json\"");
-    // Provider and authentication failures are unambiguous and must remain
-    // fatal even when an agent emitted a later structured response. Generic
-    // command-error text is not an agent launch outcome: it can be emitted by
-    // a task's tests or by a repaired intermediate tool invocation.
-    let has_provider_fatal_marker = [
-        "Authentication required. Please use /login command to sign in to your account",
-        "Endpoint /v1/chat/completions was not found",
-        "litellm.NotFoundError",
-        "litellm.InternalServerError",
-        "AnthropicException",
-        "The API provider's servers are down or overloaded",
-    ]
-    .iter()
-    .any(|marker| transcript.contains(marker));
+    // Provider diagnostics can be printed by workload tools or quoted in a
+    // successful answer. Only adapter-owned terminal events can attribute them.
     let cannot_run_tests = [
         "I can’t run tests",
         "I can't run tests",
@@ -1517,24 +1505,7 @@ fn process_failure_reason(
     ]
     .iter()
     .any(|marker| output.contains(marker));
-    if has_provider_fatal_marker {
-        let message = if transcript.contains(
-            "Authentication required. Please use /login command to sign in to your account",
-        ) {
-            "agent reported an authentication failure; check its credentials and provider configuration"
-        } else if transcript.contains("Endpoint /v1/chat/completions was not found")
-            || transcript.contains("litellm.NotFoundError")
-        {
-            "agent reported a missing provider endpoint; check the provider URL and API compatibility"
-        } else {
-            "agent reported a provider error; inspect the benchmark log and check provider availability"
-        };
-        Some(if status.success() {
-            message.into()
-        } else {
-            format!("{message} ({status})")
-        })
-    } else if !status.success() {
+    if !status.success() {
         Some(format!(
             "agent exited unsuccessfully ({status}); inspect the benchmark log for agent output"
         ))
@@ -3044,26 +3015,15 @@ mod tests {
     }
 
     #[test]
-    fn zero_exit_provider_errors_are_not_successes() {
-        let status = std::process::Command::new("true")
-            .status()
-            .expect("true exists");
-        assert!(!super::process_successful(
-            &status,
-            b"Authentication required. Please use /login command to sign in to your account",
-            b""
-        ));
-        assert!(!super::process_successful(
-            &status,
-            b"litellm.NotFoundError: Endpoint /v1/chat/completions was not found.",
-            b""
-        ));
-        assert!(!super::process_successful(
-            &status,
-            b"litellm.InternalServerError: AnthropicException - unexpected keyword argument 'system'",
-            b""
-        ));
-        assert!(super::process_successful(&status, b"completed", b""));
+    fn provider_error_words_in_workload_output_do_not_imply_agent_failure() {
+        let status = std::process::Command::new("true").status().unwrap();
+        for output in [
+            "Authentication required. Please use /login command to sign in to your account",
+            "litellm.NotFoundError: Endpoint /v1/chat/completions was not found.",
+            "litellm.InternalServerError: AnthropicException",
+        ] {
+            assert!(super::process_successful(&status, output.as_bytes(), b""));
+        }
     }
 
     #[test]
@@ -3087,15 +3047,6 @@ mod tests {
     fn agent_failure_reasons_are_specific_without_exposing_transcript() {
         let status = std::process::Command::new("true").status().unwrap();
         for (output, expected) in [
-            (
-                "Authentication required. Please use /login command to sign in to your account secret-value",
-                "authentication failure",
-            ),
-            (
-                "Endpoint /v1/chat/completions was not found secret-value",
-                "missing provider endpoint",
-            ),
-            ("litellm.InternalServerError secret-value", "provider error"),
             ("I can't run tests secret-value", "could not run tests"),
             (
                 "workspace is read-only secret-value",
@@ -3114,7 +3065,7 @@ mod tests {
             b"",
             None,
         ).unwrap();
-        assert!(reason.contains("authentication failure"), "{reason}");
+        assert!(reason.contains("agent exited unsuccessfully"), "{reason}");
         assert!(reason.contains("exit status"), "{reason}");
         assert!(!reason.contains("secret-value"));
     }
@@ -3160,13 +3111,13 @@ mod tests {
             b"",
             Some("I cannot modify files in the workspace."),
         ));
-        assert!(!super::process_successful_with_final_response(
+        assert!(super::process_successful_with_final_response(
             &status,
             b"litellm.InternalServerError: upstream unavailable",
             b"",
             Some("Updated the implementation and verified the supplied test passes."),
         ));
-        assert!(!super::process_successful_with_final_response(
+        assert!(super::process_successful_with_final_response(
             &status,
             b"litellm.InternalServerError: upstream unavailable\nAgent finished",
             b"",

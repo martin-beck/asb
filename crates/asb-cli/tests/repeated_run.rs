@@ -528,6 +528,25 @@ fn replay_with_format(
 }
 
 #[test]
+fn workload_output_mentioning_provider_error_does_not_fail_successful_agent() {
+    let project = Project::new();
+    project.config(1);
+    let agent = project.0.join("fixture-agent");
+    let script = fs::read_to_string(&agent).unwrap().replace(
+        "sys.exit(7 if (root/'fail-first').exists()",
+        "print('workload output: litellm.NotFoundError is a documented example')\nsys.exit(7 if (root/'fail-first').exists()",
+    );
+    fs::write(&agent, script).unwrap();
+    let result = project.run("1");
+    assert!(
+        result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn default_record_and_replay_pair_while_existing_legacy_default_keeps_precedence() {
     let project = Project::new();
     project.config(1);

@@ -49,8 +49,8 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_execution_failure(execution_failure)
 .with_step_count(step_count);
 
-fn execution_failure(stdout: &str, _: &str) -> Option<String> {
-    let mut failed = false;
+fn execution_failure(stdout: &str, stderr: &str) -> Option<String> {
+    let mut terminal = None;
     for event in stdout
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -74,10 +74,16 @@ fn execution_failure(stdout: &str, _: &str) -> Option<String> {
             .and_then(|message| message.get("stopReason"))
             .and_then(|reason| reason.as_str())
         {
-            failed = matches!(reason, "error" | "aborted");
+            terminal = Some(matches!(reason, "error" | "aborted"));
         }
     }
-    failed.then(|| "agent reported a terminal API request failure or cancellation; inspect the private agent log".into())
+    match terminal {
+        Some(true) => Some("agent reported a terminal API request failure or cancellation; inspect the private agent log".into()),
+        Some(false) => None,
+        None if stderr.lines().any(|line| line.starts_with("Authentication required. Please use /login command to sign in to your account")) =>
+            Some("agent reported an authentication failure; check its credentials and provider configuration".into()),
+        None => None,
+    }
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
@@ -738,6 +744,25 @@ mod tests {
             ["local-tool replay left recorded events unconsumed"]
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn authentication_diagnostic_is_scoped_to_pi_stderr_and_terminal_state() {
+        let diagnostic = "Authentication required. Please use /login command to sign in to your account fixture-secret";
+        let reason = ADAPTER
+            .execution_failure("", diagnostic)
+            .expect("Pi diagnostic");
+        assert!(reason.contains("authentication failure"));
+        assert!(!reason.contains("fixture-secret"));
+        assert!(ADAPTER.execution_failure(diagnostic, "").is_none());
+        assert!(
+            ADAPTER
+                .execution_failure(
+                    r#"{"type":"turn_end","message":{"stopReason":"stop"}}"#,
+                    diagnostic
+                )
+                .is_none()
+        );
     }
 
     #[test]
