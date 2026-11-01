@@ -47,9 +47,8 @@ impl Service {
             .get_or_init(|| Mutex::new(BTreeMap::new()))
             .lock()
             .map_err(|_| "Perfetto service registry is unavailable")?;
-        let _admission =
-            crate::project::perfetto::lock_admission_for(&root, Duration::from_secs(15))
-                .map_err(|e| e.to_string())?;
+        let _admission = super::project::lock_admission_for(&root, Duration::from_secs(15))
+            .map_err(|e| e.to_string())?;
         // Reset can finish between initial project discovery and admission.
         // Reload under the stable lock and never fall back to a parent project.
         let (current_root, settings) = crate::project::load(&root).map_err(|e| e.to_string())?;
@@ -59,7 +58,7 @@ impl Service {
         if settings.perfetto_instances.is_empty() {
             return Err("Perfetto needs delegated, isolated tracefs instances. Run `asb init --configure-host` in this benchmark project and approve the printed Perfetto commands (or use --yes after reviewing them). Existing project data will not be reset.".into());
         }
-        let expected = crate::project::perfetto::instance_names(&root)?;
+        let expected = super::project::instance_names(&root)?;
         if settings
             .perfetto_instances
             .iter()
@@ -114,7 +113,7 @@ impl Service {
             let uid = fs::metadata("/proc/self").map_err(|e| e.to_string())?.uid();
             if !fs::symlink_metadata(instance_root)
                 .is_ok_and(|metadata| metadata.is_dir() && metadata.uid() == uid)
-                || !crate::project::perfetto::delegated_ready(instance_root)
+                || !super::project::delegated_ready(instance_root)
             {
                 return Err("Perfetto instance delegation is incomplete or foreign-owned; run `asb init --configure-host` and review the exact scoped repair commands. No instance was modified by benchmarking.".into());
             }

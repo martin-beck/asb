@@ -211,7 +211,7 @@ fn configure_at(
             .map_err(crate::io_error)?;
     }
     writeln!(output, "Ownership grants this user tracing control inside the listed instances. No global event/buffer/tracing_on values or sudoers will be changed; only the explicitly listed metadata read permissions and parent traversal may be widened. Instances are reusable until reboot; rerun `asb init --configure-host` after reboot. Declining leaves other collectors usable.").map_err(crate::io_error)?;
-    if !super::request_sudo_consent(output, yes)? {
+    if !crate::project::request_sudo_consent(output, yes)? {
         return Ok(Vec::new());
     }
     if traverse
@@ -274,7 +274,7 @@ fn configure_at(
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/project_perfetto.rs"]
+#[path = "../../../../tests/unit/project_perfetto.rs"]
 mod coverage_tests;
 
 #[cfg(test)]
@@ -352,7 +352,7 @@ mod tests {
             Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "project::perfetto::tests::admission_child_fixture",
+                    "collectors::adapters::perfetto::project::tests::admission_child_fixture",
                     "--ignored",
                 ])
                 .env("ASB_TEST_ADMISSION_ROOT", &root)
