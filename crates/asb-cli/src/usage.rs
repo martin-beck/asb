@@ -22,7 +22,7 @@ pub(crate) fn from_sources(
     stderr: &str,
     cassette: Option<&Path>,
 ) -> TokenUsage {
-    let mut usage = usage_from_environment(provider, agent);
+    let mut usage = TokenUsage::default();
     let inclusive = crate::providers::anthropic_input_includes_cache(provider);
     // Only the owning adapter can identify usage in its output. A missing
     // adapter or hook leaves usage unknown instead of parsing task text.
@@ -37,6 +37,9 @@ pub(crate) fn from_sources(
         usage = usage.merge_with_source(cassette_usage, "cassette");
     } else {
         usage = usage.merge_with_source(output_usage, "agent-output");
+    }
+    if !usage.any() {
+        usage = usage_from_environment(provider, agent);
     }
     usage.with_derived_total()
 }
@@ -66,6 +69,11 @@ pub(crate) fn with_artifact_usage(
         let complete = artifact.input_tokens.is_some() && artifact.output_tokens.is_some();
         match usage.source.as_deref() {
             Some(source) if source.contains("cassette") => {}
+            Some("environment") if artifact.any() => {
+                usage = TokenUsage::default()
+                    .merge_with_source(artifact, "agent-artifact")
+                    .with_derived_total();
+            }
             None | Some("agent-output") if complete => {
                 usage = TokenUsage::default()
                     .merge_with_source(artifact, "agent-artifact")
