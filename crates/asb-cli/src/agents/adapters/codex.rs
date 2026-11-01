@@ -89,12 +89,27 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
 fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::TokenUsage {
     let mut structured = crate::measurements::TokenUsage::default();
     let mut seen = false;
+    let mut native_stream = false;
     let mut cache_complete = true;
     for event in stdout
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
     {
-        if event.get("type").and_then(|value| value.as_str()) != Some("turn.completed") {
+        let event_type = event.get("type").and_then(|value| value.as_str());
+        native_stream |= matches!(
+            event_type,
+            Some(
+                "thread.started"
+                    | "turn.started"
+                    | "turn.completed"
+                    | "turn.failed"
+                    | "item.started"
+                    | "item.updated"
+                    | "item.completed"
+                    | "error"
+            )
+        );
+        if event_type != Some("turn.completed") {
             continue;
         }
         let Some(value) = event.get("usage") else {
@@ -113,6 +128,10 @@ fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::Tok
             structured.cached_tokens = None;
         }
         return structured.with_derived_total();
+    }
+    if native_stream {
+        // A native stream without completed usage cannot establish totals.
+        return Default::default();
     }
     // Preserve legacy human-readable output while never descending into a
     // structured event's task and tool payloads.
@@ -652,6 +671,12 @@ fn declared_mcp_configuration(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn incomplete_native_stream_does_not_count_stderr_task_text() {
+        let output = r#"{"type":"thread.started","thread_id":"test"}"#;
+        assert!(!super::output_usage(output, "input tokens: 999 output tokens: 888", false).any());
+    }
+
     use super::*;
     use crate::agents::{AgentAdapter, CollectionContext};
     use std::io::Write;
