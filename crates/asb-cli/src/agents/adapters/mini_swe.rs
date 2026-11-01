@@ -377,6 +377,16 @@ fn trajectory_tool_calls(value: &serde_json::Value) -> Option<usize> {
     }
     messages.iter().try_fold(0usize, |sum, message| {
         let role = message.get("role")?.as_str()?;
+        // Format errors are recorded as user messages carrying the provider
+        // response; rejected calls may be present there rather than in an
+        // assistant message, so the assistant-only count would be partial.
+        if message
+            .pointer("/extra/interrupt_type")
+            .and_then(|v| v.as_str())
+            == Some("FormatError")
+        {
+            return None;
+        }
         if role != "assistant" {
             return Some(sum);
         }
@@ -486,6 +496,8 @@ mod tests {
         assert_eq!(super::trajectory_tool_calls(&missing), None);
         let unfinished = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1","messages":[{"role":"assistant","tool_calls":[{}]}]});
         assert_eq!(super::trajectory_tool_calls(&unfinished), None);
+        let rejected_then_success = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1","messages":[{"role":"user","extra":{"interrupt_type":"FormatError","response":{"choices":[{"message":{"tool_calls":[{}]}}]}}},{"role":"assistant","tool_calls":[{}]},{"role":"exit"}]});
+        assert_eq!(super::trajectory_tool_calls(&rejected_then_success), None);
         assert_eq!(
             super::trajectory_tool_calls(
                 &serde_json::json!({"trajectory_format":"unknown","messages":[]})
