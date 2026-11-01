@@ -1427,6 +1427,57 @@ fn full_runner_entry_bounded_capture_preserves_independent_file_grades_without_r
 }
 
 #[test]
+fn missing_fixture_grade_reports_settled_agent_and_proxy_evidence() {
+    let fixture = Fixture::new();
+    let root = fixture.0.canonicalize().unwrap();
+    let _scope = entry_test_support::Scope::disposition(
+        &root,
+        Rc::new(RefCell::new(Vec::new())),
+        "termination-true-code143",
+    );
+    let mut execution = evidence(9, false);
+    execution.output.stdout = b"private-sentinel-agent-stdout agent_end".to_vec();
+    execution.output.stderr =
+        b"fixture replay request failed private-sentinel-agent-stderr".to_vec();
+    let issues = AttemptIssues {
+        run_error: Some(format!(
+            "proxy completion failed private-sentinel-error {}",
+            "x".repeat(1_000_000)
+        )),
+        capture_error: Some(format!(
+            "private-sentinel-capture {}",
+            "y".repeat(1_000_000)
+        )),
+        ..Default::default()
+    };
+    let proxy = crate::proxy::Evidence {
+        captures: Vec::new(),
+        output_files: Vec::new(),
+        cleanup_confirmed: false,
+    };
+    entry_test_support::capture_grade_diagnostic(&root, &execution, &issues, &proxy);
+    let result = std::panic::catch_unwind(|| {
+        entry_test_support::read_fixture_grade(&root.join("private-sentinel-grade"))
+    });
+    let error = result.expect_err("missing grade must fail the fixture");
+    let message = error
+        .downcast_ref::<String>()
+        .expect("diagnostic panic string");
+    assert!(message.contains("fixture-replay-failed"), "{message}");
+    assert!(message.contains("proxy-completion-failed"), "{message}");
+    assert!(
+        message.contains("proxy_cleanup_confirmed=false"),
+        "{message}"
+    );
+    assert!(message.contains("process_status_code="), "{message}");
+    assert!(message.contains("run_error_bytes="), "{message}");
+    assert!(message.contains("capture_error_bytes="), "{message}");
+    assert!(!message.contains("private-sentinel"), "{message}");
+    assert!(!message.contains(root.to_str().unwrap()), "{message}");
+    assert!(message.len() < 2048, "diagnostic must stay bounded");
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn actual_native_termination_keeps_grades_and_optional_faults_do_not_change_completion() {
     isolated_full_entry_cases(&[
@@ -2028,7 +2079,7 @@ fn full_entry_child(case: &str) {
         } else {
             format!("process.exitCode={exit};")
         };
-        std::fs::write(&agent, format!("#!{}\nrequire('node:fs').appendFileSync({counter_js},'called\\n');fetch(process.env.OPENAI_BASE_URL+'/chat/completions',{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify({body})}}).then(async r=>{{if(!r.ok)throw new Error('fixture request failed');await r.text();{capture_js}console.log(JSON.stringify({response}));{ending}}}).catch(()=>{{process.exitCode=9;}});\n", node.display())).unwrap();
+        std::fs::write(&agent, format!("#!{}\nrequire('node:fs').appendFileSync({counter_js},'called\\n');fetch(process.env.OPENAI_BASE_URL+'/chat/completions',{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify({body})}}).then(async r=>{{if(!r.ok)throw new Error('fixture request failed');await r.text();{capture_js}console.log(JSON.stringify({response}));{ending}}}).catch(error=>{{console.error('fixture replay request failed:',error);process.exitCode=9;}});\n", node.display())).unwrap();
         if artifact_case || (phase_case && !phase_continuation) {
             let trajectory = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1", "info":{"model_stats":{"api_calls":4}},
                 "messages":[{"role":"assistant","content":answer,

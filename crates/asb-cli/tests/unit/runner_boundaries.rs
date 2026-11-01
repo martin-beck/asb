@@ -189,6 +189,85 @@ fn selected_admission_rejects_competing_membership_or_outer_identity_before_side
 }
 
 #[cfg(unix)]
+fn selected_dispatch_diagnostics(root: &Path) -> String {
+    use std::io::Read;
+    let mut rows = Vec::new();
+    for index in [2, 4] {
+        let path = root.join(format!("run-concurrency-{index}.log"));
+        let mut bytes = Vec::new();
+        let record = std::fs::File::open(path)
+            .ok()
+            .and_then(|file| file.take(65_536).read_to_end(&mut bytes).ok())
+            .and_then(|_| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        rows.push(format!(
+            "replica {index}: arrived={}, {}",
+            root.join(format!("arrived-{index}")).is_file(),
+            selected_dispatch_log_summary(record.as_ref())
+        ));
+    }
+    rows.join("; ")
+}
+
+#[cfg(unix)]
+fn selected_dispatch_log_summary(record: Option<&serde_json::Value>) -> String {
+    let Some(record) = record else {
+        return "log unavailable or exceeds diagnostic bound".into();
+    };
+    let stderr = record.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+    let markers = [
+        ("peer-timeout", "real pending peer did not launch"),
+        ("fetch-failed", "fetch failed"),
+        ("replay-request", "fixture replay request"),
+        ("connection-refused", "ECONNREFUSED"),
+        ("gate", "gate"),
+        ("run-error", "ASB run error:"),
+        ("capture-error", "capture failed"),
+    ]
+    .into_iter()
+    .filter_map(|(label, marker)| stderr.contains(marker).then_some(label))
+    .collect::<Vec<_>>();
+    let termination = record
+        .get("process_termination")
+        .and_then(|v| v.as_object());
+    let kind = termination
+        .and_then(|v| v.get("kind"))
+        .and_then(|v| v.as_str())
+        .filter(|v| matches!(*v, "code" | "signal"))
+        .unwrap_or("unavailable");
+    let value = termination
+        .and_then(|v| v.get(if kind == "signal" { "signal" } else { "code" }))
+        .and_then(|v| v.as_i64());
+    format!(
+        "termination={kind}:{value:?}, malformed={}, elapsed_ms={:?}, stdout_bytes={}, stderr_bytes={}, markers={markers:?}",
+        record
+            .get("process_termination_diagnostic")
+            .and_then(|v| v.as_str())
+            == Some("malformed"),
+        record.get("elapsed_ms").and_then(|v| v.as_u64()),
+        record
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .map_or(0, str::len),
+        stderr.len(),
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn selected_dispatch_diagnostics_are_bounded_and_do_not_emit_contents() {
+    let value = serde_json::json!({
+        "stderr": "private-secret real pending peer did not launch /private/path",
+        "stdout": "private-output", "elapsed_ms": 5000,
+        "process_termination": {"kind":"code", "code":9}
+    });
+    let summary = selected_dispatch_log_summary(Some(&value));
+    assert!(summary.contains("peer-timeout"));
+    assert!(summary.contains("code:Some(9)"));
+    assert!(!summary.contains("private"));
+    assert!(selected_dispatch_log_summary(None).contains("unavailable"));
+}
+
+#[cfg(unix)]
 #[test]
 fn actual_selected_dispatch_prepares_and_launches_only_noncontiguous_original_members() {
     use crate::test_support::IsolatedEnvironment;
@@ -293,8 +372,8 @@ fs.writeFileSync(root+'/arrived-'+replica,'ready');
             .unwrap_err()
             .to_string()
             .contains("1 concurrent benchmark replica(s) failed"),
-        "{result:?} output={}",
-        String::from_utf8_lossy(&output)
+        "selected-dispatch failure; diagnostics={}",
+        selected_dispatch_diagnostics(root)
     );
     let mut calls: Vec<_> = std::fs::read_to_string(root.join("calls"))
         .unwrap()

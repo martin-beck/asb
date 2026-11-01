@@ -1123,6 +1123,13 @@ impl<'a> CompletedAttempt<'a> {
         // A usable submission can survive a failed client or proxy teardown.
         // Evaluator errors and process failures are recorded independently.
 
+        #[cfg(test)]
+        phases::entry_test_support::capture_grade_diagnostic(
+            &context.project_root,
+            &settled.evidence,
+            &settled.issues,
+            &settled.proxy_evidence,
+        );
         let mut finalized = settled
             .evaluate_with_policy(
                 final_response.as_deref().unwrap_or_default(),

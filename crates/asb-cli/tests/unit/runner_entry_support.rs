@@ -25,7 +25,77 @@ enum PhaseFault {
     ObserveLifetime,
     RuntimeError,
 }
-thread_local! { static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) }; }
+thread_local! {
+    static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    static GRADE_DIAGNOSTIC: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Fixture-only snapshot of the settled execution, before the evaluator runs.
+pub(crate) fn capture_grade_diagnostic(
+    root: &Path,
+    evidence: &super::ExecutionEvidence,
+    issues: &super::AttemptIssues,
+    proxy: &crate::proxy::Evidence,
+) {
+    let selected = HOOK.with_borrow(|slot| {
+        slot.as_ref()
+            .is_some_and(|hook| hook.root == root && hook.capture_grade.is_some())
+    });
+    if !selected {
+        return;
+    }
+    fn markers(bytes: &[u8]) -> Vec<&'static str> {
+        let bytes = &bytes[..bytes.len().min(4096)];
+        [
+            ("agent-end", b"agent_end".as_slice()),
+            ("fixture-replay-failed", b"fixture replay request failed"),
+            ("proxy-completion-failed", b"proxy completion failed"),
+            ("fetch-failed", b"fetch failed"),
+            ("connection-refused", b"ECONNREFUSED"),
+            ("timeout", b"timed out"),
+            ("gate", b"gate"),
+        ]
+        .into_iter()
+        .filter_map(|(label, pattern)| {
+            bytes
+                .windows(pattern.len())
+                .any(|part| part == pattern)
+                .then_some(label)
+        })
+        .collect()
+    }
+    let run_error = issues.run_error.as_deref().unwrap_or("");
+    let capture_error = issues.capture_error.as_deref().unwrap_or("");
+    let diagnostic = format!(
+        "process_status_code={:?}; termination={:?}; capture_complete={}; stdout_bytes={}; stdout_markers={:?}; stderr_bytes={}; stderr_markers={:?}; run_error_bytes={}; run_error_markers={:?}; capture_error_bytes={}; capture_error_markers={:?}; proxy_cleanup_confirmed={}; proxy_capture_count={}",
+        evidence.output.status.code(),
+        evidence.observation,
+        evidence.capture_complete,
+        evidence.output.stdout.len(),
+        markers(&evidence.output.stdout),
+        evidence.output.stderr.len(),
+        markers(&evidence.output.stderr),
+        run_error.len(),
+        markers(run_error.as_bytes()),
+        capture_error.len(),
+        markers(capture_error.as_bytes()),
+        proxy.cleanup_confirmed,
+        proxy.captures.len()
+    );
+    GRADE_DIAGNOSTIC.with_borrow_mut(|slot| *slot = Some(diagnostic));
+}
+
+pub(super) fn read_fixture_grade(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|error| {
+        let detail = GRADE_DIAGNOSTIC
+            .with_borrow(|slot| slot.clone())
+            .unwrap_or_else(|| "settled execution diagnostics unavailable".into());
+        panic!(
+            "fixture grade file is unavailable: {:?}; {detail}",
+            error.kind()
+        );
+    })
+}
 
 pub(crate) struct Scope;
 
@@ -188,6 +258,7 @@ impl Drop for Scope {
         HOOK.with(|slot| {
             slot.borrow_mut().take();
         });
+        GRADE_DIAGNOSTIC.with_borrow_mut(|slot| *slot = None);
     }
 }
 pub(crate) fn configure_measurements(root: &Path, session: Option<&mut measurements::Session>) {
@@ -408,9 +479,7 @@ impl workloads::WorkloadSession for Observed {
         if let Some(expected) = self.capture_grade
             && !self.native_reward
         {
-            let grade =
-                std::fs::read_to_string(self.invocation().workspace.join("fixture-file-grade"))
-                    .unwrap();
+            let grade = read_fixture_grade(&self.invocation().workspace.join("fixture-file-grade"));
             assert_eq!(grade, if expected { "true" } else { "false" });
             return Ok(if expected {
                 workloads::Evaluation::Passed
