@@ -54,6 +54,15 @@ impl DescendantScope {
     /// submission. A short TERM grace is followed by KILL; repeated sweeps
     /// retain and reap double-forked helpers as their parents exit.
     pub(crate) fn quiesce(&mut self) -> io::Result<()> {
+        self.quiesce_with_trace(false)
+    }
+
+    /// Only the native gate owns lifecycle-traced tasks on its calling thread.
+    pub(super) fn quiesce_traced(&mut self) -> io::Result<()> {
+        self.quiesce_with_trace(true)
+    }
+
+    fn quiesce_with_trace(&mut self, traced: bool) -> io::Result<()> {
         self.attempted = true;
         if self.owner != std::process::id() {
             return Err(io::Error::other(
@@ -64,12 +73,23 @@ impl DescendantScope {
         let mut terminated = BTreeSet::new();
         let mut first_error = None;
         loop {
+            // The exclusive gate can still own lifecycle-traced threads after
+            // its principal exits. A traced exit is a waitable stop, not a
+            // completed exit; leaving it stopped prevents its thread group
+            // from becoming reapable. Consume only wait statuses owned by this
+            // gate and resume ptrace stops so teardown can finish.
+            if traced && let Err(error) = resume_owned_trace_stops() {
+                first_error.get_or_insert(error);
+            }
             let children = match children(self.owner) {
                 Ok(children) => children,
                 Err(error) => return Err(first_error.unwrap_or(error)),
             };
             if children.is_empty() {
                 return Ok(());
+            }
+            if traced && let Err(error) = resume_consumed_trace_stops(&children) {
+                first_error.get_or_insert(error);
             }
             if started.elapsed() >= Duration::from_secs(5) {
                 return Err(first_error.unwrap_or_else(|| {
@@ -113,6 +133,120 @@ impl Drop for DescendantScope {
             let _ = self.quiesce();
         }
     }
+}
+
+fn resume_owned_trace_stops() -> io::Result<()> {
+    for _ in 0..65536 {
+        let mut status = 0;
+        // Only the native gate calls this, after its principal wait and watcher
+        // settle. WNOTHREAD prevents reaping children of unrelated threads.
+        let pid = unsafe {
+            libc::waitpid(
+                -1,
+                &mut status,
+                libc::__WALL | libc::__WNOTHREAD | libc::WNOHANG,
+            )
+        };
+        if pid == 0 {
+            return Ok(());
+        }
+        if pid < 0 {
+            let error = io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::ECHILD) {
+                Ok(())
+            } else if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            } else {
+                Err(error)
+            };
+        }
+        if libc::WIFSTOPPED(status) {
+            let result = unsafe {
+                libc::ptrace(
+                    libc::PTRACE_CONT,
+                    pid,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            };
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    Err(io::Error::other(
+        "agent trace cleanup exceeded its event bound",
+    ))
+}
+
+// A lifecycle wait can already have consumed a trace stop before returning an
+// error. Such a stop no longer has a waitable event, so inspect only tasks of
+// this gate's owned children and resume stops traced by this exact thread.
+fn resume_consumed_trace_stops(children: &[u32]) -> io::Result<()> {
+    let tracer = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
+    let mut seen = 0usize;
+    for child in children {
+        let tasks = match std::fs::read_dir(format!("/proc/{child}/task")) {
+            Ok(tasks) => tasks,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for task in tasks {
+            seen += 1;
+            if seen > 65536 {
+                return Err(io::Error::other(
+                    "agent trace cleanup exceeded its task bound",
+                ));
+            }
+            let task = task?;
+            let Some(tid) = task
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<i32>().ok())
+                .filter(|tid| *tid > 1)
+            else {
+                continue;
+            };
+            let status = match std::fs::read_to_string(task.path().join("status")) {
+                Ok(status) => status,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            let mut stopped = false;
+            let mut own_tracer = false;
+            for line in status.lines() {
+                if let Some(state) = line.strip_prefix("State:") {
+                    stopped = state.split_whitespace().next() == Some("t");
+                }
+                if let Some(value) = line.strip_prefix("TracerPid:") {
+                    own_tracer = value.trim().parse::<u32>().ok() == Some(tracer);
+                }
+            }
+            if !stopped || !own_tracer {
+                continue;
+            }
+            // PTRACE_CONT succeeds only for this thread's own still-stopped
+            // tracee, including if a numeric task identity changed meanwhile.
+            let result = unsafe {
+                libc::ptrace(
+                    libc::PTRACE_CONT,
+                    tid,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            };
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn children(owner: u32) -> io::Result<Vec<u32>> {
@@ -424,6 +558,189 @@ mod tests {
         assert!(result.is_ok());
         assert!(reaped);
         assert_eq!(owner_wait.unwrap_err().raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
+    fn quiesce_reaps_a_traced_child_stopped_at_exit() {
+        let _view = CurrentTaskView::enter();
+        let mut scope = DescendantScope::new().unwrap();
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            if unsafe {
+                libc::ptrace(
+                    libc::PTRACE_TRACEME,
+                    0,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            } != 0
+            {
+                unsafe { libc::_exit(127) };
+            }
+            unsafe { libc::raise(libc::SIGSTOP) };
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        assert!(child > 0);
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(child, &mut status, libc::__WALL) },
+            child
+        );
+        assert!(libc::WIFSTOPPED(status));
+        assert_eq!(
+            unsafe {
+                libc::ptrace(
+                    libc::PTRACE_SETOPTIONS,
+                    child,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    libc::PTRACE_O_TRACEEXIT as usize as *mut libc::c_void,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                libc::ptrace(
+                    libc::PTRACE_CONT,
+                    child,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            },
+            0
+        );
+        let result = scope.quiesce_traced();
+        // Always release the exact child if the regression is present.
+        if result.is_err() {
+            unsafe {
+                libc::ptrace(
+                    libc::PTRACE_CONT,
+                    child,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                );
+                libc::kill(child, libc::SIGKILL);
+                libc::waitpid(child, &mut status, libc::__WALL);
+            }
+        }
+        assert!(
+            result.is_ok(),
+            "traced exit stop prevented cleanup: {result:?}"
+        );
+    }
+
+    #[test]
+    fn traced_quiesce_resumes_an_already_consumed_stop() {
+        let _view = CurrentTaskView::enter();
+        let mut scope = DescendantScope::new().unwrap();
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            if unsafe {
+                libc::ptrace(
+                    libc::PTRACE_TRACEME,
+                    0,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            } != 0
+            {
+                unsafe { libc::_exit(127) };
+            }
+            unsafe { libc::raise(libc::SIGSTOP) };
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        assert!(child > 0);
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(child, &mut status, libc::__WALL) },
+            child
+        );
+        assert!(libc::WIFSTOPPED(status));
+        assert_eq!(
+            unsafe {
+                libc::ptrace(
+                    libc::PTRACE_SETOPTIONS,
+                    child,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    libc::PTRACE_O_TRACEEXIT as usize as *mut libc::c_void,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                libc::ptrace(
+                    libc::PTRACE_CONT,
+                    child,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            },
+            0
+        );
+        assert_eq!(unsafe { libc::kill(child, libc::SIGKILL) }, 0);
+        assert_eq!(
+            unsafe { libc::waitpid(child, &mut status, libc::__WALL) },
+            child
+        );
+        assert!(libc::WIFSTOPPED(status));
+        assert_eq!(status >> 16, libc::PTRACE_EVENT_EXIT);
+        // The EXIT wait status has been consumed, but the owned child stays
+        // in a ptrace stop until its tracer explicitly resumes it.
+        let result = scope.quiesce_traced();
+        if result.is_err() {
+            unsafe {
+                libc::ptrace(
+                    libc::PTRACE_CONT,
+                    child,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                );
+                libc::kill(child, libc::SIGKILL);
+                libc::waitpid(child, &mut status, libc::__WALL);
+            }
+        }
+        assert!(
+            result.is_ok(),
+            "consumed stop prevented cleanup: {result:?}"
+        );
+    }
+
+    #[test]
+    fn traced_quiesce_does_not_reap_another_threads_child() {
+        use std::sync::mpsc;
+        let _view = CurrentTaskView::enter();
+        let (send, receive) = mpsc::channel();
+        let (release, done) = mpsc::channel();
+        let sibling = std::thread::spawn(move || {
+            let child = std::process::Command::new("/bin/sh")
+                .args(["-c", "exit 27"])
+                .spawn()
+                .unwrap();
+            send.send(child).unwrap();
+            done.recv().unwrap();
+        });
+        let mut child = receive.recv().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let status = std::fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
+            if status.lines().any(|line| {
+                line.starts_with("State:") && line.split_whitespace().nth(1) == Some("Z")
+            }) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        DescendantScope::new().unwrap().quiesce_traced().unwrap();
+        let result = child.wait();
+        release.send(()).unwrap();
+        sibling.join().unwrap();
+        assert_eq!(result.unwrap().code(), Some(27));
     }
 
     #[test]
