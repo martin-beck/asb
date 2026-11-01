@@ -105,11 +105,14 @@ pub fn entry(args: Vec<OsString>) -> ExitCode {
         #[cfg(not(target_os = "linux"))]
         return ExitCode::from(2);
     }
+    if let Some(code) = collectors::legacy_private_service_entry(&args) {
+        return code;
+    }
     if args
         .first()
-        .is_some_and(|arg| arg == "__asb-perfetto-probes")
+        .is_some_and(|arg| arg == "__asb-collector-service")
     {
-        return collectors::adapters::perfetto::bootstrap_entry(&args[1..]);
+        return collectors::private_service_entry(&args[1..]);
     }
     if args.first().is_some_and(|arg| arg == "__asb-namespace") {
         return match agents::driver::namespace_id() {

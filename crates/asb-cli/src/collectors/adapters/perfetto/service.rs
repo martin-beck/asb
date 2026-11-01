@@ -182,7 +182,7 @@ impl Service {
                     "--",
                 ])
                 .arg(helper)
-                .arg("__asb-perfetto-probes")
+                .args(["__asb-collector-service", "perfetto"])
                 .arg(executable)
                 .arg(service.marker.with_file_name("trace"))
                 .arg(std::process::id().to_string())

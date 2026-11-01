@@ -248,6 +248,12 @@ pub(crate) struct SelectionExtension {
 }
 
 pub(crate) trait CollectorAdapter: Sync {
+    fn private_service_aliases(&self) -> &'static [&'static str] {
+        &[]
+    }
+    fn private_service_entry(&self, _: &[std::ffi::OsString]) -> Option<std::process::ExitCode> {
+        None
+    }
     /// Conservative per-attempt retained capture estimate.
     fn estimated_disk_mib(&self) -> u64 {
         128
@@ -459,6 +465,32 @@ pub(crate) fn all() -> &'static [&'static dyn CollectorAdapter] {
 }
 pub(crate) fn find(id: &str) -> Option<&'static dyn CollectorAdapter> {
     all().iter().copied().find(|collector| collector.id() == id)
+}
+
+pub(crate) fn private_service_entry(args: &[std::ffi::OsString]) -> std::process::ExitCode {
+    let Some((id, rest)) = args.split_first() else {
+        eprintln!("asb: collector service requires a registered collector");
+        return std::process::ExitCode::from(2);
+    };
+    let Some(adapter) = id.to_str().and_then(find) else {
+        eprintln!("asb: collector service requires a registered collector");
+        return std::process::ExitCode::from(2);
+    };
+    adapter.private_service_entry(rest).unwrap_or_else(|| {
+        eprintln!("asb: selected collector has no private service");
+        std::process::ExitCode::from(2)
+    })
+}
+
+pub(crate) fn legacy_private_service_entry(
+    args: &[std::ffi::OsString],
+) -> Option<std::process::ExitCode> {
+    let (name, rest) = args.split_first()?;
+    let name = name.to_str()?;
+    adapters::REGISTRY
+        .iter()
+        .find(|adapter| adapter.private_service_aliases().contains(&name))?
+        .private_service_entry(rest)
 }
 
 /// Return the adapter that owns a configured collector selection, including
