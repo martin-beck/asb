@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod prepared;
 mod publication;
+pub(crate) use publication::scalar_if_absent;
 mod selections;
 pub(crate) use prepared::Population;
 pub(crate) use publication::scalar as publish_atomic;

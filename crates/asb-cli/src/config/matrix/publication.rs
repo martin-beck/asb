@@ -44,10 +44,17 @@ struct PublicationFailure {
 #[derive(Clone, Copy, PartialEq)]
 enum CommitState {
     NotPublished,
+    AlreadyExists,
     Published,
     Unconfirmed,
 }
 impl PublicationFailure {
+    fn already_exists(error: Error) -> Self {
+        Self {
+            state: CommitState::AlreadyExists,
+            error,
+        }
+    }
     fn before(error: Error) -> Self {
         Self {
             state: CommitState::NotPublished,
@@ -76,6 +83,21 @@ pub(super) fn confirmation(path: &Path, error: impl std::fmt::Display) -> Error 
 }
 pub(crate) fn scalar(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     scalar_with(path, bytes, &System)
+}
+
+/// Publish a complete file only if no destination exists; a competing file
+/// remains untouched and is reported as an ordinary non-publication.
+pub(crate) fn scalar_if_absent(path: &Path, bytes: &[u8]) -> Result<bool, Error> {
+    scalar_if_absent_with(path, bytes, &System)
+}
+
+fn scalar_if_absent_with(path: &Path, bytes: &[u8], backend: &impl Backend) -> Result<bool, Error> {
+    let stage = Staged::write(path, bytes, None, backend)?;
+    match stage.publish(path, true, backend) {
+        Ok(()) => Ok(true),
+        Err(failure) if failure.state == CommitState::AlreadyExists => Ok(false),
+        Err(failure) => Err(failure.error),
+    }
 }
 fn scalar_with(path: &Path, bytes: &[u8], backend: &impl Backend) -> Result<(), Error> {
     let mode = match fs::symlink_metadata(path) {
@@ -204,7 +226,7 @@ fn sweep_with_progress_with(
         progress(total, total);
         Ok(())
     })();
-    result.map_err(|error| Error::Io(format!("{}{error}; generated configurations (possibly partial) remain in {}; no setup generation is recursively cleaned", if state == CommitState::NotPublished { format!("Sweep manifest was not published at {}: ", path.display()) } else { String::new() }, directory.display())))
+    result.map_err(|error| Error::Io(format!("{}{error}; generated configurations (possibly partial) remain in {}; no setup generation is recursively cleaned", if matches!(state, CommitState::NotPublished | CommitState::AlreadyExists) { format!("Sweep manifest was not published at {}: ", path.display()) } else { String::new() }, directory.display())))
 }
 fn parent(path: &Path) -> &Path {
     path.parent()
@@ -512,6 +534,12 @@ impl Staged {
                 ))));
             }
             let cleanup = stage.cleanup(backend);
+            if cleanup.is_ok() {
+                return Err(PublicationFailure::already_exists(Error::Io(format!(
+                    "setup was not published at {}: {error}",
+                    destination.display()
+                ))));
+            }
             return Err(PublicationFailure::before(Error::Io(format!(
                 "setup was not published at {}: {error}{}",
                 destination.display(),

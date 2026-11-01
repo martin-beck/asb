@@ -79,6 +79,22 @@ fn prior(path: &Path) {
 }
 
 #[test]
+fn no_replace_distinguishes_competing_entry_from_publication_faults() {
+    let fixture = Fixture::new();
+    let path = fixture.destination();
+    assert!(scalar_if_absent(&path, b"first").unwrap());
+    assert!(!scalar_if_absent(&path, b"second").unwrap());
+    assert_eq!(fs::read(&path).unwrap(), b"first");
+    fs::remove_file(&path).unwrap();
+    let competing = Fault::new(Boundary::Commit, |path| fs::write(path, b"competing"));
+    assert!(!scalar_if_absent_with(&path, b"default", &competing).unwrap());
+    assert_eq!(fs::read(&path).unwrap(), b"competing");
+    fs::remove_file(&path).unwrap();
+    assert!(scalar_if_absent_with(&path, b"default", &Fault::failure(Boundary::Commit)).is_err());
+    assert!(!path.exists());
+}
+
+#[test]
 fn scalar_faults_never_truncate_prior_bytes_or_mode_and_success_preserves_mode() {
     for boundary in [
         Boundary::Write,
