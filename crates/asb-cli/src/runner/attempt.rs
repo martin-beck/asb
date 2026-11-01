@@ -1107,10 +1107,11 @@ impl<'a> CompletedAttempt<'a> {
         for error in &adapter_artifacts.errors {
             settled.issues.run_error(error.clone());
         }
-        let agent_outcome = settled.evidence.agent_outcome(
+        let agent_outcome = settled.evidence.agent_outcome_with_artifacts(
             &config.agent,
             workspace,
             adapter_artifacts.final_response.as_deref(),
+            collection_frozen,
         );
         let process_success = agent_outcome.failure.is_none();
         let agent_failure = agent_outcome.failure;

@@ -216,6 +216,24 @@ pub(crate) trait AgentAdapter: Sync {
     fn final_response(&self, output: &str, _workspace: &Path) -> Option<String> {
         structured_final_response(output)
     }
+    /// Whether the adapter cross-checks its answer against frozen evidence.
+    fn uses_artifact_final_response(&self) -> bool {
+        false
+    }
+    /// Interpret a final response using the frozen per-run artifacts.
+    fn final_response_with_artifacts(
+        &self,
+        output: &str,
+        _frozen: &FrozenArtifacts,
+        workspace: &Path,
+        _complete: bool,
+    ) -> Option<String> {
+        self.final_response(output, workspace)
+    }
+    /// Confirm a guest answer against the guest's restored frozen evidence.
+    fn validate_guest_artifact_answer(&self, _answer: &str, _frozen: &FrozenArtifacts) -> bool {
+        false
+    }
     /// A complete run's authoritative counter, not a count of JSON/text matches.
     fn step_count(&self, _stdout: &str, _stderr: &str) -> Option<u64> {
         None
@@ -410,26 +428,6 @@ pub(crate) struct CollectionContext<'a> {
     pub mcp_tape: Option<McpTapeContext<'a>>,
 }
 
-/// Read exactly one bounded agent-owned JSON artifact; ambiguous or malformed
-/// state is never silently attributed to the current run.
-pub(super) fn single_usage_document(
-    directory: &Path,
-    select: impl Fn(&Path) -> bool,
-) -> Option<serde_json::Value> {
-    let mut selected = None;
-    for entry in std::fs::read_dir(directory).ok()? {
-        let entry = entry.ok()?;
-        if !entry.file_type().ok()?.is_file() || !select(&entry.path()) {
-            continue;
-        }
-        if selected.is_some() {
-            return None;
-        }
-        selected = Some(entry.path());
-    }
-    read_usage_document(&selected?)
-}
-
 pub(super) fn read_usage_document(path: &Path) -> Option<serde_json::Value> {
     const MAX_USAGE_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
     let metadata = std::fs::symlink_metadata(path).ok()?;
@@ -491,6 +489,8 @@ type ArtifactCollectionHook = for<'a> fn(&CollectionContext<'a>, &mut AgentArtif
 type UsageHook = fn(&str, &str, bool) -> crate::measurements::TokenUsage;
 type BridgeHook = fn(&[std::ffi::OsString]) -> std::process::ExitCode;
 type FinalResponseHook = fn(&str, &Path) -> Option<String>;
+type ArtifactFinalResponseHook = fn(&str, &FrozenArtifacts, &Path, bool) -> Option<String>;
+type GuestArtifactAnswerHook = fn(&str, &FrozenArtifacts) -> bool;
 type ProcessHook = fn(&str) -> Result<crate::launch::ProcessLaunch, Error>;
 type StepCountHook = fn(&str, &str) -> Option<u64>;
 type FailureHook = fn(&str, &str) -> Option<String>;
@@ -524,6 +524,8 @@ pub(super) struct StaticAdapter {
     deterministic_extension: bool,
     output_usage: Option<UsageHook>,
     final_response: Option<FinalResponseHook>,
+    artifact_final_response: Option<ArtifactFinalResponseHook>,
+    guest_artifact_answer: Option<GuestArtifactAnswerHook>,
     process: Option<ProcessHook>,
     step_count: Option<StepCountHook>,
     failure: Option<FailureHook>,
@@ -573,6 +575,8 @@ impl StaticAdapter {
             bridge_entry: None,
             bridge_aliases: &[],
             final_response: None,
+            artifact_final_response: None,
+            guest_artifact_answer: None,
             process: None,
             step_count: None,
             failure: None,
@@ -663,6 +667,22 @@ impl StaticAdapter {
         assets: &'static [GuestPrivateAsset],
     ) -> Self {
         self.guest_private_assets = assets;
+        self
+    }
+
+    pub(super) const fn with_guest_artifact_answer(
+        mut self,
+        hook: GuestArtifactAnswerHook,
+    ) -> Self {
+        self.guest_artifact_answer = Some(hook);
+        self
+    }
+
+    pub(super) const fn with_artifact_final_response(
+        mut self,
+        hook: ArtifactFinalResponseHook,
+    ) -> Self {
+        self.artifact_final_response = Some(hook);
         self
     }
 
@@ -891,6 +911,25 @@ impl AgentAdapter for StaticAdapter {
             |hook| hook(output, workspace),
         )
     }
+    fn uses_artifact_final_response(&self) -> bool {
+        self.artifact_final_response.is_some()
+    }
+    fn validate_guest_artifact_answer(&self, answer: &str, frozen: &FrozenArtifacts) -> bool {
+        self.guest_artifact_answer
+            .is_some_and(|hook| hook(answer, frozen))
+    }
+    fn final_response_with_artifacts(
+        &self,
+        output: &str,
+        frozen: &FrozenArtifacts,
+        workspace: &Path,
+        complete: bool,
+    ) -> Option<String> {
+        self.artifact_final_response.map_or_else(
+            || self.final_response(output, workspace),
+            |hook| hook(output, frozen, workspace, complete),
+        )
+    }
     fn step_count(&self, stdout: &str, stderr: &str) -> Option<u64> {
         self.step_count.and_then(|hook| hook(stdout, stderr))
     }
@@ -970,6 +1009,7 @@ pub(super) fn usage_fields(value: &serde_json::Value) -> crate::measurements::To
     }
 }
 
+#[cfg(test)]
 pub(crate) fn final_response(id: &str, output: &str, workspace: &Path) -> Option<String> {
     find(id).and_then(|adapter| adapter.final_response(output, workspace))
 }
