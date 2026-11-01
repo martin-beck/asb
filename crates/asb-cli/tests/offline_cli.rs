@@ -2021,6 +2021,14 @@ fn continue_and_openhands_collect_isolated_mock_usage_artifacts() {
     use std::os::unix::fs::PermissionsExt;
     for agent in ["continue", "openhands"] {
         let project = replay_project(2);
+        // The current main preflight still requires a bridge in replay; seed a
+        // local fixture so this offline test never installs from the network.
+        let bridge = project
+            .0
+            .join(".asb-tools/cli2key/node_modules/.bin/codex-bridge");
+        std::fs::create_dir_all(bridge.parent().unwrap()).unwrap();
+        std::fs::write(&bridge, "#!/bin/sh\nexit 99\n").unwrap();
+        std::fs::set_permissions(&bridge, std::fs::Permissions::from_mode(0o755)).unwrap();
         project.write("benchmark.toml", &format!("agent='{agent}'\nworkload='bug-fix'\nprovider='cli2key'\nmodel='test-model'\nworkspace='workspace'\nlog_file='run.log'\n"));
         let body =
             serde_json::json!({"model":"test-model","messages":[],"tools":[{"type":"function"}]})
@@ -2043,7 +2051,8 @@ fetch(endpoint.replace(/\/$/, '') + (isContinue ? '/chat/completions' : '/v1/cha
   fs.writeFileSync('src/parser.py', "def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n");
   if (isContinue) {
     const dir = path.join(process.env.CONTINUE_GLOBAL_DIR, 'sessions'); fs.mkdirSync(dir, {recursive:true});
-    fs.writeFileSync(path.join(dir,'session.json'), JSON.stringify({history:[{message:{role:'assistant',usage:{prompt_tokens:n,completion_tokens:3,prompt_tokens_details:{cache_read_tokens:4}}}}]}));
+    const sessionId = '00112233-4455-6677-8899-aabbccddeeff';
+    fs.writeFileSync(path.join(dir,sessionId+'.json'), JSON.stringify({sessionId,history:[{message:{role:'assistant',content:'complete',usage:{prompt_tokens:n,completion_tokens:3,prompt_tokens_details:{cache_read_tokens:4}}}}]}));
   } else {
     const dir = path.join(process.env.OPENHANDS_CONVERSATIONS_DIR, 'fixture'); fs.mkdirSync(dir, {recursive:true});
     // LiteLLM adds the separate cache count even when the bridge's wire input already includes it.
