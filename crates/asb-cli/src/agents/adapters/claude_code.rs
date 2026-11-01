@@ -27,7 +27,21 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_state_environment_vars(&["CLAUDE_CONFIG_DIR"])
 .with_unprivileged_execution()
 .with_output_usage(output_usage)
+.with_execution_failure(execution_failure)
 .with_step_count(step_count);
+
+fn execution_failure(stdout: &str, _: &str) -> Option<String> {
+    let event: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    if event.get("type").and_then(|value| value.as_str()) != Some("result") {
+        return None;
+    }
+    let failed = event.get("is_error").and_then(|value| value.as_bool()) == Some(true)
+        || event
+            .get("subtype")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value.starts_with("error_"));
+    failed.then(|| "agent reported a terminal error; inspect the benchmark log".to_owned())
+}
 
 fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
     // Claude's final num_turns counts model round trips inside this CLI run.
@@ -281,6 +295,27 @@ mod tests {
             ADAPTER.step_count(r#"[{"type":"result","num_turns":3},{"type":"result"}]"#, ""),
             None
         );
+    }
+
+    #[test]
+    fn terminal_error_is_read_only_from_claude_result_metadata() {
+        for event in [
+            r#"{"type":"result","is_error":true,"result":"private details"}"#,
+            r#"{"type":"result","subtype":"error_max_turns"}"#,
+        ] {
+            let error = ADAPTER
+                .execution_failure(event, "")
+                .expect("typed terminal error");
+            assert!(error.contains("terminal error"));
+            assert!(!error.contains("private details"));
+        }
+        for event in [
+            r#"{"type":"result","is_error":false,"result":"litellm.NotFoundError"}"#,
+            r#"{"type":"tool_result","is_error":true}"#,
+            r#"{"type":"result","result":"error_max_turns"}"#,
+        ] {
+            assert!(ADAPTER.execution_failure(event, "").is_none());
+        }
     }
 
     #[test]
