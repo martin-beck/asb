@@ -136,9 +136,6 @@ pub(crate) fn for_plan(
             }
         }
     }
-    if mode.is_some() {
-        inputs.extend(crate::tape::runtime_inputs()?);
-    }
     inputs.sort();
     inputs.dedup();
     Ok(inputs)

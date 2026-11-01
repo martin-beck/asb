@@ -120,6 +120,7 @@ impl Fixture {
         journal
             .commit(
                 Track {
+                    recorder: None,
                     id: 1,
                     batch: 1,
                     replica: 1,

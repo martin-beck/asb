@@ -119,6 +119,7 @@ impl Inspection {
                 ));
             }
             inputs.push(ReplayInput {
+                recorder: None,
                 complete: None,
                 track: None,
                 source: input.source,

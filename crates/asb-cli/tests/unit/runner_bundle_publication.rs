@@ -4,13 +4,11 @@ use crate::evidence::{
     FaultPoint,
     tests::{Scope, WriteAction},
 };
+use crate::recording_provider_fixture::RecordingProvider;
 use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::Ordering;
-#[path = "../support/recording_provider.rs"]
-mod recording_provider;
-use recording_provider::RecordingProvider;
 
 #[test]
 fn actual_bundled_record_replay_publication_faults_preserve_independent_evidence() {

@@ -169,8 +169,22 @@ impl<'a> ConfiguredAttempt<'a> {
                 "collectors ready; preparing provider and workload",
             );
         }
+        let replay_recorder = if matches!(tape_cassette.as_ref(), Some((tape::Mode::Replay, _))) {
+            let name = options
+                .native_tool_inputs
+                .and_then(|inputs| inputs.get(options.replica.index.checked_sub(1)?))
+                .and_then(|input| input.recorder.as_deref())
+                .unwrap_or(crate::proxy::legacy_recorder_name());
+            Some(crate::proxy::recorder(name).ok_or_else(|| {
+                Error::Input(format!("recording proxy `{name}` is not registered"))
+            })?)
+        } else {
+            None
+        };
         if let Some((tape::Mode::Replay, cassette)) = tape_cassette.as_ref() {
-            models::ensure_replay_model_recorded(cassette, &config.model)?;
+            replay_recorder
+                .expect("replay recorder selected")
+                .validate_replay_model(cassette, &config.model)?;
         }
         if options.tool_mode_explicit
             && tool_tape_cassette.is_some()
@@ -192,7 +206,7 @@ impl<'a> ConfiguredAttempt<'a> {
                 agents::find(&config.agent)
     .map(|adapter| {
         let offered = if let Some((tape::Mode::Replay, cassette)) = tape_cassette.as_ref() {
-            providers::replay_endpoints(&config.provider, &config.model, models::replay_interface(cassette)?)
+            providers::replay_endpoints(&config.provider, &config.model, replay_recorder.expect("replay recorder selected").replay_interface(cassette)?)
         } else {
             let (offers, snapshot_fallback, tool_support) = providers::discover_endpoints(&config.provider, &config.model);
             discovered_tool_support = tool_support;
@@ -690,6 +704,19 @@ impl<'a> ReadyAttempt<'a> {
                             respect_record_timings,
                             &workspace,
                             Some(&config.agent),
+                            if *mode == tape::Mode::Replay {
+                                Some(
+                                    options
+                                        .native_tool_inputs
+                                        .and_then(|inputs| {
+                                            inputs.get(options.replica.index.checked_sub(1)?)
+                                        })
+                                        .and_then(|input| input.recorder.as_deref())
+                                        .unwrap_or(crate::proxy::legacy_recorder_name()),
+                                )
+                            } else {
+                                None
+                            },
                         )?))
                     } else {
                         Ok(None)
@@ -1284,7 +1311,23 @@ impl ResultFacts {
                     kind: failure.kind.as_str(),
                     reason: failure.reason.clone(),
                 });
-        let token_usage = crate::usage::from_sources(
+        let recorder_name = match tape_cassette.as_ref() {
+            Some((tape::Mode::Record, path)) => proxy_evidence
+                .captures
+                .iter()
+                .find(|capture| capture.output == *path)
+                .map(|capture| capture.adapter.as_str()),
+            Some((tape::Mode::Replay, _)) => Some(
+                options
+                    .native_tool_inputs
+                    .and_then(|inputs| inputs.get(options.replica.index.checked_sub(1)?))
+                    .and_then(|input| input.recorder.as_deref())
+                    .unwrap_or(crate::proxy::legacy_recorder_name()),
+            ),
+            None => None,
+        };
+        let recording_adapter = recorder_name.and_then(crate::proxy::recorder);
+        let token_usage = crate::usage::from_sources_with_recorder(
             &config.provider,
             &config.agent,
             &if capture_complete {
@@ -1301,6 +1344,7 @@ impl ResultFacts {
                 .as_ref()
                 .filter(|_| cassette_usage_verified)
                 .map(|(_, cassette)| cassette.as_path()),
+            recording_adapter,
         );
         let token_usage =
             crate::usage::with_artifact_usage(token_usage, adapter_artifacts.token_usage);
@@ -1329,11 +1373,14 @@ impl ResultFacts {
         });
         // Tool-call evidence is parsed from provider responses retained by the
         // llmtape proxy. Agent stdout/stderr are presentation streams only.
-        let tool_calls = tape_cassette
+        let observed_tool_calls = tape_cassette
             .as_ref()
             .filter(|_| cassette_usage_verified)
-            .map(|(_, cassette)| crate::proxy::tool_calls::from_cassette(cassette))
-            .unwrap_or_default();
+            .and_then(|(_, cassette)| {
+                recording_adapter.and_then(|recorder| recorder.recorded_tool_calls(cassette))
+            });
+        let tool_calls_available = observed_tool_calls.is_some();
+        let tool_calls = observed_tool_calls.unwrap_or_default();
         let local_tool_transcript = guest
             .as_ref()
             .and_then(|metadata| metadata.local_tool_transcript.clone())
@@ -1434,7 +1481,7 @@ impl ResultFacts {
             token_usage,
             steps,
             tool_calls,
-            tool_calls_available: cassette_usage_verified && tape_cassette.is_some(),
+            tool_calls_available,
             adapter_tool_call_count: adapter_artifacts.tool_call_count,
             local_tool_transcript,
             deterministic_manifest,

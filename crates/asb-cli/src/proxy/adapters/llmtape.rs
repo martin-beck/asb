@@ -1,5 +1,9 @@
 //! Local llmtape proxy lifecycle for deterministic LLM recording and replay.
 
+pub(crate) mod replay;
+mod tool_calls;
+pub(crate) mod usage;
+
 use crate::Error;
 use crate::proxy::{ProxyAdapter, ProxySession};
 use crate::tape::Mode;
@@ -66,7 +70,27 @@ impl ProxyAdapter for LlmtapeAdapter {
         NAME
     }
 
+    fn validate_replay_model(&self, path: &Path, model: &str) -> Result<(), Error> {
+        replay::ensure_replay_model_recorded(path, model)
+    }
+
+    fn replay_interface(&self, path: &Path) -> Result<Option<crate::endpoint::Interface>, Error> {
+        replay::replay_interface(path)
+    }
+
+    fn recorded_usage(&self, text: &str, input_includes_cache: bool) -> crate::usage::TokenUsage {
+        usage::from_cassette(text, input_includes_cache)
+    }
+
+    fn recorded_tool_calls(&self, path: &Path) -> Option<Vec<crate::proxy::tool_calls::ToolCall>> {
+        tool_calls::from_cassette(path)
+    }
+
     fn default_recording(&self) -> bool {
+        #[cfg(test)]
+        if std::env::var_os("ASB_SYNTHETIC_RECORDER_CHILD").is_some() {
+            return false;
+        }
         true
     }
 

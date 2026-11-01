@@ -14,13 +14,6 @@ pub enum Mode {
     Replay,
 }
 
-pub(crate) fn input_files() -> Result<Vec<std::path::PathBuf>, Error> {
-    proxy::recording_input_files()
-}
-pub(crate) fn runtime_inputs() -> Result<Vec<crate::runtime_inputs::Dependency>, Error> {
-    proxy::recording_runtime_inputs()
-}
-
 /// A running record/replay chain.
 pub struct Session(proxy::Chain);
 
@@ -40,6 +33,7 @@ impl Session {
             respect_record_timings,
             workspace,
             None,
+            None,
         )
     }
 
@@ -52,11 +46,13 @@ impl Session {
         respect_record_timings: bool,
         workspace: &Path,
         agent: Option<&str>,
+        recorder: Option<&str>,
     ) -> Result<Self, Error> {
         if mode == Mode::Replay {
             require_replay_cassette(cassette)?;
         }
         let settings = proxy::RecordingRequest {
+            recorder,
             mode,
             cassette,
             respect_record_timings,

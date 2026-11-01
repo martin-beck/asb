@@ -627,6 +627,13 @@ commands are re-resolved at the end, so a new earlier PATH candidate or changed
 native dependency cannot claim stability. Unsupported/excessive discovery
 leaves this optional seal unavailable, never blocks a fresh execution, and
 does not claim whole-host immutability or arbitrary application dlopen closure.
+Each new recording track retains the capture receipt's recorder adapter ID.
+Replay preserves that ID in the saved campaign plan and asks the same adapter
+to validate the model, identify the wire interface, start offline replay, and
+interpret token and tool-call measurements. Historical tracks without an ID
+use llmtape. Unknown recorders cannot start replay. Sweep input seals include
+the execution and runtime inputs of the recorders selected by its campaigns.
+
 Record/replay dispatch asks the selected proxy adapters for their
 execution files without starting them or materializing scratch scripts. The
 default adapter binds its selected host Node executable or explicit proxy

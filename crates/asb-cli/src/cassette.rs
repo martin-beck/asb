@@ -132,6 +132,9 @@ pub struct Statistics {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Track {
+    /// Recording proxy identity; absent on historical llmtape recordings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorder: Option<String>,
     /// Stable one-based ID in batch/replica order, not completion order.
     pub id: u64,
     /// One-based sequential batch.
@@ -305,7 +308,13 @@ impl Manifest {
                 .checked_sub(1)
                 .and_then(|batch| batch.checked_mul(self.concurrency))
                 .and_then(|base| base.checked_add(track.replica));
-            if track.id <= prior
+            if track.recorder.as_deref().is_some_and(|name| {
+                name.is_empty()
+                    || name.len() > 64
+                    || !name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            }) || track.id <= prior
                 || expected != Some(track.id)
                 || !(1..=self.concurrency).contains(&track.replica)
                 || !valid_digest(&track.sha256)

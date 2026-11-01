@@ -3,7 +3,6 @@
 pub(crate) mod adapters;
 pub(crate) mod capture;
 pub(crate) mod tool_calls;
-pub(crate) mod usage;
 
 use crate::Error;
 use std::any::Any;
@@ -12,6 +11,7 @@ use std::collections::HashMap;
 /// Generic inputs for a proxy which owns LLM record/replay.
 pub(crate) struct RecordingRequest<'a> {
     pub mode: crate::tape::Mode,
+    pub recorder: Option<&'a str>,
     pub cassette: &'a std::path::Path,
     pub respect_record_timings: bool,
     pub workspace: &'a std::path::Path,
@@ -32,6 +32,26 @@ pub(crate) trait ProxyAdapter: Sync {
         Err(Error::Input(
             "selected proxy does not support recording".into(),
         ))
+    }
+    fn validate_replay_model(&self, _path: &std::path::Path, _model: &str) -> Result<(), Error> {
+        Err(Error::Input(
+            "recording proxy does not support replay model validation".into(),
+        ))
+    }
+    fn replay_interface(
+        &self,
+        _path: &std::path::Path,
+    ) -> Result<Option<crate::endpoint::Interface>, Error> {
+        Err(Error::Input(
+            "recording proxy does not support replay interface discovery".into(),
+        ))
+    }
+    /// Interpret only recordings in this adapter's own format.
+    fn recorded_usage(&self, _text: &str, _input_includes_cache: bool) -> crate::usage::TokenUsage {
+        crate::usage::TokenUsage::default()
+    }
+    fn recorded_tool_calls(&self, _path: &std::path::Path) -> Option<Vec<tool_calls::ToolCall>> {
+        None
     }
     /// Adapter-owned execution files, without starting a hop or touching a
     /// cassette. Transitive interpreter/library discovery is a separate layer.
@@ -72,21 +92,56 @@ fn select_recording_adapter<'a>(
     Ok(adapter)
 }
 
-pub(crate) fn recording_input_files() -> Result<Vec<std::path::PathBuf>, Error> {
-    input_files(select_recording_adapter(adapters::REGISTRY)?.name())
+fn find_recorder<'a>(
+    registry: &'a [&'a dyn ProxyAdapter],
+    name: &str,
+) -> Option<&'a dyn ProxyAdapter> {
+    registry
+        .iter()
+        .copied()
+        .find(|adapter| adapter.name() == name)
 }
 
-pub(crate) fn recording_runtime_inputs() -> Result<Vec<crate::runtime_inputs::Dependency>, Error> {
-    runtime_inputs(select_recording_adapter(adapters::REGISTRY)?.name())
+pub(crate) fn recorder(name: &str) -> Option<&'static dyn ProxyAdapter> {
+    find_recorder(adapters::REGISTRY, name)
+}
+
+pub(crate) fn legacy_recorder_name() -> &'static str {
+    adapters::legacy_recording_name()
+}
+
+pub(crate) fn default_recorder() -> Option<&'static dyn ProxyAdapter> {
+    select_recording_adapter(adapters::REGISTRY).ok()
 }
 
 pub(crate) fn start_recording_chain(
     request: &RecordingRequest<'_>,
     upstream: Option<&str>,
 ) -> Result<Chain, Error> {
-    let adapter = select_recording_adapter(adapters::REGISTRY)?;
+    let adapter = resolve_recorder(adapters::REGISTRY, request.recorder)?;
     let names = configured_chain(adapter.name())?;
-    validate_recording_chain(&names, adapter.name(), request.mode, adapters::REGISTRY)?;
+    start_recording_chain_with(request, upstream, &names, adapters::REGISTRY)
+}
+
+fn resolve_recorder<'a>(
+    registry: &'a [&'a dyn ProxyAdapter],
+    name: Option<&str>,
+) -> Result<&'a dyn ProxyAdapter, Error> {
+    match name {
+        Some(name) => find_recorder(registry, name)
+            .ok_or_else(|| Error::Input(format!("recording proxy `{name}` is not registered"))),
+        None => select_recording_adapter(registry),
+    }
+}
+
+fn start_recording_chain_with(
+    request: &RecordingRequest<'_>,
+    upstream: Option<&str>,
+    names: &[String],
+    registry: &[&dyn ProxyAdapter],
+) -> Result<Chain, Error> {
+    let adapter = resolve_recorder(registry, request.recorder)?;
+    validate_recording_chain(names, adapter.name(), request.mode, registry)?;
     let mut configurations = HashMap::new();
     configurations.insert(
         adapter.name().to_owned(),
@@ -97,7 +152,19 @@ pub(crate) fn start_recording_chain(
     } else {
         upstream
     };
-    Chain::start(&names, upstream, &configurations)
+    let selected = names
+        .iter()
+        .map(|name| {
+            registry
+                .iter()
+                .copied()
+                .find(|adapter| adapter.name().eq_ignore_ascii_case(name))
+                .ok_or_else(|| {
+                    Error::Input(format!("unknown proxy adapter `{name}` in ASB_PROXY_CHAIN"))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Chain::start_selected(&selected, upstream, &configurations)
 }
 
 fn validate_recording_chain(
@@ -210,6 +277,7 @@ pub(crate) struct Chain {
 }
 
 impl Chain {
+    #[cfg(test)]
     pub(crate) fn start(
         names: &[String],
         upstream: Option<&str>,
@@ -363,6 +431,40 @@ mod tests {
         fn supports_offline_replay(&self) -> bool {
             true
         }
+        fn validate_replay_model(&self, _: &std::path::Path, model: &str) -> Result<(), Error> {
+            if model == "fixture-model" {
+                Ok(())
+            } else {
+                Err(Error::Input("wrong model".into()))
+            }
+        }
+        fn replay_interface(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<Option<crate::endpoint::Interface>, Error> {
+            Ok(Some(crate::endpoint::Interface::OpenAiChat))
+        }
+        fn recorded_usage(&self, _: &str, _: bool) -> crate::usage::TokenUsage {
+            crate::usage::TokenUsage {
+                input_tokens: Some(3),
+                output_tokens: Some(4),
+                total_tokens: Some(7),
+                ..Default::default()
+            }
+        }
+        fn recorded_tool_calls(&self, _: &std::path::Path) -> Option<Vec<tool_calls::ToolCall>> {
+            Some(vec![tool_calls::ToolCall {
+                ordinal: 1,
+                source: "fixture.response",
+                kind: "function".into(),
+                name: Some("read".into()),
+                id: None,
+                arguments_present: false,
+                response_observed_unix_ms: None,
+                execution_duration_ms: None,
+                classes: Vec::new(),
+            }])
+        }
         fn recording_settings(
             &self,
             request: &RecordingRequest<'_>,
@@ -378,8 +480,70 @@ mod tests {
             _: Option<&str>,
             _: Option<&dyn Any>,
         ) -> Result<Box<dyn ProxySession>, Error> {
-            Err(Error::Run("fixture does not start".into()))
+            Ok(Box::new(FixtureSession {
+                name: self.0,
+                url: format!("{}-url", self.0),
+                active: true,
+                fail_finish: false,
+                events: Arc::new(Mutex::new(Vec::new())),
+            }))
         }
+    }
+
+    #[test]
+    fn selects_recorded_identity_from_multiple_recorders() {
+        let first = RecordingFixture("first");
+        let second = RecordingFixture("second");
+        let registry: &[&dyn ProxyAdapter] = &[&first, &second];
+        assert_eq!(find_recorder(registry, "second").unwrap().name(), "second");
+        assert!(find_recorder(registry, "missing").is_none());
+    }
+
+    #[test]
+    fn replay_starts_historical_recorder_from_multi_adapter_registry() {
+        let first = RecordingFixture("first");
+        let second = RecordingFixture("second");
+        let registry: &[&dyn ProxyAdapter] = &[&first, &second];
+        let request = RecordingRequest {
+            recorder: Some("second"),
+            mode: crate::tape::Mode::Replay,
+            cassette: std::path::Path::new("fixture"),
+            respect_record_timings: false,
+            workspace: std::path::Path::new("."),
+            wire_extension: None,
+        };
+        let selected = resolve_recorder(registry, request.recorder).unwrap();
+        selected
+            .validate_replay_model(request.cassette, "fixture-model")
+            .unwrap();
+        assert!(
+            selected
+                .validate_replay_model(request.cassette, "other-model")
+                .is_err()
+        );
+        assert_eq!(
+            selected.replay_interface(request.cassette).unwrap(),
+            Some(crate::endpoint::Interface::OpenAiChat)
+        );
+        assert_eq!(
+            selected.recorded_usage("other-format", false).total_tokens,
+            Some(7)
+        );
+        assert_eq!(
+            selected.recorded_tool_calls(request.cassette).unwrap()[0].source,
+            "fixture.response"
+        );
+        let names = vec!["second".to_owned()];
+        let chain =
+            start_recording_chain_with(&request, Some("forbidden-online"), &names, registry)
+                .unwrap();
+        assert_eq!(chain.url(), "second-url");
+        chain.finish().result.unwrap();
+        let missing = RecordingRequest {
+            recorder: Some("missing"),
+            ..request
+        };
+        assert!(start_recording_chain_with(&missing, None, &names, registry).is_err());
     }
 
     #[test]
@@ -392,6 +556,11 @@ mod tests {
             fail_finish: false,
             events: Arc::new(Mutex::new(Vec::new())),
         };
+        assert!(
+            upstream
+                .recorded_tool_calls(std::path::Path::new("fixture"))
+                .is_none()
+        );
         let registry: &[&dyn ProxyAdapter] = &[&recorder, &upstream, &offline];
         let names = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
         for mode in [crate::tape::Mode::Record, crate::tape::Mode::Replay] {
@@ -464,6 +633,7 @@ mod tests {
         assert_eq!(selected.name(), "other-recorder");
         let cassette = std::path::Path::new("fixture.jsonl");
         let request = RecordingRequest {
+            recorder: None,
             mode: crate::tape::Mode::Replay,
             cassette,
             respect_record_timings: true,

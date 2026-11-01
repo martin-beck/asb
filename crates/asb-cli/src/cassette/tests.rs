@@ -97,6 +97,179 @@ fn campaign_inspection_can_select_more_than_256_tracks_from_one_descriptor() {
     );
 }
 
+#[test]
+fn selected_recorder_identity_survives_archive_staging_and_saved_plan() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.0.join(".asb")).unwrap();
+    fs::write(
+        fixture.0.join(".asb/project.toml"),
+        toml::to_string(&crate::project::ProjectConfig::default()).unwrap(),
+    )
+    .unwrap();
+    let config: crate::benchmark::BenchmarkConfig =
+        toml::from_str("agent='pi'\nprovider='local'\nmodel='fixture'\nworkload='bug-fix'\n")
+            .unwrap();
+    let path = fixture.0.join("benchmark.toml");
+    fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+    let mut source = manifest(1);
+    source.tracks[0].recorder = Some("other-recorder".into());
+    let bundle = fixture.zip(&source, &[("tracks/1.jsonl", b"{}\n")]);
+    let inspection = crate::runner::repeated::Inspection::prepare_selected(
+        &path,
+        config,
+        1,
+        crate::runner::RunOptions {
+            mode: Some(crate::tape::Mode::Replay),
+            cassette: Some(bundle.to_str().unwrap()),
+            replay_seed: Some(42),
+            ..Default::default()
+        },
+        None,
+        None,
+    )
+    .unwrap();
+    let prepared = inspection.observe().unwrap();
+    drop(crate::runner::repeated::publish_campaign(prepared).unwrap());
+    let root = fs::read_dir(fixture.0.join("results/asb-executions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let restored = crate::runner::campaign::reading::Layout::read(&root.join("plan.json")).unwrap();
+    assert_eq!(
+        restored.plan.replay_inputs[0].recorder.as_deref(),
+        Some("other-recorder")
+    );
+    assert_eq!(
+        fs::read(root.join(&restored.plan.replay_inputs[0].private)).unwrap(),
+        b"{}\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn alternate_recorder_runs_an_agent_offline_and_reports_its_metrics() {
+    use std::os::unix::fs::PermissionsExt;
+    if std::env::var_os("ASB_SYNTHETIC_RECORDER_CHILD").is_none() {
+        let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/asb");
+        assert!(
+            runtime.is_file(),
+            "build the actual ASB binary before this test"
+        );
+        let provider = crate::recording_provider_fixture::RecordingProvider::new();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cassette::tests::alternate_recorder_runs_an_agent_offline_and_reports_its_metrics",
+                "--nocapture",
+            ])
+            .env("ASB_SYNTHETIC_RECORDER_CHILD", "1")
+            .env("ASB_PROVIDER_BASE_URL", &provider.endpoint)
+            .env("OPENROUTER_BASE_URL", format!("{}/v1", provider.endpoint))
+            .env(
+                "OPENROUTER_MODELS_URL",
+                format!("{}/models", provider.endpoint),
+            )
+            .env("OPENROUTER_API_KEY", "fixture-only-key")
+            .env("ASB_RUNTIME_EXECUTABLE", runtime.canonicalize().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            0,
+            "synthetic recorder must not contact a provider for inference"
+        );
+        return;
+    }
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.0.join(".asb")).unwrap();
+    fs::write(
+        fixture.0.join(".asb/project.toml"),
+        "tools_dir='tools'\nworkloads_dir='workloads'\nworkspace_dir='workspace'\n",
+    )
+    .unwrap();
+    fs::create_dir_all(fixture.0.join("workloads")).unwrap();
+    fs::write(
+        fixture.0.join("workloads/bug-fix.txt"),
+        "Repair src/parser.py so parse_path ignores empty components.",
+    )
+    .unwrap();
+    fs::create_dir_all(fixture.0.join("workspace")).unwrap();
+    let agent = fixture.0.join("fixture-agent");
+    fs::write(&agent, r##"#!/usr/bin/python3
+import os, pathlib, urllib.request
+url = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')
+if url.endswith('/v1'): url = url[:-3]
+req = urllib.request.Request(url + '/v1/chat/completions', data=b'{"model":"fixture","messages":[]}', headers={'Content-Type':'application/json'})
+with urllib.request.urlopen(req, timeout=5) as response:
+    assert response.status == 200
+    response.read()
+pathlib.Path('src/parser.py').write_text("def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n")
+"##).unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
+    let config = fixture.0.join("benchmark.toml");
+    fs::write(&config, format!("agent='{}'\nprovider='openrouter'\nmodel='fixture'\nworkload='bug-fix'\nworkspace='workspace'\nlog_file='run.log'\n", agent.display())).unwrap();
+    let cassette = fixture.0.join("synthetic.zip");
+    let _capacity = crate::disk_space::test_available_mib(u64::MAX);
+    let mut recorded = Vec::new();
+    let record = crate::runner::run_with_tape(
+        config.to_str().unwrap(),
+        crate::runner::RunOptions {
+            mode: Some(crate::tape::Mode::Record),
+            cassette: Some(cassette.to_str().unwrap()),
+            json: true,
+            ..Default::default()
+        },
+        &mut recorded,
+    );
+    assert!(
+        record.is_ok(),
+        "record={record:?} output={}",
+        String::from_utf8_lossy(&recorded)
+    );
+    let archive = crate::cassette::Source::open(&cassette, Limits::default()).unwrap();
+    assert_eq!(
+        archive.manifest().unwrap().tracks[0].recorder.as_deref(),
+        Some("synthetic-recorder")
+    );
+    drop(archive);
+    let mut output = Vec::new();
+    let result = crate::runner::run_with_tape(
+        config.to_str().unwrap(),
+        crate::runner::RunOptions {
+            mode: Some(crate::tape::Mode::Replay),
+            cassette: Some(cassette.to_str().unwrap()),
+            tool_mode_explicit: true,
+            json: true,
+            ..Default::default()
+        },
+        &mut output,
+    );
+    assert!(
+        result.is_ok(),
+        "replay={result:?} output={}",
+        String::from_utf8_lossy(&output)
+    );
+    let summary = String::from_utf8_lossy(&output)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|row| row.get("process_success").is_some())
+        .expect("replay summary");
+    assert_eq!(summary["process_success"], true);
+    assert_eq!(summary["token_usage"]["input_tokens"], 11);
+    assert_eq!(summary["token_usage"]["output_tokens"], 7);
+    assert_eq!(summary["token_usage"]["cached_tokens"], 2);
+    assert_eq!(summary["token_usage"]["total_tokens"], 18);
+    assert_eq!(summary["tool_call_count"], 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn bundle_inspection_decodes_the_probed_descriptor_not_a_replacement_path() {
@@ -376,6 +549,7 @@ fn manifest(count: u64) -> Manifest {
         concurrency: 1,
         tracks: (1..=count)
             .map(|id| Track {
+                recorder: None,
                 id,
                 batch: id,
                 replica: 1,
@@ -394,6 +568,20 @@ fn manifest(count: u64) -> Manifest {
                 artifacts: Vec::new(),
             })
             .collect(),
+    }
+}
+
+#[test]
+fn recorder_identity_is_bounded_and_historical_tracks_remain_readable() {
+    let mut value = manifest(1);
+    let legacy = serde_json::to_value(&value).unwrap();
+    assert!(legacy["tracks"][0].get("recorder").is_none());
+    assert_eq!(serde_json::from_value::<Manifest>(legacy).unwrap(), value);
+    value.tracks[0].recorder = Some("other-recorder".into());
+    value.validate(Limits::default()).unwrap();
+    for bad in ["", "bad/name", "bad\nname", &"a".repeat(65)] {
+        value.tracks[0].recorder = Some(bad.into());
+        assert!(value.validate(Limits::default()).is_err());
     }
 }
 

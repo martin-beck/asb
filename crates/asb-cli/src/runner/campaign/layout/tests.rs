@@ -161,6 +161,7 @@ fn plan(mode: ExecutionMode, concurrency: usize, repeat: u64, measured: bool) ->
     if mode == ExecutionMode::Replay {
         for replica in 0..concurrency {
             plan.replay_inputs.push(ReplayInput {
+                recorder: None,
                 complete: None,
                 track: None,
                 source: format!("/project/legacy-{replica}.jsonl").into(),

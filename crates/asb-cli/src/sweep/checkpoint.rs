@@ -532,10 +532,40 @@ impl Inputs {
             Root::executable()?,
             Root::path("selection-plan", results.join("plan.json")),
         ];
-        if mode.is_some() {
-            for (index, path) in crate::tape::input_files()?.into_iter().enumerate() {
-                roots.push(Root::path(format!("proxy-execution-file-{index}"), path));
+        // Seal the actual recorder(s) selected by the immutable replay plans.
+        // Legacy raw cassettes always use the historical llmtape format.
+        let mut recorder_names = BTreeSet::new();
+        if mode == Some(crate::tape::Mode::Replay) && plan.execution.is_some() {
+            for layout in plan.read_campaigns(results)? {
+                for input in &layout.plan.replay_inputs {
+                    recorder_names.insert(
+                        input
+                            .recorder
+                            .as_deref()
+                            .unwrap_or(crate::proxy::legacy_recorder_name())
+                            .to_owned(),
+                    );
+                }
             }
+            if recorder_names.is_empty() {
+                recorder_names.insert(crate::proxy::legacy_recorder_name().to_owned());
+            }
+        } else if mode == Some(crate::tape::Mode::Replay) {
+            recorder_names.insert(crate::proxy::legacy_recorder_name().to_owned());
+        } else if mode.is_some() {
+            let adapter = crate::proxy::default_recorder()
+                .ok_or_else(|| resume_error("no recording proxy is registered"))?;
+            recorder_names.insert(adapter.name().to_owned());
+        }
+        let mut recorder_runtime = Vec::new();
+        let mut recorder_files = BTreeSet::new();
+        for name in &recorder_names {
+            recorder_files.extend(crate::proxy::input_files(name)?);
+            recorder_runtime.extend(crate::proxy::runtime_inputs(name)?);
+        }
+        // Keep existing root labels for historical single-recorder seals.
+        for (index, path) in recorder_files.into_iter().enumerate() {
+            roots.push(Root::path(format!("proxy-execution-file-{index}"), path));
         }
         if plan.execution.is_some() {
             roots.extend(campaigns::input_roots(results, plan)?);
@@ -590,6 +620,7 @@ impl Inputs {
             ));
         }
         let mut runtime = crate::runtime_inputs::for_plan(parent, plan, mode)?;
+        runtime.extend(recorder_runtime);
         runtime.push(crate::runtime_inputs::Dependency::Python {
             path: python.clone(),
             site: false,

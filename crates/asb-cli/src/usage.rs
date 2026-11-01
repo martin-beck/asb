@@ -22,6 +22,24 @@ pub(crate) fn from_sources(
     stderr: &str,
     cassette: Option<&Path>,
 ) -> TokenUsage {
+    from_sources_with_recorder(
+        provider,
+        agent,
+        stdout,
+        stderr,
+        cassette,
+        crate::proxy::default_recorder(),
+    )
+}
+
+pub(crate) fn from_sources_with_recorder(
+    provider: &str,
+    agent: &str,
+    stdout: &str,
+    stderr: &str,
+    cassette: Option<&Path>,
+    recorder: Option<&dyn crate::proxy::ProxyAdapter>,
+) -> TokenUsage {
     let mut usage = TokenUsage::default();
     let inclusive = crate::providers::anthropic_input_includes_cache(provider);
     // Only the owning adapter can identify usage in its output. A missing
@@ -31,7 +49,9 @@ pub(crate) fn from_sources(
     if let Some(path) = cassette
         && let Ok(text) = read_bounded_text(path, 16 * 1024 * 1024)
     {
-        cassette_usage = crate::proxy::usage::from_cassette(&text, inclusive);
+        cassette_usage = recorder.map_or_else(TokenUsage::default, |recorder| {
+            recorder.recorded_usage(&text, inclusive)
+        });
     }
     if cassette_usage.input_tokens.is_some() && cassette_usage.output_tokens.is_some() {
         usage = usage.merge_with_source(cassette_usage, "cassette");
@@ -543,7 +563,50 @@ mod usage_mock_tests;
 
 #[cfg(test)]
 mod tests {
-    use crate::proxy::usage::from_cassette;
+    use crate::proxy::adapters::llmtape::usage::from_cassette;
+
+    struct OtherRecorder;
+    impl crate::proxy::ProxyAdapter for OtherRecorder {
+        fn name(&self) -> &'static str {
+            "other-recorder"
+        }
+        fn start(
+            &self,
+            _: Option<&str>,
+            _: Option<&dyn std::any::Any>,
+        ) -> Result<Box<dyn crate::proxy::ProxySession>, crate::Error> {
+            Err(crate::Error::Run("fixture does not start".into()))
+        }
+        fn recorded_usage(&self, text: &str, _: bool) -> super::TokenUsage {
+            assert_eq!(text, "fixture-specific-format");
+            super::TokenUsage {
+                input_tokens: Some(12),
+                output_tokens: Some(5),
+                total_tokens: Some(17),
+                ..Default::default()
+            }
+        }
+    }
+
+    #[test]
+    fn recorded_usage_dispatches_to_supplied_recorder() {
+        let root = std::env::temp_dir().join(format!("asb-recorder-usage-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("cassette");
+        std::fs::write(&file, "fixture-specific-format").unwrap();
+        let usage = super::from_sources_with_recorder(
+            "fixture-provider",
+            "fixture-agent",
+            "",
+            "",
+            Some(&file),
+            Some(&OtherRecorder),
+        );
+        assert_eq!(usage.input_tokens, Some(12));
+        assert_eq!(usage.output_tokens, Some(5));
+        assert_eq!(usage.total_tokens, Some(17));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn cassette_aggregates_stream_usage_once_per_request() {

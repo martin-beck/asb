@@ -44,6 +44,9 @@ mod project;
 mod providers;
 mod proxy;
 mod python_runtime;
+#[cfg(all(test, unix))]
+#[path = "../tests/support/recording_provider.rs"]
+pub(crate) mod recording_provider_fixture;
 mod runner;
 mod runtime_inputs;
 mod selection_names;
