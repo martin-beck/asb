@@ -68,11 +68,7 @@ impl<'a> ConfiguredAttempt<'a> {
                     .unwrap_or_else(|| default_cassette(config_path, &config)),
             )
         });
-        let tool_mode = if options.tool_mode_explicit {
-            options.tool_mode
-        } else {
-            options.mode
-        };
+        let tool_mode = options.effective_tool_mode();
         let tool_tape_cassette = tool_mode.map(|mode| {
             (
                 mode,
@@ -1047,7 +1043,9 @@ impl<'a> CompletedAttempt<'a> {
             .tool_tape_cassette
             .as_ref()
             .and_then(|(mode, path)| (*mode == tape::Mode::Record).then_some(path.as_path()));
-        if context.options.mode == Some(tape::Mode::Record) && provider_capture.is_none() {
+        if context.options.effective_tool_mode() == Some(tape::Mode::Record)
+            && provider_capture.is_none()
+        {
             settled.issues.run_error(
                 "record collection lost the admitted tool-tape capture handle before adapter collection"
                     .into(),

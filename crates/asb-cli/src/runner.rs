@@ -184,6 +184,14 @@ pub(crate) struct RunOptions<'a> {
 }
 
 impl RunOptions<'_> {
+    fn effective_tool_mode(&self) -> Option<tape::Mode> {
+        if self.tool_mode_explicit {
+            self.tool_mode
+        } else {
+            self.mode
+        }
+    }
+
     fn replay_statistics(&self) -> Option<crate::cassette::Statistics> {
         self.batch
             .and_then(|batch| batch.replay_statistics(self.replica.index))
@@ -1740,6 +1748,37 @@ mod tests {
             gate.register(super::replica::Identity { index: 2, total: 2 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn tool_mode_selection_preserves_legacy_and_explicit_absence() {
+        use super::RunOptions;
+        use crate::tape::Mode;
+        let legacy = RunOptions {
+            mode: Some(Mode::Record),
+            ..Default::default()
+        };
+        assert_eq!(legacy.effective_tool_mode(), Some(Mode::Record));
+        let llm_only = RunOptions {
+            mode: Some(Mode::Record),
+            tool_mode_explicit: true,
+            ..Default::default()
+        };
+        assert_eq!(llm_only.effective_tool_mode(), None);
+        let tool_record = RunOptions {
+            mode: Some(Mode::Record),
+            tool_mode: Some(Mode::Record),
+            tool_mode_explicit: true,
+            ..Default::default()
+        };
+        assert_eq!(tool_record.effective_tool_mode(), Some(Mode::Record));
+        let tool_replay = RunOptions {
+            mode: Some(Mode::Replay),
+            tool_mode: Some(Mode::Replay),
+            tool_mode_explicit: true,
+            ..Default::default()
+        };
+        assert_eq!(tool_replay.effective_tool_mode(), Some(Mode::Replay));
     }
 
     #[test]

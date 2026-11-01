@@ -540,8 +540,8 @@ struct TapeSelection {
     carrier: Option<tape::Mode>,
     llm: Option<tape::Mode>,
     tool: Option<tape::Mode>,
-    /// Unlike legacy `--record`/`--replay`, an explicit tool selector asks
-    /// the adapter to guarantee complete local-tool interception.
+    /// The tool selection is resolved explicitly, including its absence for
+    /// LLM-only or MCP-only flags. A selected tool mode requires interception.
     tool_explicit: bool,
     mcp: Option<tape::Mode>,
 }
@@ -560,7 +560,10 @@ fn tape_selection(flags: TapeFlags) -> Result<TapeSelection, CliError> {
             || flags.tool_replay)
             .then_some(direction)
             .flatten(),
-        tool_explicit: flags.tool_record || flags.tool_replay,
+        tool_explicit: flags.tool_record
+            || flags.tool_replay
+            || (!(flags.legacy_record || flags.legacy_replay)
+                && (flags.llm_record || flags.llm_replay || flags.mcp_record || flags.mcp_replay)),
         mcp: (flags.mcp_record || flags.mcp_replay)
             .then_some(direction)
             .flatten(),
@@ -737,7 +740,7 @@ mod tape_flag_tests {
         let selection = tape_selection(TapeFlags::from_run(&args)).unwrap();
         assert_eq!(selection.llm, Some(tape::Mode::Record));
         assert_eq!(selection.tool, None);
-        assert!(!selection.tool_explicit);
+        assert!(selection.tool_explicit);
 
         let cli = Cli::try_parse_from(["asb", "run", "benchmark.toml", "--record"]).unwrap();
         let Some(CommandLine::Run(args)) = cli.command else {
@@ -746,6 +749,28 @@ mod tape_flag_tests {
         let selection = tape_selection(TapeFlags::from_run(&args)).unwrap();
         assert_eq!(selection.tool, Some(tape::Mode::Record));
         assert!(!selection.tool_explicit);
+    }
+
+    #[test]
+    fn llm_only_modes_preserve_absence_of_tool_selection() {
+        for flag in ["--llm-record", "--llm-replay"] {
+            let cli = Cli::try_parse_from(["asb", "run", "benchmark.toml", flag]).unwrap();
+            let Some(CommandLine::Run(args)) = cli.command else {
+                panic!("expected run");
+            };
+            let selection = tape_selection(TapeFlags::from_run(&args)).unwrap();
+            assert!(selection.tool.is_none());
+            assert!(
+                selection.tool_explicit,
+                "a resolved absent tool selection must not fall back to the legacy mode"
+            );
+            let cli = Cli::try_parse_from(["asb", "sweep", "sweep.toml", flag]).unwrap();
+            let Some(CommandLine::Sweep(args)) = cli.command else {
+                panic!("expected sweep");
+            };
+            let selection = tape_selection(TapeFlags::from_sweep(&args)).unwrap();
+            assert!(selection.tool.is_none() && selection.tool_explicit);
+        }
     }
 
     #[test]

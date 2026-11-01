@@ -1922,3 +1922,41 @@ fn independent_sweep_configurations_execute_concurrently_after_preparation() {
     assert!(project.0.join("cross-agent-a").exists());
     assert!(project.0.join("cross-agent-b").exists());
 }
+
+#[test]
+fn llm_only_sweep_records_without_native_track_and_replays_offline() {
+    let project = Project::new();
+    project.config(1);
+    let config_path = project.0.join("benchmark.toml");
+    let config = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("provider='fixture'", "provider='openrouter'");
+    fs::write(&config_path, config).unwrap();
+    fs::write(project.0.join("sweep.toml"), "configs=['benchmark.toml']\n").unwrap();
+    let provider = RecordingProvider::new();
+    let recorded = sweep(&project, Some(&provider), &["--llm-record"]);
+    assert!(
+        recorded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    let plan: Value = serde_json::from_slice(&fs::read(campaign_plan(&recorded)).unwrap()).unwrap();
+    let path = PathBuf::from(plan["recording"].as_str().unwrap());
+    let archive =
+        asb_cli::cassette::Archive::open(&path, asb_cli::cassette::Limits::default()).unwrap();
+    assert!(!archive.manifest().tracks.is_empty());
+    assert!(
+        archive
+            .manifest()
+            .tracks
+            .iter()
+            .all(|track| track.native.is_none())
+    );
+    drop(provider);
+    let replayed = sweep(&project, None, &["--llm-replay"]);
+    assert!(
+        replayed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+}
