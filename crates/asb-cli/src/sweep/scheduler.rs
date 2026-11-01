@@ -177,7 +177,7 @@ pub(super) fn run_with_resources_stopping_on<T: Send>(
     capacity: Option<crate::planning::Resources>,
     costs: &[crate::planning::Resources],
     execute: impl Fn(usize) -> Result<T, Error> + Sync,
-    stop_admission: impl Fn(&T) -> bool + Sync,
+    stop_admission: impl Fn(Result<&T, &Error>) -> bool + Sync,
     mut observe: impl FnMut(Event<T>) -> Result<(), Error>,
 ) -> Result<(), Error> {
     limits.validate(weights)?;
@@ -220,7 +220,7 @@ pub(super) fn run_with_resources_stopping_on<T: Send>(
                                         .into(),
                                 ))
                             });
-                    if result.as_ref().is_ok_and(stop_admission) {
+                    if stop_admission(result.as_ref()) {
                         queue.stop();
                     }
                     if sender.send(Event::Finished(index, result)).is_err() {
@@ -268,6 +268,58 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn panicking_worker_counts_towards_stopping_before_the_next_claim() {
+        let admitted = std::sync::Barrier::new(2);
+        let release = (Mutex::new(false), Condvar::new());
+        let (claimed_tx, claimed_rx) = std::sync::mpsc::channel();
+        let mut unexpected = false;
+        let mut completed = Vec::new();
+        run_with_resources_stopping_on(
+            Scheduling::new(2, Some(2), &[1; 4]).unwrap(),
+            &[1; 4],
+            None,
+            &[crate::planning::Resources::default(); 4],
+            |index| {
+                if index < 2 {
+                    admitted.wait();
+                }
+                if index == 0 {
+                    panic!("fixture worker panic");
+                }
+                if index == 1 {
+                    let mut done = release.0.lock().unwrap();
+                    while !*done {
+                        done = release.1.wait(done).unwrap();
+                    }
+                } else {
+                    claimed_tx.send(index).unwrap();
+                }
+                Ok(())
+            },
+            |result| result.is_err(),
+            |event| {
+                if let Event::Finished(index, result) = event {
+                    if index == 0 {
+                        assert!(result.unwrap_err().to_string().contains("worker panicked"));
+                        unexpected = claimed_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+                        *release.0.lock().unwrap() = true;
+                        release.1.notify_all();
+                    }
+                    completed.push(index);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(
+            !unexpected,
+            "panic allowed a later configuration to be claimed"
+        );
+        completed.sort_unstable();
+        assert_eq!(completed, [0, 1]);
+    }
 
     #[test]
     fn actual_spool_failure_stops_before_next_claim_and_joins_admitted_resource_holders() {
@@ -331,7 +383,7 @@ mod tests {
                 active.fetch_sub(1, Ordering::SeqCst);
                 Ok(report)
             },
-            |report| report.output_error.is_some(),
+            |report| report.is_ok_and(|report| report.output_error.is_some()),
             |event| {
                 match event {
                     Event::Started(index) => starts.push(index),
@@ -639,7 +691,10 @@ mod tests {
             None,
             &[crate::planning::Resources::default(); 4],
             |index| Ok(index < 2),
-            |success| !success && failed.fetch_add(1, Ordering::SeqCst) + 1 > 1,
+            |success| {
+                success.is_ok_and(|success| !success)
+                    && failed.fetch_add(1, Ordering::SeqCst) + 1 > 1
+            },
             |event| {
                 if let Event::Started(index) = event {
                     started.push(index);
