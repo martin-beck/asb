@@ -22,23 +22,8 @@ fn human_token_summaries_normalize_units_and_reject_invalid_counts() {
     ] {
         assert_eq!(parse_token_count(raw), value, "{raw}");
     }
-    let usage = usage_from_text("Tokens used\n1,234\noutput tokens=99\n");
-    assert_eq!(usage.total_tokens, Some(1234));
+    let usage = usage_from_text("output tokens=99\n");
     assert_eq!(usage.output_tokens, Some(99));
-}
-
-#[test]
-fn opencode_token_objects_parse_nested_cache_and_string_counts() {
-    let usage = usage_from_opencode_tokens(
-        &json!({"input":"1200","output":44,"cache":{"read":"900"},"total":"1244"}),
-    );
-    assert_eq!(usage.input_tokens, Some(1200));
-    assert_eq!(usage.output_tokens, Some(44));
-    assert_eq!(usage.cached_tokens, Some(900));
-    assert_eq!(usage.total_tokens, Some(1244));
-    assert_eq!(usage_from_opencode_tokens(&json!([])).total_tokens, None);
-    let usage = usage_from_opencode_tokens(&json!({"input":1,"output":2,"cache_read":"3"}));
-    assert_eq!(usage.cached_tokens, Some(3));
 }
 
 #[test]

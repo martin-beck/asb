@@ -1927,6 +1927,69 @@ mod tests {
         let usage = token_usage_from_sources("cli2key", "codex", "tokens used\n42,567\n", "", None);
         assert_eq!(usage.total_tokens, Some(42_567));
         assert_eq!(usage.source.as_deref(), Some("agent-output"));
+        let prefixed =
+            token_usage_from_sources("cli2key", "codex", "info: tokens used\n1,234\n", "", None);
+        assert_eq!(prefixed.total_tokens, Some(1234));
+    }
+
+    #[test]
+    fn other_agents_task_output_does_not_become_codex_usage() {
+        let usage = token_usage_from_sources("cli2key", "goose", "tokens used\n42,567\n", "", None);
+        assert!(
+            !usage.any(),
+            "task output was mistaken for usage: {usage:?}"
+        );
+    }
+
+    #[test]
+    fn other_agents_task_output_does_not_become_opencode_usage() {
+        let usage = token_usage_from_sources(
+            "cli2key",
+            "goose",
+            r#"{"tokens":{"input":10,"output":20}}"#,
+            "",
+            None,
+        );
+        assert!(
+            !usage.any(),
+            "task output was mistaken for usage: {usage:?}"
+        );
+    }
+
+    #[test]
+    fn opencode_typed_step_usage_remains_available() {
+        let usage = token_usage_from_sources(
+            "cli2key",
+            "opencode",
+            r#"{"type":"step_finish","part":{"tokens":{"input":10,"output":20,"cache":{"read":3,"write":2}}}}"#,
+            "",
+            None,
+        );
+        assert_eq!(usage.input_tokens, Some(15));
+        assert_eq!(usage.output_tokens, Some(20));
+        assert_eq!(usage.cached_tokens, Some(3));
+        assert_eq!(usage.total_tokens, Some(35));
+        let legacy = token_usage_from_sources(
+            "cli2key",
+            "opencode",
+            r#"{"tokens":{"input":"1200","output":44,"cache":{"read":"900"},"total":"1244"}}"#,
+            "",
+            None,
+        );
+        assert_eq!(legacy.input_tokens, Some(1200));
+        assert_eq!(legacy.output_tokens, Some(44));
+        assert_eq!(legacy.cached_tokens, Some(900));
+        assert_eq!(legacy.total_tokens, Some(1244));
+        let jsonl = token_usage_from_sources(
+            "cli2key",
+            "opencode",
+            "{\"tokens\":{\"input\":10,\"output\":2}}\n{\"tokens\":{\"input\":20,\"output\":3}}\n",
+            "",
+            None,
+        );
+        assert_eq!(jsonl.input_tokens, Some(30));
+        assert_eq!(jsonl.output_tokens, Some(5));
+        assert_eq!(jsonl.total_tokens, Some(35));
     }
 
     #[test]

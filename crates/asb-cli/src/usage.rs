@@ -87,7 +87,7 @@ fn from_path(path: &Path) -> TokenUsage {
 }
 
 impl TokenUsage {
-    fn merge(self, other: Self) -> Self {
+    pub(crate) fn merge(self, other: Self) -> Self {
         Self {
             input_tokens: self.input_tokens.or(other.input_tokens),
             output_tokens: self.output_tokens.or(other.output_tokens),
@@ -200,23 +200,13 @@ pub(crate) fn usage_from_text(text: &str) -> TokenUsage {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) {
         return usage_from_json(&value);
     }
-    let mut lines = text.lines().peekable();
-    while let Some(line) = lines.next() {
+    for line in text.lines() {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) {
             usage = usage.add(usage_from_json(&value));
             continue;
         }
         for value in embedded_json_values(line) {
             usage = usage.add(usage_from_json(&value));
-        }
-        if line.to_ascii_lowercase().contains("tokens used")
-            && let Some(value) = lines
-                .peek()
-                .and_then(|next| next.trim().replace(',', "").parse::<u64>().ok())
-        {
-            usage.total_tokens = Some(value);
-            let _ = lines.next();
-            continue;
         }
         // JSON fields are already accounted for above.  Avoid treating their
         // `"name":number` members as a second key/value event.
@@ -349,9 +339,8 @@ pub(crate) fn usage_from_json(value: &serde_json::Value) -> TokenUsage {
                 .flatten()
         });
         for (name, child) in object {
-            if name == "tokens" {
-                usage = usage.merge(usage_from_opencode_tokens(child));
-            } else if ![
+            if ![
+                "tokens",
                 "input_tokens",
                 "prompt_tokens",
                 "inputTokens",
@@ -408,27 +397,6 @@ pub(crate) fn usage_from_json(value: &serde_json::Value) -> TokenUsage {
         usage = usage.merge(usage_from_json(&nested));
     }
     usage
-}
-
-fn usage_from_opencode_tokens(value: &serde_json::Value) -> TokenUsage {
-    let Some(object) = value.as_object() else {
-        return TokenUsage::default();
-    };
-    let cached = object
-        .get("cache")
-        .and_then(|cache| {
-            cache
-                .get("read")
-                .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()))
-        })
-        .or_else(|| find_number(object, &["cached", "cacheRead", "cache_read"]));
-    TokenUsage {
-        input_tokens: find_number(object, &["input"]),
-        output_tokens: find_number(object, &["output"]),
-        cached_tokens: cached,
-        total_tokens: find_number(object, &["total"]),
-        source: None,
-    }
 }
 
 fn add_values(left: Option<u64>, right: Option<u64>) -> Option<u64> {
