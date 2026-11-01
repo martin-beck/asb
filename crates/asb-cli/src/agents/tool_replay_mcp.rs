@@ -476,18 +476,22 @@ fn run_with_io(
                 }
             };
             if let Some(response) = response {
+                // A client can terminate a short-lived service immediately
+                // after receiving a response. Persist the corresponding
+                // transcript and cursor before exposing any response bytes.
+                if options.mode == Mode::Record {
+                    publish_record_transcript(&options.transcript, &transcript.encode()?)?;
+                }
+                if let Some(state) = &options.per_call_state {
+                    let cursor = match options.mode {
+                        Mode::Record => transcript.len(),
+                        Mode::Replay => transcript.cursor(),
+                    };
+                    publish_per_call_state(state, cursor, transcript.len())?;
+                }
                 mcp_framing::write(output, &response, request.framing, "local-tool MCP")?;
                 if let (Some(trace), Some(sequence)) = (metadata_trace.as_mut(), request_trace) {
                     trace.response(sequence, "result", Some(&response))?;
-                }
-                // Some third-party clients stop a stdio extension as soon as
-                // they receive a tool result, without first closing stdin.
-                // Persist every successfully framed record-mode response so
-                // a client can never observe a causal result absent from the
-                // sealed transcript. This is transport lifecycle only: the
-                // adapter still owns tool selection and artifact meaning.
-                if options.mode == Mode::Record {
-                    publish_record_transcript(&options.transcript, &transcript.encode()?)?;
                 }
             } else if let (Some(trace), Some(sequence)) = (metadata_trace.as_mut(), request_trace) {
                 trace.response(sequence, "notification", None)?;
@@ -1910,6 +1914,72 @@ mod tests {
         let receipt = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
         verify_persistent_per_call_completion_receipt(Some(&receipt), Some(&sealed)).unwrap();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persistent_mcp_state_is_durable_before_client_receives_response() {
+        struct InspectOutput {
+            transcript: PathBuf,
+            state: PathBuf,
+            expected_cursor: usize,
+            observed: bool,
+        }
+        impl std::io::Write for InspectOutput {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let transcript =
+                    Transcript::decode(&std::fs::read(&self.transcript).unwrap()).unwrap();
+                let state = read_per_call_state(&self.state).unwrap();
+                assert_eq!(transcript.len(), 1, "transcript must precede response");
+                assert_eq!(state.events, 1, "event count must precede response");
+                assert_eq!(
+                    state.cursor, self.expected_cursor,
+                    "cursor must precede response"
+                );
+                self.observed = true;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-publication-order-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let transcript = root.join("local-tools.jsonl");
+        let state = root.join("progress.json");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("source.txt"), "fixture").unwrap();
+        std::fs::write(&transcript, Transcript::default().encode().unwrap()).unwrap();
+        publish_per_call_state(&state, 0, 0).unwrap();
+        let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"source.txt\"}}}\n";
+        for (mode, expected_cursor) in [(Mode::Record, 1), (Mode::Replay, 1)] {
+            if mode == Mode::Replay {
+                publish_per_call_state(&state, 0, 1).unwrap();
+            }
+            let mut output = InspectOutput {
+                transcript: transcript.clone(),
+                state: state.clone(),
+                expected_cursor,
+                observed: false,
+            };
+            run_with_io(
+                Options {
+                    mode,
+                    workspace: workspace.clone(),
+                    transcript: transcript.clone(),
+                    per_call_state: Some(state.clone()),
+                    metadata_trace: None,
+                    allow_commuted_observations: false,
+                },
+                &mut BufReader::new(request.as_slice()),
+                &mut output,
+            )
+            .unwrap();
+            assert!(output.observed);
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
