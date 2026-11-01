@@ -54,6 +54,15 @@ impl DescendantScope {
     /// submission. A short TERM grace is followed by KILL; repeated sweeps
     /// retain and reap double-forked helpers as their parents exit.
     pub(crate) fn quiesce(&mut self) -> io::Result<()> {
+        self.quiesce_with_trace(false)
+    }
+
+    /// Only the native gate owns lifecycle-traced tasks on its calling thread.
+    pub(super) fn quiesce_traced(&mut self) -> io::Result<()> {
+        self.quiesce_with_trace(true)
+    }
+
+    fn quiesce_with_trace(&mut self, traced: bool) -> io::Result<()> {
         self.attempted = true;
         if self.owner != std::process::id() {
             return Err(io::Error::other(
@@ -69,7 +78,7 @@ impl DescendantScope {
             // completed exit; leaving it stopped prevents its thread group
             // from becoming reapable. Consume only wait statuses owned by this
             // gate and resume ptrace stops so teardown can finish.
-            if let Err(error) = resume_owned_trace_stops() {
+            if traced && let Err(error) = resume_owned_trace_stops() {
                 first_error.get_or_insert(error);
             }
             let children = match children(self.owner) {
@@ -126,9 +135,15 @@ impl Drop for DescendantScope {
 fn resume_owned_trace_stops() -> io::Result<()> {
     for _ in 0..65536 {
         let mut status = 0;
-        // This supervisor is an exclusive reaper and calls this only after
-        // the principal wait and watcher have settled.
-        let pid = unsafe { libc::waitpid(-1, &mut status, libc::__WALL | libc::WNOHANG) };
+        // Only the native gate calls this, after its principal wait and watcher
+        // settle. WNOTHREAD prevents reaping children of unrelated threads.
+        let pid = unsafe {
+            libc::waitpid(
+                -1,
+                &mut status,
+                libc::__WALL | libc::__WNOTHREAD | libc::WNOHANG,
+            )
+        };
         if pid == 0 {
             return Ok(());
         }
@@ -526,7 +541,7 @@ mod tests {
             },
             0
         );
-        let result = scope.quiesce();
+        let result = scope.quiesce_traced();
         // Always release the exact child if the regression is present.
         if result.is_err() {
             unsafe {
@@ -544,6 +559,39 @@ mod tests {
             result.is_ok(),
             "traced exit stop prevented cleanup: {result:?}"
         );
+    }
+
+    #[test]
+    fn traced_quiesce_does_not_reap_another_threads_child() {
+        use std::sync::mpsc;
+        let _view = CurrentTaskView::enter();
+        let (send, receive) = mpsc::channel();
+        let (release, done) = mpsc::channel();
+        let sibling = std::thread::spawn(move || {
+            let child = std::process::Command::new("/bin/sh")
+                .args(["-c", "exit 27"])
+                .spawn()
+                .unwrap();
+            send.send(child).unwrap();
+            done.recv().unwrap();
+        });
+        let mut child = receive.recv().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let status = std::fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
+            if status.lines().any(|line| {
+                line.starts_with("State:") && line.split_whitespace().nth(1) == Some("Z")
+            }) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        DescendantScope::new().unwrap().quiesce_traced().unwrap();
+        let result = child.wait();
+        release.send(()).unwrap();
+        sibling.join().unwrap();
+        assert_eq!(result.unwrap().code(), Some(27));
     }
 
     #[test]

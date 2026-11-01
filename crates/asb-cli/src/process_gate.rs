@@ -274,7 +274,11 @@ pub(crate) fn run_gate(args: &[OsString]) -> std::process::ExitCode {
     #[cfg(target_os = "linux")]
     {
         let mut reported = false;
-        while let Err(error) = descendants.quiesce() {
+        while let Err(error) = if trace.is_some() {
+            descendants.quiesce_traced()
+        } else {
+            descendants.quiesce()
+        } {
             if !reported {
                 eprintln!(
                     "asb process gate retains supervision: owned descendants are not yet quiescent: {error}"
