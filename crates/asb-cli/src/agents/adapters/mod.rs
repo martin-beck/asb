@@ -72,6 +72,51 @@ pub(super) static REGISTRY: &[&dyn AgentAdapter] = &[
 mod terminal_refusal_tests {
     use super::*;
     #[test]
+    fn registry_requires_owned_final_response() {
+        assert_eq!(REGISTRY.len(), 13);
+        for adapter in REGISTRY {
+            assert!(
+                adapter.has_owned_final_response(),
+                "{} has no owned final response",
+                adapter.id()
+            );
+        }
+    }
+
+    #[test]
+    fn missing_hook_does_not_interpret_foreign_output() {
+        let adapter = StaticAdapter::new(
+            "fixture",
+            "fixture",
+            crate::install::Recipe::Npm {
+                package: "fixture@1.0.0",
+                executable: "fixture",
+                manifest: None,
+            },
+            &[],
+            |_| panic!("not invoked"),
+            |_| Ok(()),
+        );
+        assert!(!adapter.has_owned_final_response());
+        assert!(
+            adapter
+                .final_response(
+                    r#"{"type":"result","result":"foreign answer"}"#,
+                    std::path::Path::new(".")
+                )
+                .is_none()
+        );
+        let with_hook = adapter.with_final_response(|output, _| Some(output.to_owned()));
+        assert!(with_hook.has_owned_final_response());
+        assert_eq!(
+            with_hook
+                .final_response("owned answer", std::path::Path::new("."))
+                .as_deref(),
+            Some("owned answer")
+        );
+    }
+
+    #[test]
     fn terminal_refusals_are_narrow_and_registered_by_owning_adapters() {
         for adapter in [&pi::ADAPTER, &claude_code::ADAPTER] {
             assert!(

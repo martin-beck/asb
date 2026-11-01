@@ -213,8 +213,12 @@ pub(crate) trait AgentAdapter: Sync {
     /// Extract the agent's structured final answer from machine-readable
     /// output.  Intermediate tool events and echoed prompts are never treated
     /// as a final response.
-    fn final_response(&self, output: &str, _workspace: &Path) -> Option<String> {
-        structured_final_response(output)
+    fn final_response(&self, _output: &str, _workspace: &Path) -> Option<String> {
+        None
+    }
+    #[cfg(test)]
+    fn has_owned_final_response(&self) -> bool {
+        false
     }
     /// Whether the adapter cross-checks its answer against frozen evidence.
     fn uses_artifact_final_response(&self) -> bool {
@@ -906,10 +910,11 @@ impl AgentAdapter for StaticAdapter {
             .map(|hook| hook(stdout, stderr, input_includes_cache))
     }
     fn final_response(&self, output: &str, workspace: &Path) -> Option<String> {
-        self.final_response.map_or_else(
-            || structured_final_response(output),
-            |hook| hook(output, workspace),
-        )
+        self.final_response.and_then(|hook| hook(output, workspace))
+    }
+    #[cfg(test)]
+    fn has_owned_final_response(&self) -> bool {
+        self.final_response.is_some() || self.artifact_final_response.is_some()
     }
     fn uses_artifact_final_response(&self) -> bool {
         self.artifact_final_response.is_some()
@@ -1012,132 +1017,6 @@ pub(super) fn usage_fields(value: &serde_json::Value) -> crate::measurements::To
 #[cfg(test)]
 pub(crate) fn final_response(id: &str, output: &str, workspace: &Path) -> Option<String> {
     find(id).and_then(|adapter| adapter.final_response(output, workspace))
-}
-
-pub(super) fn structured_final_response(output: &str) -> Option<String> {
-    output.lines().rev().find_map(|line| {
-        let line = line
-            .trim()
-            .strip_prefix("data:")
-            .map(str::trim)
-            .unwrap_or(line.trim());
-        let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
-        final_text_from_event(&value)
-    })
-}
-
-fn final_text_from_event(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::Array(values) => values.iter().rev().find_map(final_text_from_event),
-        serde_json::Value::Object(object) => {
-            let event_type = object
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_ascii_lowercase)
-                .unwrap_or_default();
-            let role = object
-                .get("role")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_ascii_lowercase)
-                .unwrap_or_default();
-            if (object.contains_key("role") && role != "assistant")
-                || event_type.contains("tool")
-                || event_type.contains("command")
-                || event_type.contains("function_call")
-                || event_type.contains("thinking")
-                || event_type.contains("reasoning")
-                || event_type == "analysis"
-            {
-                return None;
-            }
-            // An unlabelled message wrapper is not itself an assistant turn.
-            // Only a nested event that identifies its assistant source may be
-            // interpreted as a terminal response.
-            if event_type == "message" && role.is_empty() {
-                return object.get("message").and_then(final_text_from_event);
-            }
-            if event_type == "item.completed" {
-                return object.get("item").and_then(final_text_from_event);
-            }
-            if event_type == "text" {
-                return object
-                    .get("part")
-                    .and_then(text_value)
-                    .or_else(|| object.get("text").and_then(text_value));
-            }
-            if event_type == "message_update" {
-                return object
-                    .get("assistantMessageEvent")
-                    .and_then(final_text_from_event);
-            }
-            if event_type == "agent_end" {
-                return object.get("messages").and_then(final_text_from_event);
-            }
-            let final_event = event_type.contains("output_text.done")
-                || event_type.contains("response.completed")
-                || matches!(
-                    event_type.as_str(),
-                    "result" | "final" | "assistant" | "message" | "agent_message"
-                )
-                || event_type.contains("assistantmessage")
-                || role == "assistant"
-                || object.contains_key("messages");
-            if !final_event {
-                return None;
-            }
-            for key in [
-                "text", "result", "final", "content", "message", "messages", "output",
-            ] {
-                if let Some(child) = object.get(key) {
-                    if let Some(text) = text_value(child) {
-                        return Some(text);
-                    }
-                    if let Some(text) = final_text_from_event(child) {
-                        return Some(text);
-                    }
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-fn text_value(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
-        serde_json::Value::Array(values) => values.iter().rev().find_map(text_value),
-        serde_json::Value::Object(object) => {
-            if object.get("role").is_some_and(|role| {
-                role.as_str()
-                    .is_none_or(|role| !role.eq_ignore_ascii_case("assistant"))
-            }) {
-                return None;
-            }
-            if object
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|kind| {
-                    let kind = kind.to_ascii_lowercase();
-                    kind.contains("tool")
-                        || kind.contains("command")
-                        || kind.contains("function_call")
-                        || kind.contains("thinking")
-                        || kind.contains("reasoning")
-                        || kind == "analysis"
-                })
-            {
-                return None;
-            }
-            for key in ["text", "value", "content"] {
-                if let Some(text) = object.get(key).and_then(text_value) {
-                    return Some(text);
-                }
-            }
-            None
-        }
-        _ => None,
-    }
 }
 
 pub(crate) fn local_lookup(id: &str, tools_root: &Path) -> crate::executables::Lookup {
@@ -1394,10 +1273,6 @@ mod tests {
         assert!(final_response("codex", echoed, &root).is_none());
         let structured = "{\"type\":\"tool_call\",\"command\":\"cat src/registry.py\"}\n{\"type\":\"response.output_text.done\",\"text\":\"The call path is src/cli.py -> src/registry.py through lookup.\"}";
         assert!(final_response("codex", structured, &root).is_none());
-        assert_eq!(
-            structured_final_response(structured).as_deref(),
-            Some("The call path is src/cli.py -> src/registry.py through lookup.")
-        );
 
         for event in [
             r#"{"type":"message","role":"tool","content":"I can't run tests"}"#,
@@ -1418,10 +1293,6 @@ mod tests {
         );
         let wrapped =
             r#"{"type":"message","message":{"role":"assistant","content":"wrapped assistant"}}"#;
-        assert_eq!(
-            structured_final_response(wrapped).as_deref(),
-            Some("wrapped assistant")
-        );
 
         for intermediate in [
             wrapped,
