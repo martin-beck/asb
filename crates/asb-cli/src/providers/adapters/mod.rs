@@ -2,6 +2,7 @@
 //! discovery details, and offline UI model suggestion.
 use super::{ModelKind, ModelSpec, ProviderSpec};
 use crate::endpoint::{Address, Authentication, Interface, Offer};
+pub(super) mod catalog;
 
 type EndpointFactory = fn(&str) -> Vec<Offer>;
 fn offers(address: Address, capabilities: &[(Interface, Authentication)]) -> Vec<Offer> {
@@ -54,6 +55,9 @@ pub(super) trait ProviderAdapter: Sync {
     }
     fn spec(&self) -> ProviderSpec;
     fn model_spec(&self) -> ModelSpec;
+    fn catalog_schema(&self) -> super::CatalogSchema {
+        catalog::schema(self.model_spec().kind)
+    }
     fn default_model(&self) -> &'static str;
     fn offered_endpoints(&self, model: &str) -> Vec<Offer>;
     fn discover_endpoints(&self, model: &str) -> (Vec<Offer>, bool, Option<bool>) {

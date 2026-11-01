@@ -79,6 +79,35 @@ pub enum ModelKind {
     ModelsPageTokenBearer,
 }
 
+/// Provider-selected catalog shape; fetching, bounds and cursor escaping stay shared.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CatalogSchema {
+    pub collection: &'static str,
+    pub allow_top_level_array: bool,
+    pub pagination: CatalogPagination,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CatalogPagination {
+    None,
+    Flagged {
+        more: &'static str,
+        cursor: &'static str,
+        query: &'static str,
+    },
+    Token {
+        field: &'static str,
+        query: &'static str,
+    },
+}
+
+pub(crate) fn catalog_schema(provider: &str, fallback: ModelKind) -> CatalogSchema {
+    adapters::find(provider).map_or_else(
+        || adapters::catalog::schema(fallback),
+        |adapter| adapter.catalog_schema(),
+    )
+}
+
 /// Live model discovery details for a supported provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ModelSpec {
