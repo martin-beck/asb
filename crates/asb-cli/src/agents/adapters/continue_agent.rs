@@ -25,7 +25,20 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     format: super::super::ArtifactFormat::JsonLines,
 }])
 .with_collection(collect)
-.with_output_usage(output_usage);
+.with_output_usage(output_usage)
+.with_final_response(final_response);
+
+// In Continue headless JSON mode stdout is the model's final JSON value,
+// not a stream of agent event envelopes.
+fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
+    let text = output.trim();
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    match value {
+        serde_json::Value::String(answer) if !answer.trim().is_empty() => Some(answer),
+        serde_json::Value::String(_) | serde_json::Value::Null => None,
+        _ => Some(text.to_owned()),
+    }
+}
 
 // Headless JSON output is the model's answer, not a usage event. Usage comes
 // from the private session's assistant messages or a provider cassette.
@@ -273,6 +286,31 @@ fn configure(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn json_answer_is_available_for_grading() {
+        use crate::agents::AgentAdapter;
+        let output = r#"{"response":"answer", "status":"success"}"#;
+        let path = std::path::Path::new(".");
+        assert_eq!(
+            super::ADAPTER.final_response(output, path).as_deref(),
+            Some(output)
+        );
+        let json = r#"{"arbitrary":[1,2],"role":"tool"}"#;
+        assert_eq!(
+            super::ADAPTER.final_response(json, path).as_deref(),
+            Some(json)
+        );
+        assert_eq!(
+            super::ADAPTER
+                .final_response(r#""plain answer""#, path)
+                .as_deref(),
+            Some("plain answer")
+        );
+        for invalid in ["", "null", "not JSON", "{\"response\":"] {
+            assert!(super::ADAPTER.final_response(invalid, path).is_none());
+        }
+    }
+
     #[test]
     fn json_answer_is_not_usage_when_session_is_missing() {
         let answer = r#"{"usage":{"input_tokens":999,"output_tokens":888}}"#;
