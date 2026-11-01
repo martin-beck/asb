@@ -168,6 +168,7 @@ impl Prepared {
                     native_trace,
                     native_tool,
                     mcp_relays,
+                    recorder,
                 ) = if let Some(manifest) = self.source.manifest() {
                     let track = manifest.track(*id).map_err(input_error)?;
                     let mut mcp_relays = Vec::new();
@@ -222,6 +223,7 @@ impl Prepared {
                             .as_ref()
                             .map(|_| PathBuf::from(format!("inputs/native-tool-{id}.jsonl"))),
                         mcp_relays,
+                        track.recorder.clone(),
                     )
                 } else {
                     let track = self
@@ -241,6 +243,7 @@ impl Prepared {
                         None,
                         None,
                         Vec::new(),
+                        None,
                     )
                 };
                 total = total
@@ -251,6 +254,7 @@ impl Prepared {
                     })?;
                 let index = inputs.len();
                 inputs.push(ReplayInput {
+                    recorder,
                     complete,
                     track: Some(*id),
                     source: path,
@@ -278,6 +282,19 @@ impl Prepared {
     pub fn stage(&mut self, root: &Path, inputs: &mut [ReplayInput]) -> Result<(), Error> {
         private_directory(&root.join("inputs"), false)?;
         for input in inputs {
+            let expected_recorder = self
+                .source
+                .manifest()
+                .map(|manifest| manifest.track(input.track.expect("selected input identity")))
+                .transpose()
+                .map_err(input_error)?
+                .and_then(|track| track.recorder.as_deref());
+            if input.recorder.as_deref() != expected_recorder {
+                return Err(Error::Input(
+                    "selected recording adapter changed after planning; no agent was started"
+                        .into(),
+                ));
+            }
             // One bounded payload at a time, and only unique selected IDs.
             let bytes = self
                 .source
@@ -622,6 +639,7 @@ mod tests {
         )
         .unwrap();
         let input = ReplayInput {
+            recorder: None,
             complete: Some(true),
             track: Some(7),
             source: PathBuf::from("sealed.asb.zip"),
@@ -654,6 +672,7 @@ mod tests {
         fs::create_dir_all(root.join("batch")).unwrap();
         fs::write(root.join("inputs/local-tools-1.jsonl"), b"{}\n").unwrap();
         let input = ReplayInput {
+            recorder: None,
             complete: Some(true),
             track: Some(1),
             source: root.join("source"),
@@ -686,6 +705,7 @@ mod tests {
         fs::create_dir_all(root.join("batch")).unwrap();
         fs::write(root.join("inputs/tool-protocol-1.json"), b"{}\n").unwrap();
         let input = ReplayInput {
+            recorder: None,
             complete: Some(true),
             track: Some(1),
             source: root.join("source"),
@@ -716,6 +736,7 @@ mod tests {
         fs::create_dir_all(root.join("batch")).unwrap();
         fs::write(root.join("inputs/determinism-manifest-7.json"), b"{}\n").unwrap();
         let input = ReplayInput {
+            recorder: None,
             complete: Some(true),
             track: Some(7),
             source: PathBuf::from("sealed.asb.zip"),
@@ -761,6 +782,7 @@ mod tests {
             .unwrap();
         fs::write(root.join("inputs/native-trace-7.jsonl"), &trace).unwrap();
         let input = ReplayInput {
+            recorder: None,
             complete: Some(true),
             track: Some(7),
             source: PathBuf::from("sealed.asb.zip"),
@@ -800,6 +822,7 @@ mod tests {
         fs::create_dir_all(root.join("batch")).unwrap();
         fs::write(root.join("inputs/native-trace-7.jsonl"), b"{}\n").unwrap();
         let input = ReplayInput {
+            recorder: None,
             complete: Some(true),
             track: Some(7),
             source: PathBuf::from("sealed.asb.zip"),
@@ -835,6 +858,7 @@ mod tests {
         )
         .unwrap();
         let input = ReplayInput {
+            recorder: None,
             complete: Some(true),
             track: Some(7),
             source: PathBuf::from("sealed.asb.zip"),

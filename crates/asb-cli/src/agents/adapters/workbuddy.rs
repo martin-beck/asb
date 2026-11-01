@@ -405,6 +405,7 @@ mod tests {
             false,
             &root,
             Some("workbuddy"),
+            None,
         )
         .unwrap();
         assert!(replay_request(&session, replayed).contains("200 OK"));
@@ -417,6 +418,7 @@ mod tests {
             false,
             &root,
             Some("opencode"),
+            None,
         )
         .unwrap();
         assert!(replay_request(&strict, replayed).contains("409 Conflict"));

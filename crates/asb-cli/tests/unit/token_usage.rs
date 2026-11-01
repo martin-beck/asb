@@ -1,5 +1,5 @@
 use super::*;
-use crate::proxy::usage::from_cassette as usage_from_cassette;
+use crate::proxy::adapters::llmtape::usage::from_cassette as usage_from_cassette;
 use serde_json::json;
 
 #[test]

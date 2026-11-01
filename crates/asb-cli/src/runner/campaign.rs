@@ -79,6 +79,9 @@ pub(crate) struct Slot {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReplayInput {
+    /// Historical tracks omit this and use the legacy llmtape format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorder: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub complete: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

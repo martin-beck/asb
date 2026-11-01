@@ -2556,6 +2556,14 @@ mod tests {
             crate::workloads::TaskIdentity::local("explicit-tool-campaign", None).attempt_id
         ));
         std::fs::create_dir_all(&root).unwrap();
+        let executable = root.join(".asb-tools/codex/bin/codex");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "#!/bin/sh\nexit 99\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         std::fs::create_dir(root.join(".asb")).unwrap();
         std::fs::write(
             root.join(".asb/project.toml"),

@@ -879,6 +879,7 @@ impl RecordingJournal {
                     (0, digest(b""))
                 };
                 Track {
+                    recorder: None,
                     id: started.id,
                     batch: started.batch,
                     replica: started.replica,

@@ -17,6 +17,17 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+fn capture_matches_track(track: &Track, capture: &proxy::capture::CaptureEvidence) -> bool {
+    capture.bytes == track.bytes
+        && track
+            .recorder
+            .as_deref()
+            .unwrap_or(crate::proxy::legacy_recorder_name())
+            == capture.adapter
+        && capture.sha256 == track.sha256
+        && capture.complete == track.complete
+}
+
 /// Adapter-owned sidecars share a deliberately small aggregate budget.  Relay
 /// bundles are deduplicated protocol records, not a second copy of an agent
 /// session or its process output.
@@ -65,11 +76,9 @@ impl Evidence {
             .filter(|capture| capture.output == self.producer)
             .collect();
         if matching.len() > 1
-            || matching.iter().any(|capture| {
-                capture.bytes != track.bytes
-                    || capture.sha256 != track.sha256
-                    || capture.complete != track.complete
-            })
+            || matching
+                .iter()
+                .any(|capture| !capture_matches_track(track, capture))
             || (track.complete && matching.is_empty())
             || track.statistics.requests
                 != matching.first().map(|capture| capture.inference_requests)
@@ -483,6 +492,7 @@ impl Recorder {
                 .map(seal_native_tool_sidecar)
                 .transpose()?;
             let track = Track {
+                recorder: capture.map(|capture| capture.adapter.clone()),
                 id: (batch - 1) * self.concurrency as u64 + replica.index as u64,
                 batch,
                 replica: replica.index as u64,
@@ -928,6 +938,43 @@ mod tests {
     }
 
     #[test]
+    fn capture_recorder_identity_is_bound_to_track_and_legacy_llmtape() {
+        let mut track = Track {
+            recorder: Some("other-recorder".into()),
+            id: 1,
+            batch: 1,
+            replica: 1,
+            complete: true,
+            process_success: Some(true),
+            workload_success: Some(true),
+            bytes: 3,
+            sha256: crate::cassette::digest(b"{}\n"),
+            statistics: Statistics::default(),
+            native: None,
+            artifacts: Vec::new(),
+        };
+        let mut capture = proxy::capture::CaptureEvidence {
+            adapter: "other-recorder".into(),
+            output: PathBuf::from("/fixture"),
+            complete: true,
+            accepted: 1,
+            completed: 1,
+            failed: 0,
+            recorded: 1,
+            inference_requests: 1,
+            bytes: track.bytes,
+            sha256: track.sha256.clone(),
+        };
+        assert!(capture_matches_track(&track, &capture));
+        capture.adapter = "llmtape".into();
+        assert!(!capture_matches_track(&track, &capture));
+        track.recorder = None;
+        assert!(capture_matches_track(&track, &capture));
+        capture.adapter = "other-recorder".into();
+        assert!(!capture_matches_track(&track, &capture));
+    }
+
+    #[test]
     fn raw_cleanup_warning_has_only_a_stable_track_label() {
         let warning = raw_cleanup_warning(7);
         assert_eq!(
@@ -1048,6 +1095,7 @@ mod tests {
             fs::write(&output, b"{}\n").unwrap();
             let original = fs::metadata(&output).unwrap();
             let track = Track {
+                recorder: None,
                 id: 1,
                 batch: 1,
                 replica: 1,
@@ -1188,6 +1236,7 @@ mod tests {
             fs::write(&output, b"{}\n").unwrap();
             let original = fs::metadata(&output).unwrap();
             let track = Track {
+                recorder: None,
                 id: 1,
                 batch: 1,
                 replica: 1,
