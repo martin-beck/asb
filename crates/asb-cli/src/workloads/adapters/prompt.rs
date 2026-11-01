@@ -1,3 +1,5 @@
+pub(crate) mod evaluation;
+
 use super::PromptAdapter;
 
 /// One adapter covers the bundled prompt family. Its matching and materialized

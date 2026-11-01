@@ -1,4 +1,5 @@
 //! Offline filesystem and evaluator boundary checks. No agent or provider executes.
+use super::adapters::prompt::evaluation::{evaluate_builtin, source_expectation};
 use super::*;
 
 struct Fixture(PathBuf);
