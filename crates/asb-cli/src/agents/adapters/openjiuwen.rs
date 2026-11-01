@@ -251,6 +251,7 @@ fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> 
     let mut text = String::new();
     let mut answer = String::new();
     let mut finalized = None;
+    let mut saw_typed_answer = false;
     for event in output
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -261,6 +262,7 @@ fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> 
                 .and_then(|v| v.as_str())
                 == Some("answer")
         {
+            saw_typed_answer = true;
             finalized = event
                 .pointer("/payload/output")
                 .and_then(|v| v.as_str())
@@ -282,8 +284,8 @@ fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> 
     }
     // A typed final answer supersedes llm_output chunks, which can contain
     // earlier turns. Preserve legacy chunk-only captures as a fallback.
-    if let Some(finalized) = finalized {
-        (!finalized.trim().is_empty()).then_some(finalized)
+    if saw_typed_answer {
+        finalized.filter(|answer| !answer.trim().is_empty())
     } else if !text.trim().is_empty() {
         Some(text)
     } else if !answer.trim().is_empty() {
@@ -334,6 +336,20 @@ mod tests {
             super::final_response(output, std::path::Path::new(".")).as_deref(),
             Some("final answer")
         );
+        let intermediate = r#"{"type":"llm_output","payload":{"content":"intermediate"}}"#;
+        for terminal in [
+            r#"{"type":"answer","payload":{"result_type":"answer"}}"#,
+            r#"{"type":"answer","payload":{"result_type":"answer","output":42}}"#,
+            r#"{"type":"answer","payload":{"result_type":"answer","output":""}}"#,
+        ] {
+            assert!(
+                super::final_response(
+                    &format!("{intermediate}\n{terminal}"),
+                    std::path::Path::new(".")
+                )
+                .is_none()
+            );
+        }
     }
 
     use super::{command, step_count};
