@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use super::super::CollectorAdapter;
 use crate::measurements::{self, Session};
@@ -310,16 +309,16 @@ fn runtime_versions() -> BTreeMap<String, String> {
 }
 
 fn command_version(name: &str, argument: &str) -> Option<String> {
-    let output = Command::new(name)
-        .arg(argument)
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(if output.stdout.is_empty() {
-        &output.stderr
-    } else {
-        &output.stdout
-    });
+    command_version_with_deadline(name, argument, std::time::Duration::from_secs(2))
+}
+
+fn command_version_with_deadline(
+    name: &str,
+    argument: &str,
+    budget: std::time::Duration,
+) -> Option<String> {
+    let (stdout, stderr) = measurements::bounded_version(Path::new(name), argument, budget)?;
+    let text = String::from_utf8_lossy(if stdout.is_empty() { &stderr } else { &stdout });
     text.lines().find_map(sanitize)
 }
 
@@ -381,6 +380,89 @@ mod tests {
         classify_virtualization, parse_cpu_set, parse_cpuinfo, parse_memory_total_kib,
         runtime_versions, sanitize,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probes_are_bounded_offline_and_keep_successful_versions() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+        let root = std::env::temp_dir().join(format!(
+            "asb-version-probe-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = |name: &str, body: &str| {
+            let path = root.join(name);
+            std::fs::write(&path, format!("#!/usr/bin/python3\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+        let valid = fixture(
+            "valid",
+            "import os; assert os.environ['RUSTUP_AUTO_INSTALL'] == '0'; print('fixture 1.2')",
+        );
+        let failing = fixture("failing", "import sys; print('not a version'); sys.exit(3)");
+        let large = fixture("large", "print('x'*100000)");
+        let hanging = fixture("hanging", "import time; time.sleep(30)");
+        let check = |path: &std::path::Path| {
+            super::command_version_with_deadline(
+                path.to_str().unwrap(),
+                "--version",
+                Duration::from_millis(300),
+            )
+        };
+        assert_eq!(check(&valid).as_deref(), Some("fixture 1.2"));
+        assert!(check(&failing).is_none());
+        assert!(check(&large).is_none());
+        let started = Instant::now();
+        assert!(check(&hanging).is_none());
+        assert!(started.elapsed() < Duration::from_secs(3));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn version_probe_quiesces_pipe_holders_on_success_and_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+        let root = std::env::temp_dir().join(format!(
+            "asb-probe-descendants-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        for code in [0, 7] {
+            let marker = root.join(format!("pid-{code}"));
+            let script = root.join(format!("fixture-{code}"));
+            let body = format!(
+                "#!/usr/bin/python3\nimport os,time\npid=os.fork()\nif pid==0:\n open({:?},'w').write(str(os.getpid()))\n time.sleep(30)\n os._exit(0)\nwhile not os.path.exists({:?}): time.sleep(.005)\nprint('fixture 1.0',flush=True)\nos._exit({code})\n",
+                marker.to_str().unwrap(),
+                marker.to_str().unwrap()
+            );
+            std::fs::write(&script, body).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let result = super::command_version_with_deadline(
+                script.to_str().unwrap(),
+                "--version",
+                Duration::from_secs(2),
+            );
+            if code == 0 {
+                assert_eq!(result.as_deref(), Some("fixture 1.0"));
+            } else {
+                assert!(result.is_none());
+            }
+            let pid = std::fs::read_to_string(&marker).unwrap();
+            let proc_path = format!("/proc/{}", pid.trim());
+            let until = Instant::now() + Duration::from_secs(3);
+            while std::path::Path::new(&proc_path).exists() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                !std::path::Path::new(&proc_path).exists(),
+                "probe descendant remained alive"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn parses_x86_and_arm_cpu_identity_without_raw_proc_data() {

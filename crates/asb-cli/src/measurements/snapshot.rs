@@ -54,7 +54,7 @@ impl ProcessTreeSnapshot {
                 }
                 let pids = members.iter().map(|member| member.pid).collect::<Vec<_>>();
                 let request = arguments(&pids);
-                let Some(observation) = observe(&executable, request, &cancelled)? else {
+                let Some(observation) = observe(&executable, request, &cancelled, false)? else {
                     break;
                 };
                 if !root.matches() || members.iter().any(|member| !member.in_tree(root)) {
@@ -132,6 +132,27 @@ pub(crate) struct SnapshotCommand {
     pub arguments: Vec<String>,
     pub runtime: Duration,
     pub stream_bytes: usize,
+}
+
+pub(crate) fn bounded_version(
+    executable: &std::path::Path,
+    argument: &str,
+    budget: Duration,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    #[cfg(target_os = "linux")]
+    {
+        let request = SnapshotCommand {
+            arguments: vec![argument.to_owned()],
+            runtime: budget,
+            stream_bytes: 8192,
+        };
+        let result = observe(executable, request, &AtomicBool::new(false), true).ok()??;
+        Some((result.stdout, result.stderr))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        crate::runner::portable_version_capture(executable, argument, budget)
+    }
 }
 
 struct Observation {
@@ -231,6 +252,7 @@ fn observe(
     executable: &std::path::Path,
     request: SnapshotCommand,
     cancelled: &AtomicBool,
+    no_auto_install: bool,
 ) -> Result<Option<Observation>, String> {
     if request.runtime.is_zero()
         || request.runtime > Duration::from_secs(3600)
@@ -247,6 +269,9 @@ fn observe(
         launch.arg(argument);
     }
     let (mut command, route) = launch.native(Some(&runtime().map_err(|error| error.to_string())?));
+    if no_auto_install {
+        command.env("RUSTUP_AUTO_INSTALL", "0");
+    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -460,6 +485,7 @@ fn observe(
     _: &std::path::Path,
     _: SnapshotCommand,
     _: &AtomicBool,
+    _: bool,
 ) -> Result<Option<Observation>, String> {
     Err("bounded process-tree snapshot supervision requires Linux native gate support".into())
 }

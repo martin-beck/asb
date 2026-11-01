@@ -1506,6 +1506,41 @@ pub(crate) fn fixture_module_descriptor(
 }
 
 mod capture;
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn portable_version_capture(
+    executable: &std::path::Path,
+    argument: &str,
+    runtime: std::time::Duration,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg(argument)
+        .env("RUSTUP_AUTO_INSTALL", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = capture::OwnedChild::spawn_direct(&mut command).ok()?;
+    let result = capture::capture_with_output_streams(
+        child,
+        false,
+        &mut std::io::sink(),
+        None,
+        runtime,
+        capture::PresentationPolicy::PreserveEvidence,
+        &mut || Ok(()),
+    )
+    .ok()?;
+    if !result.output.status.success()
+        || result.capture_error.is_some()
+        || result.output.stdout.len() > 8192
+        || result.output.stderr.len() > 8192
+    {
+        return None;
+    }
+    Some((result.output.stdout, result.output.stderr))
+}
+
 #[cfg(unix)]
 pub(crate) use capture::transport::GuestTransport;
 use capture::{OwnedChild, PresentationPolicy, capture_with_output_streams};
