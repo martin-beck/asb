@@ -102,7 +102,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_process(process);
 
 fn final_response_failure(response: Option<&str>) -> Option<String> {
-    response.is_none().then(|| "OpenJiuwen exited without a final response; the last event appears to be an unexecuted tool call. Retry with a compatible OpenJiuwen client or inspect the benchmark log.".into())
+    response.is_none().then(|| "OpenJiuwen exited without a final response. Inspect the benchmark log for the terminal event or error.".into())
 }
 
 /// Launch the installed Python entry point with a narrow, in-process fix for
@@ -250,10 +250,23 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
 fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> {
     let mut text = String::new();
     let mut answer = String::new();
+    let mut finalized = None;
+    let mut saw_typed_answer = false;
     for event in output
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
     {
+        if event.get("type").and_then(|v| v.as_str()) == Some("answer")
+            && let Some(result_type) = event
+                .pointer("/payload/result_type")
+                .and_then(|v| v.as_str())
+        {
+            saw_typed_answer = true;
+            finalized = (result_type == "answer")
+                .then(|| event.pointer("/payload/output").and_then(|v| v.as_str()))
+                .flatten()
+                .map(str::to_owned);
+        }
         let target = match event.get("type").and_then(|v| v.as_str()) {
             Some("llm_output") => &mut text,
             Some("answer") => &mut answer,
@@ -268,7 +281,11 @@ fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> 
             target.push_str(content);
         }
     }
-    if !text.trim().is_empty() {
+    // A typed final answer supersedes llm_output chunks, which can contain
+    // earlier turns. Preserve legacy chunk-only captures as a fallback.
+    if saw_typed_answer {
+        finalized.filter(|answer| !answer.trim().is_empty())
+    } else if !text.trim().is_empty() {
         Some(text)
     } else if !answer.trim().is_empty() {
         Some(answer)
@@ -308,6 +325,34 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_answer_supersedes_intermediate_llm_output() {
+        let output = concat!(
+            "{\"type\":\"llm_output\",\"payload\":{\"content\":\"intermediate\"}}\n",
+            "{\"type\":\"answer\",\"payload\":{\"output\":\"final answer\",\"result_type\":\"answer\"}}\n"
+        );
+        assert_eq!(
+            super::final_response(output, std::path::Path::new(".")).as_deref(),
+            Some("final answer")
+        );
+        let intermediate = r#"{"type":"llm_output","payload":{"content":"intermediate"}}"#;
+        for terminal in [
+            r#"{"type":"answer","payload":{"result_type":"answer"}}"#,
+            r#"{"type":"answer","payload":{"result_type":"answer","output":42}}"#,
+            r#"{"type":"answer","payload":{"result_type":"answer","output":""}}"#,
+            r#"{"type":"answer","payload":{"result_type":"error","output":"failure"}}"#,
+            r#"{"type":"answer","payload":{"result_type":"interrupt","output":"interrupted"}}"#,
+        ] {
+            assert!(
+                super::final_response(
+                    &format!("{intermediate}\n{terminal}"),
+                    std::path::Path::new(".")
+                )
+                .is_none()
+            );
+        }
+    }
+
     use super::{command, step_count};
     use crate::agents::{ArtifactOwner, CollectionContext, CommandContext};
     use crate::benchmark::BenchmarkConfig;
