@@ -222,6 +222,15 @@ fn unusable_selected_agent_never_runs_a_different_path_installation() {
             marker.display()
         ),
     );
+    project.write(
+        "host-bin/npm",
+        "#!/bin/sh\nprintf invoked > \"$HOME/npm-invoked\"\nexit 91\n",
+    );
+    std::fs::set_permissions(
+        project.0.join("host-bin/npm"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
     std::fs::set_permissions(
         project.0.join("host-bin/codex"),
         std::fs::Permissions::from_mode(0o700),
@@ -234,18 +243,11 @@ fn unusable_selected_agent_never_runs_a_different_path_installation() {
     let body = serde_json::json!({"model":"fixture/model", "input":"fixture", "tools":[{"type":"function", "name":"fixture"}]}).to_string();
     let interaction = serde_json::json!({"request":{"method":"POST","url":"/v1/responses","body":body},"response":{"status":200,"headers":{"content-type":"application/json"},"body":"{}"}});
     project.write("input.jsonl", &format!("{interaction}\n"));
-    let run = || {
-        project.command_with_env(
-            &[
-                "run",
-                "benchmark.toml",
-                "--llm-replay",
-                "--cassette",
-                "input.jsonl",
-            ],
-            &[("PATH", path.to_str().unwrap())],
-        )
-    };
+    project.write("suite.toml", "configs=['benchmark.toml']\n");
+    project.write(
+        "tapes/000-benchmark/cassettes/benchmark-codex-bug-fix-fixture-model.jsonl",
+        &format!("{interaction}\n"),
+    );
     let selected = project.0.join(".asb-tools/codex/bin/codex");
     project.write(".asb-tools/codex/bin/codex", "not executable");
     std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -254,18 +256,59 @@ fn unusable_selected_agent_never_runs_a_different_path_installation() {
             std::fs::remove_file(&selected).unwrap();
             symlink(project.0.join("absent-native-package"), &selected).unwrap();
         }
-        let output = run();
-        assert!(!output.status.success());
-        assert!(
-            stderr(&output).contains("not a usable executable"),
-            "{}",
-            stderr(&output)
-        );
-        assert!(
-            !marker.exists(),
-            "an unusable selection must never start the host agent"
-        );
+        for args in [
+            vec!["run", "benchmark.toml"],
+            vec![
+                "run",
+                "benchmark.toml",
+                "--llm-replay",
+                "--cassette",
+                "input.jsonl",
+            ],
+            vec!["sweep", "suite.toml"],
+            vec![
+                "sweep",
+                "suite.toml",
+                "--llm-replay",
+                "--cassette-root",
+                "tapes",
+            ],
+        ] {
+            let output = project.command_with_env(&args, &[("PATH", path.to_str().unwrap())]);
+            assert!(!output.status.success());
+            assert!(
+                stderr(&output).contains("not a usable executable"),
+                "{}",
+                stderr(&output)
+            );
+            assert!(stderr(&output).contains("asb tool install codex"));
+            assert!(
+                !marker.exists(),
+                "an unusable selection must never start the host agent"
+            );
+            assert!(
+                !project.0.join("npm-invoked").exists(),
+                "an unusable selection must not be reinstalled implicitly"
+            );
+        }
     }
+    // Truly missing tools remain eligible for automatic installation.
+    std::fs::remove_file(&selected).unwrap();
+    let output = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "input.jsonl",
+        ],
+        &[("PATH", path.to_str().unwrap())],
+    );
+    assert!(!output.status.success());
+    assert!(
+        project.0.join("npm-invoked").exists(),
+        "missing agent did not attempt automatic installation"
+    );
 }
 
 #[cfg(unix)]

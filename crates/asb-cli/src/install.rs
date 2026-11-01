@@ -665,8 +665,15 @@ pub(crate) fn ensure_execution_requirements(
     let result = (|| -> InstallResult<()> {
         for id in execution_tool_ids(config) {
             let owned_context = context.with_destination(&tools_root.join(&id))?;
-            if !tool_installed_locally(&id, &tools_root) {
-                tool_in(
+            match local_lookup(&id, &tools_root) {
+                crate::executables::Lookup::Found(_) => {}
+                crate::executables::Lookup::Unusable(path) => {
+                    return Err(Error::Input(format!(
+                        "selected tool executable {} is not a usable executable; remove or repair it, then run `asb tool install {id}`",
+                        path.display()
+                    )).into());
+                }
+                crate::executables::Lookup::Missing => tool_in(
                     &owned_context,
                     ToolInstallOptions {
                         name: id,
@@ -676,7 +683,7 @@ pub(crate) fn ensure_execution_requirements(
                     },
                     output,
                     &mut progress,
-                )?;
+                )?,
             }
         }
         if external_workload(&config.workload).is_some() {
