@@ -983,6 +983,503 @@ mod tests {
     }
 
     #[test]
+    fn replay_waits_for_an_earlier_concurrent_request() {
+        let root = test_root();
+        let cassette = root.join("ordered.jsonl");
+        let first = r#"{"model":"m","messages":[{"content":"first"}]}"#;
+        let second = r#"{"model":"m","messages":[{"content":"second"}]}"#;
+        let line = |body: &str| {
+            serde_json::json!({"request":{"method":"POST","url":"/v1/chat/completions","body":body},"response":{"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"},"delay_ms":if body == second { 150 } else { 0 }}).to_string()
+        };
+        std::fs::write(&cassette, format!("{}\n{}\n", line(first), line(second))).unwrap();
+        let session = Session::start(
+            Mode::Replay,
+            &cassette,
+            None,
+            true,
+            Path::new("/tmp/workspace"),
+        )
+        .unwrap();
+        let address = session
+            .url()
+            .trim_start_matches("http://")
+            .trim_end_matches("/v1");
+        let mut later = TcpStream::connect(address).unwrap();
+        later
+            .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        write!(later, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{second}", second.len()).unwrap();
+        let mut probe = [0u8; 1];
+        let early = later.read(&mut probe);
+        let started = std::time::Instant::now();
+        let earlier_response = request(&session, first);
+        later
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut later_response = Vec::new();
+        if let Ok(n) = early {
+            later_response.extend_from_slice(&probe[..n]);
+        }
+        let _ = later.read_to_end(&mut later_response);
+        let elapsed = started.elapsed();
+        let stopped = session.stop();
+        assert!(
+            early.is_err(),
+            "later request received an immediate response"
+        );
+        assert!(earlier_response.contains("200 OK"), "{earlier_response}");
+        assert!(String::from_utf8_lossy(&later_response).contains("200 OK"));
+        assert!(
+            elapsed >= std::time::Duration::from_millis(100),
+            "recorded response delay was not respected: {elapsed:?}"
+        );
+        assert!(stopped.is_ok(), "{stopped:?}");
+
+        // A missing earlier request must not make proxy shutdown wait for the
+        // ordering timeout or claim the cassette was completely consumed.
+        let session = Session::start(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            Path::new("/tmp/workspace"),
+        )
+        .unwrap();
+        let address = session
+            .url()
+            .trim_start_matches("http://")
+            .trim_end_matches("/v1");
+        let mut waiting = TcpStream::connect(address).unwrap();
+        waiting
+            .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        write!(waiting, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{second}", second.len()).unwrap();
+        assert!(waiting.read(&mut [0u8; 1]).is_err());
+        let started = std::time::Instant::now();
+        assert!(session.stop().is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_waits_after_skipping_a_recorded_probe() {
+        let root = test_root();
+        let cassette = root.join("probe-ordered.jsonl");
+        let first = r#"{"model":"m","messages":[{"content":"first"}]}"#;
+        let second = r#"{"model":"m","messages":[{"content":"second"}]}"#;
+        let probe = serde_json::json!({"request":{"method":"GET","url":"/v1/models","body":null},"response":{"status":200,"headers":{},"body":"{}"}});
+        let line = |body: &str| serde_json::json!({"request":{"method":"POST","url":"/v1/chat/completions","body":body},"response":{"status":200,"headers":{},"body":"{}"}});
+        std::fs::write(
+            &cassette,
+            format!("{probe}\n{}\n{}\n", line(first), line(second)),
+        )
+        .unwrap();
+        let session = Session::start(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            Path::new("/tmp/workspace"),
+        )
+        .unwrap();
+        let address = session
+            .url()
+            .trim_start_matches("http://")
+            .trim_end_matches("/v1");
+        let mut later = TcpStream::connect(address).unwrap();
+        later
+            .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        write!(later, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{second}", second.len()).unwrap();
+        let mut byte = [0u8; 1];
+        let early = later.read(&mut byte);
+        let first_response = request(&session, first);
+        later
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut response = Vec::new();
+        if let Ok(n) = early {
+            response.extend_from_slice(&byte[..n]);
+        }
+        let _ = later.read_to_end(&mut response);
+        let stopped = session.stop();
+        let _ = std::fs::remove_dir_all(root);
+        assert!(
+            early.is_err(),
+            "later request was rejected after probe skipping"
+        );
+        assert!(first_response.contains("200 OK"), "{first_response}");
+        assert!(String::from_utf8_lossy(&response).contains("200 OK"));
+        assert!(stopped.is_ok(), "{stopped:?}");
+    }
+
+    #[test]
+    fn queued_requests_wait_for_a_delayed_recorded_probe() {
+        let root = test_root();
+        let cassette = root.join("delayed-probe.jsonl");
+        let first = r#"{"model":"m","messages":[{"content":"first"}]}"#;
+        let later_body = r#"{"model":"m","messages":[{"content":"later"}]}"#;
+        for later_is_post in [false, true] {
+            let row = |method: &str, url: &str, body: Option<&str>| serde_json::json!({"request":{"method":method,"url":url,"body":body},"response":{"status":200,"headers":{},"body":"{}"}});
+            let later_method = if later_is_post { "POST" } else { "GET" };
+            let later_path = if later_is_post {
+                "/v1/chat/completions"
+            } else {
+                "/v1/other"
+            };
+            let body = if later_is_post { later_body } else { "" };
+            std::fs::write(
+                &cassette,
+                format!(
+                    "{}\n{}\n{}\n",
+                    row("POST", "/v1/chat/completions", Some(first)),
+                    row("GET", "/v1/models", None),
+                    row(later_method, later_path, (!body.is_empty()).then_some(body))
+                ),
+            )
+            .unwrap();
+            let session = Session::start(
+                Mode::Replay,
+                &cassette,
+                None,
+                false,
+                Path::new("/tmp/workspace"),
+            )
+            .unwrap();
+            let address = session
+                .url()
+                .trim_start_matches("http://")
+                .trim_end_matches("/v1");
+            let mut later = TcpStream::connect(address).unwrap();
+            later
+                .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                .unwrap();
+            write!(later, "{later_method} {later_path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            let mut byte = [0u8; 1];
+            let early = later.read(&mut byte);
+            let first_response = request(&session, first);
+            let mut probe = TcpStream::connect(address).unwrap();
+            probe
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            write!(
+                probe,
+                "GET /v1/models HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut probe_response = String::new();
+            probe.read_to_string(&mut probe_response).unwrap();
+            later
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut later_response = Vec::new();
+            if let Ok(n) = early {
+                later_response.extend_from_slice(&byte[..n]);
+            }
+            let _ = later.read_to_end(&mut later_response);
+            let stopped = session.stop();
+            assert!(early.is_err(), "later request returned before first");
+            assert!(first_response.contains("200 OK"), "{first_response}");
+            assert!(probe_response.contains("200 OK"), "{probe_response}");
+            assert!(
+                String::from_utf8_lossy(&later_response).contains("200 OK"),
+                "{}",
+                String::from_utf8_lossy(&later_response)
+            );
+            assert!(stopped.is_ok(), "{stopped:?}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn omitted_queued_probe_is_skipped_without_waiting_for_deadline() {
+        let root = test_root();
+        let cassette = root.join("omitted-probe.jsonl");
+        let first = r#"{"model":"m","messages":[{"content":"first"}]}"#;
+        let later_body = r#"{"model":"m","messages":[{"content":"later"}]}"#;
+        let row = |method: &str, url: &str, body: Option<&str>| serde_json::json!({"request":{"method":method,"url":url,"body":body},"response":{"status":200,"headers":{},"body":"{}"}});
+        std::fs::write(
+            &cassette,
+            format!(
+                "{}\n{}\n{}\n",
+                row("POST", "/v1/chat/completions", Some(first)),
+                row("GET", "/v1/models", None),
+                row("POST", "/v1/chat/completions", Some(later_body))
+            ),
+        )
+        .unwrap();
+        let session = Session::start(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            Path::new("/tmp/workspace"),
+        )
+        .unwrap();
+        let address = session
+            .url()
+            .trim_start_matches("http://")
+            .trim_end_matches("/v1");
+        let mut later = TcpStream::connect(address).unwrap();
+        later
+            .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        write!(later, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{later_body}", later_body.len()).unwrap();
+        assert!(later.read(&mut [0u8; 1]).is_err());
+        let started = std::time::Instant::now();
+        let earlier = request(&session, first);
+        later
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut response = String::new();
+        later.read_to_string(&mut response).unwrap();
+        let elapsed = started.elapsed();
+        let stopped = session.stop();
+        let _ = std::fs::remove_dir_all(root);
+        assert!(earlier.contains("200 OK"));
+        assert!(response.contains("200 OK"), "{response}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "omitted probe delayed replay: {elapsed:?}"
+        );
+        assert!(stopped.is_ok(), "{stopped:?}");
+    }
+
+    #[test]
+    fn omitted_probe_does_not_block_a_queued_bodyless_request() {
+        let root = test_root();
+        let cassette = root.join("omitted-probe-get.jsonl");
+        let first = r#"{"model":"m","messages":[{"content":"first"}]}"#;
+        let row = |method: &str, path: &str, body: Option<&str>| serde_json::json!({"request":{"method":method,"url":path,"body":body},"response":{"status":200,"headers":{},"body":"{}"}});
+        std::fs::write(
+            &cassette,
+            format!(
+                "{}\n{}\n{}\n",
+                row("POST", "/v1/chat/completions", Some(first)),
+                row("GET", "/v1/models", None),
+                row("GET", "/v1/other", None)
+            ),
+        )
+        .unwrap();
+        let session = Session::start(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            Path::new("/tmp/workspace"),
+        )
+        .unwrap();
+        let address = session
+            .url()
+            .trim_start_matches("http://")
+            .trim_end_matches("/v1");
+        let mut later = TcpStream::connect(address).unwrap();
+        later
+            .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        write!(
+            later,
+            "GET /v1/other HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let early = later.read(&mut [0u8; 1]);
+        let earlier = request(&session, first);
+        later
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut response = String::new();
+        let read = later.read_to_string(&mut response);
+        let stopped = session.stop();
+        let _ = std::fs::remove_dir_all(root);
+        assert!(early.is_err());
+        assert!(earlier.contains("200 OK"));
+        assert!(read.is_ok(), "bodyless request did not proceed: {read:?}");
+        assert!(response.contains("200 OK"), "{response}");
+        assert!(stopped.is_ok(), "{stopped:?}");
+    }
+
+    #[test]
+    fn a_different_bodyless_probe_does_not_skip_the_current_probe() {
+        let root = test_root();
+        let cassette = root.join("distinct-probe.jsonl");
+        let row = serde_json::json!({"request":{"method":"GET","url":"/v1/models","body":null},"response":{"status":200,"headers":{},"body":"models"}});
+        std::fs::write(&cassette, format!("{row}\n")).unwrap();
+        let session = Session::start(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            Path::new("/tmp/workspace"),
+        )
+        .unwrap();
+        let get = |path: &str| {
+            let address = session
+                .url()
+                .trim_start_matches("http://")
+                .trim_end_matches("/v1");
+            let mut socket = TcpStream::connect(address).unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            write!(
+                socket,
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).unwrap();
+            response
+        };
+        let wrong = get("/v1/health");
+        let right = get("/v1/models");
+        let stopped = session.stop();
+        let _ = std::fs::remove_dir_all(root);
+        assert!(wrong.contains("409 Conflict"), "{wrong}");
+        assert!(right.contains("models"), "{right}");
+        assert!(stopped.is_err(), "the rejected probe must remain visible");
+    }
+
+    #[test]
+    fn skipped_duplicate_probes_are_available_once_each() {
+        let root = test_root();
+        let cassette = root.join("duplicate-probes.jsonl");
+        let body = r#"{"model":"m","messages":[{"content":"first"}]}"#;
+        let row = |method: &str, path: &str, request: Option<&str>, response: &str| serde_json::json!({"request":{"method":method,"url":path,"body":request},"response":{"status":200,"headers":{},"body":response},"delay_ms":if response == "probe-one" { 150 } else { 0 }});
+        std::fs::write(
+            &cassette,
+            format!(
+                "{}\n{}\n{}\n",
+                row("GET", "/v1/models", None, "probe-one"),
+                row("GET", "/v1/models", None, "probe-two"),
+                row("POST", "/v1/chat/completions", Some(body), "workload")
+            ),
+        )
+        .unwrap();
+        let session = Session::start(
+            Mode::Replay,
+            &cassette,
+            None,
+            true,
+            Path::new("/tmp/workspace"),
+        )
+        .unwrap();
+        let workload = request(&session, body);
+        let get = |path: &str| {
+            let address = session
+                .url()
+                .trim_start_matches("http://")
+                .trim_end_matches("/v1");
+            let mut socket = TcpStream::connect(address).unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            write!(
+                socket,
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).unwrap();
+            response
+        };
+        let wrong = get("/v1/health");
+        let started = std::time::Instant::now();
+        let first = get("/v1/models");
+        let elapsed = started.elapsed();
+        let second = get("/v1/models");
+        let extra = get("/v1/models");
+        let stopped = session.stop();
+        let _ = std::fs::remove_dir_all(root);
+        assert!(workload.contains("200 OK"));
+        assert!(wrong.contains("409 Conflict"), "{wrong}");
+        assert!(first.contains("probe-one"), "{first}");
+        assert!(
+            elapsed >= std::time::Duration::from_millis(100),
+            "deferred probe ignored recorded timing: {elapsed:?}"
+        );
+        assert!(second.contains("probe-two"), "{second}");
+        assert!(extra.contains("409 Conflict"), "{extra}");
+        assert!(stopped.is_err(), "mismatches must remain visible");
+    }
+
+    #[test]
+    fn queued_duplicate_requests_consume_distinct_recorded_responses() {
+        let root = test_root();
+        let cassette = root.join("duplicate-ordered.jsonl");
+        let first = r#"{"model":"m","messages":[{"content":"first"}]}"#;
+        let repeated = r#"{"model":"m","messages":[{"content":"repeat"}]}"#;
+        let line = |body: &str, response: &str| serde_json::json!({"request":{"method":"POST","url":"/v1/chat/completions","body":body},"response":{"status":200,"headers":{},"body":response}});
+        std::fs::write(
+            &cassette,
+            format!(
+                "{}\n{}\n{}\n",
+                line(first, "first"),
+                line(repeated, "reply-one"),
+                line(repeated, "reply-two")
+            ),
+        )
+        .unwrap();
+        let session = Session::start(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            Path::new("/tmp/workspace"),
+        )
+        .unwrap();
+        let address = session
+            .url()
+            .trim_start_matches("http://")
+            .trim_end_matches("/v1");
+        let mut sockets = Vec::new();
+        for _ in 0..2 {
+            let mut socket = TcpStream::connect(address).unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                .unwrap();
+            write!(socket, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{repeated}", repeated.len()).unwrap();
+            let mut byte = [0u8; 1];
+            assert!(
+                socket.read(&mut byte).is_err(),
+                "duplicate arrived before its turn"
+            );
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            sockets.push(socket);
+        }
+        let first_response = request(&session, first);
+        let responses: Vec<String> = sockets
+            .into_iter()
+            .map(|mut socket| {
+                let mut text = String::new();
+                socket.read_to_string(&mut text).unwrap();
+                text
+            })
+            .collect();
+        let stopped = session.stop();
+        let _ = std::fs::remove_dir_all(root);
+        assert!(first_response.contains("200 OK"));
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|response| response.contains("reply-one"))
+                .count(),
+            1,
+            "{responses:?}"
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|response| response.contains("reply-two"))
+                .count(),
+            1,
+            "{responses:?}"
+        );
+        assert!(stopped.is_ok(), "{stopped:?}");
+    }
+
+    #[test]
     fn replay_normalizes_sweep_result_workspace_slugs() {
         let root = test_root();
         let cassette = root.join("sweep-workspace.jsonl");
