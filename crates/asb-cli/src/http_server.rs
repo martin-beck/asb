@@ -35,6 +35,14 @@ struct State {
     publication: PathBuf,
     traces: Vec<PathBuf>,
     pid: Option<u32>,
+    #[serde(default)]
+    control: Option<Control>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Control {
+    port: u16,
+    token: String,
 }
 
 /// URLs served by this project's current report server.
@@ -131,7 +139,7 @@ fn start(
     let _owner = lock_project(root)?;
     let path = state_path(root);
     if let Ok(previous) = read_state(&path) {
-        let _ = stop(&path, &previous);
+        stop(&path, &previous)?;
     }
     let generation = crate::tools::runtime::unique_id();
     let publication = root.join(".asb").join(PUBLICATION_DIR).join(&generation);
@@ -145,6 +153,7 @@ fn start(
         publication,
         traces,
         pid: None,
+        control: None,
     };
     let private_state = root
         .join(".asb")
@@ -195,6 +204,12 @@ pub(crate) fn entry(args: &[std::ffi::OsString]) -> std::process::ExitCode {
 }
 
 fn serve(state_path: &Path, mut state: State) -> Result<(), Error> {
+    let control = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(crate::io_error)?;
+    control.set_nonblocking(true).map_err(crate::io_error)?;
+    let control_address = Control {
+        port: control.local_addr().map_err(crate::io_error)?.port(),
+        token: crate::tools::runtime::unique_id(),
+    };
     for _ in 0..8 {
         let reservation = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(crate::io_error)?;
         let port = reservation.local_addr().map_err(crate::io_error)?.port();
@@ -216,6 +231,7 @@ fn serve(state_path: &Path, mut state: State) -> Result<(), Error> {
         }
         state.port = port;
         state.pid = Some(child.id());
+        state.control = Some(control_address.clone());
         write_state(state_path, &state)?;
         let (activity_tx, activity_rx) = mpsc::channel();
         if let Some(stream) = child.stdout.take() {
@@ -229,6 +245,27 @@ fn serve(state_path: &Path, mut state: State) -> Result<(), Error> {
         loop {
             if child.try_wait().map_err(crate::io_error)?.is_some() {
                 break;
+            }
+            if let Ok((mut connection, _)) = control.accept() {
+                let _ = connection.set_read_timeout(Some(Duration::from_millis(500)));
+                let mut line = String::new();
+                let valid = BufReader::new(&mut connection)
+                    .take(256)
+                    .read_line(&mut line)
+                    .is_ok()
+                    && line.trim_end() == control_address.token;
+                if valid {
+                    let stopped = child.kill().and_then(|()| child.wait()).is_ok();
+                    let response = if stopped {
+                        format!("stopped {}\n", control_address.token)
+                    } else {
+                        "failed\n".into()
+                    };
+                    let _ = connection.write_all(response.as_bytes());
+                    if stopped {
+                        break;
+                    }
+                }
             }
             if activity_rx.recv_timeout(Duration::from_millis(200)).is_ok() {
                 last_served = Instant::now();
@@ -281,17 +318,51 @@ fn wait_for_port(port: u16, child: &mut std::process::Child) -> bool {
 }
 
 fn stop(state_path: &Path, state: &State) -> Result<(), Error> {
-    if let Some(pid) = state.pid {
-        #[cfg(windows)]
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .status();
-        #[cfg(not(windows))]
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status();
+    if state.pid.is_some() {
+        stop_owned(state.control.as_ref())?;
     }
     let _ = fs::remove_file(state_path);
+    Ok(())
+}
+
+fn stop_owned(control: Option<&Control>) -> Result<(), Error> {
+    let control = control.ok_or_else(|| Error::Run("HTTP server state has no owned control endpoint; inspect the previous server and remove stale state before retrying".into()))?;
+    if control.port == 0
+        || control.token.is_empty()
+        || control.token.len() > 128
+        || !control
+            .token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    {
+        return Err(Error::Run(
+            "HTTP server control identity is malformed; state preserved".into(),
+        ));
+    }
+    let address = std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, control.port));
+    let mut stream =
+        TcpStream::connect_timeout(&address, Duration::from_secs(2)).map_err(|error| {
+            Error::Run(format!(
+                "cannot contact owned HTTP server control endpoint: {error}; state preserved"
+            ))
+        })?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(crate::io_error)?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(crate::io_error)?;
+    writeln!(stream, "{}", control.token).map_err(crate::io_error)?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .take(256)
+        .read_line(&mut response)
+        .map_err(crate::io_error)?;
+    if response != format!("stopped {}\n", control.token) {
+        return Err(Error::Run(
+            "HTTP server did not confirm owned shutdown; state preserved".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -564,6 +635,43 @@ fn percent_encode_path(value: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_server_pid_never_signals_an_unrelated_process() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        fs::create_dir_all(root.join(".asb")).unwrap();
+        let mut sentinel = Command::new("sleep").arg("30").spawn().unwrap();
+        let state = State {
+            schema_version: 1,
+            generation: Some("stale".into()),
+            port: 1,
+            public_host: "localhost".into(),
+            executable: "fixture".into(),
+            publication: root.join("publication"),
+            traces: vec![],
+            pid: Some(sentinel.id()),
+            control: None,
+        };
+        let path = state_path(&root);
+        write_state(&path, &state).unwrap();
+        let result = stop(&path, &state);
+        std::thread::sleep(Duration::from_millis(50));
+        let still_running = sentinel.try_wait().unwrap().is_none();
+        let state_preserved = path.exists();
+        let _ = sentinel.kill();
+        let _ = sentinel.wait();
+        fs::remove_dir_all(root).unwrap();
+        assert!(result.is_err());
+        assert!(
+            still_running,
+            "stale PID must not signal an unrelated process"
+        );
+        assert!(
+            state_preserved,
+            "unverified state must remain available for inspection"
+        );
+    }
+
     #[test]
     fn old_server_cleanup_preserves_a_new_server_state_and_report() {
         let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
@@ -577,6 +685,7 @@ mod tests {
             publication: root.join(".asb/http-publication").join(generation),
             traces: vec![],
             pid: None,
+            control: None,
         };
         let old = make("old");
         let new = make("new");
