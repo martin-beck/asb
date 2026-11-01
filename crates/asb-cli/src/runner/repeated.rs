@@ -166,6 +166,7 @@ enum PreparedReplay {
 /// Only presentation and saved policy survive preparation as execution options.
 /// Routing/counts/timings come from the owned plan/source, not parallel copies.
 struct ActivationOptions {
+    invocation_dir: Option<PathBuf>,
     json: bool,
     show_output: bool,
     quiet_output: bool,
@@ -317,11 +318,11 @@ impl Inspection {
             Some(if let Some(selection) = selection {
                 selection.clone()
             } else {
-                let directory = std::env::var_os("ASB_WORKLOAD_DIR")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| {
-                        crate::project::resolve(&project_root, &settings.workloads_dir)
-                    });
+                let directory = crate::project::environment_path(
+                    "ASB_WORKLOAD_DIR",
+                    options.invocation_dir.unwrap_or_else(|| Path::new(".")),
+                )
+                .unwrap_or_else(|| crate::project::resolve(&project_root, &settings.workloads_dir));
                 let catalog = crate::workloads::planning_catalog(&config.workload, &directory)
                     .map_err(Error::Input)?;
                 crate::workloads::describe_selection(&config, &directory, catalog.as_ref())
@@ -375,6 +376,7 @@ impl Inspection {
             // project authority can differ from the canonical source location.
             config_path: std::path::absolute(config_path).map_err(io_error)?,
             options: ActivationOptions {
+                invocation_dir: options.invocation_dir.map(Path::to_path_buf),
                 json: options.json,
                 show_output: options.show_output,
                 quiet_output: options.quiet_output,
@@ -1173,6 +1175,7 @@ mod tests {
                 },
                 true,
                 false,
+                None,
                 None,
                 if case == "presentation" {
                     &mut broken

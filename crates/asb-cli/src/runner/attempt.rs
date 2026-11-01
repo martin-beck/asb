@@ -87,7 +87,10 @@ impl<'a> ConfiguredAttempt<'a> {
                     .unwrap_or_else(|| default_cassette(config_path, &config)),
             )
         });
-        let network = project::network_project(&project_root);
+        let network = project::network_project_at(
+            &project_root,
+            options.invocation_dir.unwrap_or_else(|| Path::new(".")),
+        );
         let context = Context {
             config_path: config_path.into(),
             publication_config,
@@ -471,9 +474,11 @@ impl<'a> ReadyAttempt<'a> {
             &config.workspace
         };
         let workspace = project::resolve(project_root, workspace_name);
-        let workload_directory = std::env::var_os("ASB_WORKLOAD_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| project::resolve(project_root, &project_config.workloads_dir));
+        let workload_directory = project::environment_path(
+            "ASB_WORKLOAD_DIR",
+            options.invocation_dir.unwrap_or_else(|| Path::new(".")),
+        )
+        .unwrap_or_else(|| project::resolve(project_root, &project_config.workloads_dir));
         let allocation = |reference: &workloads::recovery::AttemptReference| {
             options.on_completion.map_or(Ok(()), |observer| {
                 observer
@@ -697,25 +702,30 @@ impl<'a> ReadyAttempt<'a> {
                         } else {
                             providers::tape_upstream(&config.provider, bridge_url)
                         };
-                        Ok(Some(tape::Session::start_for_agent(
+                        Ok(Some(tape::Session::start_for_agent_at(
                             *mode,
                             cassette,
                             upstream.as_deref(),
                             respect_record_timings,
-                            &workspace,
-                            Some(&config.agent),
-                            if *mode == tape::Mode::Replay {
-                                Some(
-                                    options
-                                        .native_tool_inputs
-                                        .and_then(|inputs| {
-                                            inputs.get(options.replica.index.checked_sub(1)?)
-                                        })
-                                        .and_then(|input| input.recorder.as_deref())
-                                        .unwrap_or(crate::proxy::legacy_recorder_name()),
-                                )
-                            } else {
-                                None
+                            tape::AgentContext {
+                                workspace: &workspace,
+                                agent: Some(&config.agent),
+                                recorder: if *mode == tape::Mode::Replay {
+                                    Some(
+                                        options
+                                            .native_tool_inputs
+                                            .and_then(|inputs| {
+                                                inputs.get(options.replica.index.checked_sub(1)?)
+                                            })
+                                            .and_then(|input| input.recorder.as_deref())
+                                            .unwrap_or(crate::proxy::legacy_recorder_name()),
+                                    )
+                                } else {
+                                    None
+                                },
+                                invocation_dir: options
+                                    .invocation_dir
+                                    .unwrap_or_else(|| Path::new(".")),
                             },
                         )?))
                     } else {
@@ -913,6 +923,7 @@ impl<'a> ReadyAttempt<'a> {
                     config_path,
                     config,
                     project_root,
+                    invocation_dir: options.invocation_dir.unwrap_or_else(|| Path::new(".")),
                     project_config,
                     invocation: prepared.workload.invocation(),
                     fresh_state: options.batch.is_some(),

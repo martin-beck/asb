@@ -131,13 +131,28 @@ pub(in crate::providers) fn prepare(
 }
 
 pub(in crate::providers) fn local_executable() -> Option<String> {
-    let (root, config) = crate::project::load(std::path::Path::new(".")).ok()?;
+    let base = crate::project::network_root();
+    let (root, config) = crate::project::load(&base).ok()?;
+    local_executable_at(
+        &root,
+        &config,
+        &crate::project::network_invocation_dir(),
+        std::env::var_os("ASB_TOOL_DIR").as_deref(),
+    )
+}
+
+fn local_executable_at(
+    root: &std::path::Path,
+    config: &crate::project::ProjectConfig,
+    invocation_dir: &std::path::Path,
+    override_dir: Option<&std::ffi::OsStr>,
+) -> Option<String> {
     let mut candidates = Vec::new();
-    if let Some(directory) = std::env::var_os("ASB_TOOL_DIR") {
-        candidates.push(std::path::PathBuf::from(directory).join("codex-bridge"));
+    if let Some(directory) = override_dir {
+        candidates.push(invocation_dir.join(directory).join("codex-bridge"));
     }
     candidates.push(
-        crate::project::resolve(&root, &config.tools_dir)
+        crate::project::resolve(root, &config.tools_dir)
             .join("cli2key/node_modules/.bin/codex-bridge"),
     );
     candidates
@@ -145,6 +160,41 @@ pub(in crate::providers) fn local_executable() -> Option<String> {
         .find(|candidate| candidate.is_file())
         .and_then(|candidate| candidate.canonicalize().ok())
         .map(|candidate| candidate.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    #[test]
+    fn relative_bridge_override_uses_invocation_directory_inside_project() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-cli2key-context-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let nested = root.join("nested");
+        std::fs::create_dir_all(nested.join("custom")).unwrap();
+        std::fs::create_dir_all(root.join("custom")).unwrap();
+        let selected = nested.join("custom/codex-bridge");
+        std::fs::write(&selected, "nested").unwrap();
+        std::fs::write(root.join("custom/codex-bridge"), "root").unwrap();
+        assert_eq!(
+            local_executable_at(
+                &root,
+                &crate::project::ProjectConfig::default(),
+                &nested,
+                Some(std::ffi::OsStr::new("custom"))
+            ),
+            Some(
+                selected
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// A cli2key API endpoint and the optional server process ASB owns.
@@ -225,9 +275,7 @@ impl Bridge {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or(discovered_key);
-            let proxy_root = std::env::current_dir()
-            .map_err(|error| Error::Run(format!("cannot locate the project directory for the cli2key compatibility proxy: {error}")))?
-            .join(".asb-runtime");
+            let proxy_root = crate::project::network_invocation_dir().join(".asb-runtime");
             std::fs::create_dir_all(&proxy_root).map_err(|error| {
                 Error::Run(format!(
                     "cannot create cli2key compatibility proxy directory {}: {error}",
@@ -239,6 +287,7 @@ impl Bridge {
             resources.files = Some(files);
             let upstream = base_url.clone();
             let mut command = Command::new("node");
+            command.current_dir(crate::project::network_invocation_dir());
             crate::project::apply_network_proxy(&mut command, std::path::Path::new("."))?;
             command
                 .arg(
@@ -294,6 +343,7 @@ fn start_bridge_with(
             None => allocate()?,
         };
         let mut command = Command::new(executable);
+        command.current_dir(crate::project::network_invocation_dir());
         crate::project::apply_network_proxy(&mut command, std::path::Path::new("."))?;
         command
             .arg("serve")

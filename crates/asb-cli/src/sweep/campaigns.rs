@@ -35,6 +35,7 @@ struct ContinuedWorker {
     admitted: super::checkpoint::campaigns::AdmittedCampaign,
     json: bool,
     show_output: bool,
+    invocation_dir: Option<PathBuf>,
     policy: Option<crate::planning::ResolvedPlan>,
 }
 
@@ -245,6 +246,7 @@ pub(super) fn prepare(
             entry.configuration.clone(),
             repeat,
             runner::RunOptions {
+                invocation_dir: options.invocation_dir,
                 max_steps: options.max_steps,
                 json: options.json,
                 show_output: options.show_output,
@@ -352,6 +354,7 @@ impl Pool {
                             admitted,
                             json: options.json,
                             show_output: options.show_output,
+                            invocation_dir: options.invocation_dir.map(Path::to_path_buf),
                             policy: entry.policy.clone(),
                         })))),
                         settlement,
@@ -383,6 +386,7 @@ impl Pool {
             Worker::Continued(worker) => worker.admitted.execute(
                 worker.json,
                 worker.show_output,
+                worker.invocation_dir.as_deref(),
                 worker.policy.as_ref(),
                 output,
                 warnings,

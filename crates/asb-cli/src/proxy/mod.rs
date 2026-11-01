@@ -15,6 +15,7 @@ pub(crate) struct RecordingRequest<'a> {
     pub cassette: &'a std::path::Path,
     pub respect_record_timings: bool,
     pub workspace: &'a std::path::Path,
+    pub invocation_dir: &'a std::path::Path,
     pub wire_extension: Option<&'static str>,
 }
 
@@ -55,14 +56,20 @@ pub(crate) trait ProxyAdapter: Sync {
     }
     /// Adapter-owned execution files, without starting a hop or touching a
     /// cassette. Transitive interpreter/library discovery is a separate layer.
-    fn input_files(&self) -> Result<Vec<std::path::PathBuf>, Error> {
+    fn input_files(
+        &self,
+        _invocation_dir: &std::path::Path,
+    ) -> Result<Vec<std::path::PathBuf>, Error> {
         Err(Error::Input(
             "selected proxy does not declare its execution inputs".into(),
         ))
     }
-    fn runtime_inputs(&self) -> Result<Vec<crate::runtime_inputs::Dependency>, Error> {
+    fn runtime_inputs(
+        &self,
+        invocation_dir: &std::path::Path,
+    ) -> Result<Vec<crate::runtime_inputs::Dependency>, Error> {
         Ok(self
-            .input_files()?
+            .input_files(invocation_dir)?
             .into_iter()
             .map(crate::runtime_inputs::Dependency::program)
             .collect())
@@ -208,7 +215,10 @@ fn validate_recording_chain(
     Ok(())
 }
 
-pub(crate) fn input_files(default_name: &str) -> Result<Vec<std::path::PathBuf>, Error> {
+pub(crate) fn input_files(
+    default_name: &str,
+    invocation_dir: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, Error> {
     let mut paths = Vec::new();
     for name in configured_chain(default_name)? {
         let adapter = adapters::REGISTRY
@@ -218,7 +228,7 @@ pub(crate) fn input_files(default_name: &str) -> Result<Vec<std::path::PathBuf>,
             .ok_or_else(|| {
                 Error::Input("selected proxy has no registered input declaration".into())
             })?;
-        paths.extend(adapter.input_files()?);
+        paths.extend(adapter.input_files(invocation_dir)?);
     }
     paths.sort();
     paths.dedup();
@@ -227,6 +237,7 @@ pub(crate) fn input_files(default_name: &str) -> Result<Vec<std::path::PathBuf>,
 
 pub(crate) fn runtime_inputs(
     default_name: &str,
+    invocation_dir: &std::path::Path,
 ) -> Result<Vec<crate::runtime_inputs::Dependency>, Error> {
     let mut inputs = Vec::new();
     for name in configured_chain(default_name)? {
@@ -235,7 +246,7 @@ pub(crate) fn runtime_inputs(
             .copied()
             .find(|adapter| adapter.name().eq_ignore_ascii_case(&name))
             .ok_or_else(|| Error::Input("selected proxy has no runtime declaration".into()))?;
-        inputs.extend(adapter.runtime_inputs()?);
+        inputs.extend(adapter.runtime_inputs(invocation_dir)?);
     }
     Ok(inputs)
 }
@@ -510,6 +521,7 @@ mod tests {
             cassette: std::path::Path::new("fixture"),
             respect_record_timings: false,
             workspace: std::path::Path::new("."),
+            invocation_dir: std::path::Path::new("."),
             wire_extension: None,
         };
         let selected = resolve_recorder(registry, request.recorder).unwrap();
@@ -638,6 +650,7 @@ mod tests {
             cassette,
             respect_record_timings: true,
             workspace: std::path::Path::new("."),
+            invocation_dir: std::path::Path::new("."),
             wire_extension: None,
         };
         let settings = selected.recording_settings(&request).unwrap();

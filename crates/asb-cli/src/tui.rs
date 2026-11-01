@@ -1041,13 +1041,17 @@ fn visible_message(message: &str, until: Option<std::time::Instant>) -> &str {
     }
 }
 
-/// Launch the setup wizard and write one TOML per selected combination.
-pub fn setup(input: Option<&Path>, last: bool, output: &mut dyn Write) -> Result<(), Error> {
-    let (root, project) = project::load(Path::new("."))?;
+pub(crate) fn setup_at(
+    input: Option<&Path>,
+    last: bool,
+    base: &Path,
+    output: &mut dyn Write,
+) -> Result<(), Error> {
+    let (root, project) = project::load(base)?;
     let selected = if last {
         Some(last_setup_tui_config(&root)?)
     } else {
-        input.map(Path::to_path_buf)
+        input.map(|path| base.join(path))
     };
     let mut app = App::new(root.clone(), project);
     if let Some(input) = selected.as_deref() {
@@ -1257,10 +1261,8 @@ fn sync_all_sentinel(pane: &mut Pane) {
         .all(|(_, selected)| *selected);
 }
 
-/// Launch the tree-shaped workload/trial selector. It reuses the setup TUI's
-/// Pane, terminal lifecycle, search, selection, and keyboard conventions.
-pub fn workload_tui(output: &mut dyn Write) -> Result<(), Error> {
-    let (root, project) = project::load(Path::new("."))?;
+pub(crate) fn workload_tui_at(base: &Path, output: &mut dyn Write) -> Result<(), Error> {
+    let (root, project) = project::load(base)?;
     let workload_dir = project::resolve(&root, &project.workloads_dir);
     let choices = external_workload_choices(&workload_dir);
     if choices.is_empty() {

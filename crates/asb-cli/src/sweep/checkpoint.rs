@@ -335,7 +335,7 @@ pub(super) struct Inputs {
     roots: Vec<Root>,
     context: Value,
     initial: Fingerprint,
-    runtime: Option<Vec<crate::runtime_inputs::Dependency>>,
+    runtime: Option<(Vec<crate::runtime_inputs::Dependency>, PathBuf)>,
 }
 
 #[derive(Deserialize)]
@@ -376,8 +376,9 @@ impl Inputs {
         plan: &super::plan::SweepPlan,
         mode: Option<crate::tape::Mode>,
         replay_sources: &[PathBuf],
+        invocation_dir: &Path,
     ) -> Result<Self, Error> {
-        let state = Self::build(parent, results, plan, mode, replay_sources)?;
+        let state = Self::build(parent, results, plan, mode, replay_sources, invocation_dir)?;
         state.publish("pending", None)?;
         if plan.execution.is_some() {
             state.reserve_campaigns(results, plan)?;
@@ -394,6 +395,7 @@ impl Inputs {
         plan: &super::plan::SweepPlan,
         mode: Option<crate::tape::Mode>,
         replay_sources: &[PathBuf],
+        invocation_dir: &Path,
     ) -> Result<Self, Error> {
         let directory = results.join(".checkpoint");
         if !std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir())
@@ -435,7 +437,7 @@ impl Inputs {
         if plan.execution.is_some() {
             campaigns::verify_private_inputs(results, plan)?;
         }
-        let current = Self::build(parent, results, plan, mode, replay_sources)?;
+        let current = Self::build(parent, results, plan, mode, replay_sources, invocation_dir)?;
         if current.initial != saved.initial {
             return Err(resume_error(
                 "the executable, configuration, runtime, environment or replay inputs changed",
@@ -526,6 +528,7 @@ impl Inputs {
         plan: &super::plan::SweepPlan,
         mode: Option<crate::tape::Mode>,
         replay_sources: &[PathBuf],
+        invocation_dir: &Path,
     ) -> Result<Self, Error> {
         let directory = results.join(".checkpoint");
         let mut roots = vec![
@@ -560,8 +563,8 @@ impl Inputs {
         let mut recorder_runtime = Vec::new();
         let mut recorder_files = BTreeSet::new();
         for name in &recorder_names {
-            recorder_files.extend(crate::proxy::input_files(name)?);
-            recorder_runtime.extend(crate::proxy::runtime_inputs(name)?);
+            recorder_files.extend(crate::proxy::input_files(name, invocation_dir)?);
+            recorder_runtime.extend(crate::proxy::runtime_inputs(name, invocation_dir)?);
         }
         // Keep existing root labels for historical single-recorder seals.
         for (index, path) in recorder_files.into_iter().enumerate() {
@@ -594,8 +597,7 @@ impl Inputs {
                 ("tools", crate::project::resolve(root, &config.tools_dir)),
                 (
                     "workloads",
-                    std::env::var_os("ASB_WORKLOAD_DIR")
-                        .map(PathBuf::from)
+                    crate::project::environment_path("ASB_WORKLOAD_DIR", invocation_dir)
                         .unwrap_or_else(|| crate::project::resolve(root, &config.workloads_dir)),
                 ),
                 ("python", root.join(".asb/python")),
@@ -605,7 +607,7 @@ impl Inputs {
         }
         let mut environment_files = BTreeSet::new();
         for (_, value) in std::env::vars_os() {
-            let path = PathBuf::from(value);
+            let path = invocation_dir.join(value);
             if path.is_file() {
                 // Keep the declared symlink in the input graph. Canonicalizing
                 // it here would miss retargeting to different content while
@@ -619,13 +621,13 @@ impl Inputs {
                 path,
             ));
         }
-        let mut runtime = crate::runtime_inputs::for_plan(parent, plan, mode)?;
+        let mut runtime = crate::runtime_inputs::for_plan(parent, plan, mode, invocation_dir)?;
         runtime.extend(recorder_runtime);
         runtime.push(crate::runtime_inputs::Dependency::Python {
             path: python.clone(),
             site: false,
         });
-        let runtime_paths = crate::runtime_inputs::discover(&python, &runtime)?;
+        let runtime_paths = crate::runtime_inputs::discover_at(&python, &runtime, invocation_dir)?;
         for (index, path) in runtime_paths.into_iter().enumerate() {
             roots.push(Root::path(format!("runtime-source-{index}"), path));
         }
@@ -638,7 +640,7 @@ impl Inputs {
             roots,
             context,
             initial,
-            runtime: Some(runtime),
+            runtime: Some((runtime, invocation_dir.to_path_buf())),
         };
         Ok(state)
     }
@@ -676,8 +678,12 @@ impl Inputs {
     }
 
     fn final_fingerprint(&mut self) -> Result<Fingerprint, Error> {
-        if let Some(runtime) = &self.runtime {
-            let paths = crate::runtime_inputs::discover(&self.snapshotter.python, runtime)?;
+        if let Some((runtime, invocation_dir)) = &self.runtime {
+            let paths = crate::runtime_inputs::discover_at(
+                &self.snapshotter.python,
+                runtime,
+                invocation_dir,
+            )?;
             self.roots
                 .retain(|root| !root.name.starts_with("runtime-source-"));
             for (index, path) in paths.into_iter().enumerate() {

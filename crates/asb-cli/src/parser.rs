@@ -8,39 +8,6 @@ use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
-
-// Library tests invoke the parser in-process. Serialise the short-lived cwd
-// change for --project-dir and restore it before returning to their caller.
-static PROJECT_DIRECTORY_LOCK: Mutex<()> = Mutex::new(());
-
-struct ProjectDirectoryGuard {
-    previous: PathBuf,
-    _lock: MutexGuard<'static, ()>,
-}
-
-impl Drop for ProjectDirectoryGuard {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.previous);
-    }
-}
-
-fn enter_project_directory(path: Option<&Path>) -> Result<Option<ProjectDirectoryGuard>, Error> {
-    let Some(path) = path else {
-        project::require_initialized(Path::new("."))?;
-        return Ok(None);
-    };
-    let lock = PROJECT_DIRECTORY_LOCK
-        .lock()
-        .map_err(|_| Error::Run("project directory guard was interrupted".into()))?;
-    let previous = std::env::current_dir().map_err(io_error)?;
-    let (root, _) = project::require_project_directory(path)?;
-    std::env::set_current_dir(&root).map_err(io_error)?;
-    Ok(Some(ProjectDirectoryGuard {
-        previous,
-        _lock: lock,
-    }))
-}
 
 /// Use the parser's schema for completions.  The real parser deliberately
 /// accepts custom tool and workload sources; this completion-only command adds
@@ -207,19 +174,48 @@ pub(crate) fn run_with_interactive(
     // operational command is project-local, including listing and discovery.
     let requires_project =
         cli.command.is_some() && !matches!(cli.command.as_ref(), Some(CommandLine::Init(_)));
-    let _project_directory = if requires_project {
-        match enter_project_directory(cli.project_dir.as_deref()) {
-            Ok(guard) => guard,
-            Err(error) => return fail(stderr, &error.to_string()),
-        }
-    } else {
-        None
+    let base = match std::env::current_dir() {
+        Ok(cwd) => cli
+            .project_dir
+            .as_ref()
+            .map_or(cwd.clone(), |path| cwd.join(path)),
+        Err(error) => return fail(stderr, &io_error(error).to_string()),
     };
+    if base.to_str().is_none()
+        && matches!(
+            cli.command.as_ref(),
+            Some(CommandLine::Run(_) | CommandLine::Sweep(_) | CommandLine::Compare(_))
+        )
+    {
+        return fail(
+            stderr,
+            "cannot represent this invocation directory as UTF-8 for the selected command",
+        );
+    }
+    if requires_project {
+        let checked = if cli.project_dir.is_some() {
+            project::require_project_directory(&base)
+        } else {
+            project::require_initialized(&base)
+        };
+        if let Err(error) = checked {
+            return fail(stderr, &error.to_string());
+        }
+    }
+    let _network = requires_project.then(|| project::network_project_at(&base, &base));
+    let resolve = |path: &str| base.join(path).to_string_lossy().into_owned();
     let result = match cli.command {
         None => stdout
             .write_all(Cli::command().render_help().to_string().as_bytes())
             .map_err(io_error),
-        Some(CommandLine::Init(options)) => {
+        Some(CommandLine::Init(mut options)) => {
+            if cli.project_dir.is_some() {
+                options.root = Some(
+                    options
+                        .root
+                        .map_or_else(|| base.clone(), |root| base.join(root)),
+                );
+            }
             if options.configure_host {
                 project::configure_host(options.root, options.yes, stdout)
             } else {
@@ -233,17 +229,20 @@ pub(crate) fn run_with_interactive(
             }
         }
         Some(CommandLine::Setup(options)) => match options.mode {
-            Some(SetupMode::Tui) => tui::setup(options.input.as_deref(), options.last, stdout),
+            Some(SetupMode::Tui) => {
+                tui::setup_at(options.input.as_deref(), options.last, &base, stdout)
+            }
             None => {
                 if let Some(preset) = options.preset.as_deref() {
-                    config::setup_preset(
+                    config::setup_preset_at(
                         preset,
                         options.workload.clone(),
                         options.output.clone(),
+                        &base,
                         stdout,
                     )
                 } else {
-                    config::setup(options.into(), stdout)
+                    config::setup_at(options.into(), &base, stdout)
                 }
             }
         },
@@ -272,11 +271,16 @@ pub(crate) fn run_with_interactive(
                     "--respect-record-timings requires --replay or --llm-replay; recording always stores response delays",
                 );
             }
-            let report_path = options.path.clone();
+            let report_path = resolve(&options.path);
+            let measurement_dir = options.measurements.as_deref().map(&resolve);
+            let cassette = options.cassette.as_deref().map(&resolve);
+            let native_capsule_record = options.native_capsule_record.as_deref().map(&resolve);
+            let native_capsule_replay = options.native_capsule_replay.as_deref().map(&resolve);
             let json = options.json;
             runner::run_with_tape(
-                &options.path,
+                &report_path,
                 runner::RunOptions {
+                    invocation_dir: Some(&base),
                     track: options.track,
                     replay_seed: options.seed,
                     repeat: options.repeat.or(options.record.then_some(1)),
@@ -285,14 +289,14 @@ pub(crate) fn run_with_interactive(
                     show_output: options.show_output,
                     quiet_output: !options.verbose,
                     announce_trial: !options.json,
-                    measurement_dir: options.measurements.as_deref(),
+                    measurement_dir: measurement_dir.as_deref(),
                     mode: tape.carrier,
                     tool_mode: tape.tool,
                     tool_mode_explicit: tape.tool_explicit,
                     mcp_mode: tape.mcp,
-                    cassette: options.cassette.as_deref(),
-                    native_capsule_record: options.native_capsule_record.as_deref(),
-                    native_capsule_replay: options.native_capsule_replay.as_deref(),
+                    cassette: cassette.as_deref(),
+                    native_capsule_record: native_capsule_record.as_deref(),
+                    native_capsule_replay: native_capsule_replay.as_deref(),
                     respect_record_timings: options.respect_record_timings,
                     interactive: interactive && !options.json,
                     ..Default::default()
@@ -330,7 +334,7 @@ pub(crate) fn run_with_interactive(
             }
             let generated_preset = match options.preset.as_deref() {
                 Some(preset) => {
-                    match config::setup_preset_for_sweep(preset, options.json, stdout) {
+                    match config::setup_preset_for_sweep(preset, options.json, &base, stdout) {
                         Ok(path) => Some(path),
                         Err(error) => return fail(stderr, &error.to_string()),
                     }
@@ -340,7 +344,7 @@ pub(crate) fn run_with_interactive(
             let path = generated_preset
                 .as_ref()
                 .map(|preset| preset.path.to_string_lossy().into_owned())
-                .or(options.path.clone())
+                .or(options.path.as_deref().map(&resolve))
                 .expect("clap requires either a sweep path or a preset");
             if generated_preset.is_some()
                 && !options.json
@@ -348,9 +352,11 @@ pub(crate) fn run_with_interactive(
             {
                 return fail(stderr, &io_error(error).to_string());
             }
+            let cassette_root = options.cassette_root.as_deref().map(|path| base.join(path));
             sweep::run_with_options(
                 &path,
                 sweep::Options {
+                    invocation_dir: Some(&base),
                     repeat: options
                         .repeat
                         .or(generated_preset.as_ref().map(|preset| preset.repeat)),
@@ -366,7 +372,7 @@ pub(crate) fn run_with_interactive(
                     tool_mode_explicit: tape.tool_explicit,
                     mcp_mode: tape.mcp,
                     respect_record_timings: options.respect_record_timings,
-                    cassette_root: options.cassette_root.as_deref().map(std::path::Path::new),
+                    cassette_root: cassette_root.as_deref(),
                     jobs: usize::from(options.jobs),
                     max_active_attempts: options.max_active_attempts.map(usize::from),
                     resume: options.resume || options.continue_after_failures.is_some(),
@@ -381,14 +387,15 @@ pub(crate) fn run_with_interactive(
                 stdout,
             )
         }
-        Some(CommandLine::Compare(options)) => super::compare::generate(&options.path, stdout)
-            .and_then(|report| {
+        Some(CommandLine::Compare(options)) => {
+            super::compare::generate(&resolve(&options.path), stdout).and_then(|report| {
                 if options.report {
                     super::compare::open_report(&report)
                 } else {
                     Ok(())
                 }
-            }),
+            })
+        }
         Some(CommandLine::Provider(options)) => match options.command {
             ProviderCommand::Models(args) => models::list(args.into(), stdout),
         },
@@ -396,29 +403,36 @@ pub(crate) fn run_with_interactive(
             ToolCommand::List(_) => install::tool_list(stdout),
             ToolCommand::Install(args) => {
                 let mut previous = None;
-                install::tool_with_progress(args.into(), stdout, &mut |percent, stage| {
+                install::tool_with_progress_at(args.into(), &base, stdout, &mut |percent, stage| {
                     if previous.replace(stage) != Some(stage) {
                         let _ = writeln!(stderr, "Installing: {} ({percent}%)", stage.label());
                     }
                 })
             }
             ToolCommand::Http(args) => match args.command {
-                HttpCommand::Start => http_server::start_manual(stdout),
-                HttpCommand::Stop => http_server::stop_manual(stdout),
+                HttpCommand::Start => http_server::start_manual(&base, stdout),
+                HttpCommand::Stop => http_server::stop_manual(&base, stdout),
             },
         },
         Some(CommandLine::Workload(options)) => match options.command {
-            Some(WorkloadCommand::List(args)) => install::workload_list(args.into(), stdout),
+            Some(WorkloadCommand::List(args)) => {
+                install::workload_list_at(args.into(), &base, stdout)
+            }
             Some(WorkloadCommand::Describe(args)) => {
                 crate::workloads::describe_module(&args.name, stdout)
             }
             Some(WorkloadCommand::Install(args)) => {
                 let mut previous = None;
-                install::workload_with_progress(args.into(), stdout, &mut |percent, stage| {
-                    if previous.replace(stage) != Some(stage) {
-                        let _ = writeln!(stderr, "Installing: {} ({percent}%)", stage.label());
-                    }
-                })
+                install::workload_with_progress_at(
+                    args.into(),
+                    &base,
+                    stdout,
+                    &mut |percent, stage| {
+                        if previous.replace(stage) != Some(stage) {
+                            let _ = writeln!(stderr, "Installing: {} ({percent}%)", stage.label());
+                        }
+                    },
+                )
             }
             Some(WorkloadCommand::Trials) => options.name.as_deref().map_or_else(
                 || {
@@ -426,16 +440,24 @@ pub(crate) fn run_with_interactive(
                         "`asb workload WORKLOAD trials` requires a workload name".into(),
                     ))
                 },
-                |name| list_workload_trials(name, stdout),
+                |name| list_workload_trials(name, &base, stdout),
             ),
-            Some(WorkloadCommand::Tui) => tui::workload_tui(stdout),
+            Some(WorkloadCommand::Tui) => tui::workload_tui_at(&base, stdout),
             Some(WorkloadCommand::Recover(args)) => {
                 if args.grade {
-                    crate::workloads::recovery::grade_retained(&args.reference, args.json, stdout)
+                    crate::workloads::recovery::grade_retained(
+                        &base.join(&args.reference),
+                        args.json,
+                        stdout,
+                    )
                 } else if args.inspect_grade {
-                    crate::workloads::recovery::inspect_grade(&args.reference, args.json, stdout)
+                    crate::workloads::recovery::inspect_grade(
+                        &base.join(&args.reference),
+                        args.json,
+                        stdout,
+                    )
                 } else {
-                    crate::workloads::recovery::run(&args.reference, args.json, stdout)
+                    crate::workloads::recovery::run(&base.join(&args.reference), args.json, stdout)
                 }
             }
             None => Err(Error::Input(
@@ -618,9 +640,10 @@ fn list_collector_options(name: &str, output: &mut dyn Write) -> Result<(), Erro
     Ok(())
 }
 
-fn list_workload_trials(name: &str, output: &mut dyn Write) -> Result<(), Error> {
-    let (root, project) = project::load(std::path::Path::new("."))?;
-    let directory = project::resolve(&root, &project.workloads_dir);
+fn list_workload_trials(name: &str, base: &Path, output: &mut dyn Write) -> Result<(), Error> {
+    let (root, project) = project::load(base)?;
+    let directory = project::environment_path("ASB_WORKLOAD_DIR", base)
+        .unwrap_or_else(|| project::resolve(&root, &project.workloads_dir));
     let trials = crate::workloads::installed_trials(name, &directory).map_err(Error::Input)?;
     if trials.is_empty() {
         return Err(Error::Input(format!(
@@ -636,6 +659,163 @@ fn list_workload_trials(name: &str, output: &mut dyn Write) -> Result<(), Error>
 #[cfg(test)]
 mod tape_flag_tests {
     use super::*;
+
+    #[test]
+    fn explicit_project_never_changes_another_threads_working_directory() {
+        struct ObserveCwd {
+            seen: Option<PathBuf>,
+        }
+        impl Write for ObserveCwd {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.seen = Some(std::thread::spawn(std::env::current_dir).join().unwrap()?);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "asb-project-concurrent-cwd-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(root.join(".asb")).unwrap();
+        std::fs::write(
+            root.join(".asb/project.toml"),
+            toml::to_string(&project::ProjectConfig::default()).unwrap(),
+        )
+        .unwrap();
+        let expected = std::env::current_dir().unwrap();
+        let mut output = ObserveCwd { seen: None };
+        let mut stderr = Vec::new();
+        assert_eq!(
+            run(
+                &[
+                    "tool".into(),
+                    "list".into(),
+                    "--project-dir".into(),
+                    root.clone().into_os_string(),
+                ],
+                &mut output,
+                &mut stderr,
+            ),
+            0,
+            "{}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert_eq!(output.seen.as_deref(), Some(expected.as_path()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_project_commands_keep_independent_contexts() {
+        struct Nested {
+            inner_root: PathBuf,
+            nested_output: Vec<u8>,
+            invoked: bool,
+        }
+        impl Write for Nested {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if !self.invoked {
+                    self.invoked = true;
+                    let code = run(
+                        &[
+                            "workload".into(),
+                            "list".into(),
+                            "--project-dir".into(),
+                            self.inner_root.clone().into_os_string(),
+                        ],
+                        &mut self.nested_output,
+                        &mut Vec::new(),
+                    );
+                    assert_eq!(code, 0);
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "asb-nested-projects-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        for (project, workload) in [("a", "alpha"), ("b", "beta")] {
+            let path = root.join(project);
+            std::fs::create_dir_all(path.join(".asb")).unwrap();
+            std::fs::create_dir_all(path.join("workloads")).unwrap();
+            std::fs::write(
+                path.join(".asb/project.toml"),
+                toml::to_string(&project::ProjectConfig::default()).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                path.join("workloads").join(format!("{workload}.txt")),
+                workload,
+            )
+            .unwrap();
+        }
+        let mut output = Nested {
+            inner_root: root.join("b"),
+            nested_output: Vec::new(),
+            invoked: false,
+        };
+        assert_eq!(
+            run(
+                &[
+                    "tool".into(),
+                    "list".into(),
+                    "--project-dir".into(),
+                    root.join("a").into_os_string()
+                ],
+                &mut output,
+                &mut Vec::new()
+            ),
+            0
+        );
+        let nested = String::from_utf8(output.nested_output).unwrap();
+        assert!(nested.contains("beta"));
+        assert!(!nested.contains("alpha"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn init_uses_explicit_project_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-init-explicit-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(root.join(".asb")).unwrap();
+        std::fs::write(
+            root.join(".asb/project.toml"),
+            toml::to_string(&project::ProjectConfig::default()).unwrap(),
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        assert_eq!(
+            run(
+                &[
+                    "--project-dir".into(),
+                    root.clone().into_os_string(),
+                    "init".into()
+                ],
+                &mut output,
+                &mut error
+            ),
+            2
+        );
+        assert!(
+            String::from_utf8(error)
+                .unwrap()
+                .contains("already initialized")
+        );
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains(&root.display().to_string())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn project_directory_is_global_and_restores_the_callers_directory() {

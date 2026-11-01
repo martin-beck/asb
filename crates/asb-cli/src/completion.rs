@@ -54,7 +54,11 @@ pub(crate) fn values(args: &[OsString], output: &mut dyn Write) -> Result<(), Er
         Some(path) => crate::project::require_project_directory(path)?.0,
         None => crate::project::load(Path::new("."))?.0,
     };
-    let _network = crate::project::network_project(&project_root);
+    let invocation_dir = match explicit_project {
+        Some(_) => project_root.clone(),
+        None => std::env::current_dir().map_err(io_error)?,
+    };
+    let _network = crate::project::network_project_at(&project_root, &invocation_dir);
     let mut values = match kind {
         "agent" => crate::agents::names().map(str::to_owned).collect(),
         "provider" => crate::providers::names()
@@ -63,9 +67,11 @@ pub(crate) fn values(args: &[OsString], output: &mut dyn Write) -> Result<(), Er
             .collect(),
         "tool" => crate::install::tool_names().map(str::to_owned).collect(),
         "collector" => crate::measurements::available_collectors(),
-        "workload" => local_workloads(&project_root),
-        "trial-set" => local_trial_sets(&project_root),
-        "trial" => context.map_or_else(Vec::new, |name| local_trials(name, &project_root)),
+        "workload" => local_workloads(&project_root, &invocation_dir),
+        "trial-set" => local_trial_sets(&project_root, &invocation_dir),
+        "trial" => context.map_or_else(Vec::new, |name| {
+            local_trials(name, &project_root, &invocation_dir)
+        }),
         // A provider-qualified model completion asks the same discovery path as
         // setup, so a refreshed provider catalog is immediately useful.  A
         // failed/offline lookup falls back to the documented local snapshot.
@@ -107,30 +113,33 @@ fn all_known_models() -> Vec<String> {
         .collect()
 }
 
-fn workload_directory(project: &Path) -> Option<std::path::PathBuf> {
+fn workload_directory(project: &Path, invocation_dir: &Path) -> Option<std::path::PathBuf> {
     let (root, config) = crate::project::load(project).ok()?;
-    Some(crate::project::resolve(&root, &config.workloads_dir))
+    Some(
+        crate::project::environment_path("ASB_WORKLOAD_DIR", invocation_dir)
+            .unwrap_or_else(|| crate::project::resolve(&root, &config.workloads_dir)),
+    )
 }
 
-fn local_workloads(project: &Path) -> Vec<String> {
+fn local_workloads(project: &Path, invocation_dir: &Path) -> Vec<String> {
     let mut values = crate::workloads::builtin_names()
         .chain(crate::install::external_workload_names())
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    if let Some(directory) = workload_directory(project) {
+    if let Some(directory) = workload_directory(project, invocation_dir) {
         values.extend(read_directory_names(&directory, ".txt"));
     }
     values
 }
 
-fn local_trial_sets(project: &Path) -> Vec<String> {
-    workload_directory(project).map_or_else(Vec::new, |directory| {
+fn local_trial_sets(project: &Path, invocation_dir: &Path) -> Vec<String> {
+    workload_directory(project, invocation_dir).map_or_else(Vec::new, |directory| {
         read_directory_names(&directory, ".workload.toml")
     })
 }
 
-fn local_trials(workload: &str, project: &Path) -> Vec<String> {
-    let Some(directory) = workload_directory(project) else {
+fn local_trials(workload: &str, project: &Path, invocation_dir: &Path) -> Vec<String> {
+    let Some(directory) = workload_directory(project, invocation_dir) else {
         return Vec::new();
     };
     crate::workloads::installed_trials(workload, &directory)

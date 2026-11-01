@@ -121,6 +121,7 @@ impl BatchRun<'_> {
             self.config_path,
             selected,
             RunOptions {
+                invocation_dir: self.options.invocation_dir.as_deref(),
                 json: self.options.json,
                 show_output: self.options.show_output,
                 mode,
@@ -258,6 +259,7 @@ pub(crate) fn continue_campaign(
     continued: Continuation,
     json: bool,
     show_output: bool,
+    invocation_dir: Option<&Path>,
     policy: Option<&crate::planning::ResolvedPlan>,
     output: &mut dyn Write,
     warnings: &Mutex<BTreeSet<String>>,
@@ -302,6 +304,7 @@ pub(crate) fn continue_campaign(
         ));
     }
     let options = ActivationOptions {
+        invocation_dir: invocation_dir.map(Path::to_path_buf),
         json,
         show_output,
         quiet_output: false,

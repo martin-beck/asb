@@ -39,6 +39,7 @@ fn record_uses_one_filesystem_resolved_destination_for_producer_and_receipt() {
             cassette: requested,
             respect_record_timings: false,
             workspace: fixture.0.clone(),
+            invocation_dir: fixture.0.clone(),
             wire_extension: None,
         };
         let mut session = ADAPTER
@@ -72,6 +73,7 @@ fn external_override_never_receives_private_capture_capability_or_invents_eviden
             cassette: fixture.0.join("trace.jsonl"),
             respect_record_timings: false,
             workspace: fixture.0.clone(),
+            invocation_dir: fixture.0.clone(),
             wire_extension: None,
         };
         let mut session = ADAPTER
@@ -239,6 +241,7 @@ fn existing_recording_destinations_are_refused_before_starting_a_proxy() {
             cassette: path,
             respect_record_timings: false,
             workspace: fixture.0.clone(),
+            invocation_dir: fixture.0.clone(),
             wire_extension: None,
         };
         let error = ADAPTER
@@ -270,6 +273,7 @@ fn startup_errors_are_specific_and_remove_only_their_private_scratch() {
             cassette: root.0.join("tape.jsonl"),
             respect_record_timings: false,
             workspace: root.0.join("workspace"),
+            invocation_dir: root.0.clone(),
             wire_extension: None,
         };
         let error = match scenario.as_str() {
@@ -289,7 +293,7 @@ fn startup_errors_are_specific_and_remove_only_their_private_scratch() {
                 .unwrap(),
             "override" => {
                 assert!(matches!(
-                    resolve_executable(&root.0).unwrap(),
+                    resolve_executable(&root.0, &root.0).unwrap(),
                     ProxyExecutable::Override(_)
                 ));
                 ADAPTER
@@ -467,7 +471,10 @@ fn materializing_builtin_script_failure_does_not_silently_use_an_incomplete_prox
     if std::env::var_os(CHILD).is_some() {
         let root = Fixture::new();
         fs::create_dir(root.0.join(".asb-tape-proxy.mjs")).unwrap();
-        let error = resolve_executable(&root.0).err().unwrap().to_string();
+        let error = resolve_executable(&root.0, &root.0)
+            .err()
+            .unwrap()
+            .to_string();
         assert!(error.contains("cannot materialize ASB's built-in tape proxy"));
         return;
     }

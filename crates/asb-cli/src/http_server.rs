@@ -102,8 +102,8 @@ pub(crate) fn start_for_report(
     start(&root, &config, report, traces, output)
 }
 
-pub(crate) fn start_manual(output: &mut dyn Write) -> Result<(), Error> {
-    let (root, config) = project::load(Path::new("."))?;
+pub(crate) fn start_manual(base: &Path, output: &mut dyn Write) -> Result<(), Error> {
+    let (root, config) = project::load(base)?;
     let (report, traces) = latest_report(&root)?;
     let server = start(&root, &config, &report, traces, output)?;
     writeln!(
@@ -114,8 +114,8 @@ pub(crate) fn start_manual(output: &mut dyn Write) -> Result<(), Error> {
     .map_err(crate::io_error)
 }
 
-pub(crate) fn stop_manual(output: &mut dyn Write) -> Result<(), Error> {
-    let (root, _) = project::load(Path::new("."))?;
+pub(crate) fn stop_manual(base: &Path, output: &mut dyn Write) -> Result<(), Error> {
+    let (root, _) = project::load(base)?;
     let _owner = lock_project(&root)?;
     let path = state_path(&root);
     let state = read_state(&path).map_err(|_| {

@@ -102,6 +102,7 @@ fn runtime_inputs_follow_the_path_command_when_no_project_installation_exists() 
     let inputs = adapter
         .runtime_inputs(&crate::runtime_inputs::Context {
             root,
+            invocation_dir: root,
             project: &project,
         })
         .unwrap();

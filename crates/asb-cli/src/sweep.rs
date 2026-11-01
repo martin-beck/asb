@@ -45,6 +45,7 @@ pub(crate) struct SweepFile {
 
 #[derive(Clone, Copy)]
 pub(crate) struct Options<'a> {
+    pub invocation_dir: Option<&'a Path>,
     pub repeat: Option<u64>,
     pub max_steps: Option<u64>,
     pub track: Option<crate::cassette::Selector>,
@@ -80,6 +81,7 @@ pub(crate) struct Options<'a> {
 impl Default for Options<'_> {
     fn default() -> Self {
         Self {
+            invocation_dir: None,
             repeat: None,
             max_steps: None,
             track: None,

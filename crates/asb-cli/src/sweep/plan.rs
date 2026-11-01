@@ -81,13 +81,23 @@ pub(crate) struct PlannedBenchmark {
     pub selection: TaskSelection,
 }
 
+#[cfg(test)]
 pub(crate) fn build(parent: &Path, manifest: &SweepFile) -> Result<SweepPlan, Error> {
-    build_with_catalog(parent, manifest, workloads::planning_catalog)
+    build_at(parent, manifest, Path::new("."))
+}
+
+pub(crate) fn build_at(
+    parent: &Path,
+    manifest: &SweepFile,
+    base: &Path,
+) -> Result<SweepPlan, Error> {
+    build_with_catalog(parent, manifest, base, workloads::planning_catalog)
 }
 
 fn build_with_catalog(
     parent: &Path,
     manifest: &SweepFile,
+    base: &Path,
     mut catalog_loader: impl FnMut(&str, &Path) -> Result<Option<PlanningCatalog>, String>,
 ) -> Result<SweepPlan, Error> {
     let mut catalogs: BTreeMap<(PathBuf, String), Option<PlanningCatalog>> = BTreeMap::new();
@@ -119,8 +129,7 @@ fn build_with_catalog(
             Error::Input(format!("invalid benchmark {}: {error}", path.display()))
         })?;
         let (root, settings) = project::load(&path)?;
-        let directory = std::env::var_os("ASB_WORKLOAD_DIR")
-            .map(PathBuf::from)
+        let directory = project::environment_path("ASB_WORKLOAD_DIR", base)
             .unwrap_or_else(|| project::resolve(&root, &settings.workloads_dir));
         let key = (
             directory.canonicalize().unwrap_or(directory.clone()),
@@ -609,7 +618,7 @@ mod tests {
         }
         fn plan(&self, manifest: &SweepFile) -> SweepPlan {
             let mut calls = 0;
-            let plan = build_with_catalog(&self.0, manifest, |name, _| {
+            let plan = build_with_catalog(&self.0, manifest, Path::new("."), |name, _| {
                 calls += 1;
                 assert_eq!(name, "fixture-suite");
                 Ok(Some(PlanningCatalog {

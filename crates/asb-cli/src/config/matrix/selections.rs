@@ -25,11 +25,10 @@ fn expand_values(values: &mut Vec<String>, catalog: Vec<String>, kind: &str) -> 
     Ok(())
 }
 
-pub(super) fn expand(options: &mut SetupOptions) -> Result<(), Error> {
-    let (root, settings) = project::load(Path::new("."))?;
-    let _network = project::network_project(&root);
-    let directory = std::env::var_os("ASB_WORKLOAD_DIR")
-        .map(PathBuf::from)
+pub(super) fn expand(options: &mut SetupOptions, base: &Path) -> Result<(), Error> {
+    let (root, settings) = project::load(base)?;
+    let _network = project::network_project_at(&root, base);
+    let directory = project::environment_path("ASB_WORKLOAD_DIR", base)
         .unwrap_or_else(|| project::resolve(&root, &settings.workloads_dir));
     expand_values(
         &mut options.agent,
@@ -222,7 +221,7 @@ mod tests {
             retention: crate::benchmark::RetentionConfig::default(),
             repeat: None,
         };
-        expand(&mut options).unwrap();
+        expand(&mut options, Path::new(".")).unwrap();
         assert_eq!(
             options.agent,
             agents::all()

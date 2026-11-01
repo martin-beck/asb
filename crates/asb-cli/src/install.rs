@@ -510,6 +510,7 @@ pub struct WorkloadListOptions {
     pub dir: Option<PathBuf>,
 }
 
+#[cfg(test)]
 pub fn tool(options: ToolInstallOptions, output: &mut dyn std::io::Write) -> Result<(), Error> {
     let mut progress = |_percent: u8, _stage: crate::install::ProgressStage| {};
     tool_with_progress(options, output, &mut progress)
@@ -521,7 +522,16 @@ pub fn tool_with_progress(
     output: &mut dyn std::io::Write,
     progress: &mut dyn FnMut(u8, crate::install::ProgressStage),
 ) -> Result<(), Error> {
-    let context = OperationContext::load(Path::new(".")).map_err(InstallFailure::into_public)?;
+    tool_with_progress_at(options, Path::new("."), output, progress)
+}
+
+pub(crate) fn tool_with_progress_at(
+    options: ToolInstallOptions,
+    directory: &Path,
+    output: &mut dyn std::io::Write,
+    progress: &mut dyn FnMut(u8, ProgressStage),
+) -> Result<(), Error> {
+    let context = OperationContext::load(directory).map_err(InstallFailure::into_public)?;
     let result = tool_in(&context, options, output, progress);
     let diagnostic = context.report_diagnostics(output);
     result.map_err(InstallFailure::into_public)?;
@@ -655,13 +665,15 @@ pub(crate) fn ensure_execution_requirements(
     config: &BenchmarkConfig,
     config_path: &Path,
     mode: Option<crate::tape::Mode>,
+    invocation_dir: &Path,
     output: &mut dyn std::io::Write,
 ) -> Result<(), Error> {
     let (root, project_config) = project::load(config_path)?;
     let tools_root = project::resolve(&root, &project_config.tools_dir);
-    let workloads_root = project::resolve(&root, &project_config.workloads_dir);
-    let context =
-        OperationContext::new(&root, &project_config).map_err(InstallFailure::into_public)?;
+    let workloads_root = project::environment_path("ASB_WORKLOAD_DIR", invocation_dir)
+        .unwrap_or_else(|| project::resolve(&root, &project_config.workloads_dir));
+    let context = OperationContext::new_at(&root, &project_config, invocation_dir)
+        .map_err(InstallFailure::into_public)?;
     let mut progress = |_percent: u8, _stage: ProgressStage| {};
     let result = (|| -> InstallResult<()> {
         for id in execution_tool_ids(config, mode) {
@@ -918,6 +930,7 @@ fn built_in_tool(id: &str) -> Option<(Recipe, &'static str, &'static str)> {
     Some((tool.recipe(), tool.executable()?, kind))
 }
 
+#[cfg(test)]
 pub fn workload(
     options: WorkloadInstallOptions,
     output: &mut dyn std::io::Write,
@@ -932,9 +945,17 @@ pub fn workload_with_progress(
     output: &mut dyn std::io::Write,
     progress: &mut dyn FnMut(u8, crate::install::ProgressStage),
 ) -> Result<(), Error> {
-    let resolved = workload_source(&options.source)?;
-    let context = OperationContext::new(&resolved.project_root, &resolved.project_config)
-        .map_err(InstallFailure::into_public)?;
+    workload_with_progress_at(options, Path::new("."), output, progress)
+}
+
+pub(crate) fn workload_with_progress_at(
+    options: WorkloadInstallOptions,
+    directory: &Path,
+    output: &mut dyn std::io::Write,
+    progress: &mut dyn FnMut(u8, ProgressStage),
+) -> Result<(), Error> {
+    let resolved = workload_source(&options.source, directory)?;
+    let context = OperationContext::load(directory).map_err(InstallFailure::into_public)?;
     let result = workload_in(&context, options, resolved, output, progress);
     let diagnostic = context.report_diagnostics(output);
     result.map_err(InstallFailure::into_public)?;
@@ -969,8 +990,7 @@ fn workload_in(
     let directory = requested_dir
         .map(|value| resolve_path(&project_root, &value))
         .unwrap_or_else(|| {
-            std::env::var_os("ASB_WORKLOAD_DIR")
-                .map(PathBuf::from)
+            project::environment_path("ASB_WORKLOAD_DIR", context.invocation_dir())
                 .unwrap_or_else(|| project::resolve(&project_root, &project_config.workloads_dir))
         });
     progress(2, crate::install::ProgressStage::Preparing);
@@ -1214,15 +1234,24 @@ fn install_bundle_in(
 }
 
 /// List prompt workloads and configurable external workload trial sets.
+#[cfg(test)]
 pub fn workload_list(
     options: WorkloadListOptions,
     output: &mut dyn std::io::Write,
 ) -> Result<(), Error> {
-    let (project_root, project_config) = project::load(Path::new("."))?;
+    workload_list_at(options, Path::new("."), output)
+}
+
+pub(crate) fn workload_list_at(
+    options: WorkloadListOptions,
+    directory: &Path,
+    output: &mut dyn std::io::Write,
+) -> Result<(), Error> {
+    let (project_root, project_config) = project::load(directory)?;
     let directory = options
         .dir
         .map(|value| resolve_path(&project_root, &value))
-        .or_else(|| std::env::var_os("ASB_WORKLOAD_DIR").map(PathBuf::from))
+        .or_else(|| project::environment_path("ASB_WORKLOAD_DIR", directory))
         .unwrap_or_else(|| project::resolve(&project_root, &project_config.workloads_dir));
     let mut names = fs::read_dir(&directory)
         .map_err(|error| Error::Io(format!("cannot read {}: {error}", directory.display())))?
@@ -1404,7 +1433,7 @@ fn install_package(
                     inherited.as_deref(),
                 )?
                 .or(inherited);
-                let cwd = std::env::current_dir().map_err(crate::io_error)?;
+                let cwd = context.invocation_dir().to_path_buf();
                 let npm = match &search {
                     Some(search) => tools::host_executable_in_at(
                         Path::new("npm"),
@@ -1668,7 +1697,7 @@ pub(crate) fn install_source_bounded_in(
 ) -> InstallResult<()> {
     source::install_input_in(
         context,
-        &source::Input::from_os(std::ffi::OsStr::new(source)),
+        &source_at_invocation(context, source),
         destination,
         source::Options {
             kind,
@@ -1689,7 +1718,7 @@ pub(crate) fn install_executable_source_in(
 ) -> InstallResult<()> {
     source::install_input_in(
         context,
-        &source::Input::from_os(std::ffi::OsStr::new(source)),
+        &source_at_invocation(context, source),
         destination,
         source::Options {
             kind,
@@ -1746,7 +1775,7 @@ pub(crate) fn install_verified_source_bounded_in(
 ) -> InstallResult<()> {
     source::install_input_in(
         context,
-        &source::Input::from_os(std::ffi::OsStr::new(source)),
+        &source_at_invocation(context, source),
         destination,
         source::Options {
             kind: verified.kind,
@@ -1757,6 +1786,13 @@ pub(crate) fn install_verified_source_bounded_in(
         validate,
         source::Publication::Replace,
     )
+}
+
+fn source_at_invocation(context: &OperationContext, source: &str) -> source::Input {
+    match source::Input::from_os(std::ffi::OsStr::new(source)) {
+        source::Input::Local(path) => source::Input::Local(context.invocation_dir().join(path)),
+        remote => remote,
+    }
 }
 
 pub(crate) fn json_string(value: &str) -> String {
@@ -1836,10 +1872,10 @@ struct ResolvedWorkloadSource {
     project_root: PathBuf,
     project_config: project::ProjectConfig,
 }
-fn workload_source(requested: &str) -> Result<ResolvedWorkloadSource, Error> {
+fn workload_source(requested: &str, directory: &Path) -> Result<ResolvedWorkloadSource, Error> {
     if external_workload(requested).is_none()
         && valid_name(requested)
-        && !Path::new(requested).is_file()
+        && !directory.join(requested).is_file()
     {
         let aliases = external_workload_names().collect::<Vec<_>>();
         if let Some(candidate) = suggestions::closest(requested, &aliases) {
@@ -1848,8 +1884,18 @@ fn workload_source(requested: &str) -> Result<ResolvedWorkloadSource, Error> {
             )));
         }
     }
-    let (project_root, project_config) = project::load(Path::new("."))?;
-    workload_source_in(requested, &project_root, &project_config)
+    let (project_root, project_config) = project::load(directory)?;
+    let mut resolved = workload_source_in(requested, &project_root, &project_config)?;
+    // Named registrations and URLs are not local paths. Bind every local name
+    // to the invocation before inspecting it, including absent files; never
+    // fall back to a same-named file in the caller's actual cwd.
+    if external_workload(requested).is_none()
+        && !requested.starts_with("https://")
+        && !requested.starts_with("http://")
+    {
+        resolved.source = source::Input::from_os(directory.join(requested).as_os_str());
+    }
+    Ok(resolved)
 }
 
 fn workload_source_in(

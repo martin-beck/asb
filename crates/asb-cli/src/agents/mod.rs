@@ -102,15 +102,24 @@ pub(crate) trait AgentAdapter: Sync {
         // project-local installation is selected. The optional input seal must
         // declare that same command instead of making fresh sweeps warn solely
         // because the user chose a system-installed agent.
-        let executable = resolve(self.id(), context.root, &context.project.tools_dir)
-            .unwrap_or_else(|| self.executable().into());
+        let executable = execution_lookup_at(
+            self.id(),
+            context.root,
+            &context.project.tools_dir,
+            context.invocation_dir,
+        )
+        .path()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| self.executable().into());
         let mut command = self.process(&executable)?.direct();
         project::apply_python_path(&mut command, context.root, Path::new(&executable))?;
         crate::tools::apply_runtime_path(&mut command, context.root, &context.project.tools_dir)?;
         let mut inputs = self.recipe().runtime_inputs(&context.tool_root(self.id()));
         inputs.push(crate::runtime_inputs::Dependency::command(&command));
         if let Some(path) = std::env::var_os("ASB_TOOL_DIR") {
-            inputs.push(crate::runtime_inputs::Dependency::file(PathBuf::from(path)));
+            inputs.push(crate::runtime_inputs::Dependency::file(
+                context.invocation_dir.join(path),
+            ));
         }
         Ok(inputs)
     }
@@ -1038,11 +1047,23 @@ pub(crate) fn execution_lookup(
     project_root: &Path,
     tools_dir: &str,
 ) -> crate::executables::Lookup {
+    execution_lookup_at(id, project_root, tools_dir, Path::new("."))
+}
+
+pub(crate) fn execution_lookup_at(
+    id: &str,
+    project_root: &Path,
+    tools_dir: &str,
+    invocation_dir: &Path,
+) -> crate::executables::Lookup {
     let Some(adapter) = find(id) else {
         return crate::executables::Lookup::Missing;
     };
     if let Some(directory) = std::env::var_os("ASB_TOOL_DIR") {
-        match crate::executables::lookup([PathBuf::from(directory).join(adapter.executable())]) {
+        match crate::executables::lookup([invocation_dir
+            .join(directory)
+            .join(adapter.executable())])
+        {
             crate::executables::Lookup::Missing => {}
             other => return other,
         }

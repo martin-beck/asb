@@ -130,6 +130,7 @@ fn official_adapter_selection_retention_and_missing_sdk_are_explicit() {
         let inputs = adapter
             .runtime_inputs(&crate::runtime_inputs::Context {
                 root: &fixture.root,
+                invocation_dir: &fixture.root,
                 project: &fixture.project,
             })
             .unwrap();

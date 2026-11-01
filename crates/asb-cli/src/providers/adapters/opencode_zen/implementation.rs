@@ -8,6 +8,7 @@ pub(in crate::providers) fn fetch_endpoint_catalog() -> Result<Vec<u8>, Error> {
     let catalog_url = std::env::var("ASB_ENDPOINT_CATALOG_URL")
         .unwrap_or_else(|_| "https://models.dev/api.json".into());
     let mut command = Command::new("curl");
+    command.current_dir(crate::project::network_invocation_dir());
     crate::project::apply_network_proxy(&mut command, std::path::Path::new("."))?;
     let output = command
         .args([

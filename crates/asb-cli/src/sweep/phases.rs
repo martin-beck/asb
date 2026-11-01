@@ -64,7 +64,11 @@ impl<'a> PreparedSweep<'a> {
             .unwrap_or("sweep");
         let mode = options.mode;
         let cassette_root = options.cassette_root;
-        let mut plan = plan::build(parent, &sweep)?;
+        let mut plan = plan::build_at(
+            parent,
+            &sweep,
+            options.invocation_dir.unwrap_or_else(|| Path::new(".")),
+        )?;
         plan.execution_mode = match mode {
             None => plan::SavedExecutionMode::Live,
             Some(crate::tape::Mode::Record) => plan::SavedExecutionMode::Record,
@@ -157,6 +161,7 @@ impl<'a> PreparedSweep<'a> {
                     &entry.configuration,
                     &parent.join(&entry.reference),
                     options.mode,
+                    options.invocation_dir.unwrap_or_else(|| Path::new(".")),
                     &mut messages,
                 )?;
                 if !options.json {
@@ -209,8 +214,14 @@ impl<'a> PreparedSweep<'a> {
         let replay_sources =
             execution::replay_sources(&plan, replay_inputs.as_deref().unwrap_or(&preserved_source));
         let prepared_mode = if options.resume {
-            let checkpoint =
-                checkpoint::Inputs::resume(parent, &results, &plan, mode, &replay_sources)?;
+            let checkpoint = checkpoint::Inputs::resume(
+                parent,
+                &results,
+                &plan,
+                mode,
+                &replay_sources,
+                options.invocation_dir.unwrap_or_else(|| Path::new(".")),
+            )?;
             if options.reconcile_completed {
                 checkpoint.reconcile_completed(parent, &results, &plan)?;
             }
@@ -295,6 +306,9 @@ impl<'a> PreparedSweep<'a> {
                         &self.plan,
                         self.options.mode,
                         &[],
+                        self.options
+                            .invocation_dir
+                            .unwrap_or_else(|| Path::new(".")),
                     ) {
                         Ok(checkpoint) => (
                             ActiveMode::Campaigns(Some(checkpoint)),
@@ -316,6 +330,9 @@ impl<'a> PreparedSweep<'a> {
                         &self.plan,
                         self.options.mode,
                         &self.replay_sources,
+                        self.options
+                            .invocation_dir
+                            .unwrap_or_else(|| Path::new(".")),
                     ) {
                         Ok(checkpoint) => (
                             ActiveMode::Fresh(Some(checkpoint)),

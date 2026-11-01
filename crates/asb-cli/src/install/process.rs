@@ -92,6 +92,7 @@ struct WorkerStartFault {
 #[derive(Clone)]
 pub(crate) struct OperationContext {
     root: PathBuf,
+    invocation_dir: PathBuf,
     config_path: PathBuf,
     budgets: InstallationConfig,
     proxy: crate::project::NetworkProxy,
@@ -107,9 +108,9 @@ pub(crate) struct OperationContext {
 }
 impl OperationContext {
     /// Explicit outer entry only; nested install steps reuse this snapshot.
-    pub(crate) fn load(root: &Path) -> InstallResult<Self> {
-        let (root, config) = crate::project::load(root)?;
-        Self::new(&root, &config)
+    pub(crate) fn load(directory: &Path) -> InstallResult<Self> {
+        let (root, config) = crate::project::load(directory)?;
+        Self::new_at(&root, &config, directory)
     }
     pub(crate) fn root(&self) -> &Path {
         &self.root
@@ -127,6 +128,9 @@ impl OperationContext {
             }
         }
         Ok(context)
+    }
+    pub(crate) fn invocation_dir(&self) -> &Path {
+        &self.invocation_dir
     }
     pub(crate) fn custody_failure(&self, label: &str, evidence: &Path) -> InstallFailure {
         authority_failure(self, label, Some(evidence.to_owned()))
@@ -157,6 +161,13 @@ impl OperationContext {
         }
     }
     pub(crate) fn new(root: &Path, config: &ProjectConfig) -> InstallResult<Self> {
+        Self::new_at(root, config, root)
+    }
+    pub(crate) fn new_at(
+        root: &Path,
+        config: &ProjectConfig,
+        invocation_dir: &Path,
+    ) -> InstallResult<Self> {
         let config_path = root.join(".asb/project.toml");
         config.installation.validate().map_err(|error| {
             crate::Error::Input(format!("invalid {}: {error}", config_path.display()))
@@ -173,6 +184,8 @@ impl OperationContext {
             })?;
         Ok(Self {
             root: root.to_owned(),
+            invocation_dir: std::path::absolute(invocation_dir)
+                .map_err(|error| crate::Error::Io(error.to_string()))?,
             config_path,
             budgets: config.installation.clone(),
             proxy: config.proxy.clone(),
@@ -966,6 +979,7 @@ impl PreparedStep {
         context
             .proxy
             .apply(&mut command, &|name| std::env::var(name).ok());
+        command.current_dir(context.invocation_dir());
         command.stdin(std::process::Stdio::null());
         Ok(Self {
             command,

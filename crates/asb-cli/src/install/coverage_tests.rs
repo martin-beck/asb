@@ -105,6 +105,9 @@ impl Fixture {
                     "--test-threads=1",
                 ])
                 .stdin(Stdio::null());
+            if case == "external-override-ready" {
+                command.env("ASB_WORKLOAD_DIR", "custom-workloads");
+            }
             // Child processes must retain instrumentation, never inherited keys.
             if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
                 command.env("LLVM_PROFILE_FILE", profile);
@@ -133,6 +136,12 @@ fn host_dependency_publication_is_no_clobber_and_removes_owned_temporaries() {
     let fixture = Fixture::new();
     fixture.script("fixture-host-tool", "printf 'fixture host tool\\n'");
     fixture.run("host");
+}
+
+#[test]
+fn execution_preflight_reuses_external_workload_from_invocation_override() {
+    let fixture = Fixture::new();
+    fixture.run("external-override-ready");
 }
 
 #[test]
@@ -272,6 +281,61 @@ fn installation_fixture_child() {
     };
     let root = PathBuf::from(std::env::var_os("ASB_FIXTURE_ROOT").unwrap());
     match case.as_str() {
+        "external-override-ready" => {
+            let nested = root.join("nested");
+            let workloads = nested.join("custom-workloads");
+            fs::create_dir_all(workloads.join("agentbench/source/configs/tasks")).unwrap();
+            fs::create_dir_all(workloads.join("agentbench/asb-trial")).unwrap();
+            fs::write(
+                workloads.join("agentbench/ASB-BUNDLE"),
+                "THUDM/AgentBench@d1e4a10db08c87075c78972e48ecc182be03e2d5",
+            )
+            .unwrap();
+            fs::write(
+                workloads.join("agentbench/source/configs/tasks/example.yaml"),
+                "name: fixture\n",
+            )
+            .unwrap();
+            fs::write(
+                workloads.join("agentbench/asb-trial/ASB-ADAPTER-FIXTURE"),
+                "fixture",
+            )
+            .unwrap();
+            fs::write(workloads.join("agentbench.txt"), "fixture prompt").unwrap();
+            crate::workloads::finalize_install("agentbench", &workloads).unwrap();
+            assert!(workload_available("agentbench", &workloads));
+            let agent = root.join("tools/pi/bin/pi");
+            fs::create_dir_all(agent.parent().unwrap()).unwrap();
+            fs::write(&agent, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+            let config: BenchmarkConfig = toml::from_str(
+                "agent='pi'\nworkload='agentbench'\nprovider='openrouter'\nmodel='fixture'\n",
+            )
+            .unwrap();
+            ensure_execution_requirements(
+                &config,
+                &root.join("benchmark.toml"),
+                None,
+                &nested,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert!(!root.join("workloads/agentbench").exists());
+            let replay_config: BenchmarkConfig = toml::from_str(
+                "agent='pi'\nworkload='agentbench'\nprovider='cli2key'\nmodel='fixture'\n",
+            )
+            .unwrap();
+            ensure_execution_requirements(
+                &replay_config,
+                &root.join("benchmark.toml"),
+                Some(crate::tape::Mode::Replay),
+                &nested,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert!(!root.join("tools/cli2key").exists());
+            assert!(!root.join("workloads/agentbench").exists());
+        }
         "host-replacement" => {
             let tool_root = root.join("tools/fixture-host-tool");
             let destination = tool_root.join("bin/fixture-host-tool");
@@ -386,7 +450,7 @@ fn workload_error_contract(root: &Path) {
         .unwrap_err()
         .to_string();
     assert!(error.contains("reserved"), "{error}");
-    let error = workload_source("https://fixture.invalid/a%20b.md")
+    let error = workload_source("https://fixture.invalid/a%20b.md", Path::new("."))
         .err()
         .unwrap()
         .to_string();
@@ -994,7 +1058,7 @@ fn diagnostics_contract(root: &Path) {
     )
     .unwrap_err();
     assert!(error.to_string().contains("invalid tool name"));
-    let error = workload_source("terminal-benc").unwrap_err();
+    let error = workload_source("terminal-benc", Path::new(".")).unwrap_err();
     assert!(
         error
             .to_string()

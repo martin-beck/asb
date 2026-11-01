@@ -1678,6 +1678,7 @@ mod marker_tests {
         let inputs = ADAPTER
             .runtime_inputs(&Context {
                 root: &root,
+                invocation_dir: &root,
                 project: &project,
             })
             .unwrap();

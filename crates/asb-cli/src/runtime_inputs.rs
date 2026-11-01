@@ -37,6 +37,7 @@ pub(crate) enum Dependency {
 
 pub(crate) struct Context<'a> {
     pub root: &'a Path,
+    pub invocation_dir: &'a Path,
     pub project: &'a project::ProjectConfig,
 }
 
@@ -82,6 +83,7 @@ pub(crate) fn for_plan(
     parent: &Path,
     plan: &crate::sweep::plan::SweepPlan,
     mode: Option<crate::tape::Mode>,
+    invocation_dir: &Path,
 ) -> Result<Vec<Dependency>, Error> {
     let mut inputs = vec![
         Dependency::Process {
@@ -108,6 +110,7 @@ pub(crate) fn for_plan(
         }
         let context = Context {
             root: &root,
+            invocation_dir,
             project: &project,
         };
         let agent = crate::agents::find(&entry.configuration.agent).ok_or_else(unavailable)?;
@@ -141,16 +144,40 @@ pub(crate) fn for_plan(
     Ok(inputs)
 }
 
+#[cfg(test)]
 pub(crate) fn discover(python: &Path, dependencies: &[Dependency]) -> Result<Vec<PathBuf>, Error> {
-    discover_with_timeout(python, dependencies, Duration::from_secs(60))
+    discover_at(python, dependencies, Path::new("."))
+}
+
+pub(crate) fn discover_at(
+    python: &Path,
+    dependencies: &[Dependency],
+    invocation_dir: &Path,
+) -> Result<Vec<PathBuf>, Error> {
+    discover_with_timeout_at(
+        python,
+        dependencies,
+        Duration::from_secs(60),
+        invocation_dir,
+    )
 }
 
 // Keep production policy unchanged while real-child fixtures exercise the
 // complete exchange and custody against a short watchdog.
+#[cfg(test)]
 fn discover_with_timeout(
     python: &Path,
     dependencies: &[Dependency],
     timeout: Duration,
+) -> Result<Vec<PathBuf>, Error> {
+    discover_with_timeout_at(python, dependencies, timeout, Path::new("."))
+}
+
+fn discover_with_timeout_at(
+    python: &Path,
+    dependencies: &[Dependency],
+    timeout: Duration,
+    invocation_dir: &Path,
 ) -> Result<Vec<PathBuf>, Error> {
     let mut bounded = std::collections::BTreeSet::new();
     for dependency in dependencies {
@@ -198,17 +225,17 @@ fn discover_with_timeout(
     serde_json::to_writer(&mut request, &dependencies).map_err(|_| unavailable())?;
     let request = request.0;
     #[cfg(unix)]
-    let bytes = exchange::run(python, &source, &request, exchange::Policy {
+    let bytes = exchange::run_at(python, &source, &request, exchange::Policy {
         request_bytes: 1024 * 1024,
         response_bytes: 4 * 1024 * 1024,
         timeout,
-    }).map_err(|reason| {
+    }, Some(invocation_dir)).map_err(|reason| {
         Error::Input(format!("runtime inputs could not be fully discovered within their limits; no input values were logged; {reason}"))
     })?;
     // Preserve the existing non-Unix route; it is not part of the Unix bounded
     // exchange qualification. A cancellable Windows writer remains separate.
     #[cfg(not(unix))]
-    let bytes = legacy_exchange(python, &source, request, timeout)?;
+    let bytes = legacy_exchange(python, &source, request, timeout, invocation_dir)?;
     let result: Discovered = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
     if let Some(code) = result.error_code {
         if !code.is_empty()
@@ -239,8 +266,10 @@ fn legacy_exchange(
     source: &str,
     request: Vec<u8>,
     timeout: Duration,
+    invocation_dir: &Path,
 ) -> Result<Vec<u8>, Error> {
     let mut command = Command::new(python);
+    command.current_dir(invocation_dir);
     command
         .args(["-I", "-S", "-B", "-c"])
         .arg(source)
@@ -311,6 +340,29 @@ mod tests {
         fn drop(&mut self) {
             let _ = crate::fixture_writer::cleanup(&self.0);
         }
+    }
+
+    #[test]
+    fn runtime_discovery_resolves_relative_path_in_the_invocation_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let first = Directory::new();
+        let second = Directory::new();
+        for root in [&first.0, &second.0] {
+            std::fs::create_dir(root.join("bin")).unwrap();
+            let executable = root.join("bin/fixture-tool");
+            std::fs::copy("/bin/true", &executable).unwrap();
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let dependencies = [Dependency::Program {
+            path: "fixture-tool".into(),
+            search: Some("bin".into()),
+        }];
+        let selected_first = discover_at(Path::new("python3"), &dependencies, &first.0).unwrap();
+        let selected_second = discover_at(Path::new("python3"), &dependencies, &second.0).unwrap();
+        assert!(selected_first.contains(&first.0.join("bin/fixture-tool")));
+        assert!(!selected_first.contains(&second.0.join("bin/fixture-tool")));
+        assert!(selected_second.contains(&second.0.join("bin/fixture-tool")));
+        assert!(!selected_second.contains(&first.0.join("bin/fixture-tool")));
     }
 
     #[test]
