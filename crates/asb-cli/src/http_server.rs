@@ -55,7 +55,7 @@ impl ServerInfo {
             .and_then(|index| {
                 self.base
                     .as_ref()
-                    .map(|base| format!("{base}/traces/{index}.perfetto-trace"))
+                    .map(|base| format!("{base}/traces/{index}.{}", trace_extension(&trace)))
             })
     }
     pub(crate) fn traces(&self) -> &[PathBuf] {
@@ -84,7 +84,7 @@ pub(crate) fn start_manual(output: &mut dyn Write) -> Result<(), Error> {
     let server = start(&root, &config, &report, traces, output)?;
     writeln!(
         output,
-        "HTTP report server: {}\nServes only the generated report and its Perfetto traces; stops one hour after the last request.",
+        "HTTP report server: {}\nServes only the generated report and its collector traces; stops one hour after the last request.",
         server.report_url(&report)
     )
     .map_err(crate::io_error)
@@ -291,7 +291,7 @@ fn materialize(destination: &Path, report: &Path, traces: &[PathBuf]) -> Result<
     for (index, trace) in traces.iter().enumerate() {
         let target = destination
             .join("traces")
-            .join(format!("{index}.perfetto-trace"));
+            .join(format!("{index}.{}", trace_extension(trace)));
         fs::create_dir_all(target.parent().expect("trace parent")).map_err(crate::io_error)?;
         fs::copy(trace, target).map_err(crate::io_error)?;
     }
@@ -376,19 +376,40 @@ fn write_state(path: &Path, state: &State) -> Result<(), Error> {
     .map_err(crate::io_error)
 }
 fn canonical_traces(traces: Vec<PathBuf>) -> Vec<PathBuf> {
+    canonical_traces_with(traces, |name, path| {
+        crate::collectors::report_artifact_links(name, path)
+            .iter()
+            .any(|link| link.primary.is_some())
+    })
+}
+fn canonical_traces_with(
+    traces: Vec<PathBuf>,
+    accepts: impl Fn(&str, &Path) -> bool,
+) -> Vec<PathBuf> {
     let mut traces = traces
         .into_iter()
         .filter_map(|trace| {
             let trace = trace.canonicalize().ok()?;
-            (trace.is_file()
-                && trace.extension().and_then(|value| value.to_str()) == Some("perfetto-trace")
-                && trace.metadata().ok()?.len() > 0)
+            let name = trace.file_name()?.to_str()?;
+            (trace.is_file() && accepts(name, &trace) && trace.metadata().ok()?.len() > 0)
                 .then_some(trace)
         })
         .collect::<Vec<_>>();
     traces.sort();
     traces.dedup();
     traces
+}
+fn trace_extension(trace: &Path) -> &str {
+    trace
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|extension| {
+            !extension.is_empty()
+                && extension
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+        .unwrap_or("artifact")
 }
 fn latest_report(root: &Path) -> Result<(PathBuf, Vec<PathBuf>), Error> {
     let mut files = Vec::new();
@@ -409,7 +430,15 @@ fn latest_report(root: &Path) -> Result<(PathBuf, Vec<PathBuf>), Error> {
         })?;
     let traces = files
         .into_iter()
-        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("perfetto-trace"))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    crate::collectors::report_artifact_links(name, path)
+                        .iter()
+                        .any(|link| link.primary.is_some())
+                })
+        })
         .collect();
     Ok((report, traces))
 }
@@ -496,6 +525,28 @@ fn percent_encode_path(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synthetic_collector_artifact_is_accepted_and_keeps_its_extension() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-http-other-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let trace = root.join("other.trace");
+        fs::write(&trace, b"trace").unwrap();
+        let traces = canonical_traces_with(vec![trace.clone()], |name, _| name == "other.trace");
+        assert_eq!(traces, vec![trace.canonicalize().unwrap()]);
+        let server = ServerInfo {
+            base: Some("http://localhost:1234".into()),
+            traces,
+        };
+        assert_eq!(
+            server.trace_url(&trace).as_deref(),
+            Some("http://localhost:1234/traces/0.trace")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn report_assets_and_traces_are_materialized_without_other_files() {
         let root = std::env::temp_dir().join(format!(
