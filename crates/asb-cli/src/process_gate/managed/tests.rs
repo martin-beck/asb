@@ -919,3 +919,73 @@ fn adopted_descendant_exit_does_not_abort_traced_principal() {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[test]
+fn traced_principal_completion_quiesces_live_adopted_descendant() {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let scope = test_support::Scope::new();
+    let root = root();
+    std::fs::create_dir_all(root.join("native-trace")).unwrap();
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    let helper = root.join("adopted-helper");
+    let release = root.join("release-principal");
+    let script = format!(
+        "import os,signal,time\nfrom pathlib import Path\np=os.fork()\nif p==0:\n parent=os.getpid()\n q=os.fork()\n if q==0:\n  while os.getppid()==parent: time.sleep(.005)\n  signal.signal(signal.SIGTERM,signal.SIG_IGN)\n  p=Path({:?}); t=p.with_suffix('.tmp'); t.write_text(str(os.getpid())); t.replace(p)\n  while True: time.sleep(1)\n os._exit(0)\nos.waitpid(p,0)\nwhile not Path({:?}).exists(): time.sleep(.005)\n",
+        helper.to_str().unwrap(),
+        release.to_str().unwrap()
+    );
+    let (mut command, route) = command(&binary, "/usr/bin/python3", &["-c".into(), script]);
+    let _channel = crate::agents::native_trace::prepare_gate_channel(&mut command, &root).unwrap();
+    let mut gate =
+        Admission::with_principal_observation(route.validate_gate(&mut command).unwrap())
+            .unwrap()
+            .spawn()
+            .unwrap();
+    gate.resume().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !helper.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "adopted helper never became ready"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let pid: u32 = std::fs::read_to_string(&helper).unwrap().parse().unwrap();
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+    assert!(fd >= 0);
+    let identity = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut poll = libc::pollfd {
+        fd: identity.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(
+        unsafe { libc::poll(&mut poll, 1, 0) },
+        0,
+        "fixture helper must still be alive"
+    );
+    std::fs::write(&release, "release").unwrap();
+    assert!(gate.wait().unwrap().success());
+    assert_eq!(
+        gate.principal_observation().process_termination,
+        Some(crate::process_termination::ProcessTermination::Code(0))
+    );
+    assert_eq!(
+        unsafe { libc::poll(&mut poll, 1, 0) },
+        1,
+        "gate returned before adopted helper exited"
+    );
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "gate returned before adopted helper was reaped"
+    );
+    drop(gate);
+    scope.wait_finished();
+    std::fs::remove_dir_all(root).unwrap();
+}
