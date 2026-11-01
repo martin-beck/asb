@@ -66,7 +66,7 @@ fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
         let source = event.get("source").and_then(|v| v.as_str());
         if matches!(
             kind,
-            Some("ConversationErrorEvent" | "UserRejectObservation")
+            Some("ConversationErrorEvent" | "UserRejectObservation" | "AgentErrorEvent")
         ) || (kind == Some("MessageEvent") && source == Some("user"))
         {
             return None;
@@ -336,6 +336,12 @@ mod tests {
         assert!(
             super::ADAPTER
                 .final_response(&format!("{event}\n{user}"), path)
+                .is_none()
+        );
+        let agent_error = r#"{"kind":"AgentErrorEvent","source":"agent","error":"finish failed","tool_name":"finish","action_id":"a"}"#;
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{event}\n{agent_error}"), path)
                 .is_none()
         );
         let rejected = r#"{"kind":"UserRejectObservation","source":"environment","tool_name":"finish","action_id":"a"}"#;
