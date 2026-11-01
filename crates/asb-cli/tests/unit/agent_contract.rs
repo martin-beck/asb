@@ -226,11 +226,10 @@ fn minimal_trait_implementation_has_conservative_optional_defaults() {
     assert!(adapter.output_usage("", "", false).is_none());
     assert!(adapter.step_count("", "").is_none());
     assert!(adapter.execution_failure("", "").is_none());
-    assert_eq!(
+    assert!(
         adapter
             .final_response(r#"{"type":"final","text":"answer"}"#, Path::new("fixture"))
-            .as_deref(),
-        Some("answer")
+            .is_none()
     );
 }
 
@@ -263,24 +262,7 @@ fn unknown_preparation_does_not_mutate_command_or_create_directories() {
 }
 
 #[test]
-fn nested_structured_answers_reject_nonanswer_children_and_find_real_final_text() {
-    for (document, expected) in [
-        (
-            r#"{"type":"final","output":{"type":"final","text":"nested"}}"#,
-            Some("nested"),
-        ),
-        (r#"{"type":"final","output":17}"#, None),
-        (r#"{"type":"final","text":{"value":false}}"#, None),
-        (r#"17"#, None),
-        (r#"{"type":"tool_result","content":"not final"}"#, None),
-    ] {
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(document)
-                .ok()
-                .and_then(|value| final_text_from_event(&value))
-                .as_deref(),
-            expected,
-            "{document}"
-        );
-    }
+fn unknown_adapter_does_not_interpret_structured_answer() {
+    let output = r#"{"type":"result","result":"foreign answer"}"#;
+    assert!(super::final_response("not-registered", output, Path::new(".")).is_none());
 }
