@@ -220,6 +220,23 @@ pub(crate) enum TargetScope {
     Container,
 }
 
+/// Selectable adapter-owned values displayed by setup and CLI discovery.
+pub(crate) struct SelectionOption {
+    pub selection: String,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub default: bool,
+}
+
+pub(crate) struct SelectionExtension {
+    pub tab: &'static str,
+    pub description: &'static str,
+    pub all_selection: Option<String>,
+    pub all_description: &'static str,
+    pub required: bool,
+    pub options: Vec<SelectionOption>,
+}
+
 pub(crate) trait CollectorAdapter: Sync {
     /// Conservative per-attempt retained capture estimate.
     fn estimated_disk_mib(&self) -> u64 {
@@ -246,6 +263,9 @@ pub(crate) trait CollectorAdapter: Sync {
     /// planning or setup code about their syntax.
     fn accepts_selection(&self, selection: &str) -> bool {
         selection == self.id()
+    }
+    fn selection_extension(&self) -> Option<SelectionExtension> {
+        None
     }
     fn runtime_inputs(
         &self,
@@ -440,14 +460,6 @@ pub(crate) fn adapter_for_selection(selection: &str) -> Option<&'static dyn Coll
         .find(|collector| collector.accepts_selection(selection))
 }
 
-pub(crate) fn bpftrace_profile_names() -> impl Iterator<Item = &'static str> {
-    adapters::bpftrace::bpftrace_profile_names()
-}
-
-pub(crate) fn bpftrace_profiles() -> &'static [adapters::bpftrace::BpftraceProfile] {
-    adapters::bpftrace::bpftrace_profiles()
-}
-
 /// Resolve transitive dependencies once, keeping user-selected order stable.
 pub(crate) fn expand_dependencies(selected: &[String]) -> Vec<String> {
     let mut expanded = selected.to_vec();
@@ -635,6 +647,31 @@ mod tests {
             "bpftrace",
             &["bpftrace:sched-latency".into()]
         ));
+    }
+
+    #[test]
+    fn collector_extension_options_are_unique_and_resolve_to_their_owner() {
+        let mut all_selections = std::collections::BTreeSet::new();
+        for adapter in all() {
+            let Some(extension) = adapter.selection_extension() else {
+                continue;
+            };
+            assert!(!extension.options.is_empty(), "{}", adapter.id());
+            if let Some(all) = extension.all_selection {
+                assert_eq!(
+                    adapter_for_selection(&all).map(CollectorAdapter::id),
+                    Some(adapter.id())
+                );
+            }
+            for option in extension.options {
+                assert!(all_selections.insert(option.selection.clone()));
+                assert_eq!(
+                    adapter_for_selection(&option.selection).map(CollectorAdapter::id),
+                    Some(adapter.id())
+                );
+                assert!(!option.label.is_empty() && !option.description.is_empty());
+            }
+        }
     }
 
     #[test]

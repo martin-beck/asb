@@ -47,23 +47,23 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
     prepare_missing_installables(&options, output)?;
     let repeated = requested_repeats || repeated(&options);
     for measure in &options.measure {
-        let valid_bpftrace_profile = measure.strip_prefix("bpftrace:").is_some_and(|profile| {
-            profile == "all"
-                || crate::collectors::bpftrace_profile_names().any(|candidate| candidate == profile)
-        });
-        if !measurements::available_collectors().contains(measure) && !valid_bpftrace_profile {
+        if crate::collectors::adapter_for_selection(measure).is_none() {
             return Err(Error::Input(format!(
-                "unknown measurement collector `{measure}`; use `asb measure` to see collectors or `asb measure bpftrace programs` for eBPF programs"
+                "unknown measurement collector or option `{measure}`; use `asb measure` to see collectors and their available options"
             )));
         }
     }
-    if options
+    for owner in options
         .measure
         .iter()
-        .any(|measure| measure.starts_with("bpftrace:"))
-        && !options.measure.iter().any(|measure| measure == "bpftrace")
+        .filter_map(|measure| {
+            crate::collectors::adapter_for_selection(measure).map(|adapter| adapter.id().to_owned())
+        })
+        .collect::<BTreeSet<_>>()
     {
-        options.measure.push("bpftrace".into());
+        if !options.measure.contains(&owner) {
+            options.measure.push(owner);
+        }
     }
     let (root, settings) = project::load(Path::new("."))?;
     let directory = std::env::var_os("ASB_WORKLOAD_DIR")
@@ -376,10 +376,7 @@ fn collector_installables(selected: &[String]) -> Vec<String> {
     let selected = selected
         .iter()
         .filter_map(|name| {
-            measurements::available_collectors()
-                .contains(name)
-                .then(|| name.clone())
-                .or_else(|| name.starts_with("bpftrace:").then(|| "bpftrace".into()))
+            crate::collectors::adapter_for_selection(name).map(|adapter| adapter.id().to_owned())
         })
         .collect::<Vec<_>>();
     let mut result = Vec::new();

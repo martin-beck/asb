@@ -192,6 +192,10 @@ struct App {
     step: PaneKind,
     extension_tab: String,
     extension_description: String,
+    collector_tab: String,
+    collector_description: String,
+    configured_collectors: BTreeSet<String>,
+    collector_selections: BTreeMap<String, BTreeSet<String>>,
     message: String,
     message_color: Color,
     message_until: Option<std::time::Instant>,
@@ -216,8 +220,8 @@ impl App {
             order.push(PaneKind::Extensions);
         }
         order.push(PaneKind::Measurements);
-        if !self.pane(PaneKind::BpftracePrograms).choices.is_empty() {
-            order.push(PaneKind::BpftracePrograms);
+        if !self.pane(PaneKind::CollectorOptions).choices.is_empty() {
+            order.push(PaneKind::CollectorOptions);
         }
         order.push(PaneKind::Concurrency);
         order
@@ -226,6 +230,8 @@ impl App {
     fn step_name(&self, step: PaneKind) -> &str {
         if step == PaneKind::Extensions {
             &self.extension_tab
+        } else if step == PaneKind::CollectorOptions {
+            &self.collector_tab
         } else {
             step.name()
         }
@@ -234,6 +240,8 @@ impl App {
     fn step_description(&self) -> &str {
         if self.step == PaneKind::Extensions {
             &self.extension_description
+        } else if self.step == PaneKind::CollectorOptions {
+            &self.collector_description
         } else {
             self.step.description()
         }
@@ -343,6 +351,10 @@ impl App {
             step: PaneKind::Agents,
             extension_tab: "workload options".into(),
             extension_description: PaneKind::Extensions.description().into(),
+            collector_tab: "collector options".into(),
+            collector_description: PaneKind::CollectorOptions.description().into(),
+            configured_collectors: BTreeSet::new(),
+            collector_selections: BTreeMap::new(),
             message: "Space selects; arrows move; Tab or Enter advances; Esc cancels.".into(),
             message_color: Color::Yellow,
             message_until: None,
@@ -483,18 +495,71 @@ impl App {
             }
         }
 
+        let mut collector_options = BTreeSet::new();
         for config in &configs {
             if let Some(measurements) = &config.measurements {
                 for collector in &measurements.collectors {
+                    let adapter =
+                        crate::collectors::adapter_for_selection(collector).ok_or_else(|| {
+                            Error::Input(format!(
+                                "{} selects unknown collector option `{collector}`",
+                                input.display()
+                            ))
+                        })?;
                     select_choice(
                         self.pane_mut(PaneKind::Measurements),
-                        ChoiceKey::Collector(collector.clone()),
+                        ChoiceKey::Collector(adapter.id().into()),
                         input,
                     )?;
+                    if adapter.id() != collector {
+                        if let Some(extension) = adapter.selection_extension()
+                            && extension.all_selection.as_deref() == Some(collector)
+                        {
+                            collector_options.extend(
+                                extension
+                                    .options
+                                    .into_iter()
+                                    .map(|option| (adapter.id().to_owned(), option.selection)),
+                            );
+                        } else {
+                            collector_options.insert((adapter.id().to_owned(), collector.clone()));
+                        }
+                    }
                 }
             }
         }
         self.sync_collector_dependencies();
+        self.refresh_collector_options();
+        for (collector, selection) in &collector_options {
+            if self.configured_collectors.insert(collector.clone()) {
+                for (choice, selected) in self.panes[PaneKind::CollectorOptions.index()]
+                    .choices
+                    .iter()
+                    .zip(
+                        self.panes[PaneKind::CollectorOptions.index()]
+                            .selected
+                            .iter_mut(),
+                    )
+                {
+                    if choice
+                        .key
+                        .collector_option()
+                        .is_some_and(|(owner, _)| owner == collector)
+                    {
+                        *selected = false;
+                    }
+                }
+            }
+            select_choice(
+                self.pane_mut(PaneKind::CollectorOptions),
+                ChoiceKey::CollectorOption {
+                    collector: collector.clone(),
+                    selection: selection.clone(),
+                },
+                input,
+            )?;
+        }
+        update_collector_sentinels(self.pane_mut(PaneKind::CollectorOptions));
         select_choice(
             self.pane_mut(PaneKind::Concurrency),
             ChoiceKey::Concurrency(concurrency),
@@ -673,49 +738,101 @@ impl App {
         Ok(())
     }
 
-    fn refresh_bpftrace_programs(&mut self) {
-        let previous = self
-            .pane(PaneKind::BpftracePrograms)
-            .selected_choices()
-            .filter_map(|choice| choice.key.bpftrace_program().map(str::to_owned))
-            .collect::<BTreeSet<_>>();
+    fn refresh_collector_options(&mut self) {
+        self.refresh_collector_options_with(crate::collectors::all());
+    }
+
+    fn refresh_collector_options_with(
+        &mut self,
+        adapters: &[&dyn crate::collectors::CollectorAdapter],
+    ) {
+        let pane = self.pane(PaneKind::CollectorOptions);
+        let mut previous = BTreeMap::<String, BTreeSet<String>>::new();
+        for (choice, enabled) in pane.choices.iter().zip(&pane.selected) {
+            if let Some((collector, selection)) = choice.key.collector_option() {
+                let values = previous.entry(collector.to_owned()).or_default();
+                if *enabled {
+                    values.insert(selection.to_owned());
+                }
+            }
+        }
+        for (collector, values) in previous {
+            if self.configured_collectors.contains(&collector) {
+                self.collector_selections.insert(collector, values);
+            }
+        }
         let selected = self
             .pane(PaneKind::Measurements)
             .selected_choices()
-            .any(|choice| choice.key.collector() == Some("bpftrace"));
-        if !selected {
-            self.panes[PaneKind::BpftracePrograms.index()] = Pane::new(Vec::new());
-            return;
-        }
-        let mut choices = vec![Choice {
-            label: "[all]".into(),
-            key: ChoiceKey::AllBpftracePrograms,
-            availability: Availability::Available,
-        }];
-        choices.extend(
-            crate::collectors::bpftrace_profiles()
-                .iter()
-                .map(|profile| Choice {
-                    label: format!("{} — {}", profile.name, profile.description),
-                    key: ChoiceKey::BpftraceProgram(profile.name.into()),
+            .filter_map(|choice| choice.key.collector())
+            .collect::<BTreeSet<_>>();
+        let mut choices = Vec::new();
+        let mut defaults = BTreeSet::new();
+        let mut tabs = BTreeSet::new();
+        let mut descriptions = BTreeSet::new();
+        for adapter in adapters {
+            if !selected.contains(adapter.id()) {
+                continue;
+            }
+            let Some(extension) = adapter.selection_extension() else {
+                continue;
+            };
+            tabs.insert(extension.tab);
+            descriptions.insert(extension.description);
+            if extension.all_selection.is_some() {
+                choices.push(Choice {
+                    label: "[all]".into(),
+                    key: ChoiceKey::AllCollectorOptions(adapter.id().into()),
                     availability: Availability::Available,
-                }),
-        );
+                });
+            }
+            for option in extension.options {
+                let identity = (adapter.id().to_owned(), option.selection.clone());
+                if option.default {
+                    defaults.insert(identity);
+                }
+                choices.push(Choice {
+                    label: format!("{} — {}", option.label, option.description),
+                    key: ChoiceKey::CollectorOption {
+                        collector: adapter.id().into(),
+                        selection: option.selection,
+                    },
+                    availability: Availability::Available,
+                });
+            }
+        }
         let mut pane = Pane::new(choices);
         for (index, choice) in pane.choices.iter().enumerate() {
-            if let Some(program) = choice.key.bpftrace_program() {
-                pane.selected[index] = if previous.is_empty() {
-                    crate::collectors::bpftrace_profiles()
-                        .iter()
-                        .find(|profile| profile.name == program)
-                        .is_some_and(|profile| profile.default_selection)
+            if tabs.len() > 1 {
+                pane.sections[index] = match &choice.key {
+                    ChoiceKey::AllCollectorOptions(collector) => Some(collector.clone()),
+                    ChoiceKey::CollectorOption { collector, .. } => Some(collector.clone()),
+                    _ => None,
+                };
+            }
+            if let Some((collector, selection)) = choice.key.collector_option() {
+                let identity = (collector.to_owned(), selection.to_owned());
+                pane.selected[index] = if self.configured_collectors.contains(collector) {
+                    self.collector_selections
+                        .get(collector)
+                        .is_some_and(|values| values.contains(selection))
                 } else {
-                    previous.contains(program)
+                    defaults.contains(&identity)
                 };
             }
         }
-        pane.selected[0] = pane.selected.iter().skip(1).all(|selected| *selected);
-        self.panes[PaneKind::BpftracePrograms.index()] = pane;
+        update_collector_sentinels(&mut pane);
+        self.collector_tab = if tabs.len() == 1 {
+            tabs.into_iter().next().unwrap().into()
+        } else {
+            "collector options".into()
+        };
+        self.collector_description = if descriptions.len() == 1 {
+            descriptions.into_iter().next().unwrap().into()
+        } else {
+            PaneKind::CollectorOptions.description().into()
+        };
+        self.panes[PaneKind::CollectorOptions.index()] = pane;
     }
 
     fn sync_collector_dependencies(&mut self) -> Vec<String> {
@@ -826,7 +943,31 @@ impl App {
     }
 
     fn advance(&mut self) -> Result<Option<Generated>, Error> {
-        if !self.pane(self.step).has_selection() {
+        if self.step == PaneKind::CollectorOptions {
+            let selected = self
+                .pane(PaneKind::Measurements)
+                .selected_choices()
+                .filter_map(|choice| choice.key.collector())
+                .collect::<BTreeSet<_>>();
+            if let Some((collector, tab)) = missing_required_collector_options(
+                self.pane(PaneKind::CollectorOptions),
+                crate::collectors::all(),
+                &selected,
+            ) {
+                self.message = format!("Select at least one {tab} value for {collector}.");
+                self.message_color = Color::Yellow;
+                return Ok(None);
+            }
+        }
+        let optional_collector_options = self.step == PaneKind::CollectorOptions
+            && self
+                .pane(PaneKind::Measurements)
+                .selected_choices()
+                .filter_map(|choice| choice.key.collector())
+                .filter_map(crate::collectors::find)
+                .filter_map(|adapter| adapter.selection_extension())
+                .all(|extension| !extension.required);
+        if !self.pane(self.step).has_selection() && !optional_collector_options {
             self.message = "Select at least one item before continuing.".into();
             return Ok(None);
         }
@@ -837,7 +978,7 @@ impl App {
             self.refresh_extensions()?;
         }
         if self.step == PaneKind::Measurements {
-            self.refresh_bpftrace_programs();
+            self.refresh_collector_options();
         }
         if let Some(next) = self.next_step() {
             self.step = next;
@@ -1035,13 +1176,13 @@ fn select_choice(pane: &mut Pane, key: ChoiceKey, input: &Path) -> Result<(), Er
                 ChoiceKey::Model { .. } => "model",
                 ChoiceKey::Prompt(_) | ChoiceKey::TrialSet { .. } => "workload",
                 ChoiceKey::Collector(_) => "collector",
-                ChoiceKey::BpftraceProgram(_) => "bpftrace program",
+                ChoiceKey::CollectorOption { .. } => "collector option",
                 ChoiceKey::Concurrency(_) => "concurrency",
                 ChoiceKey::AllAgents
                 | ChoiceKey::AllWorkloads
                 | ChoiceKey::AllCollectors
                 | ChoiceKey::AllExtension { .. }
-                | ChoiceKey::AllBpftracePrograms
+                | ChoiceKey::AllCollectorOptions(_)
                 | ChoiceKey::ExtensionValue { .. }
                 | ChoiceKey::Trial(_) => "selection",
             },
@@ -1085,15 +1226,13 @@ fn choice_key_label(key: &ChoiceKey) -> String {
         | ChoiceKey::Provider(value)
         | ChoiceKey::Prompt(value)
         | ChoiceKey::Collector(value)
-        | ChoiceKey::BpftraceProgram(value)
         | ChoiceKey::Trial(value) => value.clone(),
+        ChoiceKey::CollectorOption { selection, .. } => selection.clone(),
         ChoiceKey::Model { provider, model } => format!("{provider}:{model}"),
         ChoiceKey::TrialSet { workload, file } => format!("{}:{}", workload, file.display()),
         ChoiceKey::Concurrency(value) => value.to_string(),
-        ChoiceKey::AllAgents
-        | ChoiceKey::AllWorkloads
-        | ChoiceKey::AllCollectors
-        | ChoiceKey::AllBpftracePrograms => "[all]".into(),
+        ChoiceKey::AllAgents | ChoiceKey::AllWorkloads | ChoiceKey::AllCollectors => "[all]".into(),
+        ChoiceKey::AllCollectorOptions(collector) => format!("{collector}: [all]"),
         ChoiceKey::AllExtension {
             workload,
             extension,
@@ -1887,7 +2026,7 @@ fn run_loop(
             KeyEvent {
                 code: KeyCode::Char(' '),
                 ..
-            } if app.step == PaneKind::BpftracePrograms => {
+            } if app.step == PaneKind::CollectorOptions => {
                 toggle_setup_choice(app, |_app, _selected| Ok(true))?;
             }
             KeyEvent {
@@ -1999,6 +2138,33 @@ where
     let Some(index) = app.panes[step.index()].active_index() else {
         return Ok(());
     };
+    if let ChoiceKey::AllCollectorOptions(collector) =
+        app.panes[step.index()].choices[index].key.clone()
+    {
+        let enable = !app.panes[step.index()].selected[index];
+        app.configured_collectors.insert(collector.clone());
+        let pane = &mut app.panes[step.index()];
+        for (choice, selected) in pane.choices.iter().zip(pane.selected.iter_mut()) {
+            if choice
+                .key
+                .collector_option()
+                .is_some_and(|(owner, _)| owner == collector)
+            {
+                *selected = enable;
+            }
+        }
+        update_collector_sentinels(pane);
+        return Ok(());
+    }
+    if let Some((collector, _)) = app.panes[step.index()].choices[index]
+        .key
+        .collector_option()
+    {
+        app.configured_collectors.insert(collector.to_owned());
+        app.panes[step.index()].toggle();
+        update_collector_sentinels(&mut app.panes[step.index()]);
+        return Ok(());
+    }
     if let ChoiceKey::AllExtension {
         workload,
         extension,
@@ -2054,7 +2220,7 @@ where
         }
         if step == PaneKind::Measurements {
             app.sync_collector_dependencies();
-            app.refresh_bpftrace_programs();
+            app.refresh_collector_options();
             if app.panes[step.index()].selected[index] {
                 set_message(
                     &mut app.message,
@@ -2099,7 +2265,7 @@ where
     }
     if step == PaneKind::Measurements {
         app.sync_collector_dependencies();
-        app.refresh_bpftrace_programs();
+        app.refresh_collector_options();
     }
     if step == PaneKind::Extensions {
         update_extension_sentinels(&mut app.panes[step.index()], index);
@@ -2108,6 +2274,47 @@ where
         app.refresh_extensions()?;
     }
     Ok(())
+}
+
+fn update_collector_sentinels(pane: &mut Pane) {
+    for index in 0..pane.choices.len() {
+        let ChoiceKey::AllCollectorOptions(collector) = &pane.choices[index].key else {
+            continue;
+        };
+        let mut values = pane.choices.iter().enumerate().filter(|(_, choice)| {
+            choice
+                .key
+                .collector_option()
+                .is_some_and(|(owner, _)| owner == collector)
+        });
+        let mut any = false;
+        let all = values.all(|(i, _)| {
+            any = true;
+            pane.selected[i]
+        });
+        pane.selected[index] = any && all;
+    }
+}
+
+fn missing_required_collector_options(
+    pane: &Pane,
+    adapters: &[&dyn crate::collectors::CollectorAdapter],
+    selected: &BTreeSet<&str>,
+) -> Option<(&'static str, &'static str)> {
+    adapters
+        .iter()
+        .filter(|adapter| selected.contains(adapter.id()))
+        .find_map(|adapter| {
+            let extension = adapter.selection_extension()?;
+            (extension.required
+                && !pane.selected_choices().any(|choice| {
+                    choice
+                        .key
+                        .collector_option()
+                        .is_some_and(|(owner, _)| owner == adapter.id())
+                }))
+            .then_some((adapter.id(), extension.tab))
+        })
 }
 
 fn update_extension_sentinels(pane: &mut Pane, _changed: usize) {
@@ -2830,22 +3037,39 @@ fn prepare_configs(app: &App) -> Result<(usize, PathBuf, Vec<BenchmarkConfig>), 
             .filter_map(|choice| choice.key.collector().map(str::to_owned))
             .collect::<Vec<_>>(),
     );
-    if measures.iter().any(|measure| measure == "bpftrace") {
-        let programs = app.panes[PaneKind::BpftracePrograms.index()]
-            .selected_choices()
-            .filter_map(|choice| choice.key.bpftrace_program().map(str::to_owned))
-            .collect::<Vec<_>>();
-        if programs.is_empty() {
-            return Err(Error::Input(
-                "select at least one eBPF program for the bpftrace collector".into(),
-            ));
+    for collector in &measures {
+        let Some(extension) =
+            crate::collectors::find(collector).and_then(|adapter| adapter.selection_extension())
+        else {
+            continue;
+        };
+        if extension.required
+            && !app
+                .pane(PaneKind::CollectorOptions)
+                .selected_choices()
+                .any(|choice| {
+                    choice
+                        .key
+                        .collector_option()
+                        .is_some_and(|(owner, _)| owner == collector)
+                })
+        {
+            return Err(Error::Input(format!(
+                "select at least one {} value for the {collector} collector",
+                extension.tab
+            )));
         }
-        measures.extend(
-            programs
-                .into_iter()
-                .map(|program| format!("bpftrace:{program}")),
-        );
     }
+    measures.extend(
+        app.pane(PaneKind::CollectorOptions)
+            .selected_choices()
+            .filter_map(|choice| {
+                choice
+                    .key
+                    .collector_option()
+                    .map(|(_, selection)| selection.to_owned())
+            }),
+    );
     let mut concurrency = app.panes[PaneKind::Concurrency.index()].selected_choices();
     let value = concurrency
         .next()
@@ -3460,28 +3684,183 @@ mod tests {
             .position(|choice| choice.key.collector() == Some("bpftrace"))
             .expect("bpftrace collector");
         app.panes[PaneKind::Measurements.index()].selected[index] = true;
-        app.refresh_bpftrace_programs();
-        let pane = app.pane(PaneKind::BpftracePrograms);
+        app.refresh_collector_options();
+        let pane = app.pane(PaneKind::CollectorOptions);
         assert!(matches!(
             pane.choices[0].key,
-            ChoiceKey::AllBpftracePrograms
+            ChoiceKey::AllCollectorOptions(_)
         ));
-        assert!(
-            pane.choices
-                .iter()
-                .any(|choice| { choice.key.bpftrace_program() == Some("sched-latency") })
-        );
+        assert!(pane.choices.iter().any(|choice| {
+            choice.key.collector_option() == Some(("bpftrace", "bpftrace:sched-latency"))
+        }));
         assert!(pane.selected.iter().skip(1).any(|selected| *selected));
-        assert!(app.navigation_order().contains(&PaneKind::BpftracePrograms));
-        app.step = PaneKind::BpftracePrograms;
+        assert!(app.navigation_order().contains(&PaneKind::CollectorOptions));
+        app.step = PaneKind::CollectorOptions;
         super::toggle_setup_choice(&mut app, |_app, _selected| Ok(true)).unwrap();
         assert!(
-            app.pane(PaneKind::BpftracePrograms)
+            app.pane(PaneKind::CollectorOptions)
                 .selected
                 .iter()
                 .all(|selected| *selected)
         );
+        super::toggle_setup_choice(&mut app, |_app, _selected| Ok(true)).unwrap();
+        assert!(app.advance().unwrap().is_none());
+        assert_eq!(app.step, PaneKind::CollectorOptions);
+        assert!(app.message.contains("bpftrace"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    struct FixtureCollector {
+        id: &'static str,
+        supports_all: bool,
+    }
+
+    impl crate::collectors::CollectorAdapter for FixtureCollector {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+        fn selection_extension(&self) -> Option<crate::collectors::SelectionExtension> {
+            Some(crate::collectors::SelectionExtension {
+                tab: "fixture options",
+                description: "Select fixture options",
+                all_selection: self.supports_all.then(|| format!("{}:all", self.id)),
+                all_description: "all fixture options",
+                required: true,
+                options: ["one", "two"]
+                    .into_iter()
+                    .map(|label| crate::collectors::SelectionOption {
+                        selection: format!("{}:{label}", self.id),
+                        label,
+                        description: "fixture option",
+                        default: false,
+                    })
+                    .collect(),
+            })
+        }
+    }
+
+    #[test]
+    fn collector_option_groups_preserve_edits_and_require_each_selected_owner() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-tui-multiple-collectors-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let first = FixtureCollector {
+            id: "first",
+            supports_all: false,
+        };
+        let second = FixtureCollector {
+            id: "second",
+            supports_all: true,
+        };
+        let adapters: &[&dyn crate::collectors::CollectorAdapter] = &[&first, &second];
+        let mut app = App::new(root.clone(), ProjectConfig::default());
+        app.panes[PaneKind::Measurements.index()] = Pane::new(vec![
+            Choice {
+                label: "first".into(),
+                key: ChoiceKey::Collector("first".into()),
+                availability: Availability::Available,
+            },
+            Choice {
+                label: "second".into(),
+                key: ChoiceKey::Collector("second".into()),
+                availability: Availability::Available,
+            },
+        ]);
+        app.panes[PaneKind::Measurements.index()]
+            .selected
+            .fill(true);
+        app.refresh_collector_options_with(adapters);
+        let pane = app.pane(PaneKind::CollectorOptions);
+        assert!(
+            !pane
+                .choices
+                .iter()
+                .any(|choice| choice.key == ChoiceKey::AllCollectorOptions("first".into()))
+        );
+        assert!(
+            pane.choices
+                .iter()
+                .any(|choice| choice.key == ChoiceKey::AllCollectorOptions("second".into()))
+        );
+
+        app.step = PaneKind::CollectorOptions;
+        app.panes[PaneKind::CollectorOptions.index()].cursor = app
+            .pane(PaneKind::CollectorOptions)
+            .choices
+            .iter()
+            .position(|choice| choice.key.collector_option() == Some(("first", "first:one")))
+            .unwrap();
+        super::toggle_setup_choice(&mut app, |_, _| Ok(true)).unwrap();
+        let selected = BTreeSet::from(["first", "second"]);
+        assert_eq!(
+            super::missing_required_collector_options(
+                app.pane(PaneKind::CollectorOptions),
+                adapters,
+                &selected
+            ),
+            Some(("second", "fixture options"))
+        );
+
+        app.panes[PaneKind::Measurements.index()].selected[0] = false;
+        app.refresh_collector_options_with(adapters);
+        app.panes[PaneKind::Measurements.index()].selected[0] = true;
+        app.refresh_collector_options_with(adapters);
+        let selected_first = app
+            .pane(PaneKind::CollectorOptions)
+            .selected_choices()
+            .filter_map(|choice| choice.key.collector_option())
+            .filter(|(owner, _)| *owner == "first")
+            .collect::<Vec<_>>();
+        assert_eq!(selected_first, vec![("first", "first:one")]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn saved_collector_options_round_trip_through_the_setup_wizard() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-tui-collector-options-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("benchmark.toml");
+        for (requested, expected) in [
+            ("bpftrace:io-wait", vec!["bpftrace:io-wait".to_owned()]),
+            (
+                "bpftrace:all",
+                crate::collectors::find("bpftrace")
+                    .unwrap()
+                    .selection_extension()
+                    .unwrap()
+                    .options
+                    .into_iter()
+                    .map(|option| option.selection)
+                    .collect(),
+            ),
+        ] {
+            std::fs::write(&input, format!("agent='pi'\nprovider='openrouter'\nmodel='configured-model'\nworkload='bug-fix'\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['bpftrace','{requested}']\n")).unwrap();
+            let mut app = App::new(root.clone(), ProjectConfig::default());
+            app.preselect(&input).unwrap();
+            app.refresh_collector_options();
+            let selected = app
+                .pane(PaneKind::CollectorOptions)
+                .selected_choices()
+                .filter_map(|choice| {
+                    choice
+                        .key
+                        .collector_option()
+                        .map(|(_, value)| value.to_owned())
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(selected, expected.into_iter().collect());
+            let (_, _, configs) = super::prepare_configs(&app).unwrap();
+            let generated = &configs[0].measurements.as_ref().unwrap().collectors;
+            for selection in &selected {
+                assert!(generated.contains(selection));
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
