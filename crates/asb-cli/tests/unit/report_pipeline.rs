@@ -81,6 +81,167 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn compare_holds_sweep_ownership_before_reading_until_report_is_published() {
+    let fixture = Fixture::new();
+    let manifest = fixture.seed("", 1);
+    let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        READ_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_, _| {
+                opened_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }));
+        });
+        generate(manifest.to_str().unwrap(), &mut Vec::new())
+    });
+    opened_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let competitor =
+        crate::output_lock::OutputLock::acquire(&fixture.0.join(".sweep-asb-sweep.lock"), "busy");
+    let blocked = competitor.is_err();
+    drop(competitor);
+    release_tx.send(()).unwrap();
+    handle.join().unwrap().unwrap();
+    assert!(
+        blocked,
+        "a new sweep was able to rotate inputs while compare was reading"
+    );
+}
+
+#[test]
+fn external_compare_cannot_read_a_sweep_owned_by_an_active_writer() {
+    let fixture = Fixture::new();
+    let manifest = fixture.seed("", 1);
+    let owner = crate::sweep::lock::OutputLock::acquire(&fixture.0, "sweep").unwrap();
+    let error = generate(manifest.to_str().unwrap(), &mut Vec::new())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("another sweep owns"));
+    assert!(!fixture.0.join("results/sweep-comparison").exists());
+    // The sweep's own finalization retains the same owner without re-locking.
+    run_in_sweep(manifest.to_str().unwrap(), &mut Vec::new(), &owner).unwrap();
+    let mut quiet = Vec::new();
+    run_links_in_sweep(manifest.to_str().unwrap(), &mut quiet, &owner).unwrap();
+    let quiet = String::from_utf8(quiet).unwrap();
+    assert!(quiet.contains("Result report: "));
+    assert!(!quiet.contains("Compared "));
+    drop(owner);
+    generate(manifest.to_str().unwrap(), &mut Vec::new()).unwrap();
+}
+
+#[test]
+fn quiet_links_include_collector_defined_viewers() {
+    let mut output = Vec::new();
+    write_public_links(
+        vec![("Other UI".into(), "https://example.invalid/viewer".into())],
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "Other UI: https://example.invalid/viewer\n"
+    );
+}
+
+#[test]
+fn comparison_of_nested_campaign_uses_its_sweep_source_owner() {
+    let fixture = Fixture::new();
+    let campaign = fixture
+        .0
+        .join("sweep-results/000-one/campaigns/a/plan.json");
+    fs::create_dir_all(campaign.parent().unwrap()).unwrap();
+    let owner = crate::sweep::lock::OutputLock::acquire(&fixture.0, "sweep").unwrap();
+    let error = crate::sweep::lock::OutputLock::for_comparison(&campaign)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("another sweep owns"));
+    drop(owner);
+    assert!(
+        crate::sweep::lock::OutputLock::for_comparison(&campaign)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn comparison_of_nested_benchmark_toml_uses_its_sweep_source_owner() {
+    let fixture = Fixture::new();
+    let manifest = fixture.seed("", 1);
+    let benchmark = fixture.0.join("sweep-results/000-0/benchmark.toml");
+    fs::copy(fixture.0.join("0.toml"), &benchmark).unwrap();
+    let owner = crate::sweep::lock::OutputLock::acquire(&fixture.0, "sweep").unwrap();
+    let error = generate(benchmark.to_str().unwrap(), &mut Vec::new())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("another sweep owns"), "{error}");
+    assert!(
+        !fixture
+            .0
+            .join("sweep-results/000-0/.benchmark-asb-sweep.lock")
+            .exists()
+    );
+    drop(owner);
+    generate(benchmark.to_str().unwrap(), &mut Vec::new()).unwrap();
+    generate(manifest.to_str().unwrap(), &mut Vec::new()).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn comparison_resolves_symlinked_nested_sources_before_selecting_ownership() {
+    let fixture = Fixture::new();
+    fixture.seed("", 1);
+    let benchmark = fixture.0.join("sweep-results/000-0/benchmark.toml");
+    fs::copy(fixture.0.join("0.toml"), &benchmark).unwrap();
+    let alias_dir = fixture.0.join("alias");
+    std::os::unix::fs::symlink("sweep-results/000-0", &alias_dir).unwrap();
+    let alias_file = fixture.0.join("other-benchmark.toml");
+    std::os::unix::fs::symlink(&benchmark, &alias_file).unwrap();
+    let owner = crate::sweep::lock::OutputLock::acquire(&fixture.0, "sweep").unwrap();
+    for path in [alias_dir.join("benchmark.toml"), alias_file] {
+        let error = generate(path.to_str().unwrap(), &mut Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("another sweep owns"), "{error}");
+    }
+    drop(owner);
+    // The file alias has a distinct lexical output namespace; protect it as
+    // well as the target's enclosing sweep while it remains a symlink.
+    let alias_owner =
+        crate::sweep::lock::OutputLock::acquire(&fixture.0, "other-benchmark").unwrap();
+    let error = generate(
+        fixture.0.join("other-benchmark.toml").to_str().unwrap(),
+        &mut Vec::new(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("another sweep owns"), "{error}");
+    drop(alias_owner);
+}
+
+#[cfg(unix)]
+#[test]
+fn top_level_manifest_symlink_keeps_its_own_output_namespace() {
+    let fixture = Fixture::new();
+    fixture.seed("", 1);
+    std::os::unix::fs::symlink("sweep.toml", fixture.0.join("alias.toml")).unwrap();
+    fs::create_dir_all(fixture.0.join("alias-results/000-0/measurements")).unwrap();
+    fs::copy(
+        fixture.0.join("sweep-results/000-0/measurements/run.json"),
+        fixture.0.join("alias-results/000-0/measurements/run.json"),
+    )
+    .unwrap();
+    let _owner = crate::sweep::lock::OutputLock::acquire(&fixture.0, "sweep").unwrap();
+    let report = generate(
+        fixture.0.join("alias.toml").to_str().unwrap(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert!(report.ends_with("results/alias-comparison/report.html"));
+}
+#[test]
 fn dispatch_report_preserves_original_slots_and_refuses_a_forged_population_before_writes() {
     let fixture = Fixture::new();
     let manifest = fixture.seed("", 1);

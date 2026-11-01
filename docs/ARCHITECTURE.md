@@ -112,7 +112,13 @@ ASB is deliberately split into a small CLI and a file-backed workload directory:
   baseline, with signed labels and original observations in hover metadata.
   Signed scalar and series coordinates share overflow-safe normalization;
   nonnegative scalar scales retain their existing zero-to-maximum geometry.
-  A separate persistent report lock guards private same-filesystem staging;
+  A comparison of a sweep first acquires the sweep's persistent output lock
+  before reading any source and holds it through publication, excluding result
+  rotation by a concurrent sweep. Nested result comparisons and nested sweeps
+  acquire enclosing sweep owners from outermost to innermost. Sweep-owned
+  final comparison borrows the existing locks rather than acquiring them again.
+  A separate persistent report
+  lock guards private same-filesystem staging;
   Linux and macOS native rename/exchange publish a whole generation after rendering
   and synchronization. Replaced generations, including user-added files, remain
   recoverable backups. If exchange is unsupported, a no-replace capability probe

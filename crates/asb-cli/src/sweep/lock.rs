@@ -1,21 +1,109 @@
 //! Sweep-specific paths and diagnostics over shared output ownership.
 use crate::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-pub(super) struct OutputLock {
+pub(crate) struct OutputLock {
     _owner: crate::output_lock::OutputLock,
+    _ancestors: Vec<crate::output_lock::OutputLock>,
 }
 
 impl OutputLock {
-    pub(super) fn acquire(parent: &Path, stem: &str) -> Result<Self, Error> {
+    pub(crate) fn acquire(parent: &Path, stem: &str) -> Result<Self, Error> {
+        // A sweep can itself be inside a prior sweep's result tree. Take the
+        // enclosing owners from outermost to innermost before taking its own
+        // owner, so comparisons of any nested input and result rotation are
+        // mutually exclusive. A failed nonblocking acquisition drops all prior
+        // owners; no lock is held while waiting for another owner.
+        let parent = canonical_directory(parent)?;
+        let mut ancestors = enclosing_owners(&parent);
+        ancestors.push((parent, stem.to_owned()));
+        Self::acquire_owners(ancestors)
+    }
+
+    fn acquire_owners(mut candidates: Vec<(PathBuf, String)>) -> Result<Self, Error> {
+        // Canonical paths deduplicate aliases. Nonblocking acquisition and the
+        // same outermost-first total ordering avoid lock-order cycles even if
+        // a source path traverses several nested or aliased result trees.
+        candidates.sort_by(|a, b| {
+            a.0.components()
+                .count()
+                .cmp(&b.0.components().count())
+                .then_with(|| a.cmp(b))
+        });
+        candidates.dedup();
+        let mut owners = Vec::new();
+        for (directory, ancestor) in candidates {
+            owners.push(Self::acquire_one(&directory, &ancestor)?);
+        }
+        let owner = owners
+            .pop()
+            .expect("at least one comparison or sweep owner");
+        Ok(Self {
+            _owner: owner,
+            _ancestors: owners,
+        })
+    }
+
+    fn acquire_one(parent: &Path, stem: &str) -> Result<crate::output_lock::OutputLock, Error> {
         let path = parent.join(format!(".{stem}-asb-sweep.lock"));
         let busy = format!(
-            "another sweep owns the output for `{stem}`; wait for it to finish or use a different manifest filename"
+            "another sweep owns the output for `{stem}`, or a comparison is using it; wait for it to finish or use a different manifest filename"
         );
-        crate::output_lock::OutputLock::acquire(&path, &busy)
-            .map(|owner| Self { _owner: owner })
-            .map_err(Error::Run)
+        crate::output_lock::OutputLock::acquire(&path, &busy).map_err(Error::Run)
     }
+
+    /// Coordinate reads of a sweep manifest (or one of its campaign plans)
+    /// with the same owner that can rotate those source results.
+    pub(crate) fn for_comparison(path: &Path) -> Result<Option<Self>, Error> {
+        let parent = canonical_directory(path.parent().unwrap_or_else(|| Path::new(".")))?;
+        let mut candidates = enclosing_owners(&parent);
+        let parent_is_nested = !candidates.is_empty();
+        if let Ok(target) = std::fs::canonicalize(path) {
+            candidates.extend(enclosing_owners(&target));
+        }
+        // A lexical manifest outside a result tree names its own result
+        // population even when the manifest itself is a symlink. Preserve
+        // that naming while also guarding any result tree the target lies in.
+        if !parent_is_nested && path.file_name().is_none_or(|name| name != "plan.json") {
+            let stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.is_empty())
+                .unwrap_or("sweep");
+            candidates.push((parent, stem.to_owned()));
+        }
+        if candidates.is_empty() {
+            Ok(None)
+        } else {
+            Self::acquire_owners(candidates).map(Some)
+        }
+    }
+}
+
+fn canonical_directory(path: &Path) -> Result<PathBuf, Error> {
+    let path = if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    };
+    std::fs::canonicalize(path).map_err(|error| {
+        Error::Io(format!(
+            "cannot resolve sweep ownership directory {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn enclosing_owners(path: &Path) -> Vec<(PathBuf, String)> {
+    path.ancestors()
+        .filter_map(|ancestor| {
+            let stem = ancestor.file_name()?.to_str()?.strip_suffix("-results")?;
+            if stem.is_empty() {
+                return None;
+            }
+            Some((ancestor.parent()?.to_path_buf(), stem.to_owned()))
+        })
+        .collect()
 }
 #[cfg(test)]
 mod tests {
@@ -90,6 +178,42 @@ mod tests {
         drop(inherited_descriptor);
         drop(successor);
         assert!(path.is_file(), "do not unlink and split future lock owners");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_sweep_owns_enclosing_results_before_its_own_output() {
+        let root = std::env::temp_dir()
+            .join(crate::workloads::TaskIdentity::local("nested-sweep-lock", None).attempt_id);
+        let nested = root.join("outer-results/000-benchmark");
+        std::fs::create_dir_all(&nested).unwrap();
+        let outer = OutputLock::acquire(&root, "outer").unwrap();
+        assert!(OutputLock::acquire(&nested, "inner").is_err());
+        assert!(!nested.join(".inner-asb-sweep.lock").exists());
+        drop(outer);
+        let inner = OutputLock::acquire(&nested, "inner").unwrap();
+        assert!(OutputLock::acquire(&root, "outer").is_err());
+        assert!(OutputLock::for_comparison(&nested.join("benchmark.toml")).is_err());
+        drop(inner);
+        assert!(OutputLock::acquire(&root, "outer").is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_sweep_directory_symlink_still_owns_enclosing_results() {
+        let root = std::env::temp_dir()
+            .join(crate::workloads::TaskIdentity::local("nested-sweep-alias", None).attempt_id);
+        let nested = root.join("outer-results/000-benchmark");
+        std::fs::create_dir_all(&nested).unwrap();
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&nested, &alias).unwrap();
+        let owner = OutputLock::acquire(&root, "outer").unwrap();
+        assert!(OutputLock::acquire(&alias, "inner").is_err());
+        drop(owner);
+        let owner = OutputLock::acquire(&alias, "inner").unwrap();
+        assert!(OutputLock::acquire(&root, "outer").is_err());
+        drop(owner);
         std::fs::remove_dir_all(root).unwrap();
     }
 
