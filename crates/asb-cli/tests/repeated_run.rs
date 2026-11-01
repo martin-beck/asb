@@ -548,6 +548,25 @@ fn replay_using_mode(
 }
 
 #[test]
+fn workload_output_mentioning_refusal_does_not_fail_successful_agent() {
+    let project = Project::new();
+    project.config(1);
+    let agent = project.0.join("fixture-agent");
+    let script = fs::read_to_string(&agent).unwrap().replace(
+        "sys.exit(7 if (root/'fail-first').exists()",
+        "print('workload test: cannot inspect a nonexistent fixture file')\nsys.exit(7 if (root/'fail-first').exists()",
+    );
+    fs::write(&agent, script).unwrap();
+    let result = project.run("1");
+    assert!(
+        result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn workload_output_mentioning_provider_error_does_not_fail_successful_agent() {
     let project = Project::new();
     project.config(1);

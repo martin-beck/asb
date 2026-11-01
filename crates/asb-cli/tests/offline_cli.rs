@@ -1346,6 +1346,7 @@ async function main() {
   }
   console.log('fixture-agent-output');
   if (behavior === 'api-error-event') console.log(JSON.stringify({type:'agent_end',messages:[{role:'assistant',stopReason:'error',errorMessage:'400 fixture-secret'}]}));
+  if (behavior === 'terminal-refusal') console.log(JSON.stringify({type:'agent_end',messages:[{role:'assistant',stopReason:'stop',content:[{type:'text',text:"I can't run tests because the test tool is unavailable."}]}]}));
   if (behavior === 'fatal') console.error('Authentication required. Please use /login command to sign in to your account fixture-secret');
   const unresolvedFailure = behavior === 'exit-unresolved' ||
       (behavior === 'fail-second' && process.cwd().endsWith('concurrency-2')) ||
@@ -2542,6 +2543,46 @@ fn replay_rejects_partially_consumed_cassettes() {
     let result = replay(&project, "skip", &[]);
     expect_failure(&result, "replay consumed 0 of 1");
     assert_tape_scratch_cleaned(&project);
+}
+
+#[cfg(unix)]
+#[test]
+fn pi_tool_message_is_not_a_terminal_refusal() {
+    let project = replay_project(1);
+    let agent = project.0.join(".asb-tools/pi/bin/pi");
+    let script = std::fs::read_to_string(&agent).unwrap().replace(
+        "console.log('fixture-agent-output');",
+        "console.log(JSON.stringify({type:'message',role:'tool',content:\"I can't run tests is fixture output\"}));",
+    );
+    std::fs::write(&agent, script).unwrap();
+    let result = replay(&project, "success", &[]);
+    expect_success(&result);
+}
+
+#[cfg(unix)]
+#[test]
+fn pi_intermediate_assistant_text_is_not_a_terminal_refusal() {
+    let project = replay_project(1);
+    let agent = project.0.join(".asb-tools/pi/bin/pi");
+    let script = std::fs::read_to_string(&agent).unwrap().replace(
+        "console.log('fixture-agent-output');",
+        r#"console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text',text:"I can't run tests yet"}}));"#,
+    );
+    std::fs::write(&agent, script).unwrap();
+    let result = replay(&project, "success", &[]);
+    expect_success(&result);
+}
+
+#[cfg(unix)]
+#[test]
+fn pi_terminal_refusal_is_reported_without_using_tool_output() {
+    let project = replay_project(1);
+    let result = replay(&project, "terminal-refusal", &[]);
+    expect_failure(&result, "agent reported it could not run tests");
+    let log: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+    assert_eq!(log["process_success"], false);
+    assert_eq!(log["workload_success"], true);
 }
 
 #[cfg(unix)]

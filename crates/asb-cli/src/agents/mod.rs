@@ -1000,8 +1000,21 @@ fn final_text_from_event(value: &serde_json::Value) -> Option<String> {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_ascii_lowercase)
                 .unwrap_or_default();
-            if event_type.contains("tool") || event_type.contains("command") {
+            if (object.contains_key("role") && role != "assistant")
+                || event_type.contains("tool")
+                || event_type.contains("command")
+                || event_type.contains("function_call")
+                || event_type.contains("thinking")
+                || event_type.contains("reasoning")
+                || event_type == "analysis"
+            {
                 return None;
+            }
+            // An unlabelled message wrapper is not itself an assistant turn.
+            // Only a nested event that identifies its assistant source may be
+            // interpreted as a terminal response.
+            if event_type == "message" && role.is_empty() {
+                return object.get("message").and_then(final_text_from_event);
             }
             if event_type == "item.completed" {
                 return object.get("item").and_then(final_text_from_event);
@@ -1055,6 +1068,27 @@ fn text_value(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
         serde_json::Value::Array(values) => values.iter().rev().find_map(text_value),
         serde_json::Value::Object(object) => {
+            if object.get("role").is_some_and(|role| {
+                role.as_str()
+                    .is_none_or(|role| !role.eq_ignore_ascii_case("assistant"))
+            }) {
+                return None;
+            }
+            if object
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| {
+                    let kind = kind.to_ascii_lowercase();
+                    kind.contains("tool")
+                        || kind.contains("command")
+                        || kind.contains("function_call")
+                        || kind.contains("thinking")
+                        || kind.contains("reasoning")
+                        || kind == "analysis"
+                })
+            {
+                return None;
+            }
             for key in ["text", "value", "content"] {
                 if let Some(text) = object.get(key).and_then(text_value) {
                     return Some(text);
@@ -1323,6 +1357,41 @@ mod tests {
             final_response("codex", structured, &root).as_deref(),
             Some("The call path is src/cli.py -> src/registry.py through lookup.")
         );
+
+        for event in [
+            r#"{"type":"message","role":"tool","content":"I can't run tests"}"#,
+            r#"{"type":"message","role":"user","content":"I can't run tests"}"#,
+            r#"{"type":"message","content":"I can't run tests"}"#,
+            r#"{"type":"agent_end","messages":[{"role":"tool","content":"I can't run tests"}]}"#,
+            r#"{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"tool_result","content":"I can't run tests"}]}]}"#,
+            r#"{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"thinking","text":"I can't run tests"}]}]}"#,
+            r#"{"type":"agent_end","messages":[{"role":"assistant","content":"old answer"},{"role":"tool","content":"I can't run tests"}]}"#,
+            r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"toolUse","content":"I can't run tests"}]}"#,
+        ] {
+            assert!(final_response("pi", event, &root).is_none(), "{event}");
+        }
+        let mixed = r#"{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"assistant final"},{"type":"tool_result","content":"I can't run tests"}]}]}"#;
+        assert_eq!(
+            final_response("pi", mixed, &root).as_deref(),
+            Some("assistant final")
+        );
+        let wrapped =
+            r#"{"type":"message","message":{"role":"assistant","content":"wrapped assistant"}}"#;
+        assert_eq!(
+            final_response("codex", wrapped, &root).as_deref(),
+            Some("wrapped assistant")
+        );
+
+        for intermediate in [
+            wrapped,
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"text","text":"I can't run tests"}}"#,
+            r#"{"type":"turn_end","message":{"role":"assistant","content":"I can't run tests"}}"#,
+        ] {
+            assert!(
+                final_response("pi", intermediate, &root).is_none(),
+                "{intermediate}"
+            );
+        }
 
         let codex =
             r#"{"type":"item.completed","item":{"type":"agent_message","text":"codex final"}}"#;

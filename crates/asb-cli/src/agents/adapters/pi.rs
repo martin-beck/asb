@@ -45,9 +45,28 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 ])
 .with_deterministic_extension()
 .with_output_usage(output_usage)
+.with_final_response(final_response)
+.with_final_response_failure(super::terminal_refusal)
 .with_state_environment_vars(&["PI_CODING_AGENT_DIR"])
 .with_execution_failure(execution_failure)
 .with_step_count(step_count);
+
+fn final_response(output: &str, _: &Path) -> Option<String> {
+    let event = output.lines().rev().find_map(|line| {
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        (value.get("type").and_then(|kind| kind.as_str()) == Some("agent_end")).then_some(value)
+    })?;
+    let message = event.get("messages")?.as_array()?.last()?;
+    if message.get("role").and_then(|role| role.as_str()) != Some("assistant")
+        || message
+            .get("stopReason")
+            .and_then(|reason| reason.as_str())
+            .is_some_and(|reason| reason != "stop")
+    {
+        return None;
+    }
+    super::super::final_text_from_event(message)
+}
 
 fn execution_failure(stdout: &str, stderr: &str) -> Option<String> {
     let mut terminal = None;
