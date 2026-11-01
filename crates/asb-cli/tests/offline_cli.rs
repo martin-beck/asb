@@ -1846,6 +1846,7 @@ fetch(process.env.OPENAI_BASE_URL.replace(/\/$/, '') + '/responses', {method:'PO
 fn pi_mock_replay_counts_cumulative_snapshots_once_in_every_output() {
     use std::os::unix::fs::PermissionsExt;
     let project = replay_project(1);
+    assert!(!project.0.join(".asb-tools/cli2key").exists());
     let executable = ".asb-tools/pi/bin/pi";
     project.write(executable, r##"#!/usr/bin/env node
 const fs = require('fs');
@@ -1872,6 +1873,7 @@ fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'applicati
         &["--json", "--measurements", "measurements"],
     );
     expect_success(&result);
+    assert!(!project.0.join(".asb-tools/cli2key").exists());
     let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     let log: serde_json::Value =
         serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
@@ -3745,6 +3747,34 @@ fn concurrent_provider_warning_is_deduplicated_and_json_stays_clean() {
         serde_json::from_str::<serde_json::Value>(line)
             .expect("JSON output contains only JSON records");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn replay_sweep_does_not_install_unused_cli2key_bridge() {
+    let project = replay_project(1);
+    let mut config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap();
+    config.push_str("[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=[]\n");
+    project.write("good.toml", &config);
+    project.write("suite.toml", "configs=['good.toml']\n");
+    let tape = std::fs::read_to_string(project.0.join("tape.jsonl")).unwrap();
+    project.write(
+        "tapes/000-good/cassettes/benchmark-pi-bug-fix-test-model.jsonl",
+        &tape,
+    );
+    assert!(!project.0.join(".asb-tools/cli2key").exists());
+    let result = project.command_with_env(
+        &[
+            "sweep",
+            "suite.toml",
+            "--replay",
+            "--cassette-root",
+            "tapes",
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    expect_success(&result);
+    assert!(!project.0.join(".asb-tools/cli2key").exists());
 }
 
 #[cfg(unix)]

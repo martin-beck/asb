@@ -149,12 +149,14 @@ impl<'a> PreparedSweep<'a> {
         let mut prepared_workloads = BTreeSet::new();
         for entry in plan.entries.iter().filter(|_| !options.resume) {
             let (root, project) = crate::project::load(&parent.join(&entry.reference))?;
-            let preparation_key = crate::install::execution_requirements(&entry.configuration);
+            let preparation_key =
+                crate::install::execution_requirements(&entry.configuration, options.mode);
             if prepared_execution.insert((root.clone(), preparation_key)) {
                 let mut messages = Vec::new();
                 crate::install::ensure_execution_requirements(
                     &entry.configuration,
                     &parent.join(&entry.reference),
+                    options.mode,
                     &mut messages,
                 )?;
                 if !options.json {
