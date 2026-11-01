@@ -20,16 +20,16 @@ const TAPE_NORMALIZATION: &str = include_str!("../../../assets/scripts/tape-norm
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 static START_LOCK: Mutex<()> = Mutex::new(());
 
-pub(crate) const NAME: &str = "llmtape";
+const NAME: &str = "llmtape";
 
-pub(crate) struct Settings {
-    pub(crate) mode: Mode,
-    pub(crate) cassette: PathBuf,
-    pub(crate) respect_record_timings: bool,
-    pub(crate) workspace: PathBuf,
+struct Settings {
+    mode: Mode,
+    cassette: PathBuf,
+    respect_record_timings: bool,
+    workspace: PathBuf,
     /// Opaque adapter-owned request extension; llmtape materializes and
     /// invokes it without interpreting its wire protocol.
-    pub(crate) wire_extension: Option<&'static str>,
+    wire_extension: Option<&'static str>,
 }
 
 struct RunningLlmtape {
@@ -64,6 +64,23 @@ impl Drop for StartingChild {
 impl ProxyAdapter for LlmtapeAdapter {
     fn name(&self) -> &'static str {
         NAME
+    }
+
+    fn default_recording(&self) -> bool {
+        true
+    }
+
+    fn recording_settings(
+        &self,
+        request: &crate::proxy::RecordingRequest<'_>,
+    ) -> Result<Box<dyn Any>, Error> {
+        Ok(Box::new(Settings {
+            mode: request.mode,
+            cassette: request.cassette.to_path_buf(),
+            respect_record_timings: request.respect_record_timings,
+            workspace: request.workspace.to_path_buf(),
+            wire_extension: request.wire_extension,
+        }))
     }
 
     fn input_files(&self) -> Result<Vec<PathBuf>, Error> {
