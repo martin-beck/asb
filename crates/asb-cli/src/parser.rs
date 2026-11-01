@@ -236,7 +236,12 @@ pub(crate) fn run_with_interactive(
             Some(SetupMode::Tui) => tui::setup(options.input.as_deref(), options.last, stdout),
             None => {
                 if let Some(preset) = options.preset.as_deref() {
-                    config::setup_preset(preset, options.output.clone(), stdout)
+                    config::setup_preset(
+                        preset,
+                        options.workload.clone(),
+                        options.output.clone(),
+                        stdout,
+                    )
                 } else {
                     config::setup(options.into(), stdout)
                 }
@@ -950,7 +955,7 @@ struct SetupArgs {
     #[arg(long, value_hint = clap::ValueHint::DirPath)]
     workspace: Option<String>,
     /// Repository-owned preset in the bundled presets directory.
-    #[arg(long, value_name = "PRESET.toml", conflicts_with_all = ["agent", "workload", "trial", "trial_set", "provider", "model", "measure", "concurrency", "workspace"])]
+    #[arg(long, value_name = "PRESET.toml", conflicts_with_all = ["agent", "trial", "trial_set", "provider", "model", "measure", "concurrency", "workspace"])]
     preset: Option<String>,
     /// Benchmark TOML for one selection; sweep TOML for repeated selections.
     #[arg(long, value_hint = clap::ValueHint::FilePath)]
