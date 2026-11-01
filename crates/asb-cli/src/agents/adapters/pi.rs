@@ -4,6 +4,8 @@ use super::{
 };
 use crate::{Error, install::Recipe};
 use std::path::Path;
+const TOOL_PROGRESS_FILENAME: &str = "pi-progress.json";
+
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "pi",
     "pi",
@@ -32,7 +34,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     },
     super::super::ArtifactSpec {
         namespace: "tool-replay",
-        filename: "pi-progress.json",
+        filename: TOOL_PROGRESS_FILENAME,
         format: super::super::ArtifactFormat::Json,
     },
     super::super::ArtifactSpec {
@@ -81,7 +83,7 @@ fn execution_failure(stdout: &str, _: &str) -> Option<String> {
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
     let mut artifacts =
         match super::super::tool_replay_mcp::verify_persistent_per_call_completion_receipt(
-            context.frozen.document("pi-progress.json"),
+            context.frozen.document(TOOL_PROGRESS_FILENAME),
             context.frozen.bytes("local-tools.jsonl"),
         ) {
             Ok(()) => AgentArtifacts::default(),
@@ -534,7 +536,8 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
-    let launch = super::super::tool_replay_mcp::per_call_launch(context, tape)?;
+    let launch =
+        super::super::tool_replay_mcp::per_call_launch(context, tape, TOOL_PROGRESS_FILENAME)?;
     let extension = context.runtime_dir.join("pi/asb-local-tools.ts");
     let parent = extension.parent().expect("Pi extension has a parent");
     std::fs::create_dir_all(parent).map_err(|error| {
