@@ -77,6 +77,7 @@ impl ProcessLaunch {
     pub(crate) fn native(&self, gate: Option<&Path>) -> (Command, CommandRoute) {
         let (command, prefix) = if let Some(gate) = gate {
             let mut command = Command::new(gate);
+            command.env_remove("ASB_GATE_INSTALL_LOCK_FDS");
             command.arg("__asb-gate").arg(FORMAT);
             match &self.arg0 {
                 Some(arg0) => {

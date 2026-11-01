@@ -840,6 +840,20 @@ fn bundle_contract(root: &Path) {
         marker: "fixture-revision",
         prompt: "fixture task prompt",
     };
+    let error = install_bundle(
+        "fixture-external",
+        spec(),
+        &directory,
+        &mut Vec::new(),
+        &mut |_, _| {},
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("was preserved"));
+    assert_eq!(
+        fs::read(directory.join(".fixture-external.extract/stale")).unwrap(),
+        b"stale"
+    );
+    fs::remove_dir_all(directory.join(".fixture-external.extract")).unwrap();
     let mut output = Vec::new();
     let mut progress = Vec::new();
     install_bundle(
