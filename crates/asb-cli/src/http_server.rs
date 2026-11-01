@@ -27,6 +27,8 @@ const MAX_FILES: usize = 10_000;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct State {
     schema_version: u8,
+    #[serde(default)]
+    generation: Option<String>,
     port: u16,
     public_host: String,
     executable: PathBuf,
@@ -92,6 +94,7 @@ pub(crate) fn start_manual(output: &mut dyn Write) -> Result<(), Error> {
 
 pub(crate) fn stop_manual(output: &mut dyn Write) -> Result<(), Error> {
     let (root, _) = project::load(Path::new("."))?;
+    let _owner = lock_project(&root)?;
     let path = state_path(&root);
     let state = read_state(&path).map_err(|_| {
         Error::Input("no ASB HTTP report server is running for this project".into())
@@ -125,14 +128,17 @@ fn start(
             "project-local HTTP report server is not installed; run `asb tool install http` or install it from the setup TUI".into(),
         )
     })?;
+    let _owner = lock_project(root)?;
     let path = state_path(root);
     if let Ok(previous) = read_state(&path) {
         let _ = stop(&path, &previous);
     }
-    let publication = root.join(".asb").join(PUBLICATION_DIR);
+    let generation = crate::tools::runtime::unique_id();
+    let publication = root.join(".asb").join(PUBLICATION_DIR).join(&generation);
     materialize(&publication, &report, &traces)?;
     let state = State {
         schema_version: 1,
+        generation: Some(generation.clone()),
         port: 0,
         public_host: public_host()?,
         executable: executable.into(),
@@ -140,12 +146,15 @@ fn start(
         traces,
         pid: None,
     };
-    write_state(&path, &state)?;
+    let private_state = root
+        .join(".asb")
+        .join(format!("http-server-{generation}.json"));
+    write_state(&private_state, &state)?;
     let asb = std::env::current_exe().map_err(crate::io_error)?;
     Command::new(asb)
         .arg("__asb-http-server")
         .arg("--state")
-        .arg(&path)
+        .arg(&private_state)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -153,10 +162,11 @@ fn start(
         .map_err(|error| Error::Run(format!("cannot start ASB HTTP report server: {error}")))?;
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
-        if let Ok(ready) = read_state(&path)
+        if let Ok(ready) = read_state(&private_state)
             && ready.port != 0
             && ready.pid.is_some()
         {
+            write_state(&path, &ready)?;
             return Ok(ServerInfo {
                 base: Some(base_url(&ready.public_host, ready.port)),
                 traces: ready.traces,
@@ -230,6 +240,10 @@ fn serve(state_path: &Path, mut state: State) -> Result<(), Error> {
             }
         }
         let _ = fs::remove_file(state_path);
+        if let Some(root) = state_path.parent().and_then(Path::parent) {
+            let _ = clear_if_owned(root, &state);
+        }
+        let _ = fs::remove_dir_all(&state.publication);
         return Ok(());
     }
     Err(Error::Run(
@@ -361,6 +375,26 @@ fn is_report_asset(path: &Path) -> bool {
 fn state_path(root: &Path) -> PathBuf {
     root.join(".asb").join(STATE_NAME)
 }
+fn lock_project(root: &Path) -> Result<crate::output_lock::OutputLock, Error> {
+    crate::output_lock::OutputLock::acquire_for(
+        &root.join(".asb-http-server.lock"),
+        "another HTTP report server operation is in progress",
+        Duration::from_secs(5),
+    )
+    .map_err(Error::Run)
+}
+
+fn clear_if_owned(root: &Path, state: &State) -> Result<(), Error> {
+    let _owner = lock_project(root)?;
+    let path = state_path(root);
+    if let Ok(current) = read_state(&path)
+        && state.generation.is_some()
+        && current.generation == state.generation
+    {
+        fs::remove_file(path).map_err(crate::io_error)?;
+    }
+    Ok(())
+}
 fn read_state(path: &Path) -> Result<State, Error> {
     serde_json::from_str(&fs::read_to_string(path).map_err(crate::io_error)?)
         .map_err(|error| Error::Input(format!("invalid HTTP server state: {error}")))
@@ -451,7 +485,11 @@ fn collect(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), Error> {
     for entry in fs::read_dir(root).map_err(crate::io_error)? {
         let entry = entry.map_err(crate::io_error)?;
         let kind = entry.file_type().map_err(crate::io_error)?;
-        if kind.is_symlink() || entry.file_name() == ".asb-tools" {
+        if kind.is_symlink()
+            || entry.file_name() == ".asb-tools"
+            || (root.file_name().is_some_and(|name| name == ".asb")
+                && entry.file_name() == PUBLICATION_DIR)
+        {
             continue;
         }
         if kind.is_dir() {
@@ -525,6 +563,67 @@ fn percent_encode_path(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_server_cleanup_preserves_a_new_server_state_and_report() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        fs::create_dir_all(root.join(".asb")).unwrap();
+        let make = |generation: &str| State {
+            schema_version: 1,
+            generation: Some(generation.into()),
+            port: 1,
+            public_host: "localhost".into(),
+            executable: "fixture".into(),
+            publication: root.join(".asb/http-publication").join(generation),
+            traces: vec![],
+            pid: None,
+        };
+        let old = make("old");
+        let new = make("new");
+        let source = root.join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("report.html"), "old report").unwrap();
+        materialize(&old.publication, &source.join("report.html"), &[]).unwrap();
+        fs::write(source.join("report.html"), "new report").unwrap();
+        materialize(&new.publication, &source.join("report.html"), &[]).unwrap();
+        write_state(&state_path(&root), &new).unwrap();
+        clear_if_owned(&root, &old).unwrap();
+        assert_eq!(
+            read_state(&state_path(&root))
+                .unwrap()
+                .generation
+                .as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            fs::read_to_string(new.publication.join("report.html")).unwrap(),
+            "new report"
+        );
+        assert_eq!(
+            fs::read_to_string(old.publication.join("report.html")).unwrap(),
+            "old report"
+        );
+        clear_if_owned(&root, &new).unwrap();
+        assert!(!state_path(&root).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovery_does_not_treat_published_copies_as_reports() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        let report = root.join("results/report.html");
+        let published = root.join(".asb/http-publication/old/report.html");
+        fs::create_dir_all(report.parent().unwrap()).unwrap();
+        fs::create_dir_all(published.parent().unwrap()).unwrap();
+        fs::write(&report, "original").unwrap();
+        fs::write(&published, "copy").unwrap();
+        let mut found = Vec::new();
+        collect(&root, &mut found).unwrap();
+        assert!(found.contains(&report));
+        assert!(!found.contains(&published));
+        assert_eq!(latest_report(&root).unwrap().0, report);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn synthetic_collector_artifact_is_accepted_and_keeps_its_extension() {
