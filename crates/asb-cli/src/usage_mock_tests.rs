@@ -352,6 +352,17 @@ fn goose_recording_includes_the_separate_title_call() {
 }
 
 #[test]
+fn goose_native_summary_uses_accumulated_totals_and_includes_cache() {
+    let output = "Goose banner\n{\"messages\":[{\"role\":\"assistant\",\"metadata\":{\"usage\":{\"inputTokens\":5,\"outputTokens\":2}}}],\"metadata\":{\"status\":\"completed\",\"input_tokens\":10,\"output_tokens\":3,\"cache_read_input_tokens\":4,\"cache_write_input_tokens\":2,\"total_tokens\":13}}";
+    assert_usage(
+        token_usage_from_sources("anthropic", "goose", output, "", None),
+        10,
+        3,
+        Some(4),
+    );
+}
+
+#[test]
 fn opencode_recording_counts_title_and_cached_benchmark_input() {
     let cassette = chat_cassette(2);
     let output = concat!(
