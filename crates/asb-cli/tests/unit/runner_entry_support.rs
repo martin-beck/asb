@@ -44,27 +44,41 @@ pub(crate) fn capture_grade_diagnostic(
     if !selected {
         return;
     }
-    fn bounded(bytes: &[u8]) -> String {
-        let end = bytes.len().min(4096);
-        format!(
-            "{}{}",
-            String::from_utf8_lossy(&bytes[..end]),
-            if end < bytes.len() {
-                " [truncated]"
-            } else {
-                ""
-            }
-        )
+    fn markers(bytes: &[u8]) -> Vec<&'static str> {
+        let bytes = &bytes[..bytes.len().min(4096)];
+        [
+            ("agent-end", b"agent_end".as_slice()),
+            ("fixture-replay-failed", b"fixture replay request failed"),
+            ("proxy-completion-failed", b"proxy completion failed"),
+            ("fetch-failed", b"fetch failed"),
+            ("connection-refused", b"ECONNREFUSED"),
+            ("timeout", b"timed out"),
+            ("gate", b"gate"),
+        ]
+        .into_iter()
+        .filter_map(|(label, pattern)| {
+            bytes
+                .windows(pattern.len())
+                .any(|part| part == pattern)
+                .then_some(label)
+        })
+        .collect()
     }
+    let run_error = issues.run_error.as_deref().unwrap_or("");
+    let capture_error = issues.capture_error.as_deref().unwrap_or("");
     let diagnostic = format!(
-        "process_status={:?}; termination={:?}; capture_complete={}; agent_stdout={:?}; agent_stderr={:?}; run_error={:?}; capture_error={:?}; proxy_cleanup_confirmed={}; proxy_capture_count={}",
-        evidence.output.status,
+        "process_status_code={:?}; termination={:?}; capture_complete={}; stdout_bytes={}; stdout_markers={:?}; stderr_bytes={}; stderr_markers={:?}; run_error_bytes={}; run_error_markers={:?}; capture_error_bytes={}; capture_error_markers={:?}; proxy_cleanup_confirmed={}; proxy_capture_count={}",
+        evidence.output.status.code(),
         evidence.observation,
         evidence.capture_complete,
-        bounded(&evidence.output.stdout),
-        bounded(&evidence.output.stderr),
-        issues.run_error,
-        issues.capture_error,
+        evidence.output.stdout.len(),
+        markers(&evidence.output.stdout),
+        evidence.output.stderr.len(),
+        markers(&evidence.output.stderr),
+        run_error.len(),
+        markers(run_error.as_bytes()),
+        capture_error.len(),
+        markers(capture_error.as_bytes()),
         proxy.cleanup_confirmed,
         proxy.captures.len()
     );
@@ -77,8 +91,8 @@ pub(super) fn read_fixture_grade(path: &Path) -> String {
             .with_borrow(|slot| slot.clone())
             .unwrap_or_else(|| "settled execution diagnostics unavailable".into());
         panic!(
-            "fixture grade file {} is unavailable: {error}; {detail}",
-            path.display()
+            "fixture grade file is unavailable: {:?}; {detail}",
+            error.kind()
         );
     })
 }

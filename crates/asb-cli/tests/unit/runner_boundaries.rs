@@ -372,8 +372,7 @@ fs.writeFileSync(root+'/arrived-'+replica,'ready');
             .unwrap_err()
             .to_string()
             .contains("1 concurrent benchmark replica(s) failed"),
-        "{result:?} output={} diagnostics={}",
-        String::from_utf8_lossy(&output),
+        "selected-dispatch failure; diagnostics={}",
         selected_dispatch_diagnostics(root)
     );
     let mut calls: Vec<_> = std::fs::read_to_string(root.join("calls"))

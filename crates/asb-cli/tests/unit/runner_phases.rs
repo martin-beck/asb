@@ -1436,9 +1436,18 @@ fn missing_fixture_grade_reports_settled_agent_and_proxy_evidence() {
         "termination-true-code143",
     );
     let mut execution = evidence(9, false);
-    execution.output.stderr = b"fixture replay request failed".to_vec();
+    execution.output.stdout = b"private-sentinel-agent-stdout agent_end".to_vec();
+    execution.output.stderr =
+        b"fixture replay request failed private-sentinel-agent-stderr".to_vec();
     let issues = AttemptIssues {
-        run_error: Some("proxy completion failed".into()),
+        run_error: Some(format!(
+            "proxy completion failed private-sentinel-error {}",
+            "x".repeat(1_000_000)
+        )),
+        capture_error: Some(format!(
+            "private-sentinel-capture {}",
+            "y".repeat(1_000_000)
+        )),
         ..Default::default()
     };
     let proxy = crate::proxy::Evidence {
@@ -1448,22 +1457,24 @@ fn missing_fixture_grade_reports_settled_agent_and_proxy_evidence() {
     };
     entry_test_support::capture_grade_diagnostic(&root, &execution, &issues, &proxy);
     let result = std::panic::catch_unwind(|| {
-        entry_test_support::read_fixture_grade(&root.join("missing-grade"))
+        entry_test_support::read_fixture_grade(&root.join("private-sentinel-grade"))
     });
     let error = result.expect_err("missing grade must fail the fixture");
     let message = error
         .downcast_ref::<String>()
         .expect("diagnostic panic string");
-    assert!(
-        message.contains("fixture replay request failed"),
-        "{message}"
-    );
-    assert!(message.contains("proxy completion failed"), "{message}");
+    assert!(message.contains("fixture-replay-failed"), "{message}");
+    assert!(message.contains("proxy-completion-failed"), "{message}");
     assert!(
         message.contains("proxy_cleanup_confirmed=false"),
         "{message}"
     );
-    assert!(message.contains("process_status="), "{message}");
+    assert!(message.contains("process_status_code="), "{message}");
+    assert!(message.contains("run_error_bytes="), "{message}");
+    assert!(message.contains("capture_error_bytes="), "{message}");
+    assert!(!message.contains("private-sentinel"), "{message}");
+    assert!(!message.contains(root.to_str().unwrap()), "{message}");
+    assert!(message.len() < 2048, "diagnostic must stay bounded");
 }
 
 #[test]
