@@ -42,8 +42,29 @@ pub(crate) struct GuestPrivateAsset {
 
 /// Dispatch the adapter-private OpenHands native bridge without exposing the
 /// adapter registry itself to unrelated CLI modules.
-pub(crate) fn openhands_native_entry(args: &[std::ffi::OsString]) -> std::process::ExitCode {
-    adapters::openhands_native::entry(args)
+pub(crate) fn agent_bridge_entry(args: &[std::ffi::OsString]) -> std::process::ExitCode {
+    let Some((id, rest)) = args.split_first() else {
+        eprintln!("asb: agent bridge requires a registered agent");
+        return std::process::ExitCode::from(2);
+    };
+    let Some(adapter) = id.to_str().and_then(find) else {
+        eprintln!("asb: agent bridge requires a registered agent");
+        return std::process::ExitCode::from(2);
+    };
+    adapter.bridge_entry(rest).unwrap_or_else(|| {
+        eprintln!("asb: selected agent has no private bridge");
+        std::process::ExitCode::from(2)
+    })
+}
+
+/// Keep adapter-declared private aliases usable by already-running launchers.
+pub(crate) fn legacy_bridge_entry(args: &[std::ffi::OsString]) -> Option<std::process::ExitCode> {
+    let (name, rest) = args.split_first()?;
+    let name = name.to_str()?;
+    all()
+        .iter()
+        .find(|adapter| adapter.bridge_aliases().contains(&name))?
+        .bridge_entry(rest)
 }
 
 /// Versioned delivery of task inputs into an isolated coding-agent invocation.
@@ -51,6 +72,12 @@ pub(crate) fn openhands_native_entry(args: &[std::ffi::OsString]) -> std::proces
 pub(crate) const REPLAY_INPUT_CONTRACT: &str = "asb-agent-input-and-session-v1";
 
 pub(crate) trait AgentAdapter: Sync {
+    fn bridge_aliases(&self) -> &'static [&'static str] {
+        &[]
+    }
+    fn bridge_entry(&self, _args: &[std::ffi::OsString]) -> Option<std::process::ExitCode> {
+        None
+    }
     /// Conservative per-attempt storage estimate for this agent's artifacts.
     fn estimated_disk_mib(&self) -> u64 {
         512
@@ -462,6 +489,7 @@ type CollectionHook = for<'a> fn(&CollectionContext<'a>) -> AgentArtifacts;
 /// does not interpret adapter filenames or replay formats.
 type ArtifactCollectionHook = for<'a> fn(&CollectionContext<'a>, &mut AgentArtifacts);
 type UsageHook = fn(&str, &str, bool) -> crate::measurements::TokenUsage;
+type BridgeHook = fn(&[std::ffi::OsString]) -> std::process::ExitCode;
 type FinalResponseHook = fn(&str, &Path) -> Option<String>;
 type ProcessHook = fn(&str) -> Result<crate::launch::ProcessLaunch, Error>;
 type StepCountHook = fn(&str, &str) -> Option<u64>;
@@ -473,6 +501,8 @@ type WorkspaceCapsuleApplyHook = fn(&Path, &[u8]) -> Result<(), Error>;
 
 /// Trait-object implementation whose behavior is supplied by individual files.
 pub(super) struct StaticAdapter {
+    bridge_entry: Option<BridgeHook>,
+    bridge_aliases: &'static [&'static str],
     id: &'static str,
     estimated_disk_mib: u64,
     executable: &'static str,
@@ -540,6 +570,8 @@ impl StaticAdapter {
             artifact_specs: &[],
             deterministic_extension: false,
             output_usage: None,
+            bridge_entry: None,
+            bridge_aliases: &[],
             final_response: None,
             process: None,
             step_count: None,
@@ -639,6 +671,16 @@ impl StaticAdapter {
         self
     }
 
+    pub(super) const fn with_bridge_entry(mut self, hook: BridgeHook) -> Self {
+        self.bridge_entry = Some(hook);
+        self
+    }
+
+    pub(super) const fn with_bridge_aliases(mut self, aliases: &'static [&'static str]) -> Self {
+        self.bridge_aliases = aliases;
+        self
+    }
+
     pub(super) const fn with_step_count(mut self, hook: StepCountHook) -> Self {
         self.step_count = Some(hook);
         self
@@ -714,6 +756,12 @@ impl StaticAdapter {
     }
 }
 impl AgentAdapter for StaticAdapter {
+    fn bridge_aliases(&self) -> &'static [&'static str] {
+        self.bridge_aliases
+    }
+    fn bridge_entry(&self, args: &[std::ffi::OsString]) -> Option<std::process::ExitCode> {
+        self.bridge_entry.map(|hook| hook(args))
+    }
     fn estimated_disk_mib(&self) -> u64 {
         self.estimated_disk_mib
     }
