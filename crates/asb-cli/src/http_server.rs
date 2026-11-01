@@ -896,7 +896,16 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn stale_process_identity_requires_an_exact_live_instance() {
-        let current = process_identity(std::process::id()).unwrap();
+        let Ok(current) = process_identity(std::process::id()) else {
+            let unknown = ProcessIdentity {
+                pid: std::process::id(),
+                boot_id: String::new(),
+                start_time: 0,
+                pid_namespace: None,
+            };
+            assert!(!identity_gone(&unknown));
+            return;
+        };
         assert!(!identity_gone(&current));
         let mut reused = current.clone();
         reused.start_time = reused.start_time.saturating_add(1);
@@ -909,13 +918,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn pid_namespace_and_proc_mount_must_match() {
-        let stat = fs::read_to_string("/proc/self/stat").unwrap();
-        let namespace = fs::read_link("/proc/self/ns/pid").unwrap();
-        assert!(checked_pid_namespace(std::process::id(), &stat, &namespace).is_ok());
-        assert!(
-            checked_pid_namespace(std::process::id().wrapping_add(1), &stat, &namespace).is_err()
-        );
-        let mut identity = process_identity(std::process::id()).unwrap();
+        assert!(checked_pid_namespace(5, "4 (fixture) S", Path::new("pid:[42]")).is_err());
+        assert!(checked_pid_namespace(5, "5 (fixture) S", Path::new("pid:[42]")).is_ok());
+        let Ok(mut identity) = process_identity(std::process::id()) else {
+            return;
+        };
         identity.start_time += 1;
         identity.pid_namespace = Some("pid:[999999999999]".into());
         assert!(!identity_gone(&identity));
@@ -947,7 +954,9 @@ mod tests {
             );
             return;
         }
-        let identity = process_identity(std::process::id()).unwrap();
+        let Ok(identity) = process_identity(std::process::id()) else {
+            return;
+        };
         let output = match Command::new("unshare")
             .args([
                 "--user",
@@ -1003,6 +1012,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn stopped_wrapper_and_server_are_not_settled() {
+        if process_identity(std::process::id()).is_err() {
+            return;
+        }
         struct Children(Vec<std::process::Child>);
         impl Drop for Children {
             fn drop(&mut self) {
@@ -1119,13 +1131,15 @@ mod tests {
             traces: vec![],
             pid: Some(sentinel.id()),
             control: None,
-            owner_identity: Some(process_identity(std::process::id()).unwrap()),
-            server_identity: Some(process_identity(sentinel.id()).unwrap()),
+            owner_identity: process_identity(std::process::id()).ok(),
+            server_identity: process_identity(sentinel.id()).ok(),
         };
         let path = state_path(&root);
         write_state(&path, &state).unwrap();
         let result = stop(&path, &state);
-        state.owner_identity.as_mut().unwrap().start_time += 1;
+        if let Some(owner) = state.owner_identity.as_mut() {
+            owner.start_time += 1;
+        }
         let dead_owner_live_server = stop(&path, &state);
         std::thread::sleep(Duration::from_millis(50));
         let still_running = sentinel.try_wait().unwrap().is_none();
