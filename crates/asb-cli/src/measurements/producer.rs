@@ -197,23 +197,32 @@ impl Producer {
         }
     }
     pub fn stop_before(&mut self, deadline: Instant) -> Completion {
+        self.stop_before_with_owner(deadline, None)
+    }
+    pub(super) fn stop_before_with_owner(
+        &mut self,
+        deadline: Instant,
+        owner: Option<Arc<crate::output_lock::OutputLock>>,
+    ) -> Completion {
         if let Some(completion) = &self.completion {
             return completion.clone();
         }
         let completion = match self.active.take() {
             #[cfg(target_os = "linux")]
-            Some(Active::Process(mut process)) => process.settle_before(deadline),
-            Some(Active::Snapshot(snapshot)) => match snapshot.stop_before(deadline) {
-                Ok(()) => Completion {
-                    exit: None,
-                    guardian_cleanup_confirmed: None,
-                    capture_complete: true,
-                    interruption_requested: false,
-                    interruption_acknowledged: false,
-                    error: None,
-                },
-                Err(error) => Completion::failed(None, error),
-            },
+            Some(Active::Process(mut process)) => process.settle_before(deadline, owner),
+            Some(Active::Snapshot(snapshot)) => {
+                match snapshot.stop_before_with_owner(deadline, owner) {
+                    Ok(()) => Completion {
+                        exit: None,
+                        guardian_cleanup_confirmed: None,
+                        capture_complete: true,
+                        interruption_requested: false,
+                        interruption_acknowledged: false,
+                        error: None,
+                    },
+                    Err(error) => Completion::failed(None, error),
+                }
+            }
             None => Completion::failed(
                 None,
                 "collector ownership already transferred; settlement unconfirmed",
@@ -258,7 +267,11 @@ struct Process {
 }
 #[cfg(target_os = "linux")]
 impl Process {
-    fn settle_before(&mut self, deadline: Instant) -> Completion {
+    fn settle_before(
+        &mut self,
+        deadline: Instant,
+        owner: Option<Arc<crate::output_lock::OutputLock>>,
+    ) -> Completion {
         self.stop.store(true, Ordering::Release);
         let Some(handle) = self.handle.take() else {
             return Completion::failed(None, "collector worker custody is unconfirmed");
@@ -267,6 +280,7 @@ impl Process {
             std::thread::sleep(Duration::from_millis(5));
         }
         if !handle.is_finished() {
+            super::retain_owner_until_worker_exit(handle, owner);
             let mut completion = Completion::failed(
                 None,
                 "collector settlement deadline exceeded; existing worker retains guardian and raw capture custody",
@@ -564,6 +578,36 @@ mod tests {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    #[test]
+    fn timed_out_producer_retains_measurement_directory_until_settled() {
+        let fixture = Fixture::new();
+        let reached = Arc::new(AtomicBool::new(false));
+        FAULT.with(|slot| {
+            *slot.borrow_mut() = Some(Fault {
+                kind: "read",
+                reached: reached.clone(),
+                release: fixture.release.clone(),
+            });
+        });
+        let lock = fixture.path.join("directory.lock");
+        let owner = Arc::new(crate::output_lock::OutputLock::acquire(&lock, "busy").unwrap());
+        let mut producer = fixture.spawn(
+            "import signal\nprint('READY',flush=True)\nsignal.pause()\n",
+            None,
+            false,
+        );
+        until(|| reached.load(Ordering::Acquire));
+        let completion = producer.stop_before_with_owner(
+            Instant::now() + Duration::from_millis(30),
+            Some(owner.clone()),
+        );
+        assert!(!completion.capture_complete);
+        drop(owner);
+        assert!(crate::output_lock::OutputLock::acquire(&lock, "busy").is_err());
+        fixture.release.store(true, Ordering::Release);
+        until(|| crate::output_lock::OutputLock::acquire(&lock, "busy").is_ok());
     }
 
     #[test]

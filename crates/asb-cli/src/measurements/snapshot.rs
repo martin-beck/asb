@@ -81,8 +81,12 @@ impl ProcessTreeSnapshot {
     pub(super) fn request_stop(&self) {
         self.stop.store(true, Ordering::Release);
     }
-    pub(super) fn stop_before(mut self, deadline: Instant) -> Result<(), String> {
-        self.settle_before(deadline)
+    pub(super) fn stop_before_with_owner(
+        mut self,
+        deadline: Instant,
+        owner: Option<Arc<crate::output_lock::OutputLock>>,
+    ) -> Result<(), String> {
+        self.settle_before(deadline, owner)
     }
     #[cfg(test)]
     pub(super) fn is_finished(&self) -> bool {
@@ -91,9 +95,13 @@ impl ProcessTreeSnapshot {
             .is_none_or(|handle| handle.is_finished())
     }
     fn settle(&mut self) -> Result<(), String> {
-        self.settle_before(Instant::now() + Duration::from_secs(6))
+        self.settle_before(Instant::now() + Duration::from_secs(6), None)
     }
-    fn settle_before(&mut self, deadline: Instant) -> Result<(), String> {
+    fn settle_before(
+        &mut self,
+        deadline: Instant,
+        owner: Option<Arc<crate::output_lock::OutputLock>>,
+    ) -> Result<(), String> {
         self.request_stop();
         let Some(handle) = self.handle.take() else {
             return Ok(());
@@ -102,6 +110,7 @@ impl ProcessTreeSnapshot {
             std::thread::sleep(Duration::from_millis(5));
         }
         if !handle.is_finished() {
+            super::retain_owner_until_worker_exit(handle, owner);
             // The existing worker still owns its files and guardian. Do not
             // join it, publish a complete capture, or create another worker.
             return Err("process-tree snapshot settlement is unconfirmed; existing worker retains producer custody".into());

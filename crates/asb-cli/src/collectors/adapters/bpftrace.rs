@@ -350,10 +350,13 @@ impl measurements::Session {
                 &collector.captures[1],
                 std::time::Duration::from_secs(30),
             ) {
-                return Err(collector.startup_failure(format!(
-                    "bpftrace program {} did not become ready: {error}",
-                    program.path
-                )));
+                return Err(collector.startup_failure(
+                    format!(
+                        "bpftrace program {} did not become ready: {error}",
+                        program.path
+                    ),
+                    self._directory_owner.clone(),
+                ));
             }
             self.collectors.push(collector);
         }
@@ -390,10 +393,13 @@ impl measurements::Session {
                         &collector.captures[1],
                         std::time::Duration::from_secs(30),
                     ) {
-                        return Err(collector.startup_failure(format!(
-                            "bpftrace profile {} did not become ready: {error}",
-                            profile.name
-                        )));
+                        return Err(collector.startup_failure(
+                            format!(
+                                "bpftrace profile {} did not become ready: {error}",
+                                profile.name
+                            ),
+                            self._directory_owner.clone(),
+                        ));
                     }
                     self.collectors.push(collector);
                 }

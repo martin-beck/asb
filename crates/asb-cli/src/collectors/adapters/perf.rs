@@ -462,7 +462,7 @@ impl measurements::Session {
             write_unavailable(
                 &self.dir.join("perf.json"),
                 "perf",
-                collector.startup_failure(reason),
+                collector.startup_failure(reason, self._directory_owner.clone()),
             )?;
             return Ok(());
         }
@@ -484,7 +484,7 @@ impl measurements::Session {
                     write_unavailable(
                         &self.dir.join("perf-stat.json"),
                         "perf-stat",
-                        collector.startup_failure(reason),
+                        collector.startup_failure(reason, self._directory_owner.clone()),
                     )?;
                 } else {
                     self.collectors.push(collector);
