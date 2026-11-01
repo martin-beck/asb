@@ -17,6 +17,9 @@ const INTERRUPT: u8 = 2;
 const ACK: u8 = 3;
 const EXITED: u8 = 4;
 
+#[cfg(test)]
+std::thread_local! { static INTERRUPT_NEXT_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
 fn invalid() -> io::Error {
     io::Error::other("invalid or out-of-order private gate control protocol")
 }
@@ -113,7 +116,15 @@ impl Parent {
         let mut buffer = [0; FRAME * 3 + 1];
         let mut closed = false;
         loop {
-            match self.socket.read(&mut buffer) {
+            #[cfg(test)]
+            let read = if INTERRUPT_NEXT_READ.replace(false) {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            } else {
+                self.socket.read(&mut buffer)
+            };
+            #[cfg(not(test))]
+            let read = self.socket.read(&mut buffer);
+            match read {
                 Ok(0) => {
                     closed = true;
                     break;
@@ -124,14 +135,8 @@ impl Parent {
                     }
                     self.pending.extend_from_slice(&buffer[..count]);
                 }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    break;
-                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) => return Err(error),
             }
         }
@@ -330,6 +335,19 @@ impl ChildControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn interrupted_final_control_read_retries_before_classifying_exit() {
+        let (mut parent, mut peer) = Parent::pair().unwrap();
+        peer.write_all(&frame(READY, 0, 42)).unwrap();
+        parent.poll(42).unwrap();
+        peer.write_all(&frame(EXITED, 0, 7)).unwrap();
+        INTERRUPT_NEXT_READ.set(true);
+        parent.observe(42, true);
+        assert_eq!(
+            parent.observation().process_termination,
+            Some(PrincipalExit::Code(7))
+        );
+    }
     #[test]
     fn finalization_rejects_partial_or_missing_exit_without_waiting_for_eof() {
         for payload in [
