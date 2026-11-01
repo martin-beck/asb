@@ -13,6 +13,9 @@ impl CollectorAdapter for SystemCollector {
     fn estimated_disk_mib(&self) -> u64 {
         64
     }
+    fn description(&self) -> &'static str {
+        "host architecture and operating-system metadata"
+    }
     fn target_scope(&self, _backend: &str) -> crate::collectors::TargetScope {
         crate::collectors::TargetScope::HostContext
     }

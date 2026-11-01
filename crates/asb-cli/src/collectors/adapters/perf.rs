@@ -59,6 +59,9 @@ impl CollectorAdapter for PerfCollector {
     fn estimated_disk_mib(&self) -> u64 {
         512
     }
+    fn description(&self) -> &'static str {
+        "process-tree performance counter samples"
+    }
     fn id(&self) -> &'static str {
         "perf"
     }

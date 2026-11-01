@@ -57,6 +57,9 @@ impl Drop for Leaf {
 }
 
 impl CollectorAdapter for CpuAccounting {
+    fn description(&self) -> &'static str {
+        "process-tree CPU time and scheduler accounting"
+    }
     fn target_scope(&self, backend: &str) -> crate::collectors::TargetScope {
         if backend == "local-docker" {
             crate::collectors::TargetScope::Container

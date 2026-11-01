@@ -7,6 +7,9 @@ pub(super) struct ToolCallsCollector;
 pub(super) static ADAPTER: ToolCallsCollector = ToolCallsCollector;
 
 impl CollectorAdapter for ToolCallsCollector {
+    fn description(&self) -> &'static str {
+        "structured agent tool-call observations"
+    }
     fn id(&self) -> &'static str {
         "tool-calls"
     }

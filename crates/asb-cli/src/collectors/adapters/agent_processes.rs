@@ -85,6 +85,13 @@ impl Drop for Sampler {
 }
 
 impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
+    fn description(&self) -> &'static str {
+        if MEMORY {
+            "selected agent process-tree memory usage"
+        } else {
+            "selected agent process-tree worker census"
+        }
+    }
     fn prefers_execution_namespace(&self) -> bool {
         true
     }

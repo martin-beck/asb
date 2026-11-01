@@ -225,6 +225,10 @@ pub(crate) trait CollectorAdapter: Sync {
     fn estimated_disk_mib(&self) -> u64 {
         128
     }
+    /// Concise human-readable description for command-line discovery.
+    fn description(&self) -> &'static str {
+        "collector"
+    }
     fn target_scope(&self, _backend: &str) -> TargetScope {
         if self.requires_pid() {
             TargetScope::AgentProcess
@@ -599,6 +603,11 @@ mod tests {
     fn registry_has_unique_names_and_declares_tool_backed_collectors() {
         let ids = names().collect::<std::collections::BTreeSet<_>>();
         assert_eq!(ids.len(), all().len());
+        for collector in all() {
+            assert_ne!(collector.description(), "collector", "{}", collector.id());
+            assert!(!collector.description().contains('\n'));
+        }
+        assert!(crate::measurements::collector_description("unknown").is_none());
         for id in [
             "mpstat",
             "iostat",

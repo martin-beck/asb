@@ -7,6 +7,9 @@ pub(super) struct IostatCollector;
 pub(super) static ADAPTER: IostatCollector = IostatCollector;
 
 impl CollectorAdapter for IostatCollector {
+    fn description(&self) -> &'static str {
+        "block-device throughput and latency time series"
+    }
     fn id(&self) -> &'static str {
         "iostat"
     }
