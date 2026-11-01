@@ -978,6 +978,14 @@ pub fn installed_trials(name: &str, directory: &Path) -> Result<Vec<Trial>, Stri
 }
 
 pub fn write_default_trial_set(name: &str, directory: &Path) -> Result<(), std::io::Error> {
+    write_default_trial_set_with(name, directory, || {})
+}
+
+fn write_default_trial_set_with(
+    name: &str,
+    directory: &Path,
+    before_publish: impl FnOnce(),
+) -> Result<(), std::io::Error> {
     let path = directory.join(format!("{name}.workload.toml"));
     if path.exists() {
         return Ok(());
@@ -987,7 +995,10 @@ pub fn write_default_trial_set(name: &str, directory: &Path) -> Result<(), std::
         trials: installed_trials(name, directory).map_err(std::io::Error::other)?,
     };
     let text = toml::to_string_pretty(&config).map_err(std::io::Error::other)?;
-    fs::write(path, text)
+    before_publish();
+    crate::config::matrix::scalar_if_absent(&path, text.as_bytes())
+        .map_err(std::io::Error::other)?;
+    Ok(())
 }
 
 fn load_prompt_file(path: &Path, name: &str) -> Result<String, String> {
@@ -1060,6 +1071,19 @@ mod tests {
     };
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn default_trial_set_does_not_overwrite_a_concurrent_user_selection() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("smoke.workload.toml");
+        super::write_default_trial_set_with("smoke", &root, || {
+            fs::write(&destination, "user selection").unwrap();
+        })
+        .unwrap();
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "user selection");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn dependency_preflight_is_adapter_owned_and_runtime_discovery_is_read_only() {
