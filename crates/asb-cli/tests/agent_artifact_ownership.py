@@ -93,7 +93,7 @@ if (!previous) {
  } else if (process.env.ASB_ARTIFACT_SCENARIO==='oversized') {
    fs.writeFileSync(destination,'x'.repeat(16*1024*1024+1));
  } else fs.writeFileSync(destination,JSON.stringify({trajectory_format:'mini-swe-agent-1.1',
- info:{model_stats:{api_calls:4}},messages:[{role:'assistant',
+ info:{exit_status:'Submitted',submission:'src/cli.py src/registry.py lookup',model_stats:{api_calls:4}},messages:[{role:'assistant',
  content:'src/cli.py src/registry.py lookup',
  extra:{response:{usage:{prompt_tokens:13,completion_tokens:21}}}}]}));
  permissionFault(process.cwd(),0o555);
