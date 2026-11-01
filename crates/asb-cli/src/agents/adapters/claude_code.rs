@@ -36,7 +36,7 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
 
 fn output_usage(
     stdout: &str,
-    stderr: &str,
+    _stderr: &str,
     input_includes_cache: bool,
 ) -> crate::measurements::TokenUsage {
     if let Ok(event) = serde_json::from_str::<serde_json::Value>(stdout.trim())
@@ -57,7 +57,9 @@ fn output_usage(
         }
         return usage.with_derived_total();
     }
-    crate::usage::usage_from_text(&format!("{stdout}\n{stderr}"))
+    // Result text and diagnostics can contain arbitrary task content. Only
+    // the top-level typed result usage is an agent-owned usage record.
+    Default::default()
 }
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
@@ -250,6 +252,15 @@ fn prepare_tool_replay(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn result_answer_is_not_usage_when_result_has_no_usage() {
+        let output = serde_json::json!({"type":"result", "result":"{\"usage\":{\"input_tokens\":999,\"output_tokens\":888}}"}).to_string();
+        let usage = crate::usage::from_sources("anthropic", "claude-code", &output, "", None);
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (None, None, None)
+        );
+    }
     use super::*;
     use crate::agents::AgentAdapter;
 
