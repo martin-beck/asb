@@ -32,11 +32,6 @@ pub(crate) use source::check_version_in;
 
 /// Serialize writers to the same persistent installation destination.
 pub(crate) fn destination_key(destination: &Path) -> Result<PathBuf, Error> {
-    let destination = match fs::canonicalize(destination) {
-        Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => destination.to_path_buf(),
-        Err(error) => return Err(crate::io_error(error)),
-    };
     let parent = destination
         .parent()
         .ok_or_else(|| Error::Io("installation destination has no parent".into()))?;
@@ -51,14 +46,34 @@ pub(crate) fn destination_key(destination: &Path) -> Result<PathBuf, Error> {
     Ok(parent.join(lock_name))
 }
 
-pub(crate) fn destination_lock(
-    destination: &Path,
-) -> Result<crate::output_lock::OutputLock, Error> {
-    crate::output_lock::OutputLock::acquire(
-        &destination_key(destination)?,
+pub(crate) fn destination_keys(destination: &Path) -> Result<Vec<PathBuf>, Error> {
+    let mut keys = vec![destination_key(destination)?];
+    match fs::canonicalize(destination) {
+        Ok(resolved) => keys.push(destination_key(&resolved)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(crate::io_error(error)),
+    }
+    keys.sort();
+    keys.dedup();
+    Ok(keys)
+}
+
+pub(crate) fn destination_key_lock(key: &Path) -> Result<crate::output_lock::OutputLock, Error> {
+    crate::output_lock::OutputLock::acquire_retained(
+        key,
         "another installation owns this destination; wait for it to finish and retry",
     )
     .map_err(Error::Io)
+}
+
+#[cfg(test)]
+pub(crate) fn destination_lock(
+    destination: &Path,
+) -> Result<Vec<crate::output_lock::OutputLock>, Error> {
+    destination_keys(destination)?
+        .iter()
+        .map(|key| destination_key_lock(key))
+        .collect()
 }
 
 #[cfg(test)]
@@ -66,6 +81,34 @@ mod destination_lock_tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn inherited_descriptor_retains_lock_when_parent_owner_drops() {
+        let root = std::env::temp_dir().join(tools::runtime::unique_id());
+        fs::create_dir_all(&root).unwrap();
+        let owner = destination_lock(&root.join("tool")).unwrap();
+        let inherited = owner[0].cloned_descriptor();
+        drop(owner);
+        assert!(destination_lock(&root.join("tool")).is_err());
+        drop(inherited);
+        drop(destination_lock(&root.join("tool")).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leaf_replaced_by_symlink_cannot_change_ownership_key() {
+        let root = std::env::temp_dir().join(tools::runtime::unique_id());
+        fs::create_dir_all(root.join("target")).unwrap();
+        let owner = destination_lock(&root.join("tool")).unwrap();
+        std::os::unix::fs::symlink(root.join("target"), root.join("tool")).unwrap();
+        assert!(destination_lock(&root.join("tool")).is_err());
+        drop(owner);
+        let alias_owner = destination_lock(&root.join("tool")).unwrap();
+        assert!(destination_lock(&root.join("target")).is_err());
+        drop(alias_owner);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn worker_context_retains_destination_after_caller_drops() {

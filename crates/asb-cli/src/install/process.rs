@@ -115,13 +115,17 @@ impl OperationContext {
         &self.root
     }
     pub(crate) fn with_destination(&self, destination: &Path) -> Result<Self, crate::Error> {
-        let key = super::destination_key(destination)?;
-        if self.destination_owners.iter().any(|(held, _)| held == &key) {
-            return Ok(self.clone());
-        }
-        let owner = super::destination_lock(destination)?;
         let mut context = self.clone();
-        context.destination_owners.push((key, Arc::new(owner)));
+        for key in super::destination_keys(destination)? {
+            if !context
+                .destination_owners
+                .iter()
+                .any(|(held, _)| held == &key)
+            {
+                let owner = super::destination_key_lock(&key)?;
+                context.destination_owners.push((key, Arc::new(owner)));
+            }
+        }
         Ok(context)
     }
     pub(crate) fn custody_failure(&self, label: &str, evidence: &Path) -> InstallFailure {

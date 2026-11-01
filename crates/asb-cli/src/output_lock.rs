@@ -4,13 +4,17 @@ use std::path::Path;
 
 pub(crate) struct OutputLock {
     file: File,
+    unlock_on_drop: bool,
 }
 
 impl Drop for OutputLock {
     fn drop(&mut self) {
-        // A fork can retain a descriptor before exec: explicit unlock releases
-        // ownership even during that window. Never unlink the persistent inode.
-        let _ = self.file.unlock();
+        // Ordinary output ownership releases even if a fork inherited a handle.
+        // Installer custody instead ends only when the last inherited handle closes.
+        // Never unlink the persistent inode.
+        if self.unlock_on_drop {
+            let _ = self.file.unlock();
+        }
     }
 }
 
@@ -22,6 +26,13 @@ impl OutputLock {
     }
     pub(crate) fn acquire(path: &Path, busy: &str) -> Result<Self, String> {
         Self::acquire_for(path, busy, std::time::Duration::ZERO)
+    }
+
+    /// Keep a shared open-file-description lock until its last inherited handle closes.
+    pub(crate) fn acquire_retained(path: &Path, busy: &str) -> Result<Self, String> {
+        let mut lock = Self::open(path, busy, std::time::Duration::ZERO, true)?;
+        lock.unlock_on_drop = false;
+        Ok(lock)
     }
 
     /// Contention is a typed OS result, not a diagnostic-string predicate.
@@ -79,7 +90,12 @@ impl OutputLock {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             match file.try_lock() {
-                Ok(()) => return Ok(Self { file }),
+                Ok(()) => {
+                    return Ok(Self {
+                        file,
+                        unlock_on_drop: true,
+                    });
+                }
                 Err(TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
