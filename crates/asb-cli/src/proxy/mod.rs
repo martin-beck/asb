@@ -24,6 +24,10 @@ pub(crate) trait ProxyAdapter: Sync {
     fn default_recording(&self) -> bool {
         false
     }
+    /// This adapter can operate during replay without any online backend.
+    fn supports_offline_replay(&self) -> bool {
+        false
+    }
     fn recording_settings(&self, _: &RecordingRequest<'_>) -> Result<Box<dyn Any>, Error> {
         Err(Error::Input(
             "selected proxy does not support recording".into(),
@@ -81,13 +85,60 @@ pub(crate) fn start_recording_chain(
     upstream: Option<&str>,
 ) -> Result<Chain, Error> {
     let adapter = select_recording_adapter(adapters::REGISTRY)?;
+    let names = configured_chain(adapter.name())?;
+    validate_recording_chain(&names, adapter.name(), request.mode, adapters::REGISTRY)?;
     let mut configurations = HashMap::new();
     configurations.insert(
         adapter.name().to_owned(),
         adapter.recording_settings(request)?,
     );
-    let names = configured_chain(adapter.name())?;
+    let upstream = if request.mode == crate::tape::Mode::Replay {
+        None
+    } else {
+        upstream
+    };
     Chain::start(&names, upstream, &configurations)
+}
+
+fn validate_recording_chain(
+    names: &[String],
+    recorder: &str,
+    mode: crate::tape::Mode,
+    registry: &[&dyn ProxyAdapter],
+) -> Result<(), Error> {
+    let matches = names
+        .iter()
+        .filter(|name| name.eq_ignore_ascii_case(recorder))
+        .count();
+    if matches != 1 {
+        return Err(Error::Input(format!(
+            "ASB_PROXY_CHAIN must contain the recording adapter `{recorder}` exactly once"
+        )));
+    }
+    if mode == crate::tape::Mode::Replay {
+        if names
+            .last()
+            .is_none_or(|name| !name.eq_ignore_ascii_case(recorder))
+        {
+            return Err(Error::Input(format!(
+                "for offline replay, recording adapter `{recorder}` must be last in ASB_PROXY_CHAIN"
+            )));
+        }
+        for name in names {
+            let adapter = registry
+                .iter()
+                .find(|adapter| adapter.name().eq_ignore_ascii_case(name))
+                .ok_or_else(|| {
+                    Error::Input(format!("unknown proxy adapter `{name}` in ASB_PROXY_CHAIN"))
+                })?;
+            if !adapter.supports_offline_replay() {
+                return Err(Error::Input(format!(
+                    "proxy adapter `{name}` does not support offline replay"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn input_files(default_name: &str) -> Result<Vec<std::path::PathBuf>, Error> {
@@ -309,6 +360,9 @@ mod tests {
         fn default_recording(&self) -> bool {
             true
         }
+        fn supports_offline_replay(&self) -> bool {
+            true
+        }
         fn recording_settings(
             &self,
             request: &RecordingRequest<'_>,
@@ -326,6 +380,77 @@ mod tests {
         ) -> Result<Box<dyn ProxySession>, Error> {
             Err(Error::Run("fixture does not start".into()))
         }
+    }
+
+    #[test]
+    fn recording_chain_requires_recorder_and_offline_replay_hops() {
+        let recorder = RecordingFixture("recorder");
+        let offline = RecordingFixture("offline");
+        let upstream = FixtureAdapter {
+            name: "other",
+            fail: false,
+            fail_finish: false,
+            events: Arc::new(Mutex::new(Vec::new())),
+        };
+        let registry: &[&dyn ProxyAdapter] = &[&recorder, &upstream, &offline];
+        let names = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+        for mode in [crate::tape::Mode::Record, crate::tape::Mode::Replay] {
+            assert!(
+                validate_recording_chain(&names(&["other"]), "recorder", mode, registry).is_err()
+            );
+            assert!(
+                validate_recording_chain(
+                    &names(&["recorder", "recorder"]),
+                    "recorder",
+                    mode,
+                    registry
+                )
+                .is_err()
+            );
+            assert!(
+                validate_recording_chain(&names(&["recorder"]), "recorder", mode, registry).is_ok()
+            );
+        }
+        assert!(
+            validate_recording_chain(
+                &names(&["recorder", "other"]),
+                "recorder",
+                crate::tape::Mode::Replay,
+                registry
+            )
+            .is_err()
+        );
+        assert!(
+            validate_recording_chain(
+                &names(&["other", "recorder"]),
+                "recorder",
+                crate::tape::Mode::Replay,
+                registry
+            )
+            .is_err()
+        );
+        assert!(
+            validate_recording_chain(
+                &names(&["other", "recorder"]),
+                "recorder",
+                crate::tape::Mode::Record,
+                registry
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_recording_chain(
+                &names(&["offline", "recorder"]),
+                "recorder",
+                crate::tape::Mode::Replay,
+                registry
+            )
+            .is_ok()
+        );
+        assert!(
+            upstream.events.lock().unwrap().is_empty(),
+            "validation must precede proxy startup"
+        );
     }
 
     #[test]

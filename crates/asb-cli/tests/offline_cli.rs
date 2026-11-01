@@ -2131,6 +2131,36 @@ fn replay_returns_json_and_writes_completed_log_offline() {
     assert_tape_scratch_cleaned(&project);
 }
 
+#[cfg(unix)]
+#[test]
+fn replay_rejects_duplicate_recorders_before_agent_execution() {
+    let project = replay_project(1);
+    let result = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+        ],
+        &[
+            ("ASB_FIXTURE_BEHAVIOR", "success"),
+            ("ASB_PROXY_CHAIN", "llmtape,llmtape"),
+        ],
+    );
+    assert!(!result.status.success());
+    assert!(
+        stderr(&result).contains("exactly once"),
+        "{}",
+        stderr(&result)
+    );
+    let source = std::fs::read_to_string(project.0.join("workspace/src/parser.py")).unwrap();
+    assert!(
+        !source.contains("segment for segment"),
+        "agent must not run"
+    );
+}
+
 #[test]
 fn standalone_compare_reports_actual_replay_logs_and_capture_overrides() {
     for concurrency in [1, 2] {
