@@ -64,6 +64,14 @@ impl DescendantScope {
         let mut terminated = BTreeSet::new();
         let mut first_error = None;
         loop {
+            // The exclusive gate can still own lifecycle-traced threads after
+            // its principal exits. A traced exit is a waitable stop, not a
+            // completed exit; leaving it stopped prevents its thread group
+            // from becoming reapable. Consume only wait statuses owned by this
+            // gate and resume ptrace stops so teardown can finish.
+            if let Err(error) = resume_owned_trace_stops() {
+                first_error.get_or_insert(error);
+            }
             let children = match children(self.owner) {
                 Ok(children) => children,
                 Err(error) => return Err(first_error.unwrap_or(error)),
@@ -113,6 +121,47 @@ impl Drop for DescendantScope {
             let _ = self.quiesce();
         }
     }
+}
+
+fn resume_owned_trace_stops() -> io::Result<()> {
+    for _ in 0..65536 {
+        let mut status = 0;
+        // This supervisor is an exclusive reaper and calls this only after
+        // the principal wait and watcher have settled.
+        let pid = unsafe { libc::waitpid(-1, &mut status, libc::__WALL | libc::WNOHANG) };
+        if pid == 0 {
+            return Ok(());
+        }
+        if pid < 0 {
+            let error = io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::ECHILD) {
+                Ok(())
+            } else if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            } else {
+                Err(error)
+            };
+        }
+        if libc::WIFSTOPPED(status) {
+            let result = unsafe {
+                libc::ptrace(
+                    libc::PTRACE_CONT,
+                    pid,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            };
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    Err(io::Error::other(
+        "agent trace cleanup exceeded its event bound",
+    ))
 }
 
 fn children(owner: u32) -> io::Result<Vec<u32>> {
@@ -424,6 +473,77 @@ mod tests {
         assert!(result.is_ok());
         assert!(reaped);
         assert_eq!(owner_wait.unwrap_err().raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
+    fn quiesce_reaps_a_traced_child_stopped_at_exit() {
+        let _view = CurrentTaskView::enter();
+        let mut scope = DescendantScope::new().unwrap();
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            if unsafe {
+                libc::ptrace(
+                    libc::PTRACE_TRACEME,
+                    0,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            } != 0
+            {
+                unsafe { libc::_exit(127) };
+            }
+            unsafe { libc::raise(libc::SIGSTOP) };
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        assert!(child > 0);
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(child, &mut status, libc::__WALL) },
+            child
+        );
+        assert!(libc::WIFSTOPPED(status));
+        assert_eq!(
+            unsafe {
+                libc::ptrace(
+                    libc::PTRACE_SETOPTIONS,
+                    child,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    libc::PTRACE_O_TRACEEXIT as usize as *mut libc::c_void,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                libc::ptrace(
+                    libc::PTRACE_CONT,
+                    child,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            },
+            0
+        );
+        let result = scope.quiesce();
+        // Always release the exact child if the regression is present.
+        if result.is_err() {
+            unsafe {
+                libc::ptrace(
+                    libc::PTRACE_CONT,
+                    child,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                );
+                libc::kill(child, libc::SIGKILL);
+                libc::waitpid(child, &mut status, libc::__WALL);
+            }
+        }
+        assert!(
+            result.is_ok(),
+            "traced exit stop prevented cleanup: {result:?}"
+        );
     }
 
     #[test]
