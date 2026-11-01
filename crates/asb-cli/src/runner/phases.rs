@@ -149,7 +149,10 @@ impl ExecutionEvidence {
             String::new()
         };
         let final_response = match guest.as_ref() {
-            Some(metadata) => metadata.final_response.clone(),
+            Some(metadata) => metadata
+                .final_response
+                .clone()
+                .or_else(|| artifact_response.map(str::to_owned)),
             None => artifact_response
                 .map(str::to_owned)
                 .or_else(|| agents::final_response(agent, &stdout, workspace)),

@@ -717,3 +717,59 @@ fn guest_output_failure_still_quiesces_owned_helpers_without_publishing_a_result
     assert!(!project.0.join("private/attempt/agent-result.json").exists());
     assert_helper_quiesced(&project);
 }
+
+#[test]
+fn codex_guest_exports_final_answer_as_private_frozen_artifact() {
+    let project = Project::new();
+    let program = project.0.join(".asb-tools/codex/bin/codex");
+    std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+    fixture_writer::write_file(&project.0, &program, r#"#!/bin/sh
+while test "$#" -gt 0; do
+ if test "$1" = --output-last-message; then shift; printf 'guest completed answer' > "$1"; exit 0; fi
+ shift
+done
+exit 93
+"#).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut request = project.request();
+    request["config"]["agent"] = "codex".into();
+    request["connection"]["interface"] = "open_ai_responses".into();
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_asb"))
+            .arg("__asb-agent")
+            .isolated_env()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", &project.0)
+            .env("ASB_GUEST_AGENT_REQUEST", request.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
+    let mut ready = String::new();
+    stdout.read_line(&mut ready).unwrap();
+    assert_eq!(ready.trim(), format!("__ASB_GATE__:{}", process.0.id()));
+    resume_fixture(&mut process);
+    let mut text = String::new();
+    stdout.read_to_string(&mut text).unwrap();
+    assert!(process.0.wait().unwrap().success());
+    let result: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.0.join("private/attempt/agent-result.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(result["artifact_error"].is_null(), "{result}");
+    let receipt = result["exported_artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "asb-deferred-adapter-collection")
+        .unwrap();
+    let path = project
+        .0
+        .join("private/attempt/exports")
+        .join(receipt["filename"].as_str().unwrap());
+    let frozen: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let bytes: Vec<u8> = serde_json::from_value(frozen["bytes"]["final.txt"].clone()).unwrap();
+    assert_eq!(bytes, b"guest completed answer");
+}

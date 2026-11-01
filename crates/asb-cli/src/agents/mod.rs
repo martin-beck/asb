@@ -1353,8 +1353,9 @@ mod tests {
         let echoed = "Trace src/cli.py src/registry.py lookup\nASB_FINAL_RESPONSE: echoed prompt\n{\"type\":\"tool_call\",\"command\":\"cat src/registry.py\"}";
         assert!(final_response("codex", echoed, &root).is_none());
         let structured = "{\"type\":\"tool_call\",\"command\":\"cat src/registry.py\"}\n{\"type\":\"response.output_text.done\",\"text\":\"The call path is src/cli.py -> src/registry.py through lookup.\"}";
+        assert!(final_response("codex", structured, &root).is_none());
         assert_eq!(
-            final_response("codex", structured, &root).as_deref(),
+            structured_final_response(structured).as_deref(),
             Some("The call path is src/cli.py -> src/registry.py through lookup.")
         );
 
@@ -1378,7 +1379,7 @@ mod tests {
         let wrapped =
             r#"{"type":"message","message":{"role":"assistant","content":"wrapped assistant"}}"#;
         assert_eq!(
-            final_response("codex", wrapped, &root).as_deref(),
+            structured_final_response(wrapped).as_deref(),
             Some("wrapped assistant")
         );
 
@@ -1395,10 +1396,7 @@ mod tests {
 
         let codex =
             r#"{"type":"item.completed","item":{"type":"agent_message","text":"codex final"}}"#;
-        assert_eq!(
-            final_response("codex", codex, &root).as_deref(),
-            Some("codex final")
-        );
+        assert!(final_response("codex", codex, &root).is_none());
         let opencode = r#"{"type":"text","part":{"type":"text","text":"opencode final"}}"#;
         assert_eq!(
             final_response("opencode", opencode, &root).as_deref(),

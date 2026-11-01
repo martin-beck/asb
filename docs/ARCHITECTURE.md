@@ -1125,6 +1125,12 @@ owning agent adapter's final counter and reports unknown instead of guessing
 from text or streaming JSON keys. No runner or collector branches on agent
 identity to interpret that counter.
 
+Codex's adapter requests the pinned client's final-message file in a fresh,
+bounded private artifact namespace. It does not use intermediate JSONL
+messages as a final answer. The frozen artifact crosses isolated guest
+execution through the same deferred adapter-artifact handoff used for other
+private state, and is available to workload grading after collection.
+
 Agent/tool launch and installer/TUI readiness share one project executable
 policy. An explicit `<tools>/<id>/bin/<executable>` source override wins over
 adapter-owned package preferences, then the npm/venv and configured shared-bin

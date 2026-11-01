@@ -602,6 +602,20 @@ fn native_agent_outcome_uses_typed_terminal_error_and_ignores_task_text() {
 }
 
 #[test]
+fn guest_uses_frozen_adapter_answer_when_controller_has_none() {
+    let mut execution = evidence(0, true);
+    execution.guest.as_mut().unwrap().final_response = None;
+    let outcome = execution.agent_outcome("codex", Path::new("."), Some("verified final answer"));
+    assert_eq!(
+        outcome.final_response.as_deref(),
+        Some("verified final answer")
+    );
+    assert!(outcome.failure.is_none());
+    let missing = execution.agent_outcome("codex", Path::new("."), None);
+    assert!(missing.final_response.is_none());
+}
+
+#[test]
 fn native_and_guest_apply_the_same_adapter_terminal_answer_policy() {
     let fixture = Fixture::new();
     for guest in [false, true] {
@@ -1474,7 +1488,7 @@ fn missing_fixture_grade_reports_settled_agent_and_proxy_evidence() {
     let mut execution = evidence(9, false);
     execution.output.stdout = b"private-sentinel-agent-stdout agent_end".to_vec();
     execution.output.stderr =
-        b"fixture replay request failed private-sentinel-agent-stderr".to_vec();
+        b"fixture replay request failed native trace observed an unowned child status private-sentinel-agent-stderr".to_vec();
     let issues = AttemptIssues {
         run_error: Some(format!(
             "proxy completion failed private-sentinel-error {}",
@@ -1500,6 +1514,7 @@ fn missing_fixture_grade_reports_settled_agent_and_proxy_evidence() {
         .downcast_ref::<String>()
         .expect("diagnostic panic string");
     assert!(message.contains("fixture-replay-failed"), "{message}");
+    assert!(message.contains("gate-unowned-child-status"), "{message}");
     assert!(message.contains("proxy-completion-failed"), "{message}");
     assert!(
         message.contains("proxy_cleanup_confirmed=false"),
