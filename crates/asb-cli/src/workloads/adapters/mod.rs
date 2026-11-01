@@ -39,7 +39,7 @@ mod core_bench;
 mod evalplus;
 mod livecodebench;
 mod official_engine;
-mod prompt;
+pub(super) mod prompt;
 mod source_catalog;
 mod swe_bench;
 mod swe_bench_lite;
@@ -233,7 +233,7 @@ impl WorkloadAdapter for PromptAdapter {
         }
     }
     fn evaluator(&self) -> super::session::Evaluator {
-        super::evaluate_builtin
+        prompt::evaluation::evaluate_builtin
     }
     fn id(&self) -> &'static str {
         "prompt"
