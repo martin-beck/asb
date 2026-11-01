@@ -393,7 +393,49 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
         "replicas" | "resume" | "resume-mode" | "benchmark" => 2,
         _ => 1,
     };
-    assert_eq!(calls.lines().count(), expected, "{case}: {calls}");
+    if calls.lines().count() != expected {
+        // Fixture-only diagnostics: never print run output, paths or prompts.
+        // Read a bounded prefix and classify it so a prelaunch failure remains
+        // distinguishable from a presentation or provider failure in CI.
+        use std::io::Read;
+        let mut bytes = writer
+            .bytes
+            .iter()
+            .copied()
+            .take(65_536)
+            .collect::<Vec<_>>();
+        let mut readable = Vec::new();
+        for path in [
+            "sweep-results/000-a/run.log",
+            "results/sweep-comparison/comparison.json",
+        ] {
+            let mut prefix = Vec::new();
+            readable.push(
+                std::fs::File::open(root.join(path))
+                    .and_then(|file| file.take(65_536).read_to_end(&mut prefix))
+                    .is_ok(),
+            );
+            bytes.extend(prefix);
+        }
+        let text = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+        let indicators = [
+            "gate",
+            "spawn",
+            "permission",
+            "timeout",
+            "provider",
+            "replay",
+            "cassette",
+        ]
+        .into_iter()
+        .filter(|word| text.contains(word))
+        .collect::<Vec<_>>();
+        panic!(
+            "{case}: expected {expected} fixture launches, observed {}; run_and_comparison_readable={readable:?} inspected_bytes={} indicators={indicators:?}",
+            calls.lines().count(),
+            bytes.len()
+        );
+    }
     if matches!(case, "json" | "replicas") {
         assert!(!root.join("sweep-results/001-b").exists());
     }
