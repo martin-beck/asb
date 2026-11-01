@@ -101,6 +101,7 @@ pub(crate) struct OperationContext {
     log_budget: Arc<native::LogBudget>,
     deadline: Instant,
     cancel: Arc<AtomicBool>,
+    destination_owners: Vec<(PathBuf, Arc<crate::output_lock::OutputLock>)>,
     #[cfg(all(test, target_os = "linux"))]
     worker_start_fault: Arc<std::sync::Mutex<Option<WorkerStartFault>>>,
 }
@@ -112,6 +113,16 @@ impl OperationContext {
     }
     pub(crate) fn root(&self) -> &Path {
         &self.root
+    }
+    pub(crate) fn with_destination(&self, destination: &Path) -> Result<Self, crate::Error> {
+        let key = super::destination_key(destination)?;
+        if self.destination_owners.iter().any(|(held, _)| held == &key) {
+            return Ok(self.clone());
+        }
+        let owner = super::destination_lock(destination)?;
+        let mut context = self.clone();
+        context.destination_owners.push((key, Arc::new(owner)));
+        Ok(context)
     }
     pub(crate) fn custody_failure(&self, label: &str, evidence: &Path) -> InstallFailure {
         authority_failure(self, label, Some(evidence.to_owned()))
@@ -167,6 +178,7 @@ impl OperationContext {
             log_budget: Arc::new(native::LogBudget::default()),
             deadline,
             cancel: Arc::new(AtomicBool::new(false)),
+            destination_owners: Vec::new(),
             #[cfg(all(test, target_os = "linux"))]
             worker_start_fault: Arc::new(std::sync::Mutex::new(None)),
         })

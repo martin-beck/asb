@@ -30,6 +30,144 @@ pub(crate) use process::{
 };
 pub(crate) use source::check_version_in;
 
+/// Serialize writers to the same persistent installation destination.
+pub(crate) fn destination_key(destination: &Path) -> Result<PathBuf, Error> {
+    let destination = match fs::canonicalize(destination) {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => destination.to_path_buf(),
+        Err(error) => return Err(crate::io_error(error)),
+    };
+    let parent = destination
+        .parent()
+        .ok_or_else(|| Error::Io("installation destination has no parent".into()))?;
+    let name = destination
+        .file_name()
+        .ok_or_else(|| Error::Io("installation destination has no name".into()))?;
+    fs::create_dir_all(parent).map_err(crate::io_error)?;
+    let parent = parent.canonicalize().map_err(crate::io_error)?;
+    let mut lock_name = std::ffi::OsString::from(".asb-install-");
+    lock_name.push(name);
+    lock_name.push(".lock");
+    Ok(parent.join(lock_name))
+}
+
+pub(crate) fn destination_lock(
+    destination: &Path,
+) -> Result<crate::output_lock::OutputLock, Error> {
+    crate::output_lock::OutputLock::acquire(
+        &destination_key(destination)?,
+        "another installation owns this destination; wait for it to finish and retry",
+    )
+    .map_err(Error::Io)
+}
+
+#[cfg(test)]
+mod destination_lock_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn worker_context_retains_destination_after_caller_drops() {
+        let root = std::env::temp_dir().join(tools::runtime::unique_id());
+        fs::create_dir_all(&root).unwrap();
+        let base = OperationContext::new(&root, &project::ProjectConfig::default()).unwrap();
+        let owner = base.with_destination(&root.join("tool")).unwrap();
+        let nested = owner.with_destination(&root.join("tool")).unwrap();
+        let worker = owner.clone();
+        drop(owner);
+        assert!(destination_lock(&root.join("tool")).is_err());
+        drop(nested);
+        drop(worker);
+        drop(destination_lock(&root.join("tool")).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_tool_install_cannot_modify_a_destination_owned_by_another_operation() {
+        let root = std::env::temp_dir().join(tools::runtime::unique_id());
+        fs::create_dir_all(root.join("tools/fixture/bin")).unwrap();
+        let executable = root.join("tools/fixture/bin/fixture");
+        fs::write(&executable, "previous").unwrap();
+        let source = root.join("source");
+        fs::write(&source, "replacement").unwrap();
+        let owner = destination_lock(&root.join("tools/fixture")).unwrap();
+        let context = OperationContext::new(&root, &project::ProjectConfig::default()).unwrap();
+        let result = tool_in(
+            &context,
+            ToolInstallOptions {
+                name: "fixture".into(),
+                source: Some(source.to_string_lossy().into()),
+                dir: Some(root.join("tools")),
+                dry_run: false,
+            },
+            &mut Vec::new(),
+            &mut |_, _| {},
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("another installation owns")
+        );
+        assert_eq!(fs::read_to_string(executable).unwrap(), "previous");
+        drop(owner);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn active_bundle_extraction_cannot_be_removed_by_competing_install() {
+        let root = std::env::temp_dir().join(tools::runtime::unique_id());
+        fs::create_dir_all(&root).unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let worker_root = root.clone();
+        let worker = std::thread::spawn(move || {
+            let bundle = workloads::SourceBundle {
+                archive: "/missing-asb-fixture",
+                marker: "fixture",
+                prompt: "fixture",
+            };
+            install_bundle(
+                "fixture",
+                bundle,
+                &worker_root,
+                &mut Vec::new(),
+                &mut |_, stage| {
+                    if matches!(stage, ProgressStage::Downloading) {
+                        fs::write(worker_root.join(".fixture.extract/sentinel"), "preserve")
+                            .unwrap();
+                        ready_tx.send(()).unwrap();
+                        resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    }
+                },
+            )
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let bundle = workloads::SourceBundle {
+            archive: "/missing-asb-fixture",
+            marker: "fixture",
+            prompt: "fixture",
+        };
+        let competing = install_bundle("fixture", bundle, &root, &mut Vec::new(), &mut |_, _| {});
+        assert!(
+            competing
+                .unwrap_err()
+                .to_string()
+                .contains("another installation owns")
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(".fixture.extract/sentinel")).unwrap(),
+            "preserve"
+        );
+        drop(destination_lock(&root.join("unrelated")).unwrap());
+        resume_tx.send(()).unwrap();
+        assert!(worker.join().unwrap().is_err());
+        drop(destination_lock(&root.join("fixture")).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 type CustomInstall = fn(
     &OperationContext,
     &Path,
@@ -380,6 +518,12 @@ pub(crate) fn tool_in(
         progress,
         dry_run,
     )?;
+    let owned_context = if dry_run {
+        context.clone()
+    } else {
+        context.with_destination(&root)?
+    };
+    let context = &owned_context;
     if let Some(source) = source {
         let destination = root
             .join("bin")
@@ -477,9 +621,10 @@ pub(crate) fn ensure_execution_requirements(
     let mut progress = |_percent: u8, _stage: ProgressStage| {};
     let result = (|| -> InstallResult<()> {
         for id in execution_tool_ids(config) {
+            let owned_context = context.with_destination(&tools_root.join(&id))?;
             if !tool_installed_locally(&id, &tools_root) {
                 tool_in(
-                    &context,
+                    &owned_context,
                     ToolInstallOptions {
                         name: id,
                         source: None,
@@ -491,21 +636,22 @@ pub(crate) fn ensure_execution_requirements(
                 )?;
             }
         }
-        if external_workload(&config.workload).is_some()
-            && !workload_available(&config.workload, &workloads_root)
-        {
-            let source = workload_source_in(&config.workload, &root, &project_config)?;
-            workload_in(
-                &context,
-                WorkloadInstallOptions {
-                    source: config.workload.clone(),
-                    name: None,
-                    dir: Some(workloads_root.clone()),
-                },
-                source,
-                output,
-                &mut progress,
-            )?;
+        if external_workload(&config.workload).is_some() {
+            let owned_context = context.with_destination(&workloads_root.join(&config.workload))?;
+            if !workload_available(&config.workload, &workloads_root) {
+                let source = workload_source_in(&config.workload, &root, &project_config)?;
+                workload_in(
+                    &owned_context,
+                    WorkloadInstallOptions {
+                        source: config.workload.clone(),
+                        name: None,
+                        dir: Some(workloads_root.clone()),
+                    },
+                    source,
+                    output,
+                    &mut progress,
+                )?;
+            }
         }
         if let Some(measures) = config.measurements.as_ref().filter(|value| value.enabled) {
             ensure_collector_dependencies_in(
@@ -581,6 +727,12 @@ fn ensure_collector_dependencies_in(
         let recipe = tool.recipe();
         let root = tools_root.join(id);
         let destination = executable(recipe, &root);
+        let owned_context = if dry_run {
+            context.clone()
+        } else {
+            context.with_destination(&root)?
+        };
+        let context = &owned_context;
         match tools::local_lookup(id, tools_root) {
             crate::executables::Lookup::Found(_) => continue,
             crate::executables::Lookup::Unusable(path) => {
@@ -770,6 +922,8 @@ fn workload_in(
     progress(2, crate::install::ProgressStage::Preparing);
     fs::create_dir_all(&directory)
         .map_err(|error| Error::Io(format!("cannot create {}: {error}", directory.display())))?;
+    let owned_context = context.with_destination(&directory.join(&name))?;
+    let context = &owned_context;
     // A custom prompt with a coincidentally matching destination name is not
     // an upstream dataset installation.
     if external_workload(&requested).is_some() && name == requested {
@@ -838,6 +992,7 @@ fn install_bundle(
 ) -> Result<(), Error> {
     let context = OperationContext::new(directory, &project::ProjectConfig::default())
         .map_err(InstallFailure::into_public)?;
+    let context = context.with_destination(&directory.join(name))?;
     let result = install_bundle_in(&context, name, bundle, directory, output, progress);
     let diagnostic = context.report_diagnostics(output);
     result.map_err(InstallFailure::into_public)?;
@@ -902,12 +1057,18 @@ fn install_bundle_in(
     let archive = directory.join(format!(".{name}.tar.gz"));
     let extract = directory.join(format!(".{name}.extract"));
     if extract.exists() {
-        fs::remove_dir_all(&extract).map_err(|error| {
-            Error::Io(format!(
-                "cannot clear stale extraction {}: {error}",
-                extract.display()
-            ))
-        })?;
+        return Err(Error::Io(format!(
+            "previous extraction at {} was preserved; inspect it and move it aside before retrying",
+            extract.display()
+        ))
+        .into());
+    }
+    if archive.exists() {
+        return Err(Error::Io(format!(
+            "previous download at {} was preserved; inspect it and move it aside before retrying",
+            archive.display()
+        ))
+        .into());
     }
     fs::create_dir_all(&extract).map_err(|error| {
         Error::Io(format!(
@@ -1369,6 +1530,8 @@ pub(crate) fn ensure_runtime_dependency_in(
 ) -> InstallResult<()> {
     let tool = tools::find(id)
         .ok_or_else(|| Error::Input(format!("runtime dependency `{id}` is not registered")))?;
+    let owned_context = context.with_destination(&tools_root.join(id))?;
+    let context = &owned_context;
     if tool_installed_locally(id, tools_root) || tool.host_runtime_usable(context)? {
         return Ok(());
     }

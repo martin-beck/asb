@@ -403,7 +403,9 @@ impl Drop for ContinueRelease {
 }
 fn paused_admission_must_not_resume_after_abort(expire: bool) {
     let root = root();
-    let mut context = context(&root);
+    let mut context = context(&root)
+        .with_destination(&root.join("owned-tool"))
+        .unwrap();
     if expire {
         context.deadline = Instant::now() + Duration::from_millis(500);
     }
@@ -436,6 +438,11 @@ fn paused_admission_must_not_resume_after_abort(expire: bool) {
     }
     let result = receive.recv_timeout(Duration::from_secs(8)).unwrap();
     assert!(matches!(result, Err(InstallFailure::Abort(_))));
+    drop(context);
+    assert!(
+        crate::install::destination_lock(&root.join("owned-tool")).is_err(),
+        "uncertain worker must retain installation ownership"
+    );
     assert!(!root.join("client-started").exists());
     drop(release_guard);
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -443,6 +450,18 @@ fn paused_admission_must_not_resume_after_abort(expire: bool) {
         assert!(
             Instant::now() < deadline,
             "no actual matching guardian quiescence after release"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(owner) = crate::install::destination_lock(&root.join("owned-tool")) {
+            drop(owner);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "settled worker retained installation ownership"
         );
         std::thread::sleep(Duration::from_millis(5));
     }

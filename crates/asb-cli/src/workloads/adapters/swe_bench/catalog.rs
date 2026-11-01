@@ -135,6 +135,15 @@ pub(super) fn install(
     output: &mut dyn std::io::Write,
     progress: &mut dyn FnMut(u8, crate::install::ProgressStage),
 ) -> crate::install::InstallResult<()> {
+    let owned_context = context
+        .process
+        .with_destination(&context.tools_root.join(super::ENGINE.tool()))?;
+    let context = &crate::workloads::InstallationContext {
+        process: &owned_context,
+        project_root: context.project_root,
+        tools_root: context.tools_root,
+        workloads_root: context.workloads_root,
+    };
     if !install::tool_installed_locally(super::ENGINE.tool(), context.tools_root) {
         install::tool_in(
             context.process,

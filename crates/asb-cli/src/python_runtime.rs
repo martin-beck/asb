@@ -177,6 +177,8 @@ pub(crate) fn ensure_in(
     output: &mut dyn std::io::Write,
 ) -> InstallResult<PathBuf> {
     let root = context.root();
+    let owned_context = context.with_destination(&root.join(".asb/python"))?;
+    let context = &owned_context;
     let python = project_python(root);
     let probe_owner = ProducerDirectory::open(root)?;
     let mut probe = probe_owner.scope(context);

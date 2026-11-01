@@ -272,6 +272,15 @@ pub(super) fn install(
     output: &mut dyn Write,
     progress: &mut dyn FnMut(u8, crate::install::ProgressStage),
 ) -> install::InstallResult<()> {
+    let owned_context = context
+        .process
+        .with_destination(&context.tools_root.join(adapter.engine.tool()))?;
+    let context = &crate::workloads::InstallationContext {
+        process: &owned_context,
+        project_root: context.project_root,
+        tools_root: context.tools_root,
+        workloads_root: context.workloads_root,
+    };
     if !install::tool_installed_locally(adapter.engine.tool(), context.tools_root) {
         install::tool_in(
             context.process,
