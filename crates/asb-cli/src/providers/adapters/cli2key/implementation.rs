@@ -26,6 +26,88 @@ const BUILTIN_COMPAT_PROXY: &str = include_str!("../../../../assets/scripts/cli2
 const CHAT_COMPAT: &str = include_str!("../../../../assets/scripts/cli2key-chat-compat.mjs");
 const NETWORK_FETCH: &str = include_str!("../../../../assets/scripts/network-fetch.mjs");
 
+// Each proxy owns its modules. Separate ASB processes have independent
+// startup mutexes and must never truncate files another proxy is loading.
+struct RuntimeFiles {
+    path: std::path::PathBuf,
+    retain: bool,
+}
+
+impl RuntimeFiles {
+    fn create(parent: &std::path::Path) -> Result<Self, Error> {
+        for _ in 0..100 {
+            let path = parent.join(format!("cli2key-{}", crate::tools::runtime::unique_id()));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
+                Ok(()) => {
+                    let files = Self {
+                        path,
+                        retain: false,
+                    };
+                    for (name, source) in [
+                        ("network-fetch.mjs", NETWORK_FETCH),
+                        ("cli2key-chat-compat.mjs", CHAT_COMPAT),
+                        ("cli2key-proxy.mjs", BUILTIN_COMPAT_PROXY),
+                    ] {
+                        std::fs::write(files.path.join(name), source).map_err(|error| {
+                            Error::Run(format!(
+                                "cannot materialize cli2key proxy module {name}: {error}"
+                            ))
+                        })?;
+                    }
+                    return Ok(files);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(Error::Run(format!(
+                        "cannot allocate private cli2key proxy directory: {error}"
+                    )));
+                }
+            }
+        }
+        Err(Error::Run(
+            "cannot allocate a unique cli2key proxy directory".into(),
+        ))
+    }
+}
+
+struct LocalResources {
+    owner: Option<custody::Local>,
+    files: Option<RuntimeFiles>,
+}
+
+impl LocalResources {
+    fn finish(&mut self) -> Result<(), Error> {
+        let result = self
+            .owner
+            .take()
+            .map_or(Ok(()), |owner| owner.finish().map_err(Error::Run));
+        if let Some(mut files) = self.files.take() {
+            files.retain = result.is_err();
+        }
+        result
+    }
+}
+
+impl Drop for LocalResources {
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
+}
+
+impl Drop for RuntimeFiles {
+    fn drop(&mut self) {
+        if !self.retain {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 pub(in crate::providers) fn prepare(
     command: &mut Command,
     model: &str,
@@ -74,7 +156,7 @@ pub struct Bridge {
 
 enum Session {
     External,
-    Local { _owner: custody::Local },
+    Local { resources: LocalResources },
     Finished,
 }
 
@@ -86,10 +168,10 @@ impl crate::providers::ProviderSession for Bridge {
         Bridge::base_url(self)
     }
     fn finish(&mut self) -> Result<(), Error> {
-        if let Session::Local { _owner: owner } =
+        if let Session::Local { mut resources } =
             std::mem::replace(&mut self._session, Session::Finished)
         {
-            owner.finish().map_err(Error::Run)
+            resources.finish()
         } else {
             Ok(())
         }
@@ -142,9 +224,17 @@ impl Bridge {
             .env("CODEX_BRIDGE_PORT", &port)
             .stdin(Stdio::null())
             .stderr(Stdio::null());
-        let mut owner = custody::Local::new().map_err(Error::Run)?;
+        let mut resources = LocalResources {
+            owner: Some(custody::Local::new().map_err(Error::Run)?),
+            files: None,
+        };
         let result: Result<(String, String), Error> = (|| {
-            let discovered_key = owner.spawn_bridge(&mut command).map_err(Error::Run)?;
+            let discovered_key = resources
+                .owner
+                .as_mut()
+                .expect("live owner")
+                .spawn_bridge(&mut command)
+                .map_err(Error::Run)?;
             let api_key = std::env::var("CLI2KEY_API_KEY")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
@@ -158,35 +248,25 @@ impl Bridge {
                     proxy_root.display()
                 ))
             })?;
-            std::fs::write(proxy_root.join("network-fetch.mjs"), NETWORK_FETCH).map_err(
-                |error| {
-                    Error::Run(format!(
-                        "cannot materialize cli2key network client: {error}"
-                    ))
-                },
-            )?;
-            std::fs::write(proxy_root.join("cli2key-chat-compat.mjs"), CHAT_COMPAT).map_err(
-                |error| {
-                    Error::Run(format!(
-                        "cannot materialize cli2key chat compatibility module: {error}"
-                    ))
-                },
-            )?;
-            let proxy_script = proxy_root.join(format!("cli2key-proxy-{}.mjs", std::process::id()));
-            std::fs::write(&proxy_script, BUILTIN_COMPAT_PROXY).map_err(|error| {
-                Error::Run(format!(
-                    "cannot write cli2key compatibility proxy {}: {error}",
-                    proxy_script.display()
-                ))
-            })?;
+            let mut files = RuntimeFiles::create(&proxy_root)?;
+            files.retain = true;
+            resources.files = Some(files);
             let upstream = base_url.clone();
             let mut command = Command::new("node");
             crate::project::apply_network_proxy(&mut command, std::path::Path::new("."))?;
             command
-                .arg(&proxy_script)
+                .arg(
+                    resources
+                        .files
+                        .as_ref()
+                        .expect("runtime files")
+                        .path
+                        .join("cli2key-proxy.mjs"),
+                )
                 .args(["--upstream", &upstream])
                 .stdin(Stdio::piped())
                 .stderr(Stdio::null());
+            let owner = resources.owner.as_mut().expect("live owner");
             let address = owner.spawn_proxy(command).map_err(Error::Run)?;
             owner.confirm_ready().map_err(Error::Run)?;
             Ok((api_key, format!("http://{address}/v1")))
@@ -195,9 +275,12 @@ impl Bridge {
             Ok((api_key, base_url)) => Ok(Self {
                 api_key,
                 base_url,
-                _session: Session::Local { _owner: owner },
+                _session: Session::Local { resources },
             }),
-            Err(error) => Err(Error::Run(owner.failure(error.to_string()))),
+            Err(error) => match resources.finish() {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(Error::Run(format!("{error}; {cleanup}"))),
+            },
         }
     }
 
@@ -256,6 +339,49 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::normalize_endpoint;
+
+    #[test]
+    fn concurrent_proxy_modules_are_private_and_cleanup_is_owned() {
+        use std::sync::{Arc, Barrier};
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let files = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let barrier = Arc::clone(&barrier);
+                    let root = &root;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        super::RuntimeFiles::create(root).unwrap()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_ne!(files[0].path, files[1].path);
+        let first = files[0].path.join("network-fetch.mjs");
+        let second = files[1].path.join("network-fetch.mjs");
+        let original = std::fs::read(&first).unwrap();
+        std::fs::write(&second, "replaced").unwrap();
+        assert_eq!(std::fs::read(&first).unwrap(), original);
+        let mut iter = files.into_iter();
+        let mut released = iter.next().unwrap();
+        let mut retained = iter.next().unwrap();
+        retained.retain = true;
+        released.retain = false;
+        drop(released);
+        assert!(!first.exists());
+        drop(retained);
+        assert!(
+            second.exists(),
+            "uncertain cleanup must retain runtime files"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn endpoint_normalization_targets_openai_compatible_api() {
