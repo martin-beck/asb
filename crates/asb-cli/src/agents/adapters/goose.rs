@@ -28,6 +28,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_tool_replay(prepare_tool_replay)
 .with_step_count(step_count)
 .with_output_usage(output_usage)
+.with_final_response(final_response)
 .with_artifact_specs(&[super::super::ArtifactSpec {
     namespace: "tool-replay",
     filename: "local-tools.jsonl",
@@ -35,6 +36,61 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 }])
 .with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"])
 .with_max_steps();
+
+// Goose JSON mode emits a pretty-printed conversation summary after the run.
+fn final_response(output: &str, _: &Path) -> Option<String> {
+    // Pinned Goose prints its three-line session banner before JSON even in
+    // non-interactive mode. Accept only that known framing, never scan for
+    // summary-shaped objects inside arbitrary diagnostics.
+    let json = if output.trim_start().starts_with('{') {
+        output
+    } else {
+        let rest = output.strip_prefix('\n')?;
+        let (first, rest) = rest.split_once('\n')?;
+        let (second, rest) = rest.split_once('\n')?;
+        let (third, json) = rest.split_once('\n')?;
+        let heading = first.strip_prefix("    __( O)>  ● ")?;
+        if !(heading.starts_with("new session · ")
+            || heading.starts_with("resuming · ")
+            || heading.starts_with("ephemeral · "))
+            || !second.starts_with("   \\____)    ")
+            || third != "     L L     goose is ready"
+        {
+            return None;
+        }
+        json
+    };
+    let summary: serde_json::Value = serde_json::from_str(json).ok()?;
+    if summary.pointer("/metadata/status").and_then(|v| v.as_str()) != Some("completed") {
+        return None;
+    }
+    let message = summary.get("messages")?.as_array()?.last()?;
+    if message.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+        return None;
+    }
+    let content = message.get("content")?.as_array()?;
+    if content.iter().any(|part| {
+        matches!(
+            part.get("type").and_then(|v| v.as_str()),
+            Some(
+                "toolRequest"
+                    | "toolResponse"
+                    | "toolConfirmationRequest"
+                    | "actionRequired"
+                    | "error"
+            ) | None
+        )
+    }) {
+        return None;
+    }
+    let text = content
+        .iter()
+        .filter(|part| part.get("type").and_then(|v| v.as_str()) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(|v| v.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
 
 /// Goose's JSON mode emits accumulated usage in the top-level metadata of
 /// its conversation summary. Message content is arbitrary task data.
@@ -227,6 +283,60 @@ fn shell_quote(value: &std::ffi::OsStr) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn completed_goose_summary_supplies_final_answer() {
+        use crate::agents::AgentAdapter;
+        let output = "{\n  \"messages\": [{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}],\n  \"metadata\": {\"status\":\"completed\"}\n}";
+        let path = std::path::Path::new(".");
+        assert_eq!(
+            super::ADAPTER.final_response(output, path).as_deref(),
+            Some("answer")
+        );
+        let failed = output.replace("completed", "error");
+        assert!(super::ADAPTER.final_response(&failed, path).is_none());
+        let user = output.replace("assistant", "user");
+        assert!(super::ADAPTER.final_response(&user, path).is_none());
+        let tool = r#"{"messages":[{"role":"assistant","content":[{"type":"text","text":"intermediate"},{"type":"toolRequest"}]}],"metadata":{"status":"completed"}}"#;
+        assert!(super::ADAPTER.final_response(tool, path).is_none());
+        for kind in [
+            "actionRequired",
+            "toolConfirmationRequest",
+            "toolResponse",
+            "error",
+        ] {
+            let pending = format!(
+                r#"{{"messages":[{{"role":"assistant","content":[{{"type":"text","text":"intermediate"}},{{"type":"{kind}"}}]}}],"metadata":{{"status":"completed"}}}}"#
+            );
+            assert!(
+                super::ADAPTER.final_response(&pending, path).is_none(),
+                "{kind}"
+            );
+        }
+
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{output}\n{output}"), path)
+                .is_none()
+        );
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("diagnostic\n{output}"), path)
+                .is_none()
+        );
+        let banner = "\n    __( O)>  ● new session · openai mock\n   \\____)    session · /work\n     L L     goose is ready\n";
+        assert_eq!(
+            super::ADAPTER
+                .final_response(&format!("{banner}{output}"), path)
+                .as_deref(),
+            Some("answer")
+        );
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("diagnostic\n{banner}{output}"), path)
+                .is_none()
+        );
+    }
+
     use super::*;
     use crate::agents::AgentAdapter;
     use std::collections::HashMap;
