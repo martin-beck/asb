@@ -235,7 +235,8 @@ fn run_child(case: &str) {
             trajectory(answer)
         )
     } else {
-        String::new()
+        let summary = json!({"schema_version":1,"completed":true,"steps":1,"usage_complete":false,"final_answer":answer});
+        format!("fs.writeFileSync(process.env.ASB_PI_SUMMARY_PATH,JSON.stringify({summary}));")
     };
     let counter_js = serde_json::to_string(&counter).unwrap();
     let cassette_js = serde_json::to_string(&cassette).unwrap();

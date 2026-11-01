@@ -2092,7 +2092,7 @@ fn full_entry_child(case: &str) {
     std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
     let counter = root.join("agent-executions");
     let quoted_counter = counter.to_string_lossy().replace('\'', "'\\''");
-    std::fs::write(&agent, format!("#!/bin/sh\nprintf 'called\\n' >> '{quoted_counter}'\nprintf '%s\\n' '{{\"type\":\"agent_end\",\"messages\":[{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"src/cli.py src/registry.py lookup\"}}]}}]}}'\n")).unwrap();
+    std::fs::write(&agent, format!("#!/bin/sh\nprintf 'called\\n' >> '{quoted_counter}'\nif [ -n \"${{ASB_PI_SUMMARY_PATH:-}}\" ]; then printf '%s' '{{\"schema_version\":1,\"completed\":true,\"steps\":1,\"usage_complete\":false,\"final_answer\":\"src/cli.py src/registry.py lookup\"}}' > \"$ASB_PI_SUMMARY_PATH\"; fi\nprintf '%s\\n' '{{\"type\":\"agent_end\",\"messages\":[{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"src/cli.py src/registry.py lookup\"}}]}}]}}'\n")).unwrap();
     std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
     let cassette = root.join("cassette.jsonl");
     let body = serde_json::json!({"model":"fixture","tools":[{"type":"function","function":{"name":"fixture","parameters":{"type":"object"}}}],"messages":[]});
