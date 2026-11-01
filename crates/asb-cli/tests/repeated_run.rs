@@ -465,6 +465,16 @@ fn record_to(
     repeat: Option<&str>,
     cassette: Option<&str>,
 ) -> Output {
+    record_to_with_mode(project, provider, repeat, cassette, "--record")
+}
+
+fn record_to_with_mode(
+    project: &Project,
+    provider: &RecordingProvider,
+    repeat: Option<&str>,
+    cassette: Option<&str>,
+    mode: &str,
+) -> Output {
     let config = project.0.join("benchmark.toml");
     fs::write(
         &config,
@@ -486,7 +496,7 @@ fn record_to(
             "OPENROUTER_MODELS_URL",
             format!("{}/models", provider.endpoint),
         )
-        .args(["run", "benchmark.toml", "--record", "--json"]);
+        .args(["run", "benchmark.toml", mode, "--json"]);
     if let Some(cassette) = cassette {
         command.args(["--cassette", cassette]);
     }
@@ -510,6 +520,16 @@ fn replay_with_format(
     extra: &[&str],
     json: bool,
 ) -> Output {
+    replay_using_mode(project, cassette, extra, json, "--replay")
+}
+
+fn replay_using_mode(
+    project: &Project,
+    cassette: Option<&str>,
+    extra: &[&str],
+    json: bool,
+    mode: &str,
+) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_asb"));
     command
         .current_dir(&project.0)
@@ -517,7 +537,7 @@ fn replay_with_format(
         .env("HOME", &project.0)
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("OPENROUTER_BASE_URL", "http://127.0.0.1:1")
-        .args(["run", "benchmark.toml", "--replay"]);
+        .args(["run", "benchmark.toml", mode]);
     if json {
         command.arg("--json");
     }
@@ -543,6 +563,35 @@ fn workload_output_mentioning_provider_error_does_not_fail_successful_agent() {
         "stdout={} stderr={}",
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn llm_only_record_and_replay_do_not_require_tool_capture() {
+    let project = Project::new();
+    project.config(1);
+    let provider = RecordingProvider::new();
+    let recorded = record_to_with_mode(
+        &project,
+        &provider,
+        None,
+        Some("llm-only.zip"),
+        "--llm-record",
+    );
+    assert!(
+        recorded.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&recorded.stdout),
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    assert!(project.0.join("llm-only.zip").is_file());
+    drop(provider);
+    let replayed = replay_using_mode(&project, Some("llm-only.zip"), &[], true, "--llm-replay");
+    assert!(
+        replayed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&replayed.stdout),
+        String::from_utf8_lossy(&replayed.stderr)
     );
 }
 
