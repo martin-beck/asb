@@ -216,6 +216,18 @@ fn cline_repeated_current_and_final_snapshots_count_once() {
 }
 
 #[test]
+fn cline_incomplete_final_result_defers_to_cassette() {
+    let output = concat!(
+        "{\"type\":\"agent_event\",\"event\":{\"type\":\"usage\",\"inputTokens\":999,\"outputTokens\":888}}\n",
+        "{\"type\":\"run_result\",\"iterations\":1}\n",
+    );
+    let cassette = chat_cassette(2);
+    let usage = token_usage_from_sources("openrouter", "cline", output, "", Some(&cassette.0));
+    assert_eq!(usage.source.as_deref(), Some("cassette"));
+    assert_usage(usage, 20, 6, Some(8));
+}
+
+#[test]
 fn pi_cumulative_events_count_once_and_include_cached_input() {
     let output = concat!(
         "{\"type\":\"message_update\",\"usage\":{\"input\":6,\"output\":3,\"cacheRead\":4,\"totalTokens\":13}}\n",

@@ -2060,7 +2060,7 @@ mod tests {
             ),
             (
                 "cline",
-                r#"event {"usage":{"inputTokens":23,"outputTokens":8,"cachedTokens":3,"totalTokens":31}}"#,
+                r#"{"type":"run_result","usage":{"inputTokens":23,"outputTokens":8,"cachedTokens":3,"totalTokens":31}}"#,
                 23,
                 8,
                 31,
