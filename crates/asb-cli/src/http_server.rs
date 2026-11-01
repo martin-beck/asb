@@ -252,18 +252,19 @@ fn serve(
         let reservation = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(crate::io_error)?;
         let port = reservation.local_addr().map_err(crate::io_error)?.port();
         drop(reservation);
-        let mut child = Command::new(&state.executable)
+        let mut command = Command::new(&state.executable);
+        command
             .args(server_args(port))
             .arg(&state.publication)
             .stdin(Stdio::null())
             .env("FORCE_COLOR", "0")
             .env("NO_COLOR", "1")
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                Error::Run(format!("cannot start project-local http-server: {error}"))
-            })?;
+            .stderr(Stdio::piped());
+        protect_child_from_owner_loss(&mut command);
+        let mut child = command.spawn().map_err(|error| {
+            Error::Run(format!("cannot start project-local http-server: {error}"))
+        })?;
         let (activity_tx, activity_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         if let Some(stream) = child.stdout.take() {
@@ -352,6 +353,31 @@ fn serve(
         "could not reserve a free port for ASB HTTP report server".into(),
     ))
 }
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn protect_child_from_owner_loss(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    let owner = std::process::id();
+    // SAFETY: only async-signal-safe prctl/getppid operations occur in the
+    // forked child. Check the race where its owner exits before prctl runs.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() as u32 != owner {
+                return Err(std::io::Error::other(
+                    "HTTP server owner exited during startup",
+                ));
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn protect_child_from_owner_loss(_: &mut Command) {}
 
 fn server_args(port: u16) -> Vec<String> {
     [
