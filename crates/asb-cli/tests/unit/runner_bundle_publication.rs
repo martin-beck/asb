@@ -41,7 +41,7 @@ fn actual_bundled_artifact_handoff_survives_commit_and_publication_failures() {
 
 fn trajectory(answer: &str) -> Value {
     json!({"trajectory_format":"mini-swe-agent-1.1",
-        "info":{"model_stats":{"api_calls":4},"private_note":"fixture-private-artifact-note"},
+        "info":{"exit_status":"Submitted","submission":answer,"model_stats":{"api_calls":4},"private_note":"fixture-private-artifact-note"},
         "messages":[{"role":"assistant","content":answer,
             "extra":{"response":{"usage":{"prompt_tokens":13,"completion_tokens":21}}}}]})
 }
