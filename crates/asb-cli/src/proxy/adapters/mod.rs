@@ -2,14 +2,15 @@
 
 pub(crate) mod llmtape;
 #[cfg(test)]
-mod synthetic;
+mod synthetic_recorder;
 
 use super::ProxyAdapter;
 
 #[cfg(not(test))]
 pub(super) static REGISTRY: &[&dyn ProxyAdapter] = &[&llmtape::ADAPTER];
 #[cfg(test)]
-pub(super) static REGISTRY: &[&dyn ProxyAdapter] = &[&llmtape::ADAPTER, &synthetic::ADAPTER];
+pub(super) static REGISTRY: &[&dyn ProxyAdapter] =
+    &[&llmtape::ADAPTER, &synthetic_recorder::ADAPTER];
 
 /// Historical untagged cassette tracks were always produced by llmtape.
 pub(super) fn legacy_recording_name() -> &'static str {
