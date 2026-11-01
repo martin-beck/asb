@@ -386,6 +386,8 @@ pub(crate) struct AgentArtifacts {
     /// Agent-reported completed model/tool calls, when the adapter exposes a
     /// bounded structured usage artifact.
     pub steps: Option<u64>,
+    /// Aggregate tool calls observed in an adapter-owned completed session.
+    pub tool_call_count: Option<usize>,
     /// A validated JSONL transcript of client-local tool turns.  The generic
     /// runner treats this only as a sealed auxiliary cassette payload; tool
     /// semantics remain in the adapter-owned replay transport.

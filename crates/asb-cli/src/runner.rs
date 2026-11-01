@@ -104,6 +104,8 @@ struct RunResult<'a> {
     steps: Option<u64>,
     tool_calls: Vec<crate::proxy::tool_calls::ToolCall>,
     tool_calls_available: bool,
+    #[serde(skip)]
+    adapter_tool_call_count: Option<usize>,
     /// Private, validated input for cassette publication. This is never put
     /// in user-facing run JSON or logs; the recorder seals it as an auxiliary
     /// `local-tools` cassette payload.
@@ -126,6 +128,16 @@ struct RunResult<'a> {
     measurement_directory: Option<PathBuf>,
     stdout: String,
     stderr: String,
+}
+
+impl RunResult<'_> {
+    fn tool_call_count(&self) -> Option<usize> {
+        if self.tool_calls_available {
+            Some(self.tool_calls.len())
+        } else {
+            self.adapter_tool_call_count
+        }
+    }
 }
 
 /// Execution choices shared by single runs, replicas, and sweeps.
@@ -1410,7 +1422,7 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
         "elapsed_ms": result.elapsed_ms,
         "steps": result.steps,
         "tool_calls_available": result.tool_calls_available,
-        "tool_call_count": result.tool_calls_available.then_some(result.tool_calls.len()),
+        "tool_call_count": result.tool_call_count(),
         "token_usage": result.token_usage,
     });
     if let Some(execution) = &result.execution {
@@ -1440,8 +1452,7 @@ fn render_human(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Er
         result.elapsed_ms,
         format_token(result.steps),
         result
-            .tool_calls_available
-            .then_some(result.tool_calls.len())
+            .tool_call_count()
             .map_or_else(|| "unknown".into(), |count| count.to_string()),
         format_token(result.token_usage.input_tokens),
         format_token(result.token_usage.output_tokens),
@@ -2741,6 +2752,7 @@ mod tests {
             steps: Some(2),
             tool_calls: Vec::new(),
             tool_calls_available: true,
+            adapter_tool_call_count: None,
             local_tool_transcript: None,
             deterministic_manifest: None,
             native_trace: None,
@@ -2781,6 +2793,14 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&json).expect("valid json");
         assert_eq!(value["tool_calls_available"], false);
         assert!(value["tool_call_count"].is_null());
+        result.adapter_tool_call_count = Some(2);
+        let mut json = Vec::new();
+        render_json(&result, &mut json).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(value["tool_call_count"], 2);
+        assert_eq!(value["tool_calls_available"], false);
+        result.tool_calls_available = true;
+        assert_eq!(result.tool_call_count(), Some(result.tool_calls.len()));
     }
 
     #[test]
