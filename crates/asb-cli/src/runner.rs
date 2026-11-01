@@ -635,42 +635,88 @@ fn run_concurrent(
     }
 
     std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs
-            .into_iter()
-            .map(|(index, replica, measurement, cassette)| {
-                scope.spawn(move || {
-                    let mut buffer = Vec::new();
-                    let mode = cassette.as_ref().map(|(mode, _)| *mode);
-                    let cassette_path = cassette.as_ref().map(|(_, path)| path.to_string_lossy());
-                    let cassette_path = cassette_path.as_deref();
-                    let measurement_path = measurement.as_deref().and_then(Path::to_str);
-                    let result = run_mode(
-                        config_path,
-                        replica,
-                        RunOptions {
-                            replica: replica::Identity {
+        let mut handles = Vec::new();
+        for (index, replica, measurement, cassette) in jobs {
+            #[cfg(test)]
+            let test_rendezvous = REPLICA_TEST_RENDEZVOUS.with(|value| value.borrow().clone());
+            let spawn = if injected_replica_spawn_failure(index) {
+                #[cfg(test)]
+                if let Some((ready, changed)) = test_rendezvous.as_deref() {
+                    let ready = ready.lock().unwrap();
+                    let (ready, _) = changed
+                        .wait_timeout_while(ready, Duration::from_secs(2), |ready| !*ready)
+                        .unwrap();
+                    assert!(*ready, "replica did not reach test rendezvous");
+                }
+                Err(std::io::Error::other("injected replica spawn failure"))
+            } else {
+                std::thread::Builder::new().spawn_scoped(scope, move || {
+                    run_replica_catching(index, options, |buffer| {
+                        #[cfg(test)]
+                        if let Some((ready, changed)) = test_rendezvous.as_deref() {
+                            let gate = options.preparation_gate.expect("test requires gate");
+                            let mut arrival = gate.register(replica::Identity {
                                 index: index + 1,
                                 total: config.concurrency,
+                            })?;
+                            buffer.extend_from_slice(b"replica output before cancellation\n");
+                            *ready.lock().unwrap() = true;
+                            changed.notify_one();
+                            return arrival.ready(crate::cassette::Compatibility {
+                                agent: "agent".into(),
+                                provider: "provider".into(),
+                                model: "model".into(),
+                                workload: "workload".into(),
+                                task: "task".into(),
+                                dataset_sha256: None,
+                                prompt_sha256: "a".repeat(64),
+                                material_sha256: "b".repeat(64),
+                                protocol_sha256: None,
+                            });
+                        }
+                        let mode = cassette.as_ref().map(|(mode, _)| *mode);
+                        let cassette_path =
+                            cassette.as_ref().map(|(_, path)| path.to_string_lossy());
+                        let cassette_path = cassette_path.as_deref();
+                        let measurement_path = measurement.as_deref().and_then(Path::to_str);
+                        run_mode(
+                            config_path,
+                            replica,
+                            RunOptions {
+                                replica: replica::Identity {
+                                    index: index + 1,
+                                    total: config.concurrency,
+                                },
+                                measurement_dir: measurement_path,
+                                mode,
+                                cassette: cassette_path,
+                                interactive: false,
+                                ..options
                             },
-                            measurement_dir: measurement_path,
-                            mode,
-                            cassette: cassette_path,
-                            interactive: false,
-                            ..options
-                        },
-                        &mut buffer,
-                        warnings,
-                    );
-                    (index, result, buffer)
+                            buffer,
+                            warnings,
+                        )
+                    })
                 })
-            })
-            .collect();
-        for handle in handles {
-            completed.push(
-                handle
-                    .join()
-                    .expect("benchmark concurrency worker panicked"),
-            );
+            };
+            match spawn {
+                Ok(handle) => handles.push((index, handle)),
+                Err(error) => {
+                    let reason = format!("cannot start benchmark replica {}: {error}", index + 1);
+                    abort_replica_gates(options, &reason);
+                    completed.push((index, Err(Error::Run(reason)), Vec::new()));
+                    break;
+                }
+            }
+        }
+        for (index, handle) in handles {
+            completed.push(handle.join().unwrap_or_else(|_| {
+                (
+                    index,
+                    Err(Error::Run("benchmark replica worker panicked".into())),
+                    Vec::new(),
+                )
+            }));
         }
     });
 
@@ -710,6 +756,51 @@ fn run_concurrent(
         )))
     };
     diagnostics::preserve_primary(primary, presentation)
+}
+
+#[cfg(test)]
+type ReplicaTestRendezvous = std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
+
+#[cfg(test)]
+thread_local! {
+    static REPLICA_SPAWN_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static REPLICA_TEST_RENDEZVOUS: std::cell::RefCell<Option<ReplicaTestRendezvous>> = const { std::cell::RefCell::new(None) };
+}
+
+fn injected_replica_spawn_failure(index: usize) -> bool {
+    #[cfg(test)]
+    {
+        REPLICA_SPAWN_FAILURE.with(|failure| failure.get() == Some(index))
+    }
+    #[cfg(not(test))]
+    {
+        let _ = index;
+        false
+    }
+}
+
+fn abort_replica_gates(options: RunOptions<'_>, reason: &str) {
+    if let Some(gate) = options.preparation_gate {
+        gate.abort(reason);
+    }
+    if let Some(gate) = options.launch_gate {
+        gate.abort(reason);
+    }
+}
+
+fn run_replica_catching(
+    index: usize,
+    options: RunOptions<'_>,
+    execute: impl FnOnce(&mut Vec<u8>) -> Result<(), Error>,
+) -> (usize, Result<(), Error>, Vec<u8>) {
+    let mut buffer = Vec::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(&mut buffer)))
+        .unwrap_or_else(|_| {
+            let reason = format!("benchmark replica {} worker panicked", index + 1);
+            abort_replica_gates(options, &reason);
+            Err(Error::Run(reason))
+        });
+    (index, result, buffer)
 }
 
 fn add_replica_failure(failures: &mut Vec<(String, Vec<usize>)>, index: usize, message: String) {
@@ -1640,6 +1731,45 @@ mod tests {
     };
     use crate::benchmark::BenchmarkConfig;
     use crate::measurements::TokenUsage;
+
+    #[test]
+    fn concurrent_run_reports_injected_replica_spawn_failure() {
+        let config: BenchmarkConfig = toml::from_str(
+            "agent='fixture'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\nconcurrency=2\n",
+        ).unwrap();
+        let gate = super::batch::Gate::new(2, None, std::time::Duration::from_secs(30)).unwrap();
+        let mut output = Vec::new();
+        let warnings = std::sync::Mutex::new(std::collections::BTreeSet::new());
+        super::REPLICA_SPAWN_FAILURE.with(|failure| failure.set(Some(1)));
+        super::REPLICA_TEST_RENDEZVOUS.with(|value| {
+            *value.borrow_mut() = Some(std::sync::Arc::new((
+                std::sync::Mutex::new(false),
+                std::sync::Condvar::new(),
+            )))
+        });
+        let result = super::run_concurrent(
+            std::path::Path::new("benchmark.toml"),
+            &config,
+            super::RunOptions {
+                preparation_gate: Some(&gate),
+                ..Default::default()
+            },
+            &mut output,
+            &warnings,
+        );
+        super::REPLICA_SPAWN_FAILURE.with(|failure| failure.set(None));
+        super::REPLICA_TEST_RENDEZVOUS.with(|value| *value.borrow_mut() = None);
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("cannot start benchmark replica 2"),
+            "{message}"
+        );
+        assert!(String::from_utf8_lossy(&output).contains("replica output before cancellation"));
+        assert!(
+            gate.register(super::replica::Identity { index: 2, total: 2 })
+                .is_err()
+        );
+    }
 
     #[test]
     fn trial_start_uses_the_selected_name_without_record_or_replay_metadata() {

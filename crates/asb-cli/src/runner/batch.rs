@@ -324,7 +324,7 @@ impl Gate {
         })
     }
 
-    fn abort(&self, reason: &str) {
+    pub(super) fn abort(&self, reason: &str) {
         let mut state = self
             .state
             .lock()
@@ -487,6 +487,67 @@ fn unavailable() -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replica_spawn_failure_releases_waiting_material_and_launch_gates() {
+        let material_gate = Gate::new(2, None, Duration::from_secs(30)).unwrap();
+        let launch_gate = Gate::new(2, None, Duration::from_secs(30)).unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut arrival = material_gate
+                    .register(Identity { index: 1, total: 2 })
+                    .unwrap();
+                ready_tx.send(()).unwrap();
+                done_tx.send(arrival.ready(material()).is_err()).unwrap();
+            });
+            ready_rx.recv().unwrap();
+            super::super::abort_replica_gates(
+                super::super::RunOptions {
+                    preparation_gate: Some(&material_gate),
+                    launch_gate: Some(&launch_gate),
+                    ..Default::default()
+                },
+                "cannot start benchmark replica 2",
+            );
+            assert!(done_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+            assert!(
+                launch_gate
+                    .register(Identity { index: 1, total: 2 })
+                    .is_err()
+            );
+        });
+    }
+
+    #[test]
+    fn replica_panic_before_registration_aborts_waiting_peer_and_keeps_output() {
+        let gate = Gate::new(2, None, Duration::from_secs(30)).unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut arrival = gate.register(Identity { index: 1, total: 2 }).unwrap();
+                ready_tx.send(()).unwrap();
+                done_tx.send(arrival.ready(material()).is_err()).unwrap();
+            });
+            ready_rx.recv().unwrap();
+            let (index, result, output) = super::super::run_replica_catching(
+                1,
+                super::super::RunOptions {
+                    preparation_gate: Some(&gate),
+                    ..Default::default()
+                },
+                |output| {
+                    output.extend_from_slice(b"prior output");
+                    panic!("injected replica failure before registration");
+                },
+            );
+            assert_eq!(index, 1);
+            assert!(result.unwrap_err().to_string().contains("replica 2"));
+            assert_eq!(output, b"prior output");
+            assert!(done_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        });
+    }
     #[test]
     fn owned_admission_keeps_both_gates_on_actual_original_participants() {
         let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
