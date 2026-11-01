@@ -75,7 +75,7 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
     (steps > 0).then_some(steps)
 }
 
-fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::TokenUsage {
+fn output_usage(stdout: &str, _stderr: &str, _: bool) -> crate::measurements::TokenUsage {
     let mut sum = crate::measurements::TokenUsage::default();
     let mut seen = false;
     let mut native_stream = false;
@@ -124,63 +124,10 @@ fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::Tok
         // usage; tool input and task text may themselves contain token data.
         Default::default()
     } else {
-        let usage = crate::usage::usage_from_text(&format!("{stdout}\n{stderr}"));
-        let mut legacy = crate::measurements::TokenUsage::default();
-        for text in [stdout, stderr] {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) {
-                legacy = legacy.add(opencode_token_objects(&value));
-                continue;
-            }
-            for line in text.lines() {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-                    legacy = legacy.add(opencode_token_objects(&value));
-                } else {
-                    for value in crate::usage::embedded_json_values(line) {
-                        legacy = legacy.add(opencode_token_objects(&value));
-                    }
-                }
-            }
-        }
-        usage.merge(legacy).with_derived_total()
+        Default::default()
     }
 }
 
-fn opencode_token_objects(value: &serde_json::Value) -> crate::measurements::TokenUsage {
-    let mut usage = crate::measurements::TokenUsage::default();
-    if let Some(object) = value.as_object() {
-        if let Some(tokens) = object.get("tokens").and_then(serde_json::Value::as_object) {
-            let number = |key: &str| {
-                tokens
-                    .get(key)
-                    .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()))
-            };
-            let cached = tokens
-                .get("cache")
-                .and_then(|v| v.get("read"))
-                .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()))
-                .or_else(|| number("cached"))
-                .or_else(|| number("cacheRead"))
-                .or_else(|| number("cache_read"));
-            usage = usage.merge(crate::measurements::TokenUsage {
-                input_tokens: number("input"),
-                output_tokens: number("output"),
-                cached_tokens: cached,
-                total_tokens: number("total"),
-                source: None,
-            });
-        }
-        for (name, child) in object {
-            if name != "tokens" {
-                usage = usage.merge(opencode_token_objects(child));
-            }
-        }
-    } else if let Some(array) = value.as_array() {
-        for child in array {
-            usage = usage.merge(opencode_token_objects(child));
-        }
-    }
-    usage
-}
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     let model = format!("asb/{}", context.config.model);
     CommandSpec {
@@ -344,6 +291,15 @@ mod tests {
         assert!(!super::output_usage(output, "", false).any());
     }
 
+    #[test]
+    fn task_tokens_are_not_usage_without_completed_step() {
+        let output = r#"{"type":"tool_use","part":{"state":{"output":{"tokens":{"input":999,"output":888}}}}}"#;
+        let usage = crate::usage::from_sources("openrouter", "opencode", output, "", None);
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (None, None, None)
+        );
+    }
     use super::*;
 
     #[test]

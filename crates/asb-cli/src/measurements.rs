@@ -1895,7 +1895,7 @@ mod tests {
         let usage = token_usage_from_sources(
             "openrouter",
             "opencode",
-            r#"{"usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":40}}}"#,
+            r#"{"type":"step_finish","part":{"tokens":{"input":80,"output":30,"cache":{"read":40,"write":0}}}}"#,
             "",
             None,
         );
@@ -1976,14 +1976,11 @@ mod tests {
             "",
             None,
         );
-        assert_eq!(legacy.input_tokens, Some(1200));
-        assert_eq!(legacy.output_tokens, Some(44));
-        assert_eq!(legacy.cached_tokens, Some(900));
-        assert_eq!(legacy.total_tokens, Some(1244));
+        assert!(!legacy.any());
         let jsonl = token_usage_from_sources(
             "cli2key",
             "opencode",
-            "{\"tokens\":{\"input\":10,\"output\":2}}\n{\"tokens\":{\"input\":20,\"output\":3}}\n",
+            "{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":10,\"output\":2}}}\n{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":20,\"output\":3}}}\n",
             "",
             None,
         );
