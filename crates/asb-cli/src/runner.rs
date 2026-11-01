@@ -386,8 +386,15 @@ fn isolated_direct_config(
     // preparation adds missing built-in fixtures, keeping attempts isolated
     // without silently discarding the caller's checked-out source tree.
     if configured_workspace.is_dir() {
-        workloads::copy_tree(&configured_workspace, Path::new(&config.workspace))
-            .map_err(Error::Run)?;
+        for index in 1..=config.concurrency {
+            let workspace = if config.concurrency == 1 {
+                config.workspace.clone()
+            } else {
+                parallel_path(&config.workspace, index)
+            };
+            workloads::copy_tree(&configured_workspace, Path::new(&workspace))
+                .map_err(Error::Run)?;
+        }
     }
     config.log_file = result_directory
         .join("run.log")
@@ -1699,6 +1706,34 @@ mod tests {
             second_directory.join("measurements").to_string_lossy()
         );
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn direct_parallel_replicas_each_receive_independent_configured_workspace() {
+        let root = std::env::temp_dir()
+            .join(crate::workloads::TaskIdentity::local("direct-seed", None).attempt_id);
+        std::fs::create_dir_all(root.join("workspace/nested")).unwrap();
+        std::fs::write(root.join("workspace/nested/source.txt"), "original").unwrap();
+        let path = root.join("fixture.toml");
+        let config: BenchmarkConfig = toml::from_str(
+            "agent='pi'\nworkload='bug-fix'\nprovider='local'\nmodel='fixture'\nworkspace='workspace'\nconcurrency=2\n",
+        ).unwrap();
+        let (selected, _) = isolated_direct_config(&path, config).unwrap();
+        let replica = |index| {
+            super::replica::configuration(&selected, super::replica::Identity { index, total: 2 })
+                .unwrap()
+        };
+        let first = std::path::PathBuf::from(replica(1).workspace).join("nested/source.txt");
+        let second = std::path::PathBuf::from(replica(2).workspace).join("nested/source.txt");
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "original");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "original");
+        std::fs::write(&first, "changed").unwrap();
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "original");
+        assert_eq!(
+            std::fs::read_to_string(root.join("workspace/nested/source.txt")).unwrap(),
+            "original"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
