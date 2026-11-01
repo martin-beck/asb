@@ -1874,3 +1874,51 @@ fn repeated_legacy_default_keeps_each_replica_source_after_result_rotation() {
         );
     }
 }
+
+#[test]
+fn independent_sweep_configurations_execute_concurrently_after_preparation() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = Project::new();
+    project.config(1);
+    let template = fs::read_to_string(project.0.join("fixture-agent")).unwrap();
+    let config = fs::read_to_string(project.0.join("benchmark.toml"))
+        .unwrap()
+        .replace("provider='fixture'", "provider='openrouter'");
+    for name in ["agent-a", "agent-b"] {
+        let script = template.replace(
+            "root = pathlib.Path(__file__).parent\n",
+            "root = pathlib.Path(__file__).parent\n(root / ('cross-' + pathlib.Path(__file__).name)).write_text('started')\ndeadline = time.monotonic() + 5\nwhile not all((root / ('cross-' + name)).exists() for name in ['agent-a', 'agent-b']):\n    assert time.monotonic() < deadline, 'independent sweep configurations were serialized'\n    time.sleep(.005)\n",
+        );
+        let agent = project.0.join(name);
+        fixture_writer::write_file(&project.0, &agent, &script).unwrap();
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
+        let selected = config.replace(
+            &project
+                .0
+                .join("fixture-agent")
+                .to_string_lossy()
+                .to_string(),
+            &agent.to_string_lossy(),
+        );
+        fs::write(project.0.join(format!("{name}.toml")), selected).unwrap();
+    }
+    fs::write(
+        project.0.join("sweep.toml"),
+        "configs=['agent-a.toml','agent-b.toml']\n",
+    )
+    .unwrap();
+    let provider = RecordingProvider::new();
+    let result = sweep(
+        &project,
+        Some(&provider),
+        &["--record", "--jobs", "2", "--max-active-attempts", "2"],
+    );
+    assert!(
+        result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(project.0.join("cross-agent-a").exists());
+    assert!(project.0.join("cross-agent-b").exists());
+}

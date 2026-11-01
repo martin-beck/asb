@@ -568,10 +568,10 @@ fn run_dispatched(
     // Parallel sweep configurations can share project-local tool paths.
     // Serialize readiness publication, not benchmark execution.
     static RUNTIME_PREPARATION: Mutex<()> = Mutex::new(());
-    let _preparation = RUNTIME_PREPARATION
-        .lock()
-        .map_err(|_| Error::Run("shared runtime preparation failed; retry the sweep".into()))?;
     if !options.requirements_prepared {
+        let _preparation = RUNTIME_PREPARATION
+            .lock()
+            .map_err(|_| Error::Run("shared runtime preparation failed; retry the sweep".into()))?;
         let mut messages = Vec::new();
         crate::install::ensure_execution_requirements(&config, config_path, &mut messages)?;
         if !options.json {
