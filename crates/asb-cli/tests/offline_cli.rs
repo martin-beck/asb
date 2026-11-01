@@ -667,7 +667,7 @@ fn invalid_run_and_sweep_flags_fail_before_execution() {
 fn setup_writes_a_parseable_user_selected_configuration() {
     let project = Project::new();
     project.init();
-    setup_installables::seed(&project.0);
+    setup_installables::seed(&project.0, ".asb-tools");
     let result = project.command(&[
         "setup",
         "--agent",

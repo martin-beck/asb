@@ -1,5 +1,7 @@
 //! Provider-free setup contracts: catalogs are synthetic, no SDK is executed.
 use serde_json::json;
+#[path = "support/setup_installables.rs"]
+mod setup_installables;
 mod support;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -22,6 +24,7 @@ impl Project {
             ".asb/project.toml",
             "tools_dir='tools'\nworkloads_dir='catalogs'\nworkspace_dir='workspaces'\n",
         );
+        setup_installables::seed(&value.0, "tools");
         value
     }
     fn write(&self, path: &str, text: &str) {
@@ -215,6 +218,21 @@ fn all_five_catalogs_accept_explicit_instances_and_reject_missing_or_unknown_bef
 fn enabled_trial_sets_round_trip_and_invalid_selections_preserve_existing_config() {
     let project = Project::new();
     project.seed_pi();
+    // Provide a local, pinned-layout AgentBench fixture: this test covers
+    // trial-set selection, while external downloads are exercised elsewhere.
+    project.write(
+        "catalogs/agentbench/ASB-BUNDLE",
+        "THUDM/AgentBench@d1e4a10db08c87075c78972e48ecc182be03e2d5\n",
+    );
+    project.write(
+        "catalogs/agentbench/source/configs/tasks/one.yaml",
+        "name: one\n",
+    );
+    project.write(
+        "catalogs/agentbench/asb-trial/ASB-ADAPTER-FIXTURE",
+        "fixture\n",
+    );
+    project.write("catalogs/agentbench.txt", "fixture workload\n");
     project.write(
         "catalogs/selected.workload.toml",
         "workload='agentbench'\n[[trials]]\nid='one'\ndescription='enabled fixture'\n",
