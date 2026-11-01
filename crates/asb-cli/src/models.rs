@@ -306,30 +306,23 @@ fn models_match(recorded: &str, configured: &str) -> bool {
 }
 
 pub(crate) fn fetch_pages(spec: providers::ModelSpec, url: &str) -> Result<Vec<u8>, Error> {
-    collect_catalog_pages(spec.kind, url, |page| {
-        fetch_config(curl_config(spec, page, None)?, spec.name)
-    })
+    collect_catalog_pages_for_schema(
+        providers::catalog_schema(spec.name, spec.kind),
+        url,
+        |page| fetch_config(curl_config(spec, page, None)?, spec.name),
+    )
     .map_err(|error| Error::Input(format!("{} model catalog: {error}", spec.name)))
 }
 
 // Some model catalogs are paginated. Keep requests,
 // aggregate size, and cursor behavior bounded, and do not accept a URL from
 // the response (which could redirect provider credentials to another host).
-fn collect_catalog_pages(
-    kind: providers::ModelKind,
+fn collect_catalog_pages_for_schema(
+    schema: providers::CatalogSchema,
     base: &str,
     mut fetch_page: impl FnMut(&str) -> Result<Vec<u8>, Error>,
 ) -> Result<Vec<u8>, Error> {
-    let collection = if matches!(
-        kind,
-        providers::ModelKind::ModelsPageTokenApiKey
-            | providers::ModelKind::ModelsUnpaginated
-            | providers::ModelKind::ModelsPageTokenBearer
-    ) {
-        "models"
-    } else {
-        "data"
-    };
+    let collection = schema.collection;
     let mut merged = Vec::new();
     let mut cursor = None::<String>;
     let mut seen = std::collections::HashSet::new();
@@ -339,10 +332,11 @@ fn collect_catalog_pages(
             Some(token) => format!(
                 "{base}{}{}={}",
                 if base.contains('?') { '&' } else { '?' },
-                if matches!(kind, providers::ModelKind::DataCursor) {
-                    "after_id"
-                } else {
-                    "pageToken"
+                match schema.pagination {
+                    providers::CatalogPagination::Flagged { query, .. }
+                    | providers::CatalogPagination::Token { query, .. } => query,
+                    providers::CatalogPagination::None =>
+                        unreachable!("unpaginated schema has no cursor"),
                 },
                 encode_query(token)
             ),
@@ -356,7 +350,7 @@ fn collect_catalog_pages(
         let value: Value = serde_json::from_slice(&body)
             .map_err(|_| Error::Input("provider returned invalid model JSON".into()))?;
         merged.extend(
-            (if matches!(kind, providers::ModelKind::ArrayUnpaginated) && value.is_array() {
+            (if schema.allow_top_level_array && value.is_array() {
                 Some(&value)
             } else {
                 value.get(collection)
@@ -366,13 +360,13 @@ fn collect_catalog_pages(
             .iter()
             .cloned(),
         );
-        let next = match kind {
-            providers::ModelKind::DataCursor
-                if value.get("has_more").and_then(Value::as_bool) == Some(true) =>
+        let next = match schema.pagination {
+            providers::CatalogPagination::Flagged { more, cursor, .. }
+                if value.get(more).and_then(Value::as_bool) == Some(true) =>
             {
                 Some(
                     value
-                        .get("last_id")
+                        .get(cursor)
                         .and_then(Value::as_str)
                         .filter(|s| !s.is_empty())
                         .ok_or_else(|| {
@@ -380,9 +374,8 @@ fn collect_catalog_pages(
                         })?,
                 )
             }
-            providers::ModelKind::ModelsPageTokenApiKey
-            | providers::ModelKind::ModelsPageTokenBearer => value
-                .get("nextPageToken")
+            providers::CatalogPagination::Token { field, .. } => value
+                .get(field)
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty()),
             _ => None,
@@ -401,6 +394,15 @@ fn collect_catalog_pages(
     Err(Error::Input(
         "provider model catalog exceeds 16 pages".into(),
     ))
+}
+
+#[cfg(test)]
+fn collect_catalog_pages(
+    kind: providers::ModelKind,
+    base: &str,
+    fetch_page: impl FnMut(&str) -> Result<Vec<u8>, Error>,
+) -> Result<Vec<u8>, Error> {
+    collect_catalog_pages_for_schema(providers::catalog_schema("", kind), base, fetch_page)
 }
 
 fn encode_query(value: &str) -> String {
@@ -613,16 +615,7 @@ fn parse_models(
 ) -> Result<Vec<ModelInfo>, Error> {
     let value: Value = serde_json::from_slice(body)
         .map_err(|_| Error::Input("provider returned invalid model JSON".into()))?;
-    let key = if matches!(
-        kind,
-        providers::ModelKind::ModelsPageTokenApiKey
-            | providers::ModelKind::ModelsUnpaginated
-            | providers::ModelKind::ModelsPageTokenBearer
-    ) {
-        "models"
-    } else {
-        "data"
-    };
+    let key = providers::catalog_schema(provider, kind).collection;
     let entries = value
         .get(key)
         .and_then(Value::as_array)
@@ -809,6 +802,41 @@ mod coverage_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adapter_catalog_schema_drives_pagination_and_collection() {
+        let schema = providers::CatalogSchema {
+            collection: "records",
+            allow_top_level_array: false,
+            pagination: providers::CatalogPagination::Token {
+                field: "continuation",
+                query: "cursor",
+            },
+        };
+        let mut urls = Vec::new();
+        let body = collect_catalog_pages_for_schema(schema, "http://127.0.0.1/catalog", |url| {
+            urls.push(url.to_owned());
+            Ok(if urls.len() == 1 {
+                br#"{"records":[{"id":"one"}],"continuation":"a/b?"}"#.to_vec()
+            } else {
+                br#"{"records":[{"id":"two"}]}"#.to_vec()
+            })
+        })
+        .unwrap();
+        assert!(urls[1].ends_with("?cursor=a%2Fb%3F"));
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["records"].as_array().unwrap().len(), 2);
+        // A registered provider owns its schema even when a caller supplies
+        // a different legacy fallback kind; unknown fixtures use the fallback.
+        assert_eq!(
+            providers::catalog_schema("gemini", providers::ModelKind::DataUnpaginated).collection,
+            "models"
+        );
+        assert_eq!(
+            providers::catalog_schema("fixture", providers::ModelKind::DataUnpaginated).collection,
+            "data"
+        );
+    }
 
     #[test]
     fn catalog_explicit_capabilities_take_precedence_over_documented_defaults() {
