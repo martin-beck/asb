@@ -86,12 +86,48 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_replay_credential_vars(&["CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"])
 .with_state_environment_vars(&["CODEBUDDY_CONFIG_DIR"])
 .with_output_usage(output_usage)
+.with_final_response(final_response)
 .with_step_count(step_count)
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION);
 
 fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
     // Use CodeBuddy's own active-agent history counter from its final result.
     super::super::final_result_counter(stdout, "num_turns")
+}
+
+fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
+    fn latest_result(value: &serde_json::Value) -> Option<&serde_json::Value> {
+        match value {
+            serde_json::Value::Array(events) => events.iter().rev().find_map(latest_result),
+            serde_json::Value::Object(event)
+                if event.get("type").and_then(|v| v.as_str()) == Some("result") =>
+            {
+                Some(value)
+            }
+            _ => None,
+        }
+    }
+    let events = if let Ok(document) = serde_json::from_str::<serde_json::Value>(output) {
+        vec![document]
+    } else {
+        output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?
+    };
+    let result = events.iter().rev().find_map(latest_result)?;
+    if result.get("is_error").and_then(|v| v.as_bool()) != Some(false)
+        || result.get("subtype").and_then(|v| v.as_str()) != Some("success")
+    {
+        return None;
+    }
+    result
+        .get("result")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+        .map(str::to_owned)
 }
 
 fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::TokenUsage {
@@ -265,6 +301,32 @@ fn configure(directory: &std::path::Path, model: &str, base_url: &str) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_result_does_not_grade_intermediate_assistant_output() {
+        let output = r#"[{"type":"assistant","content":"intermediate"},{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["failed"]}]"#;
+        use crate::agents::AgentAdapter;
+        let path = std::path::Path::new(".");
+        assert!(super::ADAPTER.final_response(output, path).is_none());
+        let success =
+            r#"[{"type":"result","subtype":"success","is_error":false,"result":"answer"}]"#;
+        assert_eq!(
+            super::ADAPTER.final_response(success, path).as_deref(),
+            Some("answer")
+        );
+        for value in [
+            r#"[{"type":"assistant","content":"intermediate"}]"#,
+            r#"[{"type":"result","subtype":"success","result":"missing flag"}]"#,
+            r#"[{"type":"result","is_error":false,"result":"missing subtype"}]"#,
+            r#"[{"type":"result","subtype":"success","is_error":false,"result":""}]"#,
+            r#"[{"type":"result","subtype":"success","is_error":false,"result":"answer"},{"type":"result","is_error":true}]"#,
+        ] {
+            assert!(
+                super::ADAPTER.final_response(value, path).is_none(),
+                "{value}"
+            );
+        }
+    }
+
     #[test]
     fn result_without_usage_does_not_count_task_payload() {
         let output =
