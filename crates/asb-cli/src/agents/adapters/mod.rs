@@ -6,7 +6,7 @@ mod claude_code;
 mod cline;
 mod codex;
 mod continue_agent;
-mod goose;
+pub(super) mod goose;
 mod hermes;
 mod mini_swe;
 mod opencode;
