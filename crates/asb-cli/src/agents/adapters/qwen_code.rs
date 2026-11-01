@@ -85,7 +85,37 @@ fn output_usage(
 }
 
 fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> {
-    super::super::structured_final_response_document(output)
+    fn latest_result(value: &serde_json::Value) -> Option<&serde_json::Value> {
+        match value {
+            serde_json::Value::Array(events) => events.iter().rev().find_map(latest_result),
+            serde_json::Value::Object(event)
+                if event.get("type").and_then(|v| v.as_str()) == Some("result") =>
+            {
+                Some(value)
+            }
+            _ => None,
+        }
+    }
+    let document = serde_json::from_str::<serde_json::Value>(output).ok();
+    let events = if let Some(document) = document {
+        vec![document]
+    } else {
+        output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?
+    };
+    let result = events.iter().rev().find_map(latest_result)?;
+    if result.get("is_error").and_then(|v| v.as_bool()) != Some(false) {
+        return None;
+    }
+    result
+        .get("result")
+        .and_then(|v| v.as_str())
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
@@ -190,6 +220,28 @@ fn prepare_tool_replay(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_successful_qwen_result_is_final() {
+        let path = std::path::Path::new(".");
+        let success = r#"[{"type":"result","is_error":false,"result":"done"}]"#;
+        assert_eq!(
+            super::final_response(success, path).as_deref(),
+            Some("done")
+        );
+        let error = r#"[{"type":"result","is_error":true,"result":"failure"}]"#;
+        assert!(super::final_response(error, path).is_none());
+        for event in [
+            r#"[{"type":"assistant","content":"intermediate"}]"#,
+            r#"[{"type":"result","result":"unknown"}]"#,
+            r#"[{"type":"result","is_error":false,"result":"done"},{"type":"result","is_error":true,"result":"failure"}]"#,
+            r#"[{"type":"result","is_error":false,"result":"done"},{"type":"result","is_error":false}]"#,
+        ] {
+            assert!(super::final_response(event, path).is_none(), "{event}");
+        }
+        let stream = "{\"type\":\"assistant\",\"content\":\"thinking\"}\n{\"type\":\"result\",\"is_error\":false,\"result\":\"done\"}";
+        assert_eq!(super::final_response(stream, path).as_deref(), Some("done"));
+        assert!(super::final_response(&format!("{stream}\n{{"), path).is_none());
+    }
     use super::*;
     use crate::agents::AgentAdapter;
 
