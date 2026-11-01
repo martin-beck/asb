@@ -637,11 +637,43 @@ fn run_concurrent(
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for (index, replica, measurement, cassette) in jobs {
+            #[cfg(test)]
+            let test_rendezvous = REPLICA_TEST_RENDEZVOUS.with(|value| value.borrow().clone());
             let spawn = if injected_replica_spawn_failure(index) {
+                #[cfg(test)]
+                if let Some((ready, changed)) = test_rendezvous.as_deref() {
+                    let ready = ready.lock().unwrap();
+                    let (ready, _) = changed
+                        .wait_timeout_while(ready, Duration::from_secs(2), |ready| !*ready)
+                        .unwrap();
+                    assert!(*ready, "replica did not reach test rendezvous");
+                }
                 Err(std::io::Error::other("injected replica spawn failure"))
             } else {
                 std::thread::Builder::new().spawn_scoped(scope, move || {
                     run_replica_catching(index, options, |buffer| {
+                        #[cfg(test)]
+                        if let Some((ready, changed)) = test_rendezvous.as_deref() {
+                            let gate = options.preparation_gate.expect("test requires gate");
+                            let mut arrival = gate.register(replica::Identity {
+                                index: index + 1,
+                                total: config.concurrency,
+                            })?;
+                            buffer.extend_from_slice(b"replica output before cancellation\n");
+                            *ready.lock().unwrap() = true;
+                            changed.notify_one();
+                            return arrival.ready(crate::cassette::Compatibility {
+                                agent: "agent".into(),
+                                provider: "provider".into(),
+                                model: "model".into(),
+                                workload: "workload".into(),
+                                task: "task".into(),
+                                dataset_sha256: None,
+                                prompt_sha256: "a".repeat(64),
+                                material_sha256: "b".repeat(64),
+                                protocol_sha256: None,
+                            });
+                        }
                         let mode = cassette.as_ref().map(|(mode, _)| *mode);
                         let cassette_path =
                             cassette.as_ref().map(|(_, path)| path.to_string_lossy());
@@ -729,6 +761,7 @@ fn run_concurrent(
 #[cfg(test)]
 thread_local! {
     static REPLICA_SPAWN_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static REPLICA_TEST_RENDEZVOUS: std::cell::RefCell<Option<std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>> = const { std::cell::RefCell::new(None) };
 }
 
 fn injected_replica_spawn_failure(index: usize) -> bool {
@@ -1705,6 +1738,12 @@ mod tests {
         let mut output = Vec::new();
         let warnings = std::sync::Mutex::new(std::collections::BTreeSet::new());
         super::REPLICA_SPAWN_FAILURE.with(|failure| failure.set(Some(1)));
+        super::REPLICA_TEST_RENDEZVOUS.with(|value| {
+            *value.borrow_mut() = Some(std::sync::Arc::new((
+                std::sync::Mutex::new(false),
+                std::sync::Condvar::new(),
+            )))
+        });
         let result = super::run_concurrent(
             std::path::Path::new("benchmark.toml"),
             &config,
@@ -1716,11 +1755,13 @@ mod tests {
             &warnings,
         );
         super::REPLICA_SPAWN_FAILURE.with(|failure| failure.set(None));
+        super::REPLICA_TEST_RENDEZVOUS.with(|value| *value.borrow_mut() = None);
         let message = result.unwrap_err().to_string();
         assert!(
             message.contains("cannot start benchmark replica 2"),
             "{message}"
         );
+        assert!(String::from_utf8_lossy(&output).contains("replica output before cancellation"));
         assert!(
             gate.register(super::replica::Identity { index: 2, total: 2 })
                 .is_err()
