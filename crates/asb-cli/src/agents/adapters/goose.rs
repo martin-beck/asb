@@ -165,13 +165,28 @@ fn cached_archive(
     Ok((archive, checksum))
 }
 
+pub(crate) fn archive_spec() -> crate::install::archive::ArchiveSpec {
+    crate::install::archive::ArchiveSpec {
+        name: "Goose",
+        executable: "goose",
+        max_bytes: 256 * 1024 * 1024,
+    }
+}
+
 fn install(
     context: &OperationContext,
     root: &Path,
     progress: &mut dyn FnMut(u8, crate::install::ProgressStage),
 ) -> InstallResult<PathBuf> {
     let (archive, checksum) = cached_archive(context, root, progress)?;
-    crate::install::goose::install_archive_in(context, root, &archive, checksum, progress)
+    crate::install::archive::install_archive_in(
+        context,
+        root,
+        &archive,
+        checksum,
+        progress,
+        &archive_spec(),
+    )
 }
 
 fn guest_assets(

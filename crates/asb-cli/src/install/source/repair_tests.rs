@@ -634,10 +634,7 @@ fn goose_child(root: &Path) {
     ] {
         fs::write(&executable, script).unwrap();
         pack();
-        assert!(
-            super::super::goose::install_archive(&directory, &archive, &checksum(), &mut |_, _| {})
-                .is_err()
-        );
+        assert!(install_goose_archive(&directory, &archive, &checksum(), &mut |_, _| {}).is_err());
         old(&destination);
     }
     fs::write(
@@ -654,24 +651,23 @@ fn goose_child(root: &Path) {
         FaultPoint::Commit,
     ] {
         let _fault = faults::set(point, |_| Err(Error::Io("Goose fixture failure".into())));
-        assert!(
-            super::super::goose::install_archive(&directory, &archive, &checksum(), &mut |_, _| {})
-                .is_err()
-        );
+        assert!(install_goose_archive(&directory, &archive, &checksum(), &mut |_, _| {}).is_err());
         old(&destination);
     }
-    super::super::goose::install_archive(&directory, &archive, &checksum(), &mut |_, _| {})
-        .unwrap();
+    install_goose_archive(&directory, &archive, &checksum(), &mut |_, _| {}).unwrap();
     assert!(
         fs::read_to_string(&destination)
             .unwrap()
             .contains("healthy Goose")
     );
-    for point in [FaultPoint::GooseCleanupTake, FaultPoint::GooseDirectoryTake] {
+    for point in [
+        FaultPoint::ArchiveCleanupTake,
+        FaultPoint::ArchiveDirectoryTake,
+    ] {
         let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
         let observed = std::rc::Rc::clone(&seen);
         let _fault = faults::set(point, move |path| {
-            if point == FaultPoint::GooseCleanupTake {
+            if point == FaultPoint::ArchiveCleanupTake {
                 fs::remove_file(path).map_err(crate::io_error)?;
                 fs::write(path, b"foreign extracted arrival").map_err(crate::io_error)?;
             } else {
@@ -682,12 +678,9 @@ fn goose_child(root: &Path) {
             Ok(())
         });
         let mut stages = Vec::new();
-        let error = super::super::goose::install_archive(
-            &directory,
-            &archive,
-            &checksum(),
-            &mut |_, stage| stages.push(stage),
-        )
+        let error = install_goose_archive(&directory, &archive, &checksum(), &mut |_, stage| {
+            stages.push(stage)
+        })
         .unwrap_err()
         .to_string();
         assert!(error.contains("Goose scratch settlement failed"), "{error}");
@@ -711,17 +704,13 @@ fn goose_child(root: &Path) {
     }
     fs::write(&destination, OLD).unwrap();
     fs::set_permissions(&destination, fs::Permissions::from_mode(0o751)).unwrap();
-    assert!(
-        super::super::goose::install_archive(&directory, &archive, "wrong", &mut |_, _| {})
-            .is_err()
-    );
+    assert!(install_goose_archive(&directory, &archive, "wrong", &mut |_, _| {}).is_err());
     old(&destination);
     fs::write(payload.join("unknown"), b"foreign archive entry").unwrap();
     pack();
-    let error =
-        super::super::goose::install_archive(&directory, &archive, &checksum(), &mut |_, _| {})
-            .unwrap_err()
-            .to_string();
+    let error = install_goose_archive(&directory, &archive, &checksum(), &mut |_, _| {})
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("retained Goose extraction"));
     old(&destination);
     assert!(
@@ -732,12 +721,26 @@ fn goose_child(root: &Path) {
             .is_file())
     );
     fs::write(&archive, b"partial invalid archive").unwrap();
-    let error =
-        super::super::goose::install_archive(&directory, &archive, &checksum(), &mut |_, _| {})
-            .unwrap_err()
-            .to_string();
+    let error = install_goose_archive(&directory, &archive, &checksum(), &mut |_, _| {})
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("retained Goose extraction"));
     old(&destination);
+}
+
+fn install_goose_archive(
+    root: &Path,
+    archive: &Path,
+    checksum: &str,
+    progress: &mut dyn FnMut(u8, super::super::ProgressStage),
+) -> Result<PathBuf, Error> {
+    super::super::archive::install_archive(
+        root,
+        archive,
+        checksum,
+        progress,
+        &crate::agents::goose_archive_spec(),
+    )
 }
 
 fn raw_project_child(root: &Path) {

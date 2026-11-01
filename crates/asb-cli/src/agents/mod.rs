@@ -1106,6 +1106,11 @@ pub(crate) fn resolve(id: &str, project_root: &Path, tools_dir: &str) -> Option<
 mod contract_tests;
 
 #[cfg(test)]
+pub(crate) fn goose_archive_spec() -> crate::install::archive::ArchiveSpec {
+    adapters::goose::archive_spec()
+}
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn final_result_counter_uses_the_latest_native_value_without_summing() {

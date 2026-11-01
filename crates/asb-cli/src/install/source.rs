@@ -28,9 +28,9 @@ pub(super) enum FaultPoint {
     CommitRename,
     Cleanup,
     CleanupTake,
-    GooseCleanupTake,
+    ArchiveCleanupTake,
     DirectoryTake,
-    GooseDirectoryTake,
+    ArchiveDirectoryTake,
     Recovery,
 }
 fn checkpoint(point: FaultPoint, path: &Path) -> Result<(), Error> {
