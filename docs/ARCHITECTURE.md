@@ -1003,7 +1003,7 @@ the catalogue.
 
 `run` (optionally with `--record` or `--replay`) appends one bounded JSON record per execution to
 the configured `log_file`, including the captured agent output and error text.
-Token usage is collected from generic/provider/agent environment variables,
+Token usage is collected from generic/provider/agent environment variables as a fallback when run evidence is unavailable,
 structured agent JSON events (including JSON embedded in human-readable agent
 output), and recorded cassette responses, then normalized without inferring
 counts from text size. The parser accepts usage shapes emitted by every

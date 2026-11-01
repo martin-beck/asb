@@ -125,3 +125,91 @@ fn adapter_without_usage_hook_does_not_parse_task_output() {
     let output = r#"{"usage":{"input_tokens":123,"output_tokens":456}}"#;
     assert!(!adapter_output_usage(Some(&Unowned), output, output, false).any());
 }
+
+#[test]
+fn run_evidence_takes_precedence_over_inherited_environment() {
+    const CHILD: &str = "ASB_USAGE_PRECEDENCE_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "usage::normalization_tests::run_evidence_takes_precedence_over_inherited_environment", "--nocapture"])
+            .env(CHILD, "1")
+            .env("ASB_INPUT_TOKENS", "999")
+            .env("ASB_OUTPUT_TOKENS", "888")
+            .env("ASB_CACHED_TOKENS", "777")
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let path = std::env::temp_dir()
+        .join(crate::workloads::TaskIdentity::local("usage-priority", None).attempt_id);
+    let body = json!({"usage":{"input_tokens":4,"output_tokens":2}}).to_string();
+    std::fs::write(
+        &path,
+        json!({"request":{"url":"/v1/responses"},"response":{"status":200,"body":body}})
+            .to_string(),
+    )
+    .unwrap();
+    let usage = from_sources("openrouter", "pi", "", "", Some(&path));
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(
+        (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cached_tokens,
+            usage.total_tokens
+        ),
+        (Some(4), Some(2), None, Some(6))
+    );
+    assert_eq!(usage.source.as_deref(), Some("cassette"));
+    let output = r#"[{"type":"result","usage":{"input_tokens":12,"output_tokens":5}}]"#;
+    let observed = from_sources("openrouter", "qwen-code", output, "", None);
+    assert_eq!(
+        (
+            observed.input_tokens,
+            observed.output_tokens,
+            observed.cached_tokens,
+            observed.total_tokens
+        ),
+        (Some(12), Some(5), None, Some(17))
+    );
+    assert_eq!(observed.source.as_deref(), Some("agent-output"));
+    let fallback = from_sources("openrouter", "pi", "", "", None);
+    assert_eq!(fallback.input_tokens, Some(999));
+    let artifact = TokenUsage {
+        input_tokens: Some(10),
+        output_tokens: Some(3),
+        ..Default::default()
+    };
+    let usage = with_artifact_usage(fallback, Some(artifact));
+    assert_eq!(
+        (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cached_tokens,
+            usage.total_tokens
+        ),
+        (Some(10), Some(3), None, Some(13))
+    );
+    assert_eq!(usage.source.as_deref(), Some("agent-artifact"));
+    let partial = TokenUsage {
+        input_tokens: Some(6),
+        ..Default::default()
+    };
+    let usage = with_artifact_usage(
+        from_sources("openrouter", "pi", "", "", None),
+        Some(partial),
+    );
+    assert_eq!(
+        (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cached_tokens,
+            usage.total_tokens
+        ),
+        (Some(6), None, None, None)
+    );
+}
