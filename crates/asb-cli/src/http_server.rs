@@ -49,6 +49,8 @@ struct ProcessIdentity {
     pid: u32,
     boot_id: String,
     start_time: u64,
+    #[serde(default)]
+    pid_namespace: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -448,6 +450,7 @@ fn stop(state_path: &Path, state: &State) -> Result<(), Error> {
 
 #[cfg(target_os = "linux")]
 fn process_identity(pid: u32) -> std::io::Result<ProcessIdentity> {
+    let pid_namespace = current_pid_namespace()?;
     let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")?
         .trim()
         .to_owned();
@@ -466,11 +469,48 @@ fn process_identity(pid: u32) -> std::io::Result<ProcessIdentity> {
         pid,
         boot_id,
         start_time,
+        pid_namespace: Some(pid_namespace),
     })
 }
 
 #[cfg(target_os = "linux")]
+fn checked_pid_namespace(
+    process_id: u32,
+    proc_stat: &str,
+    namespace: &Path,
+) -> std::io::Result<String> {
+    let visible = proc_stat
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<u32>().ok());
+    if visible != Some(process_id) {
+        return Err(std::io::Error::other(
+            "proc mount does not match the current PID namespace",
+        ));
+    }
+    namespace
+        .to_str()
+        .filter(|value| value.starts_with("pid:[") && value.ends_with(']'))
+        .map(str::to_owned)
+        .ok_or_else(|| std::io::Error::other("cannot identify PID namespace"))
+}
+
+#[cfg(target_os = "linux")]
+fn current_pid_namespace() -> std::io::Result<String> {
+    checked_pid_namespace(
+        std::process::id(),
+        &fs::read_to_string("/proc/self/stat")?,
+        &fs::read_link("/proc/self/ns/pid")?,
+    )
+}
+
+#[cfg(target_os = "linux")]
 fn identity_gone(identity: &ProcessIdentity) -> bool {
+    if identity.pid_namespace.as_deref() != current_pid_namespace().ok().as_deref()
+        || identity.pid_namespace.is_none()
+    {
+        return false;
+    }
     let boot = match fs::read_to_string("/proc/sys/kernel/random/boot_id") {
         Ok(value) => value,
         Err(_) => return false,
@@ -507,6 +547,8 @@ fn definitely_settled(state: &State) -> bool {
         || owner.pid == server.pid
         || owner.boot_id.is_empty()
         || owner.boot_id != server.boot_id
+        || owner.pid_namespace.is_none()
+        || owner.pid_namespace != server.pid_namespace
     {
         return false;
     }
@@ -862,6 +904,159 @@ mod tests {
         let mut previous_boot = current;
         previous_boot.boot_id = "previous-boot".into();
         assert!(identity_gone(&previous_boot));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pid_namespace_and_proc_mount_must_match() {
+        let stat = fs::read_to_string("/proc/self/stat").unwrap();
+        let namespace = fs::read_link("/proc/self/ns/pid").unwrap();
+        assert!(checked_pid_namespace(std::process::id(), &stat, &namespace).is_ok());
+        assert!(
+            checked_pid_namespace(std::process::id().wrapping_add(1), &stat, &namespace).is_err()
+        );
+        let mut identity = process_identity(std::process::id()).unwrap();
+        identity.start_time += 1;
+        identity.pid_namespace = Some("pid:[999999999999]".into());
+        assert!(!identity_gone(&identity));
+        identity.pid_namespace = None;
+        assert!(!identity_gone(&identity));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nested_pid_namespace_cannot_retire_host_process_identity() {
+        const FIXTURE: &str = "ASB_HTTP_HOST_PID_IDENTITY";
+        const MISMATCH: &str = "ASB_HTTP_MISMATCHED_PROC";
+        if std::env::var_os(MISMATCH).is_some() {
+            assert!(
+                current_pid_namespace().is_err(),
+                "a host proc mount must not authorize nested PID lookups"
+            );
+            return;
+        }
+        if let Ok(encoded) = std::env::var(FIXTURE) {
+            let identity: ProcessIdentity = serde_json::from_str(&encoded).unwrap();
+            assert_ne!(
+                identity.pid_namespace.as_deref(),
+                Some(current_pid_namespace().unwrap().as_str())
+            );
+            assert!(
+                !identity_gone(&identity),
+                "an inaccessible host PID is not proof of exit"
+            );
+            return;
+        }
+        let identity = process_identity(std::process::id()).unwrap();
+        let output = match Command::new("unshare")
+            .args([
+                "--user",
+                "--map-root-user",
+                "--pid",
+                "--fork",
+                "--mount-proc",
+            ])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "http_server::tests::nested_pid_namespace_cannot_retire_host_process_identity",
+                "--nocapture",
+            ])
+            .env(FIXTURE, serde_json::to_string(&identity).unwrap())
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("cannot start namespace fixture: {error}"),
+        };
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success()
+            && (stderr.contains("Operation not permitted") || stderr.contains("Permission denied"))
+        {
+            eprintln!("nested PID namespace fixture unavailable: {stderr}");
+            return;
+        }
+        assert!(
+            output.status.success(),
+            "namespace fixture failed: {stderr} {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let mismatch = Command::new("unshare")
+            .args(["--user", "--map-root-user", "--pid", "--fork"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "http_server::tests::nested_pid_namespace_cannot_retire_host_process_identity",
+                "--nocapture",
+            ])
+            .env(MISMATCH, "1")
+            .output()
+            .unwrap();
+        assert!(
+            mismatch.status.success(),
+            "mismatched proc fixture failed: {} {}",
+            String::from_utf8_lossy(&mismatch.stderr),
+            String::from_utf8_lossy(&mismatch.stdout)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stopped_wrapper_and_server_are_not_settled() {
+        struct Children(Vec<std::process::Child>);
+        impl Drop for Children {
+            fn drop(&mut self) {
+                for child in &mut self.0 {
+                    let _ = Command::new("kill")
+                        .args(["-CONT", &child.id().to_string()])
+                        .status();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let mut children = Children(vec![
+            Command::new("sleep").arg("30").spawn().unwrap(),
+            Command::new("sleep").arg("30").spawn().unwrap(),
+        ]);
+        let owner = process_identity(children.0[0].id()).unwrap();
+        let server = process_identity(children.0[1].id()).unwrap();
+        for child in &mut children.0 {
+            assert!(
+                Command::new("kill")
+                    .args(["-STOP", &child.id().to_string()])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let status = fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
+                if status.lines().any(|line| {
+                    line.starts_with("State:") && line.split_whitespace().nth(1) == Some("T")
+                }) {
+                    break;
+                }
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert!(!identity_gone(&owner));
+        assert!(!identity_gone(&server));
+        let state = State {
+            schema_version: 1,
+            generation: None,
+            port: 0,
+            public_host: String::new(),
+            executable: PathBuf::new(),
+            publication: PathBuf::new(),
+            traces: vec![],
+            pid: Some(server.pid),
+            control: None,
+            owner_identity: Some(owner),
+            server_identity: Some(server),
+        };
+        assert!(!definitely_settled(&state));
     }
 
     #[test]
