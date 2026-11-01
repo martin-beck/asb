@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# Preserve running checks, but retain only the newest queued run for each PR
+# or event/ref. PRs, main pushes, and manual dispatches do not cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: false
+
 env:
   # Persistent native runners must not accumulate incremental compiler state
   # across revisions. CI validates clean artifacts, not incremental reuse.
