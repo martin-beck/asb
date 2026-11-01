@@ -33,6 +33,8 @@ impl Project {
         )
         .unwrap();
         let program = root.join(".asb-tools/pi/bin/pi");
+        // Mock the adapter's structured final event for this guest plumbing
+        // test; real Pi text-mode answer ownership is tested separately.
         fixture_writer::write_file(
             &root,
             &program,
@@ -44,7 +46,7 @@ printf 'changed\n' > performed.txt
 if test -n "$ASB_SESSION_CONTEXT"; then printf '%s' "$ASB_SESSION_CONTEXT" > session-env.txt; fi
 if test "$ASB_RENAME_SESSION_CWD" = yes; then mv "$PWD" "$PWD-renamed" || exit 93; fi
 printf '%s\n' '{"type":"turn_end","usage":{"input":17,"output":5,"cacheRead":0}}'
-printf '%s\n' '{"type":"result","result":"fixture completed"}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"fixture completed"}]}]}'
 printf 'fixture diagnostic\n' >&2
 exit 7
 "#,
