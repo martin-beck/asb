@@ -350,6 +350,15 @@ impl Owner {
                 continue;
             }
             let Some(&process) = state.tracees.get(&pid) else {
+                // The gate is a subreaper: an orphaned descendant of a
+                // detached helper can become its direct child. Its terminal
+                // wait status has already settled that adopted child; it is
+                // not a traced lifecycle event and has no trace identity.
+                // Keep rejecting unknown stopped/live statuses, which could
+                // indicate lost ptrace ownership.
+                if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
+                    continue;
+                }
                 return Err(io::Error::other(
                     "native trace observed an unowned child status",
                 ));
