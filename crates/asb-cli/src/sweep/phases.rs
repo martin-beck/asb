@@ -496,7 +496,11 @@ impl<'a> ActivatedSweep<'a> {
                     &self.reservations,
                     |index| Ok(execution.run(index)),
                     |report| {
-                        if report.result.is_err() {
+                        let failed = match report {
+                            Ok(report) => report.result.is_err(),
+                            Err(_) => true,
+                        };
+                        if failed {
                             let failures = stopping_failures
                                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
                                 + 1;
@@ -504,7 +508,9 @@ impl<'a> ActivatedSweep<'a> {
                                 return true;
                             }
                         }
-                        report.output_error.is_some() || report.stop_admission
+                        report.is_ok_and(|report| {
+                            report.output_error.is_some() || report.stop_admission
+                        })
                     },
                     |event| {
                         match event {
