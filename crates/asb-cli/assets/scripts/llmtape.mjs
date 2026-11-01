@@ -14,6 +14,8 @@ import { normalizeWorkspacePaths } from "./tape-normalization.mjs";
 
 const MAX_BODY = 16 * 1024 * 1024;
 const MAX_DELAY_MS = 60 * 60 * 1000;
+const MAX_REPLAY_ORDER_WAIT_MS = 30000;
+const MAX_REPLAY_ORDER_WAITERS = 64;
 let stopping = false;
 // A replay response must give clients fresh protocol identifiers, yet later
 // client history requests legitimately refer to those identifiers.  Keep the
@@ -160,6 +162,14 @@ async function replayResponse(response, interaction) {
     await new Promise((resolve) => setImmediate(resolve));
   }
   response.end();
+}
+
+async function deliverRecordedResponse(response, interaction) {
+  const delayMs = Number(interaction.delay_ms);
+  if (respectRecordTimings && Number.isFinite(delayMs) && delayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, Math.min(delayMs, MAX_DELAY_MS)));
+  }
+  await replayResponse(response, interaction);
 }
 
 // Some agent CLIs emit Anthropic server-tool descriptors without the
@@ -756,6 +766,11 @@ const interactions = mode === "replay"
       })
   : [];
 let cursor = 0;
+let replayOrderWaiters = 0;
+// Optional probes advance the recorded cursor when omitted. Keep their exact
+// entries available for a delayed matching probe, at most once per entry.
+const deferredProbes = [];
+const skippedProbeIndices = new Set();
 let rejected = 0;
 let firstMismatch = null;
 const progressPath = `${cassette}.progress.json`;
@@ -916,7 +931,45 @@ function isReplayProbe(request) {
   return typeof request.body === "string"
     && request.body.includes("What color is this image? Reply with one word.");
 }
+
+// A later exact probe may pass over omitted probes of other classes; an
+// unrecorded probe must not consume a different class by accident.
+function maySkipCurrentProbe(request) {
+  if (!isReplayProbe(request)) return true;
+  const key = requestKey(request);
+  for (let index = cursor + 1; index < interactions.length; index += 1) {
+    if (interactions[index]?.request && requestKey(interactions[index].request) === key) return true;
+  }
+  return false;
+}
 writeProgress();
+
+// Requests arriving out of order can be concurrent even when their recorded
+// sequence is fixed. Only defer an exact later request; unrelated mismatches
+// keep their normal immediate failure. Bound both waiting time and population.
+async function awaitReplayTurn(request, response, deadline) {
+  if (!interactions[cursor]?.request) return true;
+  const key = requestKey(request);
+  if (key === requestKey(interactions[cursor].request)) return true;
+  let target = -1;
+  for (let index = cursor + 1; index < interactions.length; index += 1) {
+    if (interactions[index]?.request && requestKey(interactions[index].request) === key) {
+      target = index;
+      break;
+    }
+  }
+  if (target < 0 || replayOrderWaiters >= MAX_REPLAY_ORDER_WAITERS) return true;
+  replayOrderWaiters += 1;
+  try {
+    while (cursor < target && performance.now() < deadline && !response.destroyed && !stopping) {
+      if (interactions[cursor]?.request && isReplayProbe(interactions[cursor].request) && maySkipCurrentProbe(request)) return true;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return !response.destroyed && !stopping;
+  } finally {
+    replayOrderWaiters -= 1;
+  }
+}
 
 async function handle(request, response, recording) {
   const startedAt = performance.now();
@@ -953,33 +1006,51 @@ async function handle(request, response, recording) {
   };
 
   if (mode === "replay") {
-    // Capability probes may be issued by the client even when the replayed
-    // run would otherwise omit them.  If the cassette has the corresponding
-    // known probe at the cursor, consume it and return its recorded response
-    // instead of comparing the probe with the first workload request.
-    if (isReplayProbe(recordedRequest)
-      && interactions[cursor]?.request
-      // Probe classes alone are not interchangeable: an embedding probe must
-      // never be served to a vision-capability probe (or vice versa).
-      && requestKey(recordedRequest) === requestKey(interactions[cursor].request)) {
-      const probe = interactions[cursor];
-      cursor += 1;
-      writeProgress();
-      await replayResponse(response, probe);
-      return;
-    }
-    // A provider bridge may record a health/model probe that the agent omits
-    // on replay. Consume only these known, credential-free probes when the
-    // next request carries an LLM body; arbitrary mismatches stay fail-closed.
-    while (interactions[cursor]?.request
-      && body.length > 0
-      && isReplayProbe(interactions[cursor].request)
-      // If this client did issue the next probe, it must consume its own
-      // recorded exchange. Only probes absent from the client request may be
-      // skipped.
-      && requestKey(recordedRequest) !== requestKey(interactions[cursor].request)) {
-      cursor += 1;
-      writeProgress();
+    const deadline = performance.now() + MAX_REPLAY_ORDER_WAIT_MS;
+    while (true) {
+      if (isReplayProbe(recordedRequest)) {
+        const deferred = deferredProbes.findIndex((index) => requestKey(interactions[index].request) === requestKey(recordedRequest));
+        if (deferred >= 0) {
+          const [index] = deferredProbes.splice(deferred, 1);
+          await deliverRecordedResponse(response, interactions[index]);
+          return;
+        }
+      }
+      // Capability probes may be issued by the client even when the replayed
+      // run would otherwise omit them.  If the cassette has the corresponding
+      // known probe at the cursor, consume it and return its recorded response
+      // instead of comparing the probe with the first workload request.
+      if (isReplayProbe(recordedRequest)
+        && interactions[cursor]?.request
+        // Probe classes alone are not interchangeable: an embedding probe must
+        // never be served to a vision-capability probe (or vice versa).
+        && requestKey(recordedRequest) === requestKey(interactions[cursor].request)) {
+        const probe = interactions[cursor];
+        cursor += 1;
+        writeProgress();
+        await deliverRecordedResponse(response, probe);
+        return;
+      }
+      // A provider bridge may record a health/model probe that the agent omits
+      // on replay. Consume only these known, credential-free probes when the
+      // next request is not a probe, or it exactly matches a later probe.
+      while (interactions[cursor]?.request
+        && maySkipCurrentProbe(recordedRequest)
+        && isReplayProbe(interactions[cursor].request)
+        // If this client did issue the next probe, it must consume its own
+        // recorded exchange. Only probes absent from the client request may be
+        // skipped.
+        && requestKey(recordedRequest) !== requestKey(interactions[cursor].request)) {
+        deferredProbes.push(cursor);
+        skippedProbeIndices.add(cursor);
+        cursor += 1;
+        writeProgress();
+      }
+      const expectedCursor = cursor;
+      if (!await awaitReplayTurn(recordedRequest, response, deadline)) return;
+      // Another request may have advanced to a probe, a duplicate, or the
+      // end while this one waited. Reevaluate before choosing a response.
+      if (cursor === expectedCursor) break;
     }
     const interaction = interactions[cursor];
     if (!interaction) {
@@ -995,13 +1066,13 @@ async function handle(request, response, recording) {
       // the next interaction; any other mismatch remains fail-closed.
       let retry;
       for (let index = cursor - 1; index >= 0; index -= 1) {
-        if (requestKey(recordedRequest) === requestKey(interactions[index].request)) {
+        if (!skippedProbeIndices.has(index) && requestKey(recordedRequest) === requestKey(interactions[index].request)) {
           retry = interactions[index];
           break;
         }
       }
       if (retry) {
-        await replayResponse(response, retry);
+        await deliverRecordedResponse(response, retry);
         return;
       }
       const mismatch = requestMismatch(interaction.request, recordedRequest, cursor + 1);
@@ -1013,11 +1084,7 @@ async function handle(request, response, recording) {
     }
     cursor += 1;
     writeProgress();
-    const delayMs = Number(interaction.delay_ms);
-    if (respectRecordTimings && Number.isFinite(delayMs) && delayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, Math.min(delayMs, MAX_DELAY_MS)));
-    }
-    await replayResponse(response, interaction);
+    await deliverRecordedResponse(response, interaction);
     return;
   }
 
