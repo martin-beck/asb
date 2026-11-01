@@ -635,16 +635,15 @@ fn run_concurrent(
     }
 
     std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs
-            .into_iter()
-            .map(|(index, replica, measurement, cassette)| {
-                scope.spawn(move || {
-                    let mut buffer = Vec::new();
+        let mut handles = Vec::new();
+        for (index, replica, measurement, cassette) in jobs {
+            match std::thread::Builder::new().spawn_scoped(scope, move || {
+                run_replica_catching(index, options, |buffer| {
                     let mode = cassette.as_ref().map(|(mode, _)| *mode);
                     let cassette_path = cassette.as_ref().map(|(_, path)| path.to_string_lossy());
                     let cassette_path = cassette_path.as_deref();
                     let measurement_path = measurement.as_deref().and_then(Path::to_str);
-                    let result = run_mode(
+                    run_mode(
                         config_path,
                         replica,
                         RunOptions {
@@ -658,19 +657,28 @@ fn run_concurrent(
                             interactive: false,
                             ..options
                         },
-                        &mut buffer,
+                        buffer,
                         warnings,
-                    );
-                    (index, result, buffer)
+                    )
                 })
-            })
-            .collect();
-        for handle in handles {
-            completed.push(
-                handle
-                    .join()
-                    .expect("benchmark concurrency worker panicked"),
-            );
+            }) {
+                Ok(handle) => handles.push((index, handle)),
+                Err(error) => {
+                    let reason = format!("cannot start benchmark replica {}: {error}", index + 1);
+                    abort_replica_gates(options, &reason);
+                    completed.push((index, Err(Error::Run(reason)), Vec::new()));
+                    break;
+                }
+            }
+        }
+        for (index, handle) in handles {
+            completed.push(handle.join().unwrap_or_else(|_| {
+                (
+                    index,
+                    Err(Error::Run("benchmark replica worker panicked".into())),
+                    Vec::new(),
+                )
+            }));
         }
     });
 
@@ -710,6 +718,30 @@ fn run_concurrent(
         )))
     };
     diagnostics::preserve_primary(primary, presentation)
+}
+
+fn abort_replica_gates(options: RunOptions<'_>, reason: &str) {
+    if let Some(gate) = options.preparation_gate {
+        gate.abort(reason);
+    }
+    if let Some(gate) = options.launch_gate {
+        gate.abort(reason);
+    }
+}
+
+fn run_replica_catching(
+    index: usize,
+    options: RunOptions<'_>,
+    execute: impl FnOnce(&mut Vec<u8>) -> Result<(), Error>,
+) -> (usize, Result<(), Error>, Vec<u8>) {
+    let mut buffer = Vec::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(&mut buffer)))
+        .unwrap_or_else(|_| {
+            let reason = format!("benchmark replica {} worker panicked", index + 1);
+            abort_replica_gates(options, &reason);
+            Err(Error::Run(reason))
+        });
+    (index, result, buffer)
 }
 
 fn add_replica_failure(failures: &mut Vec<(String, Vec<usize>)>, index: usize, message: String) {
