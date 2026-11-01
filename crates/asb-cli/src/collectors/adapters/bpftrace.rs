@@ -15,6 +15,14 @@ pub(super) struct BpftraceCollector;
 pub(super) static ADAPTER: BpftraceCollector = BpftraceCollector;
 
 impl CollectorAdapter for BpftraceCollector {
+    #[cfg(any(target_os = "linux", test))]
+    fn host_settings(&self) -> &'static [(&'static str, &'static str, &'static str)] {
+        &[(
+            "kernel.sched_schedstats",
+            "1",
+            "bpftrace io-wait scheduler statistics",
+        )]
+    }
     fn estimated_disk_mib(&self) -> u64 {
         768
     }
