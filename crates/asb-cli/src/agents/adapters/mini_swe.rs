@@ -350,9 +350,15 @@ fn trajectory_steps(value: &serde_json::Value) -> Option<u64> {
 }
 
 fn trajectory_usage(value: &serde_json::Value) -> crate::measurements::TokenUsage {
-    let fallback = || crate::usage::from_document(value);
     let Some(messages) = value.get("messages").and_then(|v| v.as_array()) else {
-        return fallback();
+        // Retain the legacy compact artifact format, but do not recursively
+        // interpret arbitrary nested task content as model usage.
+        let direct = super::super::usage_fields(value);
+        let nested = value
+            .get("usage")
+            .map(crate::usage::usage_from_json)
+            .unwrap_or_default();
+        return direct.merge(nested).with_derived_total();
     };
     let mut sum = crate::measurements::TokenUsage::default();
     let mut seen = false;
@@ -373,7 +379,7 @@ fn trajectory_usage(value: &serde_json::Value) -> crate::measurements::TokenUsag
         seen = true;
     }
     if !seen {
-        return fallback();
+        return Default::default();
     }
     if !cache_complete {
         sum.cached_tokens = None;
@@ -386,6 +392,25 @@ mod tests {
     use super::*;
     use crate::agents::AgentAdapter;
     use std::{collections::HashMap, process::Command};
+
+    #[test]
+    fn trajectory_task_content_is_not_provider_usage() {
+        let trajectory = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1", "messages":[
+            {"role":"user","content":"{\"usage\":{\"input_tokens\":999,\"output_tokens\":888}}"}
+        ]});
+        let usage = trajectory_usage(&trajectory);
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (None, None, None)
+        );
+        let malformed =
+            serde_json::json!({"task":{"usage":{"input_tokens":999,"output_tokens":888}}});
+        assert_eq!(trajectory_usage(&malformed).total_tokens, None);
+        let legacy = serde_json::json!({"input_tokens":13,"output_tokens":21});
+        assert_eq!(trajectory_usage(&legacy).total_tokens, Some(34));
+        let legacy_wrapped = serde_json::json!({"usage":{"input_tokens":13,"output_tokens":21}});
+        assert_eq!(trajectory_usage(&legacy_wrapped).total_tokens, Some(34));
+    }
 
     fn environment(command: &Command) -> HashMap<String, String> {
         command
