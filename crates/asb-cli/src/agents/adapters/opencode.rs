@@ -54,6 +54,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 ])
 .with_collection(collect)
 .with_output_usage(output_usage)
+.with_final_response(final_response)
 .with_step_count(step_count)
 .with_state_environment_vars(&[
     "OPENCODE_CONFIG_CONTENT",
@@ -73,6 +74,83 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
         .try_into()
         .ok()?;
     (steps > 0).then_some(steps)
+}
+
+fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
+    let mut texts =
+        std::collections::HashMap::<(String, String), Vec<(Option<String>, String)>>::new();
+    let mut final_answer = None;
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        // A truncated or malformed native stream cannot prove completion.
+        let event = serde_json::from_str::<serde_json::Value>(line).ok()?;
+        let kind = event.get("type").and_then(|v| v.as_str());
+        let part = event.get("part");
+        let event_session = event.get("sessionID").and_then(|v| v.as_str());
+        let part_session = part
+            .and_then(|p| p.get("sessionID"))
+            .and_then(|v| v.as_str());
+        if event_session.zip(part_session).is_some_and(|(a, b)| a != b) {
+            return None;
+        }
+        let session = event_session.or(part_session).unwrap_or_default();
+        match kind {
+            Some("text") => {
+                if let (Some(id), Some(text)) = (
+                    part.and_then(|p| p.get("messageID"))
+                        .and_then(|v| v.as_str()),
+                    part.and_then(|p| p.get("text")).and_then(|v| v.as_str()),
+                ) && !text.trim().is_empty()
+                {
+                    let parts = texts
+                        .entry((session.to_owned(), id.to_owned()))
+                        .or_default();
+                    let part_id = part
+                        .and_then(|p| p.get("id"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+                    if let Some(existing) = part_id
+                        .as_ref()
+                        .and_then(|id| parts.iter_mut().find(|(key, _)| key.as_ref() == Some(id)))
+                    {
+                        existing.1 = text.to_owned();
+                    } else {
+                        parts.push((part_id, text.to_owned()));
+                    }
+                }
+                final_answer = None;
+            }
+            Some("step_finish") => {
+                final_answer = match (
+                    part.and_then(|p| p.get("messageID"))
+                        .and_then(|v| v.as_str()),
+                    part.and_then(|p| p.get("reason")).and_then(|v| v.as_str()),
+                ) {
+                    (Some(id), Some(reason))
+                        if !reason.is_empty()
+                            && !matches!(reason, "tool-calls" | "unknown" | "content-filter") =>
+                    {
+                        texts
+                            .get(&(session.to_owned(), id.to_owned()))
+                            .map(|parts| {
+                                parts
+                                    .iter()
+                                    .map(|(_, text)| text.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            })
+                    }
+                    _ => None,
+                };
+                texts.clear();
+            }
+            Some("step_start" | "tool_use" | "error") => {
+                texts.clear();
+                final_answer = None;
+            }
+            _ => {}
+        }
+    }
+    final_answer
 }
 
 fn output_usage(stdout: &str, _stderr: &str, _: bool) -> crate::measurements::TokenUsage {
@@ -285,6 +363,53 @@ fn config(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn final_response_requires_matching_terminal_step() {
+        let text = r#"{"type":"text","part":{"messageID":"m1","text":"answer"}}"#;
+        let finish = r#"{"type":"step_finish","part":{"messageID":"m1","reason":"stop"}}"#;
+        let tools = r#"{"type":"step_finish","part":{"messageID":"m1","reason":"tool-calls"}}"#;
+        let wrong = r#"{"type":"step_finish","part":{"messageID":"m2","reason":"stop"}}"#;
+        let path = std::path::Path::new(".");
+        assert!(super::final_response(&format!("{text}\n{finish}\n{{"), path).is_none());
+        let session_text = r#"{"type":"text","sessionID":"s1","part":{"sessionID":"s1","messageID":"m1","text":"answer"}}"#;
+        let other_session_finish = r#"{"type":"step_finish","sessionID":"s2","part":{"sessionID":"s2","messageID":"m1","reason":"stop"}}"#;
+        assert!(
+            super::final_response(&format!("{session_text}\n{other_session_finish}"), path)
+                .is_none()
+        );
+        let mismatched_session = r#"{"type":"step_finish","sessionID":"s1","part":{"sessionID":"s2","messageID":"m1","reason":"stop"}}"#;
+        assert!(
+            super::final_response(&format!("{session_text}\n{mismatched_session}"), path).is_none()
+        );
+        let start = r#"{"type":"step_start","part":{"messageID":"m1"}}"#;
+        assert!(
+            super::final_response(&format!("{text}\n{tools}\n{start}\n{finish}"), path).is_none()
+        );
+        let update1 = r#"{"type":"text","part":{"id":"p1","messageID":"m1","text":"old"}}"#;
+        let update2 = r#"{"type":"text","part":{"id":"p1","messageID":"m1","text":"new"}}"#;
+        assert_eq!(
+            super::final_response(&format!("{update1}\n{update2}\n{finish}"), path).as_deref(),
+            Some("new")
+        );
+        let second = r#"{"type":"text","part":{"messageID":"m1","text":"second"}}"#;
+        assert_eq!(
+            super::final_response(&format!("{text}\n{second}\n{finish}"), path).as_deref(),
+            Some("answer\nsecond")
+        );
+        assert_eq!(
+            super::final_response(&format!("{text}\n{finish}"), path).as_deref(),
+            Some("answer")
+        );
+        for output in [
+            text.to_owned(),
+            format!("{text}\n{tools}"),
+            format!("{text}\n{wrong}"),
+            format!("{text}\n{finish}\n{{\"type\":\"error\"}}"),
+        ] {
+            assert!(super::final_response(&output, path).is_none(), "{output}");
+        }
+    }
+
     #[test]
     fn incomplete_stream_does_not_count_tool_input_as_usage() {
         let output = r#"{"type":"tool_use","part":{"type":"tool","state":{"status":"completed","input":{"tokens":{"input":999,"output":888}}}}}"#;

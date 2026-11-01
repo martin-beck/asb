@@ -1397,7 +1397,10 @@ mod tests {
         let codex =
             r#"{"type":"item.completed","item":{"type":"agent_message","text":"codex final"}}"#;
         assert!(final_response("codex", codex, &root).is_none());
-        let opencode = r#"{"type":"text","part":{"type":"text","text":"opencode final"}}"#;
+        let opencode = concat!(
+            "{\"type\":\"text\",\"part\":{\"type\":\"text\",\"messageID\":\"m1\",\"text\":\"opencode final\"}}\n",
+            "{\"type\":\"step_finish\",\"part\":{\"messageID\":\"m1\",\"reason\":\"stop\"}}"
+        );
         assert_eq!(
             final_response("opencode", opencode, &root).as_deref(),
             Some("opencode final")
