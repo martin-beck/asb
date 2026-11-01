@@ -39,19 +39,23 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
         .and_then(|event| event.get("iterations").and_then(|v| v.as_u64()))
 }
 
-fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::TokenUsage {
+fn output_usage(stdout: &str, _stderr: &str, _: bool) -> crate::measurements::TokenUsage {
     for event in stdout
         .lines()
         .rev()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
     {
-        if event.get("type").and_then(|v| v.as_str()) == Some("run_result")
-            && let Some(usage) = event.get("aggregateUsage").or_else(|| event.get("usage"))
-        {
-            return super::super::usage_fields(usage).with_derived_total();
+        if event.get("type").and_then(|v| v.as_str()) == Some("run_result") {
+            return event
+                .get("aggregateUsage")
+                .or_else(|| event.get("usage"))
+                .map(super::super::usage_fields)
+                .unwrap_or_default()
+                .with_derived_total();
         }
     }
-    crate::usage::usage_from_text(&format!("{stdout}\n{stderr}"))
+    // Intermediate events and task output are not final aggregate usage.
+    Default::default()
 }
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
@@ -226,6 +230,28 @@ fn configure(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tool_event_is_not_usage_when_final_result_has_no_usage() {
+        let output = concat!(
+            "{\"type\":\"agent_event\",\"event\":{\"type\":\"tool_result\",\"content\":\"{\\\"usage\\\":{\\\"input_tokens\\\":999,\\\"output_tokens\\\":888}}\"}}\n",
+            "{\"type\":\"run_result\",\"iterations\":1}\n"
+        );
+        let usage = crate::usage::from_sources("openrouter", "cline", output, "", None);
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn newer_incomplete_result_does_not_reuse_an_earlier_result() {
+        let output = concat!(
+            "{\"type\":\"run_result\",\"usage\":{\"inputTokens\":10,\"outputTokens\":3}}\n",
+            "{\"type\":\"run_result\",\"iterations\":2}\n",
+        );
+        let usage = crate::usage::from_sources("openrouter", "cline", output, "", None);
+        assert_eq!(usage.total_tokens, None);
+    }
     use super::*;
     use crate::agents::AgentAdapter;
 
