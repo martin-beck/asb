@@ -14,6 +14,9 @@ impl CollectorAdapter for FlamegraphCollector {
     fn estimated_disk_mib(&self) -> u64 {
         1024
     }
+    fn description(&self) -> &'static str {
+        "process-tree CPU flamegraph"
+    }
     fn id(&self) -> &'static str {
         "flamegraph"
     }

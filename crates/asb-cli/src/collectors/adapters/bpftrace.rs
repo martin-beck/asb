@@ -17,6 +17,9 @@ impl CollectorAdapter for BpftraceCollector {
     fn estimated_disk_mib(&self) -> u64 {
         768
     }
+    fn description(&self) -> &'static str {
+        "selected process-tree eBPF programs"
+    }
     fn id(&self) -> &'static str {
         "bpftrace"
     }

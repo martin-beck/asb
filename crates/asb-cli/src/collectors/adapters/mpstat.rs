@@ -7,6 +7,9 @@ pub(super) struct MpstatCollector;
 pub(super) static ADAPTER: MpstatCollector = MpstatCollector;
 
 impl CollectorAdapter for MpstatCollector {
+    fn description(&self) -> &'static str {
+        "per-CPU utilization time series"
+    }
     fn id(&self) -> &'static str {
         "mpstat"
     }

@@ -16,6 +16,9 @@ impl CollectorAdapter for PerfettoCollector {
     fn estimated_disk_mib(&self) -> u64 {
         1024
     }
+    fn description(&self) -> &'static str {
+        "timestamped execution trace for Perfetto"
+    }
     fn id(&self) -> &'static str {
         "perfetto"
     }
