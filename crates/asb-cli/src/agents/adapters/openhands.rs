@@ -51,23 +51,24 @@ fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
-    // The adapter's native replay launcher emits a single result envelope.
-    if let [event] = events.as_slice()
-        && event.get("type").and_then(|v| v.as_str()) == Some("result")
-    {
-        return event
-            .get("text")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-            .map(str::to_owned);
-    }
     for event in events.iter().rev() {
+        // Native replay's result follows SDK events and supersedes them,
+        // including when its answer is null or missing.
+        if event.get("type").and_then(|v| v.as_str()) == Some("result") {
+            return event
+                .get("text")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_owned);
+        }
         let kind = event.get("kind").and_then(|v| v.as_str());
         let source = event.get("source").and_then(|v| v.as_str());
         if matches!(
             kind,
             Some("ConversationErrorEvent" | "UserRejectObservation" | "AgentErrorEvent")
-        ) || (kind == Some("MessageEvent") && source == Some("user"))
+        ) || (kind == Some("MessageEvent")
+            && (source == Some("user")
+                || event.pointer("/llm_message/role").and_then(|v| v.as_str()) == Some("user")))
         {
             return None;
         }
@@ -337,6 +338,24 @@ mod tests {
             super::ADAPTER
                 .final_response(&format!("{event}\n{user}"), path)
                 .is_none()
+        );
+        let feedback = r#"{"kind":"MessageEvent","source":"environment","llm_message":{"role":"user","content":[{"type":"text","text":"retry"}]}}"#;
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{event}\n{feedback}"), path)
+                .is_none()
+        );
+        let no_result = r#"{"type":"result","text":null}"#;
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{event}\n{no_result}"), path)
+                .is_none()
+        );
+        assert_eq!(
+            super::ADAPTER
+                .final_response(&format!("{event}\n{launcher}"), path)
+                .as_deref(),
+            Some("native answer")
         );
         let agent_error = r#"{"kind":"AgentErrorEvent","source":"agent","error":"finish failed","tool_name":"finish","action_id":"a"}"#;
         assert!(
