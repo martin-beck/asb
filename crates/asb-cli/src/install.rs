@@ -649,11 +649,12 @@ pub(crate) fn ensure_collector_dependencies(
 
 /// Prepare every project-local installable selected by an executable benchmark.
 /// This is deliberately shared by direct runs and sweeps: record/replay alters
-/// transport only, never the tool, provider, workload or collector runtime
-/// requirements of the selected benchmark.
+/// transport only: replay still needs the agent, workload, and collectors,
+/// but its local tape endpoint does not need a live provider runtime.
 pub(crate) fn ensure_execution_requirements(
     config: &BenchmarkConfig,
     config_path: &Path,
+    mode: Option<crate::tape::Mode>,
     output: &mut dyn std::io::Write,
 ) -> Result<(), Error> {
     let (root, project_config) = project::load(config_path)?;
@@ -663,7 +664,7 @@ pub(crate) fn ensure_execution_requirements(
         OperationContext::new(&root, &project_config).map_err(InstallFailure::into_public)?;
     let mut progress = |_percent: u8, _stage: ProgressStage| {};
     let result = (|| -> InstallResult<()> {
-        for id in execution_tool_ids(config) {
+        for id in execution_tool_ids(config, mode) {
             let owned_context = context.with_destination(&tools_root.join(&id))?;
             match local_lookup(&id, &tools_root) {
                 crate::executables::Lookup::Found(_) => {}
@@ -735,7 +736,10 @@ pub(crate) struct ExecutionRequirements {
     collectors: Vec<String>,
 }
 
-pub(crate) fn execution_requirements(config: &BenchmarkConfig) -> ExecutionRequirements {
+pub(crate) fn execution_requirements(
+    config: &BenchmarkConfig,
+    mode: Option<crate::tape::Mode>,
+) -> ExecutionRequirements {
     let mut collectors = config
         .measurements
         .as_ref()
@@ -745,15 +749,15 @@ pub(crate) fn execution_requirements(config: &BenchmarkConfig) -> ExecutionRequi
     collectors.sort();
     collectors.dedup();
     ExecutionRequirements {
-        tools: execution_tool_ids(config),
+        tools: execution_tool_ids(config, mode),
         workload: config.workload.clone(),
         collectors,
     }
 }
 
-fn execution_tool_ids(config: &BenchmarkConfig) -> Vec<String> {
-    [&config.agent, &config.provider]
-        .into_iter()
+fn execution_tool_ids(config: &BenchmarkConfig, mode: Option<crate::tape::Mode>) -> Vec<String> {
+    std::iter::once(&config.agent)
+        .chain((mode != Some(crate::tape::Mode::Replay)).then_some(&config.provider))
         .filter(|id| agents::find(id).is_some() || tools::find(id).is_some())
         .cloned()
         .collect::<BTreeSet<_>>()
@@ -1978,13 +1982,25 @@ mod tests {
         let config: BenchmarkConfig =
             toml::from_str("agent='pi'\nprovider='cli2key'\nmodel='fixture'\nworkload='bug-fix'\n")
                 .unwrap();
-        assert_eq!(execution_tool_ids(&config), ["cli2key", "pi"]);
+        assert_eq!(execution_tool_ids(&config, None), ["cli2key", "pi"]);
+        assert_eq!(
+            execution_tool_ids(&config, Some(crate::tape::Mode::Record)),
+            ["cli2key", "pi"]
+        );
+        assert_eq!(
+            execution_tool_ids(&config, Some(crate::tape::Mode::Replay)),
+            ["pi"]
+        );
+        assert_ne!(
+            execution_requirements(&config, None),
+            execution_requirements(&config, Some(crate::tape::Mode::Replay))
+        );
 
         let endpoint_only: BenchmarkConfig = toml::from_str(
             "agent='pi'\nprovider='openrouter'\nmodel='fixture'\nworkload='bug-fix'\n",
         )
         .unwrap();
-        assert_eq!(execution_tool_ids(&endpoint_only), ["pi"]);
+        assert_eq!(execution_tool_ids(&endpoint_only, None), ["pi"]);
     }
 
     #[test]
@@ -2006,17 +2022,22 @@ mod tests {
         )
         .unwrap();
 
+        let replay = execution_requirements(&base, Some(crate::tape::Mode::Replay));
+        assert_eq!(replay.tools, ["pi"]);
+        assert_eq!(replay.workload, "swe-bench-lite");
+        assert_eq!(replay.collectors, ["mpstat", "perfetto"]);
+
         assert_eq!(
-            execution_requirements(&base),
-            execution_requirements(&same_install)
+            execution_requirements(&base, None),
+            execution_requirements(&same_install, None)
         );
         assert_ne!(
-            execution_requirements(&base),
-            execution_requirements(&different_workload)
+            execution_requirements(&base, None),
+            execution_requirements(&different_workload, None)
         );
         assert_ne!(
-            execution_requirements(&base),
-            execution_requirements(&different_collector)
+            execution_requirements(&base, None),
+            execution_requirements(&different_collector, None)
         );
     }
 

@@ -593,7 +593,12 @@ fn run_dispatched(
             .lock()
             .map_err(|_| Error::Run("shared runtime preparation failed; retry the sweep".into()))?;
         let mut messages = Vec::new();
-        crate::install::ensure_execution_requirements(&config, config_path, &mut messages)?;
+        crate::install::ensure_execution_requirements(
+            &config,
+            config_path,
+            options.mode,
+            &mut messages,
+        )?;
         if !options.json {
             output.write_all(&messages).map_err(io_error)?;
         }
