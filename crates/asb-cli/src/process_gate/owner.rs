@@ -327,42 +327,14 @@ impl Owner {
             if state.tracees.is_empty() {
                 return Ok(state.root_status.take());
             }
-            let mut status = 0;
-            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG | libc::__WALL) };
-            if pid == 0 {
-                return Ok(state
-                    .tracees
-                    .is_empty()
-                    .then(|| state.root_status.take())
-                    .flatten());
-            }
-            if pid < 0 {
-                let error = io::Error::last_os_error();
-                return if error.kind() == io::ErrorKind::Interrupted {
-                    Ok(None)
-                } else {
-                    Err(error)
-                };
-            }
-            if pid == self.watcher {
-                // The wake-only child is never a tracee and must not acquire a
-                // durable identity. Reaping it here is safe and bounded.
-                continue;
-            }
-            let Some(&process) = state.tracees.get(&pid) else {
-                // The gate is a subreaper: an orphaned descendant of a
-                // detached helper can become its direct child. Its terminal
-                // wait status has already settled that adopted child; it is
-                // not a traced lifecycle event and has no trace identity.
-                // Keep rejecting unknown stopped/live statuses, which could
-                // indicate lost ptrace ownership.
-                if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
-                    continue;
-                }
-                return Err(io::Error::other(
-                    "native trace observed an unowned child status",
-                ));
+            // Wait only for established tracees. A newborn may stop before
+            // its parent's fork event is consumed; waiting for arbitrary
+            // children would consume that stop before it can be associated.
+            // Adopted children remain for the existing descendant cleanup.
+            let Some((pid, status)) = wait_known_tracee(&state.tracees)? else {
+                return Ok(None);
             };
+            let process = state.tracees[&pid];
             if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
                 if state.exited.insert(process) {
                     record(
@@ -665,6 +637,26 @@ fn record_with_request(
         .map_err(|error| io::Error::other(error.to_string()))
 }
 
+fn wait_known_tracee(
+    tracees: &BTreeMap<libc::pid_t, u64>,
+) -> io::Result<Option<(libc::pid_t, libc::c_int)>> {
+    for &pid in tracees.keys() {
+        let mut status = 0;
+        let observed = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG | libc::__WALL) };
+        if observed == pid {
+            return Ok(Some((pid, status)));
+        }
+        if observed < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+    }
+    Ok(None)
+}
+
 fn next_process_id(tracees: &BTreeMap<libc::pid_t, u64>) -> io::Result<u64> {
     tracees
         .values()
@@ -814,5 +806,73 @@ fn pin(pid: libc::pid_t) -> io::Result<OwnedFd> {
         Err(io::Error::last_os_error())
     } else {
         Ok(unsafe { OwnedFd::from_raw_fd(descriptor as i32) })
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn lost_known_child_is_an_error_not_a_silent_retry() {
+        let mut child = Command::new("/usr/bin/python3")
+            .args(["-c", "pass"])
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        child.wait().unwrap();
+        let error = wait_known_tracee(&BTreeMap::from([(pid, 1)])).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
+    fn known_pid_scan_does_not_consume_early_unregistered_ptrace_stop() {
+        let mut early = Command::new("/usr/bin/python3")
+            .args(["-c", "import ctypes,os,signal; assert ctypes.CDLL(None).ptrace(0,0,0,0)==0; os.kill(os.getpid(),signal.SIGSTOP)"])
+            .spawn().unwrap();
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    early.id(),
+                    &mut info,
+                    libc::WSTOPPED | libc::WNOWAIT,
+                )
+            },
+            0
+        );
+        let mut known = Command::new("/usr/bin/python3")
+            .args(["-c", "pass"])
+            .spawn()
+            .unwrap();
+        let pids = BTreeMap::from([(known.id() as libc::pid_t, 1)]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (pid, status) = loop {
+            if let Some(event) = wait_known_tracee(&pids).unwrap() {
+                break event;
+            }
+            assert!(Instant::now() < deadline, "known child did not exit");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(pid, known.id() as libc::pid_t);
+        assert!(libc::WIFEXITED(status));
+        let mut early_status = 0;
+        assert_eq!(
+            unsafe {
+                libc::waitpid(
+                    early.id() as libc::pid_t,
+                    &mut early_status,
+                    libc::__WALL | libc::WNOHANG,
+                )
+            },
+            early.id() as libc::pid_t
+        );
+        assert!(libc::WIFSTOPPED(early_status));
+        early.kill().unwrap();
+        let _ = early.wait();
+        let _ = known.wait();
     }
 }
