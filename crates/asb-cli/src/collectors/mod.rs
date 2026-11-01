@@ -158,6 +158,16 @@ pub(crate) struct ReportGraph {
 pub(crate) struct ReportArtifactLink {
     pub label: &'static str,
     pub href: String,
+    pub primary: Option<ReportPrimaryLink>,
+}
+
+/// Optional prominent viewer presentation and terminal trace labels.
+pub(crate) struct ReportPrimaryLink {
+    pub heading: &'static str,
+    pub text: &'static str,
+    pub class: &'static str,
+    pub download_label: &'static str,
+    pub file_label: &'static str,
 }
 
 /// Non-secret benchmark lifecycle events available to every collector.

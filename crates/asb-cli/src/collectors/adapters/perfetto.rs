@@ -1,6 +1,6 @@
 use super::super::{
     ArtifactDisplay, CollectorAdapter, LifecycleEvent, PreflightContext, ProcessContext,
-    ProcessData, ReportArtifactLink, ReportGraph, ReportRow,
+    ProcessData, ReportArtifactLink, ReportGraph, ReportPrimaryLink, ReportRow,
 };
 use crate::measurements;
 mod bootstrap;
@@ -67,6 +67,13 @@ impl CollectorAdapter for PerfettoCollector {
             .map(|href| ReportArtifactLink {
                 label: "Perfetto UI",
                 href,
+                primary: Some(ReportPrimaryLink {
+                    heading: "Perfetto trace",
+                    text: "Open Perfetto UI and upload this trace",
+                    class: "perfetto-link",
+                    download_label: "Perfetto trace download",
+                    file_label: "Perfetto trace file",
+                }),
             })
             .into_iter()
             .collect()

@@ -113,27 +113,22 @@ pub fn run(path: &str, output: &mut dyn Write) -> Result<(), Error> {
 /// chart summary, backups, and installer chatter, so relay only those stable
 /// public links.
 pub(crate) fn run_links(path: &str, output: &mut dyn Write) -> Result<(), Error> {
-    let mut generated = Vec::new();
-    generate(path, &mut generated)?;
-    write_public_links(&generated, output)
-}
-
-fn write_public_links(generated: &[u8], output: &mut dyn Write) -> Result<(), Error> {
-    let generated = std::str::from_utf8(generated)
-        .map_err(|error| Error::Io(format!("comparison emitted invalid UTF-8: {error}")))?;
-    for line in generated.lines().filter(|line| {
-        line.starts_with("Result report: ")
-            || line.starts_with("Perfetto trace download: ")
-            || line.starts_with("Perfetto trace file: ")
-            || line.starts_with("Perfetto UI: ")
-    }) {
-        writeln!(output, "{line}").map_err(crate::io_error)?;
+    let (_, links) = generate_with_links(path, &mut std::io::sink())?;
+    for (label, href) in links {
+        writeln!(output, "{label}: {href}").map_err(crate::io_error)?;
     }
     Ok(())
 }
 
 /// Generate an offline report for either a benchmark or a sweep manifest.
 pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Error> {
+    generate_with_links(path, output).map(|(path, _)| path)
+}
+
+fn generate_with_links(
+    path: &str,
+    output: &mut dyn Write,
+) -> Result<(PathBuf, Vec<(String, String)>), Error> {
     let loaded = source::load(path)?;
     let validated = ValidatedReport::validate(loaded)?;
     let prepared = PreparedReport::prepare(validated)?;
@@ -147,7 +142,12 @@ pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Er
         .rows
         .iter()
         .flat_map(|benchmark| benchmark.artifact_sources.iter())
-        .filter_map(|(name, source)| name.ends_with(".perfetto-trace").then_some(source.clone()))
+        .filter_map(|(name, source)| {
+            crate::collectors::report_artifact_links(name, source)
+                .iter()
+                .any(|link| link.primary.is_some())
+                .then_some(source.clone())
+        })
         .collect();
     let server = http_server::start_for_report(&published.report, traces, output)?;
     writeln!(
@@ -165,29 +165,48 @@ pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Er
     if published.recoverable_fallback {
         writeln!(output,"Report published using recoverable replacement, not atomic exchange; a brief destination-absence/crash window was possible. The previous report backup was retained.").map_err(|error|published.confirmation_error(error))?;
     }
-    writeln!(
-        output,
-        "Result report: {}",
-        server.report_url(&published.report)
-    )
-    .map_err(|error| published.confirmation_error(error))?;
-    for (label, href) in collector_report_links(&prepared) {
+    let mut links = vec![(
+        "Result report".to_owned(),
+        server.report_url(&published.report),
+    )];
+    links.extend(collector_report_links(&prepared));
+    let mut viewers = BTreeSet::new();
+    for trace in server.traces() {
+        let Some(name) = trace.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        append_primary_links(
+            &mut links,
+            &mut viewers,
+            trace,
+            server.trace_url(trace),
+            crate::collectors::report_artifact_links(name, trace),
+        );
+    }
+    links.extend(viewers);
+    for (label, href) in &links {
         writeln!(output, "{label}: {href}").map_err(|error| published.confirmation_error(error))?;
     }
-    for trace in server.traces() {
-        if let Some(url) = server.trace_url(trace) {
-            writeln!(output, "Perfetto trace download: {url}")
-                .map_err(|error| published.confirmation_error(error))?;
-        } else {
-            writeln!(output, "Perfetto trace file: {}", trace.display())
-                .map_err(|error| published.confirmation_error(error))?;
+    Ok((published.report, links))
+}
+
+fn append_primary_links(
+    links: &mut Vec<(String, String)>,
+    viewers: &mut BTreeSet<(String, String)>,
+    path: &Path,
+    url: Option<String>,
+    artifacts: Vec<crate::collectors::ReportArtifactLink>,
+) {
+    for link in artifacts {
+        if let Some(primary) = link.primary {
+            if let Some(url) = &url {
+                links.push((primary.download_label.into(), url.clone()));
+            } else {
+                links.push((primary.file_label.into(), path.display().to_string()));
+            }
+            viewers.insert((link.label.to_owned(), link.href));
         }
     }
-    if !server.traces().is_empty() {
-        writeln!(output, "Perfetto UI: https://ui.perfetto.dev/")
-            .map_err(|error| published.confirmation_error(error))?;
-    }
-    Ok(published.report)
 }
 
 fn collector_report_links(prepared: &PreparedReport) -> BTreeSet<(String, String)> {
@@ -197,7 +216,7 @@ fn collector_report_links(prepared: &PreparedReport) -> BTreeSet<(String, String
         .iter()
         .flat_map(|benchmark| benchmark.artifact_sources.iter())
         .flat_map(|(name, source)| crate::collectors::report_artifact_links(name, source))
-        .filter(|link| link.label != "Perfetto UI")
+        .filter(|link| link.primary.is_none())
         .map(|link| (link.label.to_owned(), link.href))
         .collect()
 }
@@ -489,10 +508,9 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             let text = serde_json::to_string_pretty(execution).unwrap_or_else(|_| "{}".into());
             format!("<details><summary>Execution / replay identity</summary><pre class=\"json-details\">{}</pre></details>", escape(&text))
         });
-        let perfetto_details = benchmark
+        let primary_details = benchmark
             .artifacts
             .iter()
-            .filter(|artifact| artifact.ends_with(".perfetto-trace"))
             .flat_map(|artifact| {
                 benchmark
                     .artifact_sources
@@ -500,13 +518,8 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                     .map(|path| crate::collectors::report_artifact_links(artifact, path))
                     .unwrap_or_default()
             })
-            .filter(|link| link.label == "Perfetto UI")
-            .map(|link| {
-                format!(
-                    "<p class=\"perfetto-link\"><strong>Perfetto trace</strong><a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open Perfetto UI and upload this trace</a></p>",
-                    escape(&link.href),
-                )
-            })
+            .filter_map(|link| link.primary.map(|primary| (primary, link.href)))
+            .map(|(primary, href)| primary_link_markup(&primary, &href))
             .collect::<String>();
         let artifacts = if benchmark.artifacts.is_empty() {
             String::new()
@@ -521,7 +534,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                         .map(|path| crate::collectors::report_artifact_links(artifact, path))
                         .unwrap_or_default()
                         .into_iter()
-                        .filter(|link| link.label != "Perfetto UI")
+                        .filter(|link| link.primary.is_none())
                         .map(|link| {
                             format!(
                                 " <a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open in {}</a>",
@@ -588,7 +601,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             escape(&benchmark.label), escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload),
             escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload), escape(trial), escape(&attempt),
             runtime, success, tokens,
-            format_args!("{perfetto_details}{}{}<p>{dispatch_details}</p>", evaluation_details, if benchmark.reconciled { "<p>Reconciled retained local outcome: current artifact consistency checked; no agent rerun or historical attestation.</p>" } else { "" }),
+            format_args!("{primary_details}{}{}<p>{dispatch_details}</p>", evaluation_details, if benchmark.reconciled { "<p>Reconciled retained local outcome: current artifact consistency checked; no agent rerun or historical attestation.</p>" } else { "" }),
             format_args!("{execution_details}{component_details}"),
             host_details,
             metrics_details,
@@ -1207,6 +1220,16 @@ fn escape(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
+fn primary_link_markup(primary: &crate::collectors::ReportPrimaryLink, href: &str) -> String {
+    format!(
+        "<p class=\"{}\"><strong>{}</strong><a href=\"{}\" target=\"_blank\" rel=\"noopener\">{}</a></p>",
+        escape(primary.class),
+        escape(primary.heading),
+        escape(href),
+        escape(primary.text),
+    )
+}
+
 #[cfg(test)]
 #[path = "../tests/unit/compare_boundaries.rs"]
 mod boundary_tests;
@@ -1218,23 +1241,63 @@ mod pipeline_tests;
 mod tests {
     use super::GraphNames;
     use super::run;
-    use super::write_public_links;
     use serde_json::{Value, json};
     use std::collections::{BTreeMap, BTreeSet};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn quiet_comparison_relays_only_shareable_links() {
-        let mut output = Vec::new();
-        write_public_links(
-            b"Installing project-local HTTP report server...\nCompared 1 benchmarks\nResult report: http://198.51.100.7:4000/report.html\nPerfetto trace download: http://198.51.100.7:4000/traces/0.perfetto-trace\nPerfetto UI: https://ui.perfetto.dev/\n",
-            &mut output,
-        )
-        .unwrap();
-        assert_eq!(
-            String::from_utf8(output).unwrap(),
-            "Result report: http://198.51.100.7:4000/report.html\nPerfetto trace download: http://198.51.100.7:4000/traces/0.perfetto-trace\nPerfetto UI: https://ui.perfetto.dev/\n"
+    fn another_collector_can_render_a_primary_viewer_link() {
+        use crate::collectors::CollectorAdapter;
+        struct OtherCollector;
+        impl CollectorAdapter for OtherCollector {
+            fn id(&self) -> &'static str {
+                "other"
+            }
+            fn report_artifact_links(
+                &self,
+                name: &str,
+                _: &std::path::Path,
+            ) -> Vec<crate::collectors::ReportArtifactLink> {
+                if !name.ends_with(".trace") {
+                    return Vec::new();
+                }
+                vec![crate::collectors::ReportArtifactLink {
+                    label: "Other UI",
+                    href: "https://example.invalid/?a=1&b=2".into(),
+                    primary: Some(crate::collectors::ReportPrimaryLink {
+                        heading: "Other trace",
+                        text: "Open viewer",
+                        class: "other-link",
+                        download_label: "Other download",
+                        file_label: "Other file",
+                    }),
+                }]
+            }
+        }
+        let artifact = std::path::Path::new("other.trace");
+        let mut result = OtherCollector.report_artifact_links("other.trace", artifact);
+        let metadata = result[0].primary.as_ref().unwrap();
+        let html = super::primary_link_markup(metadata, &result[0].href);
+        assert!(html.contains("<strong>Other trace</strong>"));
+        assert!(html.contains("https://example.invalid/?a=1&amp;b=2"));
+        assert!(html.contains("Open viewer"));
+        let mut links = Vec::new();
+        let mut viewers = BTreeSet::new();
+        super::append_primary_links(
+            &mut links,
+            &mut viewers,
+            artifact,
+            Some("http://localhost/traces/0.trace".into()),
+            std::mem::take(&mut result),
         );
+        assert_eq!(
+            links,
+            vec![(
+                "Other download".into(),
+                "http://localhost/traces/0.trace".into()
+            )]
+        );
+        assert!(viewers.contains(&("Other UI".into(), "https://example.invalid/?a=1&b=2".into())));
     }
 
     #[test]
