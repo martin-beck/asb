@@ -42,13 +42,27 @@ struct Daemons {
 
 impl Service {
     pub fn acquire(executable: &Path, project_root: &Path) -> Result<Arc<Self>, String> {
+        Self::acquire_inner(
+            executable,
+            project_root,
+            SERVICES.get_or_init(|| Mutex::new(BTreeMap::new())),
+            || {},
+        )
+    }
+
+    fn acquire_inner(
+        executable: &Path,
+        project_root: &Path,
+        registry: &Mutex<BTreeMap<PathBuf, Weak<Service>>>,
+        before_admission: impl FnOnce(),
+    ) -> Result<Arc<Self>, String> {
         let root = project_root.canonicalize().map_err(|e| e.to_string())?;
-        let mut services = SERVICES
-            .get_or_init(|| Mutex::new(BTreeMap::new()))
-            .lock()
-            .map_err(|_| "Perfetto service registry is unavailable")?;
+        before_admission();
         let _admission = super::project::lock_admission_for(&root, Duration::from_secs(15))
             .map_err(|e| e.to_string())?;
+        let mut services = registry
+            .lock()
+            .map_err(|_| "Perfetto service registry is unavailable")?;
         // Reset can finish between initial project discovery and admission.
         // Reload under the stable lock and never fall back to a parent project.
         let (current_root, settings) = crate::project::load(&root).map_err(|e| e.to_string())?;
@@ -570,6 +584,31 @@ mod coverage_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waiting_for_project_admission_does_not_lock_other_projects_registry() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        fs::create_dir_all(&root).unwrap();
+        let admission = super::super::project::lock_admission_for(&root, Duration::ZERO).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let registry = Arc::new(Mutex::new(BTreeMap::new()));
+        let worker_registry = Arc::clone(&registry);
+        let worker_root = root.clone();
+        let worker = std::thread::spawn(move || {
+            Service::acquire_inner(Path::new("fixture"), &worker_root, &worker_registry, || {
+                sender.send(()).unwrap()
+            })
+        });
+        receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        let available = registry.try_lock().is_ok();
+        drop(admission);
+        let _ = worker.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert!(
+            available,
+            "a waiting project must not hold the shared registry"
+        );
+    }
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
