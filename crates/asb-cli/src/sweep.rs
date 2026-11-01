@@ -12,7 +12,7 @@ use std::sync::Mutex;
 mod campaigns;
 mod checkpoint;
 mod execution;
-mod lock;
+pub(crate) mod lock;
 mod phases;
 pub(crate) mod plan;
 mod presentation;

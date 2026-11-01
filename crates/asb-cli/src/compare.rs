@@ -102,6 +102,7 @@ fn attempt_label(benchmark: &BenchmarkData) -> String {
 }
 
 /// Report a benchmark's recorded results or compare the members of a sweep.
+#[cfg(test)]
 pub fn run(path: &str, output: &mut dyn Write) -> Result<(), Error> {
     generate(path, output).map(|_| ())
 }
@@ -114,6 +115,29 @@ pub fn run(path: &str, output: &mut dyn Write) -> Result<(), Error> {
 /// public links.
 pub(crate) fn run_links(path: &str, output: &mut dyn Write) -> Result<(), Error> {
     let (_, links) = generate_with_links(path, &mut std::io::sink())?;
+    write_public_links(links, output)
+}
+
+/// The active sweep already holds its source owner; borrowing that owner keeps
+/// it alive across comparison without recursively acquiring the same lock.
+pub(crate) fn run_in_sweep(
+    path: &str,
+    output: &mut dyn Write,
+    _owner: &crate::sweep::lock::OutputLock,
+) -> Result<(), Error> {
+    generate_owned_with_links(path, output).map(|_| ())
+}
+
+pub(crate) fn run_links_in_sweep(
+    path: &str,
+    output: &mut dyn Write,
+    _owner: &crate::sweep::lock::OutputLock,
+) -> Result<(), Error> {
+    let (_, links) = generate_owned_with_links(path, &mut std::io::sink())?;
+    write_public_links(links, output)
+}
+
+fn write_public_links(links: Vec<(String, String)>, output: &mut dyn Write) -> Result<(), Error> {
     for (label, href) in links {
         writeln!(output, "{label}: {href}").map_err(crate::io_error)?;
     }
@@ -126,6 +150,14 @@ pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Er
 }
 
 fn generate_with_links(
+    path: &str,
+    output: &mut dyn Write,
+) -> Result<(PathBuf, Vec<(String, String)>), Error> {
+    let _owner = crate::sweep::lock::OutputLock::for_comparison(Path::new(path))?;
+    generate_owned_with_links(path, output)
+}
+
+fn generate_owned_with_links(
     path: &str,
     output: &mut dyn Write,
 ) -> Result<(PathBuf, Vec<(String, String)>), Error> {
