@@ -637,31 +637,37 @@ fn run_concurrent(
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for (index, replica, measurement, cassette) in jobs {
-            match std::thread::Builder::new().spawn_scoped(scope, move || {
-                run_replica_catching(index, options, |buffer| {
-                    let mode = cassette.as_ref().map(|(mode, _)| *mode);
-                    let cassette_path = cassette.as_ref().map(|(_, path)| path.to_string_lossy());
-                    let cassette_path = cassette_path.as_deref();
-                    let measurement_path = measurement.as_deref().and_then(Path::to_str);
-                    run_mode(
-                        config_path,
-                        replica,
-                        RunOptions {
-                            replica: replica::Identity {
-                                index: index + 1,
-                                total: config.concurrency,
+            let spawn = if injected_replica_spawn_failure(index) {
+                Err(std::io::Error::other("injected replica spawn failure"))
+            } else {
+                std::thread::Builder::new().spawn_scoped(scope, move || {
+                    run_replica_catching(index, options, |buffer| {
+                        let mode = cassette.as_ref().map(|(mode, _)| *mode);
+                        let cassette_path =
+                            cassette.as_ref().map(|(_, path)| path.to_string_lossy());
+                        let cassette_path = cassette_path.as_deref();
+                        let measurement_path = measurement.as_deref().and_then(Path::to_str);
+                        run_mode(
+                            config_path,
+                            replica,
+                            RunOptions {
+                                replica: replica::Identity {
+                                    index: index + 1,
+                                    total: config.concurrency,
+                                },
+                                measurement_dir: measurement_path,
+                                mode,
+                                cassette: cassette_path,
+                                interactive: false,
+                                ..options
                             },
-                            measurement_dir: measurement_path,
-                            mode,
-                            cassette: cassette_path,
-                            interactive: false,
-                            ..options
-                        },
-                        buffer,
-                        warnings,
-                    )
+                            buffer,
+                            warnings,
+                        )
+                    })
                 })
-            }) {
+            };
+            match spawn {
                 Ok(handle) => handles.push((index, handle)),
                 Err(error) => {
                     let reason = format!("cannot start benchmark replica {}: {error}", index + 1);
@@ -718,6 +724,23 @@ fn run_concurrent(
         )))
     };
     diagnostics::preserve_primary(primary, presentation)
+}
+
+#[cfg(test)]
+thread_local! {
+    static REPLICA_SPAWN_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+fn injected_replica_spawn_failure(index: usize) -> bool {
+    #[cfg(test)]
+    {
+        REPLICA_SPAWN_FAILURE.with(|failure| failure.get() == Some(index))
+    }
+    #[cfg(not(test))]
+    {
+        let _ = index;
+        false
+    }
 }
 
 fn abort_replica_gates(options: RunOptions<'_>, reason: &str) {
@@ -1672,6 +1695,37 @@ mod tests {
     };
     use crate::benchmark::BenchmarkConfig;
     use crate::measurements::TokenUsage;
+
+    #[test]
+    fn concurrent_run_reports_injected_replica_spawn_failure() {
+        let config: BenchmarkConfig = toml::from_str(
+            "agent='fixture'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\nconcurrency=2\n",
+        ).unwrap();
+        let gate = super::batch::Gate::new(2, None, std::time::Duration::from_secs(30)).unwrap();
+        let mut output = Vec::new();
+        let warnings = std::sync::Mutex::new(std::collections::BTreeSet::new());
+        super::REPLICA_SPAWN_FAILURE.with(|failure| failure.set(Some(1)));
+        let result = super::run_concurrent(
+            std::path::Path::new("benchmark.toml"),
+            &config,
+            super::RunOptions {
+                preparation_gate: Some(&gate),
+                ..Default::default()
+            },
+            &mut output,
+            &warnings,
+        );
+        super::REPLICA_SPAWN_FAILURE.with(|failure| failure.set(None));
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("cannot start benchmark replica 2"),
+            "{message}"
+        );
+        assert!(
+            gate.register(super::replica::Identity { index: 2, total: 2 })
+                .is_err()
+        );
+    }
 
     #[test]
     fn trial_start_uses_the_selected_name_without_record_or_replay_metadata() {
