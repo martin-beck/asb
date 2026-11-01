@@ -78,12 +78,18 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
 fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::TokenUsage {
     let mut sum = crate::measurements::TokenUsage::default();
     let mut seen = false;
+    let mut native_stream = false;
     let mut cache_complete = true;
     for event in stdout
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
     {
-        if event.get("type").and_then(|v| v.as_str()) != Some("step_finish") {
+        let event_type = event.get("type").and_then(|v| v.as_str());
+        native_stream |= matches!(
+            event_type,
+            Some("tool_use" | "step_start" | "step_finish" | "text" | "reasoning" | "error")
+        );
+        if event_type != Some("step_finish") {
             continue;
         }
         let Some(tokens) = event.pointer("/part/tokens") else {
@@ -113,6 +119,10 @@ fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::Tok
             sum.cached_tokens = None;
         }
         sum.with_derived_total()
+    } else if native_stream {
+        // An incomplete native JSON stream has no authoritative completed
+        // usage; tool input and task text may themselves contain token data.
+        Default::default()
     } else {
         let usage = crate::usage::usage_from_text(&format!("{stdout}\n{stderr}"));
         let mut legacy = crate::measurements::TokenUsage::default();
@@ -328,6 +338,12 @@ fn config(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn incomplete_stream_does_not_count_tool_input_as_usage() {
+        let output = r#"{"type":"tool_use","part":{"type":"tool","state":{"status":"completed","input":{"tokens":{"input":999,"output":888}}}}}"#;
+        assert!(!super::output_usage(output, "", false).any());
+    }
+
     use super::*;
 
     #[test]
