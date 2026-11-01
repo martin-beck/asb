@@ -4363,7 +4363,7 @@ http.createServer((req,res)=>{res.writeHead(200,{'content-type':'application/jso
             r#"#!/usr/bin/python3
 import json,os,socket,sys
 real_node={real_node}
-if os.path.basename(sys.argv[1]).startswith('cli2key-proxy-'):
+if os.path.basename(sys.argv[1]) == 'cli2key-proxy.mjs':
     root=os.environ['HOME']
     fd=os.open(root+'/compatibility.stderr',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
     os.dup2(fd,2)
