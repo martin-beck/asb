@@ -331,6 +331,15 @@ fn mini_swe_trajectory_counts_each_response_once() {
 }
 
 #[test]
+fn mini_swe_uses_complete_cassette_instead_of_untrusted_stdout() {
+    let cassette = chat_cassette(2);
+    let output = r#"{"usage":{"input_tokens":999,"output_tokens":888}}"#;
+    let usage = token_usage_from_sources("openrouter", "mini-swe", output, "", Some(&cassette.0));
+    assert_eq!(usage.source.as_deref(), Some("cassette"));
+    assert_usage(usage, 20, 6, Some(8));
+}
+
+#[test]
 fn goose_recording_includes_the_separate_title_call() {
     let cassette = chat_cassette(2);
     let output = "{\"metadata\":{\"input_tokens\":10,\"output_tokens\":3,\"cache_read_input_tokens\":4,\"total_tokens\":13}}";

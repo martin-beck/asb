@@ -2038,13 +2038,6 @@ mod tests {
                 10,
             ),
             (
-                "mini-swe",
-                r#"result {"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}"#,
-                7,
-                3,
-                10,
-            ),
-            (
                 "claude-code",
                 r#"{"type":"result","usage":{"input_tokens":17,"output_tokens":4,"cache_read_input_tokens":2,"total_tokens":21}}"#,
                 17,
@@ -2082,7 +2075,7 @@ mod tests {
     }
 
     #[test]
-    fn derives_mini_swe_total_from_complete_input_and_output() {
+    fn mini_swe_stdout_does_not_supply_untrusted_token_usage() {
         let usage = token_usage_from_sources(
             "cli2key",
             "mini-swe",
@@ -2090,9 +2083,9 @@ mod tests {
             "",
             None,
         );
-        assert_eq!(usage.input_tokens, Some(182398));
-        assert_eq!(usage.output_tokens, Some(4189));
-        assert_eq!(usage.total_tokens, Some(186587));
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.total_tokens, None);
     }
 
     #[test]

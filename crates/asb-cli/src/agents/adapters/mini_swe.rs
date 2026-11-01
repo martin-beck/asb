@@ -32,7 +32,15 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
         format: super::super::ArtifactFormat::Json,
     },
 ])
-.with_collection(collect);
+.with_collection(collect)
+.with_output_usage(output_usage);
+
+// Mini-SWE prints task and tool output as ordinary text; token-shaped data
+// in that stream has no authoritative usage boundary. Its trajectory and the
+// provider cassette are the structured sources of usage.
+fn output_usage(_: &str, _: &str, _: bool) -> crate::measurements::TokenUsage {
+    Default::default()
+}
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
         program: "mini".into(),
@@ -394,6 +402,21 @@ mod tests {
     use std::{collections::HashMap, process::Command};
 
     #[test]
+    fn stdout_task_json_is_not_usage_when_trajectory_has_no_usage() {
+        let task_output = r#"{"usage":{"input_tokens":999,"output_tokens":888}}"#;
+        let from_output =
+            crate::usage::from_sources("openrouter", "mini-swe", task_output, "", None);
+        let trajectory = trajectory_usage(
+            &serde_json::json!({"trajectory_format":"mini-swe-agent-1.1","messages":[]}),
+        );
+        let usage = crate::usage::with_artifact_usage(from_output, Some(trajectory));
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (None, None, None)
+        );
+    }
+
+    #[test]
     fn trajectory_task_content_is_not_provider_usage() {
         let trajectory = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1", "messages":[
             {"role":"user","content":"{\"usage\":{\"input_tokens\":999,\"output_tokens\":888}}"}
@@ -408,6 +431,9 @@ mod tests {
         assert_eq!(trajectory_usage(&malformed).total_tokens, None);
         let legacy = serde_json::json!({"input_tokens":13,"output_tokens":21});
         assert_eq!(trajectory_usage(&legacy).total_tokens, Some(34));
+        let stale_total =
+            serde_json::json!({"input_tokens":182398,"output_tokens":4189,"total_tokens":116});
+        assert_eq!(trajectory_usage(&stale_total).total_tokens, Some(186587));
         let legacy_wrapped = serde_json::json!({"usage":{"input_tokens":13,"output_tokens":21}});
         assert_eq!(trajectory_usage(&legacy_wrapped).total_tokens, Some(34));
     }
