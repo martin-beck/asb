@@ -67,41 +67,9 @@ fn final_response(output: &str, _: &Path) -> Option<String> {
     super::super::final_text_from_event(message)
 }
 
-fn execution_failure(stdout: &str, stderr: &str) -> Option<String> {
-    let mut terminal = None;
-    for event in stdout
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-    {
-        let message = if event["type"] == "turn_end" {
-            event.get("message")
-        } else if event["type"] == "agent_end" {
-            event
-                .get("messages")
-                .and_then(|messages| messages.as_array())
-                .and_then(|messages| {
-                    messages
-                        .iter()
-                        .rev()
-                        .find(|message| message["role"] == "assistant")
-                })
-        } else {
-            None
-        };
-        if let Some(reason) = message
-            .and_then(|message| message.get("stopReason"))
-            .and_then(|reason| reason.as_str())
-        {
-            terminal = Some(matches!(reason, "error" | "aborted"));
-        }
-    }
-    match terminal {
-        Some(true) => Some("agent reported a terminal API request failure or cancellation; inspect the private agent log".into()),
-        Some(false) => None,
-        None if stderr.lines().any(|line| line.starts_with("Authentication required. Please use /login command to sign in to your account")) =>
-            Some("agent reported an authentication failure; check its credentials and provider configuration".into()),
-        None => None,
-    }
+fn execution_failure(_: &str, stderr: &str) -> Option<String> {
+    stderr.lines().any(|line| line.starts_with("Authentication required. Please use /login command to sign in to your account"))
+        .then(|| "agent reported an authentication failure; check its credentials and provider configuration".to_owned())
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
@@ -190,6 +158,12 @@ mod execution_tests {
     use super::execution_failure;
 
     #[test]
+    fn text_answer_cannot_spoof_terminal_error() {
+        let answer = r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"error","errorMessage":"private"}]}"#;
+        assert!(execution_failure(answer, "").is_none());
+    }
+
+    #[test]
     fn text_answer_cannot_impersonate_turn_usage() {
         let answer = r#"{"type":"turn_end","usage":{"input":999,"output":888,"cacheRead":4}}"#;
         let usage = crate::usage::from_sources("openrouter", "pi", answer, "", None);
@@ -197,16 +171,6 @@ mod execution_tests {
             (usage.input_tokens, usage.output_tokens, usage.total_tokens),
             (None, None, None)
         );
-    }
-
-    #[test]
-    fn terminal_api_errors_are_failures_without_echoing_provider_bodies() {
-        let output = serde_json::json!({"type":"agent_end","messages":[{"role":"assistant",
-            "stopReason":"error","errorMessage":"400 private-provider-body"}]})
-        .to_string();
-        let failure = execution_failure(&output, "").unwrap();
-        assert!(failure.contains("API request"));
-        assert!(!failure.contains("private-provider-body"));
     }
 
     #[test]
@@ -683,7 +647,7 @@ mod tests {
                     r#"{"type":"turn_end","message":{"stopReason":"stop"}}"#,
                     diagnostic
                 )
-                .is_none()
+                .is_some()
         );
     }
 

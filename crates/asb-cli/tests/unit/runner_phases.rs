@@ -589,7 +589,15 @@ fn native_agent_outcome_uses_typed_terminal_error_and_ignores_task_text() {
         execution
             .agent_outcome("pi", Path::new("."), None)
             .failure
-            .is_some()
+            .is_none()
+    );
+    let failed_pi = evidence(1, false).agent_outcome("pi", Path::new("."), None);
+    assert!(
+        failed_pi
+            .failure
+            .as_deref()
+            .unwrap()
+            .contains("exit status: 1")
     );
 }
 

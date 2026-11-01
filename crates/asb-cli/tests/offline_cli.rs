@@ -2593,15 +2593,13 @@ fn pi_terminal_refusal_is_reported_without_using_tool_output() {
 #[cfg(unix)]
 #[test]
 fn replay_reports_agent_exit_and_zero_exit_fatal_output() {
-    for behavior in ["exit", "fatal", "api-error-event"] {
+    for behavior in ["exit", "fatal"] {
         let project = replay_project(1);
         let result = replay(&project, behavior, &[]);
         let expected = if behavior == "exit" {
             "agent exited unsuccessfully (exit status: 7)"
-        } else if behavior == "fatal" {
-            "agent reported an authentication failure"
         } else {
-            "agent reported a terminal API request failure"
+            "agent reported an authentication failure"
         };
         expect_failure(&result, expected);
         assert!(!stderr(&result).contains("fixture-secret"));
@@ -2632,6 +2630,14 @@ fn replay_reports_agent_exit_and_zero_exit_fatal_output() {
         );
         assert_tape_scratch_cleaned(&project);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn replay_does_not_classify_pi_text_as_an_error_event() {
+    let project = replay_project(1);
+    let result = replay(&project, "api-error-event", &[]);
+    expect_success(&result);
 }
 
 #[cfg(unix)]
