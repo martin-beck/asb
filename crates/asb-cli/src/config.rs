@@ -320,7 +320,7 @@ mod tests {
             .unwrap();
             std::fs::create_dir_all(root.join("workloads")).unwrap();
             crate::workloads::populate(&root.join("workloads")).unwrap();
-            setup_installables::seed(&root);
+            setup_installables::seed(&root, ".asb-tools");
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .current_dir(&root)
                 .env(CHILD, "1")

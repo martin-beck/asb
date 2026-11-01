@@ -1,7 +1,7 @@
 // Inert project-local executables for setup tests that do not exercise installs.
 use std::path::Path;
 
-pub fn seed(root: &Path) {
+pub fn seed(root: &Path, tools_dir: &str) {
     for (id, executable) in [
         ("pi", "pi"),
         ("cli2key", "codex-bridge"),
@@ -12,11 +12,7 @@ pub fn seed(root: &Path) {
         ("flamegraph", "flamegraph"),
         ("bpftrace", "bpftrace"),
     ] {
-        let path = root
-            .join(".asb-tools")
-            .join(id)
-            .join("bin")
-            .join(executable);
+        let path = root.join(tools_dir).join(id).join("bin").join(executable);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"fixture; never execute\n").unwrap();
         #[cfg(unix)]
