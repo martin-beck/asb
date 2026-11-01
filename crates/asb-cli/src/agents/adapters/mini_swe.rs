@@ -362,8 +362,37 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
         final_response: submitted_answer(document),
         token_usage: Some(trajectory_usage(document)),
         steps: trajectory_steps(document),
+        tool_call_count: trajectory_tool_calls(document),
         ..Default::default()
     }
+}
+
+fn trajectory_tool_calls(value: &serde_json::Value) -> Option<usize> {
+    if value.get("trajectory_format")?.as_str()? != "mini-swe-agent-1.1" {
+        return None;
+    }
+    let messages = value.get("messages")?.as_array()?;
+    if messages.last()?.get("role")?.as_str()? != "exit" {
+        return None;
+    }
+    messages.iter().try_fold(0usize, |sum, message| {
+        let role = message.get("role")?.as_str()?;
+        // Format errors are recorded as user messages carrying the provider
+        // response; rejected calls may be present there rather than in an
+        // assistant message, so the assistant-only count would be partial.
+        if message
+            .pointer("/extra/interrupt_type")
+            .and_then(|v| v.as_str())
+            == Some("FormatError")
+        {
+            return None;
+        }
+        if role != "assistant" {
+            return Some(sum);
+        }
+        let calls = message.get("tool_calls")?.as_array()?;
+        sum.checked_add(calls.len())
+    })
 }
 
 fn trajectory_steps(value: &serde_json::Value) -> Option<u64> {
@@ -446,6 +475,34 @@ mod tests {
                 std::path::Path::new(".")
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn tool_count_uses_only_assistant_trajectory_calls() {
+        let doc = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1","messages":[
+            {"role":"user", "content":"secret tool_calls"},
+            {"role":"assistant", "tool_calls":[{"function":{"arguments":"sensitive"}}]},
+            {"role":"tool", "content":"secret"},
+            {"role":"assistant", "tool_calls":[{}, {}]},
+            {"role":"exit"}
+        ]});
+        assert_eq!(super::trajectory_tool_calls(&doc), Some(3));
+        let empty = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1","messages":[{"role":"exit"}]});
+        assert_eq!(super::trajectory_tool_calls(&empty), Some(0));
+        let malformed = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1","messages":[{"role":"assistant","tool_calls":"invalid"},{"role":"exit"}]});
+        assert_eq!(super::trajectory_tool_calls(&malformed), None);
+        let missing = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1","messages":[{"role":"assistant"},{"role":"exit"}]});
+        assert_eq!(super::trajectory_tool_calls(&missing), None);
+        let unfinished = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1","messages":[{"role":"assistant","tool_calls":[{}]}]});
+        assert_eq!(super::trajectory_tool_calls(&unfinished), None);
+        let rejected_then_success = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1","messages":[{"role":"user","extra":{"interrupt_type":"FormatError","response":{"choices":[{"message":{"tool_calls":[{}]}}]}}},{"role":"assistant","tool_calls":[{}]},{"role":"exit"}]});
+        assert_eq!(super::trajectory_tool_calls(&rejected_then_success), None);
+        assert_eq!(
+            super::trajectory_tool_calls(
+                &serde_json::json!({"trajectory_format":"unknown","messages":[]})
+            ),
+            None
         );
     }
     use super::*;
