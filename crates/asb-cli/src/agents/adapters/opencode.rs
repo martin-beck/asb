@@ -54,6 +54,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 ])
 .with_collection(collect)
 .with_output_usage(output_usage)
+.with_final_response(final_response)
 .with_step_count(step_count)
 .with_state_environment_vars(&[
     "OPENCODE_CONFIG_CONTENT",
@@ -73,6 +74,50 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
         .try_into()
         .ok()?;
     (steps > 0).then_some(steps)
+}
+
+fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
+    let mut texts = std::collections::HashMap::<String, String>::new();
+    let mut final_answer = None;
+    for event in output
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    {
+        let kind = event.get("type").and_then(|v| v.as_str());
+        let part = event.get("part");
+        match kind {
+            Some("text") => {
+                if let (Some(id), Some(text)) = (
+                    part.and_then(|p| p.get("messageID"))
+                        .and_then(|v| v.as_str()),
+                    part.and_then(|p| p.get("text")).and_then(|v| v.as_str()),
+                ) {
+                    if !text.trim().is_empty() {
+                        texts.insert(id.to_owned(), text.to_owned());
+                    }
+                }
+                final_answer = None;
+            }
+            Some("step_finish") => {
+                final_answer = match (
+                    part.and_then(|p| p.get("messageID"))
+                        .and_then(|v| v.as_str()),
+                    part.and_then(|p| p.get("reason")).and_then(|v| v.as_str()),
+                ) {
+                    (Some(id), Some(reason))
+                        if !reason.is_empty()
+                            && !matches!(reason, "tool-calls" | "unknown" | "content-filter") =>
+                    {
+                        texts.get(id).cloned()
+                    }
+                    _ => None,
+                };
+            }
+            Some("step_start" | "tool_use" | "error") => final_answer = None,
+            _ => {}
+        }
+    }
+    final_answer
 }
 
 fn output_usage(stdout: &str, _stderr: &str, _: bool) -> crate::measurements::TokenUsage {
@@ -285,6 +330,27 @@ fn config(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn final_response_requires_matching_terminal_step() {
+        let text = r#"{"type":"text","part":{"messageID":"m1","text":"answer"}}"#;
+        let finish = r#"{"type":"step_finish","part":{"messageID":"m1","reason":"stop"}}"#;
+        let tools = r#"{"type":"step_finish","part":{"messageID":"m1","reason":"tool-calls"}}"#;
+        let wrong = r#"{"type":"step_finish","part":{"messageID":"m2","reason":"stop"}}"#;
+        let path = std::path::Path::new(".");
+        assert_eq!(
+            super::final_response(&format!("{text}\n{finish}"), path).as_deref(),
+            Some("answer")
+        );
+        for output in [
+            text.to_owned(),
+            format!("{text}\n{tools}"),
+            format!("{text}\n{wrong}"),
+            format!("{text}\n{finish}\n{{\"type\":\"error\"}}"),
+        ] {
+            assert!(super::final_response(&output, path).is_none(), "{output}");
+        }
+    }
+
     #[test]
     fn incomplete_stream_does_not_count_tool_input_as_usage() {
         let output = r#"{"type":"tool_use","part":{"type":"tool","state":{"status":"completed","input":{"tokens":{"input":999,"output":888}}}}}"#;
