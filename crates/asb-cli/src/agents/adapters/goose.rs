@@ -39,31 +39,9 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 
 // Goose JSON mode emits a pretty-printed conversation summary after the run.
 fn final_response(output: &str, _: &Path) -> Option<String> {
-    let mut summary = None;
-    for (index, _) in output.match_indices('{') {
-        let Some(Ok(document)) = serde_json::Deserializer::from_str(&output[index..])
-            .into_iter::<serde_json::Value>()
-            .next()
-        else {
-            continue;
-        };
-        if document
-            .get("messages")
-            .and_then(|v| v.as_array())
-            .is_some()
-            && document
-                .get("metadata")
-                .and_then(|v| v.as_object())
-                .is_some()
-        {
-            // Ambiguous summary documents are not attributable to this run.
-            if summary.is_some() {
-                return None;
-            }
-            summary = Some(document);
-        }
-    }
-    let summary = summary?;
+    // The pinned JSON mode prints one summary. Do not scan diagnostic text
+    // for lookalike objects: that could attribute unrelated data to the run.
+    let summary: serde_json::Value = serde_json::from_str(output).ok()?;
     if summary.pointer("/metadata/status").and_then(|v| v.as_str()) != Some("completed") {
         return None;
     }
@@ -321,11 +299,10 @@ mod tests {
                 .final_response(&format!("{output}\n{output}"), path)
                 .is_none()
         );
-        assert_eq!(
+        assert!(
             super::ADAPTER
                 .final_response(&format!("diagnostic\n{output}"), path)
-                .as_deref(),
-            Some("answer")
+                .is_none()
         );
     }
 
