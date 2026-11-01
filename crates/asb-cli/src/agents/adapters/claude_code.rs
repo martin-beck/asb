@@ -104,7 +104,11 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             "--output-format".into(),
             "json".into(),
             "--model".into(),
-            context.config.model.clone(),
+            // Claude Code accepts its stable model alias here.  The selected
+            // ASB model is supplied through its documented Sonnet default in
+            // `prepare_adapter`, which lets an Anthropic-compatible gateway
+            // receive non-Claude model identifiers verbatim.
+            "sonnet".into(),
             "--dangerously-skip-permissions".into(),
             context.prompt.into(),
         ],
@@ -134,6 +138,11 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
             "ANTHROPIC_BASE_URL",
             connection.base_url.trim_end_matches("/v1"),
         )
+        // Claude Code validates `--model` against its built-in lineup before
+        // opening the configured Anthropic-compatible endpoint.  Its
+        // documented gateway route binds the stable `sonnet` alias to this
+        // selected model, forwarding an OpenRouter identifier verbatim.
+        .env("ANTHROPIC_DEFAULT_SONNET_MODEL", context.model)
         .env_remove("CLAUDE_CODE_USE_BEDROCK")
         .env_remove("CLAUDE_CODE_USE_VERTEX");
     match connection.authentication {
@@ -395,6 +404,12 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "--dangerously-skip-permissions")
         );
+        assert!(
+            command
+                .args
+                .windows(2)
+                .any(|arguments| arguments == ["--model", "sonnet"])
+        );
     }
 
     #[test]
@@ -640,6 +655,7 @@ mod tests {
                 })
                 .collect::<std::collections::HashMap<_, _>>();
             assert_eq!(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:4242/api");
+            assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "fixture");
             match auth {
                 crate::endpoint::Authentication::Bearer => {
                     assert_eq!(env["ANTHROPIC_API_KEY"], "");
