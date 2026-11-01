@@ -118,6 +118,7 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
             "campaign-reservation-last",
             "campaign-admission",
             "pricing-preflight",
+            "pricing-replay-offline",
         ] {
             // The real capacity probe is intentionally exercised elsewhere.
             // This fixture has a separate assertion surface: continuation and
@@ -135,10 +136,15 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
             let mut fixture_path = std::ffi::OsString::from(fixture_bin.as_os_str());
             fixture_path.push(":");
             fixture_path.push(std::env::var_os("PATH").unwrap());
-            let child=Command::new(&executable)
+            let mut command = Command::new(&executable);
+            command
                 .args(["--exact","sweep::phases::tests::actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_reports","--nocapture"])
                 .isolated_env().env("PATH",fixture_path)
-                .env("ASB_RUNTIME_EXECUTABLE",&runtime).env("ASB_SWEEP_PHASE_CASE",case).output().unwrap();
+                .env("ASB_RUNTIME_EXECUTABLE",&runtime).env("ASB_SWEEP_PHASE_CASE",case);
+            if case == "pricing-replay-offline" {
+                command.env("OPENROUTER_API_KEY", "fixture-key");
+            }
+            let child = command.output().unwrap();
             assert!(
                 child.status.success(),
                 "{case}: {}\n{}",
@@ -294,11 +300,11 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
     FAIL_INITIAL.set(case == "initial");
     FAIL_COMPARE.set(case == "benchmark-output-compare");
     FAIL_FINAL.set(case == "json-final-seal");
-    FAIL_PRICING.set(case == "pricing-preflight");
+    FAIL_PRICING.set(case == "pricing-preflight" || case == "pricing-replay-offline");
     let mut writer = Writer {
         bytes: Vec::new(),
         first: case == "initial" || case == "history",
-        fail: case != "benchmark" && case != "resume-mode",
+        fail: case != "benchmark" && case != "resume-mode" && case != "pricing-replay-offline",
         failed: false,
         after: 0,
     };
@@ -306,16 +312,30 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
         manifest.to_str().unwrap(),
         Options {
             resume: case == "resume" || case == "resume-mode",
-            mode: if case == "resume-mode" {
+            mode: if case == "resume-mode" || case == "pricing-preflight" {
                 None
             } else {
                 options.mode
+            },
+            cassette_root: if case == "pricing-preflight" {
+                None
+            } else {
+                options.cassette_root
             },
             ..options
         },
         &mut writer,
     );
     assert!(lock::OutputLock::acquire(root, "sweep").is_ok());
+    if case == "pricing-replay-offline" {
+        outcome.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            2
+        );
+        assert!(root.join("results/sweep-comparison/report.html").is_file());
+        return;
+    }
     assert!(outcome.is_err(), "{case}");
     if case == "pricing-preflight" {
         assert!(
