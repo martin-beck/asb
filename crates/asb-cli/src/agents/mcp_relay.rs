@@ -367,6 +367,14 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
 }
 
 fn write_bundle(directory: &Path, output: &Path) -> Result<(), Error> {
+    write_bundle_with(directory, output, || {})
+}
+
+fn write_bundle_with(
+    directory: &Path,
+    output: &Path,
+    before_publish: impl FnOnce(),
+) -> Result<(), Error> {
     if output.exists() {
         return Err(Error::Run(
             "MCP relay bundle destination already exists".into(),
@@ -385,8 +393,14 @@ fn write_bundle(directory: &Path, output: &Path) -> Result<(), Error> {
     let stage = reserve_file(parent, name, "mcp-bundle")?;
     let result = (|| {
         write_reserved(&stage, &bytes)?;
-        fs::rename(&stage, output)
-            .map_err(|_| Error::Run("cannot publish MCP relay bundle without overwrite".into()))
+        before_publish();
+        fs::hard_link(&stage, output)
+            .map_err(|_| Error::Run("cannot publish MCP relay bundle without overwrite".into()))?;
+        fs::remove_file(&stage).map_err(|error| {
+            Error::Run(format!(
+                "MCP relay bundle was published, but staging cleanup failed: {error}"
+            ))
+        })
     })();
     if result.is_err() {
         let _ = fs::remove_file(&stage);
@@ -496,6 +510,14 @@ pub(crate) fn empty_bundle() -> Result<Vec<u8>, Error> {
 /// The destination must not already exist, so replay can never overwrite or
 /// merge host MCP evidence with a cassette-selected recording.
 pub(crate) fn materialize_bundle(bytes: &[u8], destination: &Path) -> Result<(), Error> {
+    materialize_bundle_with(bytes, destination, || {})
+}
+
+fn materialize_bundle_with(
+    bytes: &[u8],
+    destination: &Path,
+    before_publish: impl FnOnce(),
+) -> Result<(), Error> {
     let bundle = decode_bundle(bytes)?;
     if destination.exists() {
         return Err(Error::Run(
@@ -522,7 +544,8 @@ pub(crate) fn materialize_bundle(bytes: &[u8], destination: &Path) -> Result<(),
                 payload,
             )?;
         }
-        fs::rename(&stage, destination).map_err(|_| {
+        before_publish();
+        rename_directory_noreplace(&stage, destination).map_err(|_| {
             Error::Run("cannot publish complete MCP replay recording without overwrite".into())
         })?;
         Ok(())
@@ -675,6 +698,65 @@ fn reserve_stage(parent: &Path, name: &str) -> Result<PathBuf, Error> {
     }
     Err(Error::Run(
         "cannot reserve MCP replay recording destination".into(),
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(unsafe_code)]
+fn rename_directory_noreplace(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::other("invalid staging path"))?;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::other("invalid destination path"))?;
+    // SAFETY: both pointers refer to live, NUL-terminated filesystem paths.
+    #[cfg(target_os = "linux")]
+    let status = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(target_os = "macos")]
+    let status = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn rename_directory_noreplace(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileW(source: *const u16, target: *const u16) -> i32;
+    }
+    let mut source: Vec<u16> = source.as_os_str().encode_wide().collect();
+    let mut target: Vec<u16> = target.as_os_str().encode_wide().collect();
+    if source.contains(&0) || target.contains(&0) {
+        return Err(std::io::Error::other("path contains NUL"));
+    }
+    source.push(0);
+    target.push(0);
+    // SAFETY: both buffers are NUL-terminated and stay alive during the call.
+    if unsafe { MoveFileW(source.as_ptr(), target.as_ptr()) } != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn rename_directory_noreplace(_: &Path, _: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic no-replace directory publication is unavailable",
     ))
 }
 
@@ -1050,7 +1132,7 @@ impl Recorder {
             .map_err(crate::io_error)?;
         file.write_all(&bytes).map_err(crate::io_error)?;
         file.sync_all().map_err(crate::io_error)?;
-        fs::rename(&self.stage, &self.target).map_err(|_| {
+        rename_directory_noreplace(&self.stage, &self.target).map_err(|_| {
             Error::Run("cannot publish complete MCP relay recording without overwrite".into())
         })?;
         self.published = true;
@@ -1072,6 +1154,40 @@ mod tests {
     use std::io::Cursor;
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn concurrent_bundle_destination_is_never_overwritten() {
+        let record = replay_recording("bundle-racing-destination");
+        let output = record.parent().unwrap().join("racing.jsonl");
+        let result = write_bundle_with(&record, &output, || {
+            fs::write(&output, "other writer").unwrap()
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&output).unwrap(), "other writer");
+        fs::remove_dir_all(record.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn recording_does_not_replace_a_new_empty_destination_directory() {
+        let target = record_dir("record-racing-destination");
+        let mut recorder = Recorder::new(&target).unwrap();
+        fs::create_dir(&target).unwrap();
+        assert!(recorder.finish().is_err());
+        assert!(fs::read_dir(&target).unwrap().next().is_none());
+        drop(recorder);
+        fs::remove_dir_all(target.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn replay_does_not_replace_a_new_empty_destination_directory() {
+        let record = replay_recording("replay-racing-destination");
+        let bundle = bundle_recording(&record).unwrap();
+        let target = record.parent().unwrap().join("replay");
+        let result = materialize_bundle_with(&bundle, &target, || fs::create_dir(&target).unwrap());
+        assert!(result.is_err());
+        assert!(fs::read_dir(&target).unwrap().next().is_none());
+        fs::remove_dir_all(record.parent().unwrap()).unwrap();
+    }
 
     fn record_dir(name: &str) -> PathBuf {
         let root =
