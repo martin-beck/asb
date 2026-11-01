@@ -257,15 +257,14 @@ fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> 
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
     {
         if event.get("type").and_then(|v| v.as_str()) == Some("answer")
-            && event
+            && let Some(result_type) = event
                 .pointer("/payload/result_type")
                 .and_then(|v| v.as_str())
-                == Some("answer")
         {
             saw_typed_answer = true;
-            finalized = event
-                .pointer("/payload/output")
-                .and_then(|v| v.as_str())
+            finalized = (result_type == "answer")
+                .then(|| event.pointer("/payload/output").and_then(|v| v.as_str()))
+                .flatten()
                 .map(str::to_owned);
         }
         let target = match event.get("type").and_then(|v| v.as_str()) {
@@ -341,6 +340,8 @@ mod tests {
             r#"{"type":"answer","payload":{"result_type":"answer"}}"#,
             r#"{"type":"answer","payload":{"result_type":"answer","output":42}}"#,
             r#"{"type":"answer","payload":{"result_type":"answer","output":""}}"#,
+            r#"{"type":"answer","payload":{"result_type":"error","output":"failure"}}"#,
+            r#"{"type":"answer","payload":{"result_type":"interrupt","output":"interrupted"}}"#,
         ] {
             assert!(
                 super::final_response(
