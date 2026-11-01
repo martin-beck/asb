@@ -1,5 +1,6 @@
 """Offline regression for the native OpenHands launcher response boundary."""
 import importlib.util
+import json
 import pathlib
 import sys
 import types
@@ -73,4 +74,8 @@ class NativeFinalTest(unittest.TestCase):
             with self.subTest(events=events, status=status):
                 self.assertIsNone(launcher.final_agent_text(conversation(events, status)))
 
-if __name__ == '__main__': unittest.main()
+if __name__ == '__main__':
+    if sys.argv[1:] == ['--emit-empty-result']:
+        print(json.dumps({'type': 'result', 'text': launcher.final_agent_text(conversation([]))}))
+    else:
+        unittest.main()
