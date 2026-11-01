@@ -33,7 +33,26 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     },
 ])
 .with_collection(collect)
-.with_output_usage(output_usage);
+.with_output_usage(output_usage)
+.with_final_response(no_stdout_final_response);
+
+// The final answer comes from the submitted trajectory, not arbitrary stdout.
+fn no_stdout_final_response(_: &str, _: &std::path::Path) -> Option<String> {
+    None
+}
+
+fn submitted_answer(document: &serde_json::Value) -> Option<String> {
+    if document.get("trajectory_format")?.as_str()? != "mini-swe-agent-1.1"
+        || document.pointer("/info/exit_status")?.as_str()? != "Submitted"
+    {
+        return None;
+    }
+    document
+        .pointer("/info/submission")?
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
+}
 
 // Mini-SWE prints task and tool output as ordinary text; token-shaped data
 // in that stream has no authoritative usage boundary. Its trajectory and the
@@ -340,7 +359,7 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
         return AgentArtifacts::default();
     };
     AgentArtifacts {
-        final_response: super::super::final_text_from_event(document),
+        final_response: submitted_answer(document),
         token_usage: Some(trajectory_usage(document)),
         steps: trajectory_steps(document),
         ..Default::default()
@@ -397,6 +416,38 @@ fn trajectory_usage(value: &serde_json::Value) -> crate::measurements::TokenUsag
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_trajectory_does_not_grade_last_tool_output() {
+        let doc = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1","info":{"exit_status":"LimitsExceeded","submission":""},"messages":[{"role":"user","content":"tool output"}]});
+        let frozen = super::super::super::FrozenArtifacts::for_test("trajectory.json", doc);
+        let context = super::CollectionContext {
+            frozen: &frozen,
+            provider_capture: None,
+            run_dir: std::path::Path::new("."),
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        };
+        assert!(super::collect(&context).final_response.is_none());
+        let successful = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1","info":{"exit_status":"Submitted","submission":"final answer"},"messages":[{"role":"user","content":"tool output"}]});
+        let frozen = super::super::super::FrozenArtifacts::for_test("trajectory.json", successful);
+        let context = super::CollectionContext {
+            frozen: &frozen,
+            ..context
+        };
+        assert_eq!(
+            super::collect(&context).final_response.as_deref(),
+            Some("final answer")
+        );
+        assert!(
+            super::no_stdout_final_response(
+                r#"{"type":"final","text":"tool output"}"#,
+                std::path::Path::new(".")
+            )
+            .is_none()
+        );
+    }
     use super::*;
     use crate::agents::AgentAdapter;
     use std::{collections::HashMap, process::Command};
