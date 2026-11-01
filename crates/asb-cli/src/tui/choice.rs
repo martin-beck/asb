@@ -10,7 +10,7 @@ pub(super) enum ChoiceKey {
         workload: String,
         extension: String,
     },
-    AllBpftracePrograms,
+    AllCollectorOptions(String),
     Agent(String),
     Provider(String),
     Model {
@@ -23,7 +23,10 @@ pub(super) enum ChoiceKey {
         file: PathBuf,
     },
     Collector(String),
-    BpftraceProgram(String),
+    CollectorOption {
+        collector: String,
+        selection: String,
+    },
     Concurrency(usize),
     Trial(String),
     ExtensionValue {
@@ -41,7 +44,7 @@ impl ChoiceKey {
                 | Self::AllWorkloads
                 | Self::AllCollectors
                 | Self::AllExtension { .. }
-                | Self::AllBpftracePrograms
+                | Self::AllCollectorOptions(_)
         )
     }
     pub fn is_control(&self) -> bool {
@@ -51,16 +54,14 @@ impl ChoiceKey {
                 | Self::AllWorkloads
                 | Self::AllCollectors
                 | Self::AllExtension { .. }
-                | Self::AllBpftracePrograms
+                | Self::AllCollectorOptions(_)
         )
     }
     pub fn valid(&self) -> bool {
         let valid = |name: &str| crate::selection_names::validate(name, "selection").is_ok();
         match self {
-            Self::AllAgents
-            | Self::AllWorkloads
-            | Self::AllCollectors
-            | Self::AllBpftracePrograms => true,
+            Self::AllAgents | Self::AllWorkloads | Self::AllCollectors => true,
+            Self::AllCollectorOptions(collector) => valid(collector),
             Self::AllExtension {
                 workload,
                 extension,
@@ -69,8 +70,11 @@ impl ChoiceKey {
             | Self::Provider(name)
             | Self::Prompt(name)
             | Self::Collector(name)
-            | Self::BpftraceProgram(name)
             | Self::Trial(name) => valid(name),
+            Self::CollectorOption {
+                collector,
+                selection,
+            } => valid(collector) && !selection.is_empty(),
             Self::ExtensionValue {
                 workload,
                 extension,
@@ -108,9 +112,13 @@ impl ChoiceKey {
             None
         }
     }
-    pub fn bpftrace_program(&self) -> Option<&str> {
-        if let Self::BpftraceProgram(name) = self {
-            Some(name)
+    pub fn collector_option(&self) -> Option<(&str, &str)> {
+        if let Self::CollectorOption {
+            collector,
+            selection,
+        } = self
+        {
+            Some((collector, selection))
         } else {
             None
         }
@@ -147,7 +155,7 @@ pub(super) enum PaneKind {
     Measurements,
     Concurrency,
     Extensions,
-    BpftracePrograms,
+    CollectorOptions,
 }
 
 impl PaneKind {
@@ -182,13 +190,13 @@ impl PaneKind {
             Self::Measurements => "measurement",
             Self::Concurrency => "concurrency",
             Self::Extensions => "workload options",
-            Self::BpftracePrograms => "eBPF programs",
+            Self::CollectorOptions => "collector options",
         }
     }
     pub fn description(self) -> &'static str {
         match self {
             Self::Extensions => "Choose adapter-owned options for the selected workloads.",
-            Self::BpftracePrograms => "Choose the built-in eBPF programs to run with bpftrace.",
+            Self::CollectorOptions => "Choose adapter-owned collector options.",
             _ => DESCRIPTIONS[self.index()],
         }
     }

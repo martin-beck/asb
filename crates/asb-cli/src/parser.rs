@@ -58,12 +58,14 @@ pub(crate) fn completion_command() -> clap::Command {
                 .mut_arg("model", |arg| possible_owned(arg, models.clone()))
                 .mut_arg("measure", |arg| {
                     let mut values = crate::measurements::available_collectors();
-                    values.extend(
-                        std::iter::once("bpftrace:all".into()).chain(
-                            crate::collectors::bpftrace_profile_names()
-                                .map(|name| format!("bpftrace:{name}")),
-                        ),
-                    );
+                    for collector in crate::collectors::all() {
+                        if let Some(extension) = collector.selection_extension() {
+                            values.extend(extension.all_selection);
+                            values.extend(
+                                extension.options.into_iter().map(|option| option.selection),
+                            );
+                        }
+                    }
                     possible_owned(arg, values)
                 })
         })
@@ -88,8 +90,14 @@ pub(crate) fn completion_command() -> clap::Command {
                 })
         })
         .mut_subcommand("measure", |measure| {
-            measure.mut_subcommand("bpftrace", |bpftrace| {
-                bpftrace.mut_subcommand("programs", |programs| programs)
+            measure.mut_arg("name", |arg| {
+                possible(
+                    arg,
+                    crate::collectors::all()
+                        .iter()
+                        .filter(|adapter| adapter.selection_extension().is_some())
+                        .map(|adapter| adapter.id()),
+                )
             })
         })
 }
@@ -429,11 +437,12 @@ pub(crate) fn run_with_interactive(
                 "choose a workload command, or use `asb workload WORKLOAD trials`".into(),
             )),
         },
-        Some(CommandLine::Measure(options)) => match options.command {
-            None => list_measures(stdout),
-            Some(MeasureCommand::Bpftrace(args)) => match args.command {
-                BpftraceCommand::Programs => list_bpftrace_programs(stdout),
-            },
+        Some(CommandLine::Measure(options)) => match (options.name, options.command) {
+            (None, None) => list_measures(stdout),
+            (Some(name), Some(MeasureCommand::Programs)) => list_collector_options(&name, stdout),
+            _ => Err(Error::Input(
+                "use `asb measure` or `asb measure COLLECTOR programs`".into(),
+            )),
         },
     };
     match result {
@@ -451,7 +460,7 @@ fn close_command(args: &[OsString]) -> Option<&'static str> {
             args.get(1)?.to_str()?,
             &["list", "install", "trials", "tui", "recover"],
         ),
-        "measure" => (args.get(1)?.to_str()?, &["bpftrace"]),
+        "measure" => (args.get(2)?.to_str()?, &["programs"]),
         _ => (
             first,
             &[
@@ -575,11 +584,27 @@ fn list_measures(output: &mut dyn Write) -> Result<(), Error> {
     Ok(())
 }
 
-fn list_bpftrace_programs(output: &mut dyn Write) -> Result<(), Error> {
-    writeln!(output, "all\tall built-in eBPF programs")
-        .map_err(|error| Error::Io(error.to_string()))?;
-    for profile in crate::collectors::bpftrace_profiles() {
-        writeln!(output, "{}\t{}", profile.name, profile.description)
+fn list_collector_options(name: &str, output: &mut dyn Write) -> Result<(), Error> {
+    if crate::collectors::find(name).is_none() {
+        let names = crate::collectors::all()
+            .iter()
+            .map(|adapter| adapter.id())
+            .collect::<Vec<_>>();
+        return Err(Error::Input(crate::suggestions::unknown(
+            "collector",
+            name,
+            &names,
+        )));
+    }
+    let extension = crate::collectors::find(name)
+        .and_then(|adapter| adapter.selection_extension())
+        .ok_or_else(|| Error::Input(format!("collector `{name}` has no selectable programs; use `asb measure` to list collectors")))?;
+    if extension.all_selection.is_some() {
+        writeln!(output, "all\t{}", extension.all_description)
+            .map_err(|error| Error::Io(error.to_string()))?;
+    }
+    for option in extension.options {
+        writeln!(output, "{}\t{}", option.label, option.description)
             .map_err(|error| Error::Io(error.to_string()))?;
     }
     Ok(())
@@ -1152,21 +1177,15 @@ struct WorkloadDescribeArgs {
 }
 #[derive(Debug, Args)]
 struct MeasureArgs {
+    /// Collector whose available programs will be listed.
+    #[arg(value_name = "COLLECTOR")]
+    name: Option<String>,
     #[command(subcommand)]
     command: Option<MeasureCommand>,
 }
 #[derive(Debug, Subcommand)]
 enum MeasureCommand {
-    Bpftrace(BpftraceMeasureArgs),
-}
-#[derive(Debug, Args)]
-struct BpftraceMeasureArgs {
-    #[command(subcommand)]
-    command: BpftraceCommand,
-}
-#[derive(Debug, Subcommand)]
-enum BpftraceCommand {
-    /// List built-in eBPF programs selectable as bpftrace:PROGRAM.
+    /// List the collector's selectable programs.
     Programs,
 }
 #[derive(Debug, Args)]

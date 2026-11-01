@@ -1,5 +1,6 @@
 use super::super::{
     ArtifactDisplay, CollectorAdapter, GraphSection, PreflightContext, ProcessContext, ProcessData,
+    SelectionExtension, SelectionOption,
 };
 use crate::measurements;
 use std::fmt::Write as _;
@@ -31,6 +32,24 @@ impl CollectorAdapter for BpftraceCollector {
                         .iter()
                         .any(|candidate| candidate.name == profile)
             })
+    }
+    fn selection_extension(&self) -> Option<SelectionExtension> {
+        Some(SelectionExtension {
+            tab: "eBPF programs",
+            description: "Choose the built-in eBPF programs to run with bpftrace.",
+            all_selection: Some(format!("{}:all", self.id())),
+            all_description: "all built-in eBPF programs",
+            required: true,
+            options: BPFTRACE_PROFILES
+                .iter()
+                .map(|profile| SelectionOption {
+                    selection: format!("{}:{}", self.id(), profile.name),
+                    label: profile.name,
+                    description: profile.description,
+                    default: profile.default_selection,
+                })
+                .collect(),
+        })
     }
     fn environment_flag(&self) -> Option<&'static str> {
         Some("ASB_MEASURE_BPFTRACE")
@@ -550,12 +569,6 @@ const BPFTRACE_PROFILES: &[BpftraceProfile] = &[
 /// `ASB_BPFTRACE_PROFILES=PROFILE,...`.
 pub fn bpftrace_profile_names() -> impl Iterator<Item = &'static str> {
     BPFTRACE_PROFILES.iter().map(|profile| profile.name)
-}
-
-/// Stable built-in programs shown by the CLI and setup wizard. The program
-/// text remains adapter-private: callers choose only these identifiers.
-pub(crate) fn bpftrace_profiles() -> &'static [BpftraceProfile] {
-    BPFTRACE_PROFILES
 }
 
 pub(crate) fn selected_bpftrace_profiles(
