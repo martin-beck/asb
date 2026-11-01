@@ -631,6 +631,9 @@ fn unknown_commands_suggest_the_intended_command() {
 #[test]
 fn invalid_run_and_sweep_flags_fail_before_execution() {
     let project = Project::new();
+    project.init();
+    let workspace = project.0.join("asb-workspace");
+    assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 0);
     for (args, message) in [
         (
             vec!["run", "missing.toml", "--cassette", "x"],
@@ -655,7 +658,7 @@ fn invalid_run_and_sweep_flags_fail_before_execution() {
     ] {
         expect_failure(&project.command(&args), message);
     }
-    assert!(!project.0.join("asb-workspace").exists());
+    assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 0);
 }
 
 #[test]
@@ -805,6 +808,7 @@ fn missing_local_install_sources_fail_without_provider_access() {
 #[test]
 fn sweep_rejects_invalid_manifests_and_unsafe_references() {
     let project = Project::new();
+    project.init();
     for (name, content, message) in [
         ("empty.toml", "configs = []\n", "contains no benchmark"),
         (
@@ -842,6 +846,7 @@ fn sweep_rejects_invalid_manifests_and_unsafe_references() {
 #[test]
 fn sweep_admission_errors_preserve_existing_outputs_and_reject_unbounded_replicas() {
     let project = Project::new();
+    project.init();
     project.write("sweep.toml", "configs=['benchmark.toml']\n");
     project.write(
         "benchmark.toml",
@@ -928,6 +933,7 @@ fn sweep_rejects_nested_sweeps_before_execution_or_comparison() {
 #[test]
 fn competing_sweep_leaves_existing_results_and_reports_untouched() {
     let project = Project::new();
+    project.init();
     project.write("sweep.toml", "configs=['benchmark.toml']\n");
     // A valid referenced path, deliberately malformed configuration: output
     // exclusion must happen before planning, archival or any runtime work.
@@ -3831,6 +3837,7 @@ fn provider_models_fetches_all_authenticated_catalog_pages() {
         ),
     ] {
         let project = Project::new();
+        project.init();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base = format!("http://{}/v1beta", listener.local_addr().unwrap());
@@ -3950,6 +3957,7 @@ fn catalog_diagnostics_distinguish_http_html_and_truncated_json_without_secrets(
         ),
     ] {
         let project = Project::new();
+        project.init();
         let (base, server) = serve_catalog(status, content_type, body.as_bytes().to_vec());
         let output = project.command_with_env(
             &["provider", "models", "openrouter"],
@@ -3981,6 +3989,7 @@ fn catalog_diagnostics_distinguish_http_html_and_truncated_json_without_secrets(
 #[test]
 fn catalog_above_one_mib_is_fully_enumerated() {
     let project = Project::new();
+    project.init();
     let padding = "a".repeat(1_100_000);
     let body = format!(
         "{{\"data\":[{{\"id\":\"first\",\"description\":\"{padding}\"}},{{\"id\":\"second\"}}]}}"
@@ -4002,6 +4011,7 @@ fn catalog_above_one_mib_is_fully_enumerated() {
 #[test]
 fn oversized_catalog_reports_limit_instead_of_invalid_json() {
     let project = Project::new();
+    project.init();
     let (base, server) = serve_catalog(200, "application/json", vec![b'x'; 16 * 1024 * 1024 + 1]);
     let output = project.command_with_env(
         &["provider", "models", "openrouter"],
@@ -4022,6 +4032,8 @@ fn oversized_catalog_reports_limit_instead_of_invalid_json() {
 #[test]
 fn chunked_catalog_is_bounded_even_without_content_length() {
     use std::io::{Read, Write};
+    let project = Project::new();
+    project.init();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -4059,7 +4071,6 @@ fn chunked_catalog_is_bounded_even_without_content_length() {
         }
         let _ = stream.write_all(b"0\r\n\r\n");
     });
-    let project = Project::new();
     let output = project.command_with_env(
         &["provider", "models", "openrouter"],
         &[
@@ -4114,6 +4125,7 @@ fn run_reports_catalog_http_failure_before_agent_starts() {
 #[test]
 fn catalog_connection_failure_reports_curl_code_without_proxy_credentials() {
     let project = Project::new();
+    project.init();
     let output = project.command_with_env(
         &["provider", "models", "openrouter"],
         &[
@@ -4139,6 +4151,8 @@ fn catalog_connection_failure_reports_curl_code_without_proxy_credentials() {
 #[test]
 fn together_provider_models_accepts_documented_array_response() {
     use std::io::{Read, Write};
+    let project = Project::new();
+    project.init();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -4171,7 +4185,6 @@ fn together_provider_models_accepts_documented_array_response() {
         .unwrap();
         String::from_utf8_lossy(&request[..len]).into_owned()
     });
-    let project = Project::new();
     let result = project.command_with_env(
         &["provider", "models", "together", "--json"],
         &[
@@ -4922,6 +4935,8 @@ fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'applicati
         let output = project.command_in_with_env(
             &outside.0,
             &[
+                "--project-dir",
+                project.0.to_str().unwrap(),
                 "run",
                 benchmark.to_str().unwrap(),
                 "--record",
