@@ -176,10 +176,10 @@ impl<'a> PreparedSweep<'a> {
                 )?;
             }
         }
-        // Fetch dynamic price schedules while the prior results directory is
-        // still untouched. A transient catalog failure is preflight failure,
-        // not a reason to rotate a user's completed output into history.
-        let pricing_snapshots = if options.resume {
+        // Live/record pricing is captured before rotating old results. Replay
+        // is offline and must not fetch today's unrelated prices. Existing
+        // snapshots remain with their original results in sweep history.
+        let pricing_snapshots = if options.resume || mode == Some(crate::tape::Mode::Replay) {
             Vec::new()
         } else {
             capture_pricing_snapshots(&plan)?
