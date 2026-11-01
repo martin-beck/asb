@@ -76,3 +76,65 @@ fn concurrent_server_starts_keep_latest_state_and_report() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn failed_start_does_not_leave_late_server_running() {
+    let root = std::env::temp_dir().join(format!(
+        "asb-http-startup-custody-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(root.join(".asb")).unwrap();
+    fs::create_dir_all(root.join("results")).unwrap();
+    fs::create_dir_all(root.join("tools/http/bin")).unwrap();
+    fs::write(
+        root.join(".asb/project.toml"),
+        "tools_dir='tools'\nworkloads_dir='workloads'\nworkspace_dir='workspace'\n",
+    )
+    .unwrap();
+    fs::write(root.join("results/report.html"), "fixture").unwrap();
+    let server = root.join("tools/http/bin/http-server");
+    fs::write(&server, format!("#!/usr/bin/python3\nimport os,time\nopen({:?},'w').write(str(os.getpid())+' '+str(os.getppid()))\ntime.sleep(30)\n", root.join("pid").to_string_lossy())).unwrap();
+    fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut parent = Command::new(env!("CARGO_BIN_EXE_asb"))
+        .current_dir(&root)
+        .env("ASB_HTTP_PUBLIC_HOST", "127.0.0.1")
+        .args(["tool", "http", "start"])
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !root.join("pid").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let identities = fs::read_to_string(root.join("pid")).unwrap();
+    let mut ids = identities
+        .split_whitespace()
+        .map(|value| value.parse::<u32>().unwrap());
+    let pid = ids.next().unwrap();
+    let wrapper = ids.next().unwrap();
+    parent.kill().unwrap();
+    parent.wait().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let proc_path = format!("/proc/{pid}");
+    while std::path::Path::new(&proc_path).exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let alive = std::path::Path::new(&proc_path).exists();
+    if alive {
+        let _ = Command::new("kill")
+            .args(["-KILL", &wrapper.to_string()])
+            .status();
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+    }
+    fs::remove_dir_all(root).unwrap();
+    assert!(
+        !alive,
+        "failed startup left its owned server process running"
+    );
+}
