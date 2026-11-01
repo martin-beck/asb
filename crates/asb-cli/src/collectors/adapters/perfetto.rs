@@ -6,13 +6,18 @@ use crate::measurements;
 mod bootstrap;
 mod service;
 mod state_summary;
-pub(crate) use bootstrap::entry as bootstrap_entry;
 use service::Service;
 use std::sync::Arc;
 pub(super) struct PerfettoCollector;
 pub(super) static ADAPTER: PerfettoCollector = PerfettoCollector;
 
 impl CollectorAdapter for PerfettoCollector {
+    fn private_service_aliases(&self) -> &'static [&'static str] {
+        &["__asb-perfetto-probes"]
+    }
+    fn private_service_entry(&self, args: &[std::ffi::OsString]) -> Option<std::process::ExitCode> {
+        Some(bootstrap::entry(args))
+    }
     fn estimated_disk_mib(&self) -> u64 {
         1024
     }
