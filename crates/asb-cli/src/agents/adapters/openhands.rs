@@ -33,7 +33,14 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_artifact_specs(ARTIFACTS)
 .with_collection(collect)
 .with_bridge_entry(super::openhands_native::entry)
-.with_bridge_aliases(&["__asb-openhands-native-bridge"]);
+.with_bridge_aliases(&["__asb-openhands-native-bridge"])
+.with_output_usage(output_usage);
+
+// The CLI emits individual events, including arbitrary observation content;
+// per-call usage comes from conversation state or the provider cassette.
+fn output_usage(_: &str, _: &str, _: bool) -> crate::measurements::TokenUsage {
+    Default::default()
+}
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     if let Some(mode) = context.native_tool_mode {
         let native = context.native_tool;
@@ -237,6 +244,16 @@ fn conversation_usage(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tool_event_content_is_not_usage_when_state_is_missing() {
+        let output = r#"{"kind":"ObservationEvent","content":"{\"usage\":{\"input_tokens\":999,\"output_tokens\":888}}"}"#;
+        let output_usage = crate::usage::from_sources("openrouter", "openhands", output, "", None);
+        let usage = crate::usage::with_artifact_usage(output_usage, None);
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (None, None, None)
+        );
+    }
     use super::*;
     use crate::agents::AgentAdapter;
     use std::process::Command;

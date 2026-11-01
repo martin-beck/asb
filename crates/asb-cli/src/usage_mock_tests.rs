@@ -409,6 +409,15 @@ fn continue_prefers_cassette_to_usage_shaped_json_answer() {
 }
 
 #[test]
+fn openhands_uses_complete_cassette_not_task_event() {
+    let cassette = chat_cassette(2);
+    let output = serde_json::json!({"kind":"ObservationEvent","content":"{\"usage\":{\"input_tokens\":999,\"output_tokens\":888}}"}).to_string();
+    let usage = token_usage_from_sources("openrouter", "openhands", &output, "", Some(&cassette.0));
+    assert_eq!(usage.source.as_deref(), Some("cassette"));
+    assert_usage(usage, 20, 6, Some(8));
+}
+
+#[test]
 fn incomplete_recordings_are_not_reported_as_complete_totals() {
     let complete = chat_cassette(1);
     let truncated = serde_json::json!({"request":{"url":"/v1/chat/completions"},"response":{"status":200,"body":"data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3}}\n\n"}});
