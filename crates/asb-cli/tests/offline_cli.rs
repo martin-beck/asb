@@ -2144,8 +2144,9 @@ fn standalone_compare_reports_actual_replay_logs_and_capture_overrides() {
             let output = replay(&project, "success", options);
             assert!(
                 output.status.success(),
-                "replay fixture failed: {}",
-                replay_failure_diagnostic(&output.stdout, &output.stderr, output.status.code())
+                "replay fixture failed: {}; {}",
+                replay_failure_diagnostic(&output.stdout, &output.stderr, output.status.code()),
+                replay_gate_log_diagnostic(&project.0)
             );
             expect_success(&project.command(&["compare", "benchmark.toml"]));
             let directory = project.0.join("results/benchmark-comparison");
@@ -2202,6 +2203,46 @@ fn replay_failure_diagnostic(stdout: &[u8], stderr: &[u8], status: Option<i32>) 
 }
 
 #[cfg(unix)]
+fn replay_gate_log_diagnostic(root: &std::path::Path) -> String {
+    use std::io::Read;
+    let directory = root.join("results/benchmark-runs/run-001");
+    let mut entries = Vec::new();
+    for name in ["run.log", "run-concurrency-1.log", "run-concurrency-2.log"] {
+        let mut bytes = Vec::new();
+        if std::fs::File::open(directory.join(name))
+            .and_then(|file| file.take(65_536).read_to_end(&mut bytes))
+            .is_ok()
+        {
+            entries.push(replay_gate_log_entry(&bytes));
+        }
+    }
+    format!("gate_logs={entries:?}")
+}
+
+#[cfg(unix)]
+fn replay_gate_log_entry(bytes: &[u8]) -> String {
+    let record = serde_json::from_slice::<serde_json::Value>(bytes).ok();
+    let code = record
+        .as_ref()
+        .and_then(|record| record.get("exit_code"))
+        .and_then(|value| value.as_i64())
+        .filter(|code| (0..=255).contains(code));
+    let stderr = record
+        .as_ref()
+        .and_then(|record| record.get("stderr"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let gate_error = stderr.contains("asb process gate:");
+    let missing = gate_error
+        && (stderr.contains("No such file or directory") || stderr.contains("os error 2"));
+    let permission =
+        gate_error && (stderr.contains("Permission denied") || stderr.contains("os error 13"));
+    format!(
+        "carrier_code={code:?},gate_error={gate_error},missing={missing},permission={permission}"
+    )
+}
+
+#[cfg(unix)]
 #[test]
 fn replay_failure_diagnostic_is_bounded_and_does_not_expose_contents() {
     let stdout = br#"{"process_termination_diagnostic":"malformed","failure_reason":"replay consumed 0 of 1 cassette requests secret-token /private/path"}"#;
@@ -2217,6 +2258,9 @@ fn replay_failure_diagnostic_is_bounded_and_does_not_expose_contents() {
     );
     assert!(unknown.contains("termination=other-or-absent"));
     assert!(!unknown.contains("secret-token"));
+    let entry = replay_gate_log_entry(br#"{"exit_code":127,"stderr":"asb process gate: No such file or directory /private/secret"}"#);
+    assert!(entry.contains("carrier_code=Some(127)") && entry.contains("missing=true"));
+    assert!(!entry.contains("/private/secret"));
 }
 
 #[cfg(unix)]
