@@ -99,22 +99,22 @@ fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
                     part.and_then(|p| p.get("messageID"))
                         .and_then(|v| v.as_str()),
                     part.and_then(|p| p.get("text")).and_then(|v| v.as_str()),
-                ) {
-                    if !text.trim().is_empty() {
-                        let parts = texts
-                            .entry((session.to_owned(), id.to_owned()))
-                            .or_default();
-                        let part_id = part
-                            .and_then(|p| p.get("id"))
-                            .and_then(|v| v.as_str())
-                            .map(str::to_owned);
-                        if let Some(existing) = part_id.as_ref().and_then(|id| {
-                            parts.iter_mut().find(|(key, _)| key.as_ref() == Some(id))
-                        }) {
-                            existing.1 = text.to_owned();
-                        } else {
-                            parts.push((part_id, text.to_owned()));
-                        }
+                ) && !text.trim().is_empty()
+                {
+                    let parts = texts
+                        .entry((session.to_owned(), id.to_owned()))
+                        .or_default();
+                    let part_id = part
+                        .and_then(|p| p.get("id"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+                    if let Some(existing) = part_id
+                        .as_ref()
+                        .and_then(|id| parts.iter_mut().find(|(key, _)| key.as_ref() == Some(id)))
+                    {
+                        existing.1 = text.to_owned();
+                    } else {
+                        parts.push((part_id, text.to_owned()));
                     }
                 }
                 final_answer = None;
