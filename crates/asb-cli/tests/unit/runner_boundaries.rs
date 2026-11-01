@@ -326,6 +326,7 @@ fs.writeFileSync(root+'/arrived-'+replica,'ready');
  const response=await fetch(process.env.OPENAI_BASE_URL+'/chat/completions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
  if(!response.ok)throw new Error('fixture replay request');
  await response.text();
+ fs.writeFileSync(process.env.ASB_PI_SUMMARY_PATH,JSON.stringify({schema_version:1,completed:true,steps:1,usage_complete:false,final_answer:'src/cli.py src/registry.py lookup'}));
  console.log(JSON.stringify({type:'agent_end',messages:[{role:'assistant',content:[{type:'text',text:'src/cli.py src/registry.py lookup'}]}]}));
 })().catch(error=>{console.error(error.message);process.exitCode=9;});
 "#.replace("NODE_PLACEHOLDER",node.to_str().unwrap()).replace("ROOT_PLACEHOLDER",&serde_json::to_string(root).unwrap());
