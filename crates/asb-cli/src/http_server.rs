@@ -218,13 +218,24 @@ fn serve(state_path: &Path, mut state: State) -> Result<(), Error> {
             .args(server_args(port))
             .arg(&state.publication)
             .stdin(Stdio::null())
+            .env("FORCE_COLOR", "0")
+            .env("NO_COLOR", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| {
                 Error::Run(format!("cannot start project-local http-server: {error}"))
             })?;
-        if !wait_for_port(port, &mut child) {
+        let (activity_tx, activity_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        if let Some(stream) = child.stdout.take() {
+            watch_requests(stream, activity_tx.clone(), Some(ready_tx));
+        }
+        if let Some(stream) = child.stderr.take() {
+            watch_requests(stream, activity_tx.clone(), None);
+        }
+        drop(activity_tx);
+        if !wait_for_ready(&mut child, &ready_rx, START_TIMEOUT) {
             let _ = child.kill();
             let _ = child.wait();
             continue;
@@ -233,14 +244,6 @@ fn serve(state_path: &Path, mut state: State) -> Result<(), Error> {
         state.pid = Some(child.id());
         state.control = Some(control_address.clone());
         write_state(state_path, &state)?;
-        let (activity_tx, activity_rx) = mpsc::channel();
-        if let Some(stream) = child.stdout.take() {
-            watch_requests(stream, activity_tx.clone());
-        }
-        if let Some(stream) = child.stderr.take() {
-            watch_requests(stream, activity_tx.clone());
-        }
-        drop(activity_tx);
         let mut last_served = Instant::now();
         loop {
             if child.try_wait().map_err(crate::io_error)?.is_some() {
@@ -303,16 +306,21 @@ fn server_args(port: u16) -> Vec<String> {
     .to_vec()
 }
 
-fn wait_for_port(port: u16, child: &mut std::process::Child) -> bool {
-    let deadline = Instant::now() + START_TIMEOUT;
+fn wait_for_ready(
+    child: &mut std::process::Child,
+    ready: &mpsc::Receiver<()>,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_ok() {
-            return true;
-        }
         if child.try_wait().ok().flatten().is_some() {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        match ready.recv_timeout(Duration::from_millis(20)) {
+            Ok(()) => return child.try_wait().is_ok_and(|status| status.is_none()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
     }
     false
 }
@@ -427,9 +435,20 @@ fn copy_report_assets(
     Ok(())
 }
 
-fn watch_requests(stream: impl Read + Send + 'static, sender: mpsc::Sender<()>) {
+fn watch_requests(
+    stream: impl Read + Send + 'static,
+    sender: mpsc::Sender<()>,
+    ready: Option<mpsc::Sender<()>>,
+) {
     std::thread::spawn(move || {
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
+            // http-server 14.1.1 emits this line from its listen callback,
+            // only after its own listener has successfully bound the port.
+            if line.starts_with("Starting up http-server, serving ")
+                && let Some(ready) = &ready
+            {
+                let _ = ready.send(());
+            }
             if line.contains("GET ") || line.contains("HEAD ") {
                 let _ = sender.send(());
             }
@@ -634,6 +653,40 @@ fn percent_encode_path(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreign_listener_cannot_make_an_unrelated_server_child_ready() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let (_sender, receiver) = mpsc::channel();
+        let ready = wait_for_ready(&mut child, &receiver, Duration::from_millis(100));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            !ready,
+            "a foreign listener cannot prove this child bound the port"
+        );
+        drop(listener);
+    }
+
+    #[test]
+    fn owned_child_listen_callback_is_required_for_readiness() {
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "printf 'Starting up http-server, serving fixture\\n'; exec sleep 30",
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (activity, _events) = mpsc::channel();
+        let (ready, receiver) = mpsc::channel();
+        watch_requests(child.stdout.take().unwrap(), activity, Some(ready));
+        let admitted = wait_for_ready(&mut child, &receiver, Duration::from_secs(2));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(admitted);
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
