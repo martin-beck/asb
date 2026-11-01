@@ -106,11 +106,23 @@ fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::Tok
             _ => None,
         }
     }
-    serde_json::from_str::<serde_json::Value>(stdout)
-        .ok()
-        .and_then(|v| result(&v))
-        .unwrap_or_else(|| crate::usage::usage_from_text(&format!("{stdout}\n{stderr}")))
-        .with_derived_total()
+    fn native_event(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Array(events) => events.iter().any(native_event),
+            serde_json::Value::Object(event) => matches!(
+                event.get("type").and_then(|v| v.as_str()),
+                Some("result" | "message")
+            ),
+            _ => false,
+        }
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout)
+        && native_event(&value)
+    {
+        // Do not parse task or tool contents if a native result has no usage.
+        return result(&value).unwrap_or_default().with_derived_total();
+    }
+    crate::usage::usage_from_text(&format!("{stdout}\n{stderr}")).with_derived_total()
 }
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
@@ -253,6 +265,13 @@ fn configure(directory: &std::path::Path, model: &str, base_url: &str) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn result_without_usage_does_not_count_task_payload() {
+        let output =
+            r#"{"type":"result","result":{"usage":{"input_tokens":999,"output_tokens":888}}}"#;
+        assert!(!super::output_usage(output, "", false).any());
+    }
+
     use super::*;
     use crate::agents::AgentAdapter;
     use std::io::{Read, Write};
