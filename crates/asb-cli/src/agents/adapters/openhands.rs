@@ -63,10 +63,15 @@ fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
     }
     for event in events.iter().rev() {
         let kind = event.get("kind").and_then(|v| v.as_str());
-        if kind == Some("ConversationErrorEvent") {
+        let source = event.get("source").and_then(|v| v.as_str());
+        if matches!(
+            kind,
+            Some("ConversationErrorEvent" | "UserRejectObservation")
+        ) || (kind == Some("MessageEvent") && source == Some("user"))
+        {
             return None;
         }
-        if event.get("source").and_then(|v| v.as_str()) != Some("agent") {
+        if source != Some("agent") {
             continue;
         }
         match kind {
@@ -328,6 +333,17 @@ mod tests {
         );
         let user = r#"{"kind":"MessageEvent","source":"user","llm_message":{"role":"user","content":[{"type":"text","text":"prompt"}]}}"#;
         assert!(super::ADAPTER.final_response(user, path).is_none());
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{event}\n{user}"), path)
+                .is_none()
+        );
+        let rejected = r#"{"kind":"UserRejectObservation","source":"environment","tool_name":"finish","action_id":"a"}"#;
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("{event}\n{rejected}"), path)
+                .is_none()
+        );
         assert!(
             super::ADAPTER
                 .final_response(&format!("{text}\n{tool}"), path)
