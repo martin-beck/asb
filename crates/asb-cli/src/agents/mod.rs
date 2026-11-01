@@ -51,6 +51,10 @@ pub(crate) fn openhands_native_entry(args: &[std::ffi::OsString]) -> std::proces
 pub(crate) const REPLAY_INPUT_CONTRACT: &str = "asb-agent-input-and-session-v1";
 
 pub(crate) trait AgentAdapter: Sync {
+    /// Conservative per-attempt storage estimate for this agent's artifacts.
+    fn estimated_disk_mib(&self) -> u64 {
+        512
+    }
     /// Invocation inputs actually supported by this ASB adapter's transport.
     fn input_modalities(&self) -> &'static [&'static str] {
         &["text"]
@@ -470,6 +474,7 @@ type WorkspaceCapsuleApplyHook = fn(&Path, &[u8]) -> Result<(), Error>;
 /// Trait-object implementation whose behavior is supplied by individual files.
 pub(super) struct StaticAdapter {
     id: &'static str,
+    estimated_disk_mib: u64,
     executable: &'static str,
     recipe: Recipe,
     supported_endpoints: &'static [Support],
@@ -502,6 +507,10 @@ pub(super) struct StaticAdapter {
     execution_identity: ExecutionIdentity,
 }
 impl StaticAdapter {
+    pub(super) const fn with_estimated_disk_mib(mut self, mib: u64) -> Self {
+        self.estimated_disk_mib = mib;
+        self
+    }
     pub(super) const fn new(
         id: &'static str,
         executable: &'static str,
@@ -512,6 +521,7 @@ impl StaticAdapter {
     ) -> Self {
         Self {
             id,
+            estimated_disk_mib: 512,
             executable,
             recipe,
             supported_endpoints,
@@ -704,6 +714,9 @@ impl StaticAdapter {
     }
 }
 impl AgentAdapter for StaticAdapter {
+    fn estimated_disk_mib(&self) -> u64 {
+        self.estimated_disk_mib
+    }
     fn guest_private_assets(&self) -> &'static [GuestPrivateAsset] {
         self.guest_private_assets
     }

@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub(crate) fn estimated_disk_mib(name: &str) -> u64 {
+    adapters::find(name).map_or(1024, |adapter| adapter.estimated_disk_mib())
+}
+
 mod adapters;
 pub(crate) mod contracts;
 mod evaluation;

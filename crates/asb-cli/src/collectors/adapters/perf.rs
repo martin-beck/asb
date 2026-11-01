@@ -56,6 +56,9 @@ pub(super) struct PerfCollector;
 pub(super) static ADAPTER: PerfCollector = PerfCollector;
 
 impl CollectorAdapter for PerfCollector {
+    fn estimated_disk_mib(&self) -> u64 {
+        512
+    }
     fn id(&self) -> &'static str {
         "perf"
     }

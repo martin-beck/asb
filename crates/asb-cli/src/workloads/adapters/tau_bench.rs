@@ -34,6 +34,9 @@ pub(super) struct TauBenchAdapter;
 pub(super) static ADAPTER: TauBenchAdapter = TauBenchAdapter;
 
 impl WorkloadAdapter for TauBenchAdapter {
+    fn estimated_disk_mib(&self) -> u64 {
+        2048
+    }
     fn id(&self) -> &'static str {
         "tau-bench"
     }

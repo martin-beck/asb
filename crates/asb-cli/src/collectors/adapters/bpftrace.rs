@@ -14,6 +14,9 @@ pub(super) struct BpftraceCollector;
 pub(super) static ADAPTER: BpftraceCollector = BpftraceCollector;
 
 impl CollectorAdapter for BpftraceCollector {
+    fn estimated_disk_mib(&self) -> u64 {
+        768
+    }
     fn id(&self) -> &'static str {
         "bpftrace"
     }

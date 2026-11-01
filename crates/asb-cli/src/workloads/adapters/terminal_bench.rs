@@ -27,6 +27,9 @@ pub(super) struct TerminalBenchAdapter {
 }
 
 impl super::WorkloadAdapter for TerminalBenchAdapter {
+    fn estimated_disk_mib(&self) -> u64 {
+        4096
+    }
     fn descriptor(&self, _name: &str) -> crate::workloads::contracts::ModuleDescriptor {
         use crate::workloads::contracts::{EvaluationMode, ModuleDescriptor, SubmissionKind};
         ModuleDescriptor::official(

@@ -186,35 +186,15 @@ fn configured_collectors(config: &BenchmarkConfig) -> Vec<&str> {
 }
 
 fn workload_mib(workload: &str) -> u64 {
-    if workload.starts_with("swe-bench") {
-        8192
-    } else if workload.starts_with("terminal-bench") {
-        4096
-    } else if workload == "tau-bench" {
-        2048
-    } else {
-        1024
-    }
+    crate::workloads::estimated_disk_mib(workload)
 }
 
 fn agent_mib(agent: &str) -> u64 {
-    match agent {
-        "codex" | "claude-code" | "opencode" | "goose" | "cline" | "continue" => 1024,
-        "pi" | "hermes" | "openjiuwen" | "workbuddy" => 768,
-        _ => 512,
-    }
+    crate::agents::find(agent).map_or(512, |adapter| adapter.estimated_disk_mib())
 }
 
 fn collector_mib(id: &str) -> u64 {
-    match id.split(':').next().unwrap_or(id) {
-        "perfetto" => 1024,
-        "flamegraph" => 1024,
-        "bpftrace" => 768,
-        "perf" => 512,
-        "mpstat" | "iostat" | "agent-memory" | "agent-workers" => 128,
-        "system" | "runtime" | "token_usage" | "steps" | "success_rate" | "tool_calls" => 64,
-        _ => 128,
-    }
+    crate::collectors::adapter_for_selection(id).map_or(128, |adapter| adapter.estimated_disk_mib())
 }
 
 fn mode_mib(mode: Option<tape::Mode>) -> u64 {
@@ -283,6 +263,22 @@ fn available_mib(_path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adapter_owned_estimates_cover_known_selections_and_unknown_fallbacks() {
+        assert_eq!(agent_mib("codex"), 1024);
+        assert_eq!(agent_mib("pi"), 768);
+        assert_eq!(agent_mib("unregistered-agent"), 512);
+        assert_eq!(workload_mib("swe-bench"), 8192);
+        assert_eq!(workload_mib("swe-bench-verified"), 8192);
+        assert_eq!(workload_mib("terminal-bench-2.1"), 4096);
+        assert_eq!(workload_mib("tau-bench"), 2048);
+        assert_eq!(workload_mib("custom-workload"), 1024);
+        assert_eq!(collector_mib("perfetto"), 1024);
+        assert_eq!(collector_mib("bpftrace:sched-latency"), 768);
+        assert_eq!(collector_mib("tool-calls"), 128);
+        assert_eq!(collector_mib("unknown"), 128);
+    }
 
     fn config() -> BenchmarkConfig {
         toml::from_str("agent='opencode'\nprovider='openrouter'\nmodel='fixture'\nworkload='swe-bench'\nconcurrency=2\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['perfetto','flamegraph','bpftrace:all']\n").unwrap()
