@@ -70,6 +70,10 @@ impl ProxyAdapter for LlmtapeAdapter {
         true
     }
 
+    fn supports_offline_replay(&self) -> bool {
+        true
+    }
+
     fn recording_settings(
         &self,
         request: &crate::proxy::RecordingRequest<'_>,
@@ -2427,10 +2431,15 @@ mod tests {
         assert_eq!(capture.output, cassette);
         assert_eq!(capture.bytes, std::fs::metadata(&cassette).unwrap().len());
         server.join().unwrap();
+        // Even if a caller supplies an online endpoint for replay, no hop
+        // receives it and the recorded response is served offline.
+        let forbidden = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        forbidden.set_nonblocking(true).unwrap();
+        let forbidden_url = format!("http://{}", forbidden.local_addr().unwrap());
         let session = Session::start(
             Mode::Replay,
             &cassette,
-            None,
+            Some(&forbidden_url),
             false,
             Path::new("replay-sweep-results/000-record/workspace-concurrency-1.asb-agent-runtime"),
         )
@@ -2438,6 +2447,10 @@ mod tests {
         let replay = r#"{"model":"m","messages":[{"content":"work in replay-sweep-results/000-record/workspace-concurrency-1.asb-agent-runtime"}],"tools":[{"type":"function"}]}"#;
         assert!(request(&session, replay).contains("200 OK"));
         session.stop().unwrap();
+        assert_eq!(
+            forbidden.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
