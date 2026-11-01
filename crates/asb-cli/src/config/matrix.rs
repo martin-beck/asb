@@ -10,6 +10,7 @@ mod prepared;
 mod publication;
 mod selections;
 pub(crate) use prepared::Population;
+pub(crate) use publication::scalar as publish_atomic;
 
 pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result<(), Error> {
     for values in [
