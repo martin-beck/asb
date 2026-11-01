@@ -27,6 +27,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_estimated_disk_mib(1024)
 .with_tool_replay(prepare_tool_replay)
 .with_step_count(step_count)
+.with_output_usage(output_usage)
 .with_artifact_specs(&[super::super::ArtifactSpec {
     namespace: "tool-replay",
     filename: "local-tools.jsonl",
@@ -34,6 +35,32 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 }])
 .with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"])
 .with_max_steps();
+
+/// Goose's JSON mode emits accumulated usage in the top-level metadata of
+/// its conversation summary. Message content is arbitrary task data.
+fn output_usage(stdout: &str, _: &str, _: bool) -> crate::measurements::TokenUsage {
+    for (index, _) in stdout.match_indices('{') {
+        let Some(Ok(document)) = serde_json::Deserializer::from_str(&stdout[index..])
+            .into_iter::<serde_json::Value>()
+            .next()
+        else {
+            continue;
+        };
+        if document
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .is_some()
+        {
+            return document
+                .get("metadata")
+                .filter(|v| v.is_object())
+                .map(super::super::usage_fields)
+                .unwrap_or_default()
+                .with_derived_total();
+        }
+    }
+    Default::default()
+}
 
 /// Goose's JSON output is preceded by its terminal banner.  Count only the
 /// assistant messages that carry provider inference metadata, rather than
@@ -231,6 +258,17 @@ mod tests {
 ]}"#;
         assert_eq!(step_count(output, ""), Some(2));
         assert_eq!(step_count("banner\n{\"messages\":[]}", ""), None);
+    }
+
+    #[test]
+    fn task_content_is_not_usage_when_goose_summary_is_missing_usage() {
+        let output = r#"banner
+{"messages":[{"role":"user","content":[{"type":"text","text":"{\"usage\":{\"input_tokens\":999,\"output_tokens\":888}}"}]}],"metadata":{"status":"completed","total_tokens":null}}"#;
+        let usage = crate::usage::from_sources("openrouter", "goose", output, "", None);
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (None, None, None)
+        );
     }
 
     #[test]

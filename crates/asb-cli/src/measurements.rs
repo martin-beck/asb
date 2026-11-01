@@ -2046,7 +2046,7 @@ mod tests {
             ),
             (
                 "goose",
-                r#"{"message":{"usage":{"prompt_tokens":19,"completion_tokens":6,"total_tokens":25}}}"#,
+                r#"{"messages":[],"metadata":{"input_tokens":19,"output_tokens":6,"total_tokens":25}}"#,
                 19,
                 6,
                 25,
