@@ -1211,6 +1211,7 @@ fn result() -> RunResult<'static> {
         steps: Some(3),
         tool_calls: Vec::new(),
         tool_calls_available: true,
+        adapter_tool_call_count: None,
         native_trace: None,
         native_tool_sidecar: None,
         local_tool_transcript: None,

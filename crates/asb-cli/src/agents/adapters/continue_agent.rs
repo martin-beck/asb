@@ -108,6 +108,13 @@ fn project_session(value: &serde_json::Value) -> Option<serde_json::Value> {
         {
             selected.insert("usage".into(), usage.clone());
         }
+        if role == "assistant" {
+            let count = match message.get("toolCalls") {
+                None => 0,
+                Some(calls) => calls.as_array()?.len(),
+            };
+            selected.insert("asbToolCallCount".into(), count.into());
+        }
         if i + 1 == history.len() && role == "assistant" {
             if let Some(content) = message.get("content") {
                 selected.insert("content".into(), content.clone());
@@ -126,7 +133,10 @@ fn project_session(value: &serde_json::Value) -> Option<serde_json::Value> {
         }
         reduced.push(serde_json::json!({"message":selected}));
     }
-    Some(serde_json::json!({"sessionId":id,"history":reduced}))
+    let compacted = history
+        .iter()
+        .any(|item| item.get("conversationSummary").is_some());
+    Some(serde_json::json!({"sessionId":id,"history":reduced,"asbHistoryCompacted":compacted}))
 }
 
 fn validated_session(frozen: &super::super::FrozenArtifacts) -> Option<&serde_json::Value> {
@@ -326,15 +336,54 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
                 && !context.anthropic_input_includes_cache,
         )),
         steps: session_steps(value),
+        tool_call_count: session_tool_call_count(value),
         final_response: None,
         ..Default::default()
     }
+}
+
+fn session_history_compacted(value: &serde_json::Value) -> bool {
+    value
+        .get("asbHistoryCompacted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || value
+            .get("history")
+            .and_then(|v| v.as_array())
+            .is_some_and(|history| {
+                history
+                    .iter()
+                    .any(|item| item.get("conversationSummary").is_some())
+            })
+}
+
+fn session_tool_call_count(value: &serde_json::Value) -> Option<usize> {
+    if session_history_compacted(value) {
+        return None;
+    }
+    session_raw_answer(Some(value))?;
+    value
+        .get("history")?
+        .as_array()?
+        .iter()
+        .try_fold(0usize, |sum, item| {
+            let message = item.get("message")?;
+            if message.get("role")?.as_str()? == "assistant" {
+                let count = usize::try_from(message.get("asbToolCallCount")?.as_u64()?).ok()?;
+                sum.checked_add(count)
+            } else {
+                Some(sum)
+            }
+        })
 }
 
 /// Continue persists one provider usage object per completed assistant turn.
 /// Treat a missing assistant usage object as incomplete evidence rather than
 /// reporting a partial step count.
 fn session_steps(value: &serde_json::Value) -> Option<u64> {
+    if session_history_compacted(value) {
+        return None;
+    }
     let history = value.get("history")?.as_array()?;
     let mut steps = 0_u64;
     for item in history {
@@ -352,6 +401,9 @@ fn session_usage(
     value: &serde_json::Value,
     add_anthropic_cache: bool,
 ) -> crate::measurements::TokenUsage {
+    if session_history_compacted(value) {
+        return Default::default();
+    }
     let Some(history) = value.get("history").and_then(|v| v.as_array()) else {
         return Default::default();
     };
@@ -509,9 +561,33 @@ mod tests {
                     super::session_raw_answer(super::validated_session(&restored)),
                     Some("answer")
                 );
+                assert_eq!(
+                    super::session_tool_call_count(super::validated_session(&restored).unwrap()),
+                    Some(1)
+                );
             }
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+    #[test]
+    fn session_tool_count_requires_a_well_formed_completed_session() {
+        let session = serde_json::json!({"sessionId":"00112233-4455-6677-8899-aabbccddeeff","history":[{"message":{"role":"assistant","content":"answer"}}]});
+        let reduced = super::project_session(&session).unwrap();
+        assert_eq!(super::session_tool_call_count(&reduced), Some(0));
+        let pending = serde_json::json!({"sessionId":"x","history":[{"message":{"role":"assistant","content":"answer","toolCalls":[{}]}}]});
+        assert_eq!(
+            super::session_tool_call_count(&super::project_session(&pending).unwrap()),
+            None
+        );
+        let malformed = serde_json::json!({"sessionId":"x","history":[{"message":{"role":"assistant","content":"answer","toolCalls":"invalid"}}]});
+        assert!(super::project_session(&malformed).is_none());
+        let compacted = serde_json::json!({"sessionId":"x","history":[{"conversationSummary":"earlier turns","message":{"role":"assistant","content":"summary"}},{"message":{"role":"assistant","content":"answer","usage":{"prompt_tokens":10,"completion_tokens":4}}}]});
+        let reduced = super::project_session(&compacted).unwrap();
+        assert_eq!(super::session_raw_answer(Some(&reduced)), Some("answer"));
+        assert_eq!(super::session_tool_call_count(&reduced), None);
+        assert_eq!(super::session_steps(&reduced), None);
+        assert_eq!(super::session_usage(&reduced, false).total_tokens, None);
+        assert!(!reduced.to_string().contains("earlier turns"));
     }
     #[test]
     fn session_cross_check_returns_only_raw_matching_final_answer() {
