@@ -197,15 +197,17 @@ fn evidence(exit: i32, guest: bool) -> ExecutionEvidence {
 #[test]
 fn continue_answer_requires_guest_receipt_and_host_session_even_with_other_answers() {
     let mut guest = evidence(0, true);
-    for receipt in [None, Some(b"not a receipt".to_vec())] {
-        guest.guest.as_mut().unwrap().deferred_collection = receipt;
-        let result = guest.agent_outcome_with_artifacts(
-            "continue",
-            Path::new("."),
-            Some("unverified host answer"),
-            &agents::FrozenArtifacts::default(),
-        );
-        assert_eq!(result.final_response, None);
+    for agent in ["continue", "pi"] {
+        for receipt in [None, Some(b"not a receipt".to_vec())] {
+            guest.guest.as_mut().unwrap().deferred_collection = receipt;
+            let result = guest.agent_outcome_with_artifacts(
+                agent,
+                Path::new("."),
+                Some("unverified host answer"),
+                &agents::FrozenArtifacts::default(),
+            );
+            assert_eq!(result.final_response, None);
+        }
     }
     let mut host = evidence(0, false);
     host.output.stdout = br#""submission""#.to_vec();
@@ -680,7 +682,7 @@ fn durable_truncated_guest_transcript_keeps_its_sealed_terminal_metadata() {
         execution.guest.as_ref()
     ));
     execution.capture_complete = true;
-    let agent = execution.agent_outcome("pi", Path::new("."), None);
+    let agent = execution.agent_outcome("codex", Path::new("."), None);
     assert!(agent.failure.is_none());
     assert_eq!(agent.final_response.as_deref(), Some("submission"));
     let grade = workloads::outcome::EvaluationOutcome::binary(true);

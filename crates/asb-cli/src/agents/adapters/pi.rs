@@ -46,6 +46,8 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_deterministic_extension()
 .with_output_usage(output_usage)
 .with_final_response(final_response)
+.with_artifact_final_response(owned_final_response)
+.with_guest_artifact_answer(validate_guest_answer)
 .with_final_response_failure(super::terminal_refusal)
 .with_state_environment_vars(&["PI_CODING_AGENT_DIR"])
 .with_execution_failure(execution_failure);
@@ -64,7 +66,52 @@ fn final_response(output: &str, _: &Path) -> Option<String> {
     {
         return None;
     }
-    super::super::final_text_from_event(message)
+    match message.get("content")? {
+        serde_json::Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
+        serde_json::Value::Array(parts) => {
+            let texts: Vec<&str> = parts
+                .iter()
+                .filter_map(|part| {
+                    if part.get("type")?.as_str()? != "text" {
+                        return None;
+                    }
+                    part.get("text")?
+                        .as_str()
+                        .filter(|text| !text.trim().is_empty())
+                })
+                .collect();
+            (!texts.is_empty()).then(|| texts.join("\n"))
+        }
+        _ => None,
+    }
+}
+
+fn summary_final_answer(frozen: &super::super::FrozenArtifacts) -> Option<String> {
+    let summary = frozen.document("pi-summary.json")?;
+    if summary.get("schema_version")?.as_u64()? != 1 || !summary.get("completed")?.as_bool()? {
+        return None;
+    }
+    if summary.get("steps")?.as_u64()? == 0 || summary_artifacts(summary).is_err() {
+        return None;
+    }
+    summary
+        .get("final_answer")?
+        .as_str()
+        .filter(|value| !value.trim().is_empty() && value.len() <= 262_144)
+        .map(str::to_owned)
+}
+
+fn owned_final_response(
+    _: &str,
+    frozen: &super::super::FrozenArtifacts,
+    _: &Path,
+    _: bool,
+) -> Option<String> {
+    summary_final_answer(frozen)
+}
+
+fn validate_guest_answer(answer: &str, frozen: &super::super::FrozenArtifacts) -> bool {
+    summary_final_answer(frozen).is_some_and(|saved| saved == answer)
 }
 
 fn execution_failure(_: &str, stderr: &str) -> Option<String> {
@@ -171,6 +218,89 @@ mod execution_tests {
             (usage.input_tokens, usage.output_tokens, usage.total_tokens),
             (None, None, None)
         );
+    }
+
+    #[test]
+    fn final_answer_requires_valid_completed_turn_summary() {
+        let frozen = |steps, completed| {
+            crate::agents::FrozenArtifacts::for_test(
+                "pi-summary.json",
+                serde_json::json!({"schema_version":1,"completed":completed,"steps":steps,"usage_complete":false,"final_answer":"answer"}),
+            )
+        };
+        assert_eq!(
+            super::summary_final_answer(&frozen(1, true)).as_deref(),
+            Some("answer")
+        );
+        assert!(super::summary_final_answer(&frozen(0, true)).is_none());
+        assert!(super::summary_final_answer(&frozen(1, false)).is_none());
+        assert!(super::summary_final_answer(&crate::agents::FrozenArtifacts::default()).is_none());
+    }
+
+    #[test]
+    fn summary_extension_only_publishes_last_completed_assistant_text() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-pi-final-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("summary.mjs"), super::SUMMARY_EXTENSION).unwrap();
+        std::fs::write(
+            root.join("test.mjs"),
+            r#"
+import extension from './summary.mjs';
+const handlers = {}; extension({on(name, handler) { handlers[name] = handler; }});
+handlers.agent_end(JSON.parse(process.env.ASB_PI_TEST_EVENT));
+"#,
+        )
+        .unwrap();
+        let cases = [
+            (
+                serde_json::json!({"messages":[{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"old"}]},{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"first"},{"type":"thinking","text":"private"},{"type":"text","text":"second"}]}]}),
+                Some("first\nsecond"),
+            ),
+            (
+                serde_json::json!({"messages":[{"role":"assistant","stopReason":"length","content":[{"type":"text","text":"bounded"}]}]}),
+                Some("bounded"),
+            ),
+            (
+                serde_json::json!({"messages":[{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"old"}]},{"role":"toolResult","content":"foreign"}]}),
+                None,
+            ),
+            (
+                serde_json::json!({"messages":[{"role":"assistant","stopReason":"toolUse","content":[{"type":"text","text":"not final"},{"type":"toolCall"}]}]}),
+                None,
+            ),
+            (
+                serde_json::json!({"messages":[{"role":"assistant","stopReason":"error","content":[{"type":"text","text":"failure"}]}]}),
+                None,
+            ),
+            (
+                serde_json::json!({"messages":[{"role":"assistant","stopReason":"aborted","content":[{"type":"text","text":"partial"}]}]}),
+                None,
+            ),
+        ];
+        for (index, (event, expected)) in cases.iter().enumerate() {
+            let path = root.join(format!("{index}.json"));
+            let output = std::process::Command::new("node")
+                .arg(root.join("test.mjs"))
+                .env("ASB_PI_SUMMARY_PATH", &path)
+                .env("ASB_PI_TEST_EVENT", event.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(
+                value.get("final_answer").and_then(|v| v.as_str()),
+                *expected
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -388,10 +518,15 @@ let cacheKnown = true;
 let usageComplete = true;
 
 function number(value) { return Number.isSafeInteger(value) && value >= 0 ? value : undefined; }
-function publish() {
+function publish(event) {
   if (!destination) throw new Error("ASB Pi summary destination is unavailable");
   const complete = usageComplete && steps > 0;
   const summary = { schema_version: 1, completed: true, steps, usage_complete: complete };
+  const message = event?.messages?.at(-1);
+  if (message?.role === 'assistant' && ['stop', 'length'].includes(message.stopReason) && Array.isArray(message.content) && !message.content.some(part => part?.type === 'toolCall')) {
+    const answer = message.content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n');
+    if (answer.trim() && Buffer.byteLength(answer, 'utf8') <= 262144) summary.final_answer = answer;
+  }
   if (complete) { summary.input_tokens = input; summary.output_tokens = output; }
   if (complete && cacheKnown) summary.cached_tokens = cached;
   mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
@@ -416,7 +551,7 @@ export default function(pi) {
     if (cacheRead === undefined || cacheWrite === undefined) cacheKnown = false;
     else { input += cacheRead + cacheWrite; cached += cacheRead; }
   });
-  pi.on("agent_end", () => publish());
+  pi.on("agent_end", (event) => publish(event));
 }
 "#;
 

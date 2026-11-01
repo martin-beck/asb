@@ -775,6 +775,51 @@ exit 93
 }
 
 #[test]
+fn pi_guest_exports_owned_final_answer_instead_of_stdout() {
+    let project = Project::new();
+    let program = project.0.join(".asb-tools/pi/bin/pi");
+    fixture_writer::write_file(&project.0, &program, r##"#!/bin/sh
+printf '%s' '{"schema_version":1,"completed":true,"steps":1,"usage_complete":false,"final_answer":"guest answer"}' > "$ASB_PI_SUMMARY_PATH"
+printf 'debug tool output that is not the answer\n'
+"##).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let request = project.request();
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_asb"))
+            .arg("__asb-agent")
+            .isolated_env()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", &project.0)
+            .env("ASB_GUEST_AGENT_REQUEST", request.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
+    let mut ready = String::new();
+    stdout.read_line(&mut ready).unwrap();
+    assert_eq!(ready.trim(), format!("__ASB_GATE__:{}", process.0.id()));
+    resume_fixture(&mut process);
+    let mut text = String::new();
+    stdout.read_to_string(&mut text).unwrap();
+    assert!(process.0.wait().unwrap().success());
+    let result: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.0.join("private/attempt/agent-result.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(result["artifact_error"].is_null(), "{result}");
+    assert_eq!(result["final_response"], "guest answer");
+    assert!(
+        result["exported_artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"] == "asb-deferred-adapter-collection")
+    );
+}
+
+#[test]
 fn continue_guest_exports_session_checked_answer() {
     let project = Project::new();
     let program = project.0.join(".asb-tools/continue/bin/cn");
