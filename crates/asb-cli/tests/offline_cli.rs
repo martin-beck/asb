@@ -1392,7 +1392,11 @@ async function main() {
   }
   console.log('fixture-agent-output');
   if (behavior === 'api-error-event') console.log(JSON.stringify({type:'agent_end',messages:[{role:'assistant',stopReason:'error',errorMessage:'400 fixture-secret'}]}));
-  if (behavior === 'terminal-refusal') console.log(JSON.stringify({type:'agent_end',messages:[{role:'assistant',stopReason:'stop',content:[{type:'text',text:"I can't run tests because the test tool is unavailable."}]}]}));
+  if (behavior === 'terminal-refusal') {
+    const final_answer = "I can't run tests because the test tool is unavailable.";
+    fs.writeFileSync(process.env.ASB_PI_SUMMARY_PATH, JSON.stringify({schema_version:1,completed:true,steps:1,usage_complete:false,final_answer}), {mode:0o600});
+    console.log(JSON.stringify({type:'message',role:'tool',content:'Tool output is not a refusal.'}));
+  }
   if (behavior === 'fatal') console.error('Authentication required. Please use /login command to sign in to your account fixture-secret');
   const unresolvedFailure = behavior === 'exit-unresolved' ||
       (behavior === 'fail-second' && process.cwd().endsWith('concurrency-2')) ||
@@ -2021,6 +2025,14 @@ fn continue_and_openhands_collect_isolated_mock_usage_artifacts() {
     use std::os::unix::fs::PermissionsExt;
     for agent in ["continue", "openhands"] {
         let project = replay_project(2);
+        // The current main preflight still requires a bridge in replay; seed a
+        // local fixture so this offline test never installs from the network.
+        let bridge = project
+            .0
+            .join(".asb-tools/cli2key/node_modules/.bin/codex-bridge");
+        std::fs::create_dir_all(bridge.parent().unwrap()).unwrap();
+        std::fs::write(&bridge, "#!/bin/sh\nexit 99\n").unwrap();
+        std::fs::set_permissions(&bridge, std::fs::Permissions::from_mode(0o755)).unwrap();
         project.write("benchmark.toml", &format!("agent='{agent}'\nworkload='bug-fix'\nprovider='cli2key'\nmodel='test-model'\nworkspace='workspace'\nlog_file='run.log'\n"));
         let body =
             serde_json::json!({"model":"test-model","messages":[],"tools":[{"type":"function"}]})
@@ -2043,7 +2055,8 @@ fetch(endpoint.replace(/\/$/, '') + (isContinue ? '/chat/completions' : '/v1/cha
   fs.writeFileSync('src/parser.py', "def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n");
   if (isContinue) {
     const dir = path.join(process.env.CONTINUE_GLOBAL_DIR, 'sessions'); fs.mkdirSync(dir, {recursive:true});
-    fs.writeFileSync(path.join(dir,'session.json'), JSON.stringify({history:[{message:{role:'assistant',usage:{prompt_tokens:n,completion_tokens:3,prompt_tokens_details:{cache_read_tokens:4}}}}]}));
+    const sessionId = '00112233-4455-6677-8899-aabbccddeeff';
+    fs.writeFileSync(path.join(dir,sessionId+'.json'), JSON.stringify({sessionId,history:[{message:{role:'assistant',content:'complete',usage:{prompt_tokens:n,completion_tokens:3,prompt_tokens_details:{cache_read_tokens:4}}}}]}));
   } else {
     const dir = path.join(process.env.OPENHANDS_CONVERSATIONS_DIR, 'fixture'); fs.mkdirSync(dir, {recursive:true});
     // LiteLLM adds the separate cache count even when the bridge's wire input already includes it.
@@ -2594,13 +2607,26 @@ fn replay_rejects_partially_consumed_cassettes() {
 }
 
 #[cfg(unix)]
+fn install_inert_replay_bridge(project: &Project) {
+    use std::os::unix::fs::PermissionsExt;
+    let bridge = ".asb-tools/cli2key/node_modules/.bin/codex-bridge";
+    project.write(bridge, "#!/bin/sh\nexit 99\n");
+    std::fs::set_permissions(
+        project.0.join(bridge),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
 #[test]
 fn pi_tool_message_is_not_a_terminal_refusal() {
     let project = replay_project(1);
+    install_inert_replay_bridge(&project);
     let agent = project.0.join(".asb-tools/pi/bin/pi");
     let script = std::fs::read_to_string(&agent).unwrap().replace(
         "console.log('fixture-agent-output');",
-        "console.log(JSON.stringify({type:'message',role:'tool',content:\"I can't run tests is fixture output\"}));",
+        "require('fs').writeFileSync(process.env.ASB_PI_SUMMARY_PATH,JSON.stringify({schema_version:1,completed:true,steps:1,usage_complete:false,final_answer:'Finished the work.'})); console.log(JSON.stringify({type:'message',role:'tool',content:\"I can't run tests is fixture output\"}));",
     );
     std::fs::write(&agent, script).unwrap();
     let result = replay(&project, "success", &[]);
@@ -2611,10 +2637,11 @@ fn pi_tool_message_is_not_a_terminal_refusal() {
 #[test]
 fn pi_intermediate_assistant_text_is_not_a_terminal_refusal() {
     let project = replay_project(1);
+    install_inert_replay_bridge(&project);
     let agent = project.0.join(".asb-tools/pi/bin/pi");
     let script = std::fs::read_to_string(&agent).unwrap().replace(
         "console.log('fixture-agent-output');",
-        r#"console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text',text:"I can't run tests yet"}}));"#,
+        r#"require('fs').writeFileSync(process.env.ASB_PI_SUMMARY_PATH,JSON.stringify({schema_version:1,completed:true,steps:1,usage_complete:false,final_answer:'Finished the work.'})); console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text',text:"I can't run tests yet"}}));"#,
     );
     std::fs::write(&agent, script).unwrap();
     let result = replay(&project, "success", &[]);
@@ -2682,6 +2709,7 @@ process.stdin.on('end', async () => {
 #[test]
 fn pi_terminal_refusal_is_reported_without_using_tool_output() {
     let project = replay_project(1);
+    install_inert_replay_bridge(&project);
     let result = replay(&project, "terminal-refusal", &[]);
     expect_failure(&result, "agent reported it could not run tests");
     let log: serde_json::Value =
