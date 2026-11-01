@@ -2141,7 +2141,12 @@ fn standalone_compare_reports_actual_replay_logs_and_capture_overrides() {
             } else {
                 &["--json"]
             };
-            expect_success(&replay(&project, "success", options));
+            let output = replay(&project, "success", options);
+            assert!(
+                output.status.success(),
+                "replay fixture failed: {}",
+                replay_failure_diagnostic(&output.stdout, &output.stderr, output.status.code())
+            );
             expect_success(&project.command(&["compare", "benchmark.toml"]));
             let directory = project.0.join("results/benchmark-comparison");
             let report: serde_json::Value =
@@ -2170,6 +2175,48 @@ fn standalone_compare_reports_actual_replay_logs_and_capture_overrides() {
             assert!(directory.join("report.html").is_file());
         }
     }
+}
+
+#[cfg(unix)]
+fn replay_failure_diagnostic(stdout: &[u8], stderr: &[u8], status: Option<i32>) -> String {
+    let stdout = &stdout[..stdout.len().min(65_536)];
+    let stderr = &stderr[..stderr.len().min(65_536)];
+    let value: Option<serde_json::Value> = serde_json::from_slice(stdout).ok();
+    let termination = value
+        .as_ref()
+        .and_then(|value| value.get("process_termination_diagnostic"))
+        .and_then(|value| value.as_str())
+        .filter(|value| matches!(*value, "malformed" | "unavailable"))
+        .unwrap_or("other-or-absent");
+    let reason = value
+        .as_ref()
+        .and_then(|value| value.get("failure_reason"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let unconsumed = reason.contains("replay consumed 0 of 1 cassette requests");
+    format!(
+        "exit_code={status:?}; termination={termination}; unconsumed_cassette={unconsumed}; stdout_prefix_bytes={}; stderr_prefix_bytes={}",
+        stdout.len(),
+        stderr.len()
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn replay_failure_diagnostic_is_bounded_and_does_not_expose_contents() {
+    let stdout = br#"{"process_termination_diagnostic":"malformed","failure_reason":"replay consumed 0 of 1 cassette requests secret-token /private/path"}"#;
+    let diagnostic = replay_failure_diagnostic(stdout, &[b'x'; 70_000], Some(1));
+    assert!(diagnostic.contains("termination=malformed"));
+    assert!(diagnostic.contains("unconsumed_cassette=true"));
+    assert!(diagnostic.contains("stderr_prefix_bytes=65536"));
+    assert!(!diagnostic.contains("secret-token") && !diagnostic.contains("/private/path"));
+    let unknown = replay_failure_diagnostic(
+        br#"{"process_termination_diagnostic":"secret-token"}"#,
+        b"",
+        None,
+    );
+    assert!(unknown.contains("termination=other-or-absent"));
+    assert!(!unknown.contains("secret-token"));
 }
 
 #[cfg(unix)]
