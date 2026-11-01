@@ -2,8 +2,6 @@
 
 use crate::{Error, proxy};
 use serde::{Deserialize, Serialize};
-use std::any::Any;
-use std::collections::HashMap;
 use std::path::Path;
 
 /// Request normalization, ordered matching and full-consumption replay semantics.
@@ -17,10 +15,10 @@ pub enum Mode {
 }
 
 pub(crate) fn input_files() -> Result<Vec<std::path::PathBuf>, Error> {
-    proxy::input_files(proxy::adapters::llmtape::NAME)
+    proxy::recording_input_files()
 }
 pub(crate) fn runtime_inputs() -> Result<Vec<crate::runtime_inputs::Dependency>, Error> {
-    proxy::runtime_inputs(proxy::adapters::llmtape::NAME)
+    proxy::recording_runtime_inputs()
 }
 
 /// A running record/replay chain.
@@ -58,17 +56,14 @@ impl Session {
         if mode == Mode::Replay {
             require_replay_cassette(cassette)?;
         }
-        let settings = proxy::adapters::llmtape::Settings {
+        let settings = proxy::RecordingRequest {
             mode,
-            cassette: cassette.to_path_buf(),
+            cassette,
             respect_record_timings,
-            workspace: workspace.to_path_buf(),
+            workspace,
             wire_extension: agent.and_then(crate::agents::tape_wire_extension),
         };
-        let mut configurations: HashMap<String, Box<dyn Any>> = HashMap::new();
-        configurations.insert(proxy::adapters::llmtape::NAME.into(), Box::new(settings));
-        let names = proxy::configured_chain(proxy::adapters::llmtape::NAME)?;
-        proxy::Chain::start(&names, upstream, &configurations).map(Self)
+        proxy::start_recording_chain(&settings, upstream).map(Self)
     }
 
     pub fn url(&self) -> &str {

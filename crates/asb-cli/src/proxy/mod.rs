@@ -9,9 +9,26 @@ use crate::Error;
 use std::any::Any;
 use std::collections::HashMap;
 
+/// Generic inputs for a proxy which owns LLM record/replay.
+pub(crate) struct RecordingRequest<'a> {
+    pub mode: crate::tape::Mode,
+    pub cassette: &'a std::path::Path,
+    pub respect_record_timings: bool,
+    pub workspace: &'a std::path::Path,
+    pub wire_extension: Option<&'static str>,
+}
+
 /// An adapter starts one hop using its own optional typed configuration.
 pub(crate) trait ProxyAdapter: Sync {
     fn name(&self) -> &'static str;
+    fn default_recording(&self) -> bool {
+        false
+    }
+    fn recording_settings(&self, _: &RecordingRequest<'_>) -> Result<Box<dyn Any>, Error> {
+        Err(Error::Input(
+            "selected proxy does not support recording".into(),
+        ))
+    }
     /// Adapter-owned execution files, without starting a hop or touching a
     /// cassette. Transitive interpreter/library discovery is a separate layer.
     fn input_files(&self) -> Result<Vec<std::path::PathBuf>, Error> {
@@ -31,6 +48,46 @@ pub(crate) trait ProxyAdapter: Sync {
         upstream: Option<&str>,
         settings: Option<&dyn Any>,
     ) -> Result<Box<dyn ProxySession>, Error>;
+}
+
+fn select_recording_adapter<'a>(
+    registry: &'a [&'a dyn ProxyAdapter],
+) -> Result<&'a dyn ProxyAdapter, Error> {
+    let mut candidates = registry
+        .iter()
+        .copied()
+        .filter(|adapter| adapter.default_recording());
+    let adapter = candidates
+        .next()
+        .ok_or_else(|| Error::Input("no default recording proxy is registered".into()))?;
+    if candidates.next().is_some() {
+        return Err(Error::Input(
+            "multiple default recording proxies are registered".into(),
+        ));
+    }
+    Ok(adapter)
+}
+
+pub(crate) fn recording_input_files() -> Result<Vec<std::path::PathBuf>, Error> {
+    input_files(select_recording_adapter(adapters::REGISTRY)?.name())
+}
+
+pub(crate) fn recording_runtime_inputs() -> Result<Vec<crate::runtime_inputs::Dependency>, Error> {
+    runtime_inputs(select_recording_adapter(adapters::REGISTRY)?.name())
+}
+
+pub(crate) fn start_recording_chain(
+    request: &RecordingRequest<'_>,
+    upstream: Option<&str>,
+) -> Result<Chain, Error> {
+    let adapter = select_recording_adapter(adapters::REGISTRY)?;
+    let mut configurations = HashMap::new();
+    configurations.insert(
+        adapter.name().to_owned(),
+        adapter.recording_settings(request)?,
+    );
+    let names = configured_chain(adapter.name())?;
+    Chain::start(&names, upstream, &configurations)
 }
 
 pub(crate) fn input_files(default_name: &str) -> Result<Vec<std::path::PathBuf>, Error> {
@@ -243,6 +300,60 @@ fn parse_chain(raw: &str) -> Result<Vec<String>, Error> {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    struct RecordingFixture(&'static str);
+    impl ProxyAdapter for RecordingFixture {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn default_recording(&self) -> bool {
+            true
+        }
+        fn recording_settings(
+            &self,
+            request: &RecordingRequest<'_>,
+        ) -> Result<Box<dyn Any>, Error> {
+            Ok(Box::new((
+                request.mode,
+                request.cassette.to_path_buf(),
+                request.respect_record_timings,
+            )))
+        }
+        fn start(
+            &self,
+            _: Option<&str>,
+            _: Option<&dyn Any>,
+        ) -> Result<Box<dyn ProxySession>, Error> {
+            Err(Error::Run("fixture does not start".into()))
+        }
+    }
+
+    #[test]
+    fn recording_selection_is_adapter_owned_and_unambiguous() {
+        let one = RecordingFixture("other-recorder");
+        let two = RecordingFixture("second-recorder");
+        assert!(select_recording_adapter(&[]).is_err());
+        assert!(select_recording_adapter(&[&one, &two]).is_err());
+        let registry: &[&dyn ProxyAdapter] = &[&one];
+        let selected = select_recording_adapter(registry).unwrap();
+        assert_eq!(selected.name(), "other-recorder");
+        let cassette = std::path::Path::new("fixture.jsonl");
+        let request = RecordingRequest {
+            mode: crate::tape::Mode::Replay,
+            cassette,
+            respect_record_timings: true,
+            workspace: std::path::Path::new("."),
+            wire_extension: None,
+        };
+        let settings = selected.recording_settings(&request).unwrap();
+        let captured = settings
+            .downcast_ref::<(crate::tape::Mode, std::path::PathBuf, bool)>()
+            .unwrap();
+        assert_eq!(
+            captured,
+            &(crate::tape::Mode::Replay, cassette.to_path_buf(), true)
+        );
+    }
 
     struct FixtureAdapter {
         name: &'static str,
