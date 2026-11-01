@@ -25,6 +25,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_native_tool_transport()
 .with_collection(collect)
 .with_step_count(step_count)
+.with_output_usage(output_usage)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
         namespace: "tool-replay",
@@ -83,6 +84,24 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
         .try_into()
         .ok()?;
     (steps > 0).then_some(steps)
+}
+
+fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::TokenUsage {
+    let mut usage =
+        crate::usage::usage_from_text(stdout).merge(crate::usage::usage_from_text(stderr));
+    for text in [stdout, stderr] {
+        let mut lines = text.lines();
+        while let Some(line) = lines.next() {
+            if line.to_ascii_lowercase().contains("tokens used")
+                && let Some(value) = lines
+                    .next()
+                    .and_then(|next| next.trim().replace(',', "").parse::<u64>().ok())
+            {
+                usage.total_tokens = Some(usage.total_tokens.map_or(value, |old| old.max(value)));
+            }
+        }
+    }
+    usage.with_derived_total()
 }
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
