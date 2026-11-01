@@ -165,6 +165,16 @@ fn claude_code_single_result_is_not_read_twice() {
 }
 
 #[test]
+fn claude_code_incomplete_result_uses_cassette_not_answer() {
+    let cassette = chat_cassette(2);
+    let output = serde_json::json!({"type":"result","result":"{\"usage\":{\"input_tokens\":999,\"output_tokens\":888}}"}).to_string();
+    let usage =
+        token_usage_from_sources("openrouter", "claude-code", &output, "", Some(&cassette.0));
+    assert_eq!(usage.source.as_deref(), Some("cassette"));
+    assert_usage(usage, 20, 6, Some(8));
+}
+
+#[test]
 fn claude_cache_components_follow_provider_wire_semantics() {
     let output = r#"{"type":"result","usage":{"input_tokens":10,"output_tokens":3,"cache_read_input_tokens":4,"cache_creation_input_tokens":2}}"#;
     assert_usage(
