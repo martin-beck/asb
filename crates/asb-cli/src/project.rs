@@ -866,6 +866,40 @@ pub fn load(start: &Path) -> Result<(PathBuf, ProjectConfig), Error> {
     Ok((PathBuf::from("."), ProjectConfig::default()))
 }
 
+/// Load an existing ASB project, rejecting an uninitialized directory rather
+/// than falling back to default paths. Command entry points use this guard so
+/// project-local tools and workloads cannot accidentally resolve elsewhere.
+pub fn require_initialized(start: &Path) -> Result<(PathBuf, ProjectConfig), Error> {
+    let (root, config) = load(start)?;
+    // `load` deliberately returns the default configuration rooted at `.` for
+    // callers that can operate without a project. Do not reinterpret that
+    // sentinel relative to this process's CWD here: an explicit unrelated
+    // --project-dir must fail rather than borrowing a different project.
+    if root == Path::new(".") {
+        return Err(Error::Input(
+            "no initialized project found; run `asb init` first".into(),
+        ));
+    }
+    initialized_config_path(&root)?;
+    Ok((root, config))
+}
+
+/// Load precisely the supplied project directory. Unlike [`require_initialized`],
+/// this never searches its parents: `--project-dir` is an explicit authority
+/// boundary and must not silently select another project's assets.
+pub fn require_project_directory(path: &Path) -> Result<(PathBuf, ProjectConfig), Error> {
+    let root = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| Error::Io(format!("cannot locate current directory: {error}")))?
+            .join(path)
+    };
+    initialized_config_path(&root)?;
+    let (_, config) = load(&root)?;
+    Ok((root, config))
+}
+
 pub fn resolve(root: &Path, value: &str) -> PathBuf {
     let path = Path::new(value);
     if path.is_absolute() {

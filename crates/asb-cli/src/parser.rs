@@ -7,7 +7,40 @@ use super::{
 use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand};
 use std::ffi::OsString;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+
+// Library tests invoke the parser in-process. Serialise the short-lived cwd
+// change for --project-dir and restore it before returning to their caller.
+static PROJECT_DIRECTORY_LOCK: Mutex<()> = Mutex::new(());
+
+struct ProjectDirectoryGuard {
+    previous: PathBuf,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Drop for ProjectDirectoryGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous);
+    }
+}
+
+fn enter_project_directory(path: Option<&Path>) -> Result<Option<ProjectDirectoryGuard>, Error> {
+    let Some(path) = path else {
+        project::require_initialized(Path::new("."))?;
+        return Ok(None);
+    };
+    let lock = PROJECT_DIRECTORY_LOCK
+        .lock()
+        .map_err(|_| Error::Run("project directory guard was interrupted".into()))?;
+    let previous = std::env::current_dir().map_err(io_error)?;
+    let (root, _) = project::require_project_directory(path)?;
+    std::env::set_current_dir(&root).map_err(io_error)?;
+    Ok(Some(ProjectDirectoryGuard {
+        previous,
+        _lock: lock,
+    }))
+}
 
 /// Use the parser's schema for completions.  The real parser deliberately
 /// accepts custom tool and workload sources; this completion-only command adds
@@ -161,6 +194,18 @@ pub(crate) fn run_with_interactive(
             }
             return error.exit_code() as u8;
         }
+    };
+    // `init` establishes a project and help has no project effect. Every
+    // operational command is project-local, including listing and discovery.
+    let requires_project =
+        cli.command.is_some() && !matches!(cli.command.as_ref(), Some(CommandLine::Init(_)));
+    let _project_directory = if requires_project {
+        match enter_project_directory(cli.project_dir.as_deref()) {
+            Ok(guard) => guard,
+            Err(error) => return fail(stderr, &error.to_string()),
+        }
+    } else {
+        None
     };
     let result = match cli.command {
         None => stdout
@@ -560,6 +605,60 @@ mod tape_flag_tests {
     use super::*;
 
     #[test]
+    fn project_directory_is_global_and_restores_the_callers_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-parser-project-directory-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        project::init(Some(root.clone()), false, false, false, &mut Vec::new()).unwrap();
+        let original = std::env::current_dir().unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            run(
+                &[
+                    "tool".into(),
+                    "list".into(),
+                    "--project-dir".into(),
+                    root.clone().into_os_string(),
+                ],
+                &mut stdout,
+                &mut stderr,
+            ),
+            0
+        );
+        assert!(String::from_utf8(stdout).unwrap().contains("cli2key"));
+        assert!(stderr.is_empty());
+        assert_eq!(std::env::current_dir().unwrap(), original);
+
+        // An explicit --project-dir must be the initialized root itself,
+        // rather than borrowing this initialized parent's configuration.
+        let missing = root.join("not-a-project");
+        std::fs::create_dir_all(&missing).unwrap();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            run(
+                &[
+                    "tool".into(),
+                    "list".into(),
+                    "--project-dir".into(),
+                    missing.clone().into_os_string(),
+                ],
+                &mut Vec::new(),
+                &mut stderr,
+            ),
+            2
+        );
+        assert!(
+            String::from_utf8(stderr)
+                .unwrap()
+                .contains("no initialized project found")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn explicit_llm_and_tool_flags_select_the_sealed_tape_direction() {
         let cli = Cli::try_parse_from([
             "asb",
@@ -720,6 +819,9 @@ mod tape_flag_tests {
     about = "Agent Systems Benchmark command line interface"
 )]
 struct Cli {
+    /// Initialized ASB project directory used for the complete command.
+    #[arg(long, global = true, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
+    project_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<CommandLine>,
 }
@@ -1282,9 +1384,23 @@ mod tests {
 
     #[test]
     fn measure_catalog_lists_collectors_and_bpftrace_programs() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-parser-measure-project-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        crate::project::init(Some(root.clone()), false, false, false, &mut Vec::new()).unwrap();
         let mut output = Vec::new();
         assert_eq!(
-            super::run(&["measure".into()], &mut output, &mut Vec::new()),
+            super::run(
+                &[
+                    "measure".into(),
+                    "--project-dir".into(),
+                    root.clone().into_os_string(),
+                ],
+                &mut output,
+                &mut Vec::new(),
+            ),
             0
         );
         let output = String::from_utf8(output).unwrap();
@@ -1295,7 +1411,13 @@ mod tests {
         let mut output = Vec::new();
         assert_eq!(
             super::run(
-                &["measure".into(), "bpftrace".into(), "programs".into()],
+                &[
+                    "measure".into(),
+                    "bpftrace".into(),
+                    "programs".into(),
+                    "--project-dir".into(),
+                    root.clone().into_os_string(),
+                ],
                 &mut output,
                 &mut Vec::new(),
             ),
@@ -1305,6 +1427,7 @@ mod tests {
         assert!(output.contains("all\tall built-in eBPF programs"));
         assert!(output.contains("sched-latency\twakeup-to-run latency"));
         assert!(output.contains("io-wait\tcompleted kernel-accounted I/O waits"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

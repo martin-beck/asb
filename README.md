@@ -120,6 +120,9 @@ the external program's Node version and does not add SOCKS support to it.
 
 Run `asb init` in a separate benchmark project directory; it intentionally
 refuses to modify the ASB source checkout.
+Every command other than `asb init` requires an initialized project. Run it
+from that project or append `--project-dir /path/to/project` to use that
+project for the complete command.
 Initialization prepares a project-local Python environment using an available
 Python 3.12 or 3.13. If neither is available, it uses `uv` to download Python
 3.12 into the project. If this is not possible, it warns and Python tool
