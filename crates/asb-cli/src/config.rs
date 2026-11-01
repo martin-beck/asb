@@ -335,6 +335,13 @@ mod tests {
         setup(options("pi", "cli2key", "gpt-6.1-sol"), &mut output).expect("setup succeeds");
         let text = String::from_utf8(output).expect("setup is UTF-8");
         assert!(text.contains("concurrency = 1"));
+        let config: crate::benchmark::BenchmarkConfig = toml::from_str(&text).unwrap();
+        let selected = config.measurements.unwrap();
+        assert!(selected.enabled);
+        assert_eq!(
+            selected.collectors,
+            crate::measurements::available_collectors()
+        );
     }
 
     #[test]
