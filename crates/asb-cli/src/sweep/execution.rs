@@ -71,13 +71,15 @@ impl Execution<'_> {
         let result = (|| {
             std::fs::create_dir_all(self.directory(index)).map_err(crate::io_error)?;
             if self.options.resume {
-                spool::preserve(
-                    &self.output_path(index),
-                    self.plan.entries[index].configuration.concurrency,
-                    &self.results.join(".checkpoint/interrupted-terminal"),
-                )?;
+                let path = self.output_path(index);
+                let history = self.results.join(".checkpoint/interrupted-terminal");
+                if self.plan.execution.is_some() {
+                    spool::preserve_campaign(&path, self.presentation_count(index), &history)?;
+                } else {
+                    spool::preserve(&path, self.presentation_count(index), &history)?;
+                }
             }
-            let mut spool = if self.campaigns.is_some() {
+            let mut spool = if self.plan.execution.is_some() {
                 spool::Output::create_campaign(
                     &self.output_path(index),
                     self.presentation_count(index),
@@ -237,7 +239,7 @@ impl Execution<'_> {
     }
 
     pub(super) fn drain_output(&self, index: usize, output: &mut dyn Write) -> Result<(), Error> {
-        if self.campaigns.is_some() {
+        if self.plan.execution.is_some() {
             spool::drain_campaign(
                 &self.output_path(index),
                 self.presentation_count(index),
@@ -256,6 +258,79 @@ impl Execution<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_repeated_campaign_restores_interrupted_output_without_a_live_pool() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/sweep-execution-fixtures")
+            .join(crate::workloads::TaskIdentity::local("campaign-spool-resume", None).attempt_id);
+        std::fs::create_dir_all(&root).unwrap();
+        let config: crate::benchmark::BenchmarkConfig = toml::from_str(
+            "agent='pi'\nprovider='openrouter'\nmodel='fixture'\nworkload='bug-fix'\n",
+        )
+        .unwrap();
+        let selection = crate::workloads::TaskSelection {
+            module: None,
+            workload: "bug-fix".into(),
+            task_id: "bug-fix".into(),
+            dataset: None,
+            evaluation_kind: "bundled-fixture".into(),
+            population_size: None,
+        };
+        let plan: plan::SweepPlan = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "run_id": "abc",
+            "execution": {"repeat": 65, "seed": null, "selector": null},
+            "entries": [{"reference": "a.toml", "configuration": config, "selection": selection}]
+        }))
+        .unwrap();
+        let mut reused = super::super::resume::State::default();
+        reused.groups.insert(
+            0,
+            vec![serde_json::json!({"process_success":true,"workload_success":true})],
+        );
+        let warnings = Mutex::new(BTreeSet::new());
+        let execution = Execution {
+            campaigns: None,
+            source: "fixture",
+            parent: &root,
+            plan: &plan,
+            results: &root,
+            backup: &root,
+            replay_inputs: None,
+            restore_recordings: false,
+            options: Options {
+                resume: true,
+                json: true,
+                ..Default::default()
+            },
+            warnings: &warnings,
+            checkpoint: None,
+            reused: &reused,
+        };
+        let interrupted = vec![b'x'; 4 * 1024 * 1024 + 65_537];
+        std::fs::write(execution.output_path(0), &interrupted).unwrap();
+        let report = execution.run(0);
+        assert!(report.result.is_ok(), "{:?}", report.result.err());
+        assert!(report.spool_created);
+        let history = root.join(".checkpoint/interrupted-terminal");
+        let saved = std::fs::read_dir(history)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(std::fs::read(saved).unwrap(), interrupted);
+        let mut output = Vec::new();
+        execution.drain_output(0, &mut output).unwrap();
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("\"reused\":true")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn failed_creation_and_old_spool_preservation_never_claim_cleanup_ownership() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))

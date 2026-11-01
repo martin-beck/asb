@@ -125,14 +125,30 @@ pub(super) fn discard(path: &Path) -> Result<(), Error> {
 /// Preserve interrupted presentation bytes after continuation validation.
 /// These files are not grading evidence and must never overwrite a new spool.
 pub(super) fn preserve(path: &Path, replicas: usize, history: &Path) -> Result<(), Error> {
+    preserve_bounded(path, replicas, benchmark::MAX_CONCURRENCY, history)
+}
+
+/// A repeated campaign retains one presentation stream across all executions.
+pub(super) fn preserve_campaign(
+    path: &Path,
+    executions: usize,
+    history: &Path,
+) -> Result<(), Error> {
+    preserve_bounded(path, executions, 65_533, history)
+}
+
+fn preserve_bounded(
+    path: &Path,
+    replicas: usize,
+    maximum: usize,
+    history: &Path,
+) -> Result<(), Error> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(crate::io_error(error)),
     };
-    if !(1..=benchmark::MAX_CONCURRENCY).contains(&replicas)
-        || !metadata.is_file()
-        || metadata.len() > limit(replicas)
+    if !(1..=maximum).contains(&replicas) || !metadata.is_file() || metadata.len() > limit(replicas)
     {
         return Err(Error::Input("interrupted terminal output is not a bounded regular file; preserve it before resuming this sweep".into()));
     }
@@ -234,6 +250,41 @@ mod tests {
                 b"previous presentation bytes"
             );
         }
+    }
+
+    #[test]
+    fn interrupted_repeated_campaign_preserves_its_full_output() {
+        let root = Directory::new();
+        let source = root.0.join("output");
+        let history = root.0.join("history");
+        let bytes = vec![b'x'; limit(1) as usize + 1];
+        let mut spool = Output::create_campaign(&source, 2).unwrap();
+        spool.write_all(&bytes).unwrap();
+        drop(spool);
+        // The original continuation path passed only concurrency here.
+        assert!(preserve(&source, 1, &history).is_err());
+        preserve_campaign(&source, 2, &history).unwrap();
+        let saved = std::fs::read_dir(history)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(std::fs::read(saved).unwrap(), bytes);
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn campaign_preservation_keeps_legacy_and_population_bounds() {
+        let root = Directory::new();
+        let source = root.0.join("output");
+        let history = root.0.join("history");
+        std::fs::write(&source, b"campaign output").unwrap();
+        assert!(preserve(&source, 65, &history).is_err());
+        assert!(preserve_campaign(&source, 65_534, &history).is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), b"campaign output");
+        preserve_campaign(&source, 65, &history).unwrap();
+        assert!(!source.exists());
     }
 
     #[test]
