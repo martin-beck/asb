@@ -382,6 +382,13 @@ fn incomplete_artifact_usage_fills_missing_fields_without_overwriting_observed_i
         output_tokens: Some(3),
         ..TokenUsage::default()
     };
+    let competing_input = TokenUsage {
+        input_tokens: Some(2),
+        ..TokenUsage::default()
+    };
+    let preserved = with_artifact_usage(usage.clone(), Some(competing_input));
+    assert_eq!(preserved.input_tokens, Some(10));
+    assert_eq!(preserved.output_tokens, None);
     let combined = with_artifact_usage(usage, Some(artifact));
     assert_eq!(combined.input_tokens, Some(10));
     assert_eq!(combined.output_tokens, Some(3));
