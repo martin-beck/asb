@@ -43,11 +43,6 @@ pub(crate) fn from_sources(
     usage.with_derived_total()
 }
 
-/// Read and normalize a structured usage artifact owned by an agent adapter.
-pub(crate) fn from_document(value: &serde_json::Value) -> TokenUsage {
-    usage_from_text(&value.to_string()).with_derived_total()
-}
-
 /// A complete run's authoritative counter belongs to the selected agent
 /// adapter. It is never inferred from generic text matches.
 pub(crate) fn steps_from_agent(agent: &str, stdout: &str, stderr: &str) -> Option<u64> {
