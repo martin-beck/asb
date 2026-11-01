@@ -2058,13 +2058,6 @@ mod tests {
                 8,
                 31,
             ),
-            (
-                "continue",
-                r#"{"usage":{"input":31,"output":10,"cached":4,"total":41}}"#,
-                31,
-                10,
-                41,
-            ),
         ];
         for (agent, output, input, response, total) in cases {
             let usage = token_usage_from_sources("cli2key", agent, output, "", None);

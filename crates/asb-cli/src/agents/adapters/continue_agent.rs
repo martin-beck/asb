@@ -24,7 +24,14 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     filename: "local-tools.jsonl",
     format: super::super::ArtifactFormat::JsonLines,
 }])
-.with_collection(collect);
+.with_collection(collect)
+.with_output_usage(output_usage);
+
+// Headless JSON output is the model's answer, not a usage event. Usage comes
+// from the private session's assistant messages or a provider cassette.
+fn output_usage(_: &str, _: &str, _: bool) -> crate::measurements::TokenUsage {
+    Default::default()
+}
 
 const BUILT_IN_TOOLS: &[&str] = &[
     "AskQuestion",
@@ -266,6 +273,16 @@ fn configure(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn json_answer_is_not_usage_when_session_is_missing() {
+        let answer = r#"{"usage":{"input_tokens":999,"output_tokens":888}}"#;
+        let output = crate::usage::from_sources("openrouter", "continue", answer, "", None);
+        let usage = crate::usage::with_artifact_usage(output, None);
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (None, None, None)
+        );
+    }
     use super::*;
     use crate::agents::AgentAdapter;
 
