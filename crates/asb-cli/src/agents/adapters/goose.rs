@@ -72,10 +72,18 @@ fn final_response(output: &str, _: &Path) -> Option<String> {
         return None;
     }
     let content = message.get("content")?.as_array()?;
-    if content
-        .iter()
-        .any(|part| part.get("type").and_then(|v| v.as_str()) == Some("toolRequest"))
-    {
+    if content.iter().any(|part| {
+        matches!(
+            part.get("type").and_then(|v| v.as_str()),
+            Some(
+                "toolRequest"
+                    | "toolResponse"
+                    | "toolConfirmationRequest"
+                    | "actionRequired"
+                    | "error"
+            ) | None
+        )
+    }) {
         return None;
     }
     let text = content
@@ -293,6 +301,21 @@ mod tests {
         assert!(super::ADAPTER.final_response(&user, path).is_none());
         let tool = r#"{"messages":[{"role":"assistant","content":[{"type":"text","text":"intermediate"},{"type":"toolRequest"}]}],"metadata":{"status":"completed"}}"#;
         assert!(super::ADAPTER.final_response(tool, path).is_none());
+        for kind in [
+            "actionRequired",
+            "toolConfirmationRequest",
+            "toolResponse",
+            "error",
+        ] {
+            let pending = format!(
+                r#"{{"messages":[{{"role":"assistant","content":[{{"type":"text","text":"intermediate"}},{{"type":"{kind}"}}]}}],"metadata":{{"status":"completed"}}}}"#
+            );
+            assert!(
+                super::ADAPTER.final_response(&pending, path).is_none(),
+                "{kind}"
+            );
+        }
+
         assert!(
             super::ADAPTER
                 .final_response(&format!("{output}\n{output}"), path)
