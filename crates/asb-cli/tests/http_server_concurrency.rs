@@ -26,7 +26,7 @@ fn concurrent_server_starts_keep_latest_state_and_report() {
     .unwrap();
     fs::write(root.join("results/report.html"), "fixture report").unwrap();
     let server = root.join("tools/http/bin/http-server");
-    fs::write(&server, "#!/usr/bin/python3\nimport http.server,sys\na=sys.argv\np=int(a[a.index('-p')+1])\nh=http.server.SimpleHTTPRequestHandler\nhttp.server.ThreadingHTTPServer(('0.0.0.0',p),lambda *args,**kwargs:h(*args,directory=a[-1],**kwargs)).serve_forever()\n").unwrap();
+    fs::write(&server, "#!/usr/bin/python3\nimport http.server,sys\na=sys.argv\np=int(a[a.index('-p')+1])\nh=http.server.SimpleHTTPRequestHandler\ns=http.server.ThreadingHTTPServer(('0.0.0.0',p),lambda *args,**kwargs:h(*args,directory=a[-1],**kwargs))\nprint('Starting up http-server, serving fixture',flush=True)\ns.serve_forever()\n").unwrap();
     fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
     let barrier = Arc::new(Barrier::new(2));
     let outputs = std::thread::scope(|scope| {
