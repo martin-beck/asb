@@ -22,6 +22,8 @@ pub(crate) struct ArtifactSpec {
 pub(crate) enum ArtifactFormat {
     Json,
     JsonLines,
+    /// Bounded private UTF-8 text, interpreted only by the owning adapter.
+    Text,
 }
 
 struct OwnedFile {
@@ -354,6 +356,13 @@ impl ArtifactOwner {
                         .map(|document| Some((Some(document), bytes)))
                         .map_err(|_| std::io::Error::other("malformed artifact JSON")),
                     ArtifactFormat::JsonLines => Ok(Some((None, bytes))),
+                    ArtifactFormat::Text => {
+                        if std::str::from_utf8(&bytes).is_err() {
+                            Err(std::io::Error::other("malformed artifact UTF-8"))
+                        } else {
+                            Ok(Some((None, bytes)))
+                        }
+                    }
                 }
             })();
             match result {
@@ -383,6 +392,7 @@ impl ArtifactOwner {
                         "artifact exceeds bound" => "size bound exceeded",
                         "artifact changed or exceeds bound" => "snapshot changed or exceeded bound",
                         "malformed artifact JSON" => "malformed JSON",
+                        "malformed artifact UTF-8" => "malformed UTF-8",
                         _ => "regular snapshot unavailable",
                     };
                     frozen.diagnostics.push(owned.diagnostic(reason));

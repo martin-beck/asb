@@ -602,6 +602,20 @@ fn native_agent_outcome_uses_typed_terminal_error_and_ignores_task_text() {
 }
 
 #[test]
+fn guest_uses_frozen_adapter_answer_when_controller_has_none() {
+    let mut execution = evidence(0, true);
+    execution.guest.as_mut().unwrap().final_response = None;
+    let outcome = execution.agent_outcome("codex", Path::new("."), Some("verified final answer"));
+    assert_eq!(
+        outcome.final_response.as_deref(),
+        Some("verified final answer")
+    );
+    assert!(outcome.failure.is_none());
+    let missing = execution.agent_outcome("codex", Path::new("."), None);
+    assert!(missing.final_response.is_none());
+}
+
+#[test]
 fn native_and_guest_apply_the_same_adapter_terminal_answer_policy() {
     let fixture = Fixture::new();
     for guest in [false, true] {

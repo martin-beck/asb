@@ -2580,6 +2580,63 @@ fn pi_intermediate_assistant_text_is_not_a_terminal_refusal() {
 
 #[cfg(unix)]
 #[test]
+fn codex_grading_uses_owned_final_file_not_intermediate_jsonl() {
+    use std::os::unix::fs::PermissionsExt;
+    for write_final in [false, true] {
+        let project = replay_project(1);
+        project.write("benchmark.toml", "agent='codex'\nworkload='repository-navigation'\nprovider='openrouter'\nmodel='test-model'\nconcurrency=1\nworkspace='workspace'\nlog_file='run.log'\n");
+        let agent = ".asb-tools/codex/bin/codex";
+        project.write(agent, r##"#!/usr/bin/env node
+const fs = require('fs');
+process.stdin.resume();
+process.stdin.on('end', async () => {
+  const flag = process.argv.indexOf('--output-last-message');
+  if (flag < 0 || !process.argv[flag + 1]) throw new Error('missing final-message path');
+  const base = process.env.ASB_PROVIDER_BASE_URL.replace(/\/$/, '').replace(/\/v1$/, '');
+  const body = {model:'test-model', input:'offline', tools:[{type:'function'}]};
+  const response = await fetch(base + '/v1/responses', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body)});
+  if (!response.ok) throw new Error('fixture proxy failed');
+  await response.text();
+  console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'src/cli.py src/registry.py lookup'}}));
+  console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
+  if (process.env.ASB_FIXTURE_BEHAVIOR === 'write-final') fs.writeFileSync(process.argv[flag + 1], 'src/cli.py src/registry.py lookup');
+});
+"##);
+        std::fs::set_permissions(
+            project.0.join(agent),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let result = replay(
+            &project,
+            if write_final {
+                "write-final"
+            } else {
+                "no-final"
+            },
+            &[],
+        );
+        let log: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+        assert_eq!(
+            log["workload_success"],
+            write_final,
+            "stdout={} stderr={}",
+            stdout(&result),
+            stderr(&result)
+        );
+        assert_eq!(
+            result.status.success(),
+            write_final,
+            "stdout={} stderr={}",
+            stdout(&result),
+            stderr(&result)
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn pi_terminal_refusal_is_reported_without_using_tool_output() {
     let project = replay_project(1);
     let result = replay(&project, "terminal-refusal", &[]);

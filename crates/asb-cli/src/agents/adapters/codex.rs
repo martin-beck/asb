@@ -26,7 +26,13 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_collection(collect)
 .with_step_count(step_count)
 .with_output_usage(output_usage)
+.with_final_response(no_stdout_final_response)
 .with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "codex-final-response",
+        filename: "final.txt",
+        format: super::super::ArtifactFormat::Text,
+    },
     super::super::ArtifactSpec {
         namespace: "tool-replay",
         filename: "local-tools.jsonl",
@@ -46,6 +52,12 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_state_environment_vars(&["CODEX_HOME"])
 .with_forwarded_invocation_environment_vars(&["ASB_CODEX_SANDBOX_MODE"])
 .with_preferred_executables(preferred_executables);
+
+// Codex JSONL agent messages can be intermediate. The pinned CLI's private
+// `--output-last-message` artifact is written only after a completed turn.
+fn no_stdout_final_response(_: &str, _: &std::path::Path) -> Option<String> {
+    None
+}
 
 fn preferred_executables(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     // The npm launcher injects package-management metadata. Prefer the native
@@ -226,6 +238,10 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
 }
 
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
+    context
+        .command
+        .arg("--output-last-message")
+        .arg(context.run_dir.join("codex-final-response/final.txt"));
     let connection = context.connection;
     let directory = context.runtime_dir.join("codex/config");
     configure(
@@ -305,7 +321,17 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
     // Preserve the runner's provider-capture ownership boundary. Codex tape
     // mode intentionally records tool effects only through the MCP relay.
     let _ = context.provider_capture;
-    super::super::mcp_relay::collect_artifacts(context)
+    let mut artifacts = super::super::mcp_relay::collect_artifacts(context);
+    artifacts.final_response = final_response_from_frozen(context.frozen);
+    artifacts
+}
+
+fn final_response_from_frozen(frozen: &super::super::FrozenArtifacts) -> Option<String> {
+    frozen
+        .bytes("final.txt")
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
 }
 
 /// Codex serializes native command results into its provider protocol. Keep
@@ -680,6 +706,52 @@ mod tests {
     use super::*;
     use crate::agents::{AgentAdapter, CollectionContext};
     use std::io::Write;
+
+    #[test]
+    fn completed_answer_comes_only_from_owned_final_message_artifact() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/codex-final-answer-tests")
+            .join(crate::tools::runtime::unique_id());
+        let mut owner =
+            crate::agents::ArtifactOwner::prepare(&root, ADAPTER.artifact_specs()).unwrap();
+        let path = root.join("codex-final-response/final.txt");
+        std::fs::write(&path, "verified final answer").unwrap();
+        let frozen = owner.freeze();
+        assert_eq!(
+            final_response_from_frozen(&frozen).as_deref(),
+            Some("verified final answer")
+        );
+        let stdout = concat!(
+            r#"{"type":"turn.started"}"#,
+            "\n",
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"partial answer"}}"#
+        );
+        assert!(ADAPTER.final_response(stdout, &root).is_none());
+        drop(owner);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_empty_and_invalid_final_artifacts_do_not_invent_an_answer() {
+        for (index, content) in [None, Some(&b"   "[..]), Some(&b"\xff"[..])]
+            .into_iter()
+            .enumerate()
+        {
+            let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/codex-final-answer-tests")
+                .join(format!("{}-{index}", crate::tools::runtime::unique_id()));
+            let mut owner =
+                crate::agents::ArtifactOwner::prepare(&root, ADAPTER.artifact_specs()).unwrap();
+            if let Some(content) = content {
+                std::fs::write(root.join("codex-final-response/final.txt"), content).unwrap();
+            }
+            let frozen = owner.freeze();
+            assert!(final_response_from_frozen(&frozen).is_none());
+            assert_eq!(frozen.error, index == 2);
+            drop(owner);
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
 
     #[test]
     fn counts_completed_agent_messages_not_tool_lifecycle_events() {
