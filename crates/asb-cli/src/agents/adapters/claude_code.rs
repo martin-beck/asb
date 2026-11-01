@@ -37,7 +37,16 @@ fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
     if event.get("type").and_then(|value| value.as_str()) != Some("result") {
         return None;
     }
-    super::super::final_text_from_event(&event)
+    if event.get("is_error").and_then(|v| v.as_bool()) != Some(false)
+        || event.get("subtype").and_then(|v| v.as_str()) != Some("success")
+    {
+        return None;
+    }
+    event
+        .get("result")?
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
 }
 
 fn execution_failure(stdout: &str, _: &str) -> Option<String> {
@@ -321,12 +330,22 @@ mod tests {
         assert_eq!(
             ADAPTER
                 .final_response(
-                    r#"{"type":"result","is_error":false,"result":"I can't run tests"}"#,
+                    r#"{"type":"result","subtype":"success","is_error":false,"result":"I can't run tests"}"#,
                     root
                 )
                 .as_deref(),
             Some("I can't run tests")
         );
+        for event in [
+            r#"{"type":"result","result":{"text":"foreign tool output"}}"#,
+            r#"{"type":"result","content":"foreign content"}"#,
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: 400 local mock auth failure"}"#,
+            r#"{"type":"result","subtype":"success","is_error":"false","result":"answer"}"#,
+            r#"{"type":"result","subtype":"unexpected","is_error":false,"result":"answer"}"#,
+            r#"{"type":"result","result":"answer"}"#,
+        ] {
+            assert!(ADAPTER.final_response(event, root).is_none());
+        }
     }
 
     #[test]
