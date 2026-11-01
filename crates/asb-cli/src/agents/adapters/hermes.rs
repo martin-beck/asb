@@ -53,7 +53,14 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     },
 ])
 .with_state_environment_vars(&["HERMES_HOME"])
+.with_output_usage(output_usage)
 .with_final_response(final_response);
+
+// The one-shot stream is the final answer and can contain arbitrary task
+// content. The adapter's usage ledger and provider cassette carry usage.
+fn output_usage(_: &str, _: &str, _: bool) -> crate::measurements::TokenUsage {
+    Default::default()
+}
 
 /// Hermes owns the workspace-effect representation: an ordinary bounded Git
 /// binary patch. Remote orchestration transfers these bytes opaquely and
@@ -390,6 +397,17 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
     use std::process::Command;
+
+    #[test]
+    fn final_answer_with_token_fields_is_not_usage() {
+        let answer = r#"{"usage":{"input_tokens":999,"output_tokens":888}}"#;
+        let output = crate::usage::from_sources("openrouter", "hermes", answer, "", None);
+        let usage = crate::usage::with_artifact_usage(output, None);
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (None, None, None)
+        );
+    }
 
     fn environment(command: &Command) -> HashMap<String, String> {
         command
