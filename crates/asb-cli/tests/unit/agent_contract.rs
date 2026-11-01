@@ -275,7 +275,10 @@ fn nested_structured_answers_reject_nonanswer_children_and_find_real_final_text(
         (r#"{"type":"tool_result","content":"not final"}"#, None),
     ] {
         assert_eq!(
-            structured_final_response_document(document).as_deref(),
+            serde_json::from_str::<serde_json::Value>(document)
+                .ok()
+                .and_then(|value| final_text_from_event(&value))
+                .as_deref(),
             expected,
             "{document}"
         );
