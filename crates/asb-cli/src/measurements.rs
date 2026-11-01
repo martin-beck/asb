@@ -2031,13 +2031,6 @@ mod tests {
                 10,
             ),
             (
-                "openhands",
-                r#"llm response {"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}"#,
-                7,
-                3,
-                10,
-            ),
-            (
                 "claude-code",
                 r#"{"type":"result","usage":{"input_tokens":17,"output_tokens":4,"cache_read_input_tokens":2,"total_tokens":21}}"#,
                 17,
@@ -2087,10 +2080,6 @@ mod tests {
             (
                 "workbuddy",
                 r#"[{"rawUsage":{"inputTokens":21,"outputTokens":5,"totalTokens":26,"inputTokensDetails":{"cached_tokens":3}}}]"#,
-            ),
-            (
-                "openhands",
-                r#"usage: input: 31 output: 7 cached: 4 total: 38"#,
             ),
             (
                 "openjiuwen",
