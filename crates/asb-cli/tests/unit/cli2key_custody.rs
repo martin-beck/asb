@@ -778,8 +778,10 @@ fn explicit_session_finish_is_once_reports_uncertainty_and_retains_custody() {
             api_key: "fixture-secret".into(),
             base_url: "http://127.0.0.1:1/v1".into(),
             _session: super::super::Session::Local {
-                _owner: owner,
-                _files: files,
+                resources: super::super::LocalResources {
+                    owner: Some(owner),
+                    files: Some(files),
+                },
             },
         };
         POLL_FAIL.set(mode);
@@ -799,6 +801,53 @@ fn explicit_session_finish_is_once_reports_uncertainty_and_retains_custody() {
         std::fs::remove_dir_all(root).unwrap();
         readers_finished();
     }
+}
+
+#[test]
+fn implicit_cleanup_removes_modules_only_after_confirmed_child_cleanup() {
+    for uncertain in [false, true] {
+        let scope = crate::process_cleanup::test_support::Scope::new();
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let files = super::super::RuntimeFiles::create(&root).unwrap();
+        let path = files.path.clone();
+        let mut owner = Local::new().unwrap();
+        owner.spawn(&mut command("import time;print('Codex Bridge API key: fixture-secret',flush=True);time.sleep(30)"), true).unwrap();
+        POLL_FAIL.set(u8::from(uncertain));
+        drop(super::super::LocalResources {
+            owner: Some(owner),
+            files: Some(files),
+        });
+        POLL_FAIL.set(0);
+        assert_eq!(path.exists(), uncertain);
+        scope.wait_finished();
+        readers_finished();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn failed_proxy_spawn_cleans_modules_when_cleanup_is_confirmed() {
+    let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+    std::fs::create_dir_all(&root).unwrap();
+    let mut files = super::super::RuntimeFiles::create(&root).unwrap();
+    let path = files.path.clone();
+    files.retain = true;
+    let mut resources = super::super::LocalResources {
+        owner: Some(Local::new().unwrap()),
+        files: Some(files),
+    };
+    let error = resources
+        .owner
+        .as_mut()
+        .unwrap()
+        .spawn_proxy(std::process::Command::new(root.join("missing-node")))
+        .unwrap_err();
+    assert!(error.contains("could not start"));
+    resources.finish().unwrap();
+    assert!(!path.exists());
+    readers_finished();
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

@@ -45,7 +45,10 @@ impl RuntimeFiles {
             }
             match builder.create(&path) {
                 Ok(()) => {
-                    let files = Self { path, retain: true };
+                    let files = Self {
+                        path,
+                        retain: false,
+                    };
                     for (name, source) in [
                         ("network-fetch.mjs", NETWORK_FETCH),
                         ("cli2key-chat-compat.mjs", CHAT_COMPAT),
@@ -70,6 +73,30 @@ impl RuntimeFiles {
         Err(Error::Run(
             "cannot allocate a unique cli2key proxy directory".into(),
         ))
+    }
+}
+
+struct LocalResources {
+    owner: Option<custody::Local>,
+    files: Option<RuntimeFiles>,
+}
+
+impl LocalResources {
+    fn finish(&mut self) -> Result<(), Error> {
+        let result = self
+            .owner
+            .take()
+            .map_or(Ok(()), |owner| owner.finish().map_err(Error::Run));
+        if let Some(mut files) = self.files.take() {
+            files.retain = result.is_err();
+        }
+        result
+    }
+}
+
+impl Drop for LocalResources {
+    fn drop(&mut self) {
+        let _ = self.finish();
     }
 }
 
@@ -129,10 +156,7 @@ pub struct Bridge {
 
 enum Session {
     External,
-    Local {
-        _owner: custody::Local,
-        _files: RuntimeFiles,
-    },
+    Local { resources: LocalResources },
     Finished,
 }
 
@@ -144,16 +168,10 @@ impl crate::providers::ProviderSession for Bridge {
         Bridge::base_url(self)
     }
     fn finish(&mut self) -> Result<(), Error> {
-        if let Session::Local {
-            _owner: owner,
-            _files: mut files,
-        } = std::mem::replace(&mut self._session, Session::Finished)
+        if let Session::Local { mut resources } =
+            std::mem::replace(&mut self._session, Session::Finished)
         {
-            let result = owner.finish().map_err(Error::Run);
-            if result.is_ok() {
-                files.retain = false;
-            }
-            result
+            resources.finish()
         } else {
             Ok(())
         }
@@ -206,9 +224,17 @@ impl Bridge {
             .env("CODEX_BRIDGE_PORT", &port)
             .stdin(Stdio::null())
             .stderr(Stdio::null());
-        let mut owner = custody::Local::new().map_err(Error::Run)?;
-        let result: Result<(String, String, RuntimeFiles), Error> = (|| {
-            let discovered_key = owner.spawn_bridge(&mut command).map_err(Error::Run)?;
+        let mut resources = LocalResources {
+            owner: Some(custody::Local::new().map_err(Error::Run)?),
+            files: None,
+        };
+        let result: Result<(String, String), Error> = (|| {
+            let discovered_key = resources
+                .owner
+                .as_mut()
+                .expect("live owner")
+                .spawn_bridge(&mut command)
+                .map_err(Error::Run)?;
             let api_key = std::env::var("CLI2KEY_API_KEY")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
@@ -222,29 +248,39 @@ impl Bridge {
                     proxy_root.display()
                 ))
             })?;
-            let files = RuntimeFiles::create(&proxy_root)?;
+            let mut files = RuntimeFiles::create(&proxy_root)?;
+            files.retain = true;
+            resources.files = Some(files);
             let upstream = base_url.clone();
             let mut command = Command::new("node");
             crate::project::apply_network_proxy(&mut command, std::path::Path::new("."))?;
             command
-                .arg(files.path.join("cli2key-proxy.mjs"))
+                .arg(
+                    resources
+                        .files
+                        .as_ref()
+                        .expect("runtime files")
+                        .path
+                        .join("cli2key-proxy.mjs"),
+                )
                 .args(["--upstream", &upstream])
                 .stdin(Stdio::piped())
                 .stderr(Stdio::null());
+            let owner = resources.owner.as_mut().expect("live owner");
             let address = owner.spawn_proxy(command).map_err(Error::Run)?;
             owner.confirm_ready().map_err(Error::Run)?;
-            Ok((api_key, format!("http://{address}/v1"), files))
+            Ok((api_key, format!("http://{address}/v1")))
         })();
         match result {
-            Ok((api_key, base_url, files)) => Ok(Self {
+            Ok((api_key, base_url)) => Ok(Self {
                 api_key,
                 base_url,
-                _session: Session::Local {
-                    _owner: owner,
-                    _files: files,
-                },
+                _session: Session::Local { resources },
             }),
-            Err(error) => Err(Error::Run(owner.failure(error.to_string()))),
+            Err(error) => match resources.finish() {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(Error::Run(format!("{error}; {cleanup}"))),
+            },
         }
     }
 
@@ -334,7 +370,8 @@ mod tests {
         assert_eq!(std::fs::read(&first).unwrap(), original);
         let mut iter = files.into_iter();
         let mut released = iter.next().unwrap();
-        let retained = iter.next().unwrap();
+        let mut retained = iter.next().unwrap();
+        retained.retain = true;
         released.retain = false;
         drop(released);
         assert!(!first.exists());

@@ -13,9 +13,6 @@ impl Local {
     ) -> Result<std::net::SocketAddrV4, String> {
         Err("local cli2key bridge requires Unix".into())
     }
-    pub(super) fn failure(self, reason: String) -> String {
-        reason
-    }
     pub(super) fn finish(self) -> Result<(), String> {
         Ok(())
     }

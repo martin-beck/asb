@@ -200,6 +200,7 @@ impl Local {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn failure(mut self, reason: String) -> String {
         match self.cleanup() {
             Ok(()) => reason,
