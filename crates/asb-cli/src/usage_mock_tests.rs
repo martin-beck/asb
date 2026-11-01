@@ -389,6 +389,15 @@ fn continue_and_openhands_use_recorded_mock_usage_when_output_omits_it() {
 }
 
 #[test]
+fn continue_prefers_cassette_to_usage_shaped_json_answer() {
+    let cassette = chat_cassette(2);
+    let answer = r#"{"usage":{"input_tokens":999,"output_tokens":888}}"#;
+    let usage = token_usage_from_sources("openrouter", "continue", answer, "", Some(&cassette.0));
+    assert_eq!(usage.source.as_deref(), Some("cassette"));
+    assert_usage(usage, 20, 6, Some(8));
+}
+
+#[test]
 fn incomplete_recordings_are_not_reported_as_complete_totals() {
     let complete = chat_cassette(1);
     let truncated = serde_json::json!({"request":{"url":"/v1/chat/completions"},"response":{"status":200,"body":"data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3}}\n\n"}});
