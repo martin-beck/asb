@@ -96,7 +96,7 @@ fn guest_refuses_unowned_or_controller_namespace_service_lifetimes_before_prepar
 }
 
 #[test]
-fn guest_uses_registered_adapter_prepares_before_gate_and_preserves_output_usage_and_failure() {
+fn guest_uses_registered_adapter_prepares_before_gate_and_preserves_output_and_failure() {
     qualify_guest_directory(false, false);
 }
 
@@ -371,9 +371,11 @@ fn qualify_guest_directory(inherit_directory: bool, rename: bool) {
         }
     );
     assert_eq!(result["exit_code"], 7);
-    assert_eq!(result["token_usage"]["input_tokens"], 17);
-    assert_eq!(result["token_usage"]["output_tokens"], 5);
-    assert_eq!(result["token_usage"]["total_tokens"], 22);
+    // The guest's interim result precedes collection of the owned summary.
+    // A text answer that looks like a turn event is not usage evidence.
+    assert!(result["token_usage"]["input_tokens"].is_null());
+    assert!(result["token_usage"]["output_tokens"].is_null());
+    assert!(result["token_usage"]["total_tokens"].is_null());
     assert_eq!(result["final_response"], "fixture completed");
     assert!(!String::from_utf8_lossy(&bytes).contains("fixture-token"));
 }

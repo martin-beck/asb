@@ -2000,13 +2000,6 @@ mod tests {
                 10,
             ),
             (
-                "pi",
-                r#"event: {"type":"turn_end","usage":{"input":7,"output":3,"total":10,"cacheRead":2}}"#,
-                9,
-                3,
-                12,
-            ),
-            (
                 "qwen-code",
                 r#"{"type":"result","stats":{"total_tokens":10,"input_tokens":7,"output_tokens":3,"cached":2}}"#,
                 7,
