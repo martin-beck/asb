@@ -5,6 +5,8 @@ mod fixture_namespace;
 #[cfg(unix)]
 #[path = "support/fixture_writer.rs"]
 mod fixture_writer;
+#[path = "support/setup_installables.rs"]
+mod setup_installables;
 mod support;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -19,7 +21,7 @@ impl Project {
             ".asb/project.toml",
             "tools_dir='tools'\nworkloads_dir='catalogs'\nworkspace_dir='workspaces'\n",
         );
-        project.seed_setup_collectors();
+        setup_installables::seed(&project.0, "tools");
         project
     }
 
@@ -46,19 +48,6 @@ impl Project {
                 "#!/bin/sh\nexit 0\n",
             );
         }
-    }
-    /// Setup-matrix cases exercise configuration selection and publication.
-    /// Supply every default collector locally so those tests cannot fall into
-    /// a host package/source installer (notably perf's kernel build path).
-    fn seed_setup_collectors(&self) {
-        self.seed_collector_installations(&[
-            ("mpstat", "mpstat"),
-            ("iostat", "iostat"),
-            ("perf", "perf"),
-            ("perfetto", "tracebox"),
-            ("bpftrace", "bpftrace"),
-            ("flamegraph", "flamegraph"),
-        ]);
     }
     #[cfg(unix)]
     fn write_executable(&self, path: &str, text: &str) {
@@ -197,7 +186,7 @@ fn actual_setup_in_non_utf8_project_refuses_unrepresentable_runtime_paths_before
         ".asb/project.toml",
         "tools_dir='tools'\nworkloads_dir='catalogs'\nworkspace_dir='workspace'\n",
     );
-    project.seed_setup_collectors();
+    setup_installables::seed_collectors(&project.0, "tools");
     // This fixture verifies setup's path-serialization boundary, not automatic
     // installation. Supply the selected project's expected local executable so
     // setup reaches that boundary without an unrelated installer attempt.
