@@ -2015,7 +2015,7 @@ mod tests {
             ),
             (
                 "workbuddy",
-                r#"done {"usage":{"inputTokens":7,"outputTokens":3,"totalTokens":10}}"#,
+                r#"{"type":"result","usage":{"inputTokens":7,"outputTokens":3,"totalTokens":10}}"#,
                 7,
                 3,
                 10,
@@ -2076,7 +2076,7 @@ mod tests {
         let cases = [
             (
                 "workbuddy",
-                r#"[{"rawUsage":{"inputTokens":21,"outputTokens":5,"totalTokens":26,"inputTokensDetails":{"cached_tokens":3}}}]"#,
+                r#"[{"type":"result","rawUsage":{"inputTokens":21,"outputTokens":5,"totalTokens":26,"inputTokensDetails":{"cached_tokens":3}}}]"#,
             ),
             (
                 "openjiuwen",

@@ -299,6 +299,15 @@ fn workbuddy_pretty_printed_result_counts_one_usage_record() {
 }
 
 #[test]
+fn workbuddy_incomplete_result_uses_complete_cassette() {
+    let cassette = chat_cassette(2);
+    let output = serde_json::json!({"type":"result", "result":"{\"usage\":{\"input_tokens\":999,\"output_tokens\":888}}"}).to_string();
+    let usage = token_usage_from_sources("openrouter", "workbuddy", &output, "", Some(&cassette.0));
+    assert_eq!(usage.source.as_deref(), Some("cassette"));
+    assert_usage(usage, 20, 6, Some(8));
+}
+
+#[test]
 fn mini_swe_trajectory_counts_each_response_once() {
     let trajectory = Fixture::new(concat!(
         "{\n  \"info\":{\"model_stats\":{\"api_calls\":3}},\n  \"messages\":[\n",
