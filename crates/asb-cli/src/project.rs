@@ -34,20 +34,6 @@ const CONFIG_DIR: &str = ".asb";
 const CONFIG_FILE: &str = "project.toml";
 const CLEANUP_DIR: &str = ".asb-cleanup";
 
-#[cfg(target_os = "linux")]
-const HOST_SETTINGS: &[(&str, &str, &str)] = &[
-    (
-        "kernel.perf_event_paranoid",
-        "-1",
-        "perf process-tree counters",
-    ),
-    (
-        "kernel.sched_schedstats",
-        "1",
-        "bpftrace io-wait scheduler statistics",
-    ),
-];
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProjectConfig {
     pub tools_dir: String,
@@ -566,7 +552,7 @@ fn configure_host_capabilities_with(
 ) -> Result<Option<String>, Error> {
     use host_setup::{FailurePolicy, Operation, Request, Requirement};
     let mut pending = Vec::new();
-    for &(setting, wanted, purpose) in HOST_SETTINGS {
+    for (setting, wanted, purpose) in crate::collectors::host_settings() {
         if current(setting).is_some_and(|value| value.trim() == wanted) {
             writeln!(
                 output,

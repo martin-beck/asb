@@ -213,7 +213,8 @@ exit 0
                 || text.contains("No answer received; defaulting to no.")
                 || (text.contains("system-wide tracing settings unchanged by user request")
                     && text.contains("no delegated project cgroup was created"))
-                || (text.matches("already enabled").count() == HOST_SETTINGS.len()
+                || (text.matches("already enabled").count()
+                    == crate::collectors::host_settings().len()
                     && text.contains("no delegated project cgroup was created"))
         );
     }

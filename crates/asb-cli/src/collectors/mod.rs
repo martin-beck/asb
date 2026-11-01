@@ -254,6 +254,11 @@ pub(crate) trait CollectorAdapter: Sync {
     fn private_service_entry(&self, _: &[std::ffi::OsString]) -> Option<std::process::ExitCode> {
         None
     }
+    /// Host settings this collector can request during explicit project setup.
+    #[cfg(any(target_os = "linux", test))]
+    fn host_settings(&self) -> &'static [(&'static str, &'static str, &'static str)] {
+        &[]
+    }
     /// Configure collector-owned host capabilities during project setup.
     fn configure_project(
         &self,
@@ -478,6 +483,14 @@ pub(crate) fn all() -> &'static [&'static dyn CollectorAdapter] {
     adapters::REGISTRY
 }
 
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn host_settings() -> Vec<(&'static str, &'static str, &'static str)> {
+    all()
+        .iter()
+        .flat_map(|adapter| adapter.host_settings().iter().copied())
+        .collect()
+}
+
 pub(crate) fn configure_project(
     root: &Path,
     output: &mut dyn std::io::Write,
@@ -629,6 +642,38 @@ pub(crate) fn selected_or_environment(id: &str, selected: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_setting_descriptors_belong_to_collectors_and_remain_unique() {
+        let settings = host_settings();
+        assert_eq!(
+            settings,
+            vec![
+                (
+                    "kernel.perf_event_paranoid",
+                    "-1",
+                    "perf process-tree counters"
+                ),
+                (
+                    "kernel.sched_schedstats",
+                    "1",
+                    "bpftrace io-wait scheduler statistics"
+                )
+            ]
+        );
+        let mut keys = std::collections::BTreeSet::new();
+        for (name, _, _) in settings {
+            assert!(keys.insert(name), "duplicate host setting {name}");
+        }
+        assert_eq!(
+            find("perf").unwrap().host_settings()[0].0,
+            "kernel.perf_event_paranoid"
+        );
+        assert_eq!(
+            find("bpftrace").unwrap().host_settings()[0].0,
+            "kernel.sched_schedstats"
+        );
+    }
 
     #[test]
     fn project_hooks_are_dispatched_and_reset_leases_remain_held() {

@@ -56,6 +56,14 @@ pub(super) struct PerfCollector;
 pub(super) static ADAPTER: PerfCollector = PerfCollector;
 
 impl CollectorAdapter for PerfCollector {
+    #[cfg(any(target_os = "linux", test))]
+    fn host_settings(&self) -> &'static [(&'static str, &'static str, &'static str)] {
+        &[(
+            "kernel.perf_event_paranoid",
+            "-1",
+            "perf process-tree counters",
+        )]
+    }
     fn estimated_disk_mib(&self) -> u64 {
         512
     }
