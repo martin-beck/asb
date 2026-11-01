@@ -24,13 +24,9 @@ pub(crate) fn from_sources(
 ) -> TokenUsage {
     let mut usage = usage_from_environment(provider, agent);
     let inclusive = crate::providers::anthropic_input_includes_cache(provider);
-    let output_usage = match crate::agents::find(agent) {
-        Some(adapter) => adapter
-            .output_usage(stdout, stderr, inclusive)
-            .unwrap_or_else(|| usage_from_text(stdout).merge(usage_from_text(stderr))),
-        // A caller without a registered adapter has no output schema.
-        None => TokenUsage::default(),
-    };
+    // Only the owning adapter can identify usage in its output. A missing
+    // adapter or hook leaves usage unknown instead of parsing task text.
+    let output_usage = adapter_output_usage(crate::agents::find(agent), stdout, stderr, inclusive);
     let mut cassette_usage = TokenUsage::default();
     if let Some(path) = cassette
         && let Ok(text) = read_bounded_text(path, 16 * 1024 * 1024)
@@ -43,6 +39,17 @@ pub(crate) fn from_sources(
         usage = usage.merge_with_source(output_usage, "agent-output");
     }
     usage.with_derived_total()
+}
+
+fn adapter_output_usage(
+    adapter: Option<&dyn crate::agents::AgentAdapter>,
+    stdout: &str,
+    stderr: &str,
+    inclusive: bool,
+) -> TokenUsage {
+    adapter
+        .and_then(|adapter| adapter.output_usage(stdout, stderr, inclusive))
+        .unwrap_or_default()
 }
 
 /// A complete run's authoritative counter belongs to the selected agent
