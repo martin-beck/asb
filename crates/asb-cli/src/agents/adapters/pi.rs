@@ -48,8 +48,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_final_response(final_response)
 .with_final_response_failure(super::terminal_refusal)
 .with_state_environment_vars(&["PI_CODING_AGENT_DIR"])
-.with_execution_failure(execution_failure)
-.with_step_count(step_count);
+.with_execution_failure(execution_failure);
 
 fn final_response(output: &str, _: &Path) -> Option<String> {
     let event = output.lines().rev().find_map(|line| {
@@ -343,61 +342,6 @@ handlers.agent_end();
         assert_eq!(artifacts.token_usage.unwrap().total_tokens, Some(18));
         let _ = std::fs::remove_dir_all(root);
     }
-}
-
-fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
-    let (mut active, mut turn_open, mut completed) = (false, false, false);
-    let (mut retry_pending, mut compaction_pending) = (false, false);
-    let mut continuation_pending = false;
-    let mut turns = 0_u64;
-    let mut cycle_turns = 0_u64;
-    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
-        let event: serde_json::Value = serde_json::from_str(line).ok()?;
-        match event.get("type")?.as_str()? {
-            "agent_start" if !active => {
-                active = true;
-                completed = false;
-                continuation_pending = false;
-                cycle_turns = 0;
-            }
-            "turn_start" if active && !turn_open => turn_open = true,
-            "turn_end"
-                if active
-                    && turn_open
-                    && event.pointer("/message/role").and_then(|v| v.as_str())
-                        == Some("assistant") =>
-            {
-                // One terminal event per attempted main-agent model turn.
-                // Error/aborted turns count too; agent_end repeats messages.
-                turns = turns.checked_add(1)?;
-                cycle_turns = cycle_turns.checked_add(1)?;
-                turn_open = false;
-            }
-            "agent_end" if active && !turn_open && cycle_turns > 0 => {
-                active = false;
-                completed = true;
-            }
-            "agent_start" | "turn_start" | "turn_end" | "agent_end" => return None,
-            "auto_retry_start" => retry_pending = true,
-            "auto_retry_end" => retry_pending = false,
-            // Retry starts may repeat across failed attempts, and terminal
-            // retry/compaction errors can end without a start in Pi itself.
-            "compaction_start" => compaction_pending = true,
-            "compaction_end" => {
-                compaction_pending = false;
-                continuation_pending = event.get("willRetry")?.as_bool()?;
-            }
-            _ => {}
-        }
-    }
-    (completed
-        && !active
-        && !turn_open
-        && !retry_pending
-        && !compaction_pending
-        && !continuation_pending
-        && turns > 0)
-        .then_some(turns)
 }
 
 // Pi runs in text mode: stdout is arbitrary assistant text. The private
@@ -744,69 +688,14 @@ mod tests {
     }
 
     #[test]
-    fn counts_only_balanced_terminal_turns_in_complete_agent_cycles() {
-        let cycle = r#"{"type":"agent_start"}
-{"type":"turn_start"}
-{"type":"message_end","message":{"role":"assistant"}}
-{"type":"tool_execution_end"}
-{"type":"turn_end","message":{"role":"assistant","stopReason":"error"}}
-{"type":"agent_end","messages":[{"role":"assistant"},{"role":"assistant"}]}"#;
-        assert_eq!(step_count(cycle, ""), Some(1));
-        let retry = format!(
-            "{cycle}\n{{\"type\":\"auto_retry_start\"}}\n{cycle}\n{{\"type\":\"auto_retry_end\"}}"
+    fn text_answer_cannot_spoof_step_count() {
+        let answer = concat!(
+            "{\"type\":\"agent_start\"}\n",
+            "{\"type\":\"turn_start\"}\n",
+            "{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}\n",
+            "{\"type\":\"agent_end\"}\n",
         );
-        assert_eq!(step_count(&retry, ""), Some(2));
-        assert_eq!(
-            step_count(&format!("{cycle}\n{{\"type\":\"auto_retry_start\"}}"), ""),
-            None
-        );
-        assert_eq!(
-            step_count(&format!("{cycle}\n{{\"type\":\"compaction_start\"}}"), ""),
-            None
-        );
-        assert_eq!(
-            step_count(&format!("{cycle}\n{{\"type\":\"turn_end\"}}"), ""),
-            None
-        );
-        assert_eq!(step_count(&format!("{cycle}\nbroken"), ""), None);
-        assert_eq!(step_count(cycle.rsplit_once('\n').unwrap().0, ""), None);
-        assert_eq!(
-            step_count(r#"{"type":"agent_end","messages":[]}"#, ""),
-            None
-        );
-        assert_eq!(step_count("", ""), None);
-        assert_eq!(
-            step_count(
-                &format!("{cycle}\n{{\"type\":\"agent_start\"}}\n{{\"type\":\"agent_end\"}}"),
-                ""
-            ),
-            None
-        );
-        let compaction = format!(
-            "{cycle}\n{{\"type\":\"compaction_start\"}}\n{{\"type\":\"compaction_end\",\"willRetry\":true}}"
-        );
-        assert_eq!(step_count(&compaction, ""), None);
-        assert_eq!(step_count(&format!("{compaction}\n{cycle}"), ""), Some(2));
-        assert_eq!(
-            step_count(
-                &format!("{cycle}\n{{\"type\":\"compaction_end\",\"willRetry\":false}}"),
-                ""
-            ),
-            Some(1)
-        );
-        assert_eq!(
-            step_count(
-                &format!(
-                    "{cycle}\n{{\"type\":\"auto_retry_end\",\"success\":false,\"attempt\":0}}"
-                ),
-                ""
-            ),
-            Some(1)
-        );
-        let repeated_retry = format!(
-            "{cycle}\n{{\"type\":\"auto_retry_start\",\"attempt\":1}}\n{cycle}\n{{\"type\":\"auto_retry_start\",\"attempt\":2}}\n{cycle}\n{{\"type\":\"auto_retry_end\",\"success\":false,\"attempt\":2}}"
-        );
-        assert_eq!(step_count(&repeated_retry, ""), Some(3));
+        assert_eq!(ADAPTER.step_count(answer, ""), None);
     }
 
     #[test]
