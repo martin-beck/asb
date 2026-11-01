@@ -33,6 +33,8 @@ impl Project {
         )
         .unwrap();
         let program = root.join(".asb-tools/pi/bin/pi");
+        // Mock the adapter's structured final event for this guest plumbing
+        // test; real Pi text-mode answer ownership is tested separately.
         fixture_writer::write_file(
             &root,
             &program,
@@ -44,7 +46,7 @@ printf 'changed\n' > performed.txt
 if test -n "$ASB_SESSION_CONTEXT"; then printf '%s' "$ASB_SESSION_CONTEXT" > session-env.txt; fi
 if test "$ASB_RENAME_SESSION_CWD" = yes; then mv "$PWD" "$PWD-renamed" || exit 93; fi
 printf '%s\n' '{"type":"turn_end","usage":{"input":17,"output":5,"cacheRead":0}}'
-printf '%s\n' '{"type":"result","result":"fixture completed"}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"fixture completed"}]}]}'
 printf 'fixture diagnostic\n' >&2
 exit 7
 "#,
@@ -96,7 +98,7 @@ fn guest_refuses_unowned_or_controller_namespace_service_lifetimes_before_prepar
 }
 
 #[test]
-fn guest_uses_registered_adapter_prepares_before_gate_and_preserves_output_usage_and_failure() {
+fn guest_uses_registered_adapter_prepares_before_gate_and_preserves_output_and_failure() {
     qualify_guest_directory(false, false);
 }
 
@@ -371,9 +373,11 @@ fn qualify_guest_directory(inherit_directory: bool, rename: bool) {
         }
     );
     assert_eq!(result["exit_code"], 7);
-    assert_eq!(result["token_usage"]["input_tokens"], 17);
-    assert_eq!(result["token_usage"]["output_tokens"], 5);
-    assert_eq!(result["token_usage"]["total_tokens"], 22);
+    // The guest's interim result precedes collection of the owned summary.
+    // A text answer that looks like a turn event is not usage evidence.
+    assert!(result["token_usage"]["input_tokens"].is_null());
+    assert!(result["token_usage"]["output_tokens"].is_null());
+    assert!(result["token_usage"]["total_tokens"].is_null());
     assert_eq!(result["final_response"], "fixture completed");
     assert!(!String::from_utf8_lossy(&bytes).contains("fixture-token"));
 }

@@ -1808,6 +1808,8 @@ fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'applicati
   .then(response => {
     if (!response.ok) { process.exitCode = 1; return; }
     fs.writeFileSync('src/parser.py', "def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n");
+    fs.mkdirSync(require('path').dirname(process.env.ASB_PI_SUMMARY_PATH), {recursive:true});
+    fs.writeFileSync(process.env.ASB_PI_SUMMARY_PATH, JSON.stringify({schema_version:1,completed:true,usage_complete:true,steps:1,input_tokens:10,output_tokens:3,cached_tokens:0}));
     for (const type of ['message_update', 'message_end', 'turn_end', 'agent_end'])
       console.log(JSON.stringify({type, usage:{input:10,output:3,cacheRead:0,totalTokens:13}}));
   }).catch(() => { process.exitCode = 1; });
@@ -1856,7 +1858,7 @@ fn incomplete_replay_does_not_report_unconsumed_recording_tokens() {
                 agent,
                 &script.replace(
                     "console.log('fixture-agent-output');",
-                    "console.log(JSON.stringify({type:'turn_end',usage:{input:5,output:1,cacheRead:2}}));",
+                    "require('fs').mkdirSync(require('path').dirname(process.env.ASB_PI_SUMMARY_PATH),{recursive:true}); require('fs').writeFileSync(process.env.ASB_PI_SUMMARY_PATH,JSON.stringify({schema_version:1,completed:true,usage_complete:true,steps:1,input_tokens:7,output_tokens:1,cached_tokens:2}));",
                 ),
             );
         }
@@ -1909,7 +1911,7 @@ fn incomplete_replay_does_not_report_unconsumed_recording_tokens() {
                 assert_eq!(log["token_usage"]["output_tokens"], 1);
                 assert_eq!(log["token_usage"]["cached_tokens"], 2);
                 assert_eq!(log["token_usage"]["total_tokens"], 8);
-                assert_eq!(log["token_usage"]["source"], "agent-output");
+                assert_eq!(log["token_usage"]["source"], "agent-artifact");
                 continue;
             }
             // This fake agent emits no native usage. Unknown is honest;

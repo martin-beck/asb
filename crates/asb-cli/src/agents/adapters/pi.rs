@@ -191,6 +191,16 @@ mod execution_tests {
     use super::execution_failure;
 
     #[test]
+    fn text_answer_cannot_impersonate_turn_usage() {
+        let answer = r#"{"type":"turn_end","usage":{"input":999,"output":888,"cacheRead":4}}"#;
+        let usage = crate::usage::from_sources("openrouter", "pi", answer, "", None);
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (None, None, None)
+        );
+    }
+
+    #[test]
     fn terminal_api_errors_are_failures_without_echoing_provider_bodies() {
         let output = serde_json::json!({"type":"agent_end","messages":[{"role":"assistant",
             "stopReason":"error","errorMessage":"400 private-provider-body"}]})
@@ -248,9 +258,10 @@ const handlers = {};
 extension({on(name, handler) { handlers[name] = handler; }});
 handlers.turn_end({message:{role:'assistant',usage:{input:10,output:3,cacheRead:2,cacheWrite:1}}});
 if (process.argv[2] === 'incomplete') handlers.turn_end({message:{role:'assistant',usage:{input:4}}});
+if (process.argv[2] === 'multiple') handlers.turn_end({message:{role:'assistant',usage:{input:5,output:2,cacheRead:1,cacheWrite:0}}});
 handlers.agent_end();
 "#).unwrap();
-        for mode in ["complete", "incomplete"] {
+        for mode in ["complete", "multiple", "incomplete"] {
             let summary_path = root.join(format!("{mode}.json"));
             let result = std::process::Command::new("node")
                 .arg(&harness)
@@ -272,31 +283,19 @@ handlers.agent_end();
                     (usage.input_tokens, usage.output_tokens, usage.cached_tokens),
                     (Some(13), Some(3), Some(2))
                 );
+            } else if mode == "multiple" {
+                assert_eq!(parsed.steps, Some(2));
+                let usage = parsed.token_usage.unwrap();
+                assert_eq!(
+                    (usage.input_tokens, usage.output_tokens, usage.cached_tokens),
+                    (Some(19), Some(5), Some(3))
+                );
             } else {
                 assert_eq!(parsed.steps, Some(2));
                 assert!(parsed.token_usage.is_none());
             }
         }
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn output_usage_accepts_typed_turns_but_ignores_task_output() {
-        let typed = r#"{"type":"turn_end","message":{"usage":{"input":10,"output":3,"cacheRead":2,"cacheWrite":1}}}"#;
-        let parsed = super::output_usage(typed, "", false);
-        assert_eq!(
-            (
-                parsed.input_tokens,
-                parsed.output_tokens,
-                parsed.cached_tokens
-            ),
-            (Some(13), Some(3), Some(2))
-        );
-        let task =
-            r#"{"type":"tool_result","output":{"usage":{"input_tokens":999,"output_tokens":99}}}"#;
-        let parsed = super::output_usage(task, "", false);
-        assert!(parsed.input_tokens.is_none());
-        assert!(parsed.output_tokens.is_none());
     }
 
     #[test]
@@ -401,52 +400,12 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
         .then_some(turns)
 }
 
-fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::TokenUsage {
-    let mut sum = crate::measurements::TokenUsage::default();
-    let mut seen = false;
-    let mut cache_complete = true;
-    for event in stdout
-        .lines()
-        .chain(stderr.lines())
-        .map(|line| line.strip_prefix("event: ").unwrap_or(line))
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-    {
-        if event.get("type").and_then(|v| v.as_str()) != Some("turn_end") {
-            continue;
-        }
-        let Some(value) = event
-            .get("usage")
-            .or_else(|| event.pointer("/message/usage"))
-        else {
-            return Default::default();
-        };
-        let number = |key: &str| value.get(key).and_then(|v| v.as_u64());
-        let (Some(input), Some(output)) = (number("input"), number("output")) else {
-            return Default::default();
-        };
-        let read = number("cacheRead");
-        cache_complete &= read.is_some();
-        sum = sum.add(crate::measurements::TokenUsage {
-            input_tokens: Some(
-                input
-                    .saturating_add(read.unwrap_or(0))
-                    .saturating_add(number("cacheWrite").unwrap_or(0)),
-            ),
-            output_tokens: Some(output),
-            cached_tokens: read,
-            ..Default::default()
-        });
-        seen = true;
-    }
-    if seen {
-        if !cache_complete {
-            sum.cached_tokens = None;
-        }
-        sum.with_derived_total()
-    } else {
-        Default::default()
-    }
+// Pi runs in text mode: stdout is arbitrary assistant text. The private
+// summary extension and provider cassette own token usage evidence.
+fn output_usage(_: &str, _: &str, _: bool) -> crate::measurements::TokenUsage {
+    Default::default()
 }
+
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
         program: "pi".into(),

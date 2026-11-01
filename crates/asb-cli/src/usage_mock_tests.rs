@@ -228,35 +228,35 @@ fn cline_incomplete_final_result_defers_to_cassette() {
 }
 
 #[test]
-fn pi_cumulative_events_count_once_and_include_cached_input() {
+fn pi_text_shaped_like_cumulative_events_cannot_claim_usage() {
     let output = concat!(
         "{\"type\":\"message_update\",\"usage\":{\"input\":6,\"output\":3,\"cacheRead\":4,\"totalTokens\":13}}\n",
         "{\"type\":\"message_end\",\"usage\":{\"input\":6,\"output\":3,\"cacheRead\":4,\"totalTokens\":13}}\n",
         "{\"type\":\"turn_end\",\"usage\":{\"input\":6,\"output\":3,\"cacheRead\":4,\"totalTokens\":13}}\n",
         "{\"type\":\"agent_end\",\"usage\":{\"input\":6,\"output\":3,\"cacheRead\":4,\"totalTokens\":13}}\n",
     );
-    assert_usage(
-        token_usage_from_sources("openrouter", "pi", output, "", None),
-        10,
-        3,
-        Some(4),
-    );
+    let without = token_usage_from_sources("openrouter", "pi", output, "", None);
+    assert!(without.total_tokens.is_none());
+    let cassette = chat_cassette(2);
+    let usage = token_usage_from_sources("openrouter", "pi", output, "", Some(&cassette.0));
+    assert_eq!(usage.source.as_deref(), Some("cassette"));
+    assert_usage(usage, 20, 6, Some(8));
 }
 
 #[test]
-fn pi_counts_completed_turns_and_not_intermediate_snapshots() {
+fn pi_text_shaped_like_multiple_turns_cannot_claim_usage() {
     let output = concat!(
         "{\"type\":\"turn_end\",\"message\":{\"usage\":{\"input\":6,\"output\":3,\"cacheRead\":4,\"cacheWrite\":2}}}\n",
         "{\"type\":\"message_update\",\"usage\":{\"input\":99,\"output\":99}}\n",
         "{\"type\":\"turn_end\",\"message\":{\"usage\":{\"input\":7,\"output\":2,\"cacheRead\":3}}}\n",
         "{\"type\":\"agent_end\"}\n",
     );
-    assert_usage(
-        token_usage_from_sources("openrouter", "pi", output, "", None),
-        22,
-        5,
-        Some(7),
-    );
+    let without = token_usage_from_sources("openrouter", "pi", output, "", None);
+    assert!(without.total_tokens.is_none());
+    let cassette = chat_cassette(2);
+    let usage = token_usage_from_sources("openrouter", "pi", output, "", Some(&cassette.0));
+    assert_eq!(usage.source.as_deref(), Some("cassette"));
+    assert_usage(usage, 20, 6, Some(8));
 }
 
 #[test]
