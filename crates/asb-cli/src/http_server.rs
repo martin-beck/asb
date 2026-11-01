@@ -21,6 +21,7 @@ const STATE_NAME: &str = "http-server.json";
 const PUBLICATION_DIR: &str = "http-publication";
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const START_TIMEOUT: Duration = Duration::from_secs(3);
+const STARTUP_BUDGET: Duration = Duration::from_secs(27);
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_FILES: usize = 10_000;
 
@@ -160,26 +161,45 @@ fn start(
         .join(format!("http-server-{generation}.json"));
     write_state(&private_state, &state)?;
     let asb = std::env::current_exe().map_err(crate::io_error)?;
-    Command::new(asb)
+    let mut wrapper = Command::new(asb)
         .arg("__asb-http-server")
         .arg("--state")
         .arg(&private_state)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| Error::Run(format!("cannot start ASB HTTP report server: {error}")))?;
-    let deadline = Instant::now() + START_TIMEOUT;
+    let deadline = Instant::now() + STARTUP_BUDGET;
     loop {
         if let Ok(ready) = read_state(&private_state)
             && ready.port != 0
             && ready.pid.is_some()
         {
             write_state(&path, &ready)?;
+            if wrapper
+                .stdin
+                .as_mut()
+                .ok_or_else(|| Error::Run("HTTP server startup pipe is unavailable".into()))?
+                .write_all(b"A")
+                .is_err()
+            {
+                let _ = fs::remove_file(&path);
+                return Err(Error::Run(
+                    "HTTP server exited before startup was accepted".into(),
+                ));
+            }
+            drop(wrapper.stdin.take());
             return Ok(ServerInfo {
                 base: Some(base_url(&ready.public_host, ready.port)),
                 traces: ready.traces,
             });
+        }
+        if wrapper.try_wait().map_err(crate::io_error)?.is_some() {
+            return Err(Error::Run(
+                "ASB HTTP report server exited during startup; inspect the project and retry"
+                    .into(),
+            ));
         }
         if Instant::now() >= deadline {
             return Err(Error::Run(
@@ -197,13 +217,31 @@ pub(crate) fn entry(args: &[std::ffi::OsString]) -> std::process::ExitCode {
     if flag != "--state" {
         return std::process::ExitCode::from(2);
     }
-    match read_state(Path::new(path)).and_then(|state| serve(Path::new(path), state)) {
+    let lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let monitor = std::sync::Arc::clone(&lost);
+    if std::thread::Builder::new()
+        .name("asb-http-startup-owner".into())
+        .spawn(move || {
+            let mut byte = [0];
+            if std::io::stdin().read_exact(&mut byte).is_err() || byte != *b"A" {
+                monitor.store(true, std::sync::atomic::Ordering::Release);
+            }
+        })
+        .is_err()
+    {
+        return std::process::ExitCode::from(2);
+    }
+    match read_state(Path::new(path)).and_then(|state| serve(Path::new(path), state, &lost)) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(_) => std::process::ExitCode::from(2),
     }
 }
 
-fn serve(state_path: &Path, mut state: State) -> Result<(), Error> {
+fn serve(
+    state_path: &Path,
+    mut state: State,
+    owner_lost: &std::sync::atomic::AtomicBool,
+) -> Result<(), Error> {
     let control = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(crate::io_error)?;
     control.set_nonblocking(true).map_err(crate::io_error)?;
     let control_address = Control {
@@ -235,19 +273,41 @@ fn serve(state_path: &Path, mut state: State) -> Result<(), Error> {
             watch_requests(stream, activity_tx.clone(), None);
         }
         drop(activity_tx);
-        if !wait_for_ready(&mut child, &ready_rx, START_TIMEOUT) {
+        if !wait_for_ready(&mut child, &ready_rx, START_TIMEOUT, owner_lost) {
             let _ = child.kill();
             let _ = child.wait();
+            if owner_lost.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = fs::remove_file(state_path);
+                let _ = fs::remove_dir_all(&state.publication);
+                return Err(Error::Run("HTTP server startup owner exited".into()));
+            }
             continue;
         }
         state.port = port;
         state.pid = Some(child.id());
         state.control = Some(control_address.clone());
-        write_state(state_path, &state)?;
+        if let Err(error) = write_state(state_path, &state) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(state_path);
+            let _ = fs::remove_dir_all(&state.publication);
+            return Err(error);
+        }
         let mut last_served = Instant::now();
         loop {
-            if child.try_wait().map_err(crate::io_error)?.is_some() {
+            if owner_lost.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = child.kill();
+                let _ = child.wait();
                 break;
+            }
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => (),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(crate::io_error(error));
+                }
             }
             if let Ok((mut connection, _)) = control.accept() {
                 let _ = connection.set_read_timeout(Some(Duration::from_millis(500)));
@@ -286,6 +346,8 @@ fn serve(state_path: &Path, mut state: State) -> Result<(), Error> {
         let _ = fs::remove_dir_all(&state.publication);
         return Ok(());
     }
+    let _ = fs::remove_file(state_path);
+    let _ = fs::remove_dir_all(&state.publication);
     Err(Error::Run(
         "could not reserve a free port for ASB HTTP report server".into(),
     ))
@@ -310,9 +372,13 @@ fn wait_for_ready(
     child: &mut std::process::Child,
     ready: &mpsc::Receiver<()>,
     timeout: Duration,
+    owner_lost: &std::sync::atomic::AtomicBool,
 ) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
+        if owner_lost.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
         if child.try_wait().ok().flatten().is_some() {
             return false;
         }
@@ -659,7 +725,12 @@ mod tests {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let mut child = Command::new("sleep").arg("30").spawn().unwrap();
         let (_sender, receiver) = mpsc::channel();
-        let ready = wait_for_ready(&mut child, &receiver, Duration::from_millis(100));
+        let ready = wait_for_ready(
+            &mut child,
+            &receiver,
+            Duration::from_millis(100),
+            &std::sync::atomic::AtomicBool::new(false),
+        );
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(
@@ -682,7 +753,12 @@ mod tests {
         let (activity, _events) = mpsc::channel();
         let (ready, receiver) = mpsc::channel();
         watch_requests(child.stdout.take().unwrap(), activity, Some(ready));
-        let admitted = wait_for_ready(&mut child, &receiver, Duration::from_secs(2));
+        let admitted = wait_for_ready(
+            &mut child,
+            &receiver,
+            Duration::from_secs(2),
+            &std::sync::atomic::AtomicBool::new(false),
+        );
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(admitted);
