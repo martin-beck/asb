@@ -1488,7 +1488,7 @@ fn missing_fixture_grade_reports_settled_agent_and_proxy_evidence() {
     let mut execution = evidence(9, false);
     execution.output.stdout = b"private-sentinel-agent-stdout agent_end".to_vec();
     execution.output.stderr =
-        b"fixture replay request failed private-sentinel-agent-stderr".to_vec();
+        b"fixture replay request failed native trace observed an unowned child status private-sentinel-agent-stderr".to_vec();
     let issues = AttemptIssues {
         run_error: Some(format!(
             "proxy completion failed private-sentinel-error {}",
@@ -1514,6 +1514,7 @@ fn missing_fixture_grade_reports_settled_agent_and_proxy_evidence() {
         .downcast_ref::<String>()
         .expect("diagnostic panic string");
     assert!(message.contains("fixture-replay-failed"), "{message}");
+    assert!(message.contains("gate-unowned-child-status"), "{message}");
     assert!(message.contains("proxy-completion-failed"), "{message}");
     assert!(
         message.contains("proxy_cleanup_confirmed=false"),

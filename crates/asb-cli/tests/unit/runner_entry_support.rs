@@ -53,6 +53,10 @@ pub(crate) fn capture_grade_diagnostic(
             ("fetch-failed", b"fetch failed"),
             ("connection-refused", b"ECONNREFUSED"),
             ("timeout", b"timed out"),
+            (
+                "gate-unowned-child-status",
+                b"native trace observed an unowned child status",
+            ),
             ("gate", b"gate"),
         ]
         .into_iter()
