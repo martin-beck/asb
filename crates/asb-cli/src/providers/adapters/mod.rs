@@ -122,6 +122,20 @@ pub(super) trait ProviderAdapter: Sync {
     fn pricing_snapshot(&self) -> Result<Option<(&'static str, serde_json::Value)>, crate::Error> {
         Ok(None)
     }
+    fn pricing_filename(&self) -> Option<&'static str> {
+        None
+    }
+    fn validate_pricing(&self, _snapshot: &serde_json::Value) -> Result<(), crate::Error> {
+        Ok(())
+    }
+    fn estimate_cost(
+        &self,
+        _snapshot: &serde_json::Value,
+        _model: &str,
+        _metrics: &std::collections::BTreeMap<String, f64>,
+    ) -> Option<f64> {
+        None
+    }
 }
 
 macro_rules! adapter {

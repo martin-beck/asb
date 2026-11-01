@@ -247,6 +247,23 @@ pub(crate) fn pricing_snapshot(
     adapters::find(provider).map_or(Ok(None), |adapter| adapter.pricing_snapshot())
 }
 
+pub(crate) fn pricing_filename(provider: &str) -> Option<&'static str> {
+    adapters::find(provider).and_then(|adapter| adapter.pricing_filename())
+}
+
+pub(crate) fn validate_pricing(provider: &str, snapshot: &serde_json::Value) -> Result<(), Error> {
+    adapters::find(provider).map_or(Ok(()), |adapter| adapter.validate_pricing(snapshot))
+}
+
+pub(crate) fn estimate_cost(
+    provider: &str,
+    snapshot: &serde_json::Value,
+    model: &str,
+    metrics: &std::collections::BTreeMap<String, f64>,
+) -> Option<f64> {
+    adapters::find(provider).and_then(|adapter| adapter.estimate_cost(snapshot, model, metrics))
+}
+
 fn credential_inputs(spec: &ProviderSpec) -> Vec<crate::runtime_inputs::Dependency> {
     let Some(variable) = spec.credential else {
         return Vec::new();

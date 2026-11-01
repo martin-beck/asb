@@ -9,13 +9,23 @@ pub(super) fn read_text(path: &Path, kind: &str) -> Result<String, Error> {
     read_text_limit(path, kind, MAX_BYTES)
 }
 fn read_text_limit(path: &Path, kind: &str, limit: u64) -> Result<String, Error> {
+    read_text_limit_with_policy(path, kind, limit, false)
+}
+fn read_text_limit_with_policy(
+    path: &Path,
+    kind: &str,
+    limit: u64,
+    nofollow: bool,
+) -> Result<String, Error> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK);
+        options.custom_flags(libc::O_NONBLOCK | if nofollow { libc::O_NOFOLLOW } else { 0 });
     }
+    #[cfg(not(unix))]
+    let _ = nofollow;
     let file = options
         .open(path)
         .map_err(|error| Error::Input(format!("cannot read {kind} {}: {error}", path.display())))?;
@@ -236,7 +246,7 @@ pub(super) fn load(path: &str) -> Result<LoadedReport, Error> {
             )?);
         }
     }
-    apply_openrouter_pricing(&request, &mut rows)?;
+    apply_pricing(&request, &mut rows)?;
     let mut previews = BTreeMap::new();
     for row in &rows {
         if row.result_source == ResultSource::RecoveredOfficialGrade {
@@ -295,7 +305,7 @@ fn load_campaign_sweep(request: Request) -> Result<LoadedReport, Error> {
         previews.extend(artifacts);
     }
     campaign::verify_proofs(&proofs)?;
-    apply_openrouter_pricing(&request, &mut rows)?;
+    apply_pricing(&request, &mut rows)?;
     Ok(LoadedReport {
         request,
         rows,
@@ -305,74 +315,49 @@ fn load_campaign_sweep(request: Request) -> Result<LoadedReport, Error> {
 
 /// Derive a cost estimate from the price schedule captured when this sweep
 /// started. Report generation never contacts a live provider.
-fn apply_openrouter_pricing(request: &Request, rows: &mut [BenchmarkData]) -> Result<(), Error> {
-    let path = request.sweep_results.join("openrouter-pricing.json");
+fn apply_pricing(request: &Request, rows: &mut [BenchmarkData]) -> Result<(), Error> {
+    for provider in crate::providers::names() {
+        let Some(filename) = crate::providers::pricing_filename(provider) else {
+            continue;
+        };
+        apply_provider_pricing(&request.sweep_results, provider, filename, rows)?;
+    }
+    Ok(())
+}
+
+fn apply_provider_pricing(
+    root: &Path,
+    provider: &str,
+    filename: &str,
+    rows: &mut [BenchmarkData],
+) -> Result<(), Error> {
+    let path = root.join(filename);
     let text = match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             return Err(Error::Input(format!(
-                "cannot inspect OpenRouter pricing snapshot {}: {error}",
+                "cannot inspect pricing snapshot {}: {error}",
                 path.display()
             )));
         }
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             return Err(Error::Input(
-                "OpenRouter pricing snapshot must be a regular file".into(),
+                "pricing snapshot must be a regular file".into(),
             ));
         }
-        Ok(_) => read_text(&path, "OpenRouter pricing snapshot")?,
+        Ok(_) => read_text_limit_with_policy(&path, "pricing snapshot", MAX_BYTES, true)?,
     };
     let snapshot: Value = serde_json::from_str(&text)
-        .map_err(|_| Error::Input("invalid OpenRouter pricing snapshot".into()))?;
-    if snapshot.get("schema_version").and_then(Value::as_u64) != Some(1)
-        || snapshot.get("provider").and_then(Value::as_str) != Some("openrouter")
-    {
-        return Err(Error::Input(
-            "invalid OpenRouter pricing snapshot schema".into(),
-        ));
-    }
-    let models = snapshot
-        .get("models")
-        .and_then(Value::as_object)
-        .ok_or_else(|| Error::Input("OpenRouter pricing snapshot has no models".into()))?;
-    for row in rows.iter_mut().filter(|row| row.provider == "openrouter") {
-        let Some(pricing) = models.get(&row.model).and_then(Value::as_object) else {
-            continue;
-        };
-        if let Some(estimate) = openrouter_cost(pricing, &row.metrics) {
+        .map_err(|_| Error::Input(format!("invalid {provider} pricing snapshot")))?;
+    crate::providers::validate_pricing(provider, &snapshot)?;
+    for row in rows.iter_mut().filter(|row| row.provider == provider) {
+        if let Some(estimate) =
+            crate::providers::estimate_cost(provider, &snapshot, &row.model, &row.metrics)
+        {
             row.metrics.insert("estimated_cost_usd".into(), estimate);
         }
     }
     Ok(())
-}
-
-fn openrouter_cost(
-    pricing: &serde_json::Map<String, Value>,
-    metrics: &BTreeMap<String, f64>,
-) -> Option<f64> {
-    let rate = |name: &str| {
-        pricing.get(name).and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
-        })
-    };
-    let tokens = |name: &str| metrics.get(name).copied();
-    let cached_tokens = tokens("token_usage.cached_tokens");
-    let input = tokens("token_usage.input_tokens")
-        .map(|input| input - cached_tokens.unwrap_or(0.0))
-        .filter(|input| *input >= 0.0)
-        .zip(rate("prompt"));
-    let output = tokens("token_usage.output_tokens").zip(rate("completion"));
-    let cached = cached_tokens.zip(rate("cache_read").or_else(|| rate("cacheRead")));
-    let observed = input.is_some() || output.is_some() || cached.is_some();
-    let estimate = input
-        .into_iter()
-        .chain(output)
-        .chain(cached)
-        .map(|(count, price)| count * price)
-        .sum::<f64>();
-    (observed && estimate.is_finite()).then_some(estimate)
 }
 struct Configuration {
     index: usize,
@@ -1247,26 +1232,54 @@ mod pricing_tests {
     }
 
     #[test]
-    fn retained_openrouter_prices_estimate_input_output_and_cached_tokens() {
-        let pricing = serde_json::json!({
-            "prompt": "0.000002",
-            "completion": "0.000004",
-            "cache_read": "0.0000005"
+    fn comparison_dispatches_pricing_only_to_the_matching_provider() {
+        pricing_fixture(|root| {
+            std::fs::write(root.join("openrouter-pricing.json"), r#"{"schema_version":1,"provider":"openrouter","models":{"fixture":{"prompt":"0.000002","completion":"0.000004"}}}"#).unwrap();
+            let make_row = |provider: &str| BenchmarkData {
+                observation: Default::default(),
+                id: crate::compare::RowId {
+                    configuration: 0,
+                    batch: None,
+                    replica: 0,
+                },
+                execution: None,
+                planning: None,
+                effective_budgets: None,
+                legacy_evaluation_provenance: None,
+                execution_plan_fingerprint: None,
+                module: None,
+                benchmark_outcome: None,
+                result_source: ResultSource::Missing,
+                reconciled: false,
+                replica_index: None,
+                execution_cohort: None,
+                label: "fixture".into(),
+                directory: root.into(),
+                agent: "fixture".into(),
+                workload: "fixture".into(),
+                task: None,
+                selection: None,
+                evaluation_completed: false,
+                workload_evaluation: "fixture".into(),
+                provider: provider.into(),
+                model: "fixture".into(),
+                metrics: BTreeMap::from([
+                    ("token_usage.input_tokens".into(), 100.0),
+                    ("token_usage.output_tokens".into(), 25.0),
+                ]),
+                series: BTreeMap::new(),
+                host_metadata: None,
+                components: None,
+                collector_documents: BTreeMap::new(),
+                status: None,
+                artifacts: Vec::new(),
+                artifact_sources: BTreeMap::new(),
+            };
+            let mut rows = [make_row("openrouter"), make_row("unknown")];
+            apply_pricing(&pricing_request(root), &mut rows).unwrap();
+            assert!((rows[0].metrics["estimated_cost_usd"] - 0.0003).abs() < 1e-12);
+            assert!(!rows[1].metrics.contains_key("estimated_cost_usd"));
         });
-        let metrics = BTreeMap::from([
-            ("token_usage.input_tokens".into(), 100.0),
-            ("token_usage.output_tokens".into(), 25.0),
-            ("token_usage.cached_tokens".into(), 40.0),
-        ]);
-        let estimate = openrouter_cost(pricing.as_object().unwrap(), &metrics).unwrap();
-        assert!((estimate - 0.00024).abs() < 1e-12);
-    }
-
-    #[test]
-    fn absent_token_breakdown_does_not_invent_a_cost() {
-        let pricing = serde_json::json!({"prompt": "0.000002"});
-        let metrics = BTreeMap::from([("token_usage.total_tokens".into(), 100.0)]);
-        assert!(openrouter_cost(pricing.as_object().unwrap(), &metrics).is_none());
     }
 
     #[test]
@@ -1277,7 +1290,7 @@ mod pricing_tests {
                 r#"{"schema_version":2,"provider":"untrusted","models":{}}"#,
             )
             .unwrap();
-            let error = apply_openrouter_pricing(&pricing_request(root), &mut [])
+            let error = apply_pricing(&pricing_request(root), &mut [])
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("invalid OpenRouter pricing snapshot schema"));
@@ -1297,7 +1310,7 @@ mod pricing_tests {
             )
             .unwrap();
             symlink(&target, root.join("openrouter-pricing.json")).unwrap();
-            let error = apply_openrouter_pricing(&pricing_request(root), &mut [])
+            let error = apply_pricing(&pricing_request(root), &mut [])
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("must be a regular file"));
