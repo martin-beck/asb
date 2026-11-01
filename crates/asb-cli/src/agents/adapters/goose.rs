@@ -39,9 +39,28 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 
 // Goose JSON mode emits a pretty-printed conversation summary after the run.
 fn final_response(output: &str, _: &Path) -> Option<String> {
-    // The pinned JSON mode prints one summary. Do not scan diagnostic text
-    // for lookalike objects: that could attribute unrelated data to the run.
-    let summary: serde_json::Value = serde_json::from_str(output).ok()?;
+    // Pinned Goose prints its three-line session banner before JSON even in
+    // non-interactive mode. Accept only that known framing, never scan for
+    // summary-shaped objects inside arbitrary diagnostics.
+    let json = if output.trim_start().starts_with('{') {
+        output
+    } else {
+        let rest = output.strip_prefix('\n')?;
+        let (first, rest) = rest.split_once('\n')?;
+        let (second, rest) = rest.split_once('\n')?;
+        let (third, json) = rest.split_once('\n')?;
+        let heading = first.strip_prefix("    __( O)>  ● ")?;
+        if !(heading.starts_with("new session · ")
+            || heading.starts_with("resuming · ")
+            || heading.starts_with("ephemeral · "))
+            || !second.starts_with("   \\____)    ")
+            || third != "     L L     goose is ready"
+        {
+            return None;
+        }
+        json
+    };
+    let summary: serde_json::Value = serde_json::from_str(json).ok()?;
     if summary.pointer("/metadata/status").and_then(|v| v.as_str()) != Some("completed") {
         return None;
     }
@@ -302,6 +321,18 @@ mod tests {
         assert!(
             super::ADAPTER
                 .final_response(&format!("diagnostic\n{output}"), path)
+                .is_none()
+        );
+        let banner = "\n    __( O)>  ● new session · openai mock\n   \\____)    session · /work\n     L L     goose is ready\n";
+        assert_eq!(
+            super::ADAPTER
+                .final_response(&format!("{banner}{output}"), path)
+                .as_deref(),
+            Some("answer")
+        );
+        assert!(
+            super::ADAPTER
+                .final_response(&format!("diagnostic\n{banner}{output}"), path)
                 .is_none()
         );
     }
