@@ -1,5 +1,7 @@
 //! Compatibility backend only: retains the previous direct-child policy.
 //! This is NOT Linux tree-custody or bounded-pipe qualification for other hosts.
+//! In particular, destination locks cannot survive abrupt owner death here;
+//! guardian descriptor transfer is implemented only by the Linux backend.
 use super::*;
 use std::process::Stdio;
 

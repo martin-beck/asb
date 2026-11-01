@@ -675,6 +675,20 @@ fn supervise(
         return; // No guardian/target was admitted; no invented exit status.
     }
     step.command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let lock_fds: Vec<_> = step
+        .context
+        .destination_owners
+        .iter()
+        .map(|(_, owner)| owner.raw_fd())
+        .collect();
+    if let Err(error) = crate::process_gate::retain_install_locks(&mut step.command, &lock_fds) {
+        ticket.settle(ProducerProof::NoNewAdmission);
+        let _ = send.send(Err(crate::Error::Io(format!(
+            "cannot transfer installer ownership to guardian: {error}"
+        ))
+        .into()));
+        return;
+    }
     let admitted = step
         .route
         .take()

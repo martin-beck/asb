@@ -20,6 +20,62 @@ use sha2::{Digest, Sha256};
 #[cfg(target_os = "linux")]
 const TRACE_READY_FD: &str = "ASB_NATIVE_TRACE_READY_FD";
 
+#[cfg(target_os = "linux")]
+const INSTALL_LOCK_FDS: &str = "ASB_GATE_INSTALL_LOCK_FDS";
+
+/// Transfer installation ownership to the guardian until descendant cleanup.
+#[cfg(target_os = "linux")]
+pub(crate) fn retain_install_locks(command: &mut Command, fds: &[i32]) -> io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    if fds.len() > 64 {
+        return Err(io::Error::other(
+            "too many installation ownership descriptors",
+        ));
+    }
+    if fds.is_empty() {
+        command.env_remove(INSTALL_LOCK_FDS);
+        return Ok(());
+    }
+    command.env(
+        INSTALL_LOCK_FDS,
+        fds.iter().map(i32::to_string).collect::<Vec<_>>().join(","),
+    );
+    let fds = fds.to_vec();
+    unsafe {
+        command.pre_exec(move || {
+            for fd in &fds {
+                let flags = libc::fcntl(*fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn retain_guardian_install_locks() -> io::Result<()> {
+    let value = std::env::var(INSTALL_LOCK_FDS).ok();
+    unsafe { std::env::remove_var(INSTALL_LOCK_FDS) };
+    let Some(value) = value else { return Ok(()) };
+    let mut seen = std::collections::BTreeSet::new();
+    for part in value.split(',') {
+        let fd: i32 = part
+            .parse()
+            .map_err(|_| io::Error::other("invalid installer ownership descriptor"))?;
+        if fd < 3 || !seen.insert(fd) || seen.len() > 64 {
+            return Err(io::Error::other("invalid installer ownership descriptor"));
+        }
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 /// A root executable identity is provenance for a later replay capsule, not
 /// executable capture.  Reading no more than this amount keeps lifecycle
 /// tracing lightweight and never adds a second copy of a large client binary
@@ -156,6 +212,11 @@ pub(crate) fn cancel_gate(child: &mut std::process::Child) -> io::Result<std::pr
 
 #[cfg(unix)]
 pub(crate) fn run_gate(args: &[OsString]) -> std::process::ExitCode {
+    #[cfg(target_os = "linux")]
+    if let Err(error) = retain_guardian_install_locks() {
+        eprintln!("asb process gate cannot retain installer ownership: {error}");
+        return std::process::ExitCode::from(2);
+    }
     let (args, arg0) = if args
         .first()
         .is_some_and(|value| value == crate::launch::FORMAT)

@@ -15,6 +15,11 @@ impl Drop for OutputLock {
 }
 
 impl OutputLock {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.file.as_raw_fd()
+    }
     pub(crate) fn acquire(path: &Path, busy: &str) -> Result<Self, String> {
         Self::acquire_for(path, busy, std::time::Duration::ZERO)
     }

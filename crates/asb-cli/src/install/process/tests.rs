@@ -40,6 +40,117 @@ fn wait_file(path: &Path) {
 }
 
 #[test]
+fn abrupt_owner_fixture() {
+    let Some(root) = std::env::var_os("ASB_INSTALL_DEATH_FIXTURE") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let context = context(&root).with_destination(&root.join("tool")).unwrap();
+    let _ = shell(&context, "printf started > marker; exec sleep 60").run(ProducerLease::default());
+}
+
+#[test]
+fn killed_installer_leaves_guardian_owning_destination_until_cleanup() {
+    struct Cleanup {
+        parent: std::process::Child,
+        guardian: Option<i32>,
+        stopped_children: Vec<i32>,
+    }
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = self.parent.kill();
+            let _ = self.parent.wait();
+            for pid in &self.stopped_children {
+                unsafe {
+                    libc::kill(*pid, libc::SIGCONT);
+                }
+            }
+            if let Some(pid) = self.guardian {
+                unsafe {
+                    libc::kill(pid, libc::SIGCONT);
+                }
+            }
+        }
+    }
+    let root = root();
+    let parent = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "install::process::tests::abrupt_owner_fixture",
+            "--nocapture",
+        ])
+        .env("ASB_INSTALL_DEATH_FIXTURE", &root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut cleanup = Cleanup {
+        parent,
+        guardian: None,
+        stopped_children: Vec::new(),
+    };
+    wait_file(&root.join("marker"));
+    let tasks = PathBuf::from(format!("/proc/{}/task", cleanup.parent.id()));
+    let mut children = Vec::new();
+    for task in fs::read_dir(tasks).unwrap().flatten() {
+        if let Ok(value) = fs::read_to_string(task.path().join("children")) {
+            children.extend(
+                value
+                    .split_whitespace()
+                    .filter_map(|value| value.parse::<i32>().ok()),
+            );
+        }
+    }
+    assert_eq!(
+        children.len(),
+        1,
+        "fixture must have exactly one owned guardian"
+    );
+    let guardian = children[0];
+    assert_eq!(unsafe { libc::kill(guardian, libc::SIGSTOP) }, 0);
+    cleanup.guardian = Some(guardian);
+    let guardian_children =
+        fs::read_to_string(format!("/proc/{guardian}/task/{guardian}/children")).unwrap();
+    for pid in guardian_children
+        .split_whitespace()
+        .filter_map(|value| value.parse::<i32>().ok())
+    {
+        if unsafe { libc::kill(pid, libc::SIGSTOP) } == 0 {
+            cleanup.stopped_children.push(pid);
+        }
+    }
+    assert!(
+        !cleanup.stopped_children.is_empty(),
+        "fixture watchdog and target must be present"
+    );
+    cleanup.parent.kill().unwrap();
+    cleanup.parent.wait().unwrap();
+    assert!(
+        crate::install::destination_lock(&root.join("tool")).is_err(),
+        "guardian must retain lock after installer death"
+    );
+    for pid in cleanup.stopped_children.drain(..) {
+        unsafe {
+            libc::kill(pid, libc::SIGCONT);
+        }
+    }
+    assert_eq!(unsafe { libc::kill(guardian, libc::SIGCONT) }, 0);
+    cleanup.guardian = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(owner) = crate::install::destination_lock(&root.join("tool")) {
+            drop(owner);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "guardian never released ownership after cleanup"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn purpose_budgets_share_the_frozen_operation_and_render_only_at_boundary() {
     let root = root();
     let mut config = ProjectConfig::default();
