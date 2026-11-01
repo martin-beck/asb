@@ -871,3 +871,51 @@ fn verified_stopped_guardian_cancels_without_launching_the_application() {
     scope.wait_finished();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn adopted_descendant_exit_does_not_abort_traced_principal() {
+    for exit in ["os._exit(0)", "os.kill(os.getpid(), signal.SIGTERM)"] {
+        let root = root().join(format!("adopted-orphan-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("native-trace")).unwrap();
+        let binary = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("asb");
+        let script = format!(
+            "import os,time,signal\np=os.fork()\nif p==0:\n q=os.fork()\n if q==0:\n  time.sleep(.1); {exit}\n os._exit(0)\nos.waitpid(p,0)\ntime.sleep(.5)\n"
+        );
+        let (mut command, route) = command(&binary, "/usr/bin/python3", &["-c".into(), script]);
+        let _channel =
+            crate::agents::native_trace::prepare_gate_channel(&mut command, &root).unwrap();
+        let mut gate =
+            Admission::with_principal_observation(route.validate_gate(&mut command).unwrap())
+                .unwrap()
+                .spawn()
+                .unwrap();
+        let mut stderr = gate.take_stderr().unwrap();
+        gate.resume().unwrap();
+        let status = gate.wait().unwrap();
+        let mut text = String::new();
+        stderr.read_to_string(&mut text).unwrap();
+        assert!(
+            status.success(),
+            "gate failed status={status:?} observation={:?} stderr={text:?}",
+            gate.principal_observation()
+        );
+        assert_eq!(
+            gate.principal_observation().process_termination,
+            Some(crate::process_termination::ProcessTermination::Code(0))
+        );
+        let trace = crate::agents::native_trace::Transcript::decode(
+            &std::fs::read(root.join("native-trace/native-trace.jsonl")).unwrap(),
+        )
+        .unwrap();
+        assert!(trace.events().iter().any(|event| event.operation
+            == crate::agents::native_trace::Operation::ProcessExit
+            && event.process == crate::agents::native_trace::ROOT_PROCESS));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
