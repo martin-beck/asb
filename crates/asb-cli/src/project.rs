@@ -253,6 +253,23 @@ pub fn init(
         ));
     }
     let path = root.join(CONFIG_DIR).join(CONFIG_FILE);
+    if clean && !path.is_file() {
+        return Err(Error::Usage(
+            "project is not initialized; `asb init --clean` has no managed configuration to clean",
+        ));
+    }
+    if !reset && !clean && path.is_file() {
+        return warn_initialized(&path, output);
+    }
+    if !root.exists() && !clean {
+        fs::create_dir_all(&root)
+            .map_err(|error| Error::Io(format!("cannot create project directory: {error}")))?;
+    }
+    let _configuration_owner = if root.is_dir() {
+        Some(lock_configuration(&root)?)
+    } else {
+        None
+    };
     if clean {
         if !path.is_file() {
             return Err(Error::Usage(
@@ -265,15 +282,7 @@ pub fn init(
     }
     if path.is_file() {
         if !reset {
-            writeln!(
-                output,
-                "Warning: this project is already initialized at {}.\nNo files were changed. Rerun `asb init --reset` to remove managed state and initialize fresh.",
-                path.display()
-            )
-            .map_err(super::io_error)?;
-            return Err(Error::Usage(
-                "project already initialized; use `asb init --reset` for a fresh initialization",
-            ));
+            return warn_initialized(&path, output);
         }
         // Reset intentionally preserves downloaded assets, but it is still a
         // destructive configuration transition. Validate every formerly
@@ -305,7 +314,7 @@ pub fn init(
     let fixtures = crate::workloads::populate_fixtures(&root.join(CONFIG_DIR).join("fixtures"))
         .map_err(|error| Error::Io(format!("cannot install workload fixtures: {error}")))?;
     let text = toml::to_string_pretty(&config).map_err(|error| Error::Input(error.to_string()))?;
-    fs::write(&path, text)
+    write_configuration(&path, text.as_bytes(), || {})
         .map_err(|error| Error::Io(format!("cannot write {}: {error}", path.display())))?;
     let installation = crate::install::OperationContext::new(&root, &config)
         .map_err(crate::install::InstallFailure::into_public)?;
@@ -354,6 +363,13 @@ pub fn init(
     Ok(())
 }
 
+fn warn_initialized(path: &Path, output: &mut dyn std::io::Write) -> Result<(), Error> {
+    writeln!(output, "Warning: this project is already initialized at {}.\nNo files were changed. Rerun `asb init --reset` to remove managed state and initialize fresh.", path.display()).map_err(super::io_error)?;
+    Err(Error::Usage(
+        "project already initialized; use `asb init --reset` for a fresh initialization",
+    ))
+}
+
 fn validate_reset_paths(root: &Path, config_path: &Path) -> Result<(), Error> {
     let existing = fs::read_to_string(config_path).map_err(|error| {
         Error::Io(format!(
@@ -399,17 +415,61 @@ pub fn configure_host(
     output: &mut dyn std::io::Write,
 ) -> Result<(), Error> {
     let start = root.unwrap_or_else(|| PathBuf::from("."));
-    let (root, mut config) = load(&start)?;
+    let (root, _) = load(&start)?;
     let path = initialized_config_path(&root)?;
+    let _configuration_owner = lock_configuration(&root)?;
+    let (_, mut config) = load(&root)?;
+    initialized_config_path(&root)?;
     config.cgroup_parent = configure_host_capabilities(output, yes)?.or(config.cgroup_parent);
     let instances = perfetto::configure(&root, output, yes)?;
     if !instances.is_empty() {
         config.perfetto_instances = instances;
     }
     let text = toml::to_string_pretty(&config).map_err(|error| Error::Input(error.to_string()))?;
-    fs::write(&path, text)
+    write_configuration(&path, text.as_bytes(), || {})
         .map_err(|error| Error::Io(format!("cannot update project capabilities: {error}")))?;
     writeln!(output, "Updated host capability configuration; existing tools, workloads, configurations and results were preserved.").map_err(super::io_error)
+}
+
+fn lock_configuration(root: &Path) -> Result<crate::output_lock::OutputLock, Error> {
+    crate::output_lock::OutputLock::acquire(
+        &root.join(".asb-project-config.lock"),
+        "another project initialization or host configuration is in progress",
+    )
+    .map_err(Error::Io)
+}
+
+fn write_configuration(
+    path: &Path,
+    bytes: &[u8],
+    before_publish: impl FnOnce(),
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("project configuration has no parent"))?;
+    let stage = parent.join(format!(
+        ".project-{}.tmp",
+        crate::tools::runtime::unique_id()
+    ));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stage)?;
+        if let Ok(metadata) = fs::metadata(path) {
+            file.set_permissions(metadata.permissions())?;
+        }
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        before_publish();
+        fs::rename(&stage, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(stage);
+    }
+    result
 }
 
 // Kept separate so missing-project tests never need to discover or configure
@@ -916,6 +976,54 @@ mod coverage_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_config_replacement_never_exposes_partial_content() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        fs::create_dir_all(root.join(CONFIG_DIR)).unwrap();
+        let path = root.join(CONFIG_DIR).join(CONFIG_FILE);
+        fs::write(
+            &path,
+            "tools_dir='tools'\nworkloads_dir='old'\nworkspace_dir='workspace'\n",
+        )
+        .unwrap();
+        let owner = lock_configuration(&root).unwrap();
+        assert!(lock_configuration(&root).is_err());
+        let (staged_tx, staged_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_path = path.clone();
+        let worker = std::thread::spawn(move || {
+            write_configuration(
+                &worker_path,
+                b"tools_dir='tools'\nworkloads_dir='new'\nworkspace_dir='workspace'\n",
+                || {
+                    staged_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+            )
+            .unwrap();
+        });
+        staged_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(load(&root).unwrap().1.workloads_dir, "old");
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(load(&root).unwrap().1.workloads_dir, "new");
+        drop(owner);
+        assert!(lock_configuration(&root).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refused_init_does_not_create_a_coordination_file() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        fs::create_dir_all(root.join(CONFIG_DIR)).unwrap();
+        fs::write(root.join(CONFIG_DIR).join(CONFIG_FILE), "fixture").unwrap();
+        assert!(init(Some(root.clone()), false, false, false, &mut Vec::new()).is_err());
+        assert!(!root.join(".asb-project-config.lock").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn vars<'a>(values: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |name| {
