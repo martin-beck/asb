@@ -569,13 +569,14 @@ fn spawn_and_wait_errors_remain_primary_when_failure_markers_also_fail() {
 fn native_agent_outcome_uses_typed_terminal_error_and_ignores_task_text() {
     let mut execution = evidence(0, false);
     execution.output.stdout =
-        br#"{"type":"result","is_error":true,"result":"private error"}"#.to_vec();
+        br#"{"type":"result","subtype":"success","is_error":true,"result":"private error"}"#
+            .to_vec();
     let failed = execution.agent_outcome("claude-code", Path::new("."), None);
     let reason = failed.failure.expect("typed error must fail");
     assert!(reason.contains("terminal error"));
     assert!(!reason.contains("private error"));
     execution.output.stdout =
-        br#"{"type":"result","is_error":false,"result":"litellm.NotFoundError example"}"#.to_vec();
+        br#"{"type":"result","subtype":"success","is_error":false,"result":"litellm.NotFoundError example"}"#.to_vec();
     assert!(
         execution
             .agent_outcome("claude-code", Path::new("."), None)
