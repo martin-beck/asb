@@ -74,7 +74,7 @@ pub(super) fn confirmation(path: &Path, error: impl std::fmt::Display) -> Error 
         path.display()
     ))
 }
-pub(super) fn scalar(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+pub(crate) fn scalar(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     scalar_with(path, bytes, &System)
 }
 fn scalar_with(path: &Path, bytes: &[u8], backend: &impl Backend) -> Result<(), Error> {

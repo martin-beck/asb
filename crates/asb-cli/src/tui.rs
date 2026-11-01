@@ -1125,7 +1125,7 @@ fn record_last_setup_tui(root: &Path, generated: &Generated) -> Result<(), Error
     };
     let text = toml::to_string(&record)
         .map_err(|error| Error::Io(format!("cannot serialize last setup TUI record: {error}")))?;
-    fs::write(last_setup_tui_path(root), text)
+    crate::config::matrix::publish_atomic(&last_setup_tui_path(root), text.as_bytes())
         .map_err(|error| Error::Io(format!("cannot save last setup TUI record: {error}")))
 }
 
@@ -1784,7 +1784,7 @@ fn write_trial_sets(app: &WorkloadApp) -> Result<usize, Error> {
     }
     let written = pending.len();
     for (path, text) in pending {
-        fs::write(path, text).map_err(|error| Error::Io(error.to_string()))?;
+        crate::config::matrix::publish_atomic(&path, text.as_bytes())?;
     }
     Ok(written)
 }

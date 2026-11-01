@@ -574,6 +574,52 @@ fn a_partial_manifest_is_never_visible_while_its_private_writer_is_blocked() {
     assert_eq!(crate::sweep::read_manifest(&path).unwrap().configs.len(), 2);
 }
 
+#[test]
+fn replacing_tui_state_never_exposes_partial_toml_to_concurrent_readers() {
+    use std::sync::mpsc;
+    struct Paused {
+        ready: mpsc::SyncSender<()>,
+        resume: mpsc::Receiver<()>,
+    }
+    impl Backend for Paused {
+        fn write(&self, file: &mut File, bytes: &[u8]) -> io::Result<()> {
+            file.write_all(&bytes[..3])?;
+            self.ready.send(()).map_err(io::Error::other)?;
+            self.resume
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .map_err(io::Error::other)?;
+            file.write_all(&bytes[3..])
+        }
+    }
+    let fixture = Fixture::new();
+    for name in ["last-setup-tui.toml", "swe-bench.workload.toml"] {
+        let path = fixture.0.join(name);
+        let old = b"config = 'previous.toml'\n";
+        let new = b"config = 'replacement.toml'\n";
+        fs::write(&path, old).unwrap();
+        let (ready, observe) = mpsc::sync_channel(1);
+        let (resume, wait) = mpsc::sync_channel(1);
+        let destination = path.clone();
+        let worker = std::thread::spawn(move || {
+            scalar_with(
+                &destination,
+                new,
+                &Paused {
+                    ready,
+                    resume: wait,
+                },
+            )
+        });
+        observe
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), old);
+        resume.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), new);
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn non_utf8_sweep_parent_and_stem_refuse_before_any_publication_mutation() {
