@@ -128,3 +128,98 @@ fn generated_bash_completes_project_local_workloads_and_zsh_has_the_same_bridge(
     assert!(zsh.contains("--__complete-values"));
     assert!(zsh.contains("compdef _asb asb"));
 }
+
+#[test]
+fn generated_shells_use_the_explicit_project_catalog_in_both_flag_forms() {
+    let caller = Project::new();
+    let selected = Project::new();
+    fs::write(selected.0.join("workloads/selected-only.txt"), "fixture").unwrap();
+    fs::write(caller.0.join("workloads/caller-only.txt"), "fixture").unwrap();
+    fs::write(
+        selected.0.join("workloads/selected-set.workload.toml"),
+        "fixture",
+    )
+    .unwrap();
+    fs::write(
+        caller.0.join("workloads/caller-set.workload.toml"),
+        "fixture",
+    )
+    .unwrap();
+    let target = selected.0.to_str().unwrap();
+    for shell in ["bash", "zsh"] {
+        if Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+        let script = generated(shell, &caller.0);
+        let mut flags = vec![
+            vec!["--project-dir".to_owned(), target.to_owned()],
+            vec![format!("--project-dir={target}")],
+        ];
+        if shell == "bash" {
+            flags.push(vec!["--project-dir".into(), "=".into(), target.into()]);
+        }
+        for flag in flags {
+            for (command, prefix, expected, unexpected) in [
+                (
+                    "setup",
+                    vec!["setup", "--workload"],
+                    "selected-only",
+                    "caller-only",
+                ),
+                (
+                    "install",
+                    vec!["workload", "install"],
+                    "selected-only",
+                    "caller-only",
+                ),
+                (
+                    "trial-set",
+                    vec!["setup", "--trial-set"],
+                    "selected-set",
+                    "caller-set",
+                ),
+            ] {
+                for before_command in [true, false] {
+                    let mut words = vec![asb().to_owned()];
+                    if before_command {
+                        words.extend(flag.clone());
+                    }
+                    words.extend(prefix.iter().take(1).map(|word| (*word).to_owned()));
+                    if !before_command {
+                        words.extend(flag.clone());
+                    }
+                    words.extend(prefix.iter().skip(1).map(|word| (*word).to_owned()));
+                    words.push(String::new());
+                    let body = if shell == "bash" {
+                        r#"source "$1"; shift; COMP_WORDS=("$@"); COMP_CWORD=$(($# - 1)); _asb; printf '%s\n' "${COMPREPLY[@]}""#
+                    } else {
+                        r#"compdef() { :; }; source "$1"; shift; words=("$@"); CURRENT=$#; _describe() { printf '%s\n' "${candidates[@]}"; }; _asb_catalog_complete"#
+                    };
+                    let output = Command::new(shell)
+                        .arg("-c")
+                        .arg(body)
+                        .arg("fixture")
+                        .arg(&script)
+                        .args(&words)
+                        .current_dir(&caller.0)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{shell} {command}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let candidates = String::from_utf8(output.stdout).unwrap();
+                    assert!(
+                        candidates.lines().any(|line| line == expected),
+                        "{shell} {command}: {candidates}"
+                    );
+                    assert!(
+                        !candidates.lines().any(|line| line == unexpected),
+                        "{shell} {command}: {candidates}"
+                    );
+                }
+            }
+        }
+    }
+}

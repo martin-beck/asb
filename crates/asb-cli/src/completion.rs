@@ -49,6 +49,12 @@ pub(crate) fn values(args: &[OsString], output: &mut dyn Write) -> Result<(), Er
         .and_then(|value| value.to_str())
         .ok_or_else(|| Error::Input("completion value kind is required".into()))?;
     let context = args.get(1).and_then(|value| value.to_str());
+    let explicit_project = args.get(2).filter(|value| !value.is_empty()).map(Path::new);
+    let project_root = match explicit_project {
+        Some(path) => crate::project::require_project_directory(path)?.0,
+        None => crate::project::load(Path::new("."))?.0,
+    };
+    let _network = crate::project::network_project(&project_root);
     let mut values = match kind {
         "agent" => crate::agents::names().map(str::to_owned).collect(),
         "provider" => crate::providers::names()
@@ -57,9 +63,9 @@ pub(crate) fn values(args: &[OsString], output: &mut dyn Write) -> Result<(), Er
             .collect(),
         "tool" => crate::install::tool_names().map(str::to_owned).collect(),
         "collector" => crate::measurements::available_collectors(),
-        "workload" => local_workloads(),
-        "trial-set" => local_trial_sets(),
-        "trial" => context.map_or_else(Vec::new, local_trials),
+        "workload" => local_workloads(&project_root),
+        "trial-set" => local_trial_sets(&project_root),
+        "trial" => context.map_or_else(Vec::new, |name| local_trials(name, &project_root)),
         // A provider-qualified model completion asks the same discovery path as
         // setup, so a refreshed provider catalog is immediately useful.  A
         // failed/offline lookup falls back to the documented local snapshot.
@@ -101,30 +107,30 @@ fn all_known_models() -> Vec<String> {
         .collect()
 }
 
-fn workload_directory() -> Option<std::path::PathBuf> {
-    let (root, config) = crate::project::load(Path::new(".")).ok()?;
+fn workload_directory(project: &Path) -> Option<std::path::PathBuf> {
+    let (root, config) = crate::project::load(project).ok()?;
     Some(crate::project::resolve(&root, &config.workloads_dir))
 }
 
-fn local_workloads() -> Vec<String> {
+fn local_workloads(project: &Path) -> Vec<String> {
     let mut values = crate::workloads::builtin_names()
         .chain(crate::install::external_workload_names())
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    if let Some(directory) = workload_directory() {
+    if let Some(directory) = workload_directory(project) {
         values.extend(read_directory_names(&directory, ".txt"));
     }
     values
 }
 
-fn local_trial_sets() -> Vec<String> {
-    workload_directory().map_or_else(Vec::new, |directory| {
+fn local_trial_sets(project: &Path) -> Vec<String> {
+    workload_directory(project).map_or_else(Vec::new, |directory| {
         read_directory_names(&directory, ".workload.toml")
     })
 }
 
-fn local_trials(workload: &str) -> Vec<String> {
-    let Some(directory) = workload_directory() else {
+fn local_trials(workload: &str, project: &Path) -> Vec<String> {
+    let Some(directory) = workload_directory(project) else {
         return Vec::new();
     };
     crate::workloads::installed_trials(workload, &directory)
@@ -174,7 +180,11 @@ _asb_catalog_option() {
     local name="$1" value="" i
     for ((i=1; i<COMP_CWORD; i++)); do
         if [[ "${COMP_WORDS[i]}" == "${name}" ]]; then
-            value="${COMP_WORDS[i+1]}"
+            if [[ "${COMP_WORDS[i+1]}" == = ]]; then
+                value="${COMP_WORDS[i+2]}"
+            else
+                value="${COMP_WORDS[i+1]}"
+            fi
         elif [[ "${COMP_WORDS[i]}" == "${name}="* ]]; then
             value="${COMP_WORDS[i]#*=}"
         fi
@@ -183,9 +193,18 @@ _asb_catalog_option() {
 }
 
 _asb_catalog_complete() {
-    local cur prev kind context="" values
+    local cur prev kind context="" values project command="" subcommand="" i skip=0 word
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
+    for ((i=1; i<COMP_CWORD; i++)); do
+        word="${COMP_WORDS[i]}"
+        if ((skip)); then ((skip--)); continue; fi
+        case "$word" in
+            --project-dir) if [[ "${COMP_WORDS[i+1]}" == = ]]; then skip=2; else skip=1; fi; continue ;;
+            --project-dir=*) continue ;;
+        esac
+        if [[ -z "$command" ]]; then command="$word"; else subcommand="$word"; break; fi
+    done
     case "$prev" in
         --agent) kind=agent ;;
         --provider) kind=provider ;;
@@ -195,15 +214,16 @@ _asb_catalog_complete() {
         --trial-set) kind=trial-set ;;
         --measure|--collector) kind=collector ;;
     esac
-    if [[ -z "$kind" && "${COMP_WORDS[1]}" == tool && "${COMP_WORDS[2]}" == install ]]; then
+    if [[ -z "$kind" && "$command" == tool && "$subcommand" == install ]]; then
         kind=tool
-    elif [[ -z "$kind" && "${COMP_WORDS[1]}" == workload && ( "${COMP_WORDS[2]}" == install || "${COMP_WORDS[2]}" == describe ) ]]; then
+    elif [[ -z "$kind" && "$command" == workload && ( "$subcommand" == install || "$subcommand" == describe ) ]]; then
         kind=workload
-    elif [[ -z "$kind" && "${COMP_WORDS[1]}" == provider && "${COMP_WORDS[2]}" == models ]]; then
+    elif [[ -z "$kind" && "$command" == provider && "$subcommand" == models ]]; then
         kind=provider
     fi
     [[ -n "$kind" ]] || return 1
-    values="$(_asb_catalog_value "$kind" "$context")" || return 1
+    project="$(_asb_catalog_option --project-dir)"
+    values="$(_asb_catalog_value "$kind" "$context" "$project")" || return 1
     COMPREPLY=( $(compgen -W "$values" -- "$cur") )
     return 0
 }
@@ -265,7 +285,17 @@ _asb_catalog_option() {
 }
 
 _asb_catalog_complete() {
-    local previous="${words[CURRENT-1]}" kind="" context=""
+    local previous="${words[CURRENT-1]}" kind="" context="" project command="" subcommand="" word
+    local i skip=0
+    for ((i=2; i<CURRENT; i++)); do
+        word="${words[i]}"
+        if ((skip)); then skip=0; continue; fi
+        case "$word" in
+            --project-dir) skip=1; continue ;;
+            --project-dir=*) continue ;;
+        esac
+        if [[ -z "$command" ]]; then command="$word"; else subcommand="$word"; break; fi
+    done
     case "$previous" in
         --agent) kind=agent ;;
         --provider) kind=provider ;;
@@ -275,16 +305,17 @@ _asb_catalog_complete() {
         --trial-set) kind=trial-set ;;
         --measure|--collector) kind=collector ;;
     esac
-    if [[ -z "$kind" && "${words[2]}" == tool && "${words[3]}" == install ]]; then
+    if [[ -z "$kind" && "$command" == tool && "$subcommand" == install ]]; then
         kind=tool
-    elif [[ -z "$kind" && "${words[2]}" == workload && ( "${words[3]}" == install || "${words[3]}" == describe ) ]]; then
+    elif [[ -z "$kind" && "$command" == workload && ( "$subcommand" == install || "$subcommand" == describe ) ]]; then
         kind=workload
-    elif [[ -z "$kind" && "${words[2]}" == provider && "${words[3]}" == models ]]; then
+    elif [[ -z "$kind" && "$command" == provider && "$subcommand" == models ]]; then
         kind=provider
     fi
     [[ -n "$kind" ]] || return 1
     local -a candidates
-    candidates=("${(@f)$("${words[1]}" --__complete-values "$kind" "$context" 2>/dev/null)}")
+    project="$(_asb_catalog_option --project-dir)"
+    candidates=("${(@f)$("${words[1]}" --__complete-values "$kind" "$context" "$project" 2>/dev/null)}")
     (( ${#candidates} )) || return 1
     _describe -t values "$kind" candidates
 }
