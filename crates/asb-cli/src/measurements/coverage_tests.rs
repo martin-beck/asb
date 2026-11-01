@@ -375,18 +375,63 @@ fn incomplete_artifact_usage_fills_missing_fields_without_overwriting_observed_i
     let usage = TokenUsage {
         input_tokens: Some(10),
         output_tokens: None,
-        source: Some("environment".into()),
+        source: Some("agent-output".into()),
         ..TokenUsage::default()
     };
     let artifact = TokenUsage {
-        input_tokens: Some(2),
         output_tokens: Some(3),
         ..TokenUsage::default()
     };
+    let competing_input = TokenUsage {
+        input_tokens: Some(2),
+        ..TokenUsage::default()
+    };
+    let preserved = with_artifact_usage(usage.clone(), Some(competing_input));
+    assert_eq!(preserved.input_tokens, Some(10));
+    assert_eq!(preserved.output_tokens, None);
     let combined = with_artifact_usage(usage, Some(artifact));
     assert_eq!(combined.input_tokens, Some(10));
     assert_eq!(combined.output_tokens, Some(3));
     assert_eq!(combined.total_tokens, Some(13));
+}
+
+#[test]
+fn artifact_evidence_replaces_environment_without_mixing_fields() {
+    let environment = TokenUsage {
+        input_tokens: Some(10),
+        output_tokens: Some(20),
+        source: Some("environment".into()),
+        ..TokenUsage::default()
+    };
+    let partial = TokenUsage {
+        input_tokens: Some(2),
+        ..TokenUsage::default()
+    };
+    let combined = with_artifact_usage(environment.clone(), Some(partial));
+    assert_eq!(
+        (
+            combined.input_tokens,
+            combined.output_tokens,
+            combined.total_tokens
+        ),
+        (Some(2), None, None)
+    );
+    assert_eq!(combined.source.as_deref(), Some("agent-artifact"));
+    let complete = TokenUsage {
+        input_tokens: Some(2),
+        output_tokens: Some(3),
+        ..TokenUsage::default()
+    };
+    let combined = with_artifact_usage(environment, Some(complete));
+    assert_eq!(
+        (
+            combined.input_tokens,
+            combined.output_tokens,
+            combined.total_tokens
+        ),
+        (Some(2), Some(3), Some(5))
+    );
+    assert_eq!(combined.source.as_deref(), Some("agent-artifact"));
 }
 
 #[test]
