@@ -35,14 +35,43 @@ pub(crate) struct PresetSweep {
 /// Expand a repository-owned, machine-readable benchmark preset.
 pub fn setup_preset(
     name: &str,
+    workloads: Vec<String>,
     output_path: Option<String>,
     output: &mut dyn Write,
 ) -> Result<(), Error> {
     let mut options = crate::presets::load(name)?;
+    narrow_preset_workloads(name, &mut options, workloads)?;
     if output_path.is_some() {
         options.output = output_path;
     }
     matrix::setup(options, output)
+}
+
+fn narrow_preset_workloads(
+    name: &str,
+    options: &mut SetupOptions,
+    workloads: Vec<String>,
+) -> Result<(), Error> {
+    if workloads.is_empty() || workloads.iter().any(|workload| workload == "all") {
+        return Ok(());
+    }
+    let unknown = workloads
+        .iter()
+        .find(|workload| !options.workload.contains(*workload));
+    if let Some(workload) = unknown {
+        return Err(Error::Input(format!(
+            "preset `{name}` does not declare workload `{workload}`"
+        )));
+    }
+    options.trial.retain(|trial| {
+        workloads.iter().any(|workload| {
+            trial
+                .strip_prefix(workload)
+                .is_some_and(|suffix| suffix.starts_with('='))
+        })
+    });
+    options.workload = workloads;
+    Ok(())
 }
 
 /// Write a TOML benchmark configuration from parsed setup options.
@@ -260,8 +289,8 @@ fn required(value: Option<String>) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SetupOptions, default_log_name, preset_sweep_path, require_initialized_preset_project,
-        run_command_message, setup,
+        SetupOptions, default_log_name, narrow_preset_workloads, preset_sweep_path,
+        require_initialized_preset_project, run_command_message, setup,
     };
     use std::path::Path;
 
@@ -288,6 +317,37 @@ mod tests {
         let error = require_initialized_preset_project(&root, "harnesstax.toml").unwrap_err();
         assert!(error.to_string().contains("asb init"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preset_workload_selection_keeps_only_the_selected_trials() {
+        let mut options = crate::presets::load("harnesstax.toml").unwrap();
+        narrow_preset_workloads(
+            "harnesstax.toml",
+            &mut options,
+            vec!["terminal-bench-2.0".into()],
+        )
+        .unwrap();
+        assert_eq!(options.workload, ["terminal-bench-2.0"]);
+        assert_eq!(options.trial.len(), 30);
+        assert!(
+            options
+                .trial
+                .iter()
+                .all(|trial| trial.starts_with("terminal-bench-2.0="))
+        );
+    }
+
+    #[test]
+    fn preset_workload_selection_rejects_a_workload_not_in_the_preset() {
+        let mut options = crate::presets::load("harnesstax.toml").unwrap();
+        let error = narrow_preset_workloads("harnesstax.toml", &mut options, vec!["absent".into()])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not declare workload `absent`")
+        );
     }
 
     #[test]
