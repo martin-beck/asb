@@ -168,22 +168,36 @@ def main() -> int:
     return 0
 
 
-def final_agent_text(conversation: Any) -> str:
-    """Return only the final agent text needed by ASB's structured result."""
+def final_agent_text(conversation: Any) -> str | None:
+    """Return an authoritative completed answer, or leave it unavailable."""
+    from openhands.sdk.conversation.state import ConversationExecutionStatus
+    from openhands.sdk.event.conversation_error import ConversationErrorEvent
+    from openhands.sdk.event.llm_convertible.action import ActionEvent
     from openhands.sdk.event.llm_convertible.message import MessageEvent
+    from openhands.sdk.event.llm_convertible.observation import AgentErrorEvent, UserRejectObservation
+    from openhands.sdk.tool.builtins.finish import FinishAction
     from openhands.sdk import TextContent
 
+    if conversation.state.execution_status != ConversationExecutionStatus.FINISHED:
+        return None
     for event in reversed(list(conversation.state.events)):
-        if not isinstance(event, MessageEvent) or event.source != "agent":
-            continue
-        text = "".join(
-            content.text
-            for content in event.llm_message.content
-            if isinstance(content, TextContent)
-        ).strip()
-        if text:
-            return text
-    return "OpenHands conversation completed"
+        if isinstance(event, (AgentErrorEvent, ConversationErrorEvent, UserRejectObservation)):
+            return None
+        if isinstance(event, MessageEvent):
+            if event.llm_message.role == "user":
+                return None
+            if event.source == "agent" and event.llm_message.role == "assistant":
+                text = "".join(
+                    content.text
+                    for content in event.llm_message.content
+                    if isinstance(content, TextContent)
+                ).strip()
+                return text or None
+        if isinstance(event, ActionEvent) and event.source == "agent":
+            if event.tool_name == "finish" and isinstance(event.action, FinishAction):
+                return event.action.message.strip() or None
+            return None
+    return None
 
 
 if __name__ == "__main__":

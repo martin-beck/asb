@@ -382,6 +382,41 @@ mod tests {
     }
 
     #[test]
+    fn empty_native_result_does_not_revive_an_earlier_event() {
+        use crate::agents::AgentAdapter;
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/openhands_native_final.py");
+        let output = std::process::Command::new("python3")
+            .args([
+                script.as_os_str(),
+                std::ffi::OsStr::new("--emit-empty-result"),
+            ])
+            .output()
+            .expect("generate native launcher null result");
+        assert!(output.status.success());
+        let earlier = r#"{"kind":"MessageEvent","source":"agent","llm_message":{"role":"assistant","content":[{"type":"text","text":"stale"}]}}"#;
+        let stream = format!("{earlier}\n{}", String::from_utf8_lossy(&output.stdout));
+        assert!(
+            super::ADAPTER
+                .final_response(&stream, std::path::Path::new("."))
+                .is_none()
+        );
+    }
+    #[test]
+    fn native_launcher_only_reports_completed_final_answers() {
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/openhands_native_final.py");
+        let output = std::process::Command::new("python3")
+            .arg(script)
+            .output()
+            .expect("run offline native launcher boundary tests");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[test]
     fn tool_event_content_is_not_usage_when_state_is_missing() {
         let output = r#"{"kind":"ObservationEvent","content":"{\"usage\":{\"input_tokens\":999,\"output_tokens\":888}}"}"#;
         let output_usage = crate::usage::from_sources("openrouter", "openhands", output, "", None);
