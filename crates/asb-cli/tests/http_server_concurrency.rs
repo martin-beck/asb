@@ -138,3 +138,84 @@ fn failed_start_does_not_leave_late_server_running() {
         "failed startup left its owned server process running"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn killed_wrapper_does_not_leave_its_server_running() {
+    let root = std::env::temp_dir().join(format!(
+        "asb-http-wrapper-loss-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(root.join(".asb")).unwrap();
+    fs::create_dir_all(root.join("results")).unwrap();
+    fs::create_dir_all(root.join("tools/http/bin")).unwrap();
+    fs::write(
+        root.join(".asb/project.toml"),
+        "tools_dir='tools'\nworkloads_dir='workloads'\nworkspace_dir='workspace'\n",
+    )
+    .unwrap();
+    fs::write(root.join("results/report.html"), "fixture").unwrap();
+    let server = root.join("tools/http/bin/http-server");
+    fs::write(&server, "#!/usr/bin/python3\nimport http.server,sys\na=sys.argv\np=int(a[a.index('-p')+1])\nh=http.server.SimpleHTTPRequestHandler\ns=http.server.ThreadingHTTPServer(('0.0.0.0',p),lambda *args,**kwargs:h(*args,directory=a[-1],**kwargs))\nprint('Starting up http-server, serving fixture',flush=True)\ns.serve_forever()\n").unwrap();
+    fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_asb"))
+        .current_dir(&root)
+        .env("ASB_HTTP_PUBLIC_HOST", "127.0.0.1")
+        .args(["tool", "http", "start"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join(".asb/http-server.json")).unwrap()).unwrap();
+    let pid = state["pid"].as_u64().unwrap() as u32;
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    let wrapper: u32 = status
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let executable = fs::read_link(format!("/proc/{wrapper}/exe")).unwrap();
+    assert_eq!(
+        executable,
+        fs::canonicalize(env!("CARGO_BIN_EXE_asb")).unwrap()
+    );
+    assert!(
+        Command::new("kill")
+            .args(["-KILL", &wrapper.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let running = || {
+        fs::read_to_string(format!("/proc/{pid}/status")).is_ok_and(|text| {
+            !text.lines().any(|line| {
+                line.starts_with("State:") && line.split_whitespace().nth(1) == Some("Z")
+            })
+        })
+    };
+    while running() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let leaked = running();
+    if leaked {
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+    }
+    fs::remove_dir_all(root).unwrap();
+    assert!(
+        !leaked,
+        "wrapper termination left its owned HTTP server alive"
+    );
+}
