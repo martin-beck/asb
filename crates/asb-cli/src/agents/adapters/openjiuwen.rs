@@ -250,10 +250,22 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
 fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> {
     let mut text = String::new();
     let mut answer = String::new();
+    let mut finalized = None;
     for event in output
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
     {
+        if event.get("type").and_then(|v| v.as_str()) == Some("answer")
+            && event
+                .pointer("/payload/result_type")
+                .and_then(|v| v.as_str())
+                == Some("answer")
+        {
+            finalized = event
+                .pointer("/payload/output")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+        }
         let target = match event.get("type").and_then(|v| v.as_str()) {
             Some("llm_output") => &mut text,
             Some("answer") => &mut answer,
@@ -268,7 +280,11 @@ fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> 
             target.push_str(content);
         }
     }
-    if !text.trim().is_empty() {
+    // A typed final answer supersedes llm_output chunks, which can contain
+    // earlier turns. Preserve legacy chunk-only captures as a fallback.
+    if let Some(finalized) = finalized {
+        (!finalized.trim().is_empty()).then_some(finalized)
+    } else if !text.trim().is_empty() {
         Some(text)
     } else if !answer.trim().is_empty() {
         Some(answer)
@@ -308,6 +324,18 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_answer_supersedes_intermediate_llm_output() {
+        let output = concat!(
+            "{\"type\":\"llm_output\",\"payload\":{\"content\":\"intermediate\"}}\n",
+            "{\"type\":\"answer\",\"payload\":{\"output\":\"final answer\",\"result_type\":\"answer\"}}\n"
+        );
+        assert_eq!(
+            super::final_response(output, std::path::Path::new(".")).as_deref(),
+            Some("final answer")
+        );
+    }
+
     use super::{command, step_count};
     use crate::agents::{ArtifactOwner, CollectionContext, CommandContext};
     use crate::benchmark::BenchmarkConfig;
