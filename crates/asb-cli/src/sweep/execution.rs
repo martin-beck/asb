@@ -183,6 +183,7 @@ impl Execution<'_> {
         let result = runner::run_with_diagnostics(
             isolated_path.to_string_lossy().as_ref(),
             runner::RunOptions {
+                invocation_dir: self.options.invocation_dir,
                 policy: entry.policy.as_ref(),
                 max_steps: self.options.max_steps,
                 json: self.options.json,

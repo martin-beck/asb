@@ -2225,6 +2225,291 @@ fn replay_rejects_duplicate_recorders_before_agent_execution() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn explicit_project_directory_keeps_preset_workload_selection() {
+    let project = Project::new();
+    project.init();
+    let outside = Project::new();
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "setup",
+            "--preset",
+            "harnesstax.toml",
+            "--workload",
+            "absent",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[],
+    );
+    expect_failure(&result, "does not declare workload `absent`");
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_project_directory_runs_relative_cassette_from_another_directory() {
+    let project = replay_project(1);
+    let outside = Project::new();
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    expect_success(&result);
+    let summary: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(summary["success_rate"], 1.0);
+    assert!(project.0.join("run.log").is_file());
+    assert!(!outside.0.join("run.log").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_project_directory_resolves_relative_workload_override() {
+    let project = replay_project(1);
+    let outside = Project::new();
+    std::fs::rename(
+        project.0.join("workloads"),
+        project.0.join("custom-workloads"),
+    )
+    .unwrap();
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[
+            ("ASB_FIXTURE_BEHAVIOR", "success"),
+            ("ASB_WORKLOAD_DIR", "custom-workloads"),
+        ],
+    );
+    expect_success(&result);
+    let summary: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(summary["success_rate"], 1.0);
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_project_directory_resolves_relative_agent_override() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = replay_project(1);
+    let outside = Project::new();
+    let original = project.0.join(".asb-tools/pi/bin/pi");
+    std::fs::create_dir_all(project.0.join("custom-tools")).unwrap();
+    std::fs::copy(&original, project.0.join("custom-tools/pi")).unwrap();
+    project.write(".asb-tools/pi/bin/pi", "#!/bin/sh\nexit 91\n");
+    std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[
+            ("ASB_FIXTURE_BEHAVIOR", "success"),
+            ("ASB_TOOL_DIR", "custom-tools"),
+        ],
+    );
+    expect_success(&result);
+    let summary: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(summary["success_rate"], 1.0);
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_project_directory_resolves_relative_tape_override() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = replay_project(1);
+    let outside = Project::new();
+    project.write(
+        "custom-tools/tape",
+        "#!/bin/sh\nprintf launched > tape-launched\nexit 1\n",
+    );
+    std::fs::set_permissions(
+        project.0.join("custom-tools/tape"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[("ASB_LLM_TAPE", "custom-tools/tape")],
+    );
+    assert!(!result.status.success());
+    assert!(
+        project.0.join("tape-launched").is_file(),
+        "{}",
+        stderr(&result)
+    );
+    assert!(!outside.0.join("tape-launched").exists());
+}
+
+#[test]
+fn explicit_project_missing_local_workload_never_reads_callers_file() {
+    let project = Project::new();
+    project.init();
+    let outside = Project::new();
+    outside.write("only-in-caller.txt", "this source belongs to the caller\n");
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "workload",
+            "install",
+            "only-in-caller.txt",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert!(!result.status.success(), "{}", stdout(&result));
+    assert!(!project.0.join("workloads/only-in-caller.txt").exists());
+    assert!(outside.0.join("only-in-caller.txt").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_project_tool_source_uses_selected_project_not_caller() {
+    let project = Project::new();
+    project.init();
+    let outside = Project::new();
+    project.write("tool-source", "#!/bin/sh\nprintf project-source\n");
+    outside.write("tool-source", "#!/bin/sh\nprintf caller-source\n");
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "tool",
+            "install",
+            "fixture-tool",
+            "--source",
+            "tool-source",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[],
+    );
+    expect_success(&result);
+    let installed =
+        std::fs::read_to_string(project.0.join(".asb-tools/fixture-tool/bin/fixture-tool"))
+            .unwrap();
+    assert!(installed.contains("project-source"));
+    assert!(!installed.contains("caller-source"));
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_project_sweep_uses_relative_workload_override_and_cassette_root() {
+    let project = replay_project(1);
+    let outside = Project::new();
+    std::fs::rename(
+        project.0.join("workloads"),
+        project.0.join("custom-workloads"),
+    )
+    .unwrap();
+    project.write("suite.toml", "configs=['benchmark.toml']\n");
+    let tape = std::fs::read_to_string(project.0.join("tape.jsonl")).unwrap();
+    project.write(
+        "tapes/000-benchmark/cassettes/benchmark-pi-bug-fix-test-model.jsonl",
+        &tape,
+    );
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "sweep",
+            "suite.toml",
+            "--llm-replay",
+            "--cassette-root",
+            "tapes",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[
+            ("ASB_FIXTURE_BEHAVIOR", "success"),
+            ("ASB_WORKLOAD_DIR", "custom-workloads"),
+        ],
+    );
+    expect_success(&result);
+    assert!(
+        project
+            .0
+            .join("suite-results/000-benchmark/run.log")
+            .is_file()
+    );
+    assert!(!outside.0.join("suite-results").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_project_repeated_sweep_keeps_invocation_context_in_batches() {
+    let project = replay_project(1);
+    let outside = Project::new();
+    std::fs::rename(
+        project.0.join("workloads"),
+        project.0.join("custom-workloads"),
+    )
+    .unwrap();
+    project.write("suite.toml", "configs=['benchmark.toml']\n");
+    let tape = std::fs::read_to_string(project.0.join("tape.jsonl")).unwrap();
+    project.write(
+        "tapes/000-benchmark/cassettes/benchmark-pi-bug-fix-test-model.jsonl",
+        &tape,
+    );
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "sweep",
+            "suite.toml",
+            "--llm-replay",
+            "--cassette-root",
+            "tapes",
+            "--repeat",
+            "2",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[
+            ("ASB_FIXTURE_BEHAVIOR", "success"),
+            ("ASB_WORKLOAD_DIR", "custom-workloads"),
+        ],
+    );
+    expect_success(&result);
+    assert!(project.0.join("suite-results/000-benchmark").is_dir());
+    assert!(!outside.0.join("suite-results").exists());
+}
+
 #[test]
 fn standalone_compare_reports_actual_replay_logs_and_capture_overrides() {
     for concurrency in [1, 2] {

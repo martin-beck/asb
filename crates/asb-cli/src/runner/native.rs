@@ -19,6 +19,7 @@ pub(super) struct NativePlan<'a> {
     pub config_path: &'a Path,
     pub config: &'a BenchmarkConfig,
     pub project_root: &'a Path,
+    pub invocation_dir: &'a Path,
     pub project_config: &'a project::ProjectConfig,
     pub invocation: &'a workloads::session::TaskInvocation,
     /// Explicit repeated attempts isolate agent state before adapter setup.
@@ -49,6 +50,7 @@ impl NativePlan<'_> {
             config_path,
             config,
             project_root,
+            invocation_dir,
             project_config,
             invocation,
             fresh_state,
@@ -101,7 +103,12 @@ impl NativePlan<'_> {
             max_steps,
         )?;
         let mut program = specification.program;
-        match agents::execution_lookup(&config.agent, project_root, &project_config.tools_dir) {
+        match agents::execution_lookup_at(
+            &config.agent,
+            project_root,
+            &project_config.tools_dir,
+            invocation_dir,
+        ) {
             crate::executables::Lookup::Found(local) => {
                 program = local.to_string_lossy().into_owned();
             }
@@ -359,6 +366,7 @@ mod tests {
                 config_path: &root.join("benchmark.toml"),
                 config: &config,
                 project_root: &root,
+                invocation_dir: &root,
                 project_config: &project,
                 invocation: &invocation,
                 fresh_state: true,
@@ -484,6 +492,7 @@ mod tests {
             config_path: &root.join("benchmark.toml"),
             config: &config,
             project_root: &root,
+            invocation_dir: &root,
             project_config: &project,
             invocation: &invocation,
             fresh_state,

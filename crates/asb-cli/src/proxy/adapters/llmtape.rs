@@ -31,6 +31,7 @@ struct Settings {
     cassette: PathBuf,
     respect_record_timings: bool,
     workspace: PathBuf,
+    invocation_dir: PathBuf,
     /// Opaque adapter-owned request extension; llmtape materializes and
     /// invokes it without interpreting its wire protocol.
     wire_extension: Option<&'static str>,
@@ -107,18 +108,22 @@ impl ProxyAdapter for LlmtapeAdapter {
             cassette: request.cassette.to_path_buf(),
             respect_record_timings: request.respect_record_timings,
             workspace: request.workspace.to_path_buf(),
+            invocation_dir: request.invocation_dir.to_path_buf(),
             wire_extension: request.wire_extension,
         }))
     }
 
-    fn input_files(&self) -> Result<Vec<PathBuf>, Error> {
-        execution_input_files(configured_override().as_deref())
+    fn input_files(&self, invocation_dir: &Path) -> Result<Vec<PathBuf>, Error> {
+        execution_input_files(configured_override(invocation_dir).as_deref())
     }
-    fn runtime_inputs(&self) -> Result<Vec<crate::runtime_inputs::Dependency>, Error> {
+    fn runtime_inputs(
+        &self,
+        invocation_dir: &Path,
+    ) -> Result<Vec<crate::runtime_inputs::Dependency>, Error> {
         // Retain the logical command, not just its initial PATH resolution,
         // so a new earlier PATH candidate is detectable at final discovery.
         Ok(vec![crate::runtime_inputs::Dependency::program(
-            configured_override().unwrap_or_else(|| "node".into()),
+            configured_override(invocation_dir).unwrap_or_else(|| "node".into()),
         )])
     }
 
@@ -177,7 +182,7 @@ impl ProxyAdapter for LlmtapeAdapter {
         let _start_guard = START_LOCK
             .lock()
             .map_err(|_| Error::Run("tape startup lock was poisoned".into()))?;
-        let executable = resolve_executable(&scratch.path)?;
+        let executable = resolve_executable(&scratch.path, &request.invocation_dir)?;
         // The built-in child binds its own ephemeral port and publishes it
         // only after listening. A released parent-selected port can be taken
         // by a different ASB process; a TCP connect does not prove ownership.
@@ -185,6 +190,7 @@ impl ProxyAdapter for LlmtapeAdapter {
         let port = if builtin { 0 } else { free_port()? };
         let ready_file = scratch.path.join("ready.json");
         let mut command = executable.command();
+        command.current_dir(&request.invocation_dir);
         command.env_remove("ASB_TAPE_READY_FILE");
         command.env_remove("ASB_TAPE_OWNER_PIPE");
         command.env_remove("ASB_TAPE_CAPTURE_RECEIPT");
@@ -664,8 +670,8 @@ impl ProxyExecutable {
 
 /// Resolve an explicitly supplied proxy or materialize ASB's built-in proxy.
 /// ASB deliberately does not look up an unqualified host `llmtape` command.
-fn resolve_executable(directory: &Path) -> Result<ProxyExecutable, Error> {
-    if let Some(override_path) = configured_override() {
+fn resolve_executable(directory: &Path, invocation_dir: &Path) -> Result<ProxyExecutable, Error> {
+    if let Some(override_path) = configured_override(invocation_dir) {
         return Ok(ProxyExecutable::Override(override_path));
     }
     let script = directory.join(".asb-tape-proxy.mjs");
@@ -687,10 +693,18 @@ fn resolve_executable(directory: &Path) -> Result<ProxyExecutable, Error> {
     Ok(ProxyExecutable::Builtin(script))
 }
 
-fn configured_override() -> Option<String> {
+fn configured_override(invocation_dir: &Path) -> Option<String> {
     std::env::var("ASB_LLM_TAPE")
         .ok()
         .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            let path = Path::new(&value);
+            if path.components().count() > 1 && !path.is_absolute() {
+                invocation_dir.join(path).to_string_lossy().into_owned()
+            } else {
+                value
+            }
+        })
 }
 
 fn execution_input_files(override_path: Option<&str>) -> Result<Vec<PathBuf>, Error> {
@@ -798,6 +812,25 @@ mod tests {
     use crate::tape::{Mode, Session};
     use std::io::{Read, Write};
     use std::net::TcpStream;
+
+    #[test]
+    fn registry_recording_settings_preserve_invocation_context() {
+        use crate::proxy::ProxyAdapter;
+        let request = crate::proxy::RecordingRequest {
+            recorder: None,
+            mode: Mode::Replay,
+            cassette: std::path::Path::new("fixture.jsonl"),
+            respect_record_timings: true,
+            workspace: std::path::Path::new("/fixture/workspace"),
+            invocation_dir: std::path::Path::new("/fixture/nested"),
+            wire_extension: None,
+        };
+        let settings = super::ADAPTER.recording_settings(&request).unwrap();
+        let settings = settings.downcast_ref::<super::Settings>().unwrap();
+        assert_eq!(settings.invocation_dir, request.invocation_dir);
+        assert_eq!(settings.workspace, request.workspace);
+        assert_eq!(settings.cassette, request.cassette);
+    }
 
     #[test]
     fn abnormal_builtin_exit_cannot_confirm_proxy_cleanup() {
@@ -2611,7 +2644,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("asb-tape-test-{}", std::process::id()));
         let cassette = root.join("cassettes/run.jsonl");
         std::fs::create_dir_all(cassette.parent().unwrap()).unwrap();
-        let resolved = resolve_executable(cassette.parent().unwrap()).unwrap();
+        let resolved = resolve_executable(cassette.parent().unwrap(), Path::new(".")).unwrap();
         match resolved {
             ProxyExecutable::Builtin(path) => {
                 assert_eq!(path, root.join("cassettes/.asb-tape-proxy.mjs"));

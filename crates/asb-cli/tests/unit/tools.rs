@@ -54,6 +54,7 @@ fn default_and_static_adapter_hooks_have_explicit_nonexecuting_contracts() {
     let installation = crate::install::OperationContext::new(&fixture.0, &project).unwrap();
     let context = crate::runtime_inputs::Context {
         root: &fixture.0,
+        invocation_dir: &fixture.0,
         project: &project,
     };
     assert!(DefaultTool.guest_assets(&fixture.0).unwrap().is_empty());
@@ -197,6 +198,7 @@ fn local_resolution_and_runtime_declarations_share_layout_and_helper_identity() 
     };
     let context = crate::runtime_inputs::Context {
         root: &fixture.0,
+        invocation_dir: &fixture.0,
         project: &project,
     };
     assert!(resolve("unknown-tool", &fixture.0, "tools").is_none());

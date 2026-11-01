@@ -223,3 +223,172 @@ fn generated_shells_use_the_explicit_project_catalog_in_both_flag_forms() {
         }
     }
 }
+
+fn override_catalog(project: &Path, name: &str) {
+    let directory = project.join("custom-workloads");
+    let source = directory.join("agentbench/source/configs/tasks");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(directory.join(format!("{name}.txt")), "fixture").unwrap();
+    fs::write(directory.join(format!("{name}.workload.toml")), "fixture").unwrap();
+    fs::write(source.join(format!("{name}.yaml")), "fixture").unwrap();
+    let marker = "THUDM/AgentBench@d1e4a10db08c87075c78972e48ecc182be03e2d5";
+    fs::write(directory.join("agentbench/ASB-BUNDLE"), marker).unwrap();
+    fs::write(
+        directory.join("agentbench/catalog.json"),
+        format!(r#"{{"schema_version":1,"workload":"agentbench","marker":"{marker}","tasks":[{{"id":"{name}","description":"fixture"}}]}}"#),
+    ).unwrap();
+}
+
+#[test]
+fn workload_override_applies_to_listing_and_generated_shell_completion() {
+    let caller = Project::new();
+    let selected = Project::new();
+    override_catalog(&caller.0, "caller-task");
+    override_catalog(&selected.0, "selected-task");
+    let target = selected.0.to_str().unwrap();
+    for override_dir in [
+        "custom-workloads".to_owned(),
+        selected
+            .0
+            .join("custom-workloads")
+            .to_string_lossy()
+            .into_owned(),
+    ] {
+        let output = Command::new(asb())
+            .current_dir(&caller.0)
+            .env("ASB_WORKLOAD_DIR", &override_dir)
+            .args(["workload", "agentbench", "trials", "--project-dir", target])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let listing = String::from_utf8(output.stdout).unwrap();
+        assert!(listing.contains("selected-task"), "{listing}");
+        assert!(!listing.contains("caller-task"), "{listing}");
+        for shell in ["bash", "zsh"] {
+            if Command::new(shell).arg("--version").output().is_err() {
+                continue;
+            }
+            let script = generated(shell, &caller.0);
+            for flag in [
+                vec!["--project-dir".to_owned(), target.to_owned()],
+                vec![format!("--project-dir={target}")],
+            ] {
+                for prefix in [
+                    vec!["setup", "--workload"],
+                    vec!["setup", "--trial-set"],
+                    vec!["setup", "--workload", "agentbench", "--trial"],
+                ] {
+                    let mut words = vec![asb().to_owned()];
+                    words.extend(flag.clone());
+                    words.extend(prefix.iter().map(|s| (*s).to_owned()));
+                    words.push(String::new());
+                    let body = if shell == "bash" {
+                        r#"source "$1"; shift; COMP_WORDS=("$@"); COMP_CWORD=$(($# - 1)); _asb; printf '%s\n' "${COMPREPLY[@]}""#
+                    } else {
+                        r#"compdef() { :; }; source "$1"; shift; words=("$@"); CURRENT=$#; _describe() { printf '%s\n' "${candidates[@]}"; }; _asb_catalog_complete"#
+                    };
+                    let output = Command::new(shell)
+                        .args(["-c", body, "fixture"])
+                        .arg(&script)
+                        .args(&words)
+                        .current_dir(&caller.0)
+                        .env("ASB_WORKLOAD_DIR", &override_dir)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let candidates = String::from_utf8(output.stdout).unwrap();
+                    assert!(
+                        candidates.lines().any(|line| line == "selected-task"),
+                        "{shell} {prefix:?}: {candidates}"
+                    );
+                    assert!(
+                        !candidates.lines().any(|line| line == "caller-task"),
+                        "{shell} {prefix:?}: {candidates}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn relative_workload_override_uses_nested_invocation_directory() {
+    let project = Project::new();
+    let nested = project.0.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    override_catalog(&project.0, "root-task");
+    override_catalog(&nested, "nested-task");
+    for args in [
+        vec!["workload", "agentbench", "trials"],
+        vec!["--__complete-values", "trial", "agentbench"],
+    ] {
+        let output = Command::new(asb())
+            .current_dir(&nested)
+            .env("ASB_WORKLOAD_DIR", "custom-workloads")
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let listing = String::from_utf8(output.stdout).unwrap();
+        assert!(listing.contains("nested-task"), "{args:?}: {listing}");
+        assert!(!listing.contains("root-task"), "{args:?}: {listing}");
+    }
+}
+
+#[test]
+fn concurrent_library_calls_keep_project_trial_catalogs_isolated() {
+    use std::ffi::OsString;
+    use std::sync::{Arc, Barrier};
+
+    let projects = [Project::new(), Project::new()];
+    for (project, task) in projects.iter().zip(["first-task", "second-task"]) {
+        override_catalog(&project.0, task);
+        fs::write(
+            project.0.join(".asb/project.toml"),
+            "tools_dir='tools'\nworkloads_dir='custom-workloads'\nworkspace_dir='workspace'\n",
+        )
+        .unwrap();
+    }
+    let barrier = Arc::new(Barrier::new(2));
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for (project, expected, unexpected) in [
+            (&projects[0], "first-task", "second-task"),
+            (&projects[1], "second-task", "first-task"),
+        ] {
+            let barrier = Arc::clone(&barrier);
+            handles.push(scope.spawn(move || {
+                let args: Vec<OsString> = ["workload", "agentbench", "trials", "--project-dir"]
+                    .into_iter()
+                    .map(OsString::from)
+                    .chain(std::iter::once(project.0.as_os_str().to_owned()))
+                    .collect();
+                barrier.wait();
+                for _ in 0..50 {
+                    let mut output = Vec::new();
+                    let mut errors = Vec::new();
+                    let code = asb_cli::run(&args, &mut output, &mut errors);
+                    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&errors));
+                    let listing = String::from_utf8(output).unwrap();
+                    assert!(listing.contains(expected), "{listing}");
+                    assert!(!listing.contains(unexpected), "{listing}");
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    });
+}

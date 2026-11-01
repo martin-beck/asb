@@ -19,7 +19,12 @@ enum Process {
     },
 }
 impl Process {
-    fn spawn(python: &Path, source: &str, deadline: Instant) -> Result<Self, &'static str> {
+    fn spawn(
+        python: &Path,
+        source: &str,
+        deadline: Instant,
+        cwd: Option<&Path>,
+    ) -> Result<Self, &'static str> {
         if Instant::now() >= deadline {
             return Err("local helper operation expired before admission");
         }
@@ -31,6 +36,9 @@ impl Process {
         {
             let binary = runtime().map_err(|_| "local helper supervisor unavailable")?;
             let (mut command, route) = launch.native(Some(&binary));
+            if let Some(cwd) = cwd {
+                command.current_dir(cwd);
+            }
             pipes(&mut command);
             let validated = route
                 .validate_gate(&mut command)
@@ -54,6 +62,9 @@ impl Process {
             let keeper = crate::process_cleanup::OwnedReaper::new("local-helper")
                 .map_err(|_| "local helper cleanup custody unavailable before spawn")?;
             let mut command = launch.direct();
+            if let Some(cwd) = cwd {
+                command.current_dir(cwd);
+            }
             pipes(&mut command);
             let child = command
                 .spawn()
@@ -170,6 +181,16 @@ pub(crate) fn run(
     request: &[u8],
     policy: Policy,
 ) -> Result<Vec<u8>, String> {
+    run_at(python, source, request, policy, None)
+}
+
+pub(crate) fn run_at(
+    python: &Path,
+    source: &str,
+    request: &[u8],
+    policy: Policy,
+    cwd: Option<&Path>,
+) -> Result<Vec<u8>, String> {
     if policy.request_bytes == 0
         || policy.response_bytes == 0
         || policy.response_bytes == usize::MAX
@@ -183,7 +204,7 @@ pub(crate) fn run(
     let deadline = Instant::now()
         .checked_add(policy.timeout)
         .ok_or("local helper exchange deadline overflows")?;
-    let mut process = Process::spawn(python, source, deadline)?;
+    let mut process = Process::spawn(python, source, deadline, cwd)?;
     #[cfg(test)]
     faults::after_spawn(&mut process);
     let result = communicate(&mut process, request, policy.response_bytes, deadline);

@@ -28,6 +28,12 @@ const PROGRESS_POLL: Duration = Duration::from_millis(250);
 const PROGRESS_TRANSCRIPT_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_PRIVATE_REPLAY_INPUT: u64 = 64 * 1024 * 1024;
 
+fn controller_command(program: impl AsRef<std::ffi::OsStr>) -> Result<ControllerCommand, String> {
+    let mut command = ControllerCommand::new(program)?;
+    command.current_dir(crate::project::network_invocation_dir());
+    Ok(command)
+}
+
 const GUEST_ENVIRONMENT_VARS: &[&str] = &[
     "http_proxy",
     "HTTP_PROXY",
@@ -273,7 +279,7 @@ pub(crate) fn verify_retained(
         .join(tool_id);
     require_sdk(&tool, &recovery.reference.workload)?;
     let mut command =
-        ControllerCommand::new(tool.join("venv/bin/python")).map_err(crate::Error::Run)?;
+        controller_command(tool.join("venv/bin/python")).map_err(crate::Error::Run)?;
     command
         .arg(tool.join("asb_retained.py"))
         .arg("--module")
@@ -340,7 +346,7 @@ fn retained_grade_request(
         .join(tool_id);
     require_sdk(&tool, &context.reference.workload)?;
     let mut command =
-        ControllerCommand::new(tool.join("venv/bin/python")).map_err(crate::Error::Run)?;
+        controller_command(tool.join("venv/bin/python")).map_err(crate::Error::Run)?;
     command
         .arg(runtime.join("asb_retained.py"))
         .args([
@@ -578,7 +584,7 @@ pub(crate) fn recover(
         return Err(crate::Error::Input("the installed workload recovery helper is missing; reinstall the workload before recovery".into()));
     }
     let mut command =
-        ControllerCommand::new(tool.join("venv/bin/python")).map_err(crate::Error::Run)?;
+        controller_command(tool.join("venv/bin/python")).map_err(crate::Error::Run)?;
     command
         .arg(tool.join("asb_resources.py"))
         .arg("--quiesce")
@@ -696,7 +702,7 @@ pub(crate) fn launch(
     let error_log = options
         .open(artifacts.with_extension("controller.log"))
         .map_err(|error| error.to_string())?;
-    let mut command = ControllerCommand::new(tool.join("venv/bin/python"))?;
+    let mut command = controller_command(tool.join("venv/bin/python"))?;
     command.stderr(error_log);
     command.arg(tool.join(helper));
     if let Some(operation) = operation {
@@ -1427,6 +1433,29 @@ mod execution_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn all_workload_controller_routes_inherit_the_invocation_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-controller-cwd-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let _scope = crate::project::network_project_at(&root, &root);
+        let mut command = super::controller_command("python3").unwrap();
+        command.args([
+            "-u",
+            "-c",
+            "import json,os; print(json.dumps({'cwd':os.getcwd()}),flush=True)",
+        ]);
+        let mut controller = super::Controller::spawn(&mut command).unwrap();
+        let event = controller
+            .receive(std::time::Instant::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(event["cwd"], root.to_str().unwrap());
+        drop(controller);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn initial_material_protocol_preserves_only_known_bounded_local_diagnostics() {
         for event in [

@@ -38,7 +38,7 @@ impl ProxyAdapter for Synthetic {
     fn supports_offline_replay(&self) -> bool {
         true
     }
-    fn input_files(&self) -> Result<Vec<PathBuf>, Error> {
+    fn input_files(&self, _: &Path) -> Result<Vec<PathBuf>, Error> {
         Ok(Vec::new())
     }
     fn recording_settings(&self, request: &RecordingRequest<'_>) -> Result<Box<dyn Any>, Error> {

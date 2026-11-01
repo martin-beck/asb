@@ -11,23 +11,52 @@ mod host_setup;
 
 thread_local! {
     static NETWORK_PROJECT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static NETWORK_INVOCATION: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Restrict implicit network lookups to the benchmark's project for this
 /// thread, including discovery and provider-owned subprocesses.
-pub struct NetworkProjectGuard(Option<PathBuf>, std::marker::PhantomData<std::rc::Rc<()>>);
+pub struct NetworkProjectGuard(
+    Option<PathBuf>,
+    Option<PathBuf>,
+    std::marker::PhantomData<std::rc::Rc<()>>,
+);
 
 impl Drop for NetworkProjectGuard {
     fn drop(&mut self) {
         NETWORK_PROJECT.with(|project| *project.borrow_mut() = self.0.take());
+        NETWORK_INVOCATION.with(|project| *project.borrow_mut() = self.1.take());
     }
 }
 
+#[cfg(test)]
 pub fn network_project(root: &Path) -> NetworkProjectGuard {
+    network_project_at(root, root)
+}
+
+pub(crate) fn network_project_at(root: &Path, invocation_dir: &Path) -> NetworkProjectGuard {
     NetworkProjectGuard(
         NETWORK_PROJECT.with(|project| project.borrow_mut().replace(root.to_path_buf())),
+        NETWORK_INVOCATION
+            .with(|project| project.borrow_mut().replace(invocation_dir.to_path_buf())),
         std::marker::PhantomData,
     )
+}
+
+pub(crate) fn network_root() -> PathBuf {
+    NETWORK_PROJECT
+        .with(|project| project.borrow().clone())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+pub(crate) fn network_invocation_dir() -> PathBuf {
+    NETWORK_INVOCATION
+        .with(|project| project.borrow().clone())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+pub(crate) fn environment_path(name: &str, base: &Path) -> Option<PathBuf> {
+    std::env::var_os(name).map(|path| base.join(path))
 }
 
 const CONFIG_DIR: &str = ".asb";

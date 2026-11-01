@@ -32,11 +32,11 @@ pub(crate) struct PresetSweep {
     pub(crate) repeat: u64,
 }
 
-/// Expand a repository-owned, machine-readable benchmark preset.
-pub fn setup_preset(
+pub(crate) fn setup_preset_at(
     name: &str,
     workloads: Vec<String>,
     output_path: Option<String>,
+    directory: &Path,
     output: &mut dyn Write,
 ) -> Result<(), Error> {
     let mut options = crate::presets::load(name)?;
@@ -44,7 +44,7 @@ pub fn setup_preset(
     if output_path.is_some() {
         options.output = output_path;
     }
-    matrix::setup(options, output)
+    matrix::setup_at(options, directory, output)
 }
 
 fn narrow_preset_workloads(
@@ -75,8 +75,17 @@ fn narrow_preset_workloads(
 }
 
 /// Write a TOML benchmark configuration from parsed setup options.
+#[cfg(test)]
 pub fn setup(options: SetupOptions, output: &mut dyn Write) -> Result<(), Error> {
-    matrix::setup(options, output)
+    setup_at(options, Path::new("."), output)
+}
+
+pub(crate) fn setup_at(
+    options: SetupOptions,
+    directory: &Path,
+    output: &mut dyn Write,
+) -> Result<(), Error> {
+    matrix::setup_at(options, directory, output)
 }
 
 /// Materialize a repository-owned preset in an initialized project so it can
@@ -88,18 +97,19 @@ pub fn setup(options: SetupOptions, output: &mut dyn Write) -> Result<(), Error>
 pub(crate) fn setup_preset_for_sweep(
     name: &str,
     quiet: bool,
+    directory: &Path,
     output: &mut dyn Write,
 ) -> Result<PresetSweep, Error> {
-    let (root, _) = project::load(Path::new("."))?;
+    let (root, _) = project::load(directory)?;
     require_initialized_preset_project(&root, name)?;
     let defaults = crate::presets::sweep_defaults(name)?;
     let mut options = crate::presets::load(name)?;
     let path = preset_sweep_path(&root, name, matrix::stamp());
     options.output = Some(path.to_string_lossy().into_owned());
     if quiet {
-        matrix::setup(options, &mut std::io::sink())?;
+        matrix::setup_at(options, directory, &mut std::io::sink())?;
     } else {
-        matrix::setup(options, output)?;
+        matrix::setup_at(options, directory, output)?;
     }
     Ok(PresetSweep {
         path,
@@ -125,7 +135,12 @@ fn preset_sweep_path(root: &Path, name: &str, stamp: u128) -> PathBuf {
 }
 
 /// Validate one selection before publishing any configuration in a matrix.
+#[cfg(test)]
 fn configuration(options: SetupOptions) -> Result<BenchmarkConfig, Error> {
+    configuration_at(options, Path::new("."))
+}
+
+fn configuration_at(options: SetupOptions, directory: &Path) -> Result<BenchmarkConfig, Error> {
     let SetupOptions {
         agent,
         workload,
@@ -140,7 +155,7 @@ fn configuration(options: SetupOptions) -> Result<BenchmarkConfig, Error> {
         retention,
         repeat: _,
     } = options;
-    let (_, project_config) = project::load(std::path::Path::new("."))?;
+    let (_, project_config) = project::load(directory)?;
     let agent = required(agent.into_iter().next())?;
     let known_agents = agents::all()
         .iter()

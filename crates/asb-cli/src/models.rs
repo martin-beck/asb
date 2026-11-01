@@ -369,6 +369,7 @@ fn fetch_authenticated(spec: providers::ModelSpec, url: &str, key: &str) -> Resu
 
 pub(crate) fn fetch_config(config: String, provider: &str) -> Result<Vec<u8>, Error> {
     let mut command = Command::new("curl");
+    command.current_dir(crate::project::network_invocation_dir());
     crate::project::apply_network_proxy(&mut command, std::path::Path::new("."))?;
     let io_timeout = transport::IO_TIMEOUT.as_secs().to_string();
     let max_response = transport::MAX_RESPONSE.to_string();

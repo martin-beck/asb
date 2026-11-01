@@ -1,5 +1,16 @@
 # Architecture
 
+CLI dispatch carries the invocation directory independently from the process
+working directory. An explicit `--project-dir` supplies that directory to
+setup, installation, discovery, execution, and reporting; relative command
+paths and selected environment overrides resolve against it. Sweep and batch
+workers receive the same invocation directory explicitly. Provider sessions
+bind their project and invocation context for their own lifetime. ASB never
+changes the embedding process's working directory to select a project, so
+concurrent library callers can use different projects without redirecting one
+another's file operations. Child processes receive their intended working
+directory directly.
+
 Benchmark cassette/result labels and manifest references share the private
 `benchmark_paths` policy. Its legacy component normalization is lossy and keeps
 existing artifact names stable; it must not be used as a uniqueness allocator

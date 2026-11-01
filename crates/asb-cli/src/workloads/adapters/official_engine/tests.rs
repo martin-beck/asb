@@ -130,6 +130,7 @@ fn three_owner_bindings_route_exact_engines_and_read_only_runtime_inputs() {
         let inputs = binding
             .runtime_inputs(&crate::runtime_inputs::Context {
                 root: &fixture.root,
+                invocation_dir: &fixture.root,
                 project: &fixture.project,
             })
             .unwrap();

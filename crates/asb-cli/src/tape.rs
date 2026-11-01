@@ -17,6 +17,13 @@ pub enum Mode {
 /// A running record/replay chain.
 pub struct Session(proxy::Chain);
 
+pub(crate) struct AgentContext<'a> {
+    pub workspace: &'a Path,
+    pub agent: Option<&'a str>,
+    pub recorder: Option<&'a str>,
+    pub invocation_dir: &'a Path,
+}
+
 impl Session {
     #[cfg(test)]
     pub fn start(
@@ -39,6 +46,7 @@ impl Session {
 
     /// Start a tape session with an optional adapter-owned opaque wire
     /// extension. The tape itself never interprets that extension's protocol.
+    #[cfg(test)]
     pub fn start_for_agent(
         mode: Mode,
         cassette: &Path,
@@ -48,16 +56,38 @@ impl Session {
         agent: Option<&str>,
         recorder: Option<&str>,
     ) -> Result<Self, Error> {
+        Self::start_for_agent_at(
+            mode,
+            cassette,
+            upstream,
+            respect_record_timings,
+            AgentContext {
+                workspace,
+                agent,
+                recorder,
+                invocation_dir: Path::new("."),
+            },
+        )
+    }
+
+    pub fn start_for_agent_at(
+        mode: Mode,
+        cassette: &Path,
+        upstream: Option<&str>,
+        respect_record_timings: bool,
+        context: AgentContext<'_>,
+    ) -> Result<Self, Error> {
         if mode == Mode::Replay {
             require_replay_cassette(cassette)?;
         }
         let settings = proxy::RecordingRequest {
-            recorder,
+            recorder: context.recorder,
             mode,
             cassette,
             respect_record_timings,
-            workspace,
-            wire_extension: agent.and_then(crate::agents::tape_wire_extension),
+            workspace: context.workspace,
+            invocation_dir: context.invocation_dir,
+            wire_extension: context.agent.and_then(crate::agents::tape_wire_extension),
         };
         proxy::start_recording_chain(&settings, upstream).map(Self)
     }

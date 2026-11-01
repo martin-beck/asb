@@ -13,7 +13,11 @@ mod selections;
 pub(crate) use prepared::Population;
 pub(crate) use publication::scalar as publish_atomic;
 
-pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result<(), Error> {
+pub(super) fn setup_at(
+    mut options: SetupOptions,
+    base: &Path,
+    output: &mut dyn Write,
+) -> Result<(), Error> {
     for values in [
         &options.agent,
         &options.provider,
@@ -41,12 +45,12 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
     let filter_incompatible = [&options.agent, &options.provider, &options.model]
         .into_iter()
         .any(|values| values.iter().any(|value| value == "all"));
-    selections::expand(&mut options)?;
+    selections::expand(&mut options, base)?;
     validate_concurrency_before_install(options.concurrency)?;
     if !filter_incompatible {
         validate_before_install(&options)?;
     }
-    prepare_missing_installables(&options, output)?;
+    prepare_missing_installables(&options, base, output)?;
     let repeated = requested_repeats || repeated(&options);
     for measure in &options.measure {
         if crate::collectors::adapter_for_selection(measure).is_none() {
@@ -67,9 +71,8 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
             options.measure.push(owner);
         }
     }
-    let (root, settings) = project::load(Path::new("."))?;
-    let directory = std::env::var_os("ASB_WORKLOAD_DIR")
-        .map(PathBuf::from)
+    let (root, settings) = project::load(base)?;
+    let directory = project::environment_path("ASB_WORKLOAD_DIR", base)
         .unwrap_or_else(|| project::resolve(&root, &settings.workloads_dir));
     let mut sets = BTreeMap::new();
     for filename in unique(&options.trial_set) {
@@ -195,7 +198,7 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
                             retention: options.retention.clone(),
                             repeat: None,
                         };
-                        let config = configuration(selection)?;
+                        let config = configuration_at(selection, base)?;
                         if validated_trials.insert(config.trial.clone()) {
                             validate_selection(
                                 &config,
@@ -215,23 +218,28 @@ pub(super) fn setup(mut options: SetupOptions, output: &mut dyn Write) -> Result
     if repeated || configs.len() > 1 {
         let path = options
             .output
-            .map(PathBuf::from)
+            .map(|path| base.join(path))
             .unwrap_or_else(|| root.join(format!("asb-sweep-{}.toml", stamp())));
         publish_sweep_with_repeat(&path, configs, manifest_repeat, output)?;
     } else {
         let config = &configs[0];
         let text = render(config)?;
         if let Some(path) = options.output {
-            let path = Path::new(&path);
-            create_parent(path, output)?;
-            publication::scalar(path, text.as_bytes())?;
+            let target = base.join(&path);
+            create_parent(&target, output)?;
+            publication::scalar(&target, text.as_bytes())?;
+            let shown = if std::env::current_dir().is_ok_and(|cwd| cwd == base) {
+                PathBuf::from(path)
+            } else {
+                target.clone()
+            };
             writeln!(
                 output,
                 "Wrote {}\n{}",
-                path.display(),
-                run_command_message(&path.to_string_lossy())
+                shown.display(),
+                run_command_message(&shown.to_string_lossy())
             )
-            .map_err(|error| publication::confirmation(path, error))?;
+            .map_err(|error| publication::confirmation(&target, error))?;
         } else {
             output.write_all(text.as_bytes()).map_err(crate::io_error)?;
         }
@@ -298,21 +306,25 @@ fn validate_before_install(options: &SetupOptions) -> Result<(), Error> {
 /// agents, external workloads, and collector dependencies identically.
 fn prepare_missing_installables(
     options: &SetupOptions,
+    base: &Path,
     output: &mut dyn Write,
 ) -> Result<(), Error> {
-    let (root, settings) = project::load(Path::new("."))?;
+    let (root, settings) = project::load(base)?;
     let tools = project::resolve(&root, &settings.tools_dir);
-    let workloads = project::resolve(&root, &settings.workloads_dir);
+    let workloads = project::environment_path("ASB_WORKLOAD_DIR", base)
+        .unwrap_or_else(|| project::resolve(&root, &settings.workloads_dir));
     for agent in unique(&options.agent) {
         if agents::find(agent).is_some() && !crate::install::tool_installed_locally(agent, &tools) {
-            crate::install::tool(
+            crate::install::tool_with_progress_at(
                 crate::install::ToolInstallOptions {
                     name: agent.clone(),
                     source: None,
                     dir: None,
                     dry_run: false,
                 },
+                base,
                 output,
+                &mut |_, _| {},
             )?;
         }
     }
@@ -325,14 +337,16 @@ fn prepare_missing_installables(
         if crate::tools::find(provider).is_some()
             && !crate::install::tool_installed_locally(provider, &tools)
         {
-            crate::install::tool(
+            crate::install::tool_with_progress_at(
                 crate::install::ToolInstallOptions {
                     name: provider.clone(),
                     source: None,
                     dir: None,
                     dry_run: false,
                 },
+                base,
                 output,
+                &mut |_, _| {},
             )?;
         }
     }
@@ -340,26 +354,30 @@ fn prepare_missing_installables(
         if crate::install::external_workload_names().any(|name| name == workload)
             && !crate::install::workload_available(workload, &workloads)
         {
-            crate::install::workload(
+            crate::install::workload_with_progress_at(
                 crate::install::WorkloadInstallOptions {
                     source: workload.clone(),
                     name: None,
                     dir: None,
                 },
+                base,
                 output,
+                &mut |_, _| {},
             )?;
         }
     }
     for tool in collector_installables(&options.measure) {
         if !crate::install::tool_installed_locally(&tool, &tools) {
-            crate::install::tool(
+            crate::install::tool_with_progress_at(
                 crate::install::ToolInstallOptions {
                     name: tool,
                     source: None,
                     dir: None,
                     dry_run: false,
                 },
+                base,
                 output,
+                &mut |_, _| {},
             )?;
         }
     }

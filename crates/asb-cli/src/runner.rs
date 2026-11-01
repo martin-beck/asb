@@ -143,6 +143,7 @@ impl RunResult<'_> {
 /// Execution choices shared by single runs, replicas, and sweeps.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct RunOptions<'a> {
+    pub invocation_dir: Option<&'a Path>,
     pub track: Option<crate::cassette::Selector>,
     pub replay_seed: Option<u64>,
     pub recording: Option<&'a recording::Recorder>,
@@ -597,6 +598,7 @@ fn run_dispatched(
             &config,
             config_path,
             options.mode,
+            options.invocation_dir.unwrap_or_else(|| Path::new(".")),
             &mut messages,
         )?;
         if !options.json {

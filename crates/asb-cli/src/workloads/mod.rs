@@ -1128,6 +1128,7 @@ mod tests {
                 workload,
                 &crate::runtime_inputs::Context {
                     root: &root,
+                    invocation_dir: &root,
                     project: &project,
                 },
             )
