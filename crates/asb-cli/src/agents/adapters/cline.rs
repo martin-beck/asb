@@ -28,7 +28,28 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "CLINE_MCP_SETTINGS_PATH",
 ])
 .with_output_usage(output_usage)
+.with_final_response(final_response)
 .with_step_count(step_count);
+
+fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
+    let mut answer = None;
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let event: serde_json::Value = serde_json::from_str(line).ok()?;
+        match event.get("type").and_then(|value| value.as_str()) {
+            Some("run_result") => {
+                answer = (event.get("finishReason").and_then(|value| value.as_str())
+                    == Some("completed"))
+                .then(|| event.get("text").and_then(|value| value.as_str()))
+                .flatten()
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_owned);
+            }
+            Some("run_aborted" | "error") => answer = None,
+            _ => {}
+        }
+    }
+    answer
+}
 
 fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
     stdout
@@ -230,6 +251,29 @@ fn configure(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_completed_run_result_is_final_response() {
+        use crate::agents::AgentAdapter;
+        let path = std::path::Path::new(".");
+        let completed = r#"{"type":"run_result","finishReason":"completed","text":"final answer"}"#;
+        assert_eq!(
+            super::ADAPTER.final_response(completed, path).as_deref(),
+            Some("final answer")
+        );
+        for event in [
+            r#"{"type":"agent_event","event":{"type":"content_end","text":"intermediate"}}"#,
+            r#"{"type":"run_result","finishReason":"aborted","text":"unfinished"}"#,
+            r#"{"type":"run_result","finishReason":"error","text":"failed"}"#,
+            r#"{"type":"run_result","text":"unknown"}"#,
+        ] {
+            assert!(
+                super::ADAPTER.final_response(event, path).is_none(),
+                "{event}"
+            );
+        }
+        let aborted = format!("{completed}\n{{\"type\":\"run_aborted\"}}");
+        assert!(super::ADAPTER.final_response(&aborted, path).is_none());
+    }
     #[test]
     fn tool_event_is_not_usage_when_final_result_has_no_usage() {
         let output = concat!(
