@@ -27,6 +27,9 @@ pub(super) static ADAPTER: SweBenchAdapter = SweBenchAdapter {
 };
 
 impl WorkloadAdapter for SweBenchAdapter {
+    fn estimated_disk_mib(&self) -> u64 {
+        8192
+    }
     fn source(&self) -> Option<&'static str> {
         Some(
             "https://raw.githubusercontent.com/SWE-bench/SWE-bench/02e7a74ffd0b707aab73d203fe87bdc7c76afc8e/README.md",

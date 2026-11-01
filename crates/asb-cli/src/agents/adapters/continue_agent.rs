@@ -15,6 +15,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_estimated_disk_mib(1024)
 .with_complete_tool_replay(prepare_tool_replay)
 .with_replay_credential_vars(&["CONTINUE_API_KEY"])
 .with_state_environment_vars(&["CONTINUE_CONFIG", "CONTINUE_GLOBAL_DIR"])

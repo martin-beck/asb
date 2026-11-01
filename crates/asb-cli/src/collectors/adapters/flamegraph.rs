@@ -11,6 +11,9 @@ mod coverage_tests;
 mod cleanup_tests;
 
 impl CollectorAdapter for FlamegraphCollector {
+    fn estimated_disk_mib(&self) -> u64 {
+        1024
+    }
     fn id(&self) -> &'static str {
         "flamegraph"
     }

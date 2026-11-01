@@ -221,6 +221,10 @@ pub(crate) enum TargetScope {
 }
 
 pub(crate) trait CollectorAdapter: Sync {
+    /// Conservative per-attempt retained capture estimate.
+    fn estimated_disk_mib(&self) -> u64 {
+        128
+    }
     fn target_scope(&self, _backend: &str) -> TargetScope {
         if self.requires_pid() {
             TargetScope::AgentProcess

@@ -13,6 +13,9 @@ pub(super) struct PerfettoCollector;
 pub(super) static ADAPTER: PerfettoCollector = PerfettoCollector;
 
 impl CollectorAdapter for PerfettoCollector {
+    fn estimated_disk_mib(&self) -> u64 {
+        1024
+    }
     fn id(&self) -> &'static str {
         "perfetto"
     }

@@ -16,6 +16,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_estimated_disk_mib(768)
 .with_complete_tool_replay(prepare_tool_replay)
 .with_collection(collect)
 .with_artifact_specs(&[

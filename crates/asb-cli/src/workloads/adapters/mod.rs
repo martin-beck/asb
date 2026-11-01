@@ -66,6 +66,10 @@ pub(crate) struct SourceBundle {
 }
 
 pub(super) trait WorkloadAdapter: Sync {
+    /// Conservative per-attempt workspace storage estimate.
+    fn estimated_disk_mib(&self) -> u64 {
+        1024
+    }
     /// Optional setup frontend contribution. The frontend exposes this pane
     /// only while this adapter's workload remains selected, and discards its
     /// selection immediately when it is removed.

@@ -10,6 +10,9 @@ pub(super) struct SystemCollector;
 pub(super) static ADAPTER: SystemCollector = SystemCollector;
 
 impl CollectorAdapter for SystemCollector {
+    fn estimated_disk_mib(&self) -> u64 {
+        64
+    }
     fn target_scope(&self, _backend: &str) -> crate::collectors::TargetScope {
         crate::collectors::TargetScope::HostContext
     }
