@@ -5,6 +5,28 @@ use super::{
 use crate::{Error, install::Recipe};
 const TOOL_PROGRESS_FILENAME: &str = "persistent-progress.json";
 pub(super) const OUTPUT_ENTRY: &str = "entry === 'qwen' || (entryPath.includes('/@qwen-code/qwen-code/') && (entry === 'cli-entry.js' || entry === 'cli.js'))";
+// Qwen regenerates persisted-output paths during replay. The surrounding
+// envelope, digest and preview remain part of the provider request identity.
+const TAPE_WIRE_EXTENSION: &str = r#"
+export function normalizeRequest(request) {
+  const body = request?.body;
+  if (!body || !Array.isArray(body.messages)) return body;
+  const normalize = (content) => {
+    if (typeof content !== 'string' || !content.includes('<persisted-output>')) return content;
+    return content.replace(/(Full output saved to: )\/opt\/asb-private\/agent-state\/home\/\.qwen\/tmp\/[0-9a-f]+\/tool-results\/(?:call_[A-Za-z0-9_-]+|call-<asb-uuid>|asb-replay-\d+-<asb-timestamp>-\d+)\.txt/g, '$1<asb-qwen-persisted-output>');
+  };
+  const visit = (value) => {
+    if (typeof value === 'string') return normalize(value);
+    if (Array.isArray(value)) return value.map(visit);
+    if (value && typeof value === 'object') {
+      for (const key of Object.keys(value)) value[key] = visit(value[key]);
+    }
+    return value;
+  };
+  body.messages = body.messages.map(visit);
+  return body;
+}
+"#;
 
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "qwen-code",
@@ -18,6 +40,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_complete_tool_replay(prepare_tool_replay)
 .with_collection(collect)
 .with_artifact_specs(&[
