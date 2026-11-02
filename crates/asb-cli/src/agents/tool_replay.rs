@@ -109,9 +109,8 @@ impl Transcript {
         Ok(transcript)
     }
 
-    /// Restore independently dispatched observations in the order in which an
-    /// agent returns them to its model. Only a contiguous run of effect-free
-    /// turns may commute; any workspace effect remains a strict barrier.
+    /// Restore independently dispatched observations and disjoint file
+    /// removals in the order in which an agent returns them to its model.
     pub(crate) fn replay_with_commuted_observations(
         &mut self,
         root: &Path,
@@ -130,6 +129,22 @@ impl Transcript {
                 .take_while(|event| event.effects.is_empty())
                 .position(|event| event.tool == tool && &event.request == request)
                 .map(|offset| self.cursor + offset)
+                .or_else(|| {
+                    let pending = &self.events[self.cursor..];
+                    let offset = pending
+                        .iter()
+                        .take_while(|event| independent_removal(event).is_some())
+                        .position(|event| event.tool == tool && &event.request == request)?;
+                    let candidate = independent_removal(&pending[offset])?;
+                    pending[..offset]
+                        .iter()
+                        .all(|event| {
+                            independent_removal(event).is_some_and(|path| {
+                                !path.starts_with(candidate) && !candidate.starts_with(path)
+                            })
+                        })
+                        .then_some(self.cursor + offset)
+                })
         } else {
             None
         };
@@ -186,6 +201,37 @@ impl Transcript {
         self.cursor = cursor;
         Ok(())
     }
+}
+
+/// Only successful single-file removals with identical request and effect
+/// paths commute. Other writes, failures, and observations remain barriers.
+fn independent_removal(event: &Event) -> Option<&Path> {
+    if event.tool != "remove_file"
+        || event.failure.is_some()
+        || event.result != serde_json::json!({"ok": true})
+    {
+        return None;
+    }
+    let request = event.request.as_object()?;
+    if request.len() != 1 {
+        return None;
+    }
+    let value = request.get("path")?.as_str()?;
+    let [Effect::RemoveFile { path }] = event.effects.as_slice() else {
+        return None;
+    };
+    if value != path {
+        return None;
+    }
+    let path = Path::new(value);
+    if path.as_os_str().is_empty()
+        || !path
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(path)
 }
 
 /// Parse and re-encode a transcript before it enters a cassette.  This makes
@@ -479,6 +525,91 @@ fn search_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn removal(sequence: u64, path: &str) -> Event {
+        Event {
+            schema_version: SCHEMA_VERSION,
+            sequence,
+            tool: "remove_file".into(),
+            request: serde_json::json!({"path":path}),
+            result: serde_json::json!({"ok":true}),
+            failure: None,
+            effects: vec![Effect::RemoveFile { path: path.into() }],
+        }
+    }
+
+    #[test]
+    fn disjoint_removals_commute_but_duplicates_and_other_effects_do_not() {
+        let root = std::env::temp_dir().join(format!("asb-removal-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for path in ["a", "b"] {
+            std::fs::write(root.join(path), "fixture").unwrap();
+        }
+        let mut transcript = Transcript::default();
+        transcript.record(removal(1, "a")).unwrap();
+        transcript.record(removal(2, "b")).unwrap();
+        transcript
+            .replay_with_commuted_observations(
+                &root,
+                "remove_file",
+                &serde_json::json!({"path":"b"}),
+                true,
+            )
+            .unwrap();
+        assert!(root.join("a").exists());
+        assert!(!root.join("b").exists());
+        transcript
+            .replay_with_commuted_observations(
+                &root,
+                "remove_file",
+                &serde_json::json!({"path":"a"}),
+                true,
+            )
+            .unwrap();
+        transcript.finish().unwrap();
+        let mut transcript = Transcript::default();
+        transcript.record(removal(1, "a")).unwrap();
+        let mut duplicate = removal(2, "a");
+        duplicate.request["extra"] = serde_json::json!(true);
+        transcript.record(duplicate).unwrap();
+        assert!(
+            transcript
+                .replay_with_commuted_observations(
+                    &root,
+                    "remove_file",
+                    &serde_json::json!({"path":"a","extra":true}),
+                    true
+                )
+                .is_err()
+        );
+        let mut transcript = Transcript::default();
+        transcript.record(removal(1, "a")).unwrap();
+        transcript.record(removal(2, "a/child")).unwrap();
+        assert!(
+            transcript
+                .replay_with_commuted_observations(
+                    &root,
+                    "remove_file",
+                    &serde_json::json!({"path":"a/child"}),
+                    true
+                )
+                .is_err()
+        );
+        let mut transcript = Transcript::default();
+        transcript.record(event(1)).unwrap();
+        transcript.record(removal(2, "b")).unwrap();
+        assert!(
+            transcript
+                .replay_with_commuted_observations(
+                    &root,
+                    "remove_file",
+                    &serde_json::json!({"path":"b"}),
+                    true
+                )
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn binary_effect_round_trips_and_rejects_invalid_hex() {
         let root = std::env::temp_dir().join(format!("asb-binary-effect-{}", std::process::id()));
