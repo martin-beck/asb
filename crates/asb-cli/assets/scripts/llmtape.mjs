@@ -913,6 +913,7 @@ function reject(mismatch) {
 }
 
 function isReplayProbe(request) {
+  if (agentWireExtension?.isReplayProbe?.(request) === true) return true;
   if (!request.body) {
     return (request.method === "HEAD" || request.method === "GET")
       && /(?:\/api\/hello|\/health(?:z)?|\/models|\/api\/tags)(?:[/?]|$)/.test(request.url || "");

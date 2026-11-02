@@ -17,6 +17,14 @@ use std::process::{Command, Stdio};
 const NATIVE_TOOL_SITE_CUSTOMIZE: &str =
     include_str!("../../../assets/scripts/hermes-native-tools.py");
 const MAX_WORKSPACE_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
+// Hermes can omit local backend capability probes on replay depending on its
+// cached provider detection. Only these exact read-only probes may be skipped.
+const TAPE_WIRE_EXTENSION: &str = r#"
+export function isReplayProbe(request) {
+  return request.method === "GET" && !request.body
+    && ["/v1/props", "/props", "/version"].includes(request.url);
+}
+"#;
 
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "hermes",
@@ -31,6 +39,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_estimated_disk_mib(768)
+.with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_complete_tool_replay(prepare_native_tool_replay)
 .with_native_tool_transport()
 .with_native_workspace_capsule(capture_workspace_capsule, apply_workspace_capsule)
