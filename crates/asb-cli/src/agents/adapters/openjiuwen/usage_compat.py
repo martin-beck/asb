@@ -11,6 +11,15 @@ import hashlib
 import os
 import runpy
 import sys
+
+# OpenJiuwen exposes its turn limit through this environment setting, not a
+# CLI option. Consume the adapter-private argument before importing its CLI.
+if "--asb-max-iterations" in sys.argv:
+    _index = sys.argv.index("--asb-max-iterations")
+    if _index + 1 >= len(sys.argv) or not sys.argv[_index + 1].isdecimal() or int(sys.argv[_index + 1]) < 1:
+        raise SystemExit("ASB OpenJiuwen max steps must be a positive integer")
+    os.environ["OPENJIUWEN_MAX_ITERATIONS"] = sys.argv[_index + 1]
+    del sys.argv[_index:_index + 2]
 import json
 
 # OpenJiuwen passes every configured credential as the Anthropic SDK's

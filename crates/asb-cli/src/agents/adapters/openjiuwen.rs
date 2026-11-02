@@ -93,6 +93,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_replay_credential_vars(&["OPENJIUWEN_API_KEY"])
 .with_output_usage(output_usage)
 .with_step_count(step_count)
+.with_max_steps()
 .with_final_response(final_response)
 .with_final_response_failure(final_response_failure)
 .with_native_tool_transport()
@@ -166,6 +167,9 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             "--asb-native-tool-replay".into(),
             native.path.to_string_lossy().into_owned(),
         ]);
+    }
+    if let Some(max_steps) = context.max_steps {
+        args.extend(["--asb-max-iterations".into(), max_steps.to_string()]);
     }
     args.extend(["run".into(), "-f".into(), "stream-json".into(), format!(
         "{}\n\nDo not use todo/planning tools for this run. Execute the requested work directly and return a final response when complete.", context.prompt
@@ -584,6 +588,23 @@ for (const request of invalid) {
                 .windows(2)
                 .any(|pair| pair[0] == "-f" && pair[1] == "stream-json")
         );
+        assert!(!spec.args.iter().any(|arg| arg == "--asb-max-iterations"));
+        let limited = command(&CommandContext {
+            executable: "openjiuwen",
+            config: &config,
+            endpoint: Some("http://127.0.0.1:3000/v1"),
+            interface: Some(crate::endpoint::Interface::AnthropicMessages),
+            prompt: "repair",
+            max_steps: Some(200),
+            native_tool_mode: None,
+            native_tool: None,
+        });
+        assert!(
+            limited
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--asb-max-iterations", "200"])
+        );
     }
 
     #[test]
@@ -637,6 +658,58 @@ for (const request of invalid) {
             (standard.input_tokens, standard.total_tokens),
             (Some(1000), Some(1010))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compatibility_launcher_passes_requested_iteration_limit_to_client() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "asb-openjiuwen-max-steps-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let module = root.join("openjiuwen/core/foundation/llm/schema");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(
+            module.join("message_chunk.py"),
+            "class AssistantMessageChunk:\n def __add__(self, other): return other\n",
+        )
+        .unwrap();
+        let python = std::process::Command::new("python3")
+            .args(["-c", "import sys; print(sys.executable)"])
+            .output()
+            .unwrap();
+        let entry = root.join("openjiuwen-test");
+        std::fs::write(&entry, format!("#!{}\nimport os,sys\nprint(os.getenv('OPENJIUWEN_MAX_ITERATIONS'), sys.argv[1:])\n", String::from_utf8_lossy(&python.stdout).trim())).unwrap();
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let launch = |args: &[&str]| {
+            super::process(entry.to_str().unwrap())
+                .unwrap()
+                .direct()
+                .env("PYTHONPATH", &root)
+                .env_remove("OPENJIUWEN_MAX_ITERATIONS")
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let requested = launch(&["--asb-max-iterations", "200", "run"]);
+        assert!(
+            requested.status.success(),
+            "{}",
+            String::from_utf8_lossy(&requested.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&requested.stdout).trim(),
+            "200 ['run']"
+        );
+        let default = launch(&["run"]);
+        assert!(default.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&default.stdout).trim(),
+            "None ['run']"
+        );
+        assert!(!launch(&["--asb-max-iterations", "0"]).status.success());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
