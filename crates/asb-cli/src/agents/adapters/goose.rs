@@ -202,29 +202,19 @@ fn guest_assets(
     }])
 }
 fn command(context: &CommandContext<'_>) -> CommandSpec {
-    let max_turns = context.max_steps.unwrap_or(16);
+    let mut args = vec!["run".into(), "--no-session".into()];
+    if let Some(max_turns) = context.max_steps {
+        args.extend(["--max-turns".into(), max_turns.to_string()]);
+    }
+    args.extend([
+        "--output-format".into(),
+        "json".into(),
+        "-t".into(),
+        context.prompt.into(),
+    ]);
     CommandSpec {
         program: "goose".into(),
-        args: vec![
-            "run".into(),
-            "--no-session".into(),
-            // Goose can otherwise dispatch sibling MCP calls concurrently.
-            // The ASB local-tool sidecar is a causal transcript, so make the
-            // adapter's tool boundary explicit: a result must be observed
-            // before the client asks its next tool.  This is adapter launch
-            // policy, not a generic replay ordering relaxation.
-            "--system".into(),
-            "Use exactly one tool call per assistant turn. Wait for that tool result before making another tool call.".into(),
-            "--max-turns".into(),
-            // A single turn cannot complete even the bundled fixture: Goose
-            // needs one turn to inspect and another to edit/test. Keep the
-            // bound finite while allowing a normal agent trajectory.
-            max_turns.to_string(),
-            "--output-format".into(),
-            "json".into(),
-            "-t".into(),
-            context.prompt.into(),
-        ],
+        args,
         prompt_delivery: super::PromptDelivery::Embedded,
     }
 }
@@ -515,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_turn_budget_allows_inspect_edit_and_test() {
+    fn default_launch_does_not_impose_turn_or_tool_limits() {
         let config = crate::benchmark::BenchmarkConfig {
             planning: None,
             agent: "goose".into(),
@@ -541,22 +531,12 @@ mod tests {
             native_tool_mode: None,
             native_tool: None,
         });
-        assert_eq!(
-            spec.args
-                .windows(2)
-                .find(|pair| pair[0] == "--max-turns")
-                .map(|pair| pair[1].as_str()),
-            Some("16")
-        );
-        assert!(
-            spec.args
-                .windows(2)
-                .any(|pair| pair[0] == "--system" && pair[1].contains("exactly one tool call"))
-        );
+        assert!(!spec.args.iter().any(|arg| arg == "--max-turns"));
+        assert!(!spec.args.iter().any(|arg| arg == "--system"));
     }
 
     #[test]
-    fn requested_step_budget_overrides_the_default_turn_limit() {
+    fn requested_step_budget_is_forwarded() {
         let config = crate::benchmark::BenchmarkConfig {
             planning: None,
             agent: "goose".into(),
