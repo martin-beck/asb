@@ -133,6 +133,21 @@ impl Transcript {
                     let pending = &self.events[self.cursor..];
                     let offset = pending
                         .iter()
+                        .position(|event| event.tool == tool && &event.request == request)?;
+                    let candidate = independent_text_write(&pending[offset])?;
+                    pending[..offset]
+                        .iter()
+                        .all(|event| {
+                            observation_path(event).is_some_and(|path| {
+                                !path.starts_with(candidate) && !candidate.starts_with(path)
+                            })
+                        })
+                        .then_some(self.cursor + offset)
+                })
+                .or_else(|| {
+                    let pending = &self.events[self.cursor..];
+                    let offset = pending
+                        .iter()
                         .take_while(|event| independent_removal(event).is_some())
                         .position(|event| event.tool == tool && &event.request == request)?;
                     let candidate = independent_removal(&pending[offset])?;
@@ -201,6 +216,67 @@ impl Transcript {
         self.cursor = cursor;
         Ok(())
     }
+}
+
+// A write may pass earlier observations only when the complete observed
+// subtree is disjoint from the written path. Unknown tools, workspace-wide
+// observations, unrecognized failures and multi-effect operations are barriers.
+fn observation_path(event: &Event) -> Option<&Path> {
+    if !event.effects.is_empty()
+        || !matches!(
+            event.tool.as_str(),
+            "read_file" | "search_text" | "list_directory"
+        )
+    {
+        return None;
+    }
+    if let Some(failure) = event.failure.as_deref()
+        && !(event.tool == "search_text"
+            && matches!(
+                failure,
+                "local-tool directory listing exceeds bound" | "cannot list local-tool directory"
+            ))
+    {
+        return None;
+    }
+    normal_path(event.request.get("path")?.as_str()?)
+}
+
+fn independent_text_write(event: &Event) -> Option<&Path> {
+    if event.tool != "write_file"
+        || event.failure.is_some()
+        || event.result != serde_json::json!({"ok": true})
+    {
+        return None;
+    }
+    let request = event.request.as_object()?;
+    if request.len() != 2 {
+        return None;
+    }
+    let path = request.get("path")?.as_str()?;
+    let content = request.get("content")?.as_str()?;
+    let [
+        Effect::WriteText {
+            path: effect_path,
+            content: effect_content,
+        },
+    ] = event.effects.as_slice()
+    else {
+        return None;
+    };
+    if path != effect_path || content != effect_content {
+        return None;
+    }
+    normal_path(path)
+}
+
+fn normal_path(value: &str) -> Option<&Path> {
+    let path = Path::new(value);
+    (!path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|part| matches!(part, Component::Normal(_))))
+    .then_some(path)
 }
 
 /// Only successful single-file removals with identical request and effect
@@ -695,6 +771,72 @@ mod tests {
             "recorded"
         );
         replay.finish().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disjoint_write_can_pass_only_known_disjoint_observations() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-disjoint-write-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let observation = |path: Option<&str>, failure: Option<&str>| Event {
+            schema_version: SCHEMA_VERSION,
+            sequence: 1,
+            tool: "search_text".into(),
+            request: match path {
+                Some(path) => serde_json::json!({"path":path,"query":"needle"}),
+                None => serde_json::json!({"query":"needle"}),
+            },
+            result: if failure.is_some() {
+                Value::Null
+            } else {
+                serde_json::json!({"matches":[]})
+            },
+            failure: failure.map(str::to_owned),
+            effects: Vec::new(),
+        };
+        let write = Event {
+            schema_version: SCHEMA_VERSION,
+            sequence: 2,
+            tool: "write_file".into(),
+            request: serde_json::json!({"path":"tmp/probe.txt","content":"probe"}),
+            result: serde_json::json!({"ok":true}),
+            failure: None,
+            effects: vec![Effect::WriteText {
+                path: "tmp/probe.txt".into(),
+                content: "probe".into(),
+            }],
+        };
+        for (path, failure, allowed) in [
+            (
+                Some("lib"),
+                Some("local-tool directory listing exceeds bound"),
+                true,
+            ),
+            (Some("lib"), None, true),
+            (Some("tmp"), None, false),
+            (Some("tmp/probe.txt"), None, false),
+            (None, None, false),
+            (Some("lib"), Some("other failure"), false),
+        ] {
+            let mut transcript = Transcript::default();
+            transcript.record(observation(path, failure)).unwrap();
+            transcript.record(write.clone()).unwrap();
+            let outcome = transcript.replay_with_commuted_observations(
+                &root,
+                "write_file",
+                &write.request,
+                true,
+            );
+            assert_eq!(
+                outcome.is_ok(),
+                allowed,
+                "path={path:?}, failure={failure:?}"
+            );
+            let _ = std::fs::remove_dir_all(root.join("tmp"));
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
