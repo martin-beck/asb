@@ -622,8 +622,14 @@ impl Inputs {
             roots.push(Root::path(format!("runtime-source-{index}"), path));
         }
         let snapshotter = Snapshotter::open(&directory, python)?;
-        let context = json!({"protocol":"asb-input-seal-v1","scope":"declared-project-inputs-and-process-environment"});
-        let initial = snapshotter.fingerprint(&roots, &context, true, &[])?;
+        // Continuation binds the declared project, runtime, adapter, recorder
+        // and collector inputs above.  Ambient process state is deliberately
+        // not an execution input: a resumed sweep may legitimately be
+        // launched through a different terminal, shell or service manager.
+        // Credentials are re-admitted for every live attempt and must never
+        // be retained as checkpoint material.
+        let context = json!({"protocol":"asb-input-seal-v1","scope":"declared-project-inputs"});
+        let initial = snapshotter.fingerprint(&roots, &context, false, &[])?;
         let state = Self {
             directory,
             snapshotter,
@@ -682,7 +688,7 @@ impl Inputs {
             }
         }
         self.snapshotter
-            .fingerprint(&self.roots, &self.context, true, &[])
+            .fingerprint(&self.roots, &self.context, false, &[])
     }
 
     fn publish(&self, status: &str, after: Option<&Fingerprint>) -> Result<(), Error> {
