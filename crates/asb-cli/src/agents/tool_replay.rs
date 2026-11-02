@@ -14,7 +14,6 @@ use std::path::{Component, Path, PathBuf};
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 const MAX_EVENTS: usize = 16_384;
 const MAX_LINE_BYTES: usize = 2 * 1024 * 1024;
-const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -560,9 +559,6 @@ pub(crate) fn read_text(root: &Path, value: &str) -> Result<String, Error> {
         .map_err(|_| Error::Run("cannot read local-tool file".into()))?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(Error::Run("cannot read local-tool file".into()));
-    }
-    if metadata.len() > MAX_TEXT_BYTES {
-        return Err(Error::Run("local-tool file exceeds read bound".into()));
     }
     std::fs::read_to_string(path).map_err(|_| Error::Run("cannot read local-tool file".into()))
 }
