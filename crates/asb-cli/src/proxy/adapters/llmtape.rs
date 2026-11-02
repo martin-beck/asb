@@ -1637,6 +1637,33 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_qwen_provider_tool_ids_with_underscores() {
+        let root = test_root();
+        let cassette = root.join("qwen-provider-id.jsonl");
+        let original = "/opt/asb-private/agent-state/home/.qwen/tmp/abcdef1234/tool-results/call_00_746p20s96cz7ha0ppd6w5nj6.txt";
+        let replay = "/opt/asb-private/agent-state/home/.qwen/tmp/abcdef1234/tool-results/asb-replay-42-<asb-timestamp>-1.txt";
+        let content = format!(
+            "<persisted-output>\nFull output saved to: {original}\nFull output sha256: abc123\nPreview: original\n</persisted-output>"
+        );
+        let recorded =
+            serde_json::json!({"model":"m","messages":[{"content":content}]}).to_string();
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = recorded.replace(original, replay);
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &replayed).contains("200 OK"));
+        session.stop().unwrap();
+        let changed_digest = replayed.replace("abc123", "abc124");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &changed_digest).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_openjiuwen_generated_bash_output_filename() {
         let root = test_root();
         let cassette = root.join("openjiuwen-bash-output.jsonl");
