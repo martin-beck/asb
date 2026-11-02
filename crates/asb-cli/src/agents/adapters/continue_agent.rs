@@ -3,6 +3,23 @@ use super::{
     StaticAdapter,
 };
 use crate::{Error, install::Recipe};
+
+// Git assigns a new stash commit ID on each execution. Only that ID in the
+// standard dropped-stash tool output varies; retain the rest of the output.
+const TAPE_WIRE_EXTENSION: &str = r#"
+export function normalizeRequest(request) {
+  const value = request?.body;
+  if (!request?.url?.includes("/chat/completions") || !value || !Array.isArray(value.messages)) return value;
+  for (const message of value.messages) {
+    if (message?.role !== "tool" || typeof message.content !== "string") continue;
+    message.content = message.content.replace(
+      /(^|\n)(Dropped refs\/stash@\{\d+\} \()[0-9a-f]{40}(\)(?=\r?$))/gm,
+      "$1$2<asb-stash-object>$3",
+    );
+  }
+  return value;
+}
+"#;
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "continue",
     "cn",
@@ -16,6 +33,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_estimated_disk_mib(1024)
+.with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_complete_tool_replay(prepare_tool_replay)
 .with_replay_credential_vars(&["CONTINUE_API_KEY"])
 .with_state_environment_vars(&["CONTINUE_CONFIG", "CONTINUE_GLOBAL_DIR"])
@@ -504,6 +522,33 @@ fn configure(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn replay_normalizes_only_git_stash_object_in_tool_output() {
+        let root = std::env::temp_dir().join(format!("asb-continue-stash-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("extension.mjs"), super::TAPE_WIRE_EXTENSION).unwrap();
+        std::fs::write(root.join("test.mjs"), r#"import { normalizeRequest } from './extension.mjs';
+const first = 'Dropped refs/stash@{0} (609bc489dd0deb4c62118725abf6879302a6696c)';
+const second = 'Dropped refs/stash@{0} (e89578baed6bc1d523fa21f3e9ab42edd57c39c4)';
+const norm = (role, content, url = '/v1/chat/completions') => normalizeRequest({url, body:{messages:[{role,content}]}}).messages[0].content;
+if (norm('tool', first) !== norm('tool', second)) throw new Error('stash IDs differ');
+if (norm('user', first) === norm('user', second)) throw new Error('user text changed');
+if (norm('tool', first, '/v1/responses') === norm('tool', second, '/v1/responses')) throw new Error('other API changed');
+if (norm('tool', first + '\nchanged') === norm('tool', second + '\nother')) throw new Error('meaningful output changed');
+if (norm('tool', first.replace('@{0}', '@{1}')) === norm('tool', second)) throw new Error('stash index changed');
+"#).unwrap();
+        let output = std::process::Command::new("node")
+            .arg(root.join("test.mjs"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn singleton_session_freeze_and_guest_transfer_keep_only_needed_data() {
         use crate::agents::AgentAdapter;
