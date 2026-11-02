@@ -613,6 +613,63 @@ fn auxiliary_artifacts_are_sealed_and_read_by_catalogue_identity() {
 }
 
 #[test]
+fn auxiliary_artifact_stream_checks_checksum_and_limits_chunk_size() {
+    struct ChunkWriter {
+        data: Vec<u8>,
+        largest: usize,
+    }
+    impl std::io::Write for ChunkWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.largest = self.largest.max(bytes.len());
+            self.data.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let fixture = Fixture::new();
+    let data = vec![b'x'; 3 * 1024 * 1024];
+    let mut manifest = manifest(1);
+    manifest.tracks[0].artifacts.push(Artifact {
+        kind: "local-tools".into(),
+        bytes: data.len() as u64,
+        sha256: digest(&data),
+    });
+    let path = fixture.zip(
+        &manifest,
+        &[
+            ("tracks/1.jsonl", b"{}\n"),
+            ("artifacts/1/local-tools.jsonl", &data),
+        ],
+    );
+    let mut archive = Archive::open(&path, Limits::default()).unwrap();
+    let mut output = ChunkWriter {
+        data: Vec::new(),
+        largest: 0,
+    };
+    archive
+        .copy_artifact_to(1, "local-tools", &mut output)
+        .unwrap();
+    assert_eq!(output.data, data);
+    assert!(output.largest <= 64 * 1024);
+    manifest.tracks[0].artifacts[0].sha256 = digest(b"wrong");
+    let path = fixture.zip(
+        &manifest,
+        &[
+            ("tracks/1.jsonl", b"{}\n"),
+            ("artifacts/1/local-tools.jsonl", &data),
+        ],
+    );
+    let mut archive = Archive::open(&path, Limits::default()).unwrap();
+    assert!(
+        archive
+            .copy_artifact_to(1, "local-tools", &mut Vec::new())
+            .is_err()
+    );
+}
+
+#[test]
 fn auxiliary_artifacts_reject_unlisted_or_duplicate_paths() {
     let fixture = Fixture::new();
     let mut manifest = manifest(1);

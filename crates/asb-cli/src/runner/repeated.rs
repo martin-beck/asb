@@ -994,6 +994,25 @@ pub(crate) fn publish_bytes_after_link(
     bytes: &[u8],
     after_link: impl FnOnce() -> Result<(), Error>,
 ) -> Result<(), Error> {
+    publish_stream_after_link(
+        path,
+        |file| file.write_all(bytes).map_err(io_error),
+        after_link,
+    )
+}
+
+pub(crate) fn publish_stream(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> Result<(), Error>,
+) -> Result<(), Error> {
+    publish_stream_after_link(path, write, || Ok(()))
+}
+
+fn publish_stream_after_link(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> Result<(), Error>,
+    after_link: impl FnOnce() -> Result<(), Error>,
+) -> Result<(), Error> {
     let directory = path
         .parent()
         .ok_or_else(|| Error::Input("execution metadata needs a parent".into()))?;
@@ -1009,10 +1028,12 @@ pub(crate) fn publish_bytes_after_link(
         options.mode(0o600);
     }
     let mut file = options.open(&temporary).map_err(io_error)?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| fs::hard_link(&temporary, path))
-        .map_err(io_error)?;
+    if let Err(error) = write(&mut file).and_then(|()| file.sync_all().map_err(io_error)) {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    fs::hard_link(&temporary, path).map_err(io_error)?;
     after_link()?;
     fs::File::open(directory)
         .and_then(|file| file.sync_all())
@@ -1027,6 +1048,22 @@ pub(crate) fn publish_bytes_after_link(
 mod tests {
     use super::super::replica::CompletionObserver;
     use super::*;
+
+    #[test]
+    fn failed_stream_is_never_published() {
+        let root =
+            std::env::temp_dir().join(format!("asb-stream-{}", crate::tools::runtime::unique_id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("capture");
+        let result = publish_stream(&path, |file| {
+            file.write_all(b"partial").map_err(io_error)?;
+            Err(Error::Input("corrupt stream".into()))
+        });
+        assert!(result.is_err());
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn input_admission_has_independent_exact_and_overflow_limits() {

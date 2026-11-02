@@ -295,6 +295,22 @@ impl Source {
         }
     }
 
+    /// Stream a selected sealed artifact to private staging. Publish only
+    /// after the returned length and digest validation succeeds.
+    pub fn copy_artifact_to(
+        &mut self,
+        id: u64,
+        kind: &str,
+        output: &mut impl std::io::Write,
+    ) -> Result<(), Error> {
+        match &mut self.storage {
+            Storage::Bundle(archive) => archive.copy_artifact_to(id, kind, output),
+            Storage::Legacy { .. } => Err(Error(
+                "legacy cassette has no sealed auxiliary artifacts".into(),
+            )),
+        }
+    }
+
     /// Read the selected sealed native-tool sidecar. Legacy JSONL has no
     /// authority to manufacture a native replay capability.
     pub fn read_native(&mut self, id: u64) -> Result<Vec<u8>, Error> {
