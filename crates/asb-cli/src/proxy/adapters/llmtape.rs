@@ -83,6 +83,14 @@ impl ProxyAdapter for LlmtapeAdapter {
         usage::from_cassette(text, input_includes_cache)
     }
 
+    fn recorded_usage_file(
+        &self,
+        path: &Path,
+        input_includes_cache: bool,
+    ) -> crate::usage::TokenUsage {
+        usage::from_file(path, input_includes_cache)
+    }
+
     fn recorded_tool_calls(&self, path: &Path) -> Option<Vec<crate::proxy::tool_calls::ToolCall>> {
         tool_calls::from_cassette(path)
     }

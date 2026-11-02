@@ -51,6 +51,17 @@ pub(crate) trait ProxyAdapter: Sync {
     fn recorded_usage(&self, _text: &str, _input_includes_cache: bool) -> crate::usage::TokenUsage {
         crate::usage::TokenUsage::default()
     }
+    /// Interpret an adapter-owned recording, with a bounded default for adapters
+    /// that do not provide a streaming reader.
+    fn recorded_usage_file(
+        &self,
+        path: &std::path::Path,
+        input_includes_cache: bool,
+    ) -> crate::usage::TokenUsage {
+        crate::usage::read_bounded_text(path, 16 * 1024 * 1024)
+            .map(|text| self.recorded_usage(&text, input_includes_cache))
+            .unwrap_or_default()
+    }
     fn recorded_tool_calls(&self, _path: &std::path::Path) -> Option<Vec<tool_calls::ToolCall>> {
         None
     }
