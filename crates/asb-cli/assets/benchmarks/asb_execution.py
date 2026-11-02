@@ -358,9 +358,10 @@ class ManagedDockerWorkspace:
                         or (cancelled is not None and cancelled.is_set())):
                     raise ExecutionError("container execution preparation was cancelled or exceeded its deadline")
                 execution_started = time.monotonic()
-                # The guest enforces the exact principal budget. Leave bounded
-                # time for private artifact parsing/publication after it exits.
-                phase_deadline[0] = execution_started + timeout + (15 if workload_owner else 0)
+                # The application guest enforces the principal's own budget.
+                # Its bounded post-exit cleanup and transport settlement must
+                # not be charged to that budget by this outer watchdog.
+                phase_deadline[0] = execution_started + timeout + (30 if gate == "application" else 0)
             # Minimal official task images may have only the POSIX shell's
             # kill builtin, not a standalone /bin/kill executable.
             resumed = container.exec_run(["/bin/sh", "-c", 'kill -CONT "$1"', "asb-resume", str(namespace_pid)])

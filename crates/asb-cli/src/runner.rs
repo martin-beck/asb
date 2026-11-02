@@ -1555,6 +1555,7 @@ use capture::{OwnedChild, PresentationPolicy, capture_with_output_streams};
 pub(crate) struct GuestProcessOutput {
     pub output: Output,
     pub transcript_truncated: bool,
+    pub timed_out: bool,
 }
 
 #[cfg(test)]
@@ -1618,6 +1619,7 @@ pub(crate) fn run_guest_process(
     Ok(GuestProcessOutput {
         output: captured.output,
         transcript_truncated: captured.transcript_truncated,
+        timed_out: captured.timed_out,
     })
 }
 

@@ -379,6 +379,13 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
     return guest,environment
 
 
+def propagate_guest_timeout(result, observation):
+    """Carry the owner-authored principal timeout through transport settlement."""
+    if result["metadata"].get("timed_out") is True:
+        result["timed_out"] = True
+        observation["timed_out"] = True
+
+
 def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=None, preparation_budget=None, on_preparation_failure=None):
     # The relay spans package installation AND agent execution and is closed
     # on success, cancellation and every preparation/execution exception.
@@ -501,6 +508,9 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
         # Unknown usage is never invented from text or an expected minimum.
         result["metadata"] = {"schema_version": 1, "exit_code": result["exit_code"],
                               "final_response": None, "token_usage": {}, "steps": None}
+    # The guest owns the principal execution clock; the outer transport now
+    # allows separate settlement time, so carry the guest's timeout fact out.
+    propagate_guest_timeout(result, observation)
     export_agent_artifacts(task,request.get("artifact_output"),
                            result["metadata"].get("exported_artifacts"))
     if result.get("workload_processes_retained"):

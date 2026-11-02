@@ -806,11 +806,11 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     } else {
         None
     };
-    let (output, transcript_truncated) = if retained {
+    let (output, transcript_truncated, execution_timed_out) = if retained {
         #[cfg(target_os = "linux")]
         {
             let held = held.as_ref().expect("retained process");
-            (held.output.clone(), held.truncated)
+            (held.output.clone(), held.truncated, held.timed_out)
         }
         #[cfg(not(target_os = "linux"))]
         return Err(Error::Input(
@@ -818,8 +818,9 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         ));
     } else {
         #[cfg(unix)]
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs_f64(request.timeout_seconds);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs_f64(request.timeout_seconds)
+            + std::time::Duration::from_secs(30);
         #[cfg(unix)]
         let mut transport_out = crate::runner::GuestTransport::new(&std::io::stdout(), deadline)
             .map_err(crate::io_error)?;
@@ -845,7 +846,11 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
                 Ok(())
             },
         )?;
-        (captured.output, captured.transcript_truncated)
+        (
+            captured.output,
+            captured.transcript_truncated,
+            captured.timed_out,
+        )
     };
     let namespace_collectors = capture
         .as_mut()
@@ -891,10 +896,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         elapsed_ms: held.as_ref().map(|held| held.elapsed_ms),
         #[cfg(not(target_os = "linux"))]
         elapsed_ms: None,
-        #[cfg(target_os = "linux")]
-        timed_out: held.as_ref().is_some_and(|held| held.timed_out),
-        #[cfg(not(target_os = "linux"))]
-        timed_out: false,
+        timed_out: execution_timed_out,
         workload_owner: request.workload_owner,
         schema_version: 1,
         exit_code: output.status.code(),
