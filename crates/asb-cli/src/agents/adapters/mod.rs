@@ -9,6 +9,7 @@ mod continue_agent;
 pub(super) mod goose;
 mod hermes;
 mod mini_swe;
+mod node_output;
 mod opencode;
 mod openhands;
 pub(crate) mod openhands_native;
