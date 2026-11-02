@@ -1033,7 +1033,11 @@ fn publish_stream_after_link(
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
-    fs::hard_link(&temporary, path).map_err(io_error)?;
+    if let Err(error) = fs::hard_link(&temporary, path) {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(io_error(error));
+    }
     after_link()?;
     fs::File::open(directory)
         .and_then(|file| file.sync_all())
@@ -1062,6 +1066,15 @@ mod tests {
         assert!(result.is_err());
         assert!(!path.exists());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::write(&path, b"existing").unwrap();
+        assert!(
+            publish_stream(&path, |file| file
+                .write_all(b"replacement")
+                .map_err(io_error))
+            .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"existing");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 
