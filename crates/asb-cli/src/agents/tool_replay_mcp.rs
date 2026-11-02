@@ -43,13 +43,14 @@ const STAGED_RUNTIME_EXECUTABLE: &str = "/opt/asb-runtime/asb";
 /// Bump only when a provider-visible local-tool definition or its execution
 /// semantics changes. A replay must use the same protocol that shaped its
 /// recorded provider requests; this is not a compatibility normalizer.
-const LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v7-large-directories";
+const LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v8-large-search";
 const LEGACY_LOCAL_TOOL_PROTOCOLS: &[&str] = &[
     "asb-local-tools-v2-bounded-commands",
     "asb-local-tools-v3-streamed-snapshots",
     "asb-local-tools-v4-binary-effects",
     "asb-local-tools-v5-file-search",
     "asb-local-tools-v6-agent-deadline",
+    "asb-local-tools-v7-large-directories",
 ];
 const TOOL_PROTOCOL_ARTIFACT: &str = "tool-protocol";
 
@@ -2726,6 +2727,10 @@ mod tests {
         .unwrap();
         verify_protocol_bytes(
             br#"{"schema_version":1,"protocol":"asb-local-tools-v6-agent-deadline"}"#,
+        )
+        .unwrap();
+        verify_protocol_bytes(
+            br#"{"schema_version":1,"protocol":"asb-local-tools-v7-large-directories"}"#,
         )
         .unwrap();
         let error = verify_protocol_bytes(
