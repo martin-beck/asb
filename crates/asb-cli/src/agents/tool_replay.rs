@@ -83,15 +83,22 @@ impl Transcript {
     /// not allocate a second copy of the whole recording.
     pub(crate) fn write_to(&self, output: &mut impl std::io::Write) -> Result<(), Error> {
         for event in &self.events {
-            let line = serde_json::to_vec(event)
+            // Count before publishing any bytes from this event. This preserves
+            // the legacy size check without allocating another encoded copy.
+            let mut size = EventSize::default();
+            serde_json::to_writer(&mut size, event)
                 .map_err(|_| Error::Io("cannot encode local-tool transcript".into()))?;
-            if line.len() > MAX_LINE_BYTES {
+            if size.bytes > MAX_LINE_BYTES {
                 return Err(Error::Run(
                     "local-tool transcript event exceeds bound".into(),
                 ));
             }
-            output.write_all(&line).map_err(crate::io_error)?;
-            output.write_all(b"\n").map_err(crate::io_error)?;
+            let mut buffered = std::io::BufWriter::new(&mut *output);
+            serde_json::to_writer(&mut buffered, event)
+                .map_err(|_| Error::Io("cannot write local-tool transcript".into()))?;
+            use std::io::Write as _;
+            buffered.write_all(b"\n").map_err(crate::io_error)?;
+            buffered.flush().map_err(crate::io_error)?;
         }
         Ok(())
     }
@@ -268,6 +275,25 @@ impl Transcript {
             ));
         }
         self.cursor = cursor;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct EventSize {
+    bytes: usize,
+}
+
+impl std::io::Write for EventSize {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("local-tool transcript event length overflow"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }
@@ -755,7 +781,7 @@ mod tests {
                 sequence,
                 tool: "read_file".into(),
                 request: serde_json::json!({"path":"source.txt"}),
-                result: serde_json::json!({"text":"x".repeat(400_000)}),
+                result: serde_json::json!({"text":"x\n\"é".repeat(80_000)}),
                 failure: None,
                 effects: Vec::new(),
             };
@@ -771,6 +797,22 @@ mod tests {
         assert_eq!(writer.bytes, expected);
         assert!(writer.max_write < writer.bytes.len());
         assert!(transcript.write_to(&mut FailedWriter).is_err());
+
+        let mut oversized = Transcript::default();
+        oversized
+            .record(Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                tool: "read_file".into(),
+                request: serde_json::json!({"path":"large.txt"}),
+                result: serde_json::json!({"text":"x".repeat(MAX_LINE_BYTES)}),
+                failure: None,
+                effects: Vec::new(),
+            })
+            .unwrap();
+        let mut output = Vec::new();
+        assert!(oversized.write_to(&mut output).is_err());
+        assert!(output.is_empty());
     }
 
     fn removal(sequence: u64, path: &str) -> Event {
