@@ -475,7 +475,7 @@ function normalizeCassetteBody(body, url = "") {
     // and forwards a fixed persisted-output envelope to the model. The file
     // name changes when llmtape materializes a replay response, while the
     // envelope's digest and every retained preview line stay significant.
-    .replace(/(Full output saved to: )\/opt\/asb-private\/agent-state\/home\/\.qwen\/tmp\/[0-9a-f]+\/tool-results\/(?:call_[0-9a-f]+|asb-replay-\d+-<asb-timestamp>-\d+)\.txt/g, "$1<asb-qwen-persisted-output>")
+    .replace(/(Full output saved to: )\/opt\/asb-private\/agent-state\/home\/\.qwen\/tmp\/[0-9a-f]+\/tool-results\/(?:call_[A-Za-z0-9_-]+|asb-replay-\d+-<asb-timestamp>-\d+)\.txt/g, "$1<asb-qwen-persisted-output>")
     .replace(/((?:\b\d+ (?:failed|passed|skipped|deselected|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1<asb-elapsed>")
     // pip's download progress embeds live transfer throughput and ETA after
     // the already-significant artifact size. Keep the package and byte count
