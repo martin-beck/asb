@@ -605,22 +605,12 @@ impl Inputs {
                 roots.push(Root::path(format!("project-{index}-{name}"), path));
             }
         }
-        let mut environment_files = BTreeSet::new();
-        for (_, value) in std::env::vars_os() {
-            let path = invocation_dir.join(value);
-            if path.is_file() {
-                // Keep the declared symlink in the input graph. Canonicalizing
-                // it here would miss retargeting to different content while
-                // the previous target stayed unchanged.
-                environment_files.insert(std::path::absolute(path).map_err(crate::io_error)?);
-            }
-        }
-        for (index, path) in environment_files.into_iter().enumerate() {
-            roots.push(Root::path(
-                format!("explicit-environment-file-{index}"),
-                path,
-            ));
-        }
+        // The seal binds declared ASB inputs through the concrete project,
+        // adapter, recorder and collector roots above.  Do not infer inputs
+        // from arbitrary ambient environment values: shell-maintained values
+        // such as `_`, `PWD`, and `OLDPWD` can happen to name regular files
+        // and differ between otherwise identical invocations, making a safe
+        // interrupted-sweep continuation impossible.
         let mut runtime = crate::runtime_inputs::for_plan(parent, plan, mode, invocation_dir)?;
         runtime.extend(recorder_runtime);
         runtime.push(crate::runtime_inputs::Dependency::Python {
