@@ -75,6 +75,13 @@ impl Transcript {
 
     pub(crate) fn encode(&self) -> Result<Vec<u8>, Error> {
         let mut bytes = Vec::new();
+        self.write_to(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Write each event independently so publishing a growing transcript does
+    /// not allocate a second copy of the whole recording.
+    pub(crate) fn write_to(&self, output: &mut impl std::io::Write) -> Result<(), Error> {
         for event in &self.events {
             let line = serde_json::to_vec(event)
                 .map_err(|_| Error::Io("cannot encode local-tool transcript".into()))?;
@@ -83,10 +90,10 @@ impl Transcript {
                     "local-tool transcript event exceeds bound".into(),
                 ));
             }
-            bytes.extend(line);
-            bytes.push(b'\n');
+            output.write_all(&line).map_err(crate::io_error)?;
+            output.write_all(b"\n").map_err(crate::io_error)?;
         }
-        Ok(bytes)
+        Ok(())
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, Error> {
@@ -660,6 +667,57 @@ fn append_search_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transcript_writer_streams_events_and_reports_write_errors() {
+        struct RecordingWriter {
+            bytes: Vec<u8>,
+            max_write: usize,
+        }
+        impl std::io::Write for RecordingWriter {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.max_write = self.max_write.max(data.len());
+                self.bytes.extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct FailedWriter;
+        impl std::io::Write for FailedWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("fixture write failure"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut transcript = Transcript::default();
+        let mut expected = Vec::new();
+        for sequence in 1..=3 {
+            let event = Event {
+                schema_version: SCHEMA_VERSION,
+                sequence,
+                tool: "read_file".into(),
+                request: serde_json::json!({"path":"source.txt"}),
+                result: serde_json::json!({"text":"x".repeat(400_000)}),
+                failure: None,
+                effects: Vec::new(),
+            };
+            expected.extend(serde_json::to_vec(&event).unwrap());
+            expected.push(b'\n');
+            transcript.record(event).unwrap();
+        }
+        let mut writer = RecordingWriter {
+            bytes: Vec::new(),
+            max_write: 0,
+        };
+        transcript.write_to(&mut writer).unwrap();
+        assert_eq!(writer.bytes, expected);
+        assert!(writer.max_write < writer.bytes.len());
+        assert!(transcript.write_to(&mut FailedWriter).is_err());
+    }
+
     fn removal(sequence: u64, path: &str) -> Event {
         Event {
             schema_version: SCHEMA_VERSION,

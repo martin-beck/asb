@@ -593,7 +593,7 @@ fn run_with_source(
                 // after receiving a response. Persist the corresponding
                 // transcript and cursor before exposing any response bytes.
                 if options.mode == Mode::Record {
-                    publish_record_transcript(&options.transcript, &transcript.encode()?)?;
+                    publish_record_transcript(&options.transcript, &transcript)?;
                 }
                 if let Some(state) = &options.per_call_state {
                     let cursor = match options.mode {
@@ -614,8 +614,7 @@ fn run_with_source(
     })();
     match options.mode {
         Mode::Record => {
-            let bytes = transcript.encode()?;
-            publish_record_transcript(&options.transcript, &bytes)?;
+            publish_record_transcript(&options.transcript, &transcript)?;
         }
         Mode::Replay if options.per_call_state.is_none() => transcript.finish()?,
         Mode::Replay => {}
@@ -692,7 +691,7 @@ fn publish_per_call_state(path: &Path, cursor: usize, events: usize) -> Result<(
         .map_err(crate::io_error)
 }
 
-fn publish_record_transcript(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+fn publish_record_transcript(path: &Path, transcript: &Transcript) -> Result<(), Error> {
     let parent = path
         .parent()
         .ok_or_else(|| Error::Run("local-tool transcript has no private namespace".into()))?;
@@ -719,8 +718,14 @@ fn publish_record_transcript(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let mut file = options
         .open(&temporary)
         .map_err(|_| Error::Run("cannot publish local-tool transcript".into()))?;
-    file.write_all(bytes).map_err(crate::io_error)?;
-    file.sync_all().map_err(crate::io_error)?;
+    if let Err(error) = transcript
+        .write_to(&mut file)
+        .and_then(|()| file.sync_all().map_err(crate::io_error))
+    {
+        drop(file);
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
     std::fs::rename(&temporary, path)
         .map_err(|_| Error::Run("cannot publish local-tool transcript".into()))?;
     std::fs::File::open(parent)
@@ -2633,13 +2638,28 @@ mod tests {
             })
             .unwrap();
         let expected = expected_transcript.encode().unwrap();
-        publish_record_transcript(&transcript, &expected).unwrap();
+        publish_record_transcript(&transcript, &expected_transcript).unwrap();
         assert_eq!(std::fs::read(&transcript).unwrap(), expected);
+        let mut oversized = Transcript::default();
+        oversized
+            .record(Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                tool: "read_file".into(),
+                request: json!({"path":"large.txt"}),
+                result: json!({"text":"x".repeat(2 * 1024 * 1024 + 1)}),
+                failure: None,
+                effects: Vec::new(),
+            })
+            .unwrap();
+        assert!(publish_record_transcript(&transcript, &oversized).is_err());
+        assert_eq!(std::fs::read(&transcript).unwrap(), expected);
+        publish_record_transcript(&transcript, &expected_transcript).unwrap();
         let link = root.join("link.jsonl");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&transcript, &link).unwrap();
         #[cfg(unix)]
-        assert!(publish_record_transcript(&link, b"unexpected").is_err());
+        assert!(publish_record_transcript(&link, &expected_transcript).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 
