@@ -383,7 +383,10 @@ const expected=first?['first-1','first-2']:['second'];
         .collect();
     assert_eq!(rows.len(), 3);
     let seal = read_json(&root.join("sweep-results/.checkpoint/inputs.json"));
-    assert_eq!(seal["status"], "changed", "{seal}");
+    assert_eq!(
+        seal["status"], "stable",
+        "ambient shell state must not invalidate declared sweep inputs: {seal}"
+    );
     assert_eq!(
         std::fs::read_to_string(root.join("original-input")).unwrap(),
         "original declared input"
