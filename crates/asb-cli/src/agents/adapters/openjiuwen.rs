@@ -85,7 +85,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
         dependencies: &["filelock==3.32.7"],
         executable: "openjiuwen",
     },
-    &[crate::endpoint::MESSAGES_KEY],
+    &[crate::endpoint::MESSAGES_BOTH],
     command,
     prepare_adapter,
 )
@@ -296,6 +296,12 @@ fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> 
 
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     let connection = context.connection;
+    if connection.authentication == crate::endpoint::Authentication::Bearer {
+        context.command.env("ASB_OPENJIUWEN_BEARER_AUTH", "1");
+        context.command.env_remove("ANTHROPIC_API_KEY");
+    } else {
+        context.command.env_remove("ASB_OPENJIUWEN_BEARER_AUTH");
+    }
     context.command.env(
         "OPENJIUWEN_API_KEY",
         connection.credential.as_deref().unwrap_or("asb-local"),
@@ -325,6 +331,61 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn openrouter_messages_negotiates_bearer() {
+        let agent = crate::agents::find("openjiuwen").unwrap();
+        let selected = crate::endpoint::choose(
+            "openjiuwen",
+            agent.supported_endpoints(),
+            "openrouter",
+            "deepseek/deepseek-v4.1-flash",
+        )
+        .unwrap();
+        assert_eq!(
+            selected.interface,
+            crate::endpoint::Interface::AnthropicMessages
+        );
+        assert_eq!(
+            selected.authentication,
+            crate::endpoint::Authentication::Bearer
+        );
+    }
+
+    #[test]
+    fn preparation_sets_bearer_only_for_bearer_connections() {
+        use std::ffi::OsStr;
+        for (authentication, expected) in [
+            (crate::endpoint::Authentication::Bearer, Some("1")),
+            (crate::endpoint::Authentication::ApiKey, None),
+        ] {
+            let root = std::env::temp_dir();
+            let connection = crate::endpoint::Connection {
+                interface: crate::endpoint::Interface::AnthropicMessages,
+                base_url: "http://127.0.0.1:1234/v1".into(),
+                credential: Some("fixture-key".into()),
+                authentication,
+            };
+            let mut command = std::process::Command::new("openjiuwen");
+            super::prepare_adapter(&mut super::PreparationContext {
+                command: &mut command,
+                model: "fixture",
+                connection: &connection,
+                workspace: &root,
+                runtime_dir: &root,
+                run_dir: &root,
+                mcp_servers: &[],
+                mcp_tape: None,
+                tape: None,
+            })
+            .unwrap();
+            let actual = command.get_envs().find_map(|(key, value)| {
+                (key == OsStr::new("ASB_OPENJIUWEN_BEARER_AUTH"))
+                    .then_some(value.and_then(OsStr::to_str))
+            });
+            assert_eq!(actual.flatten(), expected);
+        }
+    }
+
     #[test]
     fn terminal_answer_supersedes_intermediate_llm_output() {
         let output = concat!(
@@ -624,6 +685,59 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
             String::from_utf8_lossy(&output.stdout).trim(),
             "leftright 120 9 7 129"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compatibility_launcher_selects_bearer_without_changing_api_key_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "asb-openjiuwen-auth-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let module = root.join("openjiuwen/core/foundation/llm/schema");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(
+            module.join("message_chunk.py"),
+            "class AssistantMessageChunk:\n def __add__(self, other): return other\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("anthropic.py"),
+            "class AsyncAnthropic:\n def __init__(self, api_key=None, auth_token=None):\n  self.api_key, self.auth_token = api_key, auth_token\n",
+        )
+        .unwrap();
+        let python = std::process::Command::new("python3")
+            .args(["-c", "import sys; print(sys.executable)"])
+            .output()
+            .unwrap();
+        assert!(python.status.success());
+        let entry = root.join("openjiuwen-test");
+        std::fs::write(
+            &entry,
+            format!(
+                "#!{}\nimport anthropic\nc = anthropic.AsyncAnthropic(api_key='fixture-key')\nprint(c.api_key, c.auth_token)\n",
+                String::from_utf8(python.stdout).unwrap().trim()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for (mode, expected) in [("1", "None fixture-key"), ("0", "fixture-key None")] {
+            let output = super::process(entry.to_str().unwrap())
+                .unwrap()
+                .direct()
+                .env("PYTHONPATH", &root)
+                .env("ASB_OPENJIUWEN_BEARER_AUTH", mode)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

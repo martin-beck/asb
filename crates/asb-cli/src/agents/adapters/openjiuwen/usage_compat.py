@@ -13,6 +13,22 @@ import runpy
 import sys
 import json
 
+# OpenJiuwen passes every configured credential as the Anthropic SDK's
+# api_key.  For gateways that negotiated bearer authentication, pass it as
+# auth_token instead; leave the ordinary API-key path untouched.
+if os.environ.pop("ASB_OPENJIUWEN_BEARER_AUTH", None) == "1":
+    import anthropic
+
+    _original_anthropic_client = anthropic.AsyncAnthropic
+
+    class _BearerAnthropicClient(_original_anthropic_client):
+        def __init__(self, *args, **kwargs):
+            kwargs["auth_token"] = kwargs.pop("api_key", None)
+            kwargs["api_key"] = None
+            super().__init__(*args, **kwargs)
+
+    anthropic.AsyncAnthropic = _BearerAnthropicClient
+
 # Consume the adapter-private replay selector before importing OpenJiuwen.
 # Its package initialization may inspect argv while building provider features,
 # so record and replay must expose an identical upstream CLI shape.
