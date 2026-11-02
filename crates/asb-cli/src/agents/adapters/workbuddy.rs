@@ -1,6 +1,8 @@
 use super::{CommandContext, CommandSpec, PreparationContext, PromptDelivery, StaticAdapter};
 use crate::{Error, install::Recipe};
 
+pub(super) const OUTPUT_ENTRY: &str = "entry === 'codebuddy' || entry === 'cbc'";
+
 const MCP_PATH_BRIDGE: &str = include_str!("../../../assets/scripts/workbuddy-mcp-proxy.mjs");
 
 // CodeBuddy restores these complete client defaults after resuming a
@@ -197,7 +199,7 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         .env("CODEBUDDY_MODEL", context.model)
         .env("CODEBUDDY_CONFIG_DIR", &directory)
         .env("CODEBUDDY_API_KEY_HELPER_DISABLED", "1");
-    Ok(())
+    super::node_output::prepare(context, "workbuddy", OUTPUT_ENTRY)
 }
 
 fn prepare_tool_replay(
