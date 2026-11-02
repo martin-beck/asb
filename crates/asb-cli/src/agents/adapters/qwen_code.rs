@@ -15,14 +15,15 @@ export function normalizeRequest(request) {
     if (typeof content !== 'string' || !content.includes('<persisted-output>')) return content;
     return content.replace(/(Full output saved to: )\/opt\/asb-private\/agent-state\/home\/\.qwen\/tmp\/[0-9a-f]+\/tool-results\/(?:call_[A-Za-z0-9_-]+|call-<asb-uuid>|asb-replay-\d+-<asb-timestamp>-\d+)\.txt/g, '$1<asb-qwen-persisted-output>');
   };
-  for (const message of body.messages) {
-    if (typeof message?.content === 'string') message.content = normalize(message.content);
-    else if (Array.isArray(message?.content)) {
-      for (const block of message.content) {
-        if (block && typeof block.text === 'string') block.text = normalize(block.text);
-      }
+  const visit = (value) => {
+    if (typeof value === 'string') return normalize(value);
+    if (Array.isArray(value)) return value.map(visit);
+    if (value && typeof value === 'object') {
+      for (const key of Object.keys(value)) value[key] = visit(value[key]);
     }
-  }
+    return value;
+  };
+  body.messages = body.messages.map(visit);
   return body;
 }
 "#;

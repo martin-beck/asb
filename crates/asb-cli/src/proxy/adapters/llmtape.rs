@@ -1812,6 +1812,35 @@ mod tests {
     }
 
     #[test]
+    fn qwen_extension_normalizes_nested_tool_output_only_for_qwen() {
+        let root = test_root();
+        let cassette = root.join("qwen-nested-output.jsonl");
+        let original =
+            "/opt/asb-private/agent-state/home/.qwen/tmp/abcdef1234/tool-results/call_123.txt";
+        let replay = "/opt/asb-private/agent-state/home/.qwen/tmp/abcdef1234/tool-results/asb-replay-42-<asb-timestamp>-1.txt";
+        let content = format!(
+            "<persisted-output>\nFull output saved to: {original}\nFull output sha256: abc123\n</persisted-output>"
+        );
+        let recorded = serde_json::json!({"model":"m","messages":[{"role":"user","content":[{"type":"tool_result","content":content}]}]}).to_string();
+        let line = serde_json::json!({"request":{"method":"POST","url":"/v1/chat/completions","body":recorded},"response":{"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}});
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = recorded.replace(original, replay);
+        let session = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("qwen-code"),
+            None,
+        )
+        .unwrap();
+        assert!(request(&session, &replayed).contains("200 OK"));
+        session.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_openjiuwen_generated_bash_output_filename() {
         let root = test_root();
         let cassette = root.join("openjiuwen-bash-output.jsonl");
