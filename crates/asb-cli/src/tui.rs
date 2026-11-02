@@ -366,6 +366,12 @@ impl App {
             let Some(collector) = choice.key.collector() else {
                 continue;
             };
+            if !measurements::default_collectors()
+                .iter()
+                .any(|default| default == collector)
+            {
+                continue;
+            }
             let dependencies = crate::collectors::expand_dependencies(&[collector.to_owned()]);
             app.panes[PaneKind::Measurements.index()].selected[index] =
                 dependencies.iter().all(|name| {
@@ -4066,6 +4072,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn bpftrace_is_visible_but_not_selected_by_default() {
+        let app = App::new(std::env::temp_dir(), ProjectConfig::default());
+        let index = app.panes[PaneKind::Measurements.index()]
+            .choices
+            .iter()
+            .position(|choice| choice.key.collector() == Some("bpftrace"))
+            .expect("registered bpftrace collector");
+        assert!(!app.panes[PaneKind::Measurements.index()].selected[index]);
     }
 
     #[test]

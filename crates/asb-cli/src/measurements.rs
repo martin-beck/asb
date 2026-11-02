@@ -153,6 +153,19 @@ pub fn available_collectors() -> Vec<String> {
         .collect()
 }
 
+/// Collectors selected when a user does not explicitly choose measurements.
+///
+/// BPFTrace is intentionally available for explicit selection, but is opt-in:
+/// its programs are still evolving and can require host privileges that a
+/// normal setup should not assume.  `--measure all` continues to mean every
+/// registered collector, including BPFTrace.
+pub fn default_collectors() -> Vec<String> {
+    available_collectors()
+        .into_iter()
+        .filter(|collector| collector != "bpftrace")
+        .collect()
+}
+
 /// Concise descriptions for human-facing collector discovery.
 pub fn collector_description(id: &str) -> Option<&'static str> {
     collectors::find(id).map(|collector| collector.description())
@@ -2268,5 +2281,19 @@ mod tests {
     #[test]
     fn parses_process_parent_from_proc_stat_with_spaces_in_command() {
         assert_eq!(parse_process_parent("42 (agent helper) S 7 8 9"), Some(7));
+    }
+
+    #[test]
+    fn bpftrace_is_available_but_not_part_of_default_measurements() {
+        assert!(
+            available_collectors()
+                .iter()
+                .any(|collector| collector == "bpftrace")
+        );
+        assert!(
+            !default_collectors()
+                .iter()
+                .any(|collector| collector == "bpftrace")
+        );
     }
 }
