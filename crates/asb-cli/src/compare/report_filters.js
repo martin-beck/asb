@@ -1,8 +1,11 @@
 // One visible-benchmark set controls both the table and every comparison chart.
 // Keep original axes/layout and downloadable SVGs unchanged for reproducibility.
 function installReportFilters(document) {
-  const dimensions = ['benchmark', 'agent', 'provider', 'model', 'workload'];
   const inputs = [...document.querySelectorAll('input[data-group]')];
+  // Aggregate agent reports deliberately expose only the agent dimension;
+  // derive active dimensions from the rendered controls instead of treating
+  // absent provider/model/workload controls as empty selections.
+  const dimensions = [...new Set(inputs.map(input => input.dataset.group))];
   const rows = [...document.querySelectorAll('#results tr')];
   const count = document.querySelector('#filter-count');
   const charts = [...document.querySelectorAll('.interactive-chart')].map(chart => ({
