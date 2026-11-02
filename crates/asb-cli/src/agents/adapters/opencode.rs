@@ -21,6 +21,21 @@ const NPM_MANIFEST: &str = r#"{
 // recorded request shape impossible to replay deterministically. Keep this
 // readiness policy in the owning adapter configuration.
 const LOCAL_TOOL_STARTUP_TIMEOUT_MS: u64 = 60_000;
+// OpenCode regenerates these private output and delegated-task identifiers on
+// replay; the actual tool output and task state remain comparison-significant.
+const TAPE_WIRE_EXTENSION: &str = r#"
+export function normalizeRequest(request) {
+  const visit = (value) => {
+    if (typeof value === 'string') return value
+      .replace(/(<task id=")ses_[A-Za-z0-9_-]+(" state="completed">)/g, '$1<asb-opencode-task-session>$2')
+      .replace(/\/opt\/asb-private\/agent-state\/data\/opencode\/tool-output\/tool_[A-Za-z0-9_-]+/g, '<asb-opencode-tool-output>');
+    if (Array.isArray(value)) return value.map(visit);
+    if (value && typeof value === 'object') for (const key of Object.keys(value)) value[key] = visit(value[key]);
+    return value;
+  };
+  return visit(request?.body);
+}
+"#;
 
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "opencode",
@@ -39,6 +54,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_estimated_disk_mib(1024)
+.with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_complete_tool_replay(prepare_tool_replay)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {

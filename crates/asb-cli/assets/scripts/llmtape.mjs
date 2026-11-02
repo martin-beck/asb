@@ -429,11 +429,6 @@ function normalizeCassetteBody(body, url = "") {
     // every status/count and trailing content, but replace only the elapsed
     // renderer in a complete colored pytest summary.
     .replace(/((?:\d+ (?:passed|failed|skipped|deselected|errors?)(?:, )?)+(?:\\u001b\[(?:0|3[12])m)* in )\d+(?:\.\d+)?s(?=\\u001b\[0m)/g, "$1<asb-pytest-elapsed>")
-    // OpenCode includes its process-local delegated-task session ID in a
-    // fixed completed-task envelope returned by its own tool dispatcher. The
-    // ID is regenerated on replay, while the task state and result remain
-    // provider input. Restrict normalization to that exact envelope.
-    .replace(/(<task id=\\?")ses_[A-Za-z0-9_-]+(\\?" state=\\?"completed\\?">)/g, "$1<asb-opencode-task-session>$2")
     // Codex's shell transport prefixes each captured command result with a
     // generated chunk identifier and wall-clock duration.  The duration is a
     // client-side rendering observation, not request semantics: the same
@@ -459,13 +454,6 @@ function normalizeCassetteBody(body, url = "") {
     .replace(/"call_<asb-call>":/g, '"call_id":')
     .replace(/\bmsg_resp_[A-Za-z0-9_-]+/g, "msg_resp_<asb-response>")
     .replace(/Chunk ID: [0-9a-f]+/gi, "Chunk ID: <asb-chunk>")
-    // OpenCode persists truncated command output beneath a timestamp-derived
-    // private filename.  Python tracebacks in that output also contain ASLR
-    // addresses and pytest's terminal summary reports elapsed time.  They are
-    // observations of the same tool result, not provider input semantics;
-    // retain all file contents, failure counts, and commands while replacing
-    // only those run-local rendering details before cassette comparison.
-    .replace(/\/opt\/asb-private\/agent-state\/data\/opencode\/tool-output\/tool_[A-Za-z0-9_-]+/g, "<asb-opencode-tool-output>")
     // OpenJiuwen persists a bounded Bash result beneath a generated filename
     // before forwarding its preview to the model.  The basename is recreated
     // on replay; retain the directory, extension, and every preview byte while

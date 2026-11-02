@@ -1650,13 +1650,31 @@ mod tests {
         });
         std::fs::write(&cassette, format!("{line}\n")).unwrap();
         let replayed = r#"{"model":"m","messages":[{"content":"Full output saved to: /opt/asb-private/agent-state/data/opencode/tool-output/tool_178bfad560010MLrjXm7utidgk\nfunction = <function concatenate at 0x748aa3afbe30>\n14 failed, 30 passed, 7 skipped in 1.59s"}]}"#;
-        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let session = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("opencode"),
+            None,
+        )
+        .unwrap();
         let response = request(&session, replayed);
         assert!(response.contains("200 OK"), "{response}");
         session.stop().unwrap();
 
         let changed_result = replayed.replace("14 failed, 30 passed", "13 failed, 31 passed");
-        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let session = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("opencode"),
+            None,
+        )
+        .unwrap();
         assert!(request(&session, &changed_result).contains("409 Conflict"));
         assert!(session.stop().unwrap_err().to_string().contains("rejected"));
         std::fs::remove_dir_all(root).unwrap();
@@ -2301,12 +2319,39 @@ mod tests {
         std::fs::write(&cassette, format!("{line}\n")).unwrap();
 
         let replayed = recorded.replace("ses_record_123", "ses_replay_456");
-        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let without_adapter = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&without_adapter, &replayed).contains("409 Conflict"));
+        assert!(
+            without_adapter
+                .stop()
+                .unwrap_err()
+                .to_string()
+                .contains("rejected")
+        );
+        let session = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("opencode"),
+            None,
+        )
+        .unwrap();
         assert!(request(&session, &replayed).contains("200 OK"));
         session.stop().unwrap();
 
         let changed_state = replayed.replace("completed", "failed");
-        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let session = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("opencode"),
+            None,
+        )
+        .unwrap();
         assert!(request(&session, &changed_state).contains("409 Conflict"));
         assert!(session.stop().unwrap_err().to_string().contains("rejected"));
         std::fs::remove_dir_all(root).unwrap();
