@@ -28,7 +28,7 @@ const MAX_COMMAND_ARGUMENT_BYTES: usize = 4096;
 // a large result becomes a sealed, replayable tool failure instead of causing
 // the Pi extension's synchronous child to overflow and abandon its lease.
 const MAX_COMMAND_OUTPUT: usize = 128 * 1024;
-/// Command effects share the local-tool transcript's 1 MiB event ceiling.
+/// Command effects remain below the local-tool transcript's event ceiling.
 /// The snapshot itself retains metadata only; file content is read only for a
 /// changed regular UTF-8 file that must be reconstructed during replay.
 const MAX_COMMAND_EFFECT_BYTES: usize = 768 * 1024;

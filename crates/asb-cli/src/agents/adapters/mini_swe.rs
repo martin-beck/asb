@@ -223,7 +223,7 @@ class AsbTapeEnvironment(LocalEnvironment):
         self._append(event)
 
     def _record_failure(self, command, failure):
-        # `_effects` deliberately refuses oversized or non-text mutations.
+        # `_effects` reports an oversized mutation as an observable failure.
         # The rejected call remains causally observable: otherwise replay
         # advances its provider tape and asks for a later, unrecorded tool
         # result.  `failure` is selected only from this extension's bounded
@@ -263,14 +263,16 @@ class AsbTapeEnvironment(LocalEnvironment):
             effects.append({"kind": "remove_file", "path": path})
         for path in sorted(after):
             if before.get(path) != after[path]:
-                try:
-                    content = (root / path).read_text(encoding="utf-8")
-                except UnicodeDecodeError:
-                    raise RuntimeError("Mini-SWE local tool changed a non-text workspace file")
-                total += len(content.encode("utf-8"))
+                content = (root / path).read_bytes()
+                total += len(content)
                 if total > _MAX_EFFECT_BYTES:
                     raise RuntimeError("Mini-SWE local tool workspace effects exceed the bounded replay limit")
-                effects.append({"kind": "write_text", "path": path, "content": content})
+                try:
+                    text = content.decode("utf-8")
+                except UnicodeDecodeError:
+                    effects.append({"kind": "write_binary", "path": path, "content_hex": content.hex()})
+                else:
+                    effects.append({"kind": "write_text", "path": path, "content": text})
         return effects
 
     def _apply_effects(self, root, effects):
@@ -290,6 +292,17 @@ class AsbTapeEnvironment(LocalEnvironment):
                     raise RuntimeError("Mini-SWE replay workspace write is malformed")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
+            elif kind == "write_binary":
+                content_hex = effect.get("content_hex")
+                if (not isinstance(content_hex, str) or len(content_hex) % 2
+                        or any(char not in "0123456789abcdefABCDEF" for char in content_hex)):
+                    raise RuntimeError("Mini-SWE replay workspace binary write is malformed")
+                try:
+                    content = bytes.fromhex(content_hex)
+                except ValueError:
+                    raise RuntimeError("Mini-SWE replay workspace binary write is malformed")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
             elif kind == "remove_file":
                 if target.is_file() or target.is_symlink():
                     target.unlink()
