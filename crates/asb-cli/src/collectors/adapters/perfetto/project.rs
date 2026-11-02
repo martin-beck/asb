@@ -118,14 +118,15 @@ pub(super) fn configure(
     }
     #[cfg(target_os = "linux")]
     {
-        let parent = Path::new("/sys/kernel/tracing/instances");
-        if !parent.is_dir() {
-            return Ok(Vec::new());
-        }
-        let metadata = crate::collectors::adapters::perfetto::required_trace_metadata();
+        let tracefs_root = Path::new("/sys/kernel/tracing");
+        let parent = tracefs_root.join("instances");
         let paths = ConfigurePaths {
-            instances_parent: parent,
-            metadata_paths: &metadata,
+            tracefs_root,
+            instances_parent: &parent,
+            // Discover decoder metadata only after tracefs-root traversal is
+            // available. A restricted root otherwise makes discovery look
+            // like an empty, successful configuration.
+            metadata_paths: None,
         };
         configure_at(root, output, yes, paths, |args| {
             std::process::Command::new("sudo")
@@ -140,8 +141,11 @@ pub(super) fn configure(
 /// exposing a tracefs override to configuration, environment variables or CLI.
 #[cfg(target_os = "linux")]
 struct ConfigurePaths<'a> {
+    tracefs_root: &'a Path,
     instances_parent: &'a Path,
-    metadata_paths: &'a [std::path::PathBuf],
+    /// Fixture-only explicit metadata. Production discovery happens after
+    /// tracefs-root traversal has been repaired.
+    metadata_paths: Option<&'a [std::path::PathBuf]>,
 }
 
 #[cfg(target_os = "linux")]
@@ -150,20 +154,103 @@ fn configure_at(
     output: &mut dyn Write,
     yes: bool,
     paths: ConfigurePaths<'_>,
+    run: impl FnMut(&[&str]) -> bool,
+) -> Result<Vec<String>, Error> {
+    configure_at_with_consent(root, output, yes, paths, run, |output, yes| {
+        crate::project::request_sudo_consent(output, yes)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn configure_at_with_consent(
+    root: &Path,
+    output: &mut dyn Write,
+    yes: bool,
+    paths: ConfigurePaths<'_>,
     mut run: impl FnMut(&[&str]) -> bool,
+    mut request_consent: impl FnMut(&mut dyn Write, bool) -> Result<bool, Error>,
 ) -> Result<Vec<String>, Error> {
     use std::fs;
     use std::os::unix::fs::MetadataExt;
     let parent = paths.instances_parent;
-    if !parent.is_dir() {
-        return Ok(Vec::new());
+    let root_metadata = match fs::metadata(paths.tracefs_root) {
+        Ok(metadata) if metadata.is_dir() => metadata,
+        Ok(_) => {
+            writeln!(output, "Perfetto setup skipped: tracefs root {} is not a directory. Mount tracefs there and rerun `asb init --configure-host`.", paths.tracefs_root.display()).map_err(crate::io_error)?;
+            return Ok(Vec::new());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            writeln!(output, "Perfetto setup skipped: tracefs root {} is missing. Mount tracefs and rerun `asb init --configure-host`.", paths.tracefs_root.display()).map_err(crate::io_error)?;
+            return Ok(Vec::new());
+        }
+        Err(error) => {
+            writeln!(output, "Perfetto setup skipped: cannot inspect tracefs root {}: {error}. Check the tracefs mount and rerun `asb init --configure-host`.", paths.tracefs_root.display()).map_err(crate::io_error)?;
+            return Ok(Vec::new());
+        }
+    };
+    // `Path::is_dir` converts permission-denied into false. Repair the root
+    // before looking through it, so an inaccessible tracefs never masquerades
+    // as an unsupported host.
+    if root_metadata.mode() & 1 == 0 {
+        writeln!(output, "Perfetto setup needs execute-only traversal of tracefs root {} before it can inspect project instances. The following command grants neither trace data nor tracing control:", paths.tracefs_root.display()).map_err(crate::io_error)?;
+        writeln!(
+            output,
+            "No global event/buffer/tracing_on values or sudoers will be changed."
+        )
+        .map_err(crate::io_error)?;
+        writeln!(
+            output,
+            "  sudo chmod o+x -- {}",
+            paths.tracefs_root.display()
+        )
+        .map_err(crate::io_error)?;
+        if !request_consent(output, yes)? {
+            writeln!(output, "Perfetto setup was declined; tracefs root traversal remains unchanged. Rerun `asb init --configure-host` when ready.").map_err(crate::io_error)?;
+            return Ok(Vec::new());
+        }
+        if !run(&[
+            "chmod",
+            "o+x",
+            "--",
+            paths
+                .tracefs_root
+                .to_str()
+                .expect("fixed ASCII tracefs path"),
+        ]) {
+            writeln!(output, "Perfetto delegation was not applied: tracefs root traversal could not be enabled. Check the tracefs mount and rerun `asb init --configure-host`.").map_err(crate::io_error)?;
+            return Ok(Vec::new());
+        }
     }
+    let parent_metadata = match fs::metadata(parent) {
+        Ok(metadata) if metadata.is_dir() => metadata,
+        Ok(_) => {
+            writeln!(output, "Perfetto setup skipped: tracefs instances path {} is not a directory. Mount tracefs and rerun `asb init --configure-host`.", parent.display()).map_err(crate::io_error)?;
+            return Ok(Vec::new());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            writeln!(output, "Perfetto setup skipped: tracefs instances path {} is missing. Mount tracefs and rerun `asb init --configure-host`.", parent.display()).map_err(crate::io_error)?;
+            return Ok(Vec::new());
+        }
+        Err(error) => {
+            writeln!(output, "Perfetto setup skipped: cannot inspect tracefs instances path {} after checking {}: {error}. Check the tracefs mount and rerun `asb init --configure-host`.", parent.display(), paths.tracefs_root.display()).map_err(crate::io_error)?;
+            return Ok(Vec::new());
+        }
+    };
     let metadata = fs::metadata("/proc/self").map_err(|e| Error::Io(e.to_string()))?;
     let uid = metadata.uid();
     let owner = format!("{uid}:{}", metadata.gid());
     let names = instance_names(root).map_err(Error::Input)?;
-    let metadata = paths
-        .metadata_paths
+    let discovered_metadata;
+    let metadata_paths = match paths.metadata_paths {
+        Some(paths) => paths,
+        None => {
+            discovered_metadata = crate::collectors::adapters::perfetto::required_trace_metadata_at(
+                paths.tracefs_root,
+            );
+            &discovered_metadata
+        }
+    };
+    let metadata = metadata_paths
         .iter()
         .filter(|path| fs::File::open(path).is_err())
         .cloned()
@@ -181,7 +268,7 @@ fn configure_at(
             })
             .collect());
     }
-    let traverse = fs::metadata(parent).is_ok_and(|m| m.mode() & 1 == 0);
+    let traverse = parent_metadata.mode() & 1 == 0;
     writeln!(output, "Optional Perfetto setup creates or repairs two project-specific tracefs instances. Separate ASB processes lease separate instances; concurrent replicas share a service. The following commands change only new instances or this user's existing instances, plus execute-only traversal of the instances parent if needed (not write/list permission). Existing foreign-owned instances will not be adopted:").map_err(crate::io_error)?;
     if traverse {
         writeln!(output, "  sudo chmod o+x -- {}", parent.display()).map_err(crate::io_error)?;
@@ -211,7 +298,7 @@ fn configure_at(
             .map_err(crate::io_error)?;
     }
     writeln!(output, "Ownership grants this user tracing control inside the listed instances. No global event/buffer/tracing_on values or sudoers will be changed; only the explicitly listed metadata read permissions and parent traversal may be widened. Instances are reusable until reboot; rerun `asb init --configure-host` after reboot. Declining leaves other collectors usable.").map_err(crate::io_error)?;
-    if !crate::project::request_sudo_consent(output, yes)? {
+    if !request_consent(output, yes)? {
         return Ok(Vec::new());
     }
     if traverse

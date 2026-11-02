@@ -1344,22 +1344,22 @@ fn perfetto_instance_config(instance: &str) -> String {
     )
 }
 
-/// Read-only primary tracefs format metadata needed by Tracebox's decoder.
-/// No event enable/filter, raw pipe, or trace buffer permissions are included.
-pub(crate) fn required_trace_metadata() -> Vec<PathBuf> {
-    let root = if Path::new("/sys/kernel/tracing/events").is_dir() {
-        Path::new("/sys/kernel/tracing/events")
-    } else {
-        Path::new("/sys/kernel/debug/tracing/events")
-    };
-    let mut paths = vec![root.join("header_page"), root.join("header_event")];
+/// Discover only decoder metadata after the caller has established tracefs
+/// traversal. This avoids interpreting an inaccessible tracefs root as an
+/// empty metadata set.
+pub(crate) fn required_trace_metadata_at(root: &Path) -> Vec<PathBuf> {
+    let events = root.join("events");
+    let mut paths = vec![events.join("header_page"), events.join("header_event")];
     for line in perfetto_config(None).lines() {
         if let Some(event) = line
             .trim()
             .strip_prefix("ftrace_events: \"")
             .and_then(|event| event.strip_suffix('"'))
         {
-            paths.extend([root.join(event).join("format"), root.join(event).join("id")]);
+            paths.extend([
+                events.join(event).join("format"),
+                events.join(event).join("id"),
+            ]);
         }
     }
     paths.into_iter().filter(|path| path.is_file()).collect()
