@@ -4,6 +4,20 @@ use super::{
 };
 use crate::{Error, install::Recipe};
 const TOOL_PROGRESS_FILENAME: &str = "persistent-progress.json";
+// Qwen can call process.exit immediately after writing its final JSON document.
+// Node otherwise buffers pipe writes asynchronously and loses pending bytes.
+const OUTPUT_FLUSH_HOOK: &str = r#"const path = require('node:path');
+const entryPath = (process.argv[1] || '').replaceAll('\\', '/');
+const entry = path.basename(entryPath);
+if (entry === 'qwen' || (entryPath.includes('/@qwen-code/qwen-code/') &&
+    (entry === 'cli-entry.js' || entry === 'cli.js'))) {
+  for (const stream of [process.stdout, process.stderr]) {
+    if (!stream.isTTY && typeof stream._handle?.setBlocking === 'function') {
+      stream._handle.setBlocking(true);
+    }
+  }
+}
+"#;
 
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "qwen-code",
@@ -174,7 +188,37 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         }
         _ => return Err(context.unsupported_endpoint("qwen-code")),
     }
+    let directory = context.runtime_dir.join("qwen-code");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| Error::Run(format!("cannot create Qwen runtime directory: {error}")))?;
+    let hook = directory.join("flush-output.cjs");
+    std::fs::write(&hook, OUTPUT_FLUSH_HOOK)
+        .map_err(|error| Error::Run(format!("cannot prepare Qwen output flush: {error}")))?;
+    let inherited = context
+        .command
+        .get_envs()
+        .find(|(key, _)| *key == "NODE_OPTIONS")
+        .map(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+        .unwrap_or_else(|| std::env::var_os("NODE_OPTIONS"));
+    let options = output_flush_options(inherited.as_deref(), &hook)?;
+    context.command.env("NODE_OPTIONS", options);
     Ok(())
+}
+
+fn output_flush_options(
+    existing: Option<&std::ffi::OsStr>,
+    hook: &std::path::Path,
+) -> Result<std::ffi::OsString, Error> {
+    let path = hook
+        .to_str()
+        .ok_or_else(|| Error::Run("Qwen output flush path is not valid UTF-8".into()))?;
+    let quoted = path.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut options = existing.unwrap_or_default().to_os_string();
+    if !options.is_empty() {
+        options.push(" ");
+    }
+    options.push(format!("--require=\"{quoted}\""));
+    Ok(options)
 }
 
 /// Qwen Code accepts a per-invocation MCP document.  Its explicit exclusion
@@ -220,6 +264,46 @@ fn prepare_tool_replay(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn qwen_flush_hook_preserves_large_output_at_immediate_exit() {
+        if std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "asb qwen flush {}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let hook = root.join("flush-output.cjs");
+        std::fs::write(&hook, super::OUTPUT_FLUSH_HOOK).unwrap();
+        let agent = root.join("qwen");
+        std::fs::write(
+            &agent,
+            "process.stdout.write('x'.repeat(1048576)); process.exit(0);",
+        )
+        .unwrap();
+        let options =
+            super::output_flush_options(Some(std::ffi::OsStr::new("--no-warnings")), &hook)
+                .unwrap();
+        let output = std::process::Command::new("node")
+            .arg(agent)
+            .env("NODE_OPTIONS", options)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout.len(), 1048576);
+        assert!(output.stdout.iter().all(|byte| *byte == b'x'));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn only_successful_qwen_result_is_final() {
         let path = std::path::Path::new(".");
