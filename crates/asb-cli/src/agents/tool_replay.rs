@@ -122,7 +122,41 @@ impl Transcript {
         let current = self.events.get(self.cursor).ok_or_else(|| {
             Error::Run("local-tool replay has no remaining recorded event".into())
         })?;
-        let matching_index = if current.tool == tool && &current.request == request {
+        let matching_index = self.matching_index(tool, request, allow_commuted_observations);
+        let Some(index) = matching_index else {
+            let digest = |value: &Value| {
+                let bytes = serde_json::to_vec(value).unwrap_or_default();
+                format!("{:x}", Sha256::digest(bytes))
+            };
+            return Err(Error::Run(format!(
+                "local-tool replay request differs from its causal recording \
+                     (expected tool {}, arguments sha256 {}; actual tool {}, arguments sha256 {})",
+                current.tool,
+                digest(&current.request),
+                tool,
+                digest(request),
+            )));
+        };
+        self.events[self.cursor..=index].rotate_right(1);
+        let event = &self.events[self.cursor];
+        for effect in &event.effects {
+            apply(root, effect)?;
+        }
+        self.cursor += 1;
+        if let Some(failure) = &event.failure {
+            return Err(Error::Run(failure.clone()));
+        }
+        Ok(event.result.clone())
+    }
+
+    fn matching_index(
+        &self,
+        tool: &str,
+        request: &Value,
+        allow_commuted_observations: bool,
+    ) -> Option<usize> {
+        let current = self.events.get(self.cursor)?;
+        if current.tool == tool && &current.request == request {
             Some(self.cursor)
         } else if allow_commuted_observations {
             self.events[self.cursor..]
@@ -163,31 +197,22 @@ impl Transcript {
                 })
         } else {
             None
-        };
-        let Some(index) = matching_index else {
-            let digest = |value: &Value| {
-                let bytes = serde_json::to_vec(value).unwrap_or_default();
-                format!("{:x}", Sha256::digest(bytes))
-            };
-            return Err(Error::Run(format!(
-                "local-tool replay request differs from its causal recording \
-                     (expected tool {}, arguments sha256 {}; actual tool {}, arguments sha256 {})",
-                current.tool,
-                digest(&current.request),
-                tool,
-                digest(request),
-            )));
-        };
-        self.events[self.cursor..=index].rotate_right(1);
-        let event = &self.events[self.cursor];
-        for effect in &event.effects {
-            apply(root, effect)?;
         }
-        self.cursor += 1;
-        if let Some(failure) = &event.failure {
-            return Err(Error::Run(failure.clone()));
-        }
-        Ok(event.result.clone())
+    }
+
+    /// A later exact request can wait for preceding causal operations without
+    /// either executing it early or treating it as a mismatch.
+    pub(crate) fn should_defer(
+        &self,
+        tool: &str,
+        request: &Value,
+        allow_commuted_observations: bool,
+    ) -> bool {
+        self.matching_index(tool, request, allow_commuted_observations)
+            .is_none()
+            && self.events[self.cursor..]
+                .iter()
+                .any(|event| event.tool == tool && &event.request == request)
     }
 
     pub(crate) fn finish(&self) -> Result<(), Error> {

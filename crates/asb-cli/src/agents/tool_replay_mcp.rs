@@ -404,11 +404,83 @@ pub(super) fn replay_transcript(
 
 fn run(args: &[OsString]) -> Result<(), Error> {
     let options = options(args)?;
-    let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
-    let mut input = BufReader::new(stdin.lock());
-    run_with_io(options, &mut input, &mut output)
+    if options.mode == Mode::Replay && options.per_call_state.is_none() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(64);
+        std::thread::spawn(move || {
+            let stdin = std::io::stdin();
+            let mut input = BufReader::new(stdin.lock());
+            loop {
+                let next = mcp_framing::read(&mut input, "local-tool MCP");
+                let done = !matches!(next, Ok(Some(_)));
+                if sender.send(next).is_err() || done {
+                    break;
+                }
+            }
+        });
+        run_with_source(options, &mut ChannelSource(receiver), &mut output)
+    } else {
+        let stdin = std::io::stdin();
+        let mut input = BufReader::new(stdin.lock());
+        run_with_io(options, &mut input, &mut output)
+    }
+}
+
+enum Incoming {
+    Message(mcp_framing::Message),
+    End,
+}
+trait MessageSource {
+    fn next(&mut self) -> Result<Incoming, Error>;
+}
+struct DirectSource<'a, T>(&'a mut T);
+impl<T: std::io::BufRead> MessageSource for DirectSource<'_, T> {
+    fn next(&mut self) -> Result<Incoming, Error> {
+        Ok(match mcp_framing::read(self.0, "local-tool MCP")? {
+            Some(message) => Incoming::Message(message),
+            None => Incoming::End,
+        })
+    }
+}
+struct ChannelSource(std::sync::mpsc::Receiver<Result<Option<mcp_framing::Message>, Error>>);
+impl MessageSource for ChannelSource {
+    fn next(&mut self) -> Result<Incoming, Error> {
+        let result = match self.0.recv() {
+            Ok(value) => value,
+            Err(_) => return Ok(Incoming::End),
+        }?;
+        Ok(match result {
+            Some(message) => Incoming::Message(message),
+            None => Incoming::End,
+        })
+    }
+}
+
+fn defer_request(options: &Options, transcript: &Transcript, request: &Value) -> bool {
+    if options.mode != Mode::Replay
+        || options.per_call_state.is_some()
+        || request.get("id").is_none()
+        || request.get("method").and_then(Value::as_str) != Some("tools/call")
+    {
+        return false;
+    }
+    let Some(params) = request.get("params") else {
+        return false;
+    };
+    let Some(tool) = params.get("name").and_then(Value::as_str) else {
+        return false;
+    };
+    let Ok(arguments) = canonical_request(
+        tool,
+        params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    ) else {
+        return false;
+    };
+    transcript.should_defer(tool, &arguments, options.allow_commuted_observations)
 }
 
 /// Run one sealed local-tool session over already-bounded stdio framing.
@@ -418,6 +490,14 @@ fn run(args: &[OsString]) -> Result<(), Error> {
 fn run_with_io(
     options: Options,
     input: &mut impl std::io::BufRead,
+    output: &mut impl Write,
+) -> Result<(), Error> {
+    run_with_source(options, &mut DirectSource(input), output)
+}
+
+fn run_with_source(
+    options: Options,
+    source: &mut impl MessageSource,
     output: &mut impl Write,
 ) -> Result<(), Error> {
     let _lease = options
@@ -453,22 +533,44 @@ fn run_with_io(
         }
     }
     let operation = (|| {
-        while let Some(request) = mcp_framing::read(input, "local-tool MCP")? {
-            let request_trace = metadata_trace
-                .as_mut()
-                .map(|trace| {
-                    trace.request(
-                        request.value.get("method").and_then(Value::as_str),
-                        request.value.get("id"),
-                        request
-                            .value
-                            .get("params")
-                            .and_then(|params| params.get("name"))
-                            .and_then(Value::as_str),
-                        request.framing,
-                    )
-                })
-                .transpose()?;
+        let mut pending: Vec<(mcp_framing::Message, Option<u64>)> = Vec::new();
+        let mut ended = false;
+        loop {
+            let ready = pending
+                .iter()
+                .position(|(request, _)| !defer_request(&options, &transcript, &request.value));
+            let selected = ready.or_else(|| ended.then_some(0).filter(|_| !pending.is_empty()));
+            let (request, request_trace) = if let Some(index) = selected {
+                pending.remove(index)
+            } else {
+                if ended {
+                    break;
+                }
+                let request = match source.next()? {
+                    Incoming::Message(request) => request,
+                    Incoming::End => {
+                        ended = true;
+                        continue;
+                    }
+                };
+                let request_trace = metadata_trace
+                    .as_mut()
+                    .map(|trace| {
+                        trace.request(
+                            request.value.get("method").and_then(Value::as_str),
+                            request.value.get("id"),
+                            request
+                                .value
+                                .get("params")
+                                .and_then(|params| params.get("name"))
+                                .and_then(Value::as_str),
+                            request.framing,
+                        )
+                    })
+                    .transpose()?;
+                pending.push((request, request_trace));
+                continue;
+            };
             let response = match respond(&options, &mut transcript, &request.value) {
                 Ok(response) => response,
                 Err(error) => {
@@ -1593,6 +1695,139 @@ mod tests {
         // without re-copying that private transcript.
         verify_persistent_per_call_completion_receipt(Some(&receipt), None).unwrap();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_replay_waits_for_recorded_causal_predecessor() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-causal-order-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("old.txt"), "old").unwrap();
+        let mut transcript = Transcript::default();
+        transcript
+            .record(Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                tool: "remove_file".into(),
+                request: json!({"path":"old.txt"}),
+                result: json!({"ok":true}),
+                failure: None,
+                effects: vec![Effect::RemoveFile {
+                    path: "old.txt".into(),
+                }],
+            })
+            .unwrap();
+        transcript
+            .record(Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: 2,
+                tool: "run_command".into(),
+                request: json!({"argv":["pwd"]}),
+                result: Value::Null,
+                failure: Some("recorded command failure".into()),
+                effects: Vec::new(),
+            })
+            .unwrap();
+        let file = root.join("transcript.jsonl");
+        std::fs::write(&file, transcript.encode().unwrap()).unwrap();
+        let options = Options {
+            mode: Mode::Replay,
+            workspace: root.clone(),
+            transcript: file,
+            per_call_state: None,
+            metadata_trace: None,
+            allow_commuted_observations: false,
+        };
+        let requests = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_command\",\"arguments\":{\"argv\":[\"pwd\"]}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"remove_file\",\"arguments\":{\"path\":\"old.txt\"}}}\n",
+        );
+        let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+        let reader = std::thread::spawn(move || {
+            let mut input = BufReader::new(requests.as_bytes());
+            sender
+                .send(mcp_framing::read(&mut input, "fixture"))
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(30));
+            sender
+                .send(mcp_framing::read(&mut input, "fixture"))
+                .unwrap();
+            sender.send(Ok(None)).unwrap();
+        });
+        let mut output = Vec::new();
+        run_with_source(options, &mut ChannelSource(receiver), &mut output).unwrap();
+        reader.join().unwrap();
+        let responses: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["id"], 2);
+        assert_eq!(responses[1]["id"], 1);
+        assert_eq!(responses[1]["error"]["message"], "recorded command failure");
+        assert!(!root.join("old.txt").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_a_future_request_if_its_predecessor_never_arrives() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-causal-missing-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("old.txt"), "old").unwrap();
+        let mut transcript = Transcript::default();
+        transcript
+            .record(Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                tool: "remove_file".into(),
+                request: json!({"path":"old.txt"}),
+                result: json!({"ok":true}),
+                failure: None,
+                effects: vec![Effect::RemoveFile {
+                    path: "old.txt".into(),
+                }],
+            })
+            .unwrap();
+        transcript
+            .record(Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: 2,
+                tool: "run_command".into(),
+                request: json!({"argv":["pwd"]}),
+                result: Value::Null,
+                failure: Some("recorded command failure".into()),
+                effects: Vec::new(),
+            })
+            .unwrap();
+        let file = root.join("transcript.jsonl");
+        std::fs::write(&file, transcript.encode().unwrap()).unwrap();
+        let options = Options {
+            mode: Mode::Replay,
+            workspace: root.clone(),
+            transcript: file,
+            per_call_state: None,
+            metadata_trace: None,
+            allow_commuted_observations: false,
+        };
+        let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_command\",\"arguments\":{\"argv\":[\"pwd\"]}}}\n";
+        let mut output = Vec::new();
+        assert!(run_with_io(options, &mut BufReader::new(&request[..]), &mut output).is_err());
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("differs from its causal recording")
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("old.txt")).unwrap(),
+            "old"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
