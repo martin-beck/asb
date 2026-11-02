@@ -210,7 +210,7 @@ fn configuration_at(options: SetupOptions, directory: &Path) -> Result<Benchmark
             enabled: true,
             directory: "measurements".into(),
             collectors: if measure.is_empty() {
-                measurements::available_collectors()
+                measurements::default_collectors()
             } else {
                 crate::collectors::expand_dependencies(&measure)
             },
@@ -415,7 +415,7 @@ mod tests {
         assert!(selected.enabled);
         assert_eq!(
             selected.collectors,
-            crate::measurements::available_collectors()
+            crate::measurements::default_collectors()
         );
     }
 

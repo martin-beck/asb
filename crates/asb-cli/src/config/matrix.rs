@@ -389,7 +389,7 @@ fn prepare_missing_installables(
 /// tools, while others only contribute dependencies such as `perf`.
 fn collector_installables(selected: &[String]) -> Vec<String> {
     let selected = if selected.is_empty() {
-        measurements::available_collectors()
+        measurements::default_collectors()
     } else {
         selected.to_vec()
     };
