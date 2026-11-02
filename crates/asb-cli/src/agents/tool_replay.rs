@@ -537,11 +537,6 @@ pub(crate) fn list_directory(root: &Path, value: &str) -> Result<Vec<(String, bo
     for entry in std::fs::read_dir(&path)
         .map_err(|_| Error::Run("cannot list local-tool directory".into()))?
     {
-        if entries.len() >= 256 {
-            return Err(Error::Run(
-                "local-tool directory listing exceeds bound".into(),
-            ));
-        }
         let entry = entry.map_err(|_| Error::Run("cannot list local-tool directory".into()))?;
         let name = entry.file_name();
         let name = name
@@ -1085,6 +1080,28 @@ mod tests {
         assert!(!entries.iter().any(|entry| entry.0 == "outside"));
         assert!(list_directory(&root, "../outside").is_err());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn directory_listing_and_search_handle_more_than_256_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-large-directory-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        for index in 0..300 {
+            std::fs::write(
+                root.join(format!("source-{index:03}.txt")),
+                if index == 299 { "needle" } else { "other" },
+            )
+            .unwrap();
+        }
+        assert_eq!(list_directory(&root, ".").unwrap().len(), 300);
+        assert_eq!(
+            search_text(&root, ".", "needle").unwrap(),
+            vec![("source-299.txt".into(), 1, "needle".into())]
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
