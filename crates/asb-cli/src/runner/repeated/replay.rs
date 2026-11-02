@@ -1,5 +1,5 @@
 //! Run-owned whole-track selection and private JSONL staging; no proxy changes.
-use super::{Plan, ReplayInput, Slot, path_text, private_directory, publish_bytes};
+use super::{Plan, ReplayInput, Slot, path_text, private_directory, publish_bytes, publish_stream};
 use crate::cassette::{Compatibility, Limits, SelectionPlan, Selector, Source, SourceInspection};
 use crate::runner::campaign::McpRelayInput;
 use crate::{Error, benchmark::BenchmarkConfig, runner::RunOptions};
@@ -308,11 +308,15 @@ impl Prepared {
             }
             publish_bytes(&root.join(&input.private), &bytes)?;
             if let Some(local_tools) = &input.local_tools {
-                let bytes = self
-                    .source
-                    .read_artifact(input.track.expect("selected bundle track"), "local-tools")
-                    .map_err(input_error)?;
-                publish_bytes(&root.join(local_tools), &bytes)?;
+                publish_stream(&root.join(local_tools), |file| {
+                    self.source
+                        .copy_artifact_to(
+                            input.track.expect("selected bundle track"),
+                            "local-tools",
+                            file,
+                        )
+                        .map_err(input_error)
+                })?;
             }
             if let Some(protocol) = &input.tool_protocol {
                 let bytes = self

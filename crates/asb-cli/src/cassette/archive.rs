@@ -1,9 +1,10 @@
 //! Bounded metadata preflight and selective extraction; no filesystem extraction.
 use super::metadata::MetadataReader;
 use super::{Error, Manifest, digest};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use zip::{
     CompressionMethod, ZipArchive,
@@ -341,6 +342,20 @@ impl Archive {
 
     /// Decode one sealed auxiliary payload for the selected execution track.
     pub fn read_artifact(&mut self, id: u64, kind: &str) -> Result<Vec<u8>, Error> {
+        let mut bytes = Vec::new();
+        self.copy_artifact_to(id, kind, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Stream a selected artifact to private staging and validate its length,
+    /// ZIP checksum and digest. The caller must not publish the destination
+    /// unless this method returns successfully.
+    pub fn copy_artifact_to(
+        &mut self,
+        id: u64,
+        kind: &str,
+        output: &mut impl Write,
+    ) -> Result<(), Error> {
         let track = self.manifest.track(id)?;
         let artifact = track
             .artifacts
@@ -355,13 +370,34 @@ impl Archive {
             .artifact_entries
             .get(&(id, kind.to_owned()))
             .ok_or_else(|| Error("cassette auxiliary artifact payload is absent".into()))?;
-        let bytes = read_bounded(&mut self.archive, index, self.limits.max_track_bytes)?;
-        if bytes.len() as u64 != artifact.bytes || digest(&bytes) != artifact.sha256 {
+        let expected_bytes = artifact.bytes;
+        let expected_sha256 = artifact.sha256.clone();
+        let mut entry = self.archive.by_index(index).map_err(zip_error)?;
+        let mut hash = Sha256::new();
+        let mut size = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = entry.read(&mut buffer).map_err(io_error)?;
+            if read == 0 {
+                break;
+            }
+            size = size
+                .checked_add(read as u64)
+                .ok_or_else(|| Error("cassette auxiliary artifact length overflow".into()))?;
+            if size > expected_bytes || size > self.limits.max_track_bytes {
+                return Err(Error(
+                    "cassette decompressed entry exceeds its declared length or limit".into(),
+                ));
+            }
+            hash.update(&buffer[..read]);
+            output.write_all(&buffer[..read]).map_err(io_error)?;
+        }
+        if size != expected_bytes || format!("{:x}", hash.finalize()) != expected_sha256 {
             return Err(Error(format!(
                 "cassette track {id} auxiliary artifact {kind} checksum or length mismatch"
             )));
         }
-        Ok(bytes)
+        Ok(())
     }
 }
 
