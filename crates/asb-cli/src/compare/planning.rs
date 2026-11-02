@@ -175,7 +175,7 @@ impl PreparedReport {
     }
 }
 
-fn graphable_metric(name: &str) -> bool {
+pub(super) fn graphable_metric(name: &str) -> bool {
     // Per-destination CPU migration counters are useful retained evidence but
     // produce one low-value chart per core. Keep the aggregate migration plot.
     !name.contains("cpu_migration_destination[")

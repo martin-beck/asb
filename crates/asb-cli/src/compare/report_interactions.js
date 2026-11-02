@@ -91,3 +91,15 @@ document.querySelectorAll('.interactive-chart').forEach(chart=>{
   backdrop.addEventListener('click',()=>setExpanded(false));
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&chart.classList.contains('expanded'))setExpanded(false)});
 });
+// Highlight controls are intentionally duplicated in the report overview and
+// beside every chart. Keep every control synchronized so users can mark the
+// few graphs they want to discuss without losing their current filters/view.
+const highlightControls=[...document.querySelectorAll('input[data-highlight-graph]')];
+const highlightedCharts=[...document.querySelectorAll('.interactive-chart')];
+const highlightRows=[...document.querySelectorAll('[data-highlight-row]')];
+function setChartHighlight(graph,enabled){
+  for(const chart of highlightedCharts)if(chart.dataset.graph===graph)chart.classList.toggle('highlighted',enabled);
+  for(const row of highlightRows)if(row.dataset.highlightRow===graph)row.classList.toggle('highlighted',enabled);
+  for(const input of highlightControls)if(input.dataset.highlightGraph===graph)input.checked=enabled;
+}
+for(const input of highlightControls)input.addEventListener('change',()=>setChartHighlight(input.dataset.highlightGraph,input.checked));

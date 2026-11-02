@@ -1476,6 +1476,68 @@ fn generated_svg_and_embedded_html_script_execute_observed_hover_zoom_pan_and_mo
 }
 
 #[test]
+fn comparison_publishes_agent_summary_distribution_and_histogram_reports() {
+    let fixture = Fixture::new();
+    let manifest = fixture.seed("", 2);
+    fixture.write(
+        "0.toml",
+        "agent='alpha'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\n",
+    );
+    fixture.write(
+        "1.toml",
+        "agent='beta'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\n",
+    );
+    fixture.write(
+        "sweep-results/000-0/measurements/profile.json",
+        json!({"metrics":{"latency_ms":10.0,"tokens":100.0}}).to_string(),
+    );
+    fixture.write(
+        "sweep-results/001-1/measurements/profile.json",
+        json!({"metrics":{"latency_ms":30.0,"tokens":250.0}}).to_string(),
+    );
+    let report = generate(manifest.to_str().unwrap(), &mut Vec::new()).unwrap();
+    let directory = report.parent().unwrap();
+    for file in [
+        "agent-summary-report.html",
+        "agent-distribution-report.html",
+        "agent-histogram-report.html",
+    ] {
+        let html = fs::read_to_string(directory.join(file)).unwrap();
+        assert!(html.contains("ASB AGENT REPORT"));
+        assert!(html.contains("data-highlight-graph"));
+        assert!(html.contains("chart-expand"));
+        assert!(html.contains("alpha"));
+        assert!(html.contains("beta"));
+    }
+    for graph in [
+        "agent-summary-mean-profile.latency_ms.svg",
+        "agent-summary-median-profile.latency_ms.svg",
+        "agent-summary-p95-profile.latency_ms.svg",
+        "agent-distribution-profile.latency_ms.svg",
+        "agent-histogram-profile.latency_ms.svg",
+    ] {
+        let svg = fs::read_to_string(directory.join(graph)).unwrap();
+        assert!(svg.contains("data-benchmark=\"alpha\""));
+        assert!(svg.contains("data-benchmark=\"beta\""));
+    }
+    let original = fs::read_to_string(&report).unwrap();
+    assert!(original.contains("Chart highlights"));
+    assert!(original.contains("data-highlight-graph"));
+    assert!(original.contains("agent-summary-report.html"));
+    let comparison: Value =
+        serde_json::from_slice(&fs::read(report.with_file_name("comparison.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        comparison["agent_reports"],
+        json!([
+            "agent-summary-report.html",
+            "agent-distribution-report.html",
+            "agent-histogram-report.html"
+        ])
+    );
+}
+
+#[test]
 fn signed_scalar_graphs_retain_observations_and_finite_zero_based_geometry() {
     let fixture = Fixture::new();
     let cases = [
