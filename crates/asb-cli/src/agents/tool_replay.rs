@@ -100,17 +100,38 @@ impl Transcript {
         if bytes.len() > MAX_EVENTS * (MAX_LINE_BYTES + 1) {
             return Err(Error::Run("local-tool transcript exceeds bound".into()));
         }
-        let text = std::str::from_utf8(bytes)
-            .map_err(|_| Error::Run("local-tool transcript is not UTF-8 JSONL".into()))?;
+        Self::decode_from(&mut std::io::BufReader::new(bytes))
+    }
+
+    /// Decode one framed event at a time without retaining a second raw copy
+    /// of the full transcript alongside its parsed events.
+    pub(crate) fn decode_from(reader: &mut impl std::io::BufRead) -> Result<Self, Error> {
+        use std::io::{BufRead as _, Read as _};
         let mut transcript = Self::default();
-        for line in text.lines() {
+        loop {
+            let mut line = Vec::new();
+            let read = (&mut *reader)
+                .take((MAX_LINE_BYTES + 2) as u64)
+                .read_until(b'\n', &mut line)
+                .map_err(crate::io_error)?;
+            if read == 0 {
+                break;
+            }
+            if line.last() == Some(&b'\n') {
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+            }
             if line.len() > MAX_LINE_BYTES {
                 return Err(Error::Run(
                     "local-tool transcript event exceeds bound".into(),
                 ));
             }
+            let text = std::str::from_utf8(&line)
+                .map_err(|_| Error::Run("local-tool transcript is not UTF-8 JSONL".into()))?;
             transcript.record(
-                serde_json::from_str(line)
+                serde_json::from_str(text)
                     .map_err(|_| Error::Run("local-tool transcript is malformed".into()))?,
             )?;
         }
@@ -667,6 +688,40 @@ fn append_search_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transcript_reader_accepts_chunked_lines_and_rejects_oversized_or_invalid_input() {
+        struct Chunked<'a>(&'a [u8]);
+        impl std::io::Read for Chunked<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let n = buffer.len().min(self.0.len()).min(7);
+                buffer[..n].copy_from_slice(&self.0[..n]);
+                self.0 = &self.0[n..];
+                Ok(n)
+            }
+        }
+        let mut transcript = Transcript::default();
+        transcript.record(removal(1, "one")).unwrap();
+        transcript.record(removal(2, "two")).unwrap();
+        let canonical = transcript.encode().unwrap();
+        let mixed = String::from_utf8(canonical.clone())
+            .unwrap()
+            .replacen('\n', "\r\n", 1);
+        let mixed = mixed.trim_end_matches('\n');
+        let parsed =
+            Transcript::decode_from(&mut std::io::BufReader::new(Chunked(mixed.as_bytes())))
+                .unwrap();
+        assert_eq!(parsed.encode().unwrap(), canonical);
+        assert!(
+            Transcript::decode_from(&mut std::io::BufReader::new(Chunked(&[0xff, b'\n']))).is_err()
+        );
+        let oversized = vec![b'x'; MAX_LINE_BYTES + 1];
+        let error = Transcript::decode_from(&mut std::io::BufReader::new(Chunked(&oversized)))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("event exceeds bound"), "{error}");
+    }
+
     #[test]
     fn transcript_writer_streams_events_and_reports_write_errors() {
         struct RecordingWriter {

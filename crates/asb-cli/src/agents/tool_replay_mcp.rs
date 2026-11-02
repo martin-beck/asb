@@ -518,15 +518,18 @@ fn run_with_source(
         .map(MetadataTrace::open)
         .transpose()?;
     let mut transcript = match options.mode {
-        Mode::Record if options.per_call_state.is_some() => Transcript::decode(
-            &std::fs::read(&options.transcript)
-                .map_err(|_| Error::Run("local-tool record transcript is unavailable".into()))?,
-        )?,
+        Mode::Record if options.per_call_state.is_some() => {
+            Transcript::decode_from(&mut BufReader::new(
+                std::fs::File::open(&options.transcript).map_err(|_| {
+                    Error::Run("local-tool record transcript is unavailable".into())
+                })?,
+            ))?
+        }
         Mode::Record => Transcript::default(),
-        Mode::Replay => Transcript::decode(
-            &std::fs::read(&options.transcript)
+        Mode::Replay => Transcript::decode_from(&mut BufReader::new(
+            std::fs::File::open(&options.transcript)
                 .map_err(|_| Error::Run("local-tool replay transcript is unavailable".into()))?,
-        )?,
+        ))?,
     };
     if let Some(state) = &options.per_call_state {
         let state = read_per_call_state(state)?;
