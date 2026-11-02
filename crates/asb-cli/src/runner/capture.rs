@@ -212,6 +212,7 @@ pub(super) struct CapturedOutput {
     pub transcript_truncated: bool,
     pub stream_fault: bool,
     pub drain_timed_out: bool,
+    pub timed_out: bool,
 }
 
 impl CapturedOutput {
@@ -579,6 +580,7 @@ fn capture_inner(
         transcript_truncated: stdout.truncated || stderr.truncated,
         stream_fault,
         drain_timed_out,
+        timed_out,
     })
 }
 

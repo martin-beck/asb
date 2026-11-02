@@ -290,6 +290,26 @@ class ExecutionTests(unittest.TestCase):
             self.assertFalse(result["timed_out"])
             self.assertNotIn("kill", container.events)
 
+    def test_application_guest_can_settle_after_its_agent_execution_budget(self):
+        workspace, container, api, _ = self.workspace()
+        class DelayedSettlement(Stream):
+            def __next__(self):
+                if self.index == 1 and api.container.resumed:
+                    # The application gate enforces its own agent deadline;
+                    # its private result and output may settle afterward.
+                    time.sleep(.08)
+                return super().__next__()
+        def start(*_args, **_kwargs):
+            api.stream = DelayedSettlement(api)
+            return api.stream
+        api.exec_start = start
+        with workspace:
+            result = workspace.execute(["asb", "__asb-agent"], gate="application",
+                                       timeout=.02, preparation_timeout=.3)
+        self.assertFalse(result["timed_out"])
+        self.assertEqual(result["exit_code"], 0)
+        self.assertNotIn("kill", container.events)
+
     def test_expired_or_cancelled_preparation_never_resumes_the_owned_gate(self):
         for cancel in (False, True):
             workspace, container, _, _ = self.workspace()

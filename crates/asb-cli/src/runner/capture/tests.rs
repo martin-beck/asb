@@ -13,6 +13,27 @@ fn child(script: &str) -> OwnedChild {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn guest_execution_reports_its_own_timeout() {
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "exec sleep 10"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let result = super::super::run_guest_process(
+        &mut command,
+        None,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        Duration::from_millis(50),
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    assert!(result.timed_out);
+    assert!(!result.output.status.success());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn shared_launch_failure_aborts_peers_before_stopping_its_owned_child() {
     struct Admission {
         pid: u32,

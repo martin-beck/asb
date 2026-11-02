@@ -28,6 +28,11 @@ index = 2
 total = 5
 ```
 
+Set `execution_seconds = 1800` for a 30-minute agent execution budget. Guest
+preparation and collector attachment have separate deadlines; grading and
+teardown happen after the agent budget. The guest enforces the agent deadline,
+while the outer transport allows a bounded settlement period afterward.
+
 Repetition identifies a distinct selected configuration. It does not create
 extra executions: select each repeated configuration explicitly. Its replicas
 are still controlled by `concurrency`; sweep `jobs` bounds concurrent distinct
