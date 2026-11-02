@@ -34,16 +34,11 @@ const MAX_COMMAND_OUTPUT: usize = 128 * 1024;
 /// changed regular UTF-8 file that must be reconstructed during replay.
 const MAX_COMMAND_EFFECT_BYTES: usize = 768 * 1024;
 const MAX_COMMAND_EFFECT_ENTRIES: usize = 256;
-// Pi records every tool result in several structured output events.  Keep one
-// confined file read comfortably below the outer agent-output capture bound,
-// while exposing truncation to the model so it can use search or a narrower
-// command instead of silently reasoning from partial source.
-const MAX_MCP_READ_BYTES: usize = 48 * 1024;
 const STAGED_RUNTIME_EXECUTABLE: &str = "/opt/asb-runtime/asb";
 /// Bump only when a provider-visible local-tool definition or its execution
 /// semantics changes. A replay must use the same protocol that shaped its
 /// recorded provider requests; this is not a compatibility normalizer.
-const LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v8-large-search";
+const LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v9-complete-text-reads";
 const LEGACY_LOCAL_TOOL_PROTOCOLS: &[&str] = &[
     "asb-local-tools-v2-bounded-commands",
     "asb-local-tools-v3-streamed-snapshots",
@@ -51,6 +46,7 @@ const LEGACY_LOCAL_TOOL_PROTOCOLS: &[&str] = &[
     "asb-local-tools-v5-file-search",
     "asb-local-tools-v6-agent-deadline",
     "asb-local-tools-v7-large-directories",
+    "asb-local-tools-v8-large-search",
 ];
 const TOOL_PROTOCOL_ARTIFACT: &str = "tool-protocol";
 
@@ -1082,7 +1078,7 @@ fn execute(root: &Path, tool: &str, request: &Value) -> Result<(Value, Vec<Effec
             Ok((result, command_effects(&before, &after, root)?))
         }
         "read_file" => Ok((
-            bounded_read_result(tool_replay::read_text(root, required_path(request)?)?),
+            json!({"text":tool_replay::read_text(root, required_path(request)?)?, "truncated":false}),
             Vec::new(),
         )),
         "write_file" => {
@@ -1336,21 +1332,6 @@ fn command_effects(
         ));
     }
     Ok(effects)
-}
-
-fn bounded_read_result(text: String) -> Value {
-    if text.len() <= MAX_MCP_READ_BYTES {
-        return json!({"text": text, "truncated": false});
-    }
-    let mut end = MAX_MCP_READ_BYTES;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    json!({
-        "text": &text[..end],
-        "truncated": true,
-        "limit_bytes": MAX_MCP_READ_BYTES,
-    })
 }
 
 fn run_command(root: &Path, request: &Value) -> Result<Value, Error> {
@@ -1658,16 +1639,38 @@ mod tests {
     }
 
     #[test]
-    fn private_file_reads_are_utf8_safe_bounded_and_explicitly_marked() {
-        let source = format!("{}é", "x".repeat(MAX_MCP_READ_BYTES));
-        let result = bounded_read_result(source);
-        assert_eq!(result["truncated"], true);
-        assert_eq!(result["limit_bytes"], MAX_MCP_READ_BYTES);
-        assert_eq!(result["text"].as_str().unwrap().len(), MAX_MCP_READ_BYTES);
-        assert!(std::str::from_utf8(result["text"].as_str().unwrap().as_bytes()).is_ok());
-
-        let complete = bounded_read_result("small source".into());
-        assert_eq!(complete, json!({"text":"small source","truncated":false}));
+    fn large_utf8_file_read_is_recorded_and_replayed_without_truncation() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-large-read-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = format!("{}é", "x".repeat(1024 * 1024 + 1));
+        std::fs::write(root.join("source.txt"), &source).unwrap();
+        std::fs::write(root.join("binary"), [0xff, 0xfe]).unwrap();
+        let request = json!({"name":"read_file","arguments":{"path":"source.txt"}});
+        let record = Options {
+            mode: Mode::Record,
+            workspace: root.clone(),
+            transcript: root.join("record.jsonl"),
+            per_call_state: None,
+            metadata_trace: None,
+            allow_commuted_observations: false,
+        };
+        let mut transcript = Transcript::default();
+        let recorded = call(&record, &mut transcript, request.clone()).unwrap();
+        assert_eq!(recorded["structuredContent"]["text"], source);
+        assert_eq!(recorded["structuredContent"]["truncated"], false);
+        assert!(execute(&root, "read_file", &json!({"path":"binary"})).is_err());
+        let mut playback = Transcript::decode(&transcript.encode().unwrap()).unwrap();
+        std::fs::remove_file(root.join("source.txt")).unwrap();
+        let replay = Options {
+            mode: Mode::Replay,
+            ..record
+        };
+        assert_eq!(call(&replay, &mut playback, request).unwrap(), recorded);
+        playback.finish().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2731,6 +2734,10 @@ mod tests {
         .unwrap();
         verify_protocol_bytes(
             br#"{"schema_version":1,"protocol":"asb-local-tools-v7-large-directories"}"#,
+        )
+        .unwrap();
+        verify_protocol_bytes(
+            br#"{"schema_version":1,"protocol":"asb-local-tools-v8-large-search"}"#,
         )
         .unwrap();
         let error = verify_protocol_bytes(
