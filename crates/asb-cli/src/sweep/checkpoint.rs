@@ -861,7 +861,7 @@ mod tests {
             let roots = vec![Root::path("declared-input", input.clone())];
             let context = json!({"scope":"unit-fixture"});
             let initial = snapshotter
-                .fingerprint(&roots, &context, true, &[])
+                .fingerprint(&roots, &context, false, &[])
                 .unwrap();
             let inputs = Inputs {
                 directory: state.clone(),

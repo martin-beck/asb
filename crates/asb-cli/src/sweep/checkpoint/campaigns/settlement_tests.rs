@@ -171,15 +171,15 @@ pub(in crate::sweep::checkpoint) fn fixture_concurrency(
             .unwrap();
         }
     }
-    let state = inputs_environment(&plan, &results, concurrency > 1);
+    let state = inputs_environment(&plan, &results);
     (fixture, plan, results, state)
 }
 
 fn inputs(plan: &SweepPlan, results: &Path) -> Inputs {
-    inputs_environment(plan, results, false)
+    inputs_environment(plan, results)
 }
 
-fn inputs_environment(plan: &SweepPlan, results: &Path, environment: bool) -> Inputs {
+fn inputs_environment(plan: &SweepPlan, results: &Path) -> Inputs {
     let directory = results.join(".checkpoint");
     let mut roots = input_roots(results, plan).unwrap();
     roots.push(crate::sweep::checkpoint::Root::path(
@@ -189,7 +189,7 @@ fn inputs_environment(plan: &SweepPlan, results: &Path, environment: bool) -> In
     let context = json!({"scope":"settlement-test-not-runtime-closure"});
     let snapshotter = Snapshotter::open(&directory, "python3".into()).unwrap();
     let initial = snapshotter
-        .fingerprint(&roots, &context, environment, &[])
+        .fingerprint(&roots, &context, false, &[])
         .unwrap();
     let state = Inputs {
         directory,

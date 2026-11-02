@@ -8,11 +8,12 @@ mod resolution;
 
 fn inputs(results: &Path, sweep: &SweepPlan) -> Inputs {
     let mut inputs = reservations_tests::inputs(results, sweep);
-    // Match real initial/final input hashing, including environment. The
-    // reservation-only fixture deliberately omits environment from its hashes.
+    // Match real initial/final input hashing. Ambient process state is not a
+    // declared continuation input, so the reservation fixture already uses
+    // the production hashing policy.
     inputs.initial = inputs
         .snapshotter
-        .fingerprint(&inputs.roots, &inputs.context, true, &[])
+        .fingerprint(&inputs.roots, &inputs.context, false, &[])
         .unwrap();
     inputs
 }
