@@ -1718,6 +1718,37 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_qwen_uuid_persisted_output_without_hiding_changes() {
+        let root = test_root();
+        let cassette = root.join("qwen-persisted-uuid.jsonl");
+        let original = "/opt/asb-private/agent-state/home/.qwen/tmp/abcdef1234/tool-results/call-123e4567-e89b-12d3-a456-426614174000.txt";
+        let replay = "/opt/asb-private/agent-state/home/.qwen/tmp/abcdef1234/tool-results/asb-replay-42-<asb-timestamp>-1.txt";
+        let content = format!(
+            "<persisted-output>\nFull output saved to: {original}\nFull output sha256: abc123\nPreview: original\n</persisted-output>"
+        );
+        let recorded =
+            serde_json::json!({"model":"m","messages":[{"content":content}]}).to_string();
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = recorded.replace(original, replay);
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, &replayed).contains("200 OK"));
+        session.stop().unwrap();
+        for changed in [
+            replayed.replace("abc123", "abc124"),
+            replayed.replace("Preview: original", "Preview: changed"),
+        ] {
+            let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+            assert!(request(&session, &changed).contains("409 Conflict"));
+            assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_openjiuwen_generated_bash_output_filename() {
         let root = test_root();
         let cassette = root.join("openjiuwen-bash-output.jsonl");
