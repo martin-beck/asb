@@ -217,6 +217,8 @@ impl Plan {
                 || !crate::cassette::valid_digest(&input.sha256)
                 || input.bytes > max_bytes
                 || input.complete.is_some() != bundled
+                || input.recorded_max_steps == Some(0)
+                || (!bundled && input.recorded_max_steps.is_some())
             {
                 return Err(invalid("input path, size, digest or completeness differs"));
             }

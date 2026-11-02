@@ -119,6 +119,7 @@ impl Inspection {
                 ));
             }
             inputs.push(ReplayInput {
+                recorded_max_steps: None,
                 recorder: None,
                 complete: None,
                 track: None,

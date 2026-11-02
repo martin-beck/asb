@@ -270,6 +270,7 @@ pub(super) fn metadata_budget<M: Serialize>(
 fn maximum_track(count: u64, repeat: u64, concurrency: u64, limits: Limits) -> Track {
     Track {
         recorder: Some("a".repeat(64)),
+        recorded_max_steps: Some(u64::MAX),
         id: count,
         batch: repeat,
         replica: concurrency,

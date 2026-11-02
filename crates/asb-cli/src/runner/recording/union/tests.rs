@@ -121,6 +121,7 @@ impl Fixture {
             .commit(
                 Track {
                     recorder: None,
+                    recorded_max_steps: None,
                     id: 1,
                     batch: 1,
                     replica: 1,

@@ -880,6 +880,7 @@ impl RecordingJournal {
                 };
                 Track {
                     recorder: None,
+                    recorded_max_steps: None,
                     id: started.id,
                     batch: started.batch,
                     replica: started.replica,

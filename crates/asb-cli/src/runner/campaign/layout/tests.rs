@@ -162,6 +162,7 @@ fn plan(mode: ExecutionMode, concurrency: usize, repeat: u64, measured: bool) ->
     if mode == ExecutionMode::Replay {
         for replica in 0..concurrency {
             plan.replay_inputs.push(ReplayInput {
+                recorded_max_steps: None,
                 recorder: None,
                 complete: None,
                 track: None,

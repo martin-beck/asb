@@ -63,6 +63,7 @@ fn manifest(id: &str, provenance: Option<OriginPlan>) -> Manifest {
 fn track(id: u64) -> Track {
     Track {
         recorder: None,
+        recorded_max_steps: None,
         id,
         batch: id,
         replica: 1,

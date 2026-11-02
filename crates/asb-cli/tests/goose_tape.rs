@@ -123,6 +123,9 @@ fn run_with_changed_request(root: &Path, endpoint: &str, args: &[&str], changed:
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(pair) = args.windows(2).find(|pair| pair[0] == "--max-steps") {
+        command.env("ASB_TEST_EXPECTED_TURNS", pair[1]);
+    }
     if changed {
         command.env("ASB_TEST_CHANGED", "1");
     }
@@ -173,6 +176,12 @@ fn goose_routes_record_and_replay_through_tape_without_live_credentials() {
     let agent = agent_dir.join("goose");
     std::fs::write(&agent, r##"#!/usr/bin/env node
 const host = process.env.OPENAI_HOST;
+if (process.env.ASB_TAPE_MODE) {
+  const index = process.argv.indexOf('--max-turns');
+  if (index < 0 || process.argv[index + 1] !== (process.env.ASB_TEST_EXPECTED_TURNS || '7')) {
+    console.error('recorded step limit was not applied'); process.exit(11);
+  }
+}
 if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(host || '') ||
     (process.env.ASB_TAPE_MODE ? host === process.env.ASB_TEST_UPSTREAM : host !== process.env.ASB_TEST_UPSTREAM)) {
   console.error('Goose endpoint is not the expected loopback service'); process.exit(7);
@@ -224,6 +233,8 @@ main().catch(e => { console.error(e); process.exitCode = 1; });
             "run",
             "benchmark.toml",
             "--record",
+            "--max-steps",
+            "7",
             "--cassette",
             "tape.jsonl",
         ],
@@ -241,6 +252,7 @@ main().catch(e => { console.error(e); process.exitCode = 1; });
     .unwrap();
     assert_eq!(archive.manifest().tracks.len(), 1);
     assert!(archive.manifest().tracks[0].complete);
+    assert_eq!(archive.manifest().tracks[0].recorded_max_steps, Some(7));
     assert!(
         !archive.read_artifact(1, "local-tools").unwrap().is_empty(),
         "Goose recording must retain its local-tool transcript for offline replay"
@@ -282,6 +294,25 @@ main().catch(e => { console.error(e); process.exitCode = 1; });
         before_replay,
         "replay must not contact the live upstream"
     );
+    let override_replay = run(
+        &root,
+        &provider.endpoint,
+        &[
+            "run",
+            "benchmark.toml",
+            "--replay",
+            "--cassette",
+            "tape.jsonl",
+            "--max-steps",
+            "9",
+        ],
+    );
+    assert!(
+        override_replay.status.success(),
+        "explicit override: {}",
+        String::from_utf8_lossy(&override_replay.stderr)
+    );
+    assert_eq!(*provider.requests.lock().unwrap(), before_replay);
     let mismatch = run_with_changed_request(
         &root,
         &provider.endpoint,

@@ -135,6 +135,10 @@ pub struct Track {
     /// Recording proxy identity; absent on historical llmtape recordings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorder: Option<String>,
+    /// Explicit agent step limit used to make this recording, if supplied.
+    /// Older tracks do not contain this setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_max_steps: Option<u64>,
     /// Stable one-based ID in batch/replica order, not completion order.
     pub id: u64,
     /// One-based sequential batch.
@@ -317,6 +321,7 @@ impl Manifest {
             }) || track.id <= prior
                 || expected != Some(track.id)
                 || !(1..=self.concurrency).contains(&track.replica)
+                || track.recorded_max_steps == Some(0)
                 || !valid_digest(&track.sha256)
                 || track.bytes > limits.max_track_bytes
             {
