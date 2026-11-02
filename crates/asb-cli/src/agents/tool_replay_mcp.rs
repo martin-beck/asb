@@ -33,8 +33,6 @@ const MAX_COMMAND_OUTPUT: usize = 128 * 1024;
 /// changed regular UTF-8 file that must be reconstructed during replay.
 const MAX_COMMAND_EFFECT_BYTES: usize = 768 * 1024;
 const MAX_COMMAND_EFFECT_ENTRIES: usize = 256;
-const MAX_COMMAND_SNAPSHOT_ENTRIES: usize = 4096;
-const MAX_COMMAND_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 // Pi records every tool result in several structured output events.  Keep one
 // confined file read comfortably below the outer agent-output capture bound,
 // while exposing truncation to the model so it can use search or a narrower
@@ -45,7 +43,8 @@ const STAGED_RUNTIME_EXECUTABLE: &str = "/opt/asb-runtime/asb";
 /// Bump only when a provider-visible local-tool definition or its execution
 /// semantics changes. A replay must use the same protocol that shaped its
 /// recorded provider requests; this is not a compatibility normalizer.
-const LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v2-bounded-commands";
+const LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v3-streamed-snapshots";
+const LEGACY_LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v2-bounded-commands";
 const TOOL_PROTOCOL_ARTIFACT: &str = "tool-protocol";
 
 #[derive(Deserialize, Serialize)]
@@ -229,7 +228,9 @@ pub(crate) fn prepare_protocol_artifact(
 pub(crate) fn verify_protocol_bytes(bytes: &[u8]) -> Result<(), Error> {
     let manifest: ToolProtocol = serde_json::from_slice(bytes)
         .map_err(|_| Error::Run("sealed local-tool protocol identity is malformed".into()))?;
-    if manifest.schema_version != 1 || manifest.protocol != LOCAL_TOOL_PROTOCOL {
+    if manifest.schema_version != 1
+        || ![LOCAL_TOOL_PROTOCOL, LEGACY_LOCAL_TOOL_PROTOCOL].contains(&manifest.protocol.as_str())
+    {
         return Err(Error::Run(
             "sealed local-tool protocol differs from this ASB build; replay requires the recorded tool definition and execution semantics".into(),
         ));
@@ -1006,11 +1007,12 @@ fn execute(root: &Path, tool: &str, request: &Value) -> Result<(Value, Vec<Effec
 enum CommandEntry {
     Directory,
     File { bytes: u64, sha256: [u8; 32] },
+    Symlink { target: String },
 }
 
 type CommandSnapshot = BTreeMap<String, CommandEntry>;
 
-/// A deliberately small workspace identity for a locally executed command.
+/// A streaming workspace identity for a locally executed command.
 /// It follows neither symlinks nor build/cache trees. It identifies source
 /// changes without retaining workspace copies or adding syscall/kernel tracing.
 fn command_snapshot(root: &Path) -> Result<CommandSnapshot, Error> {
@@ -1019,7 +1021,6 @@ fn command_snapshot(root: &Path) -> Result<CommandSnapshot, Error> {
         .map_err(|_| Error::Run("local-tool workspace is unavailable".into()))?;
     let mut pending = vec![(root, PathBuf::new())];
     let mut entries = CommandSnapshot::new();
-    let mut snapshot_bytes = 0_u64;
     while let Some((directory, relative)) = pending.pop() {
         let mut children = fs::read_dir(&directory)
             .map_err(|_| Error::Run("cannot snapshot local-tool workspace".into()))?
@@ -1037,11 +1038,6 @@ fn command_snapshot(root: &Path) -> Result<CommandSnapshot, Error> {
             ) {
                 continue;
             }
-            if entries.len() >= MAX_COMMAND_SNAPSHOT_ENTRIES {
-                return Err(Error::Run(
-                    "local-tool command workspace exceeds snapshot bound".into(),
-                ));
-            }
             let path = child.path();
             let relative = relative.join(&name);
             let relative_text = relative
@@ -1051,15 +1047,19 @@ fn command_snapshot(root: &Path) -> Result<CommandSnapshot, Error> {
             let metadata = fs::symlink_metadata(&path)
                 .map_err(|_| Error::Run("cannot inspect local-tool workspace".into()))?;
             if metadata.file_type().is_symlink() {
-                return Err(Error::Run(
-                    "local-tool command workspace contains a symlink".into(),
-                ));
-            }
-            if metadata.is_dir() {
+                let target = fs::read_link(&path)
+                    .map_err(|_| Error::Run("cannot read local-tool workspace symlink".into()))?
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_| {
+                        Error::Run("local-tool workspace symlink target is not UTF-8".into())
+                    })?;
+                entries.insert(relative_text, CommandEntry::Symlink { target });
+            } else if metadata.is_dir() {
                 entries.insert(relative_text, CommandEntry::Directory);
                 pending.push((path, relative));
             } else if metadata.is_file() {
-                let sha256 = command_file_identity(&path, metadata.len(), &mut snapshot_bytes)?;
+                let sha256 = command_file_identity(&path, metadata.len())?;
                 entries.insert(
                     relative_text,
                     CommandEntry::File {
@@ -1078,18 +1078,9 @@ fn command_snapshot(root: &Path) -> Result<CommandSnapshot, Error> {
 }
 
 /// Hash each admissible source file once per snapshot.  The digest catches a
-/// same-length rewrite even on a filesystem with coarse or restored mtimes,
-/// while the shared byte ceiling keeps command replay lighter than a workspace
-/// copy or syscall-level recorder.
-fn command_file_identity(path: &Path, bytes: u64, consumed: &mut u64) -> Result<[u8; 32], Error> {
-    *consumed = consumed.checked_add(bytes).ok_or_else(|| {
-        Error::Run("local-tool command workspace exceeds snapshot byte bound".into())
-    })?;
-    if *consumed > MAX_COMMAND_SNAPSHOT_BYTES {
-        return Err(Error::Run(
-            "local-tool command workspace exceeds snapshot byte bound".into(),
-        ));
-    }
+/// same-length rewrite even on a filesystem with coarse or restored mtimes.
+/// File bytes are streamed rather than retained in memory.
+fn command_file_identity(path: &Path, bytes: u64) -> Result<[u8; 32], Error> {
     let mut file = fs::File::open(path)
         .map_err(|_| Error::Run("cannot read local-tool workspace source".into()))?;
     let mut hasher = Sha256::new();
@@ -1102,9 +1093,9 @@ fn command_file_identity(path: &Path, bytes: u64, consumed: &mut u64) -> Result<
         if count == 0 {
             break;
         }
-        read = read.checked_add(count as u64).ok_or_else(|| {
-            Error::Run("local-tool command workspace exceeds snapshot byte bound".into())
-        })?;
+        read = read
+            .checked_add(count as u64)
+            .ok_or_else(|| Error::Run("local-tool workspace source length overflowed".into()))?;
         if read > bytes {
             return Err(Error::Run(
                 "local-tool workspace source changed during snapshot".into(),
@@ -1134,7 +1125,11 @@ fn command_effects(
     }
     for (path, entry) in before {
         if let Some(after_entry) = after.get(path)
-            && std::mem::discriminant(entry) != std::mem::discriminant(after_entry)
+            && (std::mem::discriminant(entry) != std::mem::discriminant(after_entry)
+                || matches!(
+                    (entry, after_entry),
+                    (CommandEntry::Symlink { .. }, CommandEntry::Symlink { .. })
+                ) && entry != after_entry)
         {
             removed.insert(path.clone());
         }
@@ -1149,7 +1144,7 @@ fn command_effects(
             Some(CommandEntry::Directory) => {
                 effects.push(Effect::RemoveDirectory { path: path.clone() });
             }
-            Some(CommandEntry::File { .. }) => {
+            Some(CommandEntry::File { .. } | CommandEntry::Symlink { .. }) => {
                 effects.push(Effect::RemoveFile { path: path.clone() })
             }
             None => {
@@ -1162,6 +1157,14 @@ fn command_effects(
     for (path, entry) in after {
         if matches!(entry, CommandEntry::Directory) && before.get(path) != Some(entry) {
             effects.push(Effect::CreateDirectory { path: path.clone() });
+        }
+        if let CommandEntry::Symlink { target } = entry
+            && before.get(path) != Some(entry)
+        {
+            effects.push(Effect::CreateSymlink {
+                path: path.clone(),
+                target: target.clone(),
+            });
         }
     }
     let mut content_bytes = 0usize;
@@ -1643,6 +1646,91 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn command_snapshots_and_replays_symlink_changes() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "asb-symlink-workspace-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let replay = root.join("replay");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&replay).unwrap();
+        symlink("old", workspace.join("link")).unwrap();
+        symlink("old", replay.join("link")).unwrap();
+        symlink("unchanged", workspace.join("other")).unwrap();
+        let (result, effects) = execute(
+            &workspace,
+            "run_command",
+            &json!({"argv":["sh","-c","rm link && ln -s new link"]}),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::RemoveFile {
+                    path: "link".into()
+                },
+                Effect::CreateSymlink {
+                    path: "link".into(),
+                    target: "new".into()
+                }
+            ]
+        );
+        for effect in &effects {
+            tool_replay::apply(&replay, effect).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_link(replay.join("link")).unwrap(),
+            std::path::Path::new("new")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn command_runs_and_records_changes_in_a_large_workspace() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-large-workspace-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let replay = root.join("replay");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&replay).unwrap();
+        std::fs::File::create(workspace.join("large-source"))
+            .unwrap()
+            .set_len(17 * 1024 * 1024)
+            .unwrap();
+        for index in 0..4097 {
+            std::fs::write(workspace.join(format!("source-{index}")), b"").unwrap();
+        }
+        let (result, effects) = execute(
+            &workspace,
+            "run_command",
+            &json!({"argv":["sh","-c","printf repaired > changed.txt"]}),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(
+            effects,
+            vec![Effect::WriteText {
+                path: "changed.txt".into(),
+                content: "repaired".into()
+            }]
+        );
+        for effect in &effects {
+            tool_replay::apply(&replay, effect).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(replay.join("changed.txt")).unwrap(),
+            "repaired"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_returns_a_recorded_command_result_without_starting_a_process() {
         let root =
             std::env::temp_dir().join(format!("asb-mcp-command-replay-{}", std::process::id()));
@@ -1735,17 +1823,10 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         std::fs::write(&transcript, Transcript::default().encode().unwrap()).unwrap();
-        // A sparse file reaches the command snapshot's byte ceiling without
-        // retaining a large test fixture.  The first snapshot must fail before
-        // the command is executed, exactly like the Pi qualification symptom.
-        std::fs::File::create(workspace.join("oversized-source"))
-            .unwrap()
-            .set_len(MAX_COMMAND_SNAPSHOT_BYTES + 1)
-            .unwrap();
         std::fs::write(workspace.join("still-readable.txt"), "available\n").unwrap();
         let state = per_call_state_path(&run_dir, "pi-progress.json");
         publish_per_call_state(&state, 0, 0).unwrap();
-        let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_command\",\"arguments\":{\"argv\":[\"pwd\"]}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"still-readable.txt\"}}}\n";
+        let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"missing.txt\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"still-readable.txt\"}}}\n";
         let record = Options {
             mode: Mode::Record,
             workspace: workspace.clone(),
@@ -1759,7 +1840,7 @@ mod tests {
         let responses = String::from_utf8(output.clone()).unwrap();
         assert!(responses.contains("\"id\":1"));
         assert!(responses.contains("\"id\":2"));
-        assert!(responses.contains("local-tool command workspace exceeds snapshot byte bound"));
+        assert!(responses.contains("cannot read local-tool file"));
         assert!(responses.contains("available"), "{responses}");
         let bytes = std::fs::read(&transcript).unwrap();
         let recorded = Transcript::decode(&bytes).unwrap();
@@ -1767,7 +1848,7 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<Value>(bytes.split(|byte| *byte == b'\n').next().unwrap())
                 .unwrap()["failure"],
-            "local-tool command workspace exceeds snapshot byte bound"
+            "cannot read local-tool file"
         );
         let recorded_state = read_per_call_state(&state).unwrap();
         assert_eq!((recorded_state.cursor, recorded_state.events), (2, 2));
@@ -2078,11 +2159,11 @@ mod tests {
         assert_eq!(
             before.get("source.txt").and_then(|entry| match entry {
                 CommandEntry::File { bytes, .. } => Some(*bytes),
-                CommandEntry::Directory => None,
+                CommandEntry::Directory | CommandEntry::Symlink { .. } => None,
             }),
             after.get("source.txt").and_then(|entry| match entry {
                 CommandEntry::File { bytes, .. } => Some(*bytes),
-                CommandEntry::Directory => None,
+                CommandEntry::Directory | CommandEntry::Symlink { .. } => None,
             })
         );
         assert_ne!(before, after);
@@ -2253,6 +2334,10 @@ mod tests {
     #[test]
     fn protocol_identity_rejects_changed_provider_visible_tool_definitions() {
         verify_protocol_bytes(&protocol_bytes().unwrap()).unwrap();
+        verify_protocol_bytes(
+            br#"{"schema_version":1,"protocol":"asb-local-tools-v2-bounded-commands"}"#,
+        )
+        .unwrap();
         let error = verify_protocol_bytes(
             br#"{"schema_version":1,"protocol":"asb-local-tools-v1-read-only"}"#,
         )
