@@ -276,6 +276,7 @@ pub(crate) struct ExecutionContext<'a> {
     pub project_root: &'a Path,
     pub project_config: &'a crate::project::ProjectConfig,
     pub replay: bool,
+    pub max_steps: Option<u64>,
     /// Exact provider cassette identity when this execution is tape-backed.
     /// This is forwarded to guest agent preparation so adapter-owned tool
     /// replay never guesses from the loopback endpoint.

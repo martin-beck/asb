@@ -29,6 +29,7 @@ fn planned(root: &Path, destination: PathBuf) -> crate::runner::campaign::Plan {
         repeat: 1,
         concurrency: 1,
         mode: crate::planning::ExecutionMode::Record,
+        max_steps: None,
         respect_record_timings: false,
         measurement_root: None,
         replay_inputs: Vec::new(),

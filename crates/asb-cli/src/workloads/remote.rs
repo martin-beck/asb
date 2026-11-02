@@ -1022,7 +1022,7 @@ impl Session {
             network: std::env::var("ASB_BENCHMARK_NETWORK").ok(),
             artifact_output: &artifact_output,
             private_inputs,
-            request: json!({"process_lifetime":self.process_lifetime,"config":config,"connection":connection,"prompt":self.invocation.input.instructions,"timeout_seconds":self.agent_timeout.as_secs_f64(),
+            request: json!({"process_lifetime":self.process_lifetime,"config":config,"connection":connection,"prompt":self.invocation.input.instructions,"timeout_seconds":self.agent_timeout.as_secs_f64(),"max_steps":context.max_steps,
                 "project_root":"/opt/asb-project","runtime_dir":"/opt/asb-private","run_dir":"/opt/asb-private/attempt","replay":context.replay,
                 "tape_cassette":tape_cassette,
                 "tool_replay":context.tool_replay,

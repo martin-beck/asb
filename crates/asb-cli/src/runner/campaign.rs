@@ -181,6 +181,8 @@ pub(crate) struct Plan {
     pub repeat: u64,
     pub concurrency: usize,
     pub mode: planning::ExecutionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<u64>,
     pub respect_record_timings: bool,
     pub measurement_root: Option<PathBuf>,
     pub replay_inputs: Vec<ReplayInput>,

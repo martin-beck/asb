@@ -365,6 +365,7 @@ impl Inspection {
                 Some(crate::tape::Mode::Replay) => crate::planning::ExecutionMode::Replay,
                 _ => crate::planning::ExecutionMode::Live,
             },
+            max_steps: options.max_steps,
             respect_record_timings: options.respect_record_timings,
             measurement_root: measurement_root.clone(),
             replay_inputs: Vec::new(),
@@ -1091,6 +1092,38 @@ mod tests {
         let config_path = root.join("benchmark.toml");
         fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
         (root, config, config_path)
+    }
+
+    #[test]
+    fn requested_step_limit_is_bound_to_the_saved_campaign_plan() {
+        let (root, mut config, path) = planning_fixture();
+        config.agent = "goose".into();
+        fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        let prepared = Inspection::prepare_selected(
+            &path,
+            config,
+            1,
+            RunOptions {
+                max_steps: Some(200),
+                ..Default::default()
+            },
+            Some(&root.join("campaigns")),
+            None,
+        )
+        .unwrap();
+        assert_eq!(prepared.plan.max_steps, Some(200));
+        let serialized = serde_json::to_vec(&prepared.plan).unwrap();
+        let restored: Plan = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(restored.max_steps, Some(200));
+        let mut invalid = serde_json::to_value(&restored).unwrap();
+        invalid["max_steps"] = serde_json::json!(0);
+        assert!(
+            serde_json::from_value::<Plan>(invalid)
+                .unwrap()
+                .validate_layout()
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

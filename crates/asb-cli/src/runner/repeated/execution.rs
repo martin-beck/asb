@@ -125,6 +125,7 @@ impl BatchRun<'_> {
                 json: self.options.json,
                 show_output: self.options.show_output,
                 mode,
+                max_steps: self.plan.max_steps,
                 tool_mode: self.options.tool_mode,
                 tool_mode_explicit: self.options.tool_mode_explicit,
                 mcp_mode: self.options.mcp_mode,

@@ -40,6 +40,7 @@ impl Fixture {
                 authentication: Authentication::None,
             },
             prompt: "offline admission fixture".into(),
+            max_steps: None,
             project_root: self.0.join("project"),
             runtime_dir: self.0.join("runtime"),
             run_dir: self.0.join("runtime/run"),

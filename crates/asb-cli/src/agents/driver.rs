@@ -86,6 +86,8 @@ pub(crate) struct GuestRequest {
     pub config: BenchmarkConfig,
     pub connection: Connection,
     pub prompt: String,
+    #[serde(default)]
+    pub max_steps: Option<u64>,
     pub project_root: PathBuf,
     pub runtime_dir: PathBuf,
     pub run_dir: PathBuf,
@@ -555,6 +557,15 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
     let adapter = super::find(&request.config.agent).ok_or_else(|| {
         Error::Input("guest execution requires a registered agent adapter".into())
     })?;
+    if request
+        .max_steps
+        .is_some_and(|limit| limit == 0 || limit > 65533)
+        || request.max_steps.is_some() && !adapter.supports_max_steps()
+    {
+        return Err(Error::Input(
+            "guest max steps is invalid or unsupported by the selected agent".into(),
+        ));
+    }
     if !adapter.supported_endpoints().iter().any(|support| {
         support.interface == request.connection.interface
             && support
@@ -599,7 +610,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         endpoint: Some(&request.connection.base_url),
         interface: Some(request.connection.interface),
         prompt: &request.prompt,
-        max_steps: None,
+        max_steps: request.max_steps,
         native_tool_mode: request.tool_tape_cassette.as_ref().map(|_| {
             if request.tool_replay {
                 crate::tape::Mode::Replay

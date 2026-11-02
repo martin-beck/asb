@@ -53,6 +53,7 @@ raw=sys.stdin.readline()
 if not raw: closed();sys.exit(0)
 request=json.loads(raw);assert request['op']=='agent';record('agent')
 log.with_name('preparation-seconds').write_text(json.dumps(request['preparation_seconds']))
+log.with_name('agent-max-steps').write_text(json.dumps(request['request']['max_steps']))
 assert request['request']['config']['concurrency']==1
 assert request['request']['config']['workspace']=='/fixture-task'
 assert request['timeout']==1
@@ -259,6 +260,7 @@ fn actual_python_producer_and_rust_session_keep_both_grades_and_consume_close_pe
             project_root: &fixture.0,
             project_config: &project,
             replay: true,
+            max_steps: None,
             tape_cassette: None,
             tool_replay: false,
             tool_tape_cassette: None,
@@ -338,6 +340,7 @@ fn actual_python_task_loop_forwards_declared_termination_without_changing_grade_
                 project_root: &fixture.0,
                 project_config: &project,
                 replay: true,
+                max_steps: None,
                 tape_cassette: None,
                 tool_replay: false,
                 tool_tape_cassette: None,
@@ -504,6 +507,7 @@ fn unmeasured_shared_launch_requires_valid_target_and_aborts_before_cancellation
             project_root: &fixture.0,
             project_config: &project,
             replay: true,
+            max_steps: None,
             tape_cassette: None,
             tool_replay: false,
             tool_tape_cassette: None,
@@ -586,6 +590,7 @@ fn completed_guest_survives_capture_end_errors_and_still_grades_then_closes() {
             project_root: &fixture.0,
             project_config: &project,
             replay: true,
+            max_steps: None,
             tape_cassette: None,
             tool_replay: false,
             tool_tape_cassette: None,
@@ -643,6 +648,7 @@ fn prepared_protocol_preserves_output_exit_time_and_grades_only_after_completion
             project_root: &fixture.0,
             project_config: &project,
             replay: true,
+            max_steps: Some(200),
             tape_cassette: None,
             tool_replay: false,
             tool_tape_cassette: None,
@@ -657,6 +663,10 @@ fn prepared_protocol_preserves_output_exit_time_and_grades_only_after_completion
         let result =
             session.run_prepared(&mut context, &mut output, &connection, fixture.prepared());
         let result = session.settle_execution(&mut context, result).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(fixture.0.join("agent-max-steps")).unwrap(),
+            "200"
+        );
         assert_eq!(result.output.status.code(), Some(7));
         assert_eq!(result.output.stdout, b"ok");
         assert_eq!(result.output.stderr, b"diag");
@@ -693,6 +703,7 @@ fn unknown_grade_settlement_never_repeats_evaluation_or_cancellation() {
         project_root: &fixture.0,
         project_config: &project,
         replay: true,
+        max_steps: None,
         tape_cassette: None,
         tool_replay: false,
         tool_tape_cassette: None,
@@ -750,6 +761,7 @@ fn protocol_errors_preserve_original_reason_and_cancel_instead_of_grading() {
             project_root: &fixture.0,
             project_config: &project,
             replay: false,
+            max_steps: None,
             tape_cassette: None,
             tool_replay: false,
             tool_tape_cassette: None,
@@ -814,6 +826,7 @@ fn broken_human_output_does_not_cancel_a_completed_guest_submission_or_grader() 
         project_root: &fixture.0,
         project_config: &project,
         replay: true,
+        max_steps: None,
         tape_cassette: None,
         tool_replay: false,
         tool_tape_cassette: None,
@@ -865,6 +878,7 @@ fn broken_output_and_deadline_use_same_preserving_error_envelope() {
             project_root: &fixture.0,
             project_config: &project,
             replay: false,
+            max_steps: None,
             tape_cassette: None,
             tool_replay: false,
             tool_tape_cassette: None,
@@ -917,6 +931,7 @@ fn production_preparation_still_rejects_unregistered_agent_without_protocol_disp
         project_root: &fixture.0,
         project_config: &project,
         replay: false,
+        max_steps: None,
         tape_cassette: None,
         tool_replay: false,
         tool_tape_cassette: None,
@@ -967,6 +982,7 @@ fn measured_protocol_rejects_unverified_target_and_execution_end_before_start() 
             project_root: &fixture.0,
             project_config: &project,
             replay: true,
+            max_steps: None,
             tape_cassette: None,
             tool_replay: false,
             tool_tape_cassette: None,
@@ -1029,6 +1045,7 @@ fn completed_metadata_retains_unknown_timing_and_requires_valid_service_handoff(
             project_root: &fixture.0,
             project_config: &project,
             replay: true,
+            max_steps: None,
             tape_cassette: None,
             tool_replay: false,
             tool_tape_cassette: None,
@@ -1086,6 +1103,7 @@ fn completed_metadata_retains_unknown_timing_and_requires_valid_service_handoff(
             project_root: &fixture.0,
             project_config: &project,
             replay: true,
+            max_steps: None,
             tape_cassette: None,
             tool_replay: false,
             tool_tape_cassette: None,
