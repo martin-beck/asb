@@ -18,7 +18,8 @@ use std::fs;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
 
 const MAX_COMMAND_ARGUMENTS: usize = 32;
 const MAX_COMMAND_ARGUMENT_BYTES: usize = 4096;
@@ -38,16 +39,16 @@ const MAX_COMMAND_EFFECT_ENTRIES: usize = 256;
 // while exposing truncation to the model so it can use search or a narrower
 // command instead of silently reasoning from partial source.
 const MAX_MCP_READ_BYTES: usize = 48 * 1024;
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
 const STAGED_RUNTIME_EXECUTABLE: &str = "/opt/asb-runtime/asb";
 /// Bump only when a provider-visible local-tool definition or its execution
 /// semantics changes. A replay must use the same protocol that shaped its
 /// recorded provider requests; this is not a compatibility normalizer.
-const LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v5-file-search";
+const LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v6-agent-deadline";
 const LEGACY_LOCAL_TOOL_PROTOCOLS: &[&str] = &[
     "asb-local-tools-v2-bounded-commands",
     "asb-local-tools-v3-streamed-snapshots",
     "asb-local-tools-v4-binary-effects",
+    "asb-local-tools-v5-file-search",
 ];
 const TOOL_PROTOCOL_ARTIFACT: &str = "tool-protocol";
 
@@ -1397,18 +1398,15 @@ fn run_command(root: &Path, request: &Value) -> Result<Value, Error> {
             .read_to_end(&mut bytes)
             .map(|_| bytes)
     });
-    let deadline = Instant::now() + COMMAND_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Error::Run(
-                    "local-tool command exceeded its time bound".into(),
-                ));
-            }
+    // The owning benchmark controls the agent execution deadline and cleans
+    // up its process tree. A second fixed per-command deadline truncates valid
+    // long-running builds and tests before the user-selected limit.
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Run("cannot wait for local-tool command".into()));
         }
     };
     let stdout = stdout_reader
@@ -1963,6 +1961,26 @@ mod tests {
             std::fs::read_link(replay.join("link")).unwrap(),
             std::path::Path::new("new")
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "manual regression takes more than 45 seconds"]
+    fn command_can_run_past_the_previous_fixed_deadline() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-long-command-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (result, effects) = execute(
+            &root,
+            "run_command",
+            &json!({"argv":["sh","-c","sleep 46; printf finished"]}),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["stdout"], "finished");
+        assert!(effects.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2676,6 +2694,10 @@ mod tests {
         .unwrap();
         verify_protocol_bytes(
             br#"{"schema_version":1,"protocol":"asb-local-tools-v4-binary-effects"}"#,
+        )
+        .unwrap();
+        verify_protocol_bytes(
+            br#"{"schema_version":1,"protocol":"asb-local-tools-v5-file-search"}"#,
         )
         .unwrap();
         let error = verify_protocol_bytes(
