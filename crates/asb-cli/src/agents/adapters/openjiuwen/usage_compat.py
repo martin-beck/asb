@@ -138,6 +138,7 @@ _record_invocation_stack = contextvars.ContextVar(
 )
 _native_alias = "openjiuwen-native-tools-1"
 _message_cursor = 0
+_consumed_final_events = set()
 _history_cursor = 0
 _final_history = []
 _history_trace = []
@@ -222,6 +223,17 @@ def _bound_final_event(result, tool_call_id):
     if bound is not None and bound[0] is result and bound[2] == tool_call_id:
         return bound[1]
     return None
+
+def _consume_final_event(event, final_outputs):
+    # Tool dispatch order and model-context insertion order can differ when
+    # independent tools finish concurrently. The event must belong to the
+    # recorded exchange and may only be consumed once; its message is checked
+    # against the next recorded history item by the caller.
+    global _message_cursor
+    if not any(candidate is event for candidate in final_outputs) or id(event) in _consumed_final_events:
+        raise RuntimeError("ASB OpenJiuwen native replay final tool message is missing or duplicated")
+    _consumed_final_events.add(id(event))
+    _message_cursor += 1
 
 def _request_shape(value):
     if isinstance(value, str):
@@ -525,9 +537,7 @@ try:
                     envelope = json.loads(base64.b64decode(event["output_b64"]))
                     if _replay_path:
                         if _history_cursor < len(history) and history[_history_cursor].get("native"):
-                            if _message_cursor >= len(final_outputs) or event is not final_outputs[_message_cursor]:
-                                raise RuntimeError("ASB OpenJiuwen native replay final tool message is missing or out of order")
-                            _message_cursor += 1
+                            _consume_final_event(event, final_outputs)
                     else:
                         if envelope.get("message") is not None:
                             raise RuntimeError("ASB OpenJiuwen native replay has an extra final tool message")
@@ -609,9 +619,7 @@ try:
                 if recorded.get("native"):
                     if event is None:
                         raise RuntimeError("ASB OpenJiuwen native replay final native message was not inserted")
-                    if _message_cursor >= len(final_outputs) or event is not final_outputs[_message_cursor]:
-                        raise RuntimeError("ASB OpenJiuwen native replay final tool message is missing or out of order")
-                    _message_cursor += 1
+                    _consume_final_event(event, final_outputs)
                     sealed = json.loads(base64.b64decode(event["output_b64"])).get("message")
                     if sealed != expected:
                         raise RuntimeError("ASB OpenJiuwen native replay final history/native message disagrees")
