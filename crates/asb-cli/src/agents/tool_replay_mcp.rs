@@ -430,14 +430,13 @@ fn run(args: &[OsString]) -> Result<(), Error> {
 enum Incoming {
     Message(mcp_framing::Message),
     End,
-    Timeout,
 }
 trait MessageSource {
-    fn next(&mut self, timeout: Option<Duration>) -> Result<Incoming, Error>;
+    fn next(&mut self) -> Result<Incoming, Error>;
 }
 struct DirectSource<'a, T>(&'a mut T);
 impl<T: std::io::BufRead> MessageSource for DirectSource<'_, T> {
-    fn next(&mut self, _: Option<Duration>) -> Result<Incoming, Error> {
+    fn next(&mut self) -> Result<Incoming, Error> {
         Ok(match mcp_framing::read(self.0, "local-tool MCP")? {
             Some(message) => Incoming::Message(message),
             None => Incoming::End,
@@ -446,17 +445,10 @@ impl<T: std::io::BufRead> MessageSource for DirectSource<'_, T> {
 }
 struct ChannelSource(std::sync::mpsc::Receiver<Result<Option<mcp_framing::Message>, Error>>);
 impl MessageSource for ChannelSource {
-    fn next(&mut self, timeout: Option<Duration>) -> Result<Incoming, Error> {
-        let result = match timeout {
-            Some(timeout) => match self.0.recv_timeout(timeout) {
-                Ok(value) => value,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(Incoming::Timeout),
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(Incoming::End),
-            },
-            None => match self.0.recv() {
-                Ok(value) => value,
-                Err(_) => return Ok(Incoming::End),
-            },
+    fn next(&mut self) -> Result<Incoming, Error> {
+        let result = match self.0.recv() {
+            Ok(value) => value,
+            Err(_) => return Ok(Incoming::End),
         }?;
         Ok(match result {
             Some(message) => Incoming::Message(message),
@@ -541,36 +533,25 @@ fn run_with_source(
         }
     }
     let operation = (|| {
-        let mut pending: Vec<(mcp_framing::Message, Option<u64>, Instant)> = Vec::new();
+        let mut pending: Vec<(mcp_framing::Message, Option<u64>)> = Vec::new();
         let mut ended = false;
         loop {
             let ready = pending
                 .iter()
-                .position(|(request, _, _)| !defer_request(&options, &transcript, &request.value));
-            let expired = pending
-                .first()
-                .is_some_and(|(_, _, time)| time.elapsed() >= Duration::from_secs(30));
-            let selected = ready.or_else(|| {
-                (expired || ended)
-                    .then_some(0)
-                    .filter(|_| !pending.is_empty())
-            });
-            let (request, request_trace, _) = if let Some(index) = selected {
+                .position(|(request, _)| !defer_request(&options, &transcript, &request.value));
+            let selected = ready.or_else(|| ended.then_some(0).filter(|_| !pending.is_empty()));
+            let (request, request_trace) = if let Some(index) = selected {
                 pending.remove(index)
             } else {
                 if ended {
                     break;
                 }
-                let timeout = pending
-                    .first()
-                    .map(|(_, _, time)| Duration::from_secs(30).saturating_sub(time.elapsed()));
-                let request = match source.next(timeout)? {
+                let request = match source.next()? {
                     Incoming::Message(request) => request,
                     Incoming::End => {
                         ended = true;
                         continue;
                     }
-                    Incoming::Timeout => continue,
                 };
                 let request_trace = metadata_trace
                     .as_mut()
@@ -587,7 +568,7 @@ fn run_with_source(
                         )
                     })
                     .transpose()?;
-                pending.push((request, request_trace, Instant::now()));
+                pending.push((request, request_trace));
                 continue;
             };
             let response = match respond(&options, &mut transcript, &request.value) {
