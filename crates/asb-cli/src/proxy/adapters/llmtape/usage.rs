@@ -4,14 +4,54 @@
 //! complete successful cassette responses into normalized usage observations.
 
 use crate::usage::TokenUsage;
+use std::io::{BufRead, BufReader, Read};
+use std::path::Path;
+
+// Bound individual wire records while allowing long recordings with many calls.
+const MAX_RECORD_BYTES: u64 = 16 * 1024 * 1024;
+
+pub(crate) fn from_file(path: &Path, input_includes_cache: bool) -> TokenUsage {
+    let Ok(file) = std::fs::File::open(path) else {
+        return TokenUsage::default();
+    };
+    let mut reader = BufReader::new(file);
+    let lines = std::iter::from_fn(move || {
+        let mut bytes = Vec::new();
+        match reader
+            .by_ref()
+            .take(MAX_RECORD_BYTES + 1)
+            .read_until(b'\n', &mut bytes)
+        {
+            Ok(0) => None,
+            Ok(_) if bytes.len() as u64 <= MAX_RECORD_BYTES => {
+                Some(String::from_utf8(bytes).map_err(|_| ()))
+            }
+            _ => Some(Err(())),
+        }
+    });
+    from_lines(lines, input_includes_cache)
+}
 
 /// A cassette has one response per request. SSE usage snapshots within one
 /// response are cumulative, not separate calls; only sum across responses.
 pub(crate) fn from_cassette(text: &str, input_includes_cache: bool) -> TokenUsage {
+    from_lines(
+        text.lines().map(|line| Ok(line.to_owned())),
+        input_includes_cache,
+    )
+}
+
+fn from_lines(
+    lines: impl Iterator<Item = Result<String, ()>>,
+    input_includes_cache: bool,
+) -> TokenUsage {
     let mut sum = TokenUsage::default();
     let mut cache_complete = true;
-    for line in text.lines() {
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+    for line in lines {
+        let Ok(line) = line else {
+            return TokenUsage::default();
+        };
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
             return TokenUsage::default();
         };
         let Some(response) = record.get("response") else {
@@ -118,4 +158,42 @@ pub(crate) fn from_cassette(text: &str, input_includes_cache: bool) -> TokenUsag
         sum.cached_tokens = None;
     }
     sum.with_derived_total()
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn large_recording_is_streamed_and_truncation_remains_unknown() {
+        let path = std::env::temp_dir().join(format!("asb-large-usage-{}", std::process::id()));
+        let mut file = std::fs::File::create(&path).unwrap();
+        let record = serde_json::json!({
+            "request": {"url": "/responses", "padding": "x".repeat(1024 * 1024)},
+            "response": {"status": 200, "body": "{\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}"}
+        }).to_string();
+        for _ in 0..17 {
+            writeln!(file, "{record}").unwrap();
+        }
+        file.flush().unwrap();
+        let usage = from_file(&path, false);
+        assert_eq!(usage.input_tokens, Some(51));
+        assert_eq!(usage.output_tokens, Some(34));
+        assert_eq!(usage.total_tokens, Some(85));
+        let reported = crate::usage::from_sources_with_recorder(
+            "openrouter",
+            "codex",
+            "",
+            "",
+            Some(&path),
+            crate::proxy::default_recorder(),
+        );
+        assert_eq!(reported.total_tokens, Some(85));
+        assert_eq!(reported.source.as_deref(), Some("cassette"));
+        writeln!(file, "{{\"response\":").unwrap();
+        file.flush().unwrap();
+        assert!(!from_file(&path, false).any());
+        std::fs::remove_file(path).unwrap();
+    }
 }

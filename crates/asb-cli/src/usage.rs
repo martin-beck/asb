@@ -46,11 +46,9 @@ pub(crate) fn from_sources_with_recorder(
     // adapter or hook leaves usage unknown instead of parsing task text.
     let output_usage = adapter_output_usage(crate::agents::find(agent), stdout, stderr, inclusive);
     let mut cassette_usage = TokenUsage::default();
-    if let Some(path) = cassette
-        && let Ok(text) = read_bounded_text(path, 16 * 1024 * 1024)
-    {
+    if let Some(path) = cassette {
         cassette_usage = recorder.map_or_else(TokenUsage::default, |recorder| {
-            recorder.recorded_usage(&text, inclusive)
+            recorder.recorded_usage_file(path, inclusive)
         });
     }
     if cassette_usage.input_tokens.is_some() && cassette_usage.output_tokens.is_some() {
@@ -536,7 +534,7 @@ fn parse_token_count(value: &str) -> Option<u64> {
     })
 }
 
-fn read_bounded_text(path: &Path, max_bytes: u64) -> Result<String, std::io::Error> {
+pub(crate) fn read_bounded_text(path: &Path, max_bytes: u64) -> Result<String, std::io::Error> {
     let file = File::open(path)?;
     let mut bytes = Vec::new();
     file.take(max_bytes + 1).read_to_end(&mut bytes)?;
