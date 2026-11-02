@@ -907,8 +907,9 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             !transcript_truncated,
         ),
         token_usage: usage,
-        steps: super::find(&request.config.agent)
-            .and_then(|adapter| adapter.step_count(&stdout, &stderr)),
+        steps: adapter
+            .step_count(&stdout, &stderr)
+            .or_else(|| adapter.guest_step_count(&request.run_dir)),
         // Large replay sidecars must cross the guest boundary as verified
         // files.  Embedding their byte vectors would base64-expand them into
         // the one-megabyte controller frame.
