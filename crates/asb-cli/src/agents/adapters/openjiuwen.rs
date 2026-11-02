@@ -995,6 +995,10 @@ async def main():
     async def concurrent_context(label):
         tool = ReadFileTool()
         output = await tool.invoke({{"context": label}})
+        # Both calls are dispatched in order, but their final context messages
+        # are inserted in the opposite order when the first call is delayed.
+        if label == "first":
+            await asyncio.sleep(0.03)
         tool_call = type("ToolCall", (), {{"id": "concurrent-" + label}})()
         AbilityManager._render_tool_result(tool, tool_call, output)
         return await ReActAgent()._execute_tool_call(
