@@ -93,9 +93,12 @@ impl Transcript {
                     "local-tool transcript event exceeds bound".into(),
                 ));
             }
-            serde_json::to_writer(&mut *output, event)
+            let mut buffered = std::io::BufWriter::new(&mut *output);
+            serde_json::to_writer(&mut buffered, event)
                 .map_err(|_| Error::Io("cannot write local-tool transcript".into()))?;
-            output.write_all(b"\n").map_err(crate::io_error)?;
+            use std::io::Write as _;
+            buffered.write_all(b"\n").map_err(crate::io_error)?;
+            buffered.flush().map_err(crate::io_error)?;
         }
         Ok(())
     }
