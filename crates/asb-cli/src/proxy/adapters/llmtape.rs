@@ -1131,6 +1131,60 @@ mod tests {
     }
 
     #[test]
+    fn hermes_replay_skips_only_its_recorded_capability_probes() {
+        let root = test_root();
+        let cassette = root.join("hermes-probes.jsonl");
+        let body = r#"{"model":"m","messages":[{"content":"hello"}]}"#;
+        let interaction = |method: &str, url: &str, body: Option<&str>| {
+            serde_json::json!({
+                "request":{"method":method,"url":url,"body":body},
+                "response":{"status":200,"headers":{},"body":"{}"}
+            })
+        };
+        let make_session = || {
+            Session::start_for_agent(
+                Mode::Replay,
+                &cassette,
+                None,
+                false,
+                Path::new("/tmp/workspace"),
+                Some("hermes"),
+                None,
+            )
+            .unwrap()
+        };
+        let probes = ["/v1/props", "/props", "/version"];
+        let rows: Vec<_> = probes
+            .iter()
+            .map(|path| interaction("GET", path, None).to_string())
+            .chain(std::iter::once(
+                interaction("POST", "/v1/chat/completions", Some(body)).to_string(),
+            ))
+            .collect();
+        std::fs::write(&cassette, rows.join("\n") + "\n").unwrap();
+        let session = make_session();
+        assert!(request(&session, body).contains("200 OK"));
+        assert!(session.stop().is_ok());
+
+        // Similar paths and non-GET requests remain required interactions.
+        for (method, path) in [("GET", "/v1/props/private"), ("POST", "/version")] {
+            std::fs::write(
+                &cassette,
+                format!(
+                    "{}\n{}\n",
+                    interaction(method, path, None),
+                    interaction("POST", "/v1/chat/completions", Some("different"))
+                ),
+            )
+            .unwrap();
+            let session = make_session();
+            assert!(request(&session, body).contains("409 Conflict"));
+            assert!(session.stop().is_err());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn replay_waits_after_skipping_a_recorded_probe() {
         let root = test_root();
         let cassette = root.join("probe-ordered.jsonl");
