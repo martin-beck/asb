@@ -12,6 +12,9 @@ from asb_swebench import (CatalogError, MAX_PATCH_BYTES, agent_instruction,
 from asb_swebench_sources import build_image, resolve_image
 from asb_resources import ResourceJournal
 
+SUBMISSION_GIT_DIR = "/opt/asb-swebench-baseline.git"
+SUBMISSION_WORKTREE = "/testbed"
+
 
 class SweBenchTask:
     def __init__(self, client, catalog_path, task_id, artifacts):
@@ -57,6 +60,12 @@ class SweBenchTask:
                 raise CatalogError("prepared repository does not match the official base commit")
             if self.checked(["git", "status", "--porcelain", "--untracked-files=all"]).strip():
                 raise CatalogError("prepared task repository is not clean")
+            # Keep an independent copy of the verified base Git metadata for
+            # submission generation. Agents may modify or delete their own
+            # .git directory; that must not destroy the original comparison.
+            self.checked(["cp", "-a", f"{CONTAINER_WORKDIR}/.git", SUBMISSION_GIT_DIR])
+            self.checked(["git", f"--git-dir={SUBMISSION_GIT_DIR}",
+                          f"--work-tree={CONTAINER_WORKDIR}", "cat-file", "-e", base + "^{commit}"])
             self.invocation = {
                 "identity": {"workload": self.catalog["workload"], "task_id": self.task_id,
                              "attempt_id": self.attempt, "dataset": self.catalog["dataset"]},
@@ -85,13 +94,14 @@ class SweBenchTask:
     def capture_submission(self):
         if self.invocation is None:
             raise ExecutionError("task must be prepared before capturing a submission")
-        untracked = self.checked(["git", "ls-files", "--others", "--exclude-standard", "-z"], MAX_PATCH_BYTES)
+        git = ["git", f"--git-dir={SUBMISSION_GIT_DIR}", f"--work-tree={SUBMISSION_WORKTREE}"]
+        untracked = self.checked([*git, "ls-files", "--others", "--exclude-standard", "-z"], MAX_PATCH_BYTES)
         paths = [path.decode("utf-8") for path in untracked.split(b"\x00") if path]
         if len(paths) > 10000 or sum(len(path.encode()) for path in paths) > 512 * 1024:
             raise ExecutionError("submission contains too many untracked paths")
         if paths:
-            self.checked(["git", "add", "--intent-to-add", "--", *paths])
-        patch = self.checked(["git", "-c", "core.fsmonitor=false", "diff", "--binary", "--no-ext-diff",
+            self.checked([*git, "add", "--intent-to-add", "--", *paths])
+        patch = self.checked([*git, "-c", "core.fsmonitor=false", "diff", "--binary", "--no-ext-diff",
                               "--no-textconv", self.row["base_commit"], "--"], MAX_PATCH_BYTES)
         path = self.artifacts / "candidate.patch"
         atomic_write(path, patch)
