@@ -153,10 +153,10 @@ fn prepare_tool_transport(
             })?;
             transcript
         }
-        // The generic guest boundary stages the selected opaque replay
-        // sidecar at its private root. Mini-SWE owns its filename and uses it
-        // only through this adapter-local environment extension.
-        crate::tape::Mode::Replay => directory.join("local-tools.jsonl"),
+        // The staged sidecar retains the selected replica's cassette suffix.
+        crate::tape::Mode::Replay => {
+            super::super::tool_replay_mcp::replay_transcript(context, tape.cassette)?
+        }
     };
     context
         .command
@@ -579,7 +579,7 @@ mod tests {
         let workspace = root.join("workspace");
         let run_dir = root.join("run");
         std::fs::create_dir_all(&workspace).unwrap();
-        let cassette = root.join("record.jsonl");
+        let cassette = root.join("replay.jsonl");
         let connection = crate::endpoint::Connection {
             interface: crate::endpoint::Interface::OpenAiChat,
             base_url: "http://127.0.0.1:4321/v1".into(),
@@ -658,6 +658,35 @@ mod tests {
             replay_environment.get("ASB_MINI_SWE_TOOL_MODE"),
             Some(&"replay".into())
         );
+        for replica in 1..=4 {
+            let cassette = root.join(format!("replay-concurrency-{replica}.jsonl"));
+            let mut command = Command::new("mini");
+            ADAPTER
+                .prepare(&mut PreparationContext {
+                    command: &mut command,
+                    model: "fixture-model",
+                    connection: &connection,
+                    workspace: &workspace,
+                    runtime_dir: &runtime,
+                    run_dir: &run_dir,
+                    mcp_servers: &[],
+                    mcp_tape: None,
+                    tape: Some(super::super::TapeContext {
+                        mode: crate::tape::Mode::Replay,
+                        cassette: &cassette,
+                    }),
+                })
+                .unwrap();
+            assert_eq!(
+                environment(&command).get("ASB_MINI_SWE_TOOL_TAPE"),
+                Some(
+                    &root
+                        .join(format!("local-tools-concurrency-{replica}.jsonl"))
+                        .to_string_lossy()
+                        .into_owned()
+                )
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

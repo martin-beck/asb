@@ -375,7 +375,10 @@ pub(crate) fn runtime_program(staged: Option<std::ffi::OsString>) -> Result<Path
     })
 }
 
-fn replay_transcript(context: &PreparationContext<'_>, cassette: &Path) -> Result<PathBuf, Error> {
+pub(super) fn replay_transcript(
+    context: &PreparationContext<'_>,
+    cassette: &Path,
+) -> Result<PathBuf, Error> {
     let name = cassette
         .file_name()
         .and_then(|name| name.to_str())
