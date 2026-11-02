@@ -27,9 +27,19 @@ function object(value) {
 
 export function normalizeRequest(request) {
   const value = request?.body;
-  if (!request?.url?.includes("/messages") || !object(value) || !Array.isArray(value.messages)) {
+  if (!object(value) || !Array.isArray(value.messages)) {
     return value;
   }
+  const visit = (entry) => {
+    if (typeof entry === "string") return entry
+      .replace(/(\/bash_)[0-9a-f]{8,}\b/gi, "$1<asb-openjiuwen-shell>")
+      .replace(/bash_outputs\/bash_[0-9a-f]{12}\.txt/gi, "bash_outputs/<asb-openjiuwen-bash-output>.txt");
+    if (Array.isArray(entry)) return entry.map(visit);
+    if (object(entry)) for (const key of Object.keys(entry)) entry[key] = visit(entry[key]);
+    return entry;
+  };
+  value.messages = value.messages.map(visit);
+  if (!request?.url?.includes("/messages")) return value;
   for (let index = 0; index < value.messages.length; index += 1) {
     const resultTurn = value.messages[index];
     if (!object(resultTurn) || resultTurn.role !== "user" || !Array.isArray(resultTurn.content)) continue;

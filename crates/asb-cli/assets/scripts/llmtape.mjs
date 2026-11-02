@@ -412,10 +412,6 @@ function normalizeCassetteBody(body, url = "") {
     .replace(/original token count: \d+/g, "original token count: <asb-token-count>")
     .replace(/Total output lines: \d+/g, "Total output lines: <asb-line-count>")
     .replace(/codex-arg[A-Za-z0-9_-]+/g, "codex-arg<asb-random>")
-    // OpenJiuwen returns a process-local shell transcript basename through
-    // later Anthropic turns. Its hexadecimal suffix is regenerated for each
-    // client process; scope this to the exact slash-delimited component.
-    .replace(/(\/bash_)[0-9a-f]{8,}\b/gi, "$1<asb-openjiuwen-shell>")
     // OpenHands persists a generated conversation directory and its generated
     // immediate subagent directory in later provider history. These IDs are
     // created afresh for every agent process, so scope normalization to this
@@ -454,11 +450,6 @@ function normalizeCassetteBody(body, url = "") {
     .replace(/"call_<asb-call>":/g, '"call_id":')
     .replace(/\bmsg_resp_[A-Za-z0-9_-]+/g, "msg_resp_<asb-response>")
     .replace(/Chunk ID: [0-9a-f]+/gi, "Chunk ID: <asb-chunk>")
-    // OpenJiuwen persists a bounded Bash result beneath a generated filename
-    // before forwarding its preview to the model.  The basename is recreated
-    // on replay; retain the directory, extension, and every preview byte while
-    // normalizing only this documented twelve-hex filename convention.
-    .replace(/bash_outputs\/bash_[0-9a-f]{12}\.txt/gi, "bash_outputs/<asb-openjiuwen-bash-output>.txt")
     .replace(/((?:\b\d+ (?:failed|passed|skipped|deselected|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1<asb-elapsed>")
     // pip's download progress embeds live transfer throughput and ETA after
     // the already-significant artifact size. Keep the package and byte count

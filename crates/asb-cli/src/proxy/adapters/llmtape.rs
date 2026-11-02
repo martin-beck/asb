@@ -1869,12 +1869,39 @@ mod tests {
         });
         std::fs::write(&cassette, format!("{line}\n")).unwrap();
         let replayed = recorded.replace("bash_2ea5c8b331cb.txt", "bash_a0865e8bb19c.txt");
-        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let without_adapter = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&without_adapter, &replayed).contains("409 Conflict"));
+        assert!(
+            without_adapter
+                .stop()
+                .unwrap_err()
+                .to_string()
+                .contains("rejected")
+        );
+        let session = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("openjiuwen"),
+            None,
+        )
+        .unwrap();
         assert!(request(&session, &replayed).contains("200 OK"));
         session.stop().unwrap();
 
         let changed_preview = replayed.replace("resolved", "failed");
-        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let session = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("openjiuwen"),
+            None,
+        )
+        .unwrap();
         assert!(request(&session, &changed_preview).contains("409 Conflict"));
         assert!(session.stop().unwrap_err().to_string().contains("rejected"));
         std::fs::remove_dir_all(root).unwrap();
@@ -2238,12 +2265,30 @@ mod tests {
         std::fs::write(&cassette, format!("{line}\n")).unwrap();
 
         let replayed = recorded.replace("eb4149008", "6c88783c4");
-        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let session = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("openjiuwen"),
+            None,
+        )
+        .unwrap();
         assert!(request_to(&session, "/v1/messages", &replayed).contains("200 OK"));
         session.stop().unwrap();
 
         let changed_text = replayed.replace("artifacts", "changed-artifacts");
-        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let session = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("openjiuwen"),
+            None,
+        )
+        .unwrap();
         assert!(request_to(&session, "/v1/messages", &changed_text).contains("409 Conflict"));
         assert!(session.stop().unwrap_err().to_string().contains("rejected"));
         std::fs::remove_dir_all(root).unwrap();
