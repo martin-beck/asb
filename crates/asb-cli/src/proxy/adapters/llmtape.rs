@@ -1676,7 +1676,16 @@ mod tests {
             "/opt/asb-private/agent-state/home/.qwen/tmp/427298c01319355aae99da720b647df7cd291b9e3d2f3b5950ed35fb285aaf3f/tool-results/call_193d25ef253b4045a147311558349385.txt",
             "/opt/asb-private/agent-state/home/.qwen/tmp/427298c01319355aae99da720b647df7cd291b9e3d2f3b5950ed35fb285aaf3f/tool-results/asb-replay-1891570-<asb-timestamp>-4.txt",
         );
-        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let session = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("qwen-code"),
+            None,
+        )
+        .unwrap();
         assert!(request(&session, &replayed).contains("200 OK"));
         session.stop().unwrap();
 
@@ -1684,7 +1693,16 @@ mod tests {
             "cd15fb964c709e38041ea1ae54f12add71bf2c7ac8c8167883326629ccd06745",
             "dd15fb964c709e38041ea1ae54f12add71bf2c7ac8c8167883326629ccd06745",
         );
-        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let session = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("qwen-code"),
+            None,
+        )
+        .unwrap();
         assert!(request(&session, &changed_digest).contains("409 Conflict"));
         assert!(session.stop().unwrap_err().to_string().contains("rejected"));
         std::fs::remove_dir_all(root).unwrap();
@@ -1707,11 +1725,38 @@ mod tests {
         });
         std::fs::write(&cassette, format!("{line}\n")).unwrap();
         let replayed = recorded.replace(original, replay);
-        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let without_adapter = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&without_adapter, &replayed).contains("409 Conflict"));
+        assert!(
+            without_adapter
+                .stop()
+                .unwrap_err()
+                .to_string()
+                .contains("rejected")
+        );
+        let session = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("qwen-code"),
+            None,
+        )
+        .unwrap();
         assert!(request(&session, &replayed).contains("200 OK"));
         session.stop().unwrap();
         let changed_digest = replayed.replace("abc123", "abc124");
-        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let session = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("qwen-code"),
+            None,
+        )
+        .unwrap();
         assert!(request(&session, &changed_digest).contains("409 Conflict"));
         assert!(session.stop().unwrap_err().to_string().contains("rejected"));
         std::fs::remove_dir_all(root).unwrap();
@@ -1734,14 +1779,32 @@ mod tests {
         });
         std::fs::write(&cassette, format!("{line}\n")).unwrap();
         let replayed = recorded.replace(original, replay);
-        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let session = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("qwen-code"),
+            None,
+        )
+        .unwrap();
         assert!(request(&session, &replayed).contains("200 OK"));
         session.stop().unwrap();
         for changed in [
             replayed.replace("abc123", "abc124"),
             replayed.replace("Preview: original", "Preview: changed"),
         ] {
-            let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+            let session = Session::start_for_agent(
+                Mode::Replay,
+                &cassette,
+                None,
+                false,
+                &root,
+                Some("qwen-code"),
+                None,
+            )
+            .unwrap();
             assert!(request(&session, &changed).contains("409 Conflict"));
             assert!(session.stop().unwrap_err().to_string().contains("rejected"));
         }
