@@ -43,8 +43,11 @@ const STAGED_RUNTIME_EXECUTABLE: &str = "/opt/asb-runtime/asb";
 /// Bump only when a provider-visible local-tool definition or its execution
 /// semantics changes. A replay must use the same protocol that shaped its
 /// recorded provider requests; this is not a compatibility normalizer.
-const LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v3-streamed-snapshots";
-const LEGACY_LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v2-bounded-commands";
+const LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v4-binary-effects";
+const LEGACY_LOCAL_TOOL_PROTOCOLS: &[&str] = &[
+    "asb-local-tools-v2-bounded-commands",
+    "asb-local-tools-v3-streamed-snapshots",
+];
 const TOOL_PROTOCOL_ARTIFACT: &str = "tool-protocol";
 
 #[derive(Deserialize, Serialize)]
@@ -229,7 +232,8 @@ pub(crate) fn verify_protocol_bytes(bytes: &[u8]) -> Result<(), Error> {
     let manifest: ToolProtocol = serde_json::from_slice(bytes)
         .map_err(|_| Error::Run("sealed local-tool protocol identity is malformed".into()))?;
     if manifest.schema_version != 1
-        || ![LOCAL_TOOL_PROTOCOL, LEGACY_LOCAL_TOOL_PROTOCOL].contains(&manifest.protocol.as_str())
+        || !(manifest.protocol == LOCAL_TOOL_PROTOCOL
+            || LEGACY_LOCAL_TOOL_PROTOCOLS.contains(&manifest.protocol.as_str()))
     {
         return Err(Error::Run(
             "sealed local-tool protocol differs from this ASB build; replay requires the recorded tool definition and execution semantics".into(),
@@ -1271,18 +1275,47 @@ fn command_effects(
     }
     let mut content_bytes = 0usize;
     for (path, entry) in after {
-        if before.get(path) != Some(entry) && matches!(entry, CommandEntry::File { .. }) {
-            let content = tool_replay::read_text(root, path)?;
+        if before.get(path) != Some(entry)
+            && let CommandEntry::File { bytes, sha256 } = entry
+        {
+            let remaining = MAX_COMMAND_EFFECT_BYTES.saturating_sub(content_bytes);
+            let mut content = Vec::new();
+            fs::File::open(root.join(path))
+                .map_err(|_| Error::Run("cannot read local-tool command effect".into()))?
+                .take(remaining as u64 + 1)
+                .read_to_end(&mut content)
+                .map_err(|_| Error::Run("cannot read local-tool command effect".into()))?;
             content_bytes = content_bytes
                 .checked_add(content.len())
                 .ok_or_else(|| Error::Run("local-tool command effects exceed bound".into()))?;
             if content_bytes > MAX_COMMAND_EFFECT_BYTES {
                 return Err(Error::Run("local-tool command effects exceed bound".into()));
             }
-            effects.push(Effect::WriteText {
-                path: path.clone(),
-                content,
-            });
+            if content.len() as u64 != *bytes
+                || <[u8; 32]>::from(Sha256::digest(&content)) != *sha256
+            {
+                return Err(Error::Run(
+                    "local-tool command effect changed during capture".into(),
+                ));
+            }
+            match String::from_utf8(content) {
+                Ok(content) => effects.push(Effect::WriteText {
+                    path: path.clone(),
+                    content,
+                }),
+                Err(error) => {
+                    let mut content_hex = String::with_capacity(error.as_bytes().len() * 2);
+                    use std::fmt::Write as _;
+                    for byte in error.into_bytes() {
+                        write!(&mut content_hex, "{byte:02x}")
+                            .expect("writing to a string cannot fail");
+                    }
+                    effects.push(Effect::WriteBinary {
+                        path: path.clone(),
+                        content_hex,
+                    });
+                }
+            }
         }
     }
     if effects.len() > MAX_COMMAND_EFFECT_ENTRIES {
@@ -1921,6 +1954,61 @@ mod tests {
             std::fs::read_link(replay.join("link")).unwrap(),
             std::path::Path::new("new")
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn command_records_and_replays_binary_output_files() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-binary-workspace-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let replay = root.join("replay");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&replay).unwrap();
+        let (result, effects) = execute(
+            &workspace,
+            "run_command",
+            &json!({"argv":["python3","-c","open('plot.bin','wb').write(bytes([0,255,128,65]))"]}),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(
+            effects,
+            vec![Effect::WriteBinary {
+                path: "plot.bin".into(),
+                content_hex: "00ff8041".into()
+            }]
+        );
+        for effect in &effects {
+            tool_replay::apply(&replay, effect).unwrap();
+        }
+        assert_eq!(
+            std::fs::read(replay.join("plot.bin")).unwrap(),
+            [0, 255, 128, 65]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oversized_binary_effect_is_reported_instead_of_truncated() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-binary-effect-limit-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let before = command_snapshot(&root).unwrap();
+        std::fs::write(
+            root.join("large.bin"),
+            vec![0xff; MAX_COMMAND_EFFECT_BYTES + 1],
+        )
+        .unwrap();
+        let after = command_snapshot(&root).unwrap();
+        let error = command_effects(&before, &after, &root)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("command effects exceed bound"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2571,6 +2659,10 @@ mod tests {
         verify_protocol_bytes(&protocol_bytes().unwrap()).unwrap();
         verify_protocol_bytes(
             br#"{"schema_version":1,"protocol":"asb-local-tools-v2-bounded-commands"}"#,
+        )
+        .unwrap();
+        verify_protocol_bytes(
+            br#"{"schema_version":1,"protocol":"asb-local-tools-v3-streamed-snapshots"}"#,
         )
         .unwrap();
         let error = verify_protocol_bytes(
