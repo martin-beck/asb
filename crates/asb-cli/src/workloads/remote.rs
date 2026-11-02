@@ -163,6 +163,10 @@ fn local_tool_sidecar(path: &Path) -> Result<PathBuf, String> {
     replay_sidecar(path, "local-tools", "jsonl")
 }
 
+fn tool_protocol_sidecar(path: &Path) -> Result<PathBuf, String> {
+    replay_sidecar(path, "tool-protocol", "json")
+}
+
 fn deterministic_manifest_sidecar(path: &Path) -> Result<PathBuf, String> {
     replay_sidecar(path, "determinism-manifest", "json")
 }
@@ -199,6 +203,7 @@ fn replay_private_inputs(
         return Ok(Vec::new());
     };
     let local_tools = local_tool_sidecar(path)?;
+    let tool_protocol = tool_protocol_sidecar(path)?;
     let manifest = deterministic_manifest_sidecar(path)?;
     let native_trace = native_trace_sidecar(path)?;
     let mut inputs = Vec::new();
@@ -231,6 +236,7 @@ fn replay_private_inputs(
     };
     for (source, description) in [
         (local_tools, "sealed local-tool replay transcript"),
+        (tool_protocol, "sealed local-tool protocol identity"),
         (manifest, "sealed deterministic replay manifest"),
     ] {
         match std::fs::symlink_metadata(&source) {
@@ -1530,17 +1536,20 @@ mod tests {
         std::fs::create_dir_all(&batch).unwrap();
         std::fs::write(batch.join("replay-2.jsonl"), b"provider tape\n").unwrap();
         std::fs::write(batch.join("local-tools-2.jsonl"), b"{}\n").unwrap();
+        std::fs::write(batch.join("tool-protocol-2.json"), b"protocol\n").unwrap();
         std::fs::write(batch.join("determinism-manifest-2.json"), b"{}\n").unwrap();
         std::fs::write(batch.join("native-trace-2.jsonl"), b"").unwrap();
         let inputs =
             replay_private_inputs(Some(&batch.join("replay-2.jsonl")), true, &[], false).unwrap();
-        assert_eq!(inputs.len(), 3);
+        assert_eq!(inputs.len(), 4);
         assert_eq!(inputs[0].target, "local-tools-2.jsonl");
         assert_eq!(inputs[0].bytes, 3);
         assert_eq!(inputs[0].sha256, crate::cassette::digest(b"{}\n"));
-        assert_eq!(inputs[1].target, "determinism-manifest-2.json");
-        assert_eq!(inputs[2].target, "native-trace-2.jsonl");
-        assert_eq!(inputs[2].bytes, 0);
+        assert_eq!(inputs[1].target, "tool-protocol-2.json");
+        assert_eq!(inputs[1].sha256, crate::cassette::digest(b"protocol\n"));
+        assert_eq!(inputs[2].target, "determinism-manifest-2.json");
+        assert_eq!(inputs[3].target, "native-trace-2.jsonl");
+        assert_eq!(inputs[3].bytes, 0);
         assert!(
             replay_private_inputs(Some(&batch.join("replay-2.jsonl")), false, &[], false)
                 .unwrap()
@@ -1611,6 +1620,26 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_private_input_rejects_symlinked_tool_protocol() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-replay-private-protocol-symlink-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("identity.json"), b"{}\n").unwrap();
+        std::os::unix::fs::symlink(root.join("identity.json"), root.join("tool-protocol.json"))
+            .unwrap();
+        let error = match replay_private_inputs(Some(&root.join("replay.jsonl")), true, &[], false)
+        {
+            Ok(_) => panic!("symlinked protocol identity must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("sealed local-tool protocol identity"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
