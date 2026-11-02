@@ -583,7 +583,16 @@ pub(crate) fn search_text(
     };
     let mut files = 0usize;
     let mut matches = Vec::new();
-    search_directory(&root, &start, query, 0, &mut files, &mut matches)?;
+    if !start.is_empty()
+        && std::fs::symlink_metadata(root.join(&start))
+            .map_err(|_| Error::Run("cannot inspect local-tool search path".into()))?
+            .is_file()
+    {
+        let text = read_text(&root, &start)?;
+        append_search_matches(&start, &text, query, &mut matches)?;
+    } else {
+        search_directory(&root, &start, query, 0, &mut files, &mut matches)?;
+    }
     Ok(matches)
 }
 
@@ -628,15 +637,25 @@ fn search_directory(
             // only observation surface; they cannot change replay behavior.
             continue;
         };
-        for (index, line) in text.lines().enumerate() {
-            if line.contains(query) {
-                if line.len() > 4096 {
-                    return Err(Error::Run("local-tool search line exceeds bound".into()));
-                }
-                matches.push((child.clone(), index as u64 + 1, line.into()));
-                if matches.len() >= MAX_SEARCH_MATCHES {
-                    break;
-                }
+        append_search_matches(&child, &text, query, matches)?;
+    }
+    Ok(())
+}
+
+fn append_search_matches(
+    path: &str,
+    text: &str,
+    query: &str,
+    matches: &mut Vec<(String, u64, String)>,
+) -> Result<(), Error> {
+    for (index, line) in text.lines().enumerate() {
+        if line.contains(query) {
+            if line.len() > 4096 {
+                return Err(Error::Run("local-tool search line exceeds bound".into()));
+            }
+            matches.push((path.to_owned(), index as u64 + 1, line.into()));
+            if matches.len() >= MAX_SEARCH_MATCHES {
+                break;
             }
         }
     }
@@ -1066,6 +1085,26 @@ mod tests {
         assert!(!entries.iter().any(|entry| entry.0 == "outside"));
         assert!(list_directory(&root, "../outside").is_err());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn text_search_accepts_an_explicit_file_path() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-file-search-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "first\nfind needle\nlast needle\n").unwrap();
+        assert_eq!(
+            search_text(&root, "src/lib.rs", "needle").unwrap(),
+            vec![
+                ("src/lib.rs".into(), 2, "find needle".into()),
+                ("src/lib.rs".into(), 3, "last needle".into()),
+            ]
+        );
+        assert!(search_text(&root, "src/missing.rs", "needle").is_err());
+        assert!(search_text(&root, "../outside", "needle").is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

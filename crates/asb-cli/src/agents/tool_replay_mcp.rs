@@ -43,10 +43,11 @@ const STAGED_RUNTIME_EXECUTABLE: &str = "/opt/asb-runtime/asb";
 /// Bump only when a provider-visible local-tool definition or its execution
 /// semantics changes. A replay must use the same protocol that shaped its
 /// recorded provider requests; this is not a compatibility normalizer.
-const LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v4-binary-effects";
+const LOCAL_TOOL_PROTOCOL: &str = "asb-local-tools-v5-file-search";
 const LEGACY_LOCAL_TOOL_PROTOCOLS: &[&str] = &[
     "asb-local-tools-v2-bounded-commands",
     "asb-local-tools-v3-streamed-snapshots",
+    "asb-local-tools-v4-binary-effects",
 ];
 const TOOL_PROTOCOL_ARTIFACT: &str = "tool-protocol";
 
@@ -1884,6 +1885,14 @@ mod tests {
         let (result, effects) = execute(&root, "search_text", &json!({"query":"answer"})).unwrap();
         assert_eq!(effects, Vec::<Effect>::new());
         assert_eq!(result["matches"][0]["path"], "answer.txt");
+        let (file_result, file_effects) = execute(
+            &root,
+            "search_text",
+            &json!({"path":"answer.txt","query":"answer"}),
+        )
+        .unwrap();
+        assert_eq!(file_effects, Vec::<Effect>::new());
+        assert_eq!(file_result["matches"][0]["path"], "answer.txt");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2663,6 +2672,10 @@ mod tests {
         .unwrap();
         verify_protocol_bytes(
             br#"{"schema_version":1,"protocol":"asb-local-tools-v3-streamed-snapshots"}"#,
+        )
+        .unwrap();
+        verify_protocol_bytes(
+            br#"{"schema_version":1,"protocol":"asb-local-tools-v4-binary-effects"}"#,
         )
         .unwrap();
         let error = verify_protocol_bytes(
