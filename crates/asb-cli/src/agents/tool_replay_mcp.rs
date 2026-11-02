@@ -1007,6 +1007,7 @@ fn execute(root: &Path, tool: &str, request: &Value) -> Result<(Value, Vec<Effec
 enum CommandEntry {
     Directory,
     File { bytes: u64, sha256: [u8; 32] },
+    Symlink { target: String },
 }
 
 type CommandSnapshot = BTreeMap<String, CommandEntry>;
@@ -1046,11 +1047,15 @@ fn command_snapshot(root: &Path) -> Result<CommandSnapshot, Error> {
             let metadata = fs::symlink_metadata(&path)
                 .map_err(|_| Error::Run("cannot inspect local-tool workspace".into()))?;
             if metadata.file_type().is_symlink() {
-                return Err(Error::Run(
-                    "local-tool command workspace contains a symlink".into(),
-                ));
-            }
-            if metadata.is_dir() {
+                let target = fs::read_link(&path)
+                    .map_err(|_| Error::Run("cannot read local-tool workspace symlink".into()))?
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_| {
+                        Error::Run("local-tool workspace symlink target is not UTF-8".into())
+                    })?;
+                entries.insert(relative_text, CommandEntry::Symlink { target });
+            } else if metadata.is_dir() {
                 entries.insert(relative_text, CommandEntry::Directory);
                 pending.push((path, relative));
             } else if metadata.is_file() {
@@ -1120,7 +1125,11 @@ fn command_effects(
     }
     for (path, entry) in before {
         if let Some(after_entry) = after.get(path)
-            && std::mem::discriminant(entry) != std::mem::discriminant(after_entry)
+            && (std::mem::discriminant(entry) != std::mem::discriminant(after_entry)
+                || matches!(
+                    (entry, after_entry),
+                    (CommandEntry::Symlink { .. }, CommandEntry::Symlink { .. })
+                ) && entry != after_entry)
         {
             removed.insert(path.clone());
         }
@@ -1135,7 +1144,7 @@ fn command_effects(
             Some(CommandEntry::Directory) => {
                 effects.push(Effect::RemoveDirectory { path: path.clone() });
             }
-            Some(CommandEntry::File { .. }) => {
+            Some(CommandEntry::File { .. } | CommandEntry::Symlink { .. }) => {
                 effects.push(Effect::RemoveFile { path: path.clone() })
             }
             None => {
@@ -1148,6 +1157,14 @@ fn command_effects(
     for (path, entry) in after {
         if matches!(entry, CommandEntry::Directory) && before.get(path) != Some(entry) {
             effects.push(Effect::CreateDirectory { path: path.clone() });
+        }
+        if let CommandEntry::Symlink { target } = entry
+            && before.get(path) != Some(entry)
+        {
+            effects.push(Effect::CreateSymlink {
+                path: path.clone(),
+                target: target.clone(),
+            });
         }
     }
     let mut content_bytes = 0usize;
@@ -1629,6 +1646,50 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn command_snapshots_and_replays_symlink_changes() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "asb-symlink-workspace-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let replay = root.join("replay");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&replay).unwrap();
+        symlink("old", workspace.join("link")).unwrap();
+        symlink("old", replay.join("link")).unwrap();
+        symlink("unchanged", workspace.join("other")).unwrap();
+        let (result, effects) = execute(
+            &workspace,
+            "run_command",
+            &json!({"argv":["sh","-c","rm link && ln -s new link"]}),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::RemoveFile {
+                    path: "link".into()
+                },
+                Effect::CreateSymlink {
+                    path: "link".into(),
+                    target: "new".into()
+                }
+            ]
+        );
+        for effect in &effects {
+            tool_replay::apply(&replay, effect).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_link(replay.join("link")).unwrap(),
+            std::path::Path::new("new")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn command_runs_and_records_changes_in_a_large_workspace() {
         let root = std::env::temp_dir().join(format!(
             "asb-large-workspace-{}",
@@ -2098,11 +2159,11 @@ mod tests {
         assert_eq!(
             before.get("source.txt").and_then(|entry| match entry {
                 CommandEntry::File { bytes, .. } => Some(*bytes),
-                CommandEntry::Directory => None,
+                CommandEntry::Directory | CommandEntry::Symlink { .. } => None,
             }),
             after.get("source.txt").and_then(|entry| match entry {
                 CommandEntry::File { bytes, .. } => Some(*bytes),
-                CommandEntry::Directory => None,
+                CommandEntry::Directory | CommandEntry::Symlink { .. } => None,
             })
         );
         assert_ne!(before, after);

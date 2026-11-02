@@ -42,6 +42,7 @@ pub(crate) enum Effect {
     CreateDirectory { path: String },
     WriteText { path: String, content: String },
     WriteBinary { path: String, content_hex: String },
+    CreateSymlink { path: String, target: String },
     RemoveFile { path: String },
     RemoveDirectory { path: String },
 }
@@ -384,6 +385,7 @@ pub(crate) fn apply(root: &Path, effect: &Effect) -> Result<(), Error> {
         Effect::CreateDirectory { path }
         | Effect::WriteText { path, .. }
         | Effect::WriteBinary { path, .. }
+        | Effect::CreateSymlink { path, .. }
         | Effect::RemoveFile { path }
         | Effect::RemoveDirectory { path } => Path::new(path),
     };
@@ -405,6 +407,24 @@ pub(crate) fn apply(root: &Path, effect: &Effect) -> Result<(), Error> {
         Effect::WriteText { content, .. } => {
             parent(&root, relative)?;
             std::fs::write(path, content)
+        }
+        Effect::CreateSymlink { target, .. } => {
+            parent(&root, relative)?;
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(target, path)
+            }
+            #[cfg(windows)]
+            {
+                std::os::windows::fs::symlink_file(target, path)
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "symlink replay is unsupported",
+                ))
+            }
         }
         Effect::WriteBinary { content_hex, .. } => {
             let bytes = content_hex.as_bytes();
