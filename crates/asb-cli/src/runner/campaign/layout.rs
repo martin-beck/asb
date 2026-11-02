@@ -84,6 +84,12 @@ impl Plan {
             || self.configuration.concurrency != self.concurrency
             || self.admission != crate::planning::BatchAdmissionPolicy::current()
             || self.mode == ExecutionMode::Unknown
+            || self
+                .max_steps
+                .is_some_and(|limit| !(1..=65533).contains(&limit))
+            || self.max_steps.is_some()
+                && !crate::agents::find(&self.configuration.agent)
+                    .is_some_and(|adapter| adapter.supports_max_steps())
             || (self.respect_record_timings && self.mode != ExecutionMode::Replay)
             || self.source.as_os_str().is_empty()
         {
