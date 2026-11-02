@@ -13,7 +13,7 @@ use std::path::{Component, Path, PathBuf};
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 const MAX_EVENTS: usize = 16_384;
-const MAX_LINE_BYTES: usize = 1024 * 1024;
+const MAX_LINE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 const MAX_SEARCH_FILES: usize = 512;
 const MAX_SEARCH_MATCHES: usize = 128;
@@ -41,6 +41,7 @@ pub(crate) struct Event {
 pub(crate) enum Effect {
     CreateDirectory { path: String },
     WriteText { path: String, content: String },
+    WriteBinary { path: String, content_hex: String },
     RemoveFile { path: String },
     RemoveDirectory { path: String },
 }
@@ -260,6 +261,7 @@ pub(crate) fn apply(root: &Path, effect: &Effect) -> Result<(), Error> {
     let relative = match effect {
         Effect::CreateDirectory { path }
         | Effect::WriteText { path, .. }
+        | Effect::WriteBinary { path, .. }
         | Effect::RemoveFile { path }
         | Effect::RemoveDirectory { path } => Path::new(path),
     };
@@ -281,6 +283,27 @@ pub(crate) fn apply(root: &Path, effect: &Effect) -> Result<(), Error> {
         Effect::WriteText { content, .. } => {
             parent(&root, relative)?;
             std::fs::write(path, content)
+        }
+        Effect::WriteBinary { content_hex, .. } => {
+            let bytes = content_hex.as_bytes();
+            if !bytes.len().is_multiple_of(2) || !bytes.iter().all(u8::is_ascii_hexdigit) {
+                return Err(Error::Run(
+                    "local-tool replay binary effect is malformed".into(),
+                ));
+            }
+            let decoded = bytes
+                .chunks_exact(2)
+                .map(|pair| {
+                    let digit = |value: u8| match value {
+                        b'0'..=b'9' => value - b'0',
+                        b'a'..=b'f' => value - b'a' + 10,
+                        _ => value - b'A' + 10,
+                    };
+                    digit(pair[0]) * 16 + digit(pair[1])
+                })
+                .collect::<Vec<_>>();
+            parent(&root, relative)?;
+            std::fs::write(path, decoded)
         }
         Effect::RemoveFile { .. } => match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
@@ -456,6 +479,50 @@ fn search_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn binary_effect_round_trips_and_rejects_invalid_hex() {
+        let root = std::env::temp_dir().join(format!("asb-binary-effect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let effect = Effect::WriteBinary {
+            path: "result.bin".into(),
+            content_hex: "00ff8041".into(),
+        };
+        let mut recorded = event(1);
+        recorded.effects = vec![effect];
+        let mut transcript = Transcript::default();
+        transcript.record(recorded).unwrap();
+        let encoded = transcript.encode().unwrap();
+        let mut decoded = Transcript::decode(&encoded).unwrap();
+        decoded
+            .replay_with_commuted_observations(
+                &root,
+                "write_file",
+                &serde_json::json!({"path":"answer.txt"}),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read(root.join("result.bin")).unwrap(),
+            [0, 255, 128, 65]
+        );
+        let mut maximum = event(1);
+        maximum.effects = vec![Effect::WriteBinary {
+            path: "large.bin".into(),
+            content_hex: "ff".repeat(512 * 1024),
+        }];
+        let mut transcript = Transcript::default();
+        transcript.record(maximum).unwrap();
+        assert!(Transcript::decode(&transcript.encode().unwrap()).is_ok());
+        for invalid in ["f", "fg", "00 ff"] {
+            let effect = Effect::WriteBinary {
+                path: "bad.bin".into(),
+                content_hex: invalid.into(),
+            };
+            assert!(apply(&root, &effect).is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
     fn event(sequence: u64) -> Event {
         Event {
             schema_version: SCHEMA_VERSION,

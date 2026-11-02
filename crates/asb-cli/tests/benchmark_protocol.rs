@@ -130,6 +130,11 @@ fn swebench_submission_survives_agent_git_metadata_removal() {
 }
 
 #[test]
+fn mini_swe_record_replay_preserves_binary_tool_effects() {
+    python_protocol("mini_swe_binary_replay.py");
+}
+
+#[test]
 fn swebench_source_fallback_is_pinned_private_and_attempt_owned() {
     python_protocol("swebench_sources.py");
 }
