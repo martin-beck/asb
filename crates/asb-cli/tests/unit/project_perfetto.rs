@@ -40,6 +40,9 @@ fn owned_tracefs_fixture_covers_delegation_policy_without_sudo_or_host_tracefs()
         let parent = root.join("tracefs/instances");
         let tracefs_root = root.join("tracefs");
         fs::create_dir_all(&parent).unwrap();
+        // Model a traversable tracefs explicitly, independent of the test
+        // runner's umask. Individual cases override this when needed.
+        fs::set_permissions(&tracefs_root, fs::Permissions::from_mode(0o755)).unwrap();
         let names = instance_names(&root).unwrap();
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
         if matches!(case, "root-traversal" | "root-traversal-fails") {
@@ -197,6 +200,7 @@ fn owned_tracefs_fixture_covers_delegation_policy_without_sudo_or_host_tracefs()
 #[cfg(target_os = "linux")]
 #[test]
 fn missing_tracefs_instances_are_reported_instead_of_silently_skipped() {
+    use std::os::unix::fs::PermissionsExt;
     let root = std::env::temp_dir().join(format!(
         "asb-owned-tracefs-missing-instances-{}",
         std::process::id()
@@ -204,6 +208,7 @@ fn missing_tracefs_instances_are_reported_instead_of_silently_skipped() {
     let _ = fs::remove_dir_all(&root);
     let tracefs_root = root.join("tracefs");
     fs::create_dir_all(&tracefs_root).unwrap();
+    fs::set_permissions(&tracefs_root, fs::Permissions::from_mode(0o755)).unwrap();
     let mut output = Vec::new();
     let result = configure_at(
         &root,
@@ -306,6 +311,7 @@ fn production_metadata_discovery_follows_root_traversal_repair() {
     let events = tracefs_root.join("events");
     fs::create_dir_all(events.join("sched/sched_switch")).unwrap();
     fs::create_dir_all(&instances).unwrap();
+    fs::set_permissions(&instances, fs::Permissions::from_mode(0o755)).unwrap();
     for path in [
         events.join("header_page"),
         events.join("header_event"),
