@@ -24,6 +24,8 @@ fn owned_tracefs_fixture_covers_delegation_policy_without_sudo_or_host_tracefs()
         "repair",
         "owned-empty",
         "partial",
+        "root-traversal",
+        "root-traversal-fails",
         "traversal-fails",
         "metadata-fails",
         "mkdir-fails",
@@ -32,13 +34,20 @@ fn owned_tracefs_fixture_covers_delegation_policy_without_sudo_or_host_tracefs()
         "incomplete",
         "symlink",
     ] {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/owned-tracefs-fixtures")
-            .join(crate::workloads::TaskIdentity::local(case, None).attempt_id);
+        let root =
+            std::env::temp_dir().join(format!("asb-owned-tracefs-{case}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
         let parent = root.join("tracefs/instances");
+        let tracefs_root = root.join("tracefs");
         fs::create_dir_all(&parent).unwrap();
         let names = instance_names(&root).unwrap();
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        if matches!(case, "root-traversal" | "root-traversal-fails") {
+            // The fixture owner can still access this directory, but its lack
+            // of world execute models the root-owned 0700 tracefs topology
+            // that requires an explicit traversal repair for the caller.
+            fs::set_permissions(&tracefs_root, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         if case == "ready" {
             for name in &names {
                 controls(&parent.join(name));
@@ -74,8 +83,9 @@ fn owned_tracefs_fixture_covers_delegation_policy_without_sudo_or_host_tracefs()
             &mut output,
             true,
             ConfigurePaths {
+                tracefs_root: &tracefs_root,
                 instances_parent: &parent,
-                metadata_paths: &metadata,
+                metadata_paths: Some(&metadata),
             },
             |args| {
                 calls.push(args.iter().map(|value| (*value).to_owned()).collect());
@@ -85,6 +95,9 @@ fn owned_tracefs_fixture_covers_delegation_policy_without_sudo_or_host_tracefs()
                     "fixture runner must never touch host paths"
                 );
                 if args.starts_with(&["chmod", "o+x", "--"]) {
+                    if target == tracefs_root {
+                        return case != "root-traversal-fails";
+                    }
                     assert_eq!(target, parent);
                     return case != "traversal-fails";
                 }
@@ -125,7 +138,7 @@ fn owned_tracefs_fixture_covers_delegation_policy_without_sudo_or_host_tracefs()
                 assert!(calls.is_empty());
                 assert!(text.is_empty());
             }
-            "repair" | "owned-empty" | "partial" | "metadata-fails" => {
+            "repair" | "owned-empty" | "partial" | "metadata-fails" | "root-traversal" => {
                 assert_eq!(result, names);
                 assert!(
                     result
@@ -147,6 +160,11 @@ fn owned_tracefs_fixture_covers_delegation_policy_without_sudo_or_host_tracefs()
                 assert!(result.is_empty());
                 assert_eq!(calls.len(), 1);
                 assert!(text.contains("parent traversal could not be enabled"));
+            }
+            "root-traversal-fails" => {
+                assert!(result.is_empty());
+                assert_eq!(calls.len(), 1);
+                assert!(text.contains("tracefs root traversal could not be enabled"));
             }
             "mkdir-fails" | "symlink" => {
                 assert!(result.is_empty());
@@ -175,6 +193,189 @@ fn owned_tracefs_fixture_covers_delegation_policy_without_sudo_or_host_tracefs()
         fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn missing_tracefs_instances_are_reported_instead_of_silently_skipped() {
+    let root = std::env::temp_dir().join(format!(
+        "asb-owned-tracefs-missing-instances-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let tracefs_root = root.join("tracefs");
+    fs::create_dir_all(&tracefs_root).unwrap();
+    let mut output = Vec::new();
+    let result = configure_at(
+        &root,
+        &mut output,
+        true,
+        ConfigurePaths {
+            tracefs_root: &tracefs_root,
+            instances_parent: &tracefs_root.join("instances"),
+            metadata_paths: Some(&[]),
+        },
+        |_| panic!("missing tracefs must not run a host command"),
+    )
+    .unwrap();
+    assert!(result.is_empty());
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("instances path"));
+    assert!(output.contains("Mount tracefs"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn missing_tracefs_root_is_reported_instead_of_silently_skipped() {
+    let root = std::env::temp_dir().join(format!(
+        "asb-owned-tracefs-missing-root-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let tracefs_root = root.join("missing-tracefs");
+    let mut output = Vec::new();
+    let result = configure_at(
+        &root,
+        &mut output,
+        true,
+        ConfigurePaths {
+            tracefs_root: &tracefs_root,
+            instances_parent: &tracefs_root.join("instances"),
+            metadata_paths: Some(&[]),
+        },
+        |_| panic!("missing tracefs must not run a host command"),
+    )
+    .unwrap();
+    assert!(result.is_empty());
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("tracefs root"));
+    assert!(output.contains("Mount tracefs"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn restricted_tracefs_root_requires_and_honors_explicit_consent() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!(
+        "asb-owned-tracefs-root-refusal-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let tracefs_root = root.join("tracefs");
+    let instances = tracefs_root.join("instances");
+    fs::create_dir_all(&instances).unwrap();
+    fs::set_permissions(&tracefs_root, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut output = Vec::new();
+    let result = configure_at_with_consent(
+        &root,
+        &mut output,
+        false,
+        ConfigurePaths {
+            tracefs_root: &tracefs_root,
+            instances_parent: &instances,
+            metadata_paths: Some(&[]),
+        },
+        |_| panic!("declined root traversal must not run a host command"),
+        |_, yes| {
+            assert!(!yes);
+            Ok(false)
+        },
+    )
+    .unwrap();
+    assert!(result.is_empty());
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("sudo chmod o+x"));
+    assert!(output.contains("was declined"));
+    fs::set_permissions(&tracefs_root, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn production_metadata_discovery_follows_root_traversal_repair() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!(
+        "asb-owned-tracefs-late-metadata-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let tracefs_root = root.join("tracefs");
+    let instances = tracefs_root.join("instances");
+    let events = tracefs_root.join("events");
+    fs::create_dir_all(events.join("sched/sched_switch")).unwrap();
+    fs::create_dir_all(&instances).unwrap();
+    for path in [
+        events.join("header_page"),
+        events.join("header_event"),
+        events.join("sched/sched_switch/format"),
+        events.join("sched/sched_switch/id"),
+    ] {
+        fs::write(path, "fixture").unwrap();
+    }
+    fs::set_permissions(&tracefs_root, fs::Permissions::from_mode(0o700)).unwrap();
+    let discovered =
+        crate::collectors::adapters::perfetto::required_trace_metadata_at(&tracefs_root);
+    assert!(discovered.contains(&events.join("header_page")));
+    assert!(discovered.contains(&events.join("sched/sched_switch/format")));
+
+    let mut output = Vec::new();
+    let mut calls = Vec::new();
+    let names = instance_names(&root).unwrap();
+    let result = configure_at(
+        &root,
+        &mut output,
+        true,
+        ConfigurePaths {
+            tracefs_root: &tracefs_root,
+            instances_parent: &instances,
+            // This is the production discovery path, deliberately not an
+            // injected fixture list.
+            metadata_paths: None,
+        },
+        |args| {
+            calls.push(
+                args.iter()
+                    .map(|value| (*value).to_owned())
+                    .collect::<Vec<_>>(),
+            );
+            let target = Path::new(args.last().unwrap());
+            if args.starts_with(&["chmod", "o+x", "--"]) {
+                return target == tracefs_root;
+            }
+            if args.starts_with(&["mkdir", "--"]) {
+                fs::create_dir(target).unwrap();
+                return true;
+            }
+            if args.starts_with(&["chown", "-R"])
+                || args.starts_with(&["chmod", "-R", "u+rwX", "--"])
+            {
+                fs::create_dir_all(target.join("events")).unwrap();
+                for file in [
+                    "trace_marker",
+                    "tracing_on",
+                    "buffer_size_kb",
+                    "trace_clock",
+                    "events/enable",
+                ] {
+                    fs::write(target.join(file), "fixture").unwrap();
+                }
+                return true;
+            }
+            false
+        },
+    )
+    .unwrap();
+    assert_eq!(result, names);
+    assert_eq!(
+        calls[0],
+        vec!["chmod", "o+x", "--", tracefs_root.to_str().unwrap()]
+    );
+    fs::set_permissions(&tracefs_root, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn isolated_delegation_consent_logs_scoped_commands_without_host_mutation() {
