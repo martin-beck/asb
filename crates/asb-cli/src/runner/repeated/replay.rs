@@ -99,9 +99,8 @@ impl Inspection {
             && source.manifest().is_some_and(|manifest| {
                 chosen.iter().any(|id| {
                     manifest
-                        .tracks
-                        .iter()
-                        .any(|track| track.id == *id && track.recorded_max_steps.is_some())
+                        .track(*id)
+                        .is_ok_and(|track| track.recorded_max_steps.is_some())
                 })
             })
             && crate::agents::find(&config.agent)
