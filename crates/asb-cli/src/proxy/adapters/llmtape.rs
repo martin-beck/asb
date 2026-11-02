@@ -1173,7 +1173,7 @@ mod tests {
                 format!(
                     "{}\n{}\n",
                     interaction(method, path, None),
-                interaction("POST", "/v1/chat/completions", Some("different"))
+                    interaction("POST", "/v1/chat/completions", Some("different"))
                 ),
             )
             .unwrap();
