@@ -125,6 +125,11 @@ fn swebench_catalog_materialization_is_bounded_private_and_reproducible() {
 }
 
 #[test]
+fn swebench_submission_survives_agent_git_metadata_removal() {
+    python_protocol("swebench_submission_recovery.py");
+}
+
+#[test]
 fn swebench_source_fallback_is_pinned_private_and_attempt_owned() {
     python_protocol("swebench_sources.py");
 }
