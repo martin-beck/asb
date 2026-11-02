@@ -280,7 +280,11 @@ class RuntimeTests(unittest.TestCase):
                 _,stderr = process.communicate(timeout=5)
                 self.assertEqual(process.returncode,0,stderr.decode())
                 metadata = json.loads((project/"private/attempt/agent-result.json").read_text())
-                self.assertEqual(metadata["token_usage"]["total_tokens"],5)
+                # Pi token accounting is returned through its sealed deferred
+                # summary; this guest-protocol boundary does not aggregate it.
+                self.assertIsNone(metadata["token_usage"]["total_tokens"])
+                self.assertEqual(len(metadata["exported_artifacts"]),1)
+                self.assertEqual(metadata["exported_artifacts"][0]["kind"],"asb-deferred-adapter-collection")
             finally:
                 if process.poll() is None:
                     process.kill()
