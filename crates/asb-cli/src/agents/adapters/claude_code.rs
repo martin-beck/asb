@@ -25,6 +25,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_collection(super::super::mcp_relay::collect_artifacts)
 .with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"])
 .with_state_environment_vars(&["CLAUDE_CONFIG_DIR"])
+.with_forwarded_invocation_environment_vars(&["CLAUDE_CODE_MAX_OUTPUT_TOKENS"])
 .with_unprivileged_execution()
 .with_output_usage(output_usage)
 .with_final_response(final_response)
@@ -59,7 +60,13 @@ fn execution_failure(stdout: &str, _: &str) -> Option<String> {
             .get("subtype")
             .and_then(|value| value.as_str())
             .is_some_and(|value| value.starts_with("error_"));
-    failed.then(|| "agent reported a terminal error; inspect the benchmark log".to_owned())
+    failed.then(|| {
+        if event.get("api_error").and_then(|value| value.as_str()) == Some("max_output_tokens") {
+            "Claude Code reached its output-token limit; set CLAUDE_CODE_MAX_OUTPUT_TOKENS to a value supported by the selected model and retry".to_owned()
+        } else {
+            "agent reported a terminal error; inspect the benchmark log".to_owned()
+        }
+    })
 }
 
 fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
@@ -376,6 +383,20 @@ mod tests {
         ] {
             assert!(ADAPTER.execution_failure(event, "").is_none());
         }
+        let limit = ADAPTER.execution_failure(
+            r#"{"type":"result","is_error":true,"api_error":"max_output_tokens","result":"private details"}"#,
+            "",
+        ).unwrap();
+        assert!(limit.contains("CLAUDE_CODE_MAX_OUTPUT_TOKENS"));
+        assert!(!limit.contains("private details"));
+        assert!(
+            ADAPTER
+                .execution_failure(
+                    r#"{"type":"result","is_error":false,"api_error":"max_output_tokens"}"#,
+                    ""
+                )
+                .is_none()
+        );
     }
 
     #[test]
