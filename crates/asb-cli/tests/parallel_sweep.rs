@@ -197,6 +197,29 @@ const expected=first?['first-1','first-2']:['second'];
     let seal = read_json(&root.join("sweep-results/.checkpoint/inputs.json"));
     assert_eq!(seal["scope"], "input-stability-only-not-a-resume-receipt");
     assert_eq!(seal["status"], "stable");
+    // A resumed campaign can be launched from another terminal or service
+    // manager. Terminal-only ambient state is not a declared benchmark input.
+    let resumed = Command::new(env!("CARGO_BIN_EXE_asb"))
+        .args(arguments)
+        .arg("--continue")
+        .current_dir(root)
+        .isolated_env()
+        .env("HOME", root)
+        .env("ASB_TEST_INPUT", root.join("explicit-input"))
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("TERM", "resume-fixture-terminal")
+        .output()
+        .unwrap();
+    assert!(
+        resumed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert_eq!(
+        read_json(&root.join("sweep-results/.checkpoint/inputs.json"))["status"],
+        "stable"
+    );
     let roots = seal["roots"].as_array().unwrap();
     for (index, name) in [(0, "000-first"), (1, "001-second")] {
         let input = roots
