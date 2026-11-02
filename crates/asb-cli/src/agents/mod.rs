@@ -251,6 +251,10 @@ pub(crate) trait AgentAdapter: Sync {
     fn step_count(&self, _stdout: &str, _stderr: &str) -> Option<u64> {
         None
     }
+    /// Extract an adapter-owned counter before an isolated guest is removed.
+    fn guest_step_count(&self, _run_dir: &Path) -> Option<u64> {
+        None
+    }
     /// A terminal client/protocol failure that a zero process exit can hide.
     fn execution_failure(&self, _stdout: &str, _stderr: &str) -> Option<String> {
         None
@@ -508,6 +512,7 @@ type ArtifactFinalResponseHook = fn(&str, &FrozenArtifacts, &Path, bool) -> Opti
 type GuestArtifactAnswerHook = fn(&str, &FrozenArtifacts) -> bool;
 type ProcessHook = fn(&str) -> Result<crate::launch::ProcessLaunch, Error>;
 type StepCountHook = fn(&str, &str) -> Option<u64>;
+type GuestStepCountHook = fn(&Path) -> Option<u64>;
 type FailureHook = fn(&str, &str) -> Option<String>;
 type PreferredExecutablesHook = fn(&Path) -> Vec<PathBuf>;
 type ResponseFailureHook = fn(Option<&str>) -> Option<String>;
@@ -543,6 +548,7 @@ pub(super) struct StaticAdapter {
     guest_artifact_answer: Option<GuestArtifactAnswerHook>,
     process: Option<ProcessHook>,
     step_count: Option<StepCountHook>,
+    guest_step_count: Option<GuestStepCountHook>,
     failure: Option<FailureHook>,
     response_failure: Option<ResponseFailureHook>,
     replay_credential_vars: &'static [&'static str],
@@ -594,6 +600,7 @@ impl StaticAdapter {
             guest_artifact_answer: None,
             process: None,
             step_count: None,
+            guest_step_count: None,
             failure: None,
             response_failure: None,
             replay_credential_vars: &[],
@@ -718,6 +725,10 @@ impl StaticAdapter {
 
     pub(super) const fn with_step_count(mut self, hook: StepCountHook) -> Self {
         self.step_count = Some(hook);
+        self
+    }
+    pub(super) const fn with_guest_step_count(mut self, hook: GuestStepCountHook) -> Self {
+        self.guest_step_count = Some(hook);
         self
     }
 
@@ -948,6 +959,9 @@ impl AgentAdapter for StaticAdapter {
     }
     fn step_count(&self, stdout: &str, stderr: &str) -> Option<u64> {
         self.step_count.and_then(|hook| hook(stdout, stderr))
+    }
+    fn guest_step_count(&self, run_dir: &Path) -> Option<u64> {
+        self.guest_step_count.and_then(|hook| hook(run_dir))
     }
     fn execution_failure(&self, stdout: &str, stderr: &str) -> Option<String> {
         self.failure.and_then(|hook| hook(stdout, stderr))
