@@ -129,8 +129,10 @@ impl CollectorAdapter for PerfettoCollector {
     fn finish(&self, session: &mut measurements::Session) -> Result<(), String> {
         finish(session)
     }
-    fn start(&self, session: &mut measurements::Session) -> Result<(), String> {
-        session.start_perfetto()
+    fn start(&self, _: &mut measurements::Session) -> Result<(), String> {
+        // `tids_to_trace` must be configured with the gated child PID. Do not
+        // start a host-wide ftrace session before that provenance exists.
+        Ok(())
     }
     fn lifecycle_event(
         &self,
@@ -161,8 +163,7 @@ impl CollectorAdapter for PerfettoCollector {
         session.write_trace_marker(&marker)
     }
     fn attach_pid(&self, session: &mut measurements::Session, pid: u32) -> Result<(), String> {
-        session.set_perfetto_pid(pid);
-        Ok(())
+        session.start_perfetto_for_pid(pid)
     }
 }
 
@@ -171,15 +172,21 @@ fn process(
     context: &ProcessContext<'_>,
 ) -> Result<ProcessData, String> {
     let mut result = ProcessData::from_output(context);
-    if let Err(error) = session.verify_perfetto_marker_capture() {
-        // Preserve diagnostics without cancelling an independently graded task.
-        // The coverage check below suppresses metrics from incomplete capture.
-        session.state::<PerfettoState>().borrow_mut().marker_warning = Some(error);
-    } else {
-        session
-            .state::<PerfettoState>()
-            .borrow_mut()
-            .marker_verified = true;
+    // `tids_to_trace` deliberately excludes ASB's parent process, which is
+    // the trace-marker writer. A missing ASB marker is therefore expected for
+    // an agent-only trace and must not be presented as a collector warning.
+    let pid_filter_active = session.state::<PerfettoState>().borrow().pid.is_some();
+    if !pid_filter_active {
+        if let Err(error) = session.verify_perfetto_marker_capture() {
+            // Preserve diagnostics without cancelling an independently graded task.
+            // The coverage check below suppresses metrics from incomplete capture.
+            session.state::<PerfettoState>().borrow_mut().marker_warning = Some(error);
+        } else {
+            session
+                .state::<PerfettoState>()
+                .borrow_mut()
+                .marker_verified = true;
+        }
     }
     let analysis_warning = session
         .state::<PerfettoState>()
@@ -201,19 +208,29 @@ fn process(
             );
             state.capture_complete = false;
         } else {
-            state.capture_warning = match (session.tool_dir.as_ref(), state.trace.as_ref()) {
-                (Some(tools), Some(trace)) => verify_trace_coverage(
+            state.capture_warning = match (session.tool_dir.as_ref(), state.trace.as_ref(), state.pid) {
+                (Some(tools), Some(trace), Some(pid)) => verify_trace_coverage(
                     &tools.join("perfetto/bin/trace_processor_shell"),
                     trace,
                     session.trace_id(),
                 )
+                .and_then(|()| verify_agent_scheduler_scope(
+                    &tools.join("perfetto/bin/trace_processor_shell"),
+                    trace,
+                    pid,
+                    session.trace_id(),
+                ))
                 .err(),
+                (_, _, None) => Some(
+                    "Perfetto capture has no verified agent process identity; scheduler metrics are unavailable rather than unscoped.".into(),
+                ),
                 _ => Some(
                     "Perfetto capture coverage cannot be verified: trace or processor is missing."
                         .into(),
                 ),
             };
             state.capture_complete = state.capture_warning.is_none();
+            state.scope_verified = state.capture_complete;
         }
     }
     result.metrics = session.perfetto_trace_metrics();
@@ -251,6 +268,7 @@ fn finish(session: &mut measurements::Session) -> Result<(), String> {
             "marker_verified": state.marker_verified,
             "marker_warning": state.marker_warning,
             "scope_warning": state.scope_warning,
+            "scope_verified": state.scope_verified,
             "capture_complete": state.capture_complete,
             "capture_warning": state.capture_warning,
             "analysis_warning": state.analysis_warning,
@@ -533,6 +551,7 @@ struct PerfettoState {
     marker_verified: bool,
     marker_warning: Option<String>,
     scope_warning: Option<String>,
+    scope_verified: bool,
     capture_warning: Option<String>,
     analysis_warning: Option<String>,
     capture_complete: bool,
@@ -584,11 +603,8 @@ fn wait_for_capture_ready(collector: &mut Collector, timeout: Duration) -> Resul
 }
 
 impl measurements::Session {
-    pub(crate) fn set_perfetto_pid(&mut self, pid: u32) {
+    pub(crate) fn start_perfetto_for_pid(&mut self, pid: u32) -> Result<(), String> {
         self.state::<PerfettoState>().borrow_mut().pid = Some(pid);
-    }
-
-    pub(crate) fn start_perfetto(&mut self) -> Result<(), String> {
         if !self.state::<PerfettoState>().borrow().enabled {
             return Ok(());
         }
@@ -600,18 +616,19 @@ impl measurements::Session {
                 .ok_or("Perfetto requires the benchmark project's explicit authority")?,
         )?;
         let marker = service.marker.clone();
-        self.start_perfetto_with_marker(&marker, Some(service))
+        self.start_perfetto_with_marker(&marker, Some(service), pid)
     }
 
     fn start_perfetto_with_marker(
         &mut self,
         marker: &Path,
         service: Option<Arc<Service>>,
+        pid: u32,
     ) -> Result<(), String> {
         let config = self.dir.join("perfetto-scheduling.pbtx");
         let configuration = service.as_ref().map_or_else(
-            || perfetto_config(None),
-            |service| perfetto_instance_config(&service.instance),
+            || perfetto_config(Some(pid)),
+            |service| perfetto_instance_config(&service.instance, pid),
         );
         fs::write(&config, configuration)
             .map_err(|error| format!("cannot write Perfetto trace configuration: {error}"))?;
@@ -1184,10 +1201,12 @@ fn verify_trace_marker_capture(
 }
 
 /// A bounded file/duration limit must not silently turn a partial trace into
-/// whole-execution scheduler metrics. Check both ends and reported data loss.
+/// whole-execution scheduler metrics. The kernel PID filter intentionally
+/// excludes ASB's own trace-marker writes, so completion is qualified from
+/// producer loss evidence plus the separately validated agent tree.
 fn verify_trace_coverage(processor: &Path, trace: &Path, trace_id: &str) -> Result<(), String> {
     let query = format!(
-        "WITH marks AS (SELECT COUNT(*) FILTER (WHERE name='asb.trace.ready.{trace_id}') AS ready, MIN(ts) FILTER (WHERE name='asb.trace.ready.{trace_id}') AS ready_ts, COUNT(*) FILTER (WHERE name='asb.run.finishing.{trace_id}') AS finishing, MIN(ts) FILTER (WHERE name='asb.run.finishing.{trace_id}') AS finishing_ts, COUNT(*) FILTER (WHERE name='asb.run.failed.{trace_id}') AS failed, MIN(ts) FILTER (WHERE name='asb.run.failed.{trace_id}') AS failed_ts FROM slice) SELECT ready, CASE WHEN (finishing=1 AND failed<=1 AND finishing_ts>ready_ts AND (failed=0 OR (failed_ts>ready_ts AND failed_ts<=finishing_ts))) OR (finishing=0 AND failed=1 AND failed_ts>ready_ts) THEN 1 ELSE 0 END, EXISTS(SELECT 1 FROM stats WHERE value>0 AND (name IN ('traced_buf_bytes_overwritten','traced_buf_chunks_discarded','traced_buf_patches_failed','traced_buf_trace_writer_packet_loss','traced_buf_sequence_packet_loss','ftrace_cpu_overrun_delta','ftrace_cpu_commit_overrun_delta','ftrace_cpu_dropped_events_delta') OR name GLOB 'traced_buf_data_loss_*')) FROM marks"
+        "SELECT EXISTS(SELECT 1 FROM stats WHERE value>0 AND (name IN ('traced_buf_bytes_overwritten','traced_buf_chunks_discarded','traced_buf_patches_failed','traced_buf_trace_writer_packet_loss','traced_buf_sequence_packet_loss','ftrace_cpu_overrun_delta','ftrace_cpu_commit_overrun_delta','ftrace_cpu_dropped_events_delta') OR name GLOB 'traced_buf_data_loss_*')) AS loss /* {trace_id} */"
     );
     let output = processor_query(processor, trace, &query).map_err(|_| {
         "Cannot verify Perfetto capture coverage: trace processor could not start.".to_owned()
@@ -1197,7 +1216,7 @@ fn verify_trace_coverage(processor: &Path, trace: &Path, trace_id: &str) -> Resu
             "Cannot verify Perfetto capture coverage: trace processor query failed.".into(),
         );
     }
-    let values = bounded(&output.stdout)
+    let loss = bounded(&output.stdout)
         .lines()
         .find_map(|line| {
             let fields = line
@@ -1205,19 +1224,47 @@ fn verify_trace_coverage(processor: &Path, trace: &Path, trace_id: &str) -> Resu
                 .map(|field| field.trim().parse::<u64>())
                 .collect::<Result<Vec<_>, _>>()
                 .ok()?;
-            (fields.len() == 3).then_some(fields)
+            fields.last().copied()
         })
         .ok_or_else(|| {
             "Cannot verify Perfetto capture coverage: invalid processor result.".to_owned()
         })?;
-    if values == [1, 1, 0] {
+    if loss == 0 {
+        return Ok(());
+    }
+    Err("Incomplete Perfetto capture: data loss=true. Scheduler metrics are suppressed. Inspect native trace stats for buffer overruns/overwrites and check whether the 1 GiB file or one-hour duration limit was reached; reduce tracing load before a fresh qualification.".into())
+}
+
+/// Reject a trace with scheduler events outside the direct gated agent and
+/// descendants inherited through tracefs `event-fork`.
+fn verify_agent_scheduler_scope(
+    processor: &Path,
+    trace: &Path,
+    pid: u32,
+    trace_id: &str,
+) -> Result<(), String> {
+    let scope = perfetto_scope_sql(pid, trace_id);
+    let query = format!(
+        "{scope} SELECT COUNT(*) FROM sched s LEFT JOIN thread th ON s.utid=th.utid CROSS JOIN bounds WHERE s.ts >= bounds.start_ts AND s.ts < bounds.end_ts AND (th.upid IS NULL OR th.upid NOT IN tree) HAVING {VALID_SCOPE}"
+    );
+    let output = processor_query(processor, trace, &query).map_err(|_| {
+        "Cannot verify Perfetto agent scope: trace processor could not start.".to_owned()
+    })?;
+    if !output.status.success() {
+        return Err("Cannot verify Perfetto agent scope: trace processor query failed.".into());
+    }
+    let outside = bounded(&output.stdout)
+        .lines()
+        .rev()
+        .find_map(parse_float)
+        .ok_or_else(|| {
+            "Cannot verify Perfetto agent scope: invalid processor result.".to_owned()
+        })?;
+    if outside == 0.0 {
         return Ok(());
     }
     Err(format!(
-        "Incomplete Perfetto capture: startup markers={}, terminal boundary valid={}, data loss={}. Scheduler metrics are suppressed. Inspect native trace stats for buffer overruns/overwrites and check whether the 1 GiB file or one-hour duration limit was reached; reduce tracing load before a fresh qualification.",
-        values[0],
-        values[1] != 0,
-        values[2] != 0
+        "Perfetto captured {outside:.0} scheduler event(s) outside the verified agent process tree; scheduler metrics are suppressed rather than attributing host or ASB work to the agent. Check Tracebox TID filtering and retry."
     ))
 }
 
@@ -1236,9 +1283,9 @@ fn marker_access_error(path: &Path, error: &std::io::Error) -> String {
 }
 
 /// Build Perfetto queries that restrict scheduler data to the benchmark
-/// process and every descendant it launched.  Tracebox cannot apply a pid
-/// filter on all supported versions, so the scope is enforced by the offline
-/// trace processor instead of silently reporting host-wide activity.
+/// process and every descendant it launched. Kernel filtering excludes
+/// unrelated events at capture time; these queries are a second fail-closed
+/// guard before ASB reports any scheduler aggregate.
 pub(crate) fn perfetto_metric_queries(pid: Option<u32>, trace_id: &str) -> Vec<(String, String)> {
     let Some(pid) = pid else {
         return Vec::new();
@@ -1290,17 +1337,22 @@ pub(crate) fn perfetto_scope_sql(pid: u32, trace_id: &str) -> String {
     // unique generation alive at the agent-start marker. Without a marker,
     // a unique PID generation is required; ambiguity must not become zero data.
     format!(
-        "WITH RECURSIVE tree(upid) AS (SELECT upid FROM root UNION ALL SELECT p.upid FROM process p JOIN tree t ON p.parent_upid=t.upid), marker_bounds AS (SELECT MIN(ts) FILTER (WHERE name='asb.agent.started.{trace_id}') AS marker_start, MAX(ts) FILTER (WHERE name='asb.agent.exited.{trace_id}') AS marker_end FROM slice), root_candidates AS (SELECT p.upid,p.start_ts,p.end_ts,COALESCE(p.start_ts,(SELECT MIN(s.ts) FROM sched s JOIN thread th ON s.utid=th.utid WHERE th.upid=p.upid)) AS first_seen FROM process p WHERE p.pid={pid}), eligible_roots AS (SELECT r.upid FROM root_candidates r CROSS JOIN marker_bounds m WHERE (m.marker_start IS NOT NULL AND r.first_seen <= m.marker_start AND (r.end_ts IS NULL OR r.end_ts >= m.marker_start)) OR (m.marker_start IS NULL AND (SELECT COUNT(*) FROM root_candidates)=1)), root AS (SELECT upid FROM eligible_roots WHERE (SELECT COUNT(*) FROM eligible_roots)=1), process_bounds AS (SELECT MIN(start_ts) AS process_start, MAX(COALESCE(end_ts,(SELECT MAX(ts+dur) FROM sched))) AS process_end FROM process WHERE upid IN tree), bounds AS (SELECT COALESCE(marker_start,process_start) AS start_ts, COALESCE(marker_end,process_end) AS end_ts FROM process_bounds CROSS JOIN marker_bounds)",
+        "WITH RECURSIVE tree(upid) AS (SELECT upid FROM root UNION ALL SELECT p.upid FROM process p JOIN tree t ON p.parent_upid=t.upid), marker_bounds AS (SELECT MIN(ts) FILTER (WHERE name='asb.agent.started.{trace_id}') AS marker_start, MAX(ts) FILTER (WHERE name='asb.agent.exited.{trace_id}') AS marker_end FROM slice), root_candidates AS (SELECT p.upid,p.start_ts,p.end_ts,COALESCE(p.start_ts,(SELECT MIN(s.ts) FROM sched s JOIN thread th ON s.utid=th.utid WHERE th.upid=p.upid)) AS first_seen FROM process p WHERE p.pid={pid}), eligible_roots AS (SELECT r.upid FROM root_candidates r CROSS JOIN marker_bounds m WHERE (m.marker_start IS NOT NULL AND r.first_seen <= m.marker_start AND (r.end_ts IS NULL OR r.end_ts >= m.marker_start)) OR (m.marker_start IS NULL AND (SELECT COUNT(*) FROM root_candidates)=1)), root AS (SELECT upid FROM eligible_roots WHERE (SELECT COUNT(*) FROM eligible_roots)=1), process_bounds AS (SELECT MIN(start_ts) AS process_start, MAX(end_ts) AS process_end FROM process WHERE upid IN tree), scheduler_bounds AS (SELECT MIN(s.ts) AS scheduler_start, MAX(s.ts+s.dur) AS scheduler_end FROM sched s JOIN thread th ON s.utid=th.utid WHERE th.upid IN tree), bounds AS (SELECT COALESCE(marker_start,process_start,scheduler_start) AS start_ts, COALESCE(marker_end,process_end,scheduler_end) AS end_ts FROM process_bounds CROSS JOIN scheduler_bounds CROSS JOIN marker_bounds)",
     )
 }
 
 pub(crate) fn perfetto_config(pid: Option<u32>) -> String {
-    // Tracebox's bundled schema rejects FtraceConfig.pid_filter. Process
-    // scoping is applied during post-processing using ASB lifecycle markers.
-    let _ = pid;
+    // Tracebox does not support the old `pid_filter` field. Its supported
+    // `tids_to_trace` writes the gated root PID to tracefs/set_event_pid; the
+    // kernel's event-fork option carries that filter to every descendant.
+    let target_filter = pid.map_or_else(String::new, |pid| {
+        format!(
+            "      tids_to_trace: {pid}\n      tracefs_options {{ name: \"event-fork\" state: STATE_ENABLED }}\n"
+        )
+    });
     // Collect only events consumed by scheduler/process-lifetime queries.
     // Redundant sched_stat events multiply traffic on a busy shared host.
-    r#"duration_ms: 3600000
+    let configuration = r#"duration_ms: 3600000
 write_into_file: true
 file_write_period_ms: 1000
 max_file_size_bytes: 1073741824
@@ -1333,11 +1385,16 @@ data_sources {
   }
 }
 "#
-    .to_owned()
+    .to_owned();
+    configuration.replacen(
+        "ftrace_config {\n",
+        &format!("ftrace_config {{\n{target_filter}"),
+        1,
+    )
 }
 
-fn perfetto_instance_config(instance: &str) -> String {
-    perfetto_config(None).replacen(
+fn perfetto_instance_config(instance: &str, pid: u32) -> String {
+    perfetto_config(Some(pid)).replacen(
         "ftrace_config {",
         &format!("ftrace_config {{\n      instance_name: \"{instance}\""),
         1,
@@ -1371,7 +1428,7 @@ fn perfetto_probe(service: &Service, measurement_dir: &Path) -> Result<bool, Str
     let trace = measurement_dir.join(".perfetto-preflight.perfetto-trace");
     fs::write(
         &config,
-        perfetto_instance_config(&service.instance).replacen(
+        perfetto_instance_config(&service.instance, std::process::id()).replacen(
             "duration_ms: 3600000",
             "duration_ms: 250",
             1,
@@ -1495,6 +1552,32 @@ mod marker_tests {
         let config = perfetto_config(Some(42));
         assert!(!config.contains("pid_filter"));
         assert!(config.contains("scan_all_processes_on_start: false"));
+        assert!(config.contains("tids_to_trace: 42"));
+        assert!(config.contains("tracefs_options { name: \"event-fork\" state: STATE_ENABLED }"));
+        assert!(!perfetto_config(None).contains("tids_to_trace"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_scope_validation_rejects_unrelated_scheduler_events() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "asb-perfetto-scope-validation-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        for (name, output, expected) in [
+            ("scoped", "count\n0\n", true),
+            ("leaked", "count\n3\n", false),
+            ("invalid", "count\nnot-a-number\n", false),
+        ] {
+            let processor = root.join(name);
+            fs::write(&processor, format!("#!/bin/sh\nprintf '{output}'\n")).unwrap();
+            fs::set_permissions(&processor, fs::Permissions::from_mode(0o755)).unwrap();
+            let result = verify_agent_scheduler_scope(&processor, &root.join("trace"), 42, "scope");
+            assert_eq!(result.is_ok(), expected, "{name}: {result:?}");
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1565,7 +1648,7 @@ mod marker_tests {
     fn capture_configuration_streams_with_bounded_storage_and_kernel_draining() {
         for config in [
             perfetto_config(None),
-            perfetto_instance_config("asb-fixture-0"),
+            perfetto_instance_config("asb-fixture-0", 42),
         ] {
             for field in [
                 "write_into_file: true",
@@ -1595,15 +1678,8 @@ mod marker_tests {
         let root = std::env::temp_dir().join(format!("asb-trace-coverage-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         for (name, row, expected) in [
-            ("complete", "1,1,0", None),
-            ("startup_missing", "0,1,0", Some("startup markers=0")),
-            (
-                "tail_missing",
-                "1,0,0",
-                Some("terminal boundary valid=false"),
-            ),
-            ("duplicate", "2,1,0", Some("startup markers=2")),
-            ("loss", "1,1,1", Some("data loss=true")),
+            ("complete", "0", None),
+            ("loss", "1", Some("data loss=true")),
             ("invalid", "not-a-row", Some("invalid processor result")),
         ] {
             let processor = root.join(name);
@@ -1908,7 +1984,9 @@ print(json.dumps(c.execute(sys.argv[1]).fetchall()))
         let mut session =
             measurements::Session::start_with_collectors(&root.join("run"), &[], Some(&tools))
                 .unwrap();
-        session.start_perfetto_with_marker(&marker, None).unwrap();
+        session
+            .start_perfetto_with_marker(&marker, None, 1)
+            .unwrap();
         let id = session.trace_id().to_owned();
         session.write_trace_marker("I|1|asb.test.event").unwrap();
         let contents = fs::read_to_string(&marker).unwrap();
@@ -1930,7 +2008,7 @@ print(json.dumps(c.execute(sys.argv[1]).fetchall()))
             measurements::Session::start_with_collectors(&root.join("failed"), &[], Some(&tools))
                 .unwrap();
         let error = session
-            .start_perfetto_with_marker(&marker, None)
+            .start_perfetto_with_marker(&marker, None, 1)
             .unwrap_err();
         assert!(error.contains("tracing is off"), "{error}");
         let pid = session.collectors[0].producer.id().unwrap();
