@@ -704,6 +704,10 @@ the selected agent and provider, then writes the agent-specific configuration.
 Not every agent, provider, and model combination is compatible; ASB reports
 when there is no matching interface.
 
+For Claude Code, set `CLAUDE_CODE_MAX_OUTPUT_TOKENS` when the selected model
+supports a larger output than the CLI's default. ASB forwards the setting to
+isolated workload guests; use the same value when recording and replaying.
+
 If npm, Python, curl, or tar is unavailable, the failed command describes the
 missing prerequisite. The npm repair uses user-local `fnm`; the Python setup
 can use `uv` and records details in `.asb/python/setup.log`.

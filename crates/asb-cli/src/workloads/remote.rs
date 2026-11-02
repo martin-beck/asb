@@ -1667,6 +1667,7 @@ mod tests {
     fn guest_environment_forwards_only_selected_adapter_invocation_settings() {
         let values = std::collections::BTreeMap::from([
             ("ASB_CODEX_SANDBOX_MODE", "danger-full-access"),
+            ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "65536"),
             ("HTTPS_PROXY", "http://proxy.invalid:8443"),
             ("UNRELATED_HOST_VALUE", "must-not-cross"),
         ]);
@@ -1684,7 +1685,14 @@ mod tests {
 
         let opencode = guest_environment("opencode", lookup);
         assert!(opencode.get("ASB_CODEX_SANDBOX_MODE").is_none());
+        assert!(opencode.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS").is_none());
         assert_eq!(opencode["HTTPS_PROXY"], codex["HTTPS_PROXY"]);
+        let claude = guest_environment("claude-code", lookup);
+        assert_eq!(
+            claude["CLAUDE_CODE_MAX_OUTPUT_TOKENS"],
+            Value::String("65536".into())
+        );
+        assert!(claude.get("ASB_CODEX_SANDBOX_MODE").is_none());
     }
 
     #[test]
