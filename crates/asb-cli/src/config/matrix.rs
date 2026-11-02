@@ -566,15 +566,12 @@ mod tests {
     #[test]
     fn default_collectors_install_their_project_local_dependencies() {
         let tools = collector_installables(&[]);
-        for tool in [
-            "bpftrace",
-            "flamegraph",
-            "iostat",
-            "mpstat",
-            "perf",
-            "perfetto",
-        ] {
+        for tool in ["flamegraph", "iostat", "mpstat", "perf", "perfetto"] {
             assert!(tools.contains(&tool.to_owned()), "missing {tool}");
         }
+        assert!(
+            !tools.contains(&"bpftrace".to_owned()),
+            "bpftrace is only installed when explicitly selected"
+        );
     }
 }
