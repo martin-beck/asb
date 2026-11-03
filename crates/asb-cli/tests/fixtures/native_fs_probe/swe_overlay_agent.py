@@ -40,6 +40,7 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
 
     def mounts():
         pairs = [(LOWER,'/lower'),(root,'/work'),(PROBE,'/probe'),
+                 (PROBE.parents[2]/'assets/benchmarks/asb_fs_proxy.py','/asb-fs-proxy.py'),
                  (HERMES,'/asb-hermes'),(NODE,'/asb-node'),
                  (OVERLAY,'/opt/fuse-overlayfs'),(LIB3,'/usr/lib/x86_64-linux-gnu/libfuse3.so.3'),
                  (LIB2,'/opt/libfuse.so.2'),(FUSER,'/usr/bin/fusermount3'),(FUSEPY,'/opt/fuse.py'),
@@ -79,7 +80,7 @@ export ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl
     record_script='''set -eu
 /opt/fuse-overlayfs -o allow_other,lowerdir=/lower,upperdir=/work/record-upper,workdir=/work/record-work /work/lower-view
 export ASB_PROBE_ROOT_TGID=$$ ASB_PROBE_ALLOW_OTHER=1 ASB_PROBE_CONTROL_SOCKET=/work/control/record.sock PYTHONPATH=/opt FUSE_LIBRARY_PATH=/opt/libfuse.so.2
-python3 /probe/proxy.py /work/lower-view /work/mount /work/evidence > /work/proxy.log 2>&1 &
+python3 /asb-fs-proxy.py /work/lower-view /work/mount /work/evidence > /work/proxy.log 2>&1 &
 p=$!
 cleanup() { code=$?; trap - EXIT; cd /; n=0; while ! fusermount3 -u /work/mount 2>/work/control/unmount.log; do n=$((n+1)); if [ "$n" -ge 100 ]; then kill "$p" 2>/dev/null || true; code=1; break; fi; sleep .1; done; wait "$p" || code=1; fusermount3 -u /work/lower-view || code=1; chown -R "$ASB_UID:$ASB_GID" /work/record-upper /work/record-work || code=1; exit "$code"; }
 trap cleanup EXIT

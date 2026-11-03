@@ -21,7 +21,7 @@ with tempfile.TemporaryDirectory(dir=base) as tmp:
   script='''set -eu
 /opt/fuse-overlayfs -o allow_other,lowerdir=/lower,upperdir=/work/upper,workdir=/work/work /work/mount
 export ASB_PROBE_ROOT_TGID=$$ ASB_PROBE_ALLOW_OTHER=1 PYTHONPATH=/opt FUSE_LIBRARY_PATH=/opt/libfuse.so.2
-python3 /probe/proxy.py /work/mount /work/observed /work/evidence > /work/proxy.log 2>&1 &
+python3 /asb-fs-proxy.py /work/mount /work/observed /work/evidence > /work/proxy.log 2>&1 &
 p=$!
 cleanup() { code=$?; trap - EXIT; fusermount3 -u /work/observed || code=1; wait "$p" || code=1; fusermount3 -u /work/mount || code=1; chown -R "$ASB_UID:$ASB_GID" /work || code=1; exit "$code"; }
 trap cleanup EXIT
@@ -38,6 +38,7 @@ setpriv --reuid "$ASB_UID" --regid "$ASB_GID" --clear-groups /bin/sh -c 'printf 
 '''
   name='asb-overlay-probe-'+uuid.uuid4().hex
   cmd=['docker','run','--rm','--name',name,'--network','none','--device','/dev/fuse','--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={low},dst=/lower,readonly','--mount',f'type=bind,src={work},dst=/work','--mount',f'type=bind,src={overlay},dst=/opt/fuse-overlayfs,readonly','--mount',f'type=bind,src={lib},dst=/usr/lib/x86_64-linux-gnu/libfuse3.so.3,readonly','--mount',f'type=bind,src={unmount},dst=/usr/bin/fusermount3,readonly','--mount',f'type=bind,src={probe},dst=/probe,readonly','--mount',f'type=bind,src={fusepy},dst=/opt/fuse.py,readonly','--mount',f'type=bind,src={lib2},dst=/opt/libfuse.so.2,readonly','--env',f'ASB_UID={os.getuid()}','--env',f'ASB_GID={os.getgid()}','--env',f'ASB_REPLICA={index}','--env',f'ASB_MARKER={marker}','--entrypoint','/bin/sh',image,'-c',script]
+  cmd[cmd.index('--env'):cmd.index('--env')]=['--mount',f'type=bind,src={probe.parents[2]/"assets/benchmarks/asb_fs_proxy.py"},dst=/asb-fs-proxy.py,readonly']
   try:
    r=subprocess.run(cmd,capture_output=True,text=True,timeout=120)
   except BaseException:

@@ -202,8 +202,10 @@ No production path selects it yet; recorder dependency provisioning and VM
 fallback remain incomplete.
 The experimental guest lifecycle mounts a recorder over the existing workspace,
 settles it and restores any pre-existing workspace mount. A disposable guest
-test exercised that lifecycle with the probe; it is not yet wired to agent runs
-and does not establish complete filesystem or subprocess replay.
+test exercised the supervisor with the packaged proxy. The guest driver starts
+and settles this supervisor when its internal recording flag is selected, but
+the normal runner does not select it. This does not establish complete
+filesystem or subprocess replay.
 The draft `fuse-overlayfs` tool installer obtains the pinned upstream static
 binary for Linux x86-64 or aarch64 and can stage it into a guest. An x86-64
 project-local install and mount/unmount in the selected SWE-bench image passed;

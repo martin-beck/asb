@@ -23,7 +23,7 @@ def _mount_ids(path):
 
 class FilesystemRecorder:
     """Mount the recorder over a task workspace until the attempt settles."""
-    def __init__(self, workspace, run_dir, proxy, binding, library):
+    def __init__(self, workspace, run_dir, proxy, binding, library, root_pid=None):
         self.workspace = Path(workspace).resolve()
         self.run_dir = Path(run_dir).resolve()
         self.proxy = Path(proxy).resolve()
@@ -35,6 +35,7 @@ class FilesystemRecorder:
         self.bound = False
         self.log = None
         self.original_mounts = None
+        self.root_pid = root_pid if root_pid is not None else os.getpid()
 
     def recorder_mounted(self):
         return bool(_mount_ids(self.workspace) - self.original_mounts)
@@ -50,7 +51,7 @@ class FilesystemRecorder:
                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             self.bound = True
             env = dict(os.environ, PYTHONPATH=str(self.binding), FUSE_LIBRARY_PATH=str(self.library),
-                       ASB_PROBE_ROOT_TGID=str(os.getpid()), ASB_PROBE_ALLOW_OTHER='1', ASB_PROBE_NONEMPTY='1')
+                       ASB_PROBE_ROOT_TGID=str(self.root_pid), ASB_PROBE_ALLOW_OTHER='1', ASB_PROBE_NONEMPTY='1')
             self.log = (self.run_dir / 'filesystem-recorder.log').open('wb')
             self.process = subprocess.Popen([sys.executable, str(self.proxy), str(self.lower),
                                              str(self.workspace), str(self.recording)],
@@ -102,3 +103,12 @@ class FilesystemRecorder:
 
     def __exit__(self, *_):
         self.close()
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 6:
+        raise SystemExit('usage: asb_fs_record.py WORKSPACE RUN_DIR PROXY BINDING LIBRARY')
+    with FilesystemRecorder(*sys.argv[1:], root_pid=os.getppid()):
+        print('READY', flush=True)
+        if sys.stdin.readline() != 'STOP\n':
+            raise RuntimeError('filesystem recorder control ended unexpectedly')

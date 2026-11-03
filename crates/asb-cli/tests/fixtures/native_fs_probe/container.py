@@ -45,7 +45,7 @@ with tempfile.TemporaryDirectory(dir=base) as tmp, tempfile.TemporaryDirectory(d
   (root/'mock-record/command.txt').write_text(command)
  script='''set -eu
 export ASB_PROBE_ROOT_TGID=$$
-python3 /probe/proxy.py /work/backing /work/mount /work/evidence > /work/proxy.log 2>&1 &
+python3 /asb-fs-proxy.py /work/backing /work/mount /work/evidence > /work/proxy.log 2>&1 &
 p=$!
 trap 'fusermount3 -u /work/mount || true; wait "$p" || true' EXIT
 n=0
@@ -66,6 +66,7 @@ fi
 '''
  name='asb-fuse-probe-'+uuid.uuid4().hex
  cmd=['docker','run','--rm','--name',name,'--network','none','--device','/dev/fuse','--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={root},dst=/work','--mount',f'type=bind,src={probe},dst=/probe,readonly','--mount',f'type=bind,src={fusepy},dst=/opt/fuse.py,readonly','--mount',f'type=bind,src={fuse_library},dst=/opt/libfuse.so.2,readonly','--env','PYTHONPATH=/opt','--env','FUSE_LIBRARY_PATH=/opt/libfuse.so.2','--entrypoint','/bin/sh',image,'-c',script]
+ cmd[cmd.index('--env'):cmd.index('--env')]=['--mount',f'type=bind,src={probe.parents[2]/"assets/benchmarks/asb_fs_proxy.py"},dst=/asb-fs-proxy.py,readonly']
  fuse_unmount=os.environ.get('ASB_CONTAINER_FUSERMOUNT')
  if fuse_unmount:
   position=cmd.index('--env')

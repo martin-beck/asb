@@ -24,7 +24,7 @@ with tempfile.TemporaryDirectory(dir=BASE) as temp:
         result=subprocess.run(['git','-C',str(path),'status','--porcelain=2','--branch'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True,timeout=120)
         return time.monotonic()-start,result.stdout
     direct,direct_out=status(backing)
-    process=subprocess.Popen([python,str(HERE/'proxy.py'),str(backing),str(mount),str(evidence)],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+    process=subprocess.Popen([python,str(HERE.parents[2]/'assets/benchmarks/asb_fs_proxy.py'),str(backing),str(mount),str(evidence)],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
     mounted=False
     try:
         deadline=time.monotonic()+5

@@ -6,7 +6,7 @@ use crate::{Error, benchmark::BenchmarkConfig, endpoint::Connection, project};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -763,10 +763,23 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         .to_path_buf();
     fs::create_dir_all(&request.run_dir)
         .map_err(|error| Error::Io(format!("cannot create private guest artifacts: {error}")))?;
-    if request.filesystem_recording {
+    let mut filesystem_capture = if request.filesystem_recording {
         let (_, project) = project::load(&request.project_root)?;
-        prepare_filesystem_library(&request.project_root, &project.tools_dir, &request.run_dir)?;
-    }
+        let library = prepare_filesystem_library(
+            &request.project_root,
+            &project.tools_dir,
+            &request.run_dir,
+        )?;
+        Some(GuestFilesystemCapture::start(
+            &request.project_root,
+            &project.tools_dir,
+            &request.run_dir,
+            &workspace,
+            &library,
+        )?)
+    } else {
+        None
+    };
     let mut capture = if request.namespace_collectors.is_empty() {
         None
     } else {
@@ -877,6 +890,9 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             captured.timed_out,
         )
     };
+    if let Some(mut recorder) = filesystem_capture.take() {
+        recorder.stop()?;
+    }
     let namespace_collectors = capture
         .as_mut()
         .map(|session| session.export_execution_namespace_state())
@@ -989,6 +1005,86 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         .code()
         .and_then(|code| u8::try_from(code).ok())
         .unwrap_or(1))
+}
+
+/// Own the recorder supervisor until the guest attempt has stopped using it.
+struct GuestFilesystemCapture {
+    child: Option<std::process::Child>,
+}
+
+impl GuestFilesystemCapture {
+    fn start(
+        project_root: &Path,
+        tools_dir: &str,
+        run_dir: &Path,
+        workspace: &Path,
+        library: &Path,
+    ) -> Result<Self, Error> {
+        let proxy = run_dir.join("asb-fs-proxy.py");
+        fs::write(
+            &proxy,
+            include_str!("../../assets/benchmarks/asb_fs_proxy.py"),
+        )
+        .map_err(crate::io_error)?;
+        let binding =
+            project::resolve(project_root, tools_dir).join("fuse-overlayfs/binding/runtime");
+        let log =
+            fs::File::create(run_dir.join("filesystem-supervisor.log")).map_err(crate::io_error)?;
+        let mut child = Command::new(crate::python_runtime::project_python(project_root))
+            .arg("-c")
+            .arg(include_str!("../../assets/benchmarks/asb_fs_record.py"))
+            .arg(workspace)
+            .arg(run_dir)
+            .arg(proxy)
+            .arg(binding)
+            .arg(library)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(log)
+            .spawn()
+            .map_err(|_| Error::Run("cannot start guest filesystem recorder".into()))?;
+        let mut ready = String::new();
+        let output = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::Run("filesystem recorder readiness is unavailable".into()))?;
+        let result = BufReader::new(output).read_line(&mut ready);
+        if result.is_err() || ready != "READY\n" {
+            drop(child.stdin.take());
+            let _ = child.wait();
+            return Err(Error::Run(
+                "guest filesystem recorder failed to mount; inspect its private supervisor log"
+                    .into(),
+            ));
+        }
+        Ok(Self { child: Some(child) })
+    }
+
+    fn stop(&mut self) -> Result<(), Error> {
+        let Some(mut child) = self.child.take() else {
+            return Ok(());
+        };
+        let write = child
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("missing recorder control"))
+            .and_then(|mut input| input.write_all(b"STOP\n"));
+        let status = child.wait().map_err(crate::io_error)?;
+        if write.is_err() || !status.success() {
+            return Err(Error::Run(
+                "guest filesystem recorder did not settle; inspect its private supervisor log"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for GuestFilesystemCapture {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
 }
 
 /// Build the pinned source in the guest before the agent execution gate.
@@ -1276,6 +1372,38 @@ pub(crate) fn entry() -> std::process::ExitCode {
 #[cfg(all(test, unix))]
 mod artifact_publication_tests {
     use super::*;
+
+    #[test]
+    fn filesystem_capture_supervisor_requires_readiness_and_settles() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "asb-guest-fuse-supervisor-{}",
+                crate::tools::runtime::unique_id()
+            ));
+        let python = crate::python_runtime::project_python(&root);
+        let run = root.join("run");
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::create_dir_all(&run).unwrap();
+        fs::write(
+            &python,
+            "#!/bin/sh\nprintf 'READY\\n'\nread value\n[ \"$value\" = STOP ]\n",
+        )
+        .unwrap();
+        fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut capture =
+            GuestFilesystemCapture::start(&root, "tools", &run, &root, &root.join("libfuse.so"))
+                .unwrap();
+        capture.stop().unwrap();
+        capture.stop().unwrap();
+        fs::write(&python, "#!/bin/sh\nprintf 'FAILED\\n'\n").unwrap();
+        assert!(
+            GuestFilesystemCapture::start(&root, "tools", &run, &root, &root.join("libfuse.so"))
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn filesystem_library_is_prepared_from_the_staged_guest_source() {

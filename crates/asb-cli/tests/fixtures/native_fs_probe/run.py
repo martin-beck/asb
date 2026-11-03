@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     control, peer = socket.socketpair()
     env = dict(os.environ, ASB_PROBE_HOLD_WRITE='1', ASB_PROBE_CONTROL_FD=str(peer.fileno()), ASB_PROBE_ROOT_TGID=str(os.getpid()))
     with (root / 'fuse.log').open('wb') as log:
-        process = subprocess.Popen([python, str(HERE / 'proxy.py'), str(backing), str(mount), str(evidence)], env=env, stdout=log, stderr=log, pass_fds=(peer.fileno(),))
+        process = subprocess.Popen([python, str(HERE.parents[2] / 'assets/benchmarks/asb_fs_proxy.py'), str(backing), str(mount), str(evidence)], env=env, stdout=log, stderr=log, pass_fds=(peer.fileno(),))
         peer.close()
         markers = control.makefile('rwb', buffering=0)
         def mark(name):
