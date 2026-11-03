@@ -49,6 +49,12 @@ impl AuxiliarySessions {
                 "invalid or duplicate auxiliary tape identity".into(),
             ));
         }
+        // The main provider's agent-specific wire extension describes its LLM
+        // conversation; it must never rewrite a separate auxiliary protocol.
+        let context = AgentContext {
+            agent: None,
+            ..context
+        };
         let session =
             Session::start_for_agent_at(mode, cassette, upstream, respect_record_timings, context)?;
         self.sessions.insert(name.to_owned(), (mode, session));
@@ -239,6 +245,7 @@ mod auxiliary_tests {
                 .unwrap();
             let mut body = vec![0; length];
             stream.read_exact(&mut body).unwrap();
+            assert_eq!(body, br#"{"model":"embedding","messages":[{"content":"bash_outputs/bash_aaaaaaaaaaaa.txt"}]}"#);
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}").unwrap();
         });
         let mut sessions = AuxiliarySessions::default();
@@ -251,7 +258,7 @@ mod auxiliary_tests {
                 false,
                 AgentContext {
                     workspace: &root,
-                    agent: None,
+                    agent: Some("openjiuwen"),
                     recorder: None,
                     invocation_dir: &root,
                 },
@@ -262,7 +269,7 @@ mod auxiliary_tests {
             .trim_start_matches("http://")
             .trim_end_matches("/v1");
         let mut socket = std::net::TcpStream::connect(address).unwrap();
-        let body = r#"{"model":"embedding","input":["fixture"]}"#;
+        let body = r#"{"model":"embedding","messages":[{"content":"bash_outputs/bash_aaaaaaaaaaaa.txt"}]}"#;
         write!(socket, "POST /v1/embeddings HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
         let mut response = String::new();
         socket.read_to_string(&mut response).unwrap();
