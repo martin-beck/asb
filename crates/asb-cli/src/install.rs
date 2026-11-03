@@ -289,6 +289,16 @@ pub(crate) struct GuestBootstrap {
     npm_package_tree: Option<NpmPackageTree>,
 }
 
+impl GuestBootstrap {
+    fn add_runtimes(&mut self, additional: &[&'static str]) {
+        for runtime in additional {
+            if !self.runtime_tools.contains(runtime) {
+                self.runtime_tools.push(runtime);
+            }
+        }
+    }
+}
+
 /// A bounded, project-owned npm installation that is staged into an isolated
 /// workload guest.  The guest validates and extracts this archive itself; it
 /// never receives a host directory mount.
@@ -319,13 +329,25 @@ pub(crate) fn guest_bootstrap(
     project_root: &Path,
     tools_root: &Path,
 ) -> Result<GuestBootstrap, Error> {
+    guest_bootstrap_with_runtimes(id, project_root, tools_root, &[])
+}
+
+/// Include additional project-local support runtimes selected by an attempt.
+pub(crate) fn guest_bootstrap_with_runtimes(
+    id: &str,
+    project_root: &Path,
+    tools_root: &Path,
+    additional_runtimes: &[&'static str],
+) -> Result<GuestBootstrap, Error> {
     let context = OperationContext::load(project_root).map_err(InstallFailure::into_public)?;
-    guest_bootstrap_in(&context, id, tools_root).map_err(InstallFailure::into_public)
+    guest_bootstrap_in(&context, id, tools_root, additional_runtimes)
+        .map_err(InstallFailure::into_public)
 }
 fn guest_bootstrap_in(
     context: &OperationContext,
     id: &str,
     tools_root: &Path,
+    additional_runtimes: &[&'static str],
 ) -> InstallResult<GuestBootstrap> {
     let adapter = agents::find(id)
         .ok_or_else(|| Error::Input("selected agent has no installation adapter".into()))?;
@@ -347,6 +369,7 @@ fn guest_bootstrap_in(
         public_package_cache: matches!(recipe, Recipe::Npm { .. }),
         npm_package_tree: None,
     };
+    plan.add_runtimes(additional_runtimes);
     for id in &plan.runtime_tools {
         let tool = tools::find(id)
             .ok_or_else(|| Error::Input("guest runtime is not registered".into()))?;
@@ -2021,6 +2044,24 @@ mod coverage_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn guest_bootstrap_additional_runtimes_are_ordered_and_deduplicated() {
+        let mut plan = super::GuestBootstrap::fixture_empty();
+        plan.add_runtimes(&["uv", "fuse-overlayfs", "uv", "fuse-overlayfs"]);
+        assert_eq!(plan.runtime_tools, ["uv", "fuse-overlayfs"]);
+        let runtime = crate::tools::find("fuse-overlayfs").unwrap();
+        let assets = runtime
+            .guest_assets(std::path::Path::new("/fixture/fuse-overlayfs"))
+            .unwrap();
+        assert_eq!(assets.len(), 3);
+        assert!(
+            assets
+                .iter()
+                .all(|asset| asset.source.starts_with("/fixture/fuse-overlayfs")
+                    && !asset.target.is_absolute())
+        );
+    }
+
     use super::*;
 
     #[test]

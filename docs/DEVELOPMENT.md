@@ -208,6 +208,8 @@ installed overlay binary and binding passed the four-replica offline fixture
 with libfuse2 built from the installed pinned source inside the selected guest.
 The helper needs guest `tar`, `make` and `cc`; the guest driver invokes it before
 the execution gate when the internal filesystem recording request is selected.
+That internal selection also adds the recorder tool and its three pinned
+assets to guest bootstrap. The runner currently leaves the selection off.
 Automatic toolchain provisioning, selecting that request from a production
 launcher, the aarch64 path, and VM fallback remain unqualified.
 

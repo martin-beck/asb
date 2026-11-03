@@ -849,6 +849,7 @@ impl<'a> ReadyAttempt<'a> {
             let isolated = prepared.workload.execute(
                 &mut workloads::ExecutionContext {
                     launch,
+                    filesystem_recording: false,
                     auxiliary_endpoints: &auxiliary_endpoints,
                     config,
                     connection: connection.as_ref(),

@@ -271,6 +271,8 @@ impl Drop for LaunchFailureGuard<'_> {
 /// The runner provides negotiated connections, never workload/agent dispatch.
 pub(crate) struct ExecutionContext<'a> {
     pub launch: Option<&'a dyn LaunchReadiness>,
+    /// Whether this attempt prepares the experimental filesystem recorder.
+    pub filesystem_recording: bool,
     /// Endpoints owned by this attempt and translated for an isolated guest.
     pub auxiliary_endpoints: &'a std::collections::BTreeMap<String, String>,
     pub config: &'a crate::benchmark::BenchmarkConfig,

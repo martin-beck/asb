@@ -1023,6 +1023,7 @@ impl Session {
             artifact_output: &artifact_output,
             private_inputs,
             request: json!({"process_lifetime":self.process_lifetime,"config":config,"connection":connection,"prompt":self.invocation.input.instructions,"timeout_seconds":self.agent_timeout.as_secs_f64(),"max_steps":context.max_steps,
+                "filesystem_recording":context.filesystem_recording,
                 "auxiliary_endpoints": context.auxiliary_endpoints,
                 "project_root":"/opt/asb-project","runtime_dir":"/opt/asb-private","run_dir":"/opt/asb-private/attempt","replay":context.replay,
                 "tape_cassette":tape_cassette,
@@ -1297,10 +1298,16 @@ impl PreparedBootstrap {
         let binary = runtime_binary()?;
         let tools_root =
             crate::project::resolve(context.project_root, &context.project_config.tools_dir);
-        let installation = crate::install::guest_bootstrap(
+        let additional = if context.filesystem_recording {
+            &["fuse-overlayfs"][..]
+        } else {
+            &[][..]
+        };
+        let installation = crate::install::guest_bootstrap_with_runtimes(
             &context.config.agent,
             context.project_root,
             &tools_root,
+            additional,
         )
         .map_err(|error| {
             format!("cannot prepare selected agent installation artifacts: {error}")
