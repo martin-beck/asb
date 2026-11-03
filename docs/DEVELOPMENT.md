@@ -1,15 +1,15 @@
 # Development
 
 The opt-in, offline `crates/asb-cli/tests/fixtures/fs_snapshot/overlay.py`
-probes four independent fuse-overlayfs workspaces from the same existing Git
-baseline. Set `ASB_SNAPSHOT_GIT_BASELINE` to that workspace,
+probes one recording and four replay fuse-overlayfs workspaces from the same
+existing Git baseline. Set `ASB_SNAPSHOT_GIT_BASELINE` to that workspace,
 `ASB_SNAPSHOT_FUSE_OVERLAYFS` and `ASB_SNAPSHOT_FUSERMOUNT` to installed
 binaries, and `ASB_SNAPSHOT_IMAGE` to an already cached image with Git and
 Python; then run the script with Python. Docker is invoked with networking
 disabled and image pulling disabled. The fixture verifies concurrent Git status
 and recent-log agreement, index isolation, hard-link/rename behavior, and a
 child-process write in only one replica. It applies a synthetic Git patch to
-three replicas and compares resulting diffs and file bytes. A subprocess makes
+four replicas and compares resulting diffs and file bytes. A subprocess makes
 the original synthetic change and an external counter checks that it is not
 rerun when applying the patch. It reports, but does not require,
 identical metadata fields. It preserves failed fixture logs under `target`.
