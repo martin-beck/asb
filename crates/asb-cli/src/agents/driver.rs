@@ -722,6 +722,9 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             "invalid experimental guest filesystem replay request".into(),
         ));
     }
+    if let Some(evidence) = &request.filesystem_replay {
+        bind_filesystem_replay_inputs(&request.runtime_dir, evidence)?;
+    }
     let retained =
         request.process_lifetime == crate::workloads::session::ProcessLifetime::ThroughEvaluation;
     if retained {
@@ -1050,6 +1053,28 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         .code()
         .and_then(|code| u8::try_from(code).ok())
         .unwrap_or(1))
+}
+
+/// Bind each sealed guest-private input into the coordinator's evidence
+/// directory without copying potentially multi-gigabyte artifact contents.
+fn bind_filesystem_replay_inputs(runtime: &Path, evidence: &Path) -> Result<(), Error> {
+    let inputs = [
+        (runtime.join("asb-fs-events.jsonl"), "events.jsonl"),
+        (runtime.join("asb-fs-payload.bin"), "payload.bin"),
+    ];
+    for (source, _) in &inputs {
+        let metadata = fs::symlink_metadata(source).map_err(crate::io_error)?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::Input(
+                "guest filesystem replay input is not a regular file".into(),
+            ));
+        }
+    }
+    fs::create_dir(evidence).map_err(crate::io_error)?;
+    for (source, name) in inputs {
+        fs::hard_link(source, evidence.join(name)).map_err(crate::io_error)?;
+    }
+    Ok(())
 }
 
 /// Own the recorder supervisor until the guest attempt has stopped using it.
@@ -1466,6 +1491,36 @@ pub(crate) fn entry() -> std::process::ExitCode {
 #[cfg(all(test, unix))]
 mod artifact_publication_tests {
     use super::*;
+
+    #[test]
+    fn filesystem_replay_binds_sealed_inputs_without_copying_or_replacing() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!("fs-bind-{}", crate::tools::runtime::unique_id()));
+        fs::create_dir_all(&root).unwrap();
+        let evidence = root.join("filesystem-replay");
+        fs::write(root.join("asb-fs-events.jsonl"), b"events").unwrap();
+        assert!(bind_filesystem_replay_inputs(&root, &evidence).is_err());
+        assert!(!evidence.exists());
+        symlink(
+            root.join("asb-fs-events.jsonl"),
+            root.join("asb-fs-payload.bin"),
+        )
+        .unwrap();
+        assert!(bind_filesystem_replay_inputs(&root, &evidence).is_err());
+        fs::remove_file(root.join("asb-fs-payload.bin")).unwrap();
+        fs::write(root.join("asb-fs-payload.bin"), b"payload").unwrap();
+        bind_filesystem_replay_inputs(&root, &evidence).unwrap();
+        assert_eq!(fs::read(evidence.join("events.jsonl")).unwrap(), b"events");
+        assert_eq!(fs::read(evidence.join("payload.bin")).unwrap(), b"payload");
+        assert_eq!(
+            fs::metadata(root.join("asb-fs-payload.bin")).unwrap().ino(),
+            fs::metadata(evidence.join("payload.bin")).unwrap().ino()
+        );
+        assert!(bind_filesystem_replay_inputs(&root, &evidence).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn filesystem_replay_supervisor_runs_and_rejects_unconsumed_calls() {

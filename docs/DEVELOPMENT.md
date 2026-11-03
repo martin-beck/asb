@@ -62,6 +62,10 @@ The guest can start and settle the server through an internal Mini-SWE replay
 request, preserving the supervisor during agent cleanup. The host does not yet
 admit this request. The server does not intercept direct agent filesystem
 access, and these checks do not establish complete replay coverage.
+The host-side staging plan selects each replica's own sealed event and payload
+files under stable guest-private names. The guest binds those files as hard
+links into its coordinator evidence directory; it rejects missing files and
+existing evidence directories. The host admission guard remains in place.
 It additionally exercises a background child that writes after its tool-return
 marker and before the next invocation, checking the file is absent at the first
 boundary and present at the second. This does not implement a scheduler for
