@@ -29,6 +29,10 @@ complete and unambiguous; otherwise it reports unknown or ambiguous. It is not
 yet wired into direct filesystem replay. Newly recorded reads retain the requested
 size, and writes retain the full request size and SHA-256 even when the kernel
 reports a short write; older journals remain readable but lack that evidence.
+An offline direct-prefix validator checks request shapes, handle bindings and
+payload bytes before a replay could skip already-performed startup effects. It
+rejects missing attribution, extra operations and open handles. It is not wired
+to the runtime and cannot verify currently unrecorded metadata operations.
 The experimental replay cursor can apply an ordered prefix and resume while
 keeping file handles open. The fixture checks an intermediate write before its
 later truncate and brackets one synchronous subprocess with explicit markers.
