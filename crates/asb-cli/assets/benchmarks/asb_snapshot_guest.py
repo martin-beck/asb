@@ -4,9 +4,36 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import re
+import shutil
+import tarfile
 
-from asb_snapshot_service import MarkerServer, SnapshotService, export_snapshot_streams
+from asb_snapshot_service import (MarkerServer, SnapshotService, SnapshotReplay,
+                                  SnapshotApplier, export_snapshot_streams,
+                                  receive_snapshot_streams)
 from asb_snapshot_workspace import SnapshotWorkspace
+
+
+def unpack_streams(archive, destination):
+    """Stream the flat snapshot archive into a fresh private directory."""
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=False)
+    names = set()
+    with tarfile.open(archive, 'r|*') as source:
+        for member in source:
+            name = member.name
+            if (not member.isfile() or name in names or
+                    not (name in ('boundaries.jsonl', 'markers.jsonl') or
+                         re.fullmatch(r'snapshot-[0-9]{8}\.btrfs', name))):
+                raise ValueError('snapshot archive contains an unexpected entry')
+            names.add(name)
+            content = source.extractfile(member)
+            if content is None:
+                raise ValueError('snapshot archive entry is unreadable')
+            with content, (destination/name).open('xb') as output:
+                shutil.copyfileobj(content, output, length=1024*1024)
+    if not {'boundaries.jsonl', 'markers.jsonl'}.issubset(names):
+        raise ValueError('snapshot archive is missing its journals')
 
 
 def main(argv=None):
@@ -15,6 +42,7 @@ def main(argv=None):
         parser.add_argument('--'+name,required=True)
     parser.add_argument('--size',type=int,required=True)
     parser.add_argument('--apply-final',action='store_true')
+    parser.add_argument('--replay-archive')
     args=parser.parse_args(argv)
     root=Path(args.root);root.mkdir(parents=True,exist_ok=False)
     workspace=SnapshotWorkspace(root/'workspace.img',root/'filesystem',args.size,
@@ -24,7 +52,16 @@ def main(argv=None):
         mounted=workspace.prepare(args.target)
         subprocess.run(['mount','--bind',str(mounted),args.target],check=True,timeout=60)
         bound=True
-        service=SnapshotService(mounted,root/'filesystem/snapshots',[args.btrfs])
+        store = root/'filesystem/snapshots'
+        if args.replay_archive:
+            unpack_streams(args.replay_archive, root/'streams')
+            boundaries = receive_snapshot_streams(root/'streams', store, [args.btrfs])
+            subprocess.run([args.rsync, '-aHAX', '--inplace', '--checksum', '--delete',
+                            str(store/'snapshot-00000001')+'/', str(mounted)+'/'],
+                           check=True, timeout=300)
+            service = SnapshotReplay(boundaries, SnapshotApplier(store, mounted, [args.rsync]))
+        else:
+            service=SnapshotService(mounted,store,[args.btrfs])
         server=MarkerServer(args.socket,service)
         worker=threading.Thread(target=server.serve_forever,daemon=True);worker.start()
         print('READY',flush=True)
@@ -34,7 +71,8 @@ def main(argv=None):
         server.shutdown();server.server_close();worker.join();server=None
         Path(args.socket).unlink(missing_ok=True)
         service.finish();service=None
-        export_snapshot_streams(root/'filesystem/snapshots',args.output,[args.btrfs])
+        if not args.replay_archive:
+            export_snapshot_streams(store,args.output,[args.btrfs])
         print('SAVED',flush=True)
     finally:
         if server is not None:
