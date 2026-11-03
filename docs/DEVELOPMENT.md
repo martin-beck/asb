@@ -68,6 +68,10 @@ it does not contact a provider.
 The experimental per-replica replay server accepts validated tool-end markers
 and acknowledges each only after applying its recorded operations. Offline
 tests exercise four isolated workspaces and reject missing or invalid calls.
+For nested work, a validated parent can be admitted at its recorded begin
+boundary before child calls arrive; its end remains mandatory. Tests cover
+overlapping children and four independent replicas. This protocol is not yet
+connected to OpenHands delegated conversations.
 The guest can start and settle the server through an internal Mini-SWE replay
 request, preserving the supervisor during agent cleanup. The host does not yet
 admit this request. The server does not intercept direct agent filesystem

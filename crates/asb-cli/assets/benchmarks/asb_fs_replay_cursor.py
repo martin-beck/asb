@@ -154,12 +154,49 @@ class Coordinator:
         self.replay = replay
         self.condition = threading.Condition()
         self.claimed = set()
+        self.pre_admitted = {}
+        self.begun_starts = set()
         self.failure = None
         with (replay.evidence / 'events.jsonl').open(encoding='utf-8') as stream:
             self.ends = {event['sequence']: event.get('marker')
                          for event in map(json.loads, stream) if event['op'] == 'marker'}
 
-    def invoke(self, tool, end_sequence, timeout, validate):
+    def begin(self, tool, start_sequence, end_sequence, timeout, validate):
+        """Admit a validated parent call before its nested calls can arrive."""
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            if (self.ends.get(start_sequence) != f'tool-begin:{tool}'
+                    or self.ends.get(end_sequence) != f'tool-end:{tool}'
+                    or start_sequence >= end_sequence or end_sequence in self.pre_admitted
+                    or end_sequence in self.claimed or start_sequence in self.begun_starts
+                    or start_sequence <= self.replay.sequence):
+                raise RuntimeError('parent invocation boundaries are invalid or already admitted')
+            if any(value == tool for value in self.pre_admitted.values()):
+                raise RuntimeError('overlapping parent invocations require distinct aliases')
+            response = validate()
+            self.pre_admitted[end_sequence] = tool
+            self.begun_starts.add(start_sequence)
+            self.replay.admit(tool)
+            self.condition.notify_all()
+            try:
+                while self.replay.sequence < start_sequence:
+                    if self.failure is not None:
+                        raise RuntimeError('concurrent replay failed') from self.failure
+                    self.replay.apply_until(start_sequence)
+                    self.condition.notify_all()
+                    if self.replay.sequence >= start_sequence:
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError('recorded parent invocation did not arrive in order')
+                    self.condition.wait(remaining)
+            except BaseException as error:
+                self.failure = error
+                self.condition.notify_all()
+                raise
+            return response
+
+    def invoke(self, tool, end_sequence, timeout, validate, *, pre_admitted=False):
         if self.ends.get(end_sequence) != f'tool-end:{tool}':
             raise RuntimeError('invocation end marker does not match tool')
         deadline = time.monotonic() + timeout
@@ -171,10 +208,16 @@ class Coordinator:
                        and sequence not in self.claimed]
             if earlier:
                 raise RuntimeError('tool invocation arrived out of recorded order')
+            if pre_admitted:
+                if self.pre_admitted.get(end_sequence) != tool:
+                    raise RuntimeError('parent invocation was not admitted')
+            elif end_sequence in self.pre_admitted:
+                raise RuntimeError('parent invocation requires its admitted boundary')
             # Validation must succeed before advancing the operation cursor.
             response = validate()
             self.claimed.add(end_sequence)
-            self.replay.admit(tool)
+            if not pre_admitted:
+                self.replay.admit(tool)
             self.condition.notify_all()
             try:
                 while self.replay.sequence < end_sequence:
@@ -188,6 +231,8 @@ class Coordinator:
                     if remaining <= 0:
                         raise TimeoutError('recorded concurrent invocation did not arrive')
                     self.condition.wait(remaining)
+                if pre_admitted:
+                    del self.pre_admitted[end_sequence]
             except BaseException as error:
                 self.failure = error
                 self.condition.notify_all()
