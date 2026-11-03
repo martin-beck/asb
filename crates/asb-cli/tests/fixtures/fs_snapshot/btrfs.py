@@ -34,6 +34,7 @@ received_attached=0
 cleanup(){ umount /work/recvfs || true; if [ "$received_attached" = 1 ]; then losetup -d /dev/loop29 || true; fi; umount /work/fs || true; losetup -d /dev/LOOPDEV || true; chmod -R a+rwX /work; }
 trap cleanup EXIT
 mknod /dev/loop29 b 7 29
+mknod /dev/loop30 b 7 30
 truncate -s 4G /work/received.img
 /hostlib/LOADER --library-path /hostlib /opt/mkfs.btrfs -q /work/received.img
 losetup /dev/loop29 /work/received.img
@@ -292,6 +293,16 @@ if os.environ.get('ASB_SNAPSHOT_REAL_WORKSPACE')=='1':
   checks['real_mini_agent_original_tool_ran_once']=Path('/work/real-agent-invocations').read_bytes()==b'12'
  else:
   checks['swe_workspace_original_tool_ran_once']=Path('/work/adapter-invocations').read_bytes()==b'11'
+ from asb_snapshot_workspace import SnapshotWorkspace
+ provisioner=SnapshotWorkspace('/work/provisioned.img','/work/provisioned',4*1024**3,
+  ['/hostlib/LOADER','--library-path','/hostlib','/opt/mkfs.btrfs'],command,
+  ['/hostlib/LOADER','--library-path','/hostlib','/opt/rsync'])
+ try:
+  prepared=provisioner.prepare(source)
+  checks['dynamic_workspace_prepared']=subprocess.run(['git','-C',str(prepared),'rev-parse','HEAD'],capture_output=True,check=True).stdout==baseline
+ finally:
+  provisioner.close()
+ checks['dynamic_workspace_settled']=provisioner.loop is None and not provisioner.mounted
 for fd in link_fds+split_fds+dir_fds+nested_fds:os.close(fd)
 for name,passed in checks.items():print(name,passed)
 print('xattr_exercised',xattr)
@@ -300,6 +311,7 @@ for fd in fds:os.close(fd)
 EOPY
 '''.replace('LOADER',loader).replace('LOOPDEV',loop.name)
  cmd=['docker','run','--rm','--name',container_name,'--pull=never','--network','none','--env',f'ASB_SNAPSHOT_REAL_WORKSPACE={os.environ.get("ASB_SNAPSHOT_REAL_WORKSPACE","0")}','--device','/dev/loop-control','--device',str(loop),'--device-cgroup-rule','b 7:* rwm','--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={mkfs},dst=/opt/mkfs.btrfs,readonly','--mount',f'type=bind,src={btrfs},dst=/opt/btrfs,readonly','--mount',f'type=bind,src={rsync},dst=/opt/rsync,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_topology.py").resolve()},dst=/opt/asb_snapshot_topology.py,readonly','--mount',f'type=bind,src={Path(__file__).with_name("mini_swe_client.py").resolve()},dst=/opt/mini_swe_client.py,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/src/agents/adapters/mini_swe.rs").resolve()},dst=/opt/mini_swe.rs,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_service.py").resolve()},dst=/opt/asb_snapshot_service.py,readonly','--mount',f'type=bind,src={libraries},dst=/hostlib,readonly','--entrypoint','/bin/sh',image,'-c',script]
+ cmd[cmd.index('--entrypoint'):cmd.index('--entrypoint')]=['--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_workspace.py").resolve()},dst=/opt/asb_snapshot_workspace.py,readonly']
  if os.environ.get('ASB_SNAPSHOT_REAL_AGENT')=='1':
   if os.environ.get('ASB_SNAPSHOT_REAL_WORKSPACE')!='1':raise ValueError('real agent probe requires a task workspace')
   mini_venv=Path(os.environ['ASB_SNAPSHOT_MINI_VENV']).resolve(strict=True)
