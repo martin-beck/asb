@@ -132,7 +132,7 @@ async function replayResponse(response, interaction) {
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const body = workspace
     ? normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(
-        normalizeCassetteBody(interaction.response.body || ""),
+        interaction.response.body || "",
         "<asb-workspace>",
         workspace,
       ), "<asb-workspace>", workspace).replaceAll("<asb-workspace>", workspace)
@@ -338,6 +338,17 @@ function normalizePytestTestMapsAddress(value) {
   return value.replace(
     /(\bself = <astropy\.wcs\.tests\.test_wcs\.TestMaps object at )0x[0-9a-f]+>/gi,
     "$1<asb-pytest-testmaps-address>>",
+  );
+}
+
+// Preserve provider response content exactly, apart from workspace paths that
+// must point into the replay replica. Request canonicalization is only for
+// matching and must never rewrite dates, UUIDs or other model-generated data.
+function normalizeRecordedResponse(body) {
+  const workspace = process.env.ASB_TAPE_WORKSPACE;
+  return normalizeWorkspacePaths(
+    normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace), workspace)
+      .replaceAll(workspace || "\u0000", "<asb-workspace>"),
   );
 }
 
@@ -731,9 +742,6 @@ const interactions = mode === "replay"
           interaction.request.url = requestPath(interaction.request.url);
           interaction.request.body = normalizeCassetteBody(interaction.request.body, interaction.request.url);
         }
-        if (interaction.response?.body) {
-          interaction.response.body = normalizeCassetteBody(interaction.response.body);
-        }
         return interaction;
       })
   : [];
@@ -1085,7 +1093,7 @@ async function handle(request, response, recording) {
   const recordedResponse = {
     status: upstreamResponse.status,
     headers: responseHeaders(upstreamResponse.headers),
-    body: normalizeCassetteBody(responseBody),
+    body: normalizeRecordedResponse(responseBody),
   };
   const delayMs = Math.min(Math.max(0, Math.round(performance.now() - startedAt)), MAX_DELAY_MS);
   const interaction = {
