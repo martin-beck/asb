@@ -33,6 +33,7 @@ def caller_identity(tid):
         return {'tid': tid, 'tgid': None, 'ppid': None, 'start_ticks': None, 'ancestry': [], 'ancestry_complete': False}
 
 class Proxy(Operations):
+    use_ns = True
     def __init__(self):
         self.record_lock = threading.Lock()
         self.sequence = 0
@@ -90,7 +91,9 @@ class Proxy(Operations):
     def getattr(self, path, fh=None):
         try: st = os.lstat(self.path(path))
         except OSError as error: raise FuseOSError(error.errno)
-        return {key: getattr(st, key) for key in ('st_atime','st_ctime','st_gid','st_ino','st_mode','st_mtime','st_nlink','st_size','st_uid','st_blocks','st_blksize')}
+        attrs = {key: getattr(st, key) for key in ('st_gid','st_ino','st_mode','st_nlink','st_size','st_uid','st_blocks','st_blksize')}
+        attrs.update(st_atime=st.st_atime_ns, st_mtime=st.st_mtime_ns, st_ctime=st.st_ctime_ns)
+        return attrs
     def readdir(self, path, fh): return ['.', '..', *os.listdir(self.path(path))]
     def open(self, path, fi):
         try:
@@ -140,6 +143,16 @@ class Proxy(Operations):
             if fh is None: os.truncate(self.path(path), length)
             else: os.ftruncate(fh.fh, length)
             self.record('truncate', path, size=length, handle=self.handle(fh) if fh is not None else None)
+    def chmod(self, path, mode):
+        with self.lock_for_stat(os.stat(self.path(path))):
+            os.chmod(self.path(path), mode)
+            self.record('chmod', path, mode=mode)
+    def utimens(self, path, times=None):
+        with self.lock_for_stat(os.stat(self.path(path))):
+            if times is None: os.utime(self.path(path), None)
+            else: os.utime(self.path(path), ns=times)
+            st = os.stat(self.path(path))
+            self.record('utimens', path, atime_ns=st.st_atime_ns, mtime_ns=st.st_mtime_ns)
     def rename(self, old, new):
         os.rename(self.path(old), self.path(new)); self.record('rename', old, destination=new)
     def link(self, target, source):

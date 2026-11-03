@@ -105,6 +105,10 @@ class Replay:
                 os.truncate(path, event['size'])
             else:
                 os.ftruncate(self.handles[event['handle']], event['size'])
+        elif op == 'chmod':
+            os.chmod(path, event['mode'])
+        elif op == 'utimens':
+            os.utime(path, ns=(event['atime_ns'], event['mtime_ns']))
         elif op == 'rename':
             os.rename(path, self.root / event['destination'].lstrip('/'))
         elif op == 'link':
