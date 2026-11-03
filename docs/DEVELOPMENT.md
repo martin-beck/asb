@@ -58,6 +58,12 @@ Setting `ASB_SNAPSHOT_REAL_WORKSPACE=1` additionally copies the cached task
 image's `/testbed` into a snapshot-backed workspace and runs the fixture tool
 and four replays against that repository. It requires a task image with a Git
 checkout and still does not run a live agent or official evaluator.
+For a further offline probe, set `ASB_SNAPSHOT_REAL_AGENT=1` and
+`ASB_SNAPSHOT_MINI_VENV` to an installed Mini-SWE venv. The probe runs the
+installed Mini-SWE agent and local environment with deterministic simulated
+model responses, then replays its two tool boundaries in four replicas. This
+uses host Python 3.12 inside the disposable container and does not qualify a
+live provider, official evaluator, or the production guest lifecycle.
 
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without

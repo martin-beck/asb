@@ -210,6 +210,11 @@ def adapter_client(root,mode,socket_path,tape='/work/adapter-tape.jsonl'):
   'ASB_MINI_SWE_TOOL_MODE':mode,'ASB_FIXTURE_WORKSPACE':str(root),
   'ASB_FS_MARKER_SOCKET' if mode=='record' else 'ASB_FS_REPLAY_SOCKET':str(socket_path)})
  return subprocess.run(['python3','/opt/mini_swe_client.py'],env=env,capture_output=True,timeout=60)
+def real_agent_client(root,mode,socket_path,tape):
+ env=os.environ.copy();env.update({'ASB_MINI_SWE_TOOL_TAPE':tape,'ASB_MINI_SWE_TOOL_MODE':mode,
+  'ASB_FIXTURE_WORKSPACE':str(root),'PYTHONPATH':'/opt/mini-venv/lib/python3.12/site-packages',
+  'ASB_FS_MARKER_SOCKET' if mode=='record' else 'ASB_FS_REPLAY_SOCKET':str(socket_path)})
+ return subprocess.run(['/hostlib/LOADER','--library-path','/hostlib','/usr/bin/python3.12','/opt/mini_swe_real_agent.py'],env=env,capture_output=True,timeout=60)
 try:
  recorded=adapter_client(roots[0],'record',adapter_socket)
  if recorded.returncode:raise RuntimeError('adapter record failed: '+recorded.stderr.decode()[-1000:])
@@ -261,10 +266,11 @@ if os.environ.get('ASB_SNAPSHOT_REAL_WORKSPACE')=='1':
   subprocess.run(['/hostlib/LOADER','--library-path','/hostlib','/opt/btrfs','subvolume','snapshot',str(swe_base),str(root)],check=True,stdout=subprocess.DEVNULL)
  baseline=subprocess.run(['git','-C',str(swe_roots[0]),'rev-parse','HEAD'],capture_output=True,check=True).stdout
  swe_service=SnapshotService(swe_roots[0],Path('/work/fs/swe-recorded'),['/hostlib/LOADER','--library-path','/hostlib','/opt/btrfs'])
+ client=real_agent_client if os.environ.get('ASB_SNAPSHOT_REAL_AGENT')=='1' else adapter_client
  path=Path('/work/swe-record.sock');swe_server=MarkerServer(path,swe_service)
  thread=threading.Thread(target=swe_server.serve_forever,daemon=True);thread.start()
  try:
-  result=adapter_client(swe_roots[0],'record',path,'/work/swe-tape.jsonl')
+  result=client(swe_roots[0],'record',path,'/work/swe-tape.jsonl')
   if result.returncode:raise RuntimeError('SWE fixture record failed: '+result.stderr.decode()[-1000:])
  finally:
   swe_server.shutdown();swe_server.server_close();thread.join();path.unlink(missing_ok=True)
@@ -275,7 +281,7 @@ if os.environ.get('ASB_SNAPSHOT_REAL_WORKSPACE')=='1':
   replay=SnapshotReplay(load_replay_boundaries('/work/fs/swe-recorded'),applier);server=MarkerServer(sock,replay)
   thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
   try:
-   result=adapter_client(root,'replay',sock,'/work/swe-tape.jsonl')
+   result=client(root,'replay',sock,'/work/swe-tape.jsonl')
    if result.returncode:raise RuntimeError('SWE fixture replay failed: '+result.stderr.decode()[-1000:])
    replay.finish()
    return (root/'trial-result').read_bytes()==b'fixed' and subprocess.run(['git','-C',str(root),'rev-parse','HEAD'],capture_output=True,check=True).stdout==baseline
@@ -283,7 +289,10 @@ if os.environ.get('ASB_SNAPSHOT_REAL_WORKSPACE')=='1':
    server.shutdown();server.server_close();thread.join();sock.unlink(missing_ok=True)
  with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
   checks['swe_workspace_four_concurrent_replays']=all(pool.map(replay_swe,range(1,5)))
- checks['swe_workspace_original_tool_ran_once']=Path('/work/adapter-invocations').read_bytes()==b'11'
+ if os.environ.get('ASB_SNAPSHOT_REAL_AGENT')=='1':
+  checks['real_mini_agent_original_tool_ran_once']=Path('/work/real-agent-invocations').read_bytes()==b'12'
+ else:
+  checks['swe_workspace_original_tool_ran_once']=Path('/work/adapter-invocations').read_bytes()==b'11'
 for fd in link_fds+split_fds+dir_fds+nested_fds:os.close(fd)
 for name,passed in checks.items():print(name,passed)
 print('xattr_exercised',xattr)
@@ -292,6 +301,14 @@ for fd in fds:os.close(fd)
 EOPY
 '''.replace('LOADER',loader).replace('LOOPDEV',loop.name)
  cmd=['docker','run','--rm','--name',container_name,'--pull=never','--network','none','--env',f'ASB_SNAPSHOT_REAL_WORKSPACE={os.environ.get("ASB_SNAPSHOT_REAL_WORKSPACE","0")}','--device','/dev/loop-control','--device',str(loop),'--device-cgroup-rule','b 7:* rwm','--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={mkfs},dst=/opt/mkfs.btrfs,readonly','--mount',f'type=bind,src={btrfs},dst=/opt/btrfs,readonly','--mount',f'type=bind,src={rsync},dst=/opt/rsync,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_topology.py").resolve()},dst=/opt/asb_snapshot_topology.py,readonly','--mount',f'type=bind,src={Path(__file__).with_name("mini_swe_client.py").resolve()},dst=/opt/mini_swe_client.py,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/src/agents/adapters/mini_swe.rs").resolve()},dst=/opt/mini_swe.rs,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_service.py").resolve()},dst=/opt/asb_snapshot_service.py,readonly','--mount',f'type=bind,src={libraries},dst=/hostlib,readonly','--entrypoint','/bin/sh',image,'-c',script]
+ if os.environ.get('ASB_SNAPSHOT_REAL_AGENT')=='1':
+  if os.environ.get('ASB_SNAPSHOT_REAL_WORKSPACE')!='1':raise ValueError('real agent probe requires a task workspace')
+  mini_venv=Path(os.environ['ASB_SNAPSHOT_MINI_VENV']).resolve(strict=True)
+  extra=['--env','ASB_SNAPSHOT_REAL_AGENT=1','--mount',f'type=bind,src={mini_venv},dst=/opt/mini-venv,readonly',
+         '--mount','type=bind,src=/usr/bin/python3.12,dst=/usr/bin/python3.12,readonly',
+         '--mount','type=bind,src=/usr/lib/python3.12,dst=/usr/lib/python3.12,readonly',
+         '--mount',f'type=bind,src={Path(__file__).with_name("mini_swe_real_agent.py").resolve()},dst=/opt/mini_swe_real_agent.py,readonly']
+  cmd[cmd.index('--entrypoint'):cmd.index('--entrypoint')]=extra
  try:
   r=subprocess.run(cmd,text=True,capture_output=True,timeout=300)
  except subprocess.TimeoutExpired:
