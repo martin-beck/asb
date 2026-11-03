@@ -9,6 +9,7 @@ import { spawn, execFileSync } from "node:child_process";
 import http from "node:http";
 import net from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
+import { normalizeWorkspacePaths } from "../assets/scripts/tape-normalization.mjs";
 
 async function fixture(t, upstreamHandler, options = {}) {
   const parent = join(process.cwd(), "target/capture-http-fixtures");
@@ -39,7 +40,8 @@ async function fixture(t, upstreamHandler, options = {}) {
   const child = spawn(process.execPath, arguments_, {
     env: { PATH: path, HOME: root, ASB_TAPE_OWNER_PIPE: "1", ASB_TAPE_READY_FILE: ready,
       ...(options.curl ? { http_proxy: "http://127.0.0.1:1", no_proxy: "127.0.0.1" } : {}),
-      ASB_TAPE_CAPTURE_RECEIPT: receipt, ASB_TAPE_CAPTURE_NONCE: "fixture-private-invocation" },
+      ASB_TAPE_CAPTURE_RECEIPT: receipt, ASB_TAPE_CAPTURE_NONCE: "fixture-private-invocation",
+      ...(options.workspace ? { ASB_TAPE_WORKSPACE: options.workspace } : {}) },
     stdio: ["pipe", "ignore", "pipe"],
   });
   let stderr = "";
@@ -151,7 +153,19 @@ function request(port, path = "/v1/responses", body = "{}") {
   });
 }
 
-test("linear path normalization preserves legacy cassette keys across path boundaries", { timeout: 10000 }, async (t) => {
+test("legacy request normalization retains workspace key compatibility", () => {
+  const cases = [
+    ["/tmp/sweep/000/workspace-concurrency-3.asb-agent-runtime/a", "<asb-workspace>/a"],
+    ["relative/workspace/file", "<asb-workspace>/file"],
+    ["/tmp/workspaceSuffix", "/tmp/workspaceSuffix"],
+    ["/asb-snapshot-storage/snapshot/filesystem/workspace/a", "/asb-snapshot-storage/snapshot/filesystem/workspace/a"],
+  ];
+  for (const [input, expected] of cases) {
+    assert.deepEqual(JSON.parse(normalizeWorkspacePaths(JSON.stringify({ message: input }))), { message: expected });
+  }
+});
+
+test("recorded provider responses preserve unrelated workspace-like paths", { timeout: 10000 }, async (t) => {
   const cases = [
     "/tmp/sweep/000/workspace-concurrency-3.asb-agent-runtime/a",
     "relative/workspace/file", "/tmp/workspace", "/tmp/workspaceSuffix",
@@ -172,10 +186,30 @@ test("linear path normalization preserves legacy cassette keys across path bound
   assert.equal(value.complete, true);
   const entries = bytes.toString().trim().split("\n").map(JSON.parse);
   cases.forEach((sample, offset) => {
-    const legacy = JSON.stringify({ message: sample })
-      .replace(/\/?(?:[A-Za-z0-9_.-]+\/)+workspace-concurrency-\d+(?:\.asb-agent-runtime)?/g, "<asb-workspace>")
-      .replace(/\/?(?:[A-Za-z0-9_.-]+\/)+workspace(?=\/|["\\])/g, "<asb-workspace>");
-    assert.deepEqual(JSON.parse(entries[offset].response.body), JSON.parse(legacy), sample);
+    assert.deepEqual(JSON.parse(entries[offset].response.body), { message: sample }, sample);
+  });
+});
+
+test("recorded responses rewrite only the selected workspace", { timeout: 10000 }, async (t) => {
+  const workspace = "/tmp/sweep/000/workspace-concurrency-3";
+  const cases = [
+    [workspace, "<asb-workspace>"],
+    [`${workspace}/src/file`, "<asb-workspace>/src/file"],
+    [`${workspace}.asb-agent-runtime/a`, `${workspace}.asb-agent-runtime/a`],
+    [`${workspace}-other/a`, `${workspace}-other/a`],
+    ["/unrelated/workspace/src/file", "/unrelated/workspace/src/file"],
+  ];
+  let index = 0;
+  const { port, stop } = await fixture(t, (_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ message: cases[index++][0] }));
+  }, { workspace });
+  for (const _ of cases) assert.equal((await request(port)).status, 200);
+  const { value, bytes } = await stop();
+  assert.equal(value.complete, true);
+  const entries = bytes.toString().trim().split("\n").map(JSON.parse);
+  cases.forEach(([sample, expected], offset) => {
+    assert.deepEqual(JSON.parse(entries[offset].response.body), { message: expected }, sample);
   });
 });
 
