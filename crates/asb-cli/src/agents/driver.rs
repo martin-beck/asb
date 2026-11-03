@@ -1586,17 +1586,23 @@ mod artifact_publication_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn filesystem_capture_records_creator_thread_lineage() {
-        let script =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/benchmark_fs_thread_lineage.py");
-        let output = std::process::Command::new("python3")
-            .arg(script)
-            .output()
-            .expect("python3 is required for filesystem recorder tests");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        for name in [
+            "benchmark_fs_thread_lineage.py",
+            "benchmark_fs_attribution.py",
+        ] {
+            let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join(name);
+            let output = std::process::Command::new("python3")
+                .arg(script)
+                .output()
+                .expect("python3 is required for filesystem recorder tests");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]
