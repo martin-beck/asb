@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 const FUSEPY_URL: &str = "https://files.pythonhosted.org/packages/04/0b/4506cb2e831cea4b0214d3625430e921faaa05a7fb520458c75a2dbd2152/fusepy-3.0.1.tar.gz";
 const FUSEPY_SHA256: &str = "72ff783ec2f43de3ab394e3f7457605bf04c8cf288a2f4068b4cde141d4ee6bd";
+const LIBFUSE_URL: &str =
+    "https://github.com/libfuse/libfuse/releases/download/fuse-2.9.9/fuse-2.9.9.tar.gz";
+const LIBFUSE_SHA256: &str = "d0e69d5d608cc22ff4843791ad097f554dd32540ddc9bed7638cc6fea7c1b4b5";
 
 pub(super) static ADAPTER: StaticTool = StaticTool::new(
     "fuse-overlayfs",
@@ -49,6 +52,14 @@ fn guest_assets(root: &Path) -> Result<Vec<super::GuestAsset>, Error> {
                 asset
             }),
     );
+    assets.extend(
+        super::runtime::guest_archive(&root.join("libfuse"), LIBFUSE_URL, LIBFUSE_SHA256)
+            .into_iter()
+            .map(|mut asset| {
+                asset.target = Path::new("libfuse").join(asset.target);
+                asset
+            }),
+    );
     Ok(assets)
 }
 
@@ -81,6 +92,13 @@ fn install(
             progress(15 + (u16::from(percent) * 65 / 100) as u8, stage)
         },
     )?;
+    super::runtime::cached_archive_in(
+        context,
+        &root.join("libfuse/cache/fuse-2.9.9.tar.gz"),
+        LIBFUSE_URL,
+        LIBFUSE_SHA256,
+        &mut |_, stage| progress(82, stage),
+    )?;
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).map_err(crate::io_error)?;
     let target = bin.join("fuse-overlayfs");
@@ -110,8 +128,9 @@ mod tests {
         );
         assert_eq!(hash.len(), 64);
         let assets = ADAPTER.guest_assets(Path::new("fixture")).unwrap();
-        assert_eq!(assets.len(), 2);
+        assert_eq!(assets.len(), 3);
         assert_eq!(assets[0].distribution, Some((url, hash)));
         assert_eq!(assets[1].distribution, Some((FUSEPY_URL, FUSEPY_SHA256)));
+        assert_eq!(assets[2].distribution, Some((LIBFUSE_URL, LIBFUSE_SHA256)));
     }
 }

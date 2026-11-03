@@ -179,6 +179,10 @@ pub(crate) fn publish_support(root: &std::path::Path) -> Result<(), crate::Error
             include_str!("../../assets/benchmarks/asb_execution.py"),
         ),
         (
+            "asb_fuse_build.py",
+            include_str!("../../assets/benchmarks/asb_fuse_build.py"),
+        ),
+        (
             "asb_task_server.py",
             include_str!("../../assets/benchmarks/asb_task_server.py"),
         ),

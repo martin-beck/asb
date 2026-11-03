@@ -171,6 +171,11 @@ fn guest_bootstrap_reuses_adapters_without_exposing_host_state() {
 }
 
 #[test]
+fn filesystem_recorder_builds_library_in_guest_environment() {
+    python_protocol("benchmark_fuse_build.py");
+}
+
+#[test]
 fn runtime_bundle_executes_the_same_asb_without_a_guest_compiler() {
     python_protocol("benchmark_runtime.py");
 }
