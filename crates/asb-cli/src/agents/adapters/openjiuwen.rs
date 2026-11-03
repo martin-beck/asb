@@ -870,6 +870,7 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
             "core/single_agent/agents",
             "harness/cli/agent",
             "harness/tools/shell",
+            "harness/tools/web",
             "harness/tools",
         ] {
             std::fs::create_dir_all(package.join(relative)).unwrap();
@@ -892,6 +893,7 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
             "harness/cli/agent/__init__.py",
             "harness/tools/__init__.py",
             "harness/tools/shell/__init__.py",
+            "harness/tools/web/__init__.py",
         ] {
             std::fs::write(package.join(relative), "").unwrap();
         }
@@ -1069,6 +1071,26 @@ class GrepTool(_Tool): label = "grep"
             format!("{}\nclass CodeTool(_Tool): label = 'code'\n", tools),
         )
         .unwrap();
+        let web_tools = r#"
+class _WebTool(_Tool):
+    async def invoke(self, inputs, **kwargs):
+        with open(os.environ["ASB_TEST_NATIVE_EXECUTED"], "a", encoding="utf-8") as marker:
+            marker.write(self.label + "\n")
+        return "shared web result"
+    def render_for_llm(self, output):
+        return os.environ["ASB_TEST_RENDER_PREFIX"] + output
+"#;
+        for (module, class, label) in [
+            ("fetch_webpage", "WebFetchWebpageTool", "fetch_webpage"),
+            ("free_search", "WebFreeSearchTool", "free_search"),
+            ("paid_search", "WebPaidSearchTool", "paid_search"),
+        ] {
+            std::fs::write(
+                package.join(format!("harness/tools/web/{module}.py")),
+                format!("{tools}\n{web_tools}\nclass {class}(_WebTool): label = '{label}'\n"),
+            )
+            .unwrap();
+        }
         let python = std::process::Command::new("python3")
             .args(["-c", "import sys; print(sys.executable)"])
             .output()
@@ -1086,6 +1108,9 @@ from openjiuwen.harness.cli.agent import factory
 from openjiuwen.harness.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool
 from openjiuwen.harness.tools.shell import BashTool
 from openjiuwen.harness.tools.code import CodeTool
+from openjiuwen.harness.tools.web.fetch_webpage import WebFetchWebpageTool
+from openjiuwen.harness.tools.web.free_search import WebFreeSearchTool
+from openjiuwen.harness.tools.web.paid_search import WebPaidSearchTool
 from openjiuwen.core.single_agent.ability_manager import AbilityManager, ToolMessage
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 from openjiuwen.core.context_engine.context.context import Context
@@ -1095,7 +1120,7 @@ async def main():
     assert agent._deep_config.parallel_tool_calls is False
     result = []
     context = Context()
-    for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool):
+    for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool, WebFetchWebpageTool, WebFetchWebpageTool, WebFreeSearchTool, WebPaidSearchTool):
         instance = tool()
         # A wrapped native tool can call another wrapped native tool before
         # the outer result is returned to AbilityManager. The inner exchange
@@ -1175,7 +1200,7 @@ asyncio.run(main())
         );
         assert_eq!(
             std::fs::read_to_string(&marker).unwrap().lines().count(),
-            21
+            29
         );
         assert_eq!(
             std::fs::read_to_string(&sidecar)
@@ -1183,7 +1208,7 @@ asyncio.run(main())
                 .lines()
                 .filter(|line| line.contains(r#""event":"write""#))
                 .count(),
-            20,
+            28,
             "nested helper calls must not become independent replay exchanges"
         );
         std::fs::remove_file(&marker).unwrap();
