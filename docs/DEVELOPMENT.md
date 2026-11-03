@@ -177,6 +177,13 @@ untracked or out-of-workspace effects, or support for all native tools.
 separate production defect: overlapping terminal calls can interleave the
 single-session sidecar, which is marked complete but rejected on replay. A
 repair must identify concurrent invocations without serializing the agent.
+The cassette validator already allows multiple aliases under one launch and
+tracks each alias's poll/write/output/exit lifecycle independently. This makes
+one alias per invocation a possible format for overlapping calls. The Hermes
+reader currently accepts only one alias, however, and the alias alone does not
+reconstruct completion ordering, filesystem effects, or distinguish repeated
+identical calls. The implementation must address those cases, validate with
+the actual cassette reader, and retain legacy single-alias recordings.
 
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the

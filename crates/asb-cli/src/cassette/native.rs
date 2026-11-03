@@ -569,6 +569,44 @@ mod tests {
     }
 
     #[test]
+    fn interleaved_native_sessions_retain_independent_exchanges() {
+        let one = exact_lines();
+        let two: Vec<_> = one
+            .iter()
+            .map(|line| line.replace("shell-1", "shell-2"))
+            .collect();
+        let events = vec![
+            one[0].clone(),
+            one[1].clone(),
+            two[1].clone(),
+            one[2].clone(),
+            one[3].clone(),
+            two[2].clone(),
+            two[3].clone(),
+            two[4].clone(),
+            one[4].clone(),
+            one[5].clone(),
+            two[5].clone(),
+            one[6].clone(),
+        ];
+        let (native, bytes) = sidecar(&events, true);
+        let mut transport = NativeToolTransport::from_sidecar(&native, &bytes).unwrap();
+        for alias in ["shell-2", "shell-1"] {
+            assert_eq!(
+                transport
+                    .replay_output(alias, b"read private workspace")
+                    .unwrap(),
+                b"recorded private tool output"
+            );
+        }
+        transport.require_complete_replay().unwrap();
+        let mut broken = events;
+        broken.remove(7);
+        let (native, bytes) = sidecar(&broken, true);
+        assert!(NativeToolTransport::from_sidecar(&native, &bytes).is_err());
+    }
+
+    #[test]
     fn exact_native_lifecycle_is_private_and_deterministic() {
         let (native, bytes) = sidecar(&exact_lines(), true);
         let transport = NativeToolTransport::from_sidecar(&native, &bytes).unwrap();
