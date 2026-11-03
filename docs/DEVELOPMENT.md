@@ -50,6 +50,11 @@ The cursor rejects an incomplete final event and a stream that ends before an
 explicitly requested boundary; reaching ordinary end of stream during finish
 is still valid. These checks do not prove that an otherwise well-formed journal
 contains every operation that should have been recorded.
+With the experimental filesystem recorder enabled, Mini-SWE marks the beginning
+and end of each real bash invocation and does not generate workspace snapshot
+effects. A missing marker is recorded as an unreplayable tool failure while the
+original tool still runs. This provides boundaries for a future coordinator;
+production filesystem replay remains unavailable.
 It additionally exercises a background child that writes after its tool-return
 marker and before the next invocation, checking the file is absent at the first
 boundary and present at the second. This does not implement a scheduler for
