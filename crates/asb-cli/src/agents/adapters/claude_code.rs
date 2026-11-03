@@ -1,6 +1,20 @@
 use super::{CommandContext, CommandSpec, PreparationContext, StaticAdapter};
 use crate::Error;
 use crate::install::Recipe;
+
+// Claude regenerates this environment header from the current date on every
+// launch. Keep all task content and other system-message text significant.
+const TAPE_WIRE_EXTENSION: &str = r#"
+export function normalizeRequest(request) {
+  const body = request?.body;
+  if (!Array.isArray(body?.system)) return body;
+  for (const block of body.system) {
+    if (block?.type !== 'text' || typeof block.text !== 'string') continue;
+    block.text = block.text.replace(/^(CWD: [^\n]+\nDate: )\d{4}-\d{2}-\d{2}(?=\n|$)/, '$1<asb-claude-date>');
+  }
+  return body;
+}
+"#;
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "claude-code",
     "claude",
@@ -14,6 +28,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_estimated_disk_mib(1024)
+.with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_complete_tool_replay(prepare_tool_replay)
 .with_artifact_specs(&[super::super::ArtifactSpec {
     namespace: "tool-replay",
@@ -301,6 +316,36 @@ fn prepare_tool_replay(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn replay_normalizes_only_claude_environment_date() {
+        let root = std::env::temp_dir().join(format!("asb-claude-wire-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("extension.mjs"), super::TAPE_WIRE_EXTENSION).unwrap();
+        std::fs::write(root.join("test.mjs"), r#"
+import { normalizeRequest } from './extension.mjs';
+const make = date => ({body: {system: [
+  {type:'text', text:`CWD: /testbed\nDate: ${date}\n\nKeep this text`},
+  {type:'text', text:`Task date: ${date}`},
+], messages:[{role:'user', content:`Date: ${date}`}]}});
+const a = normalizeRequest(make('2026-11-02'));
+const b = normalizeRequest(make('2026-11-03'));
+if (a.system[0].text !== b.system[0].text) throw Error('environment date differs');
+if (a.system[1].text === b.system[1].text || a.messages[0].content === b.messages[0].content) throw Error('task text was normalized');
+const altered = make('2026-11-03'); altered.body.system[0].text += ' changed';
+if (normalizeRequest(altered).system[0].text === a.system[0].text) throw Error('other system text was ignored');
+"#).unwrap();
+        let output = std::process::Command::new("node")
+            .arg(root.join("test.mjs"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn result_answer_is_not_usage_when_result_has_no_usage() {
         let output = serde_json::json!({"type":"result", "result":"{\"usage\":{\"input_tokens\":999,\"output_tokens\":888}}"}).to_string();
