@@ -245,6 +245,12 @@ pub(crate) fn run_with_diagnostics(
         .cassette
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| default_cassette(config_path, &config));
+    let filesystem_replay = uses_experimental_filesystem_replay(
+        std::env::var_os("ASB_EXPERIMENTAL_FILESYSTEM_REPLAY").as_deref()
+            == Some(std::ffi::OsStr::new("1")),
+        options.effective_tool_mode(),
+        &config.workload,
+    );
     let derived_capsule = automatic_native_capsule(
         &config.agent,
         options.mode,
@@ -261,7 +267,7 @@ pub(crate) fn run_with_diagnostics(
             // LLM replay is independently useful.  Only opt into the
             // conventional workspace sidecar when the recorder produced
             // one; an explicit --native-capsule-replay remains strict.
-            (options.mode == Some(tape::Mode::Replay))
+            (options.mode == Some(tape::Mode::Replay) && !filesystem_replay)
                 .then_some(derived_capsule.as_deref())
                 .flatten()
                 .filter(|path| Path::new(path).exists())
@@ -338,6 +344,19 @@ pub(crate) fn run_with_diagnostics(
         return repeated::run(config_path, config, repeat, options, output, warnings);
     }
     run_loaded(config_path, config, options, output, warnings)
+}
+
+fn uses_experimental_filesystem_replay(
+    enabled: bool,
+    tool_mode: Option<tape::Mode>,
+    workload: &str,
+) -> bool {
+    enabled
+        && tool_mode == Some(tape::Mode::Replay)
+        && matches!(
+            workload,
+            "swe-bench" | "swe-bench-lite" | "swe-bench-verified"
+        )
 }
 
 fn automatic_native_capsule(
@@ -3308,6 +3327,31 @@ mod tests {
         assert_eq!(values["NO_PROXY"], "127.0.0.1,localhost,::1");
         assert_eq!(values["no_proxy"], "127.0.0.1,localhost,::1");
         assert_eq!(values["NODE_USE_ENV_PROXY"], "1");
+    }
+
+    #[test]
+    fn filesystem_replay_suppresses_only_its_automatic_capsule() {
+        use crate::tape::Mode;
+        assert!(super::uses_experimental_filesystem_replay(
+            true,
+            Some(Mode::Replay),
+            "swe-bench"
+        ));
+        assert!(!super::uses_experimental_filesystem_replay(
+            false,
+            Some(Mode::Replay),
+            "swe-bench"
+        ));
+        assert!(!super::uses_experimental_filesystem_replay(
+            true,
+            Some(Mode::Record),
+            "swe-bench"
+        ));
+        assert!(!super::uses_experimental_filesystem_replay(
+            true,
+            Some(Mode::Replay),
+            "bug-fix"
+        ));
     }
 
     #[test]
