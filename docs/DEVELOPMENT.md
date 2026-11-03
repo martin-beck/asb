@@ -54,6 +54,16 @@ This is an experimental fixture, not an ASB replay backend: it changes timing,
 does not capture all filesystem operations, and does not replay tool execution.
 FUSE is not a requirement for ordinary development or CI.
 
+The opt-in `fixtures/native_fs_probe/container.py` runs the same experimental
+proxy inside a local Docker image, then replays its operations in four separate
+host directories without network access. Set `ASB_FUSE_TEST_IMAGE`,
+`ASB_FUSEPY_MODULE`, and `ASB_CONTAINER_FUSE_LIBRARY` to an available image,
+fusepy module and image-compatible libfuse2 file. The test mounts `/dev/fuse`
+with `SYS_ADMIN` and an unconfined AppArmor profile; these are fixture-specific
+settings, not a production integration or a requirement for ASB users. On the
+tested host Docker could not bind-mount the user's host FUSE mount, so this
+fixture mounts it inside the container. It does not launch SWE-bench or an agent.
+
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the
 recorded response to four clients but does not reproduce a file written by the
