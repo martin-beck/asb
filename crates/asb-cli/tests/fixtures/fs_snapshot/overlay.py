@@ -52,6 +52,33 @@ checks={
  'post_status_indexes_equal':len({r[3] for r in results})==1,
  'base_index_unchanged':fingerprint(source)==original,
 }
+def git_at(root,*args,input=None):
+ result=subprocess.run(['git','-c','safe.directory=*','-C',str(root),*args],input=input,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=90)
+ if result.returncode: raise RuntimeError('git fixture operation failed: '+result.stderr.decode(errors='replace')[-300:])
+ return result.stdout
+tracked=git_at(roots[0],'ls-files','-z').split(b'\\x00')
+selected=None
+for raw in tracked:
+ if not raw: continue
+ candidate=roots[0]/os.fsdecode(raw)
+ if candidate.is_symlink() or not candidate.is_file() or candidate.stat().st_size>1048576: continue
+ original_bytes=candidate.read_bytes()
+ if b'\\x00' in original_bytes: continue
+ clean=subprocess.run(['git','-c','safe.directory=*','-C',str(roots[0]),'diff','--quiet','--',os.fsdecode(raw)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+ if clean.returncode==0:
+  selected=os.fsdecode(raw);break
+if selected is None: raise RuntimeError('fixture requires one clean tracked text file')
+base_file=Path('/source')/selected;base_hash=fingerprint(base_file)
+with (roots[0]/selected).open('ab') as stream: stream.write(b'\\n')
+patch=git_at(roots[0],'diff','--binary','--',selected)
+if not patch: raise RuntimeError('fixture change did not produce a patch')
+def apply_effect(root):
+ git_at(root,'apply','--binary','-',input=patch)
+ return fingerprint(root/selected),git_at(root,'diff','--binary','--',selected)
+with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool: replica_effects=list(pool.map(apply_effect,roots[1:]))
+checks['replayed_patch_contents_equal']=all(item[0]==fingerprint(roots[0]/selected) for item in replica_effects)
+checks['replayed_patch_diffs_equal']=all(item[1]==patch for item in replica_effects)
+checks['base_file_unchanged']=fingerprint(base_file)==base_hash
 a=roots[0]/'asb-overlay-fixture-file';a.write_text('one');os.link(a,roots[0]/'asb-overlay-fixture-link');os.rename(a,roots[0]/'asb-overlay-fixture-renamed')
 checks['hardlink_rename_preserved']=(roots[0]/'asb-overlay-fixture-link').stat().st_ino==(roots[0]/'asb-overlay-fixture-renamed').stat().st_ino
 checks['fixture_isolated']=all(not (root/'asb-overlay-fixture-link').exists() for root in roots[1:]) and not Path('/source/asb-overlay-fixture-link').exists()
