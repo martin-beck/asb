@@ -5,10 +5,12 @@ import os
 from pathlib import Path
 import stat
 import sys
+import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'assets/benchmarks'))
-from asb_fs_initial_reads import plan_initial_reads
+from asb_fs_initial_reads import plan_initial_reads, restore_initial_reads
 
 
 def events(*items):
@@ -27,6 +29,68 @@ def read(offset, size, handle=1, path='/file', payload=0):
 
 
 class InitialReadTests(unittest.TestCase):
+    def test_four_workspaces_prepare_independent_initial_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); evidence = root / 'evidence'; evidence.mkdir()
+            workspaces = []
+            for index in range(4):
+                workspace = root / f'workspace-{index}'; workspace.mkdir()
+                (workspace / 'file').write_bytes(b'xxxxxx')
+                workspaces.append(workspace)
+            mode = (workspaces[0] / 'file').stat().st_mode
+            (evidence / 'payload.bin').write_bytes(b'abcdef')
+            (evidence / 'events.jsonl').write_text(events(opened(mode=mode), read(0, 6)).getvalue())
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                self.assertEqual(list(pool.map(lambda workspace: restore_initial_reads(
+                    evidence, workspace, evidence), workspaces)), [1, 1, 1, 1])
+            for workspace in workspaces:
+                self.assertEqual((workspace / 'file').read_bytes(), b'abcdef')
+            (workspaces[0] / 'file').write_bytes(b'changed')
+            self.assertEqual((workspaces[1] / 'file').read_bytes(), b'abcdef')
+
+    def test_restore_verifies_overlaps_and_preserves_inode_and_mtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); evidence = root / 'evidence'; evidence.mkdir()
+            workspace = root / 'workspace'; workspace.mkdir()
+            target = workspace / 'file'; target.write_bytes(b'xxxxxx')
+            before = target.stat()
+            (evidence / 'payload.bin').write_bytes(b'abcdefcde')
+            (evidence / 'events.jsonl').write_text(events(opened(mode=before.st_mode),
+                read(0, 6), read(2, 3, payload=6)).getvalue())
+            self.assertEqual(restore_initial_reads(evidence, workspace, evidence), 1)
+            self.assertEqual(target.read_bytes(), b'abcdef')
+            after = target.stat()
+            self.assertEqual(after.st_ino, before.st_ino)
+            self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+
+    def test_conflicting_or_truncated_payload_never_changes_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); evidence = root / 'evidence'; evidence.mkdir()
+            workspace = root / 'workspace'; workspace.mkdir()
+            target = workspace / 'file'; target.write_bytes(b'xxxxxx')
+            before = target.stat()
+            (evidence / 'events.jsonl').write_text(events(opened(mode=before.st_mode),
+                read(0, 6), read(2, 3, payload=6)).getvalue())
+            for payload, message in [(b'abcdefXYZ', 'overlapping'), (b'abc', 'truncated')]:
+                (evidence / 'payload.bin').write_bytes(payload)
+                with self.assertRaisesRegex(ValueError, message):
+                    restore_initial_reads(evidence, workspace, evidence)
+                self.assertEqual(target.read_bytes(), b'xxxxxx')
+
+    def test_all_destinations_are_checked_before_any_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); evidence = root / 'evidence'; evidence.mkdir()
+            workspace = root / 'workspace'; workspace.mkdir()
+            target = workspace / 'file'; target.write_bytes(b'xxxxxx')
+            mode = target.stat().st_mode
+            (evidence / 'payload.bin').write_bytes(b'abcdefz')
+            (evidence / 'events.jsonl').write_text(events(opened(mode=mode), read(0, 6),
+                opened(path='/missing', handle=2, size=1, mode=mode),
+                read(0, 1, handle=2, path='/missing', payload=6)).getvalue())
+            with self.assertRaises(FileNotFoundError):
+                restore_initial_reads(evidence, workspace, evidence)
+            self.assertEqual(target.read_bytes(), b'xxxxxx')
+
     def test_fully_observed_out_of_order_reads_are_planned(self):
         result = plan_initial_reads(events(opened(), read(3, 3, payload=7), read(0, 3)))
         self.assertEqual(result['/file']['size'], 6)

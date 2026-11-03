@@ -1092,6 +1092,7 @@ impl GuestFilesystemCapture {
     ) -> Result<Self, Error> {
         let cursor = run_dir.join("asb_fs_replay_cursor.py");
         let server = run_dir.join("asb_fs_replay_server.py");
+        let initial_reads = run_dir.join("asb_fs_initial_reads.py");
         fs::write(
             &cursor,
             include_str!("../../assets/benchmarks/asb_fs_replay_cursor.py"),
@@ -1100,6 +1101,11 @@ impl GuestFilesystemCapture {
         fs::write(
             &server,
             include_str!("../../assets/benchmarks/asb_fs_replay_server.py"),
+        )
+        .map_err(crate::io_error)?;
+        fs::write(
+            &initial_reads,
+            include_str!("../../assets/benchmarks/asb_fs_initial_reads.py"),
         )
         .map_err(crate::io_error)?;
         let log = fs::File::create(run_dir.join("filesystem-replay-supervisor.log"))
@@ -1539,6 +1545,7 @@ mod artifact_publication_tests {
         fs::create_dir_all(&run).unwrap();
         fs::create_dir_all(&workspace).unwrap();
         fs::create_dir_all(&evidence).unwrap();
+        fs::write(evidence.join("payload.bin"), b"").unwrap();
         symlink("/usr/bin/python3", &python).unwrap();
         fs::write(evidence.join("events.jsonl"), concat!(
             "{\"sequence\":1,\"op\":\"marker\",\"path\":null,\"marker\":\"tool-begin:mini-swe-1\"}\n",

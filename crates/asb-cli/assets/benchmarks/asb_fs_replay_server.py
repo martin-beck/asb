@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 
 from asb_fs_replay_cursor import Coordinator, Replay
+from asb_fs_initial_reads import restore_initial_reads
 
 
 class ReplayServer:
@@ -18,6 +19,7 @@ class ReplayServer:
         self.cursor = Replay(evidence, workspace, enforce_admission=True, existing=True)
         try:
             self.coordinator = Coordinator(self.cursor)
+            restore_initial_reads(evidence, workspace, evidence)
             self.path = Path(socket_path)
             self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
