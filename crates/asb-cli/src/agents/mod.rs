@@ -17,6 +17,7 @@ pub(crate) mod mcp_transcript;
 pub(crate) mod native_trace;
 pub(crate) mod tool_replay;
 pub(crate) mod tool_replay_mcp;
+pub(crate) mod tool_tracing;
 pub(crate) use artifacts::{ArtifactFormat, ArtifactOwner, ArtifactSpec, FrozenArtifacts};
 pub(crate) mod driver;
 use adapters::REGISTRY;

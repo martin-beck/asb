@@ -261,9 +261,14 @@ fn finish(session: &mut measurements::Session) -> Result<(), String> {
     if let Some(observer) = state.observer.as_mut() {
         observer.finish();
     }
-    if let Some(report) = state.observer_report.as_deref() {
-        state.observer_warning =
-            validate_request_observation_report(report, session.trace_id()).err();
+    if !state.observer_reports.is_empty() {
+        state.observer_warning = state
+            .observer_reports
+            .iter()
+            .filter_map(|(report, producer)| {
+                validate_observation_report(report, session.trace_id(), producer).err()
+            })
+            .next();
     }
     if !state.enabled {
         return Ok(());
@@ -283,7 +288,7 @@ fn finish(session: &mut measurements::Session) -> Result<(), String> {
             "capture_complete": state.capture_complete,
             "capture_warning": state.capture_warning,
             "analysis_warning": state.analysis_warning,
-            "request_observation_report": state.observer_report.as_ref().map(|path| measurements::file_name(path)),
+            "observation_reports": state.observer_reports.iter().map(|(path, _)| measurements::file_name(path)).collect::<Vec<_>>(),
             "request_observation_warning": state.observer_warning,
         }),
     )?;
@@ -565,15 +570,15 @@ mod report_tests {
             r#"{"schema_version":1,"producer":"llmtape","trace_id":"run-1","complete":true}"#,
         )
         .unwrap();
-        assert!(validate_request_observation_report(&report, "run-1").is_ok());
+        assert!(validate_observation_report(&report, "run-1", "llmtape").is_ok());
         assert!(
-            validate_request_observation_report(&report, "other-run")
+            validate_observation_report(&report, "other-run", "llmtape")
                 .unwrap_err()
                 .contains("does not belong")
         );
         fs::write(&report, b"not-json").unwrap();
         assert!(
-            validate_request_observation_report(&report, "run-1")
+            validate_observation_report(&report, "run-1", "llmtape")
                 .unwrap_err()
                 .contains("malformed")
         );
@@ -590,7 +595,7 @@ struct PerfettoState {
     trace_marker: Option<PathBuf>,
     trace_marker_output: Option<File>,
     observer: Option<observer::Relay>,
-    observer_report: Option<PathBuf>,
+    observer_reports: Vec<(PathBuf, &'static str)>,
     observer_warning: Option<String>,
     marker_verified: bool,
     marker_warning: Option<String>,
@@ -615,7 +620,7 @@ const MAX_OBSERVATION_REPORT_BYTES: u64 = 64 * 1024;
 /// for task grading or scheduler scope.  Keep malformed, stale, incomplete,
 /// or oversized reports visible to users without allowing an observer failure
 /// to discard an otherwise valid Perfetto capture.
-fn validate_request_observation_report(path: &Path, trace_id: &str) -> Result<(), String> {
+fn validate_observation_report(path: &Path, trace_id: &str, producer: &str) -> Result<(), String> {
     let metadata = fs::metadata(path).map_err(|error| {
         format!(
             "LLM request observation report is unavailable at {}: {error}",
@@ -642,7 +647,7 @@ fn validate_request_observation_report(path: &Path, trace_id: &str) -> Result<()
     {
         return Err("LLM request observation report has an unsupported schema version".into());
     }
-    if field("producer") != Some("llmtape") {
+    if field("producer") != Some(producer) {
         return Err("LLM request observation report has an unexpected producer".into());
     }
     if field("trace_id") != Some(trace_id) {
@@ -713,7 +718,25 @@ impl measurements::Session {
         };
         let producer = observer.producer_fd()?;
         let report = self.dir.join(report);
-        state.observer_report = Some(report.clone());
+        state.observer_reports.push((report.clone(), "llmtape"));
+        Ok(Some((producer, self.trace_id.clone(), report)))
+    }
+
+    /// Private producer capability for ASB-owned local-tool and MCP relays.
+    /// The consumer receives a relay descriptor, never a tracefs pathname.
+    pub(crate) fn perfetto_tool_observer_context(
+        &mut self,
+    ) -> Result<Option<(File, String, PathBuf)>, String> {
+        let state = self.state::<PerfettoState>();
+        let mut state = state.borrow_mut();
+        let Some(observer) = state.observer.as_ref() else {
+            return Ok(None);
+        };
+        let producer = observer.producer_fd()?;
+        let report = self.dir.join("perfetto-tools.json");
+        state
+            .observer_reports
+            .push((report.clone(), "asb-tool-service"));
         Ok(Some((producer, self.trace_id.clone(), report)))
     }
 
