@@ -403,15 +403,9 @@ function normalizeCassetteBody(body, url = "") {
       }
       return `"${callIdentifiers.get(identifier)}"`;
     })
-    // Agent SDKs generate fresh message/session IDs for every invocation;
-    // those identifiers are not provider semantics and must not prevent a
-    // cassette recorded in one process from replaying in another.
-    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<asb-uuid>")
-    .replace(/\b1[0-9]{12,}\b/g, "<asb-timestamp>")
-    // Shell directory listings include filesystem mtimes. They are not
-    // provider input and naturally differ between record and replay.
-    .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{2}:\d{2}\b/g, "<asb-file-mtime>")
-    .replace(/\b20\d{2}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?\b/g, "<asb-file-mtime>")
+    // Generated replay protocol IDs contain a local clock; literal timestamps
+    // in prompts, tool arguments and tool results remain replay-significant.
+    .replace(/(asb-replay-\d+-)1[0-9]{12,}(?=-\d+)/g, "$1<asb-timestamp>")
     // WorkBuddy derives a memory-project slug from the absolute workspace;
     // canonicalize that generated slug when record and replay roots differ.
     .replace(/srv-data-projects-[A-Za-z0-9_.-]+-(?:sweep-(?:record|replay)-[A-Za-z0-9_.-]+|workspaces(?:-replay)?-[A-Za-z0-9_.-]+)/g, "<asb-project-workspace>")
