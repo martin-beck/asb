@@ -729,6 +729,70 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn memory_scope_includes_nested_worker_processes_but_excludes_unrelated_processes() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        use std::time::Instant;
+
+        let mut root = Command::new("/bin/sh")
+            .args([
+                "-c",
+                r#"/bin/sh -c 'sleep 30 & printf "%s %s\n" "$$" "$!"; wait' & wait"#,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut unrelated = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let mut line = String::new();
+        BufReader::new(root.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let descendants = line
+            .split_whitespace()
+            .map(|value| value.parse::<u32>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(descendants.len(), 2);
+        let root_pid = root.id();
+        let unrelated_pid = unrelated.id();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Memory samples the verified tree independently of entry-point
+            // classification; use a distinct executable to verify that here.
+            let identity = Identity::resolve("/bin/false", &[]).unwrap();
+            let process = measurements::ProcessIdentity::read(root_pid).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut totals = Totals::default();
+            loop {
+                totals.sample(process, &identity, true);
+                if descendants
+                    .iter()
+                    .all(|pid| totals.seen.iter().any(|(seen, _)| seen == pid))
+                {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "nested worker was not observed");
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(totals.seen.iter().any(|(pid, _)| *pid == root_pid));
+            assert!(!totals.seen.iter().any(|(pid, _)| *pid == unrelated_pid));
+            assert!(totals.peak_rss_kib > 0);
+        }));
+        for pid in descendants.into_iter().rev() {
+            let _ = Command::new("/bin/kill")
+                .args(["-TERM", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = root.kill();
+        let _ = root.wait();
+        let _ = unrelated.kill();
+        let _ = unrelated.wait();
+        result.unwrap();
+    }
+
+    #[test]
     fn prepared_launch_uses_child_path_and_working_directory_for_entry_point_resolution() {
         let root = std::env::temp_dir()
             .join(crate::workloads::TaskIdentity::local("prepared-entry", None).attempt_id);
