@@ -12,6 +12,11 @@ import os
 import runpy
 import sys
 
+# ASB supplies this only when it owns a separate embedding tape session.
+# Keep the upstream URL and key on the provider for its cache fingerprint;
+# only HTTP dispatch is redirected to the tape ingress.
+_asb_install_embedding_route(os.environ.pop("ASB_OPENJIUWEN_EMBEDDING_TAPE_ORIGIN", None))
+
 # OpenJiuwen exposes its turn limit through this environment setting, not a
 # CLI option. Consume the adapter-private argument before importing its CLI.
 if "--asb-max-iterations" in sys.argv:

@@ -156,7 +156,11 @@ fn process(executable: &str) -> Result<crate::launch::ProcessLaunch, Error> {
     let mut command = crate::launch::ProcessLaunch::new(interpreter);
     command
         .arg("-c")
-        .arg(include_str!("openjiuwen/usage_compat.py"))
+        .arg(concat!(
+            include_str!("openjiuwen/embedding_route.py"),
+            "\n",
+            include_str!("openjiuwen/usage_compat.py")
+        ))
         .arg(path);
     Ok(command)
 }
@@ -348,6 +352,54 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn embedding_tape_routes_only_http_dispatch_and_keeps_provider_identity() {
+        let fixture = r#"
+import asyncio, sys, types
+module = types.ModuleType('openjiuwen.core.memory.lite.embeddings')
+class Client:
+    def __init__(self): self.event_hooks = {'request': []}
+class Provider:
+    def __init__(self):
+        self.base_url = 'https://embedding.invalid/v1'
+        self.api_key = 'fixture-key'
+        self.client = Client()
+    def _get_client(self): return self.client
+module.OpenAICompatibleEmbeddingProvider = Provider
+sys.modules['openjiuwen.core.memory.lite.embeddings'] = module
+exec(sys.stdin.read())
+for bad in ('https://127.0.0.1:1234', 'http://example.invalid:1234',
+            'http://127.0.0.1:1234/path', 'http://127.0.0.1:bad'):
+    try: _asb_install_embedding_route(bad)
+    except RuntimeError: pass
+    else: raise AssertionError('accepted invalid ingress')
+_asb_install_embedding_route('http://127.0.0.1:1234')
+p = Provider()
+client = p._get_client()
+assert p._get_client() is client and len(client.event_hooks['request']) == 1
+class URL:
+    def copy_with(self, **kwargs): return kwargs
+request = types.SimpleNamespace(url=URL())
+asyncio.run(client.event_hooks['request'][0](request))
+assert request.url == {'scheme': 'http', 'host': '127.0.0.1', 'port': 1234}
+assert p.base_url == 'https://embedding.invalid/v1' and p.api_key == 'fixture-key'
+"#;
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("python3")
+            .args(["-c", fixture])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(include_bytes!("openjiuwen/embedding_route.py"))
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
     #[test]
     fn openrouter_messages_negotiates_bearer() {
         let agent = crate::agents::find("openjiuwen").unwrap();
