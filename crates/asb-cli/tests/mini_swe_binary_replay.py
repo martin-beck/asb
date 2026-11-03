@@ -38,6 +38,67 @@ sys.modules[exceptions.__name__] = exceptions
 
 
 class BinaryReplayTests(unittest.TestCase):
+    def test_replay_waits_for_journal_effects_before_returning(self):
+        import os
+        import socket
+        import threading
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tape = root / 'tape.jsonl'
+            tape.write_text(json.dumps({'schema_version': 1, 'sequence': 1,
+                'tool': 'mini-swe.bash', 'request': {'command': 'run tests'},
+                'result': {'returncode': 0, 'output': 'done'}}) + '\n')
+            path = str(root / 'replay.sock')
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(path)
+            listener.listen(1)
+            messages = []
+            def serve():
+                with listener.accept()[0] as connection:
+                    messages.append(connection.recv(1024).decode('ascii').strip())
+                    (root / 'result.txt').write_text('journal effect')
+                    connection.sendall(b'42\n')
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            env = {'ASB_MINI_SWE_TOOL_TAPE': str(tape), 'ASB_MINI_SWE_TOOL_MODE': 'replay',
+                   'ASB_FS_REPLAY_SOCKET': path}
+            try:
+                with patch.dict(os.environ, env):
+                    namespace = {}
+                    exec(compile(transport, 'asb_mini_swe_tools.py', 'exec'), namespace)
+                    with patch.object(LocalEnvironment, 'execute', side_effect=AssertionError('executed live tool')):
+                        result = namespace['AsbTapeEnvironment'](cwd=str(root)).execute({'command': 'run tests'})
+                thread.join(timeout=5)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(messages, ['tool-end:mini-swe-1'])
+                self.assertEqual(result['output'], 'done')
+                self.assertEqual((root / 'result.txt').read_text(), 'journal effect')
+            finally:
+                listener.close()
+
+    def test_replay_rejects_missing_coordinator_and_snapshot_effects(self):
+        import os
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tape = root / 'tape.jsonl'
+            entry = {'schema_version': 1, 'sequence': 1, 'tool': 'mini-swe.bash',
+                     'request': {'command': 'run tests'}, 'result': {'output': 'done'}}
+            env = {'ASB_MINI_SWE_TOOL_TAPE': str(tape), 'ASB_MINI_SWE_TOOL_MODE': 'replay',
+                   'ASB_FS_REPLAY_SOCKET': str(root / 'missing.sock')}
+            with patch.dict(os.environ, env):
+                namespace = {}
+                exec(compile(transport, 'asb_mini_swe_tools.py', 'exec'), namespace)
+                tape.write_text(json.dumps(entry) + '\n')
+                with self.assertRaisesRegex(RuntimeError, 'boundary is unavailable'):
+                    namespace['AsbTapeEnvironment'](cwd=str(root)).execute({'command': 'run tests'})
+                entry['effects'] = [{'kind': 'write_text', 'path': 'result.txt', 'content': 'snapshot'}]
+                tape.write_text(json.dumps(entry) + '\n')
+                with self.assertRaisesRegex(RuntimeError, 'cannot use snapshot effects'):
+                    namespace['AsbTapeEnvironment'](cwd=str(root)).execute({'command': 'run tests'})
+                self.assertFalse((root / 'result.txt').exists())
+
     def test_filesystem_markers_use_the_recorder_socket(self):
         import os
         import socket
