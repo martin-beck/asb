@@ -6,6 +6,7 @@ import os
 import pathlib
 import sys
 import threading
+import time
 import types
 import unittest
 from unittest.mock import MagicMock, patch
@@ -61,6 +62,32 @@ def message(source, text):
     return MessageEvent(source=source, llm_message=Event(role='assistant' if source == 'agent' else 'user', content=[TextContent(text=text)]))
 
 class NativeFinalTest(unittest.TestCase):
+    def test_native_execution_remains_parallel_during_recording(self):
+        terminal=types.ModuleType('openhands.tools.terminal')
+        metadata=types.ModuleType('openhands.tools.terminal.metadata')
+        terminal.TerminalObservation=Event
+        metadata.CmdOutputMetadata=Event
+        barrier=threading.Barrier(2,timeout=2)
+        def delegate(action):
+            barrier.wait()
+            return Event(text='ok',is_error=False,command=action.command,exit_code=0,
+                         timeout=False,metadata=Event(model_dump=lambda:{}))
+        executor=launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
+        executor._bridge_lock=threading.Lock();executor._delegate=delegate
+        executor._sequence=0;executor._sequence_lock=threading.Lock()
+        executor._bridge=Event(stdin=io.StringIO(),stdout=io.StringIO(
+            '{"kind":"ack","schema_version":1}\n'*2))
+        results=[]
+        def call(command):
+            results.append(executor(Event(command=command,is_input=False,timeout=5,reset=False)).command)
+        with patch.dict(sys.modules,{'openhands.tools':types.ModuleType('openhands.tools'),
+                                    'openhands.tools.terminal':terminal,
+                                    'openhands.tools.terminal.metadata':metadata}):
+            threads=[threading.Thread(target=call,args=(name,)) for name in ('first','second')]
+            for thread in threads: thread.start()
+            for thread in threads: thread.join()
+        self.assertCountEqual(results,['first','second'])
+
     def test_terminal_record_brackets_the_actual_tool_execution(self):
         terminal=types.ModuleType('openhands.tools.terminal')
         metadata=types.ModuleType('openhands.tools.terminal.metadata')
@@ -71,6 +98,7 @@ class NativeFinalTest(unittest.TestCase):
                           timeout=False,metadata=Event(model_dump=lambda:{}))
         executor=launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
         executor._sequence=0;executor._sequence_lock=threading.Lock()
+        executor._bridge_lock=threading.Lock()
         executor._delegate=lambda action:(timeline.append('execute') or observation)
         executor._bridge=Event(stdin=io.StringIO(),stdout=io.StringIO('{"kind":"ok","schema_version":1}\n'))
         action=Event(command='edit',is_input=False,timeout=5,reset=False)
@@ -91,6 +119,7 @@ class NativeFinalTest(unittest.TestCase):
                   'is_error':False,'command':'edit','exit_code':0,'timeout':False,'metadata':{}}
         executor=launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
         executor._sequence=0;executor._sequence_lock=threading.Lock();executor._delegate=None
+        executor._bridge_lock=threading.Lock()
         executor._bridge=Event(stdin=io.StringIO(),stdout=io.StringIO(json.dumps(response)+'\n'))
         with patch.dict(sys.modules,{'openhands.tools':types.ModuleType('openhands.tools'),
                                     'openhands.tools.terminal':terminal,
@@ -100,6 +129,37 @@ class NativeFinalTest(unittest.TestCase):
         boundary.assert_called_once_with('replay','end','openhands-1')
         self.assertEqual(result.exit_code,0)
         self.assertEqual(json.loads(executor._bridge.stdin.getvalue())['command'],'edit')
+
+    def test_parallel_callers_receive_their_own_bridge_observation(self):
+        terminal=types.ModuleType('openhands.tools.terminal')
+        metadata=types.ModuleType('openhands.tools.terminal.metadata')
+        terminal.TerminalObservation=Event
+        metadata.CmdOutputMetadata=Event
+        class BridgeIO:
+            def write(self, line):
+                self.command=json.loads(line)['command']
+                time.sleep(0.03)  # allow a competing caller to write
+            def flush(self): pass
+            def readline(self):
+                return json.dumps({'kind':'terminal_observation','schema_version':1,
+                    'content':self.command,'is_error':False,'command':self.command,
+                    'exit_code':0,'timeout':False,'metadata':{}})+'\n'
+        io_pair=BridgeIO()
+        executor=launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
+        executor._sequence=0;executor._sequence_lock=threading.Lock()
+        executor._bridge_lock=threading.Lock();executor._delegate=None
+        executor._bridge=Event(stdin=io_pair,stdout=io_pair)
+        results={}
+        def call(command):
+            results[command]=executor(Event(command=command,is_input=False,timeout=5,reset=False)).command
+        with patch.dict(sys.modules,{'openhands.tools':types.ModuleType('openhands.tools'),
+                                    'openhands.tools.terminal':terminal,
+                                    'openhands.tools.terminal.metadata':metadata}), \
+             patch.object(launcher,'snapshot_boundary'):
+            threads=[threading.Thread(target=call,args=(name,)) for name in ('first','second')]
+            for thread in threads: thread.start()
+            for thread in threads: thread.join()
+        self.assertEqual(results,{'first':'first','second':'second'})
 
     def test_optional_snapshot_boundaries_use_adapter_alias_and_fail_on_rejection(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(launcher.socket, 'socket') as factory:

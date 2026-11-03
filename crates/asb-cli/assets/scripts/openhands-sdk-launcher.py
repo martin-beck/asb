@@ -68,6 +68,7 @@ class NativeTerminalExecutor(ToolExecutor):
         self._delegate = None
         self._sequence = 0
         self._sequence_lock = threading.Lock()
+        self._bridge_lock = threading.Lock()
         if mode == "record":
             from openhands.tools.terminal.impl import TerminalExecutor
             self._delegate = TerminalExecutor(working_dir=os.getcwd(), terminal_type="subprocess")
@@ -109,9 +110,13 @@ class NativeTerminalExecutor(ToolExecutor):
                        }}
         assert self._bridge.stdin is not None
         assert self._bridge.stdout is not None
-        self._bridge.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
-        self._bridge.stdin.flush()
-        line = self._bridge.stdout.readline()
+        # Keep a request and its response together. SDK tools can run in
+        # parallel, and a shared stdio bridge otherwise lets one caller read
+        # another caller's observation. Tool execution itself remains parallel.
+        with self._bridge_lock:
+            self._bridge.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+            self._bridge.stdin.flush()
+            line = self._bridge.stdout.readline()
         if not line:
             raise RuntimeError("ASB native terminal bridge stopped without an observation")
         response = json.loads(line)
