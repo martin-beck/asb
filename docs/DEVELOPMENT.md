@@ -10,6 +10,10 @@ upstream. It requires Node.js and never contacts a live provider. It does not
 qualify the ASB cassette lifecycle, a complete agent run, or workload grading.
 The replay clients use a placeholder key and restore a fixture cache identity;
 the fixture never saves its record-only key in that identity.
+Set `ASB_TEST_EMBEDDING_USERINFO=1` to additionally compare direct and routed
+authentication for a fake credential-bearing URL. That variant confirms the
+prototype identity contains the fake URL password and therefore must not yet
+be used to persist real credential-bearing identities.
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without
 Docker, providers or installed clients. The opt-in

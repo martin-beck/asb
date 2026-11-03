@@ -20,7 +20,7 @@ seen = []
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        seen.append((self.path, body))
+        seen.append((self.path, body, self.headers.get('Authorization')))
         payload = json.dumps({'data': [{'index': 0, 'embedding': [0.25, 0.75]}]}).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
@@ -53,11 +53,12 @@ import asyncio, json, runpy, sys
 from pathlib import Path
 from openjiuwen.core.memory.lite.embeddings import OpenAICompatibleEmbeddingProvider
 hook = runpy.run_path(sys.argv[3])
-hook['_asb_install_embedding_route'](f'http://127.0.0.1:{sys.argv[2]}')
 metadata = Path(sys.argv[4])
 mode = sys.argv[5]
+if mode != 'baseline':
+    hook['_asb_install_embedding_route'](f'http://127.0.0.1:{sys.argv[2]}')
 async def main():
-    key = 'fixture-record-only-key' if mode == 'record' else 'asb-replay-placeholder'
+    key = 'fixture-record-only-key' if mode in ('record', 'baseline') else 'asb-replay-placeholder'
     if mode == 'replay':
         identity = json.loads(metadata.read_text())
         hook['_asb_install_embedding_identity'](identity)
@@ -67,7 +68,7 @@ async def main():
         identity = {'model': provider.model, 'base_url': provider.base_url, 'fingerprint': fingerprint}
         assert key not in repr(identity)
         metadata.write_text(json.dumps(identity))
-    else:
+    elif mode == 'replay':
         assert fingerprint == identity['fingerprint']
         other = OpenAICompatibleEmbeddingProvider(api_key='another-key', model=identity['model'], base_url=identity['base_url'])
         assert other.config_fingerprint != fingerprint
@@ -89,18 +90,29 @@ async def main():
     upstream = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     thread = threading.Thread(target=upstream.serve_forever, daemon=True); thread.start()
     origin = f'http://127.0.0.1:{upstream.server_port}'
-    original_url = origin + '/v1'
+    userinfo = os.environ.get('ASB_TEST_EMBEDDING_USERINFO') == '1'
+    original_url = (f'http://fixture-user:fixture-url-password@127.0.0.1:{upstream.server_port}'
+                    if userinfo else origin) + '/v1'
     processes = []
     with tempfile.TemporaryDirectory(dir=test_root) as tmp:
         root = Path(tmp); tape = root / 'record.jsonl'
         try:
+            if userinfo:
+                await request(root, original_url, upstream.server_port, 'baseline')
             recorder, port = start(root, 'record', ['record', '--upstream', origin, '--out', str(tape)])
             processes.append(recorder)
             await request(root, original_url, port, 'record')
             stop(recorder); processes.remove(recorder)
             assert 'fixture-record-only-key' not in tape.read_text()
             assert 'fixture-record-only-key' not in (root / 'identity.json').read_text()
-            assert len(seen) == 1 and seen[0][0] == '/v1/embeddings'
+            if userinfo:
+                assert len(seen) == 2 and seen[0] == seen[1]
+                # This is an intentionally fake secret and demonstrates why
+                # the prototype identity must not yet be persisted by ASB.
+                assert 'fixture-url-password' in (root / 'identity.json').read_text()
+                assert 'fixture-url-password' not in tape.read_text()
+            else:
+                assert len(seen) == 1 and seen[0][0] == '/v1/embeddings'
             upstream.shutdown(); thread.join(); upstream.server_close()
             sessions = []
             for i in range(4):
@@ -112,7 +124,7 @@ async def main():
                 stop(child); processes.remove(child)
                 progress = json.loads(Path(str(replica) + '.progress.json').read_text())
                 assert progress['consumed'] == progress['total'] == 1, progress
-            assert len(seen) == 1
+            assert len(seen) == (2 if userinfo else 1)
             print('Actual OpenJiuwen client: one embedding recorded and replayed by four independent llmtape processes after upstream shutdown; configured identity unchanged.')
         finally:
             for child in processes:
