@@ -11,6 +11,7 @@ with tempfile.TemporaryDirectory(dir=base) as tmp:
  for part in ('backing','mount','evidence','baseline'): (root/part).mkdir()
  (root/'backing/source').write_text('original')
  (root/'baseline/source').write_text('original')
+ (root/'hermes-home').mkdir(mode=0o700)
  script='''set -eu
 export ASB_PROBE_ROOT_TGID=$$
 python3 /probe/proxy.py /work/backing /work/mount /work/evidence > /work/proxy.log 2>&1 &
@@ -20,6 +21,9 @@ n=0
 while ! mountpoint -q /work/mount; do n=$((n+1)); [ "$n" -lt 100 ] || exit 42; sleep 0.05; done
 cat /work/mount/source
 printf container > /work/mount/output
+if [ "${ASB_FIXTURE_HERMES:-0}" = 1 ]; then
+  HERMES_HOME=/work/hermes-home TERMINAL_ENV=local setpriv --reuid "$ASB_HERMES_UID" --regid "$ASB_HERMES_GID" --clear-groups /asb-hermes/venv/bin/python -c 'import json; from tools.terminal_tool import terminal_tool; result=json.loads(terminal_tool("printf hermes > hermes-tool-output",workdir="/work/mount")); assert result["exit_code"] == 0'
+fi
 '''
  name='asb-fuse-probe-'+uuid.uuid4().hex
  cmd=['docker','run','--rm','--name',name,'--network','none','--device','/dev/fuse','--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={root},dst=/work','--mount',f'type=bind,src={probe},dst=/probe,readonly','--mount',f'type=bind,src={fusepy},dst=/opt/fuse.py,readonly','--mount',f'type=bind,src={fuse_library},dst=/opt/libfuse.so.2,readonly','--env','PYTHONPATH=/opt','--env','FUSE_LIBRARY_PATH=/opt/libfuse.so.2','--entrypoint','/bin/sh',image,'-c',script]
@@ -27,6 +31,11 @@ printf container > /work/mount/output
  if fuse_unmount:
   position=cmd.index('--env')
   cmd[position:position]=['--mount', f'type=bind,src={Path(fuse_unmount).resolve()},dst=/usr/bin/fusermount3,readonly']
+ hermes_install=os.environ.get('ASB_HERMES_TEST_INSTALL')
+ if hermes_install:
+  position=cmd.index('--env')
+  cmd[position:position]=['--mount', f'type=bind,src={Path(hermes_install).resolve()},dst=/asb-hermes,readonly']
+  cmd[position:position]=['--env', 'ASB_FIXTURE_HERMES=1', '--env', 'ASB_PROBE_ALLOW_OTHER=1', '--env', f'ASB_HERMES_UID={os.getuid()}', '--env', f'ASB_HERMES_GID={os.getgid()}']
  try:
   result=subprocess.run(cmd,capture_output=True,text=True,timeout=30)
  except BaseException:
@@ -44,12 +53,14 @@ printf container > /work/mount/output
  if (root/'evidence/events.jsonl').exists():
   events=[json.loads(x) for x in (root/'evidence/events.jsonl').read_text().splitlines()]
   assert any(e['op']=='write' and e['path']=='/output' for e in events)
+  if hermes_install: assert any(e['op']=='write' and e['path']=='/hermes-tool-output' for e in events)
   print('recorded operations:',[(e['op'],e['path']) for e in events])
   def replay(index):
    destination=root/f'replay-{index}'
    subprocess.run(['python3',str(probe/'replay.py'),str(root/'evidence'),str(destination),str(root/'baseline')],check=True)
    assert (destination/'source').read_text()=='original'
    assert (destination/'output').read_text()=='container'
+   if hermes_install: assert (destination/'hermes-tool-output').read_text()=='hermes'
   with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool: list(pool.map(replay,range(4)))
   print('four independent offline replays: passed')
  if (root/'proxy.log').exists() and result.returncode: print('proxy log:',(root/'proxy.log').read_text()[-1000:])

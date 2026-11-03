@@ -66,6 +66,12 @@ fixture mounts it inside the container. Set `ASB_CONTAINER_FUSERMOUNT` to an
 image-compatible `fusermount3` when the image does not already contain one.
 The fixture has also passed using the local image for the selected SWE-bench
 trial; it does not launch the SWE-bench harness or an agent.
+Optionally set `ASB_HERMES_TEST_INSTALL` to a directory containing a `venv`
+with the pinned Hermes package installed for the image's Python. The fixture
+then runs the real Hermes terminal tool as the invoking user and checks its
+file write in all four replays. It enables `allow_other` on this temporary
+container-local FUSE mount so that the unprivileged tool can access the proxy;
+this is not a production setting. No LLM or complete agent is invoked.
 
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the
