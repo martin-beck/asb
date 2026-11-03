@@ -6,6 +6,7 @@ qualified by this fixture.
 """
 from collections import defaultdict
 import os
+import shutil
 import tempfile
 from pathlib import Path
 import stat
@@ -136,6 +137,20 @@ def plan_tree_transitions(before_files, after_files, replica_files,
     new = {identity[1]: path for path, identity in after_dirs.items()}
     if len(new) != len(after_dirs):
         raise ValueError('snapshot directory identities are ambiguous')
+    replaced = []
+    for path in sorted(before_dirs.keys() & after_dirs.keys(), key=lambda value: (value.count('/'), value)):
+        old_inode = before_dirs[path][1]
+        if old_inode != after_dirs[path][1] and old_inode not in new:
+            if not any(path.startswith(parent + '/') for parent in replaced):
+                replaced.append(path)
+    after_file_inodes = {identity[1] for identity in after_files.values()}
+    for parent in replaced:
+        if any(path.startswith(parent + '/') and identity[1] in after_file_inodes
+               for path, identity in before_files.items()):
+            raise ValueError('directory replacement contains a surviving file identity')
+        if any(path.startswith(parent + '/') and identity[1] in new
+               for path, identity in before_dirs.items()):
+            raise ValueError('directory replacement contains a surviving directory identity')
     raw = sorted((old[inode], path) for inode, path in new.items()
                  if inode in old and old[inode] != path)
     moves = []
@@ -158,14 +173,18 @@ def plan_tree_transitions(before_files, after_files, replica_files,
             result[path] = identity
         return result
 
-    files = plan_transitions(remap(before_files), after_files, remap(replica_files))
-    return {'directory_moves': moves, 'files': files}
+    def without_replaced(inventory):
+        return {path: identity for path, identity in inventory.items()
+                if not any(path.startswith(parent + '/') for parent in replaced)}
+    files = plan_transitions(remap(without_replaced(before_files)), after_files,
+                             remap(without_replaced(replica_files)))
+    return {'directory_moves': moves, 'directory_replacements': replaced, 'files': files}
 
 
 def apply_tree_transitions(replica_root, plan):
     """Move directory inodes, then apply the regular-file transition plan."""
     root = Path(replica_root)
-    if plan['directory_moves']:
+    if plan['directory_moves'] or plan['directory_replacements']:
         staging = Path(tempfile.mkdtemp(dir=root, prefix='.asb-snapshot-dirs-'))
         try:
             staged = []
@@ -174,10 +193,17 @@ def apply_tree_transitions(replica_root, plan):
                 saved = staging / f'directory-{index}'
                 os.rename(root / source, saved)
                 staged.append((saved, destination))
+            detached = []
+            for index, path in enumerate(plan['directory_replacements']):
+                saved = staging / f'replaced-{index}'
+                os.rename(root / path, saved)
+                detached.append(saved)
             for saved, destination in sorted(staged, key=lambda item: (item[1].count('/'), item[1])):
                 target = root / destination
                 target.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(saved, target)
+            for saved in detached:
+                shutil.rmtree(saved)
             staging.rmdir()
         except Exception as error:
             raise RuntimeError(f'snapshot directory transition was partial; retained staging at {staging}') from error

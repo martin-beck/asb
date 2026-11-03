@@ -91,6 +91,27 @@ class TopologyTest(unittest.TestCase):
             self.assertEqual(len(staging),1)
             self.assertEqual((staging[0]/'directory-0'/'file').read_bytes(),b'old')
 
+    def test_replaced_directory_preserves_unlinked_file_descriptor(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);(root/'dir').mkdir();(root/'dir'/'file').write_bytes(b'old')
+            plan=plan_tree_transitions({'dir/file':(1,20)},{'dir/file':(2,30)},regular_files(root),
+                                       {'dir':(1,10)},{'dir':(2,11)},directories(root))
+            self.assertEqual(plan['directory_replacements'],['dir'])
+            fd=os.open(root/'dir'/'file',os.O_RDONLY)
+            try:
+                apply_tree_transitions(root,plan)
+                (root/'dir').mkdir();(root/'dir'/'file').write_bytes(b'new')
+                self.assertEqual(os.pread(fd,3,0),b'old')
+                self.assertEqual((root/'dir'/'file').read_bytes(),b'new')
+            finally:os.close(fd)
+
+    def test_directory_replacement_with_surviving_descendant_is_reported(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);(root/'dir').mkdir();(root/'dir'/'file').write_bytes(b'old')
+            with self.assertRaisesRegex(ValueError,'surviving file identity'):
+                plan_tree_transitions({'dir/file':(1,20)},{'elsewhere':(2,20)},regular_files(root),
+                                      {'dir':(1,10)},{'dir':(2,11)},directories(root))
+
     def test_directory_swap_preserves_file_identities(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);(root/'a').mkdir();(root/'b').mkdir();(root/'a'/'file').write_bytes(b'aaa');(root/'b'/'file').write_bytes(b'bbb')

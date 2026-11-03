@@ -157,7 +157,17 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(p
 if any(x.returncode for x in results):raise RuntimeError('sixth rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
 checks['moved_directory_correct']=all((r/'renamed-folder/data').read_bytes()==b'bravo' and not (r/'folder').exists() for r in roots[1:])
 checks['moved_directory_descriptors_correct']=all('data' in os.listdir(fd) for fd in dir_fds) and all(os.pread(fd,5,0)==b'bravo' for fd in nested_fds)
-checks['original_subprocess_only_six_times']=Path('/work/invocations').read_bytes()==b'123456'
+subprocess.run(['python3','-c','import shutil; from pathlib import Path; shutil.rmtree(\"renamed-folder\"); Path(\"renamed-folder\").mkdir(); Path(\"renamed-folder/data\").write_bytes(b\"other\"); Path(\"/work/invocations\").open(\"ab\").write(b\"7\")'],cwd=roots[0],check=True)
+seventh=capture('captured-7')
+for root in roots[1:]:
+ plan=plan_tree_transitions(regular_files(sixth),regular_files(seventh),regular_files(root),directories(sixth),directories(seventh),directories(root))
+ if plan['directory_replacements']!=['renamed-folder']:raise RuntimeError('snapshot directory replacement plan differs')
+ apply_tree_transitions(root,plan)
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(lambda root:sync(seventh,root),roots[1:]))
+if any(x.returncode for x in results):raise RuntimeError('seventh rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
+checks['replaced_directory_correct']=all((r/'renamed-folder/data').read_bytes()==b'other' for r in roots[1:])
+checks['replaced_directory_old_descriptors_correct']=all(os.pread(fd,5,0)==b'bravo' for fd in nested_fds) and all(os.fstat(fd).st_nlink==0 for fd in dir_fds)
+checks['original_subprocess_only_seven_times']=Path('/work/invocations').read_bytes()==b'1234567'
 for fd in link_fds+split_fds+dir_fds+nested_fds:os.close(fd)
 for name,passed in checks.items():print(name,passed)
 print('xattr_exercised',xattr)
