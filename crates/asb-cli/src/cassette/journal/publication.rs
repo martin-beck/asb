@@ -358,7 +358,12 @@ impl RecordingJournal {
             for artifact in &track.artifacts {
                 self.publication_fault.check("before-zip-artifact")?;
                 writer
-                    .start_file(track.artifact_entry_name(&artifact.kind), options)
+                    .start_file(
+                        track.artifact_entry_name(&artifact.kind),
+                        // Deflate can expand incompressible input slightly;
+                        // reserve ZIP64 before either size reaches ZIP32's limit.
+                        options.large_file(artifact.bytes >= 3 * 1024 * 1024 * 1024),
+                    )
                     .map_err(zip_error)?;
                 let path = self.artifact_path(track.id, &artifact.kind);
                 let copied = std::io::copy(
@@ -515,7 +520,7 @@ impl RecordingJournal {
                 archive.read_native(track.id)?;
             }
             for artifact in &track.artifacts {
-                archive.read_artifact(track.id, &artifact.kind)?;
+                archive.copy_artifact_to(track.id, &artifact.kind, &mut std::io::sink())?;
             }
         }
         Ok(())

@@ -234,7 +234,7 @@ pub struct Artifact {
 impl Artifact {
     fn validate(&self, limits: Limits) -> Result<(), Error> {
         if !valid_artifact_kind(&self.kind)
-            || self.bytes > limits.max_track_bytes
+            || self.bytes > limits.max_artifact_bytes
             || !valid_digest(&self.sha256)
         {
             return Err(Error(
