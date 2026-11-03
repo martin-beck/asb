@@ -26,7 +26,9 @@ when a creator is unavailable. The offline thread-lineage test distinguishes
 children created by concurrent sibling threads. An offline attribution prototype
 classifies direct and tool-owned operations only when the required lineage is
 complete and unambiguous; otherwise it reports unknown or ambiguous. It is not
-yet wired into direct filesystem replay.
+yet wired into direct filesystem replay. Newly recorded reads retain the requested
+size, and writes retain the full request size and SHA-256 even when the kernel
+reports a short write; older journals remain readable but lack that evidence.
 The experimental replay cursor can apply an ordered prefix and resume while
 keeping file handles open. The fixture checks an intermediate write before its
 later truncate and brackets one synchronous subprocess with explicit markers.

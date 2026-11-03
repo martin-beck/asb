@@ -228,7 +228,7 @@ class Proxy(Operations):
     def read(self, path, size, offset, fh):
         with self.inode_lock(fh):
             data = os.pread(fh.fh, size, offset)
-            self.record('read', path, data, offset=offset, handle=self.handle(fh))
+            self.record('read', path, data, offset=offset, handle=self.handle(fh), requested_size=size)
             return data
     def write(self, path, data, offset, fh):
         with self.inode_lock(fh):
@@ -238,7 +238,8 @@ class Proxy(Operations):
                 deadline = time.monotonic() + 5
                 while not (evidence / 'write-release').exists() and time.monotonic() < deadline:
                     time.sleep(0.005)
-            self.record('write', path, data[:written], offset=offset, handle=self.handle(fh))
+            self.record('write', path, data[:written], offset=offset, handle=self.handle(fh),
+                        requested_size=len(data), request_sha256=hashlib.sha256(data).hexdigest())
             return written
     def truncate(self, path, length, fh=None):
         lock = self.lock_for_stat(os.stat(self.path(path))) if fh is None else self.inode_lock(fh)
