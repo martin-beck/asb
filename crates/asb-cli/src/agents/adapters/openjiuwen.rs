@@ -328,6 +328,10 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         context.runtime_dir.join("openjiuwen/workspace"),
     );
     context.command.env(
+        "ASB_OPENJIUWEN_LOG_DIR",
+        context.runtime_dir.join("openjiuwen/logs"),
+    );
+    context.command.env(
         "ASB_OPENJIUWEN_NATIVE_TOOL_RECORD",
         context.run_dir.join("openjiuwen/native-tool-sidecar.jsonl"),
     );
@@ -410,6 +414,12 @@ mod tests {
                     .flatten()
             });
             assert_eq!(state, Some(root.join("openjiuwen/workspace").as_os_str()));
+            let logs = command.get_envs().find_map(|(key, value)| {
+                (key == OsStr::new("ASB_OPENJIUWEN_LOG_DIR"))
+                    .then_some(value)
+                    .flatten()
+            });
+            assert_eq!(logs, Some(root.join("openjiuwen/logs").as_os_str()));
         }
     }
 
