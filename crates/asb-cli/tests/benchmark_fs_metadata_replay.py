@@ -54,6 +54,26 @@ class MetadataReplayTest(unittest.TestCase):
                     replay.apply(dict(event,error=errno.ENOENT))
             replay.close()
 
+    def test_inferred_absence_requires_an_unchanged_recorded_parent_listing(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'target') as directory:
+            payload=Path(directory)/'payload.bin';payload.write_bytes(b'')
+            listing={'op':'observe-readdir','path':'/','result':['.','..','present'],'caller':CALLER}
+            probe={'op':'observe-inferred-absent','path':'/missing','parent':'/',
+                   'requested_op':'getattr','error':errno.ENOENT,'caller':CALLER}
+            end={'op':'marker','marker':'tool-begin:first','origin':None}
+            def lines(entries):
+                return [json.dumps(dict(item,sequence=i))+'\n' for i,item in enumerate(entries,1)]
+            self.assertEqual(validate_direct_prefix(lines([listing,end]),payload,lines([listing,probe]),payload),1)
+            present=dict(probe,path='/present')
+            with self.assertRaisesRegex(ValueError,'absence is unproven'):
+                validate_direct_prefix(lines([listing,end]),payload,lines([listing,present]),payload)
+            wrong_parent=dict(probe,parent='/wrong')
+            with self.assertRaisesRegex(ValueError,'absence is unproven'):
+                validate_direct_prefix(lines([listing,end]),payload,lines([listing,wrong_parent]),payload)
+            mutation={'op':'mkdir','path':'/new','mode':493,'caller':CALLER}
+            with self.assertRaisesRegex(ValueError,'absence is unproven'):
+                validate_direct_prefix(lines([listing,mutation,end]),payload,lines([listing,mutation,probe]),payload)
+
     def test_direct_observation_results_are_compared(self):
         with tempfile.TemporaryDirectory(dir=ROOT/'target') as directory:
             payload=Path(directory)/'payload.bin';payload.write_bytes(b'')

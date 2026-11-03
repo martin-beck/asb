@@ -54,7 +54,8 @@ class MetadataObservationTest(unittest.TestCase):
             def attrs(size):
                 return dict(st_gid=1,st_ino=1,st_mode=33188,st_nlink=1,st_size=size,st_uid=1,
                             st_blocks=1,st_blksize=4096,st_atime=1,st_mtime=1,st_ctime=1)
-            events=[{'op':'observe-getattr','path':'/file','result':attrs(3)},
+            events=[{'op':'observe-readdir','path':'/','result':['.','..','file']},
+                    {'op':'observe-getattr','path':'/file','result':attrs(3)},
                     {'op':'write','path':'/file'},
                     {'op':'observe-getattr','path':'/file','result':attrs(4)},
                     {'op':'marker','path':None,'marker':'tool-begin:first'}]
@@ -64,6 +65,9 @@ class MetadataObservationTest(unittest.TestCase):
             instances=[];fake.FUSE=lambda proxy,*_args,**_kw:instances.append(proxy)
             with patch.dict(sys.modules,{'fuse':fake}), patch.object(sys,'argv',[str(SCRIPT),str(backing),str(mount),str(evidence)]), patch.dict(os.environ,{'ASB_PROBE_ROOT_TGID':str(os.getpid()),'ASB_PROBE_METADATA_REPLAY':str(source)}):
                 runpy.run_path(str(SCRIPT),run_name='__main__');proxy=instances[0]
+                self.assertEqual(proxy.readdir('/',None),['.','..','file'])
+                with self.assertRaises(OSError) as missing: proxy.getattr('/missing')
+                self.assertEqual(missing.exception.args,(2,))
                 self.assertEqual(proxy.getattr('/file')['st_size'],3)
                 with self.assertRaisesRegex(RuntimeError,'no recorded'):
                     proxy.getattr('/file')
@@ -73,8 +77,10 @@ class MetadataObservationTest(unittest.TestCase):
             self.assertEqual((backing/'file').read_bytes(),b'actual bytes')
             recorded=[json.loads(line) for line in (evidence/'events.jsonl').read_text().splitlines()]
             self.assertEqual([event['op'] for event in recorded],
-                             ['observe-getattr','observe-unmatched','write','observe-getattr'])
+                             ['observe-readdir','observe-inferred-absent','observe-getattr','observe-unmatched','write','observe-getattr'])
             self.assertEqual(recorded[1]['requested_op'],'getattr')
+            self.assertEqual(recorded[1]['parent'],'/')
+            self.assertEqual(recorded[3]['requested_op'],'getattr')
 
 
 if __name__ == '__main__':

@@ -238,7 +238,15 @@ class Proxy(Operations):
                 result = (self.metadata_playback.observe('observe-' + op, path, **detail)
                           if self.metadata_playback is not None else operation())
             except OSError as error:
-                self.record('observe-' + op, path, error=error.errno, **detail)
+                inferred = False
+                if self.metadata_playback is not None:
+                    from asb_fs_metadata_windows import InferredAbsent
+                    inferred = isinstance(error, InferredAbsent)
+                if inferred:
+                    self.record('observe-inferred-absent', path, error=error.errno,
+                                parent=error.parent, requested_op=op, **detail)
+                else:
+                    self.record('observe-' + op, path, error=error.errno, **detail)
                 raise
             except RuntimeError:
                 if self.metadata_playback is not None:

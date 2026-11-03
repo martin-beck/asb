@@ -4,6 +4,8 @@ Experimental evidence comparison only; not a mounted replay filesystem.
 """
 import hashlib
 import json
+import os
+import posixpath
 from pathlib import Path
 
 from asb_fs_attribution import Attribution
@@ -63,6 +65,34 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
     count = 0
     with Path(expected_payload).open('rb') as expected_data, Path(observed_payload).open('rb') as observed_data:
         expected = iter(expected_events); observed = iter(observed_events)
+        directory_listings = {}
+        def next_actual():
+            while True:
+                line = next(observed, None)
+                if line is None:
+                    return None, None
+                if not line.endswith('\n'):
+                    raise ValueError('observed direct filesystem event stream is truncated')
+                actual = json.loads(line)
+                scope = observed_attribution.observe(actual)
+                if scope['kind'] == 'handle-release':
+                    if scope['opened_as'] != {'kind':'direct'}:
+                        raise ValueError('observed direct release has an unproven opener')
+                elif scope['kind'] != 'direct':
+                    raise ValueError('observed direct operation has unproven attribution')
+                if actual.get('op') != 'observe-inferred-absent':
+                    return actual, scope
+                path = actual.get('path')
+                if not isinstance(path, str) or not path.startswith('/'):
+                    raise ValueError('inferred filesystem absence is invalid')
+                parts = path.split('/')
+                if len(parts) < 2 or any(part in ('', '.', '..') for part in parts[1:]):
+                    raise ValueError('inferred filesystem absence is invalid')
+                parent, name = posixpath.split(path); parent = parent or '/'
+                listing = directory_listings.get(parent)
+                if (actual.get('requested_op') != 'getattr' or actual.get('error') != 2
+                        or actual.get('parent') != parent or listing is None or name in listing):
+                    raise ValueError('inferred filesystem absence is unproven')
         pending = None
         while True:
             expected_line = pending if pending is not None else next(expected, None)
@@ -82,19 +112,9 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
                     raise ValueError('direct filesystem release has an unproven opener')
             elif scope['kind'] != 'direct':
                 raise ValueError('direct filesystem prefix has unproven attribution')
-            try:
-                actual_line = next(observed)
-            except StopIteration as error:
-                raise ValueError('direct filesystem replay ended before the recorded prefix') from error
-            if not actual_line.endswith('\n'):
-                raise ValueError('observed direct filesystem event stream is truncated')
-            actual = json.loads(actual_line)
-            actual_scope = observed_attribution.observe(actual)
-            if actual_scope['kind'] == 'handle-release':
-                if actual_scope['opened_as'] != {'kind':'direct'}:
-                    raise ValueError('observed direct release has an unproven opener')
-            elif actual_scope['kind'] != 'direct':
-                raise ValueError('observed direct operation has unproven attribution')
+            actual, actual_scope = next_actual()
+            if actual is None:
+                raise ValueError('direct filesystem replay ended before the recorded prefix')
             op = event.get('op')
             # Parallel reads on already-open handles can complete in either
             # order. Never move them across another operation or boundary.
@@ -113,14 +133,10 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
                     if scope['kind'] != 'direct':
                         raise ValueError('direct filesystem prefix has unproven attribution')
                     expected_reads.append(candidate)
-                    try:
-                        actual_line = next(observed)
-                    except StopIteration as error:
-                        raise ValueError('direct filesystem replay ended before the recorded prefix') from error
-                    if not actual_line.endswith('\n'):
-                        raise ValueError('observed direct filesystem event stream is truncated')
-                    candidate_actual = json.loads(actual_line)
-                    if observed_attribution.observe(candidate_actual)['kind'] != 'direct':
+                    candidate_actual, candidate_scope = next_actual()
+                    if candidate_actual is None:
+                        raise ValueError('direct filesystem replay ended before the recorded prefix')
+                    if candidate_scope['kind'] != 'direct':
                         raise ValueError('observed direct operation has unproven attribution')
                     actual_reads.append(candidate_actual)
                 reverse_handles = {value: key for key, value in handles.items()}
@@ -180,10 +196,21 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
                         raise ValueError('direct filesystem observation payload differs')
             if op in _PAYLOAD_OPS and _digest_range(expected_data, event) != _digest_range(observed_data, actual):
                 raise ValueError('direct filesystem operation payload differs')
+            if op == 'observe-readdir' and 'error' not in event:
+                listing = event.get('result')
+                if (not isinstance(listing, list) or any(not isinstance(name, str) or not name or '/' in name for name in listing)
+                        or len(listing) != len(set(listing)) or '.' not in listing or '..' not in listing):
+                    raise ValueError('recorded filesystem directory listing is invalid')
+                directory_listings[event['path']] = frozenset(listing)
+            flags = event.get('flags')
+            read_only_open = (op == 'open' and type(flags) is int and flags & os.O_ACCMODE == os.O_RDONLY
+                              and not flags & (os.O_CREAT | os.O_TRUNC))
+            if not op.startswith('observe-') and op not in ('read', 'release') and not read_only_open:
+                directory_listings.clear()
             count += 1
         if handles or expected_attribution.handles or observed_attribution.handles:
             raise ValueError('direct filesystem prefix has open handles')
-        if next(observed, None) is not None:
+        if next_actual()[0] is not None:
             raise ValueError('direct filesystem replay has additional operations')
     return count
 
