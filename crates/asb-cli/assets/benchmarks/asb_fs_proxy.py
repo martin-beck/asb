@@ -240,6 +240,10 @@ class Proxy(Operations):
             except OSError as error:
                 self.record('observe-' + op, path, error=error.errno, **detail)
                 raise
+            except RuntimeError:
+                if self.metadata_playback is not None:
+                    self.record('observe-unmatched', path, requested_op=op, **detail)
+                raise
             if isinstance(result, bytes):
                 self.record('observe-' + op, path, result, **detail)
             else:
