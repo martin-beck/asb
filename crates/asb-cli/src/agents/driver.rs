@@ -812,13 +812,16 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         "guest agent gate currently requires Unix signals".into(),
     ));
     #[cfg(target_os = "linux")]
-    let held = if retained {
+    let mut held = if retained {
         Some(crate::runner::workload_process::start_with_spawn(
             &mut command,
             stdin_prompt.as_deref(),
             &mut std::io::stdout(),
             &mut std::io::stderr(),
             std::time::Duration::from_secs_f64(request.timeout_seconds),
+            filesystem_capture
+                .as_ref()
+                .and_then(|capture| capture.child.as_ref()),
             |pid| {
                 if let Some(session) = capture.as_mut() {
                     session.agent_process_spawned(pid).map_err(Error::Run)?;
@@ -883,6 +886,9 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
                 }
                 Ok(())
             },
+            filesystem_capture
+                .as_ref()
+                .and_then(|capture| capture.child.as_ref()),
         )?;
         (
             captured.output,
@@ -891,7 +897,13 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         )
     };
     if let Some(mut recorder) = filesystem_capture.take() {
+        #[cfg(target_os = "linux")]
+        let pid = recorder.child.as_ref().map(std::process::Child::id);
         recorder.stop()?;
+        #[cfg(target_os = "linux")]
+        if let (Some(pid), Some(held)) = (pid, held.as_mut()) {
+            held.release_preserved_child(pid);
+        }
     }
     let namespace_collectors = capture
         .as_mut()

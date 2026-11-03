@@ -13,10 +13,16 @@ use std::time::{Duration, Instant};
 pub(crate) struct DescendantScope {
     owner: u32,
     attempted: bool,
+    preserved: BTreeSet<u32>,
 }
 
 impl DescendantScope {
     pub(crate) fn new() -> io::Result<Self> {
+        Self::new_preserving(None)
+    }
+
+    /// Preserve a separately owned supervisor, whose Child remains with its caller.
+    pub(crate) fn new_preserving(child: Option<&std::process::Child>) -> io::Result<Self> {
         super::become_child_subreaper()?;
         // Probe the required kernel API before starting a client. Our own
         // process is not a child, so the ownership check cannot send a signal.
@@ -24,7 +30,12 @@ impl DescendantScope {
         Ok(Self {
             owner: std::process::id(),
             attempted: false,
+            preserved: child.map(|child| child.id()).into_iter().collect(),
         })
+    }
+
+    pub(crate) fn release_preserved(&mut self, pid: u32) {
+        self.preserved.remove(&pid);
     }
 
     /// Reap exited adopted services without signalling any live process.
@@ -43,6 +54,9 @@ impl DescendantScope {
         }
         let mut first_error = None;
         for pid in children {
+            if self.preserved.contains(&pid) {
+                continue;
+            }
             if let Err(error) = signal_and_reap_owned_child(pid, None) {
                 first_error.get_or_insert(error);
             }
@@ -85,7 +99,7 @@ impl DescendantScope {
                 Ok(children) => children,
                 Err(error) => return Err(first_error.unwrap_or(error)),
             };
-            if children.is_empty() {
+            if children.iter().all(|pid| self.preserved.contains(pid)) {
                 return Ok(());
             }
             if traced && let Err(error) = resume_consumed_trace_stops(&children) {
@@ -97,6 +111,9 @@ impl DescendantScope {
                 }));
             }
             for pid in children {
+                if self.preserved.contains(&pid) {
+                    continue;
+                }
                 // One inaccessible child must not starve separately owned
                 // siblings, nor restart the shared five-second budget.
                 if started.elapsed() >= Duration::from_secs(5) {
@@ -463,6 +480,57 @@ mod tests {
     #[test]
     fn kernel_ownership_check_refuses_to_signal_the_test_process_itself() {
         signal_and_reap_owned_child(std::process::id(), Some(libc::SIGKILL)).unwrap();
+    }
+
+    #[test]
+    fn guest_cleanup_preserves_supervisor_and_reaps_other_owned_children() {
+        use std::process::{Command, Stdio};
+        const CHILD: &str = "ASB_TEST_PRESERVED_SUPERVISOR_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let _view = CurrentTaskView::enter();
+            let mut supervisor = Command::new("/bin/sleep")
+                .arg("30")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let helper = Command::new("/bin/sleep")
+                .arg("30")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let helper_pid = helper.id();
+            let mut agent = Command::new("/bin/sh");
+            agent
+                .args(["-c", "exit 0"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let result = crate::runner::run_guest_process(
+                &mut agent,
+                None,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                Duration::from_secs(10),
+                &mut |_| Ok(()),
+                Some(&supervisor),
+            )
+            .unwrap();
+            assert!(result.output.status.success());
+            assert!(!std::path::Path::new(&format!("/proc/{helper_pid}")).exists());
+            assert!(supervisor.try_wait().unwrap().is_none());
+            supervisor.kill().unwrap();
+            supervisor.wait().unwrap();
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "process_gate::descendants::tests::guest_cleanup_preserves_supervisor_and_reaps_other_owned_children", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        assert!(
+            output.status.success(),
+            "isolated custody test failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
