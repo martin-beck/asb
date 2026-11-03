@@ -33,20 +33,21 @@ if os.environ.get('ASB_FIXTURE_NATIVE_FILES') == '1':
     # Private test transcript: production Hermes does not yet implement this.
     import tools.file_tools as _fixture_file_tools
     from tools.registry import registry as _fixture_registry
+    _fixture_original_dispatch = _fixture_registry.dispatch
     _fixture_file_path = Path(os.environ['ASB_FIXTURE_NATIVE_FILE_TRANSCRIPT'])
     _fixture_file_events = []
     _fixture_file_cursor = 0
     if MODE == 'replay':
         _fixture_file_events = [json.loads(line) for line in _fixture_file_path.read_text().splitlines()]
-    def _fixture_wrap_file_tool(tool_name, marker, handler):
+    def _fixture_wrap_file_tool(tool_name, marker):
         def wrapped(args, **kwargs):
             global _fixture_file_cursor
             request = {'tool': tool_name, 'args': args}
             if MODE == 'record':
                 _fixture_exchange('tool-begin:' + marker)
-                output = handler(args, **kwargs)
-                if not isinstance(output, str):
-                    raise RuntimeError('fixture file tool returned a non-text result')
+                output = _fixture_original_dispatch(tool_name, args, **kwargs)
+                if not isinstance(output, (str, dict)):
+                    raise RuntimeError('fixture registry tool returned an unsupported result')
                 with _fixture_file_path.open('a', encoding='utf-8') as log:
                     log.write(json.dumps({'request': request, 'output': output}, separators=(',', ':')) + '\n')
                 _fixture_exchange('tool-end:' + marker)
@@ -61,9 +62,17 @@ if os.environ.get('ASB_FIXTURE_NATIVE_FILES') == '1':
             _fixture_exchange('tool-end:' + marker)
             return event['output']
         return wrapped
-    for _fixture_tool, _fixture_marker in (('write_file','write'),('read_file','read'),('patch','patch'),('search_files','search')):
-        _fixture_entry = _fixture_registry._tools[_fixture_tool]
-        _fixture_entry.handler = _fixture_wrap_file_tool(_fixture_tool, _fixture_marker, _fixture_entry.handler)
+    def _fixture_dispatch(tool_name, args, **kwargs):
+        # Terminal/process use the existing sidecar. MCP retains its separate
+        # proxy path. This is a fixture experiment, not complete interception:
+        # agent-loop tools and direct agent APIs can bypass this registry.
+        entry = _fixture_registry.get_entry(tool_name)
+        if tool_name in ('terminal', 'process') or (entry and entry.toolset.startswith('mcp-')):
+            return _fixture_original_dispatch(tool_name, args, **kwargs)
+        marker = {'write_file':'write','read_file':'read','patch':'patch','search_files':'search'}.get(
+            tool_name, tool_name.replace('_', '-'))
+        return _fixture_wrap_file_tool(tool_name, marker)(args, **kwargs)
+    _fixture_registry.dispatch = _fixture_dispatch
     @atexit.register
     def _fixture_finish_file_tools():
         if MODE == 'replay' and _fixture_file_cursor != len(_fixture_file_events):
