@@ -63,6 +63,17 @@ def message(source, text):
     return MessageEvent(source=source, llm_message=Event(role='assistant' if source == 'agent' else 'user', content=[TextContent(text=text)]))
 
 class NativeFinalTest(unittest.TestCase):
+    def test_editor_only_recording_does_not_create_empty_terminal_sidecar(self):
+        implementation = module('openhands.tools.terminal.impl')
+        class Delegate:
+            def __init__(self, **_kwargs): pass
+            def close(self): pass
+        implementation.TerminalExecutor = Delegate
+        with patch.object(launcher.subprocess, 'Popen') as spawn:
+            executor = launcher.NativeTerminalExecutor('/bridge', 'record', '/sidecar', '')
+            executor.close()
+            spawn.assert_not_called()
+
     def test_unrecorded_default_tool_still_runs_but_cannot_claim_complete_recording(self):
         class Delegate:
             def __call__(self, value): return 'ran:' + value

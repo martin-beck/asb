@@ -241,12 +241,20 @@ class NativeTerminalExecutor(ToolExecutor):
         self._marker_count = 0
         self._marker_failed = False
         self._delegate = None
+        self._bridge_args = [bridge, "__asb-agent-bridge", "openhands", "--mode", mode,
+                             "--sidecar", sidecar, "--launch-json", launch_json]
+        self._bridge = None
         if mode == "record":
             from openhands.tools.terminal.impl import TerminalExecutor
             self._delegate = TerminalExecutor(working_dir=os.getcwd(), terminal_type="subprocess")
+        else:
+            self._start_bridge()
+
+    def _start_bridge(self) -> None:
+        if self._bridge is not None:
+            return
         self._bridge = subprocess.Popen(
-            [bridge, "__asb-agent-bridge", "openhands", "--mode", mode,
-             "--sidecar", sidecar, "--launch-json", launch_json],
+            self._bridge_args,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
             text=True, encoding="utf-8",
         )
@@ -282,6 +290,7 @@ class NativeTerminalExecutor(ToolExecutor):
                            "timeout": observation.timeout,
                            "metadata": observation.metadata.model_dump(),
                        }}
+        self._start_bridge()
         assert self._bridge.stdin is not None
         assert self._bridge.stdout is not None
         self._bridge.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
@@ -313,11 +322,12 @@ class NativeTerminalExecutor(ToolExecutor):
     def close(self) -> None:
         if self._delegate is not None:
             self._delegate.close()
-        if self._bridge.stdin is not None:
-            self._bridge.stdin.close()
-        status = self._bridge.wait()
-        if status != 0:
-            raise RuntimeError("ASB native terminal bridge did not consume the sealed replay")
+        if self._bridge is not None:
+            if self._bridge.stdin is not None:
+                self._bridge.stdin.close()
+            status = self._bridge.wait()
+            if status != 0:
+                raise RuntimeError("ASB native terminal bridge did not consume the sealed replay")
         if self._marker_failed:
             raise RuntimeError("OpenHands filesystem recording boundary was unavailable")
 

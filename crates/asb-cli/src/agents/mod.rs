@@ -1374,12 +1374,12 @@ mod tests {
             );
         }
         // Negative coverage: non-native adapters cannot satisfy the contract
-        // merely by declaring an unrelated native artifact, while native
-        // adapters are not required to pretend their transport is MCP/local.
+        // merely by declaring an unrelated native artifact. OpenHands uses
+        // its native terminal sidecar and a separate editor transcript.
         assert!(local_sidecar(find("pi").unwrap()));
         assert!(!native_sidecar(find("pi").unwrap()));
         assert!(native_sidecar(find("openhands").unwrap()));
-        assert!(!local_sidecar(find("openhands").unwrap()));
+        assert!(local_sidecar(find("openhands").unwrap()));
     }
 
     #[test]
