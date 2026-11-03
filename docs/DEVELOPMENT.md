@@ -206,8 +206,10 @@ project-local install and mount/unmount in the selected SWE-bench image passed;
 the installer also stages pinned fusepy 3.0.1 for use by the recorder. The
 installed overlay binary and binding passed the four-replica offline fixture
 with libfuse2 built from the installed pinned source inside the selected guest.
-The helper needs guest `tar`, `make` and `cc`; automatic toolchain provisioning,
-automatic helper invocation, the aarch64 path, and VM fallback remain unqualified.
+The helper needs guest `tar`, `make` and `cc`; the guest driver invokes it before
+the execution gate when the internal filesystem recording request is selected.
+Automatic toolchain provisioning, selecting that request from a production
+launcher, the aarch64 path, and VM fallback remain unqualified.
 
 `python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` checks that
 overlapping terminal calls produce a readable sidecar without serializing

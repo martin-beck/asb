@@ -763,6 +763,10 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         .to_path_buf();
     fs::create_dir_all(&request.run_dir)
         .map_err(|error| Error::Io(format!("cannot create private guest artifacts: {error}")))?;
+    if request.filesystem_recording {
+        let (_, project) = project::load(&request.project_root)?;
+        prepare_filesystem_library(&request.project_root, &project.tools_dir, &request.run_dir)?;
+    }
     let mut capture = if request.namespace_collectors.is_empty() {
         None
     } else {
@@ -985,6 +989,43 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         .code()
         .and_then(|code| u8::try_from(code).ok())
         .unwrap_or(1))
+}
+
+/// Build the pinned source in the guest before the agent execution gate.
+fn prepare_filesystem_library(
+    project_root: &Path,
+    tools_dir: &str,
+    run_dir: &Path,
+) -> Result<PathBuf, Error> {
+    let source = project::resolve(project_root, tools_dir)
+        .join("fuse-overlayfs/libfuse/cache/fuse-2.9.9.tar.gz");
+    if !source.is_file() {
+        return Err(Error::Run("filesystem recorder source is missing; run `asb tool install fuse-overlayfs` before recording".into()));
+    }
+    let destination = run_dir.join("libfuse-build");
+    let log =
+        fs::File::create(run_dir.join("libfuse-build-driver.log")).map_err(crate::io_error)?;
+    let status = Command::new(crate::python_runtime::project_python(project_root))
+        .arg("-c")
+        .arg(include_str!("../../assets/benchmarks/asb_fuse_build.py"))
+        .arg(&source)
+        .arg(&destination)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .stdin(Stdio::null())
+        .stdout(log.try_clone().map_err(crate::io_error)?)
+        .stderr(log)
+        .status()
+        .map_err(|_| {
+            Error::Run(
+                "cannot start guest filesystem recorder build; install the project Python runtime"
+                    .into(),
+            )
+        })?;
+    let library = destination.join("lib/.libs/libfuse.so.2.9.9");
+    if !status.success() || !library.is_file() {
+        return Err(Error::Run("guest filesystem recorder build failed; inspect its private libfuse build logs and install tar, make and a C compiler in the guest".into()));
+    }
+    Ok(library)
 }
 
 /// Move replay sidecars into receipt-backed files before the result reaches
@@ -1235,6 +1276,30 @@ pub(crate) fn entry() -> std::process::ExitCode {
 #[cfg(all(test, unix))]
 mod artifact_publication_tests {
     use super::*;
+
+    #[test]
+    fn filesystem_library_is_prepared_from_the_staged_guest_source() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "asb-guest-fuse-prepare-{}",
+                crate::tools::runtime::unique_id()
+            ));
+        let source = root.join("tools/fuse-overlayfs/libfuse/cache/fuse-2.9.9.tar.gz");
+        let python = crate::python_runtime::project_python(&root);
+        let run = root.join("run");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::create_dir_all(&run).unwrap();
+        assert!(prepare_filesystem_library(&root, "tools", &run).is_err());
+        fs::write(&source, b"fixture").unwrap();
+        fs::write(&python, "#!/bin/sh\nmkdir -p \"$4/lib/.libs\"\nprintf fixture > \"$4/lib/.libs/libfuse.so.2.9.9\"\n").unwrap();
+        fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+        let library = prepare_filesystem_library(&root, "tools", &run).unwrap();
+        assert_eq!(fs::read(library).unwrap(), b"fixture");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn filesystem_recording_exports_file_backed_receipts() {
