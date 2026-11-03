@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const LIMIT: u64 = 16 * 1024 * 1024;
+const DEFERRED_JSON_LIMIT: u64 = LIMIT * 8;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ArtifactSpec {
@@ -214,12 +215,19 @@ impl FrozenArtifacts {
             documents: &'a BTreeMap<String, serde_json::Value>,
             bytes: &'a BTreeMap<String, Vec<u8>>,
         }
-        serde_json::to_vec(&Envelope {
-            schema_version: 1,
-            documents: &self.documents,
-            bytes: &self.bytes,
-        })
-        .map_err(|_| crate::Error::Run("cannot encode deferred adapter artifacts".into()))
+        let mut compressed = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        serde_json::to_writer(
+            &mut compressed,
+            &Envelope {
+                schema_version: 1,
+                documents: &self.documents,
+                bytes: &self.bytes,
+            },
+        )
+        .map_err(|_| crate::Error::Run("cannot encode deferred adapter artifacts".into()))?;
+        compressed
+            .finish()
+            .map_err(|_| crate::Error::Run("cannot compress deferred adapter artifacts".into()))
     }
 
     /// Reconstruct generic frozen custody data received through the bounded
@@ -233,7 +241,20 @@ impl FrozenArtifacts {
             documents: BTreeMap<String, serde_json::Value>,
             bytes: BTreeMap<String, Vec<u8>>,
         }
-        let envelope: Envelope = serde_json::from_slice(bytes)
+        let mut expanded = Vec::new();
+        let payload = if bytes.starts_with(&[0x1f, 0x8b]) {
+            flate2::read::GzDecoder::new(bytes)
+                .take(DEFERRED_JSON_LIMIT + 1)
+                .read_to_end(&mut expanded)
+                .map_err(|_| "deferred adapter artifact receipt is invalid".to_owned())?;
+            if expanded.len() as u64 > DEFERRED_JSON_LIMIT {
+                return Err("deferred adapter artifact receipt exceeds its bounds".into());
+            }
+            expanded.as_slice()
+        } else {
+            bytes
+        };
+        let envelope: Envelope = serde_json::from_slice(payload)
             .map_err(|_| "deferred adapter artifact receipt is invalid".to_owned())?;
         if envelope.schema_version != 1
             || envelope.documents.len() > 16
@@ -1540,7 +1561,44 @@ mod tests {
     }
 
     #[test]
+    fn deferred_collection_compacts_large_json_and_tool_transcripts_without_losing_bytes() {
+        let document = serde_json::json!({"messages": "agent output ".repeat(300_000)});
+        let original_json = serde_json::to_vec(&document).unwrap();
+        let transcript = b"{\"tool\":\"terminal\",\"result\":\"sample\"}\n".repeat(70_000);
+        let frozen = FrozenArtifacts {
+            documents: [("trajectory.json".into(), document.clone())]
+                .into_iter()
+                .collect(),
+            bytes: [
+                ("trajectory.json".into(), original_json.clone()),
+                ("local-tools.jsonl".into(), transcript.clone()),
+            ]
+            .into_iter()
+            .collect(),
+            error: false,
+            diagnostics: Vec::new(),
+        };
+        let expanded = serde_json::to_vec(&serde_json::json!({"schema_version":1,
+            "documents":frozen.documents,"bytes":frozen.bytes}))
+        .unwrap();
+        assert!(expanded.len() > LIMIT as usize);
+        let encoded = frozen.deferred_collection_bytes().unwrap();
+        assert!(encoded.len() < LIMIT as usize);
+        let restored = FrozenArtifacts::from_deferred_collection_bytes(&encoded).unwrap();
+        assert_eq!(restored.document("trajectory.json"), Some(&document));
+        assert_eq!(
+            restored.bytes("trajectory.json"),
+            Some(original_json.as_slice())
+        );
+        assert_eq!(
+            restored.bytes("local-tools.jsonl"),
+            Some(transcript.as_slice())
+        );
+    }
+
+    #[test]
     fn deferred_collection_rejects_unknown_or_oversized_envelopes() {
+        assert!(FrozenArtifacts::from_deferred_collection_bytes(&[0x1f, 0x8b, 0, 1]).is_err());
         assert!(
             FrozenArtifacts::from_deferred_collection_bytes(
                 br#"{"schema_version":1,"extra":true,"documents":{},"bytes":{}}"#
