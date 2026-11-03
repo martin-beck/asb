@@ -92,7 +92,29 @@ checks['second_boundary_open_descriptors_correct']=all(os.pread(fd,3,0)==b'end' 
 checks['second_boundary_hardlinks_correct']=all((r/'file').stat().st_ino==(r/'link').stat().st_ino for r in roots[1:])
 checks['base_unchanged_after_second_boundary']=(Path('/work/fs/base/file').read_bytes()==b'old' and Path('/work/fs/base/link').read_bytes()==b'old' and Path('/work/fs/base/file').stat().st_ino==Path('/work/fs/base/link').stat().st_ino)
 checks['first_capture_unchanged']=(first/'file').read_bytes()==b'new' and (first/'symlink').is_symlink()
-checks['original_subprocess_only_twice']=Path('/work/invocations').read_bytes()==b'12'
+link_fds=[os.open(root/'link',os.O_RDONLY) for root in roots[1:]]
+subprocess.run(['python3','-c','from pathlib import Path; Path(\"link\").unlink(); Path(\"link\").write_bytes(b\"sep\"); Path(\"/work/invocations\").open(\"ab\").write(b\"3\")'],cwd=roots[0],check=True)
+third=capture('captured-3')
+control=Path('/work/fs/control')
+subprocess.run(['/hostlib/LOADER','--library-path','/hostlib','/opt/btrfs','subvolume','snapshot',str(second),str(control)],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=30,check=True)
+naive=sync(third,control)
+if naive.returncode:raise RuntimeError('control rsync failed: '+naive.stderr.decode(errors='replace')[-300:])
+naive_correct=(control/'file').read_bytes()==b'end' and (control/'link').read_bytes()==b'sep' and (control/'file').stat().st_ino!=(control/'link').stat().st_ino
+print('naive_split_sync_correct',naive_correct)
+if ((second/'file').stat().st_ino!=(second/'link').stat().st_ino
+        or (third/'file').stat().st_ino!=(second/'file').stat().st_ino
+        or (third/'link').stat().st_ino==(second/'link').stat().st_ino):
+ raise RuntimeError('fixture did not produce the expected hard-link split')
+for root in roots[1:]:
+ if (root/'file').stat().st_ino!=(root/'link').stat().st_ino:
+  raise RuntimeError('replica hard-link state differs before split')
+ (root/'link').unlink()
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(lambda root:sync(third,root),roots[1:]))
+if any(x.returncode for x in results):raise RuntimeError('third rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
+checks['split_link_correct']=all((r/'file').read_bytes()==b'end' and (r/'link').read_bytes()==b'sep' and (r/'file').stat().st_ino!=(r/'link').stat().st_ino for r in roots[1:])
+checks['split_link_existing_descriptors_correct']=all(os.pread(fd,3,0)==b'end' for fd in fds[1:]+link_fds)
+checks['original_subprocess_only_three_times']=Path('/work/invocations').read_bytes()==b'123'
+for fd in link_fds:os.close(fd)
 for name,passed in checks.items():print(name,passed)
 print('xattr_exercised',xattr)
 if not all(checks.values()):raise RuntimeError('Btrfs snapshot checks failed')
