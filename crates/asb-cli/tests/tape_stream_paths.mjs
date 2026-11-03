@@ -31,7 +31,7 @@ test('record and replay preserve split guest paths and remap split host paths', 
   const recordWorkspace='/srv/record/workspace-concurrency-1';
   const replayWorkspace='/srv/replay/workspace-concurrency-2';
   const guest='/asb-snapshot-storage/snapshot/filesystem/workspace/a';
-  const literal=' 2022-12-16T00:00:00Z 1234567890123 123e4567-e89b-12d3-a456-426614174000';
+  const literal=' 2022-12-16T00:00:00Z 1234567890123 123e4567-e89b-12d3-a456-426614174000 /unrelated/project/workspace/file '+recordWorkspace+'-backup/file';
   const chunks=['/asb-snapshot-storage/snapshot/files','ystem/workspace/a and /srv/record/workspace-con','currency-1/b'+literal];
   const body=chunks.map((value)=>`data: ${JSON.stringify({choices:[{index:0,delta:{reasoning:value,tool_calls:[{index:0,function:{arguments:value}}]}}]})}\n\n`).join('')+'data: [DONE]\n\n';
   const upstream=http.createServer((_request,response)=>{response.writeHead(200,{'content-type':'text/event-stream'});response.end(body);});
@@ -93,6 +93,36 @@ test('replay rejects changed literal dates, numbers and UUIDs in task data', asy
     if (record) await stop(record.child);
     if (replay) await stop(replay.child);
     if (upstream.listening) await new Promise((resolve)=>upstream.close(resolve));
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
+test('Anthropic streamed tool arguments keep unrelated workspace paths', async () => {
+  const root=await mkdtemp(join(tmpdir(),'asb-anthropic-paths-'));
+  const recordWorkspace='/srv/record/workspace';
+  const replayWorkspace='/srv/replay/workspace';
+  const pieces=['{"command":"cat /srv/record/work','space/a /other/project/workspace/b"}'];
+  const body=pieces.map(part=>`data: ${JSON.stringify({type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:part}})}\n\n`).join('')+
+    `data: ${JSON.stringify({type:'content_block_stop',index:0})}\n\n`;
+  const upstream=http.createServer((_request,response)=>{response.writeHead(200,{'content-type':'text/event-stream'});response.end(body);});
+  await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));
+  let record,replay;
+  const options={method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'fixture',messages:[]})};
+  try {
+    const cassette=join(root,'capture.jsonl');
+    record=await start(['record','--port','0','--upstream',`http://127.0.0.1:${upstream.address().port}`,'--out',cassette],join(root,'record.ready'),recordWorkspace);
+    assert.equal(await (await fetch(`http://127.0.0.1:${record.port}/v1/messages`,options)).text(),body);
+    await stop(record.child); record=null;
+    await new Promise(resolve=>upstream.close(resolve));
+    replay=await start(['replay','--port','0','--cassette',cassette],join(root,'replay.ready'),replayWorkspace);
+    const response=await fetch(`http://127.0.0.1:${replay.port}/v1/messages`,options);
+    assert.equal(response.status,200);
+    const reconstructed=(await response.text()).split('\n').filter(line=>line.startsWith('data: {')).map(line=>JSON.parse(line.slice(6)).delta?.partial_json || '').join('');
+    assert.equal(JSON.parse(reconstructed).command,`cat ${replayWorkspace}/a /other/project/workspace/b`);
+  } finally {
+    if (record) await stop(record.child);
+    if (replay) await stop(replay.child);
+    if (upstream.listening) await new Promise(resolve=>upstream.close(resolve));
     await rm(root,{recursive:true,force:true});
   }
 });
