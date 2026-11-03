@@ -714,9 +714,7 @@ function normalizeSseWorkspaceFragments(body, workspace, replacement = "<asb-wor
 }
 
 function normalizeWorkspaceText(value, workspace, replacement = "<asb-workspace>") {
-  return (workspace ? value.replaceAll(workspace, replacement) : value)
-    .replace(/\/?(?:[A-Za-z0-9_.-]+\/)+workspace-concurrency-\d+(?:\.asb-agent-runtime)?/g, replacement)
-    .replace(/\/?(?:[A-Za-z0-9_.-]+\/)+workspace(?=\/|["\\])/g, replacement);
+  return normalizeWorkspacePaths(workspace ? value.replaceAll(workspace, replacement) : value, replacement);
 }
 
 function requestKey(request) {
