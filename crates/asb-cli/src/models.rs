@@ -1049,6 +1049,22 @@ mod tests {
     }
 
     #[test]
+    fn replay_model_admission_does_not_confuse_embeddings_with_inference() {
+        for url in ["/v1/embeddings", "/v1/embeddings/?version=1"] {
+            let embedding = format!(
+                "{{\"request\":{{\"url\":\"{url}\",\"body\":{{\"model\":\"test-model\",\"input\":[\"hello\"]}}}}}}\n"
+            );
+            replay_fixture(&embedding, |path| {
+                assert!(ensure_replay_model_recorded(path, "test-model").is_err());
+            });
+            let inference = "{\"request\":{\"url\":\"/v1/chat/completions\",\"body\":{\"model\":\"test-model\",\"messages\":[]}}}\n";
+            replay_fixture(&(embedding + inference), |path| {
+                ensure_replay_model_recorded(path, "test-model").unwrap();
+            });
+        }
+    }
+
+    #[test]
     fn replay_accepts_tool_choice_and_legacy_function_requests() {
         for body in [
             r#"{"model":"test-model","tool_choice":"auto"}"#,

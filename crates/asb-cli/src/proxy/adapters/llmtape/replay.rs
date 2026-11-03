@@ -24,6 +24,24 @@ pub(crate) fn ensure_replay_model_recorded(cassette: &Path, model: &str) -> Resu
         } else {
             raw_body.clone()
         };
+        // Embedding operations are mandatory tape exchanges, but do not
+        // establish that the cassette contains a language-model request.
+        // Older body-only cassettes have no URL, so retain their existing
+        // model matching behavior.
+        if value
+            .get("request")
+            .and_then(|request| request.get("url"))
+            .and_then(Value::as_str)
+            .is_some_and(|url| {
+                url.split('?')
+                    .next()
+                    .unwrap_or(url)
+                    .trim_end_matches('/')
+                    .ends_with("/embeddings")
+            })
+        {
+            continue;
+        }
         let Some(recorded_model) = body.get("model").and_then(Value::as_str) else {
             continue;
         };
