@@ -2,6 +2,7 @@
 import io
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
 import sys
@@ -14,7 +15,7 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).parents[1] / "assets/benchmarks"))
 from asb_execution import ExecutionError
-from asb_guest import (execute_agent, export_agent_artifacts, stage_npm_package_tree, stage_private_inputs, propagate_guest_timeout,
+from asb_guest import (execute_agent, export_agent_artifacts, stage_npm_package_tree, stage_private_inputs, stage_auxiliary_tools, propagate_guest_timeout,
                        stage_public_cache, stage_bootstrap, PreparationBudget)
 from asb_runtime import elf as inspect_elf
 
@@ -67,6 +68,18 @@ class ArchiveContainer:
 
 
 class GuestBootstrapTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('ASB_TEST_HOST_ASB'), 'needs just-built ASB')
+    def test_auxiliary_tool_staging_uses_private_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);container=Container();commands=[]
+            task=SimpleNamespace(workspace=SimpleNamespace(container=container,image_identity={}),artifacts=root,
+                                 checked=lambda command:commands.append(command))
+            paths=stage_auxiliary_tools(task,{'fixture':os.environ['ASB_TEST_HOST_ASB']},(1,2))
+            self.assertEqual(paths,{'fixture':'/opt/asb-private/tools/fixture/fixture'})
+            self.assertTrue(any(item[1]=='tools/fixture/fixture' for item in container.files))
+            self.assertTrue(commands and commands[0][:2]==['mkdir','-p'])
+            with self.assertRaises(ExecutionError):stage_auxiliary_tools(task,{'../invalid':'unused'},(1,2))
+
     def test_private_inputs_stream_and_reject_changed_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);source=root/'source';payload=b'abc123'*20000;source.write_bytes(payload)

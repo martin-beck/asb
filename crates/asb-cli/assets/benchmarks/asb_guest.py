@@ -18,7 +18,7 @@ import time
 import threading
 
 from asb_execution import ExecutionError, principal_observation
-from asb_runtime import bundle
+from asb_runtime import bundle, bundle_tool
 from asb_staging import upload, upload_files, stage_runtime, root_execute, prepare_guest_roots
 from asb_relay import HostRelay, ForwardingCancellation, forward_request
 
@@ -258,6 +258,27 @@ def stage_private_inputs(task, inputs, owner=None):
         staged.append((target,source,item['bytes'],item['sha256'],0o600))
     if staged:
         upload_files(task.workspace.container,"/opt/asb-private",staged,temporary_dir=task.artifacts,owner=owner)
+
+
+def stage_auxiliary_tools(task, tools, owner):
+    """Stage declared host or project-local tools under the guest-private prefix."""
+    if not isinstance(tools,dict):
+        raise ExecutionError('guest auxiliary tools must be a name-to-path mapping')
+    paths = {}
+    architecture = getattr(task.workspace,'image_identity',{}).get('architecture')
+    for name, source in tools.items():
+        files, _ = bundle_tool(source,name,architecture,root='/opt/asb-private')
+        directories = set()
+        for relative,_,_ in files:
+            parent = Path(relative).parent
+            while str(parent) not in ('.',''):
+                directories.add('/opt/asb-private/'+parent.as_posix())
+                parent = parent.parent
+        if directories:
+            task.checked(['mkdir','-p',*sorted(directories,key=lambda value:(value.count('/'),value))])
+        upload(task.workspace.container,'/opt/asb-private',files,temporary_dir=task.artifacts,owner=owner)
+        paths[name] = '/opt/asb-private/tools/'+name+'/'+name
+    return paths
 
 
 def stage_npm_package_tree(task, tree, tools, selected, owner=None):
