@@ -136,6 +136,24 @@ class MetadataWindowTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'no recorded'):
                 window.observe('observe-getattr','/target')
 
+    def test_unobserved_entries_are_audited_and_do_not_create_directory_evidence(self):
+        events=[{'sequence':1,'op':'observe-getattr','path':'/a','result':attrs(1)},
+                {'sequence':2,'op':'observe-readdir','path':'/','result':['.','..','a']},
+                {'sequence':3,'op':'open','path':'/a','flags':0}]
+        window=ObservationWindow(events,ROOT/'target/unused')
+        self.assertEqual(window.discard_unobserved(),[1,2])
+        with self.assertRaisesRegex(RuntimeError,'no recorded'):
+            window.observe('observe-getattr','/missing')
+        self.assertEqual(window.advance()['op'],'open');window.operation_applied()
+        self.assertEqual(window.discard_unobserved(),[])
+        self.assertIsNone(window.advance())
+
+    def test_invalid_skipped_sequences_are_not_discarded(self):
+        event={'op':'observe-getattr','path':'/a','result':attrs(1)}
+        window=ObservationWindow([event],ROOT/'target/unused')
+        with self.assertRaisesRegex(ValueError,'sequence is invalid'): window.discard_unobserved()
+        self.assertEqual(window.observe('observe-getattr','/a'),attrs(1))
+
     def test_wrong_request_does_not_consume_observation(self):
         window=ObservationWindow([{'op':'observe-readlink','path':'/a','result':'target'}],ROOT/'target/unused')
         with self.assertRaisesRegex(RuntimeError,'no recorded'): window.observe('observe-readlink','/b')

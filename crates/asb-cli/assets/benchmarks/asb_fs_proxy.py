@@ -206,9 +206,12 @@ class Proxy(Operations):
         with self.record_lock:
             playback_boundary = None
             if self.metadata_playback is not None and not op.startswith('observe-'):
+                skipped = self.metadata_playback.discard_unobserved()
                 playback_boundary = self.metadata_playback.advance()
                 if playback_boundary is None or playback_boundary.get('op') != op or playback_boundary.get('path') != path:
                     raise RuntimeError('recorded direct filesystem operation differs')
+                if skipped:
+                    detail['skipped_observations'] = skipped
             self.sequence += 1
             event = {'sequence': self.sequence, 'op': op, 'path': path, 'caller': None if is_marker or os.environ.get('ASB_PROBE_BENCHMARK_NO_IDENTITY') == '1' else caller_identity(fuse_get_context()[2]), **detail}
             scope = None

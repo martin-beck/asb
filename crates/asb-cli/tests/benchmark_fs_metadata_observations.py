@@ -82,6 +82,25 @@ class MetadataObservationTest(unittest.TestCase):
             self.assertEqual(recorded[1]['parent'],'/')
             self.assertEqual(recorded[3]['requested_op'],'getattr')
 
+    def test_proxy_records_unobserved_metadata_ids_at_next_boundary(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'target') as directory:
+            root=Path(directory);backing=root/'backing';mount=root/'mount';evidence=root/'evidence';source=root/'source'
+            for path in (backing,mount,evidence,source):path.mkdir()
+            (source/'payload.bin').write_bytes(b'')
+            events=[{'sequence':1,'op':'observe-readlink','path':'/unused','result':'target'},
+                    {'sequence':2,'op':'write','path':'/file'},
+                    {'sequence':3,'op':'marker','marker':'tool-begin:first'}]
+            (source/'events.jsonl').write_text(''.join(json.dumps(event)+'\n' for event in events))
+            fake=types.ModuleType('fuse');fake.Operations=object;fake.FuseOSError=OSError
+            fake.fuse_get_context=lambda:(os.getuid(),os.getgid(),os.getpid())
+            instances=[];fake.FUSE=lambda proxy,*_args,**_kw:instances.append(proxy)
+            with patch.dict(sys.modules,{'fuse':fake}), patch.object(sys,'argv',[str(SCRIPT),str(backing),str(mount),str(evidence)]), patch.dict(os.environ,{'ASB_PROBE_ROOT_TGID':str(os.getpid()),'ASB_PROBE_METADATA_REPLAY':str(source)}):
+                runpy.run_path(str(SCRIPT),run_name='__main__');proxy=instances[0]
+                proxy.record('write','/file')
+                proxy.log.close();proxy.payload.file.close()
+            row=json.loads((evidence/'events.jsonl').read_text())
+            self.assertEqual(row['skipped_observations'],[1])
+
 
 if __name__ == '__main__':
     unittest.main()

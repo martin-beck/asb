@@ -192,6 +192,17 @@ class ObservationWindow:
         return result
 
     @_synchronized
+    def discard_unobserved(self):
+        """Discard unrequested observations; retain their IDs for audit."""
+        if self.in_flight:
+            raise RuntimeError('recorded filesystem operation has not been applied')
+        sequences = [event.get('sequence') for queue in self.pending.values() for event in queue]
+        if any(type(sequence) is not int or sequence <= 0 for sequence in sequences) or len(set(sequences)) != len(sequences):
+            raise ValueError('recorded filesystem observation sequence is invalid')
+        self.pending.clear()
+        return sorted(sequences)
+
+    @_synchronized
     def advance(self):
         """Return the next operation only after this window is consumed.
 
