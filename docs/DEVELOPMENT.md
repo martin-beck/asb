@@ -176,6 +176,8 @@ untracked or out-of-workspace effects, or support for all native tools.
 `python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` checks that
 overlapping terminal calls produce a readable sidecar without serializing
 their execution. The test does not qualify parallel replay or its ordering.
+It forces the second invocation to finish first, checks invocation-order
+framing, and demonstrates that reversed replay arrival is still rejected.
 The cassette validator already allows multiple aliases under one launch and
 tracks each alias's poll/write/output/exit lifecycle independently. This makes
 one alias per invocation a possible format for overlapping calls. The Hermes
