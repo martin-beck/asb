@@ -126,7 +126,12 @@ fi
  if not (root/'evidence/events.jsonl').exists(): raise RuntimeError('container produced no operation log')
  if (root/'evidence/events.jsonl').exists():
   events=[json.loads(x) for x in (root/'evidence/events.jsonl').read_text().splitlines()]
-  if not swe_patch: assert any(e['op']=='write' and e['path']=='/output' for e in events)
+  if not swe_patch:
+   assert any(e['op']=='write' and e['path']=='/output' for e in events)
+   source_reads = [e for e in events if e['op']=='read' and e['path']=='/source']
+   assert any((e.get('caller') or {}).get('thread_ancestry_complete')
+              and (e['caller']['ancestry'][0].get('creator_thread') or {}).get('tid')
+              for e in source_reads), 'child creator thread was not captured through FUSE'
   from collections import Counter
   print('recorded operation counts:',dict(Counter(e['op'] for e in events)))
   if hermes_install:

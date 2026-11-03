@@ -33,32 +33,103 @@ class PayloadStore:
                 self.recent.popitem(last=False)
         return offset
 
-def caller_identity(tid):
-    """Best-effort bounded ancestry at callback time; not an authority boundary."""
-    def status(pid):
-        fields = {}
-        for line in Path(f'/proc/{pid}/status').read_text().splitlines():
-            key, separator, value = line.partition(':')
-            if separator and key in ('Tgid', 'PPid'):
-                fields[key] = int(value.strip())
-        parts = Path(f'/proc/{pid}/stat').read_text().rpartition(')')[2].split()
-        return fields['Tgid'], fields['PPid'], int(parts[19])
+# Bounded positive cache: a process start tick prevents stale PID reuse from
+# inheriting a creator thread. Missing observations are never guessed.
+_creator_cache = OrderedDict()
+_creator_lock = threading.Lock()
+_CREATOR_CACHE_LIMIT = 8192
+_MAX_PARENT_THREADS = 4096
+
+
+def proc_status(pid):
+    fields = {}
+    for line in Path(f'/proc/{pid}/status').read_text().splitlines():
+        key, separator, value = line.partition(':')
+        if separator and key in ('Tgid', 'PPid'):
+            fields[key] = int(value.strip())
+    parts = Path(f'/proc/{pid}/stat').read_text().rpartition(')')[2].split()
+    return fields['Tgid'], fields['PPid'], int(parts[19])
+
+
+def creator_thread(child, parent, child_start):
+    """Find the live parent thread that created a child process, if observable."""
+    key = (child, parent, child_start)
+    with _creator_lock:
+        cached = _creator_cache.get(key)
+        if cached is not None:
+            _creator_cache.move_to_end(key)
+            return dict(cached)
     try:
-        tgid, ppid, started = status(tid)
+        threads = list(Path(f'/proc/{parent}/task').iterdir())
+        if len(threads) > _MAX_PARENT_THREADS:
+            return None
+        for task in threads:
+            if not task.name.isdigit():
+                continue
+            try:
+                before_group, _, before_start = proc_status(int(task.name))
+                if str(child) not in (task / 'children').read_text().split():
+                    continue
+                group, _, thread_start = proc_status(int(task.name))
+                actual_child, actual_parent, actual_start = proc_status(child)
+                if (before_group != parent or group != parent or before_start != thread_start
+                        or actual_child != child or actual_parent != parent
+                        or actual_start != child_start):
+                    return None
+                result = {'tid': int(task.name), 'start_ticks': thread_start}
+                with _creator_lock:
+                    _creator_cache[key] = result
+                    _creator_cache.move_to_end(key)
+                    if len(_creator_cache) > _CREATOR_CACHE_LIMIT:
+                        _creator_cache.popitem(last=False)
+                return dict(result)
+            except (OSError, KeyError, ValueError, IndexError):
+                continue
+    except OSError:
+        pass
+    return None
+
+
+def marker_origin(pid, tid):
+    """Attach generation evidence without assuming the marker's thread lives."""
+    origin = {'pid': pid, 'tid': tid, 'process_start_ticks': None, 'thread_start_ticks': None}
+    try:
+        group, _, thread_start = proc_status(tid)
+        leader, _, process_start = proc_status(pid)
+        if group == pid and leader == pid:
+            origin.update(process_start_ticks=process_start, thread_start_ticks=thread_start)
+    except (OSError, KeyError, ValueError, IndexError):
+        pass
+    return origin
+
+
+def caller_identity(tid):
+    """Best-effort bounded process and creating-thread ancestry."""
+    try:
+        tgid, ppid, started = proc_status(tid)
         ancestry = []
         current = tgid
         root = int(os.environ['ASB_PROBE_ROOT_TGID'])
+        thread_complete = True
         for _ in range(64):
-            group, parent, start = status(current)
-            ancestry.append({'tgid': group, 'start_ticks': start})
+            group, parent, start = proc_status(current)
+            entry = {'tgid': group, 'start_ticks': start}
+            if group != root and parent > 0 and parent != group:
+                creator = creator_thread(group, parent, start)
+                entry['creator_thread'] = creator
+                thread_complete &= creator is not None
+            ancestry.append(entry)
             if group == root or parent <= 0 or parent == group:
                 break
             current = parent
+        complete = bool(ancestry and ancestry[-1]['tgid'] == root)
         return {'tid': tid, 'tgid': tgid, 'ppid': ppid,
                 'start_ticks': started, 'ancestry': ancestry,
-                'ancestry_complete': bool(ancestry and ancestry[-1]['tgid'] == root)}
+                'ancestry_complete': complete,
+                'thread_ancestry_complete': complete and thread_complete}
     except (OSError, KeyError, ValueError, IndexError):
-        return {'tid': tid, 'tgid': None, 'ppid': None, 'start_ticks': None, 'ancestry': [], 'ancestry_complete': False}
+        return {'tid': tid, 'tgid': None, 'ppid': None, 'start_ticks': None,
+                'ancestry': [], 'ancestry_complete': False, 'thread_ancestry_complete': False}
 
 class Proxy(Operations):
     use_ns = True
@@ -97,7 +168,7 @@ class Proxy(Operations):
                 if match is None:
                     raise RuntimeError('invalid fixture marker')
                 marker, pid, tid = match.groups()
-                origin = {'pid':int(pid), 'tid':int(tid)} if pid is not None else None
+                origin = marker_origin(int(pid), int(tid)) if pid is not None else None
                 sequence = self.record('marker', None, marker=marker, origin=origin, is_marker=True)
                 stream.write(f'{sequence}\n'.encode('ascii'))
     def path(self, path): return backing / path.lstrip('/')

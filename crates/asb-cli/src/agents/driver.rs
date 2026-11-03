@@ -1583,6 +1583,22 @@ mod artifact_publication_tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn filesystem_capture_records_creator_thread_lineage() {
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/benchmark_fs_thread_lineage.py");
+        let output = std::process::Command::new("python3")
+            .arg(script)
+            .output()
+            .expect("python3 is required for filesystem recorder tests");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn filesystem_capture_supervisor_requires_readiness_and_settles() {
         use std::os::unix::fs::PermissionsExt;
