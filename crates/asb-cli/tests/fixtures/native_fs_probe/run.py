@@ -1,6 +1,7 @@
 """Opt-in Linux FUSE ordering experiment; this is not a replay backend."""
 import concurrent.futures
 import json
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -111,6 +112,27 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     assert child_writes and all(event['caller']['tid'] == child_pid and event['caller']['tgid'] == child_pid and event['caller']['ppid'] == os.getpid() and event['caller']['start_ticks'] is not None for event in child_writes), child_writes
     parent_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/one']
     assert parent_writes and all(event['caller']['tid'] == writer_tids['one'] and event['caller']['tgid'] == os.getpid() and event['caller']['start_ticks'] is not None for event in parent_writes), parent_writes
+    # A future caller needs effects before it returns each tool response, not
+    # one final replay of the whole filesystem history.
+    module_spec = importlib.util.spec_from_file_location('native_fs_replay', HERE / 'replay.py')
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    staged_root = root / 'staged-replay'
+    staged = module.Replay(evidence, staged_root, baseline)
+    try:
+        staged.apply_until(parent_writes[0]['sequence'])
+        assert (staged_root / 'one').read_bytes() == b'changed'
+        try:
+            staged.apply_until(0)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('replay cursor moved backwards')
+        staged.finish()
+        assert (staged_root / 'one').read_bytes() == b''
+        assert (staged_root / 'child').read_bytes() == b'child data'
+    finally:
+        staged.close()
     def replay(index):
         destination = root / f'replay-{index}'
         subprocess.run([python, str(HERE / 'replay.py'), str(evidence), str(destination), str(baseline)], check=True)
