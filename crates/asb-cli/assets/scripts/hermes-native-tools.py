@@ -34,7 +34,7 @@ def _filesystem_marker(action, alias):
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             connection.settimeout(5)
             connection.connect(path)
-            connection.sendall(f"tool-{action}:{alias}\n".encode("ascii"))
+            connection.sendall(f"tool-{action}:{alias}:{os.getpid()}:{threading.get_native_id()}\n".encode("ascii"))
             with connection.makefile("rb") as response:
                 return response.readline(32).strip().isdigit()
     except (OSError, UnicodeError):

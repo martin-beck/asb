@@ -407,6 +407,7 @@ class GuestBootstrapTests(unittest.TestCase):
             with patch("asb_guest.prepare_agent", return_value=({"filesystem_recording":True}, {})):
                 result = execute_agent(task, {}, None, None, None)
             self.assertTrue(task.interrupted)
+            self.assertTrue(task.preserve_requested)
             self.assertIn("task preserved", result["metadata"]["execution_failure"])
 
     def test_completed_filesystem_recording_does_not_request_preservation(self):

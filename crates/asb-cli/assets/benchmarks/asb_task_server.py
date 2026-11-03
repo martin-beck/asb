@@ -122,7 +122,7 @@ def serve(task, source, destination, idle_timeout=DEFAULT_IDLE_TIMEOUT):
                 request = receive()
                 operation = request.get("op")
                 if operation == Operation.CLOSE:
-                    task.interrupted = False
+                    task.interrupted = bool(getattr(task, "preserve_requested", False))
                     break
                 try:
                     try:

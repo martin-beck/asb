@@ -92,10 +92,13 @@ class Proxy(Operations):
     def control_loop(self, control):
         with control, control.makefile('rwb', buffering=0) as stream:
             for line in stream:
-                marker = line.decode('ascii').strip()
-                if not re.fullmatch(r'tool-(?:begin|end):[A-Za-z0-9_-]{1,80}', marker):
+                text = line.decode('ascii').strip()
+                match = re.fullmatch(r'(tool-(?:begin|end):[A-Za-z0-9_-]{1,80})(?::([0-9]+):([0-9]+))?', text)
+                if match is None:
                     raise RuntimeError('invalid fixture marker')
-                sequence = self.record('marker', None, marker=marker, is_marker=True)
+                marker, pid, tid = match.groups()
+                origin = {'pid':int(pid), 'tid':int(tid)} if pid is not None else None
+                sequence = self.record('marker', None, marker=marker, origin=origin, is_marker=True)
                 stream.write(f'{sequence}\n'.encode('ascii'))
     def path(self, path): return backing / path.lstrip('/')
     def register(self, fd):

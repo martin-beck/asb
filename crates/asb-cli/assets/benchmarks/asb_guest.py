@@ -560,6 +560,7 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
             # The capture can still exist inside the task container when guest
             # result publication failed. Keep that owned container for recovery.
             task.interrupted = True
+            task.preserve_requested = True
             if not result["metadata"].get("execution_failure"):
                 result["metadata"]["execution_failure"] = "filesystem recording export did not complete; task preserved"
     # The guest owns the principal execution clock; the outer transport now
