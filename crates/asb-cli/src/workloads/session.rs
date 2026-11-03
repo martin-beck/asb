@@ -100,6 +100,8 @@ impl TaskIdentity {
 }
 
 pub(crate) struct PreparationContext<'a> {
+    /// Local tool record/replay intent, available before the workload is created.
+    pub tool_mode: Option<crate::tape::Mode>,
     pub verify_initial_material: bool,
     pub budgets: crate::planning::PhaseBudgets,
     pub on_allocation: Option<&'a super::recovery::AllocationObserver<'a>>,
@@ -729,6 +731,7 @@ mod tests {
         std::fs::write(root.join("fixture.py"), "original material").unwrap();
         let project = crate::project::ProjectConfig::default();
         let context = PreparationContext {
+            tool_mode: None,
             verify_initial_material: true,
             budgets: Default::default(),
             on_allocation: None,
@@ -765,6 +768,7 @@ mod tests {
             ..Default::default()
         };
         let context = super::PreparationContext {
+            tool_mode: None,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,
@@ -883,6 +887,7 @@ mod tests {
         std::fs::create_dir_all(&workloads).unwrap();
         super::super::populate(&workloads).unwrap();
         let mut session = super::super::prepare_task(&PreparationContext {
+            tool_mode: None,
             verify_initial_material: true,
             budgets: Default::default(),
             on_allocation: None,
@@ -911,6 +916,7 @@ mod tests {
         assert_eq!(session.baseline_passed(), Some(false));
         assert_eq!(session.initial_material_sha256().unwrap(), initial_material);
         let later = super::super::prepare_task(&PreparationContext {
+            tool_mode: None,
             verify_initial_material: true,
             budgets: Default::default(),
             on_allocation: None,
@@ -940,6 +946,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            tool_mode: None,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,
@@ -979,6 +986,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            tool_mode: None,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,
@@ -1015,6 +1023,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            tool_mode: None,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,

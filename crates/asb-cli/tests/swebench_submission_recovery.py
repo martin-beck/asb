@@ -1,14 +1,17 @@
 """Offline regression for submissions after agent-owned Git metadata is removed."""
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "assets" / "benchmarks"))
 import asb_swebench_task as task_module
+import asb_swebench
 
 
 class LocalWorkspace:
@@ -22,6 +25,21 @@ class LocalWorkspace:
 
 
 class SubmissionRecoveryTests(unittest.TestCase):
+    def test_task_preserves_tool_mode(self):
+        for mode in ('none','record','replay'):
+            self.assertEqual(task_module.SweBenchTask(None,'catalog','fixture','artifacts',tool_mode=mode).tool_mode,mode)
+        with self.assertRaisesRegex(ValueError,'unsupported workload tool mode'):
+            task_module.SweBenchTask(None,'catalog','fixture','artifacts',tool_mode='unexpected')
+
+    def test_session_entrypoint_forwards_tool_mode(self):
+        for mode in ('none','record','replay'):
+            with self.subTest(mode=mode), patch.dict(os.environ,{'ASB_WORKLOAD_TOOL_MODE':mode}), \
+                 patch('asb_docker.DockerSession') as docker, patch('asb_task_server.serve') as serve, \
+                 patch('asb_swebench.signal.signal'):
+                docker.return_value.__enter__.return_value=MagicMock()
+                serve.side_effect=lambda task, *_: task.tool_mode
+                result=asb_swebench.main(['session','--catalog','catalog','--task','fixture','--artifacts','artifacts'])
+                self.assertEqual(result,mode)
     def test_preserved_baseline_captures_changes_after_git_metadata_deleted(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

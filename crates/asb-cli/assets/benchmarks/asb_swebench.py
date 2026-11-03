@@ -888,7 +888,8 @@ def main(argv=None):
             raise InterruptedError("ASB task session was cancelled")
         signal.signal(signal.SIGTERM, interrupted)
         with DockerSession() as client:
-            return serve(SweBenchTask(client, arguments.catalog, arguments.task, arguments.artifacts),
+            return serve(SweBenchTask(client, arguments.catalog, arguments.task, arguments.artifacts,
+                                      tool_mode=os.environ.get("ASB_WORKLOAD_TOOL_MODE", "none")),
                          sys.stdin, sys.stdout)
     try:
         if arguments.operation == "catalog":
