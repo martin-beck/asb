@@ -17,7 +17,10 @@ SUBMISSION_WORKTREE = "/testbed"
 
 
 class SweBenchTask:
-    def __init__(self, client, catalog_path, task_id, artifacts):
+    def __init__(self, client, catalog_path, task_id, artifacts, tool_mode="none"):
+        if tool_mode not in ("none", "record", "replay"):
+            raise ValueError("unsupported workload tool mode")
+        self.tool_mode = tool_mode
         self.client, self.catalog_path, self.task_id = client, Path(catalog_path), task_id
         self.artifacts = Path(artifacts).absolute()
         self.workspace = None
