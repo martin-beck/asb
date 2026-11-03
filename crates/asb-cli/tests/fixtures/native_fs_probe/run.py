@@ -31,6 +31,8 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     (baseline / 'one').write_bytes(b'initial')
     os.link(baseline / 'one', baseline / 'alias')
     (baseline / 'other').write_bytes(b'independent')
+    (baseline / 'two').write_bytes(b'initial')
+    os.link(baseline / 'two', baseline / 'two-alias')
     subprocess.run(['/bin/cp', '-a', str(baseline) + '/.', str(backing)], check=True)
     env = dict(os.environ, ASB_PROBE_HOLD_WRITE='1')
     with (root / 'fuse.log').open('wb') as log:
@@ -41,14 +43,14 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
             if process.poll() is not None:
                 raise RuntimeError('FUSE process exited before mounting')
             mounted = True
-            def write():
-                fd = os.open(mount / 'one', os.O_WRONLY)
+            def write(name):
+                fd = os.open(mount / name, os.O_WRONLY)
                 try:
                     os.pwrite(fd, b'changed', 0)
                 finally:
                     os.close(fd)
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-                writer = pool.submit(write)
+                writer = pool.submit(write, 'one')
                 try:
                     wait_for(lambda: (evidence / 'write-applied').exists(), 'write did not reach the test barrier')
                     truncation = pool.submit(os.truncate, mount / 'alias', 0)
@@ -61,6 +63,25 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
                 writer.result(timeout=5)
                 truncation.result(timeout=5)
             assert (backing / 'alias').read_bytes() == b''
+            (evidence / 'write-applied').unlink()
+            (evidence / 'write-release').unlink()
+            def open_truncate():
+                fd = os.open(mount / 'two-alias', os.O_WRONLY | os.O_TRUNC)
+                os.close(fd)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                writer = pool.submit(write, 'two')
+                try:
+                    wait_for(lambda: (evidence / 'write-applied').exists(), 'second write did not reach barrier')
+                    truncation = pool.submit(open_truncate)
+                    unrelated = pool.submit((mount / 'other').read_bytes)
+                    assert unrelated.result(timeout=2) == b'independent'
+                    time.sleep(.1)
+                    assert not truncation.done(), 'open with truncation passed write barrier'
+                finally:
+                    (evidence / 'write-release').touch()
+                writer.result(timeout=5)
+                truncation.result(timeout=5)
+            assert (backing / 'two').read_bytes() == b''
         finally:
             (evidence / 'write-release').touch()
             if mounted:
@@ -75,12 +96,17 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     events = [json.loads(line) for line in (evidence / 'events.jsonl').read_text().splitlines()]
     ops = [event['op'] for event in events]
     assert ops.index('write') < ops.index('truncate'), ops
+    second_write = next(i for i, event in enumerate(events) if event['op'] == 'write' and event['path'] == '/two')
+    second_truncate = next(i for i, event in enumerate(events) if event['op'] == 'truncate' and event['path'] == '/two-alias')
+    assert second_write < second_truncate, ops
     def replay(index):
         destination = root / f'replay-{index}'
         subprocess.run([python, str(HERE / 'replay.py'), str(evidence), str(destination), str(baseline)], check=True)
         assert (destination / 'one').read_bytes() == b''
         assert (destination / 'other').read_bytes() == b'independent'
+        assert (destination / 'two').read_bytes() == b''
+        assert os.stat(destination / 'two').st_ino == os.stat(destination / 'two-alias').st_ino
         assert os.stat(destination / 'one').st_ino == os.stat(destination / 'alias').st_ino
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(replay, range(4)))
-    print('FUSE ordering experiment passed: dependent truncate, unrelated read, four operation replays')
+    print('FUSE ordering experiment passed: truncate and open-truncate, unrelated reads, four operation replays')

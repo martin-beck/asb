@@ -4,8 +4,10 @@ The opt-in Linux filesystem ordering experiment at
 `crates/asb-cli/tests/fixtures/native_fs_probe/run.py` requires `/dev/fuse`,
 `fusermount3`, and an interpreter with fusepy. Set `ASB_FUSE_TEST_PYTHON` to
 that interpreter and run the script with Python. It records a forced
-write/truncate race on hard-linked files, checks that an unrelated read can
-proceed, and replays the recorded operations into four independent directories.
+write/truncate races on hard-linked files, including an `O_TRUNC` open,
+checks that an unrelated read can proceed, and replays the recorded operations
+into four independent directories. The tested FUSE stack delivered `O_TRUNC`
+as a separate truncate callback; this does not prove other kernel behavior.
 This is an experimental fixture, not an ASB replay backend: it changes timing,
 does not capture all filesystem operations, and does not replay tool execution.
 FUSE is not a requirement for ordinary development or CI.
