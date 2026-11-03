@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import tempfile
 import threading
 import time
 from types import SimpleNamespace
@@ -345,7 +346,10 @@ class ExecutionTests(unittest.TestCase):
         self.assertNotIn('cap_add',normal_creation[0])
         snapshot, _, _, snapshot_creation = self.workspace()
         snapshot.snapshot=True
-        with snapshot:pass
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot.snapshot_storage=Path(directory)
+            with snapshot:pass
+        self.assertEqual(snapshot_creation[0]['volumes'][directory]['bind'],'/asb-snapshot-storage')
         self.assertEqual(snapshot_creation[0]['cap_add'],['SYS_ADMIN'])
         self.assertEqual(snapshot_creation[0]['devices'],['/dev/loop-control:/dev/loop-control:rwm'])
         self.assertEqual(snapshot_creation[0]['device_cgroup_rules'],['b 7:* rwm'])

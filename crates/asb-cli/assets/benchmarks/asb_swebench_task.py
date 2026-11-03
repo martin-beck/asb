@@ -49,8 +49,13 @@ class SweBenchTask:
             self.source_image_tag = source.get("tag")
             if self.source_image_tag is not None:
                 atomic_write(self.artifacts / "source-image.json", encoded(source))
+            snapshot_storage = None
+            if self.snapshot:
+                snapshot_storage = self.artifacts/'snapshot-storage'
+                snapshot_storage.mkdir(mode=0o700)
             self.workspace = ManagedDockerWorkspace(self.client, image, self.attempt, CONTAINER_WORKDIR,
-                                                    journal=self.journal, snapshot=self.snapshot)
+                                                    journal=self.journal, snapshot=self.snapshot,
+                                                    snapshot_storage=snapshot_storage)
             self.workspace.__enter__()
             base = self.row["base_commit"]
             self.checked(["git", "cat-file", "-e", base + "^{commit}"])
