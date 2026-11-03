@@ -27,13 +27,28 @@ class SnapshotWorkspace:
             # The container may expose loop-control without pre-created loop
             # nodes. Allocate a free number dynamically and create its node
             # inside the guest, rather than requiring a particular host device.
-            with open('/dev/loop-control', 'rb', buffering=0) as control:
-                number = fcntl.ioctl(control.fileno(), 0x4C82)
-            node = Path('/dev') / f'loop{number}'
-            if not node.exists():
-                os.mknod(node, stat.S_IFBLK | 0o600, os.makedev(7, number))
-            subprocess.run(['losetup', str(node), str(self.image)], check=True, timeout=60)
-            self.loop = str(node)
+            # GET_FREE does not reserve the device. Another replica can take it
+            # before losetup, so retry only that collision and never detach a
+            # device unless this owner successfully attached it.
+            for attempt in range(32):
+                with open('/dev/loop-control', 'rb', buffering=0) as control:
+                    number = fcntl.ioctl(control.fileno(), 0x4C82)
+                node = Path('/dev') / f'loop{number}'
+                if not node.exists():
+                    try:
+                        os.mknod(node, stat.S_IFBLK | 0o600, os.makedev(7, number))
+                    except FileExistsError:
+                        pass
+                try:
+                    subprocess.run(['losetup', str(node), str(self.image)], check=True,
+                                   stderr=subprocess.PIPE, timeout=60,
+                                   env=dict(os.environ, LC_ALL='C'))
+                except subprocess.CalledProcessError as error:
+                    if b'busy' in (error.stderr or b'').lower() and attempt < 31:
+                        continue
+                    raise
+                self.loop = str(node)
+                break
             if not self.loop.startswith('/dev/loop') or not self.loop[9:].isdigit():
                 raise RuntimeError('snapshot loop device result is invalid')
             self.mountpoint.mkdir(parents=True, exist_ok=False)
