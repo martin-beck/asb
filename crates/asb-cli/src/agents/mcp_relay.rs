@@ -1002,8 +1002,10 @@ fn replay_messages<R: Read, W: Write>(
     mut writer: W,
     replay: &Replayer,
 ) -> Result<(), Error> {
+    let mut observation = super::tool_tracing::Trace::from_environment();
     let mut reader = BufReader::new(reader);
     let mut ids = BTreeMap::<String, serde_json::Value>::new();
+    let mut pending = BTreeMap::<String, Option<u64>>::new();
     for event in replay.transcript.events() {
         let recorded = replay.payload(&event.message)?;
         match event.direction {
@@ -1043,6 +1045,14 @@ fn replay_messages<R: Read, W: Write>(
                             ));
                         }
                         ids.insert(recorded_id.sha256.clone(), actual_id);
+                        if actual
+                            .value
+                            .get("method")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("tools/call")
+                        {
+                            pending.insert(recorded_id.sha256.clone(), observation.begin("mcp"));
+                        }
                     }
                     mcp_transcript::MessageKind::Notification => {
                         if expected != actual.value {
@@ -1070,6 +1080,14 @@ fn replay_messages<R: Read, W: Write>(
                         let mut value: serde_json::Value = serde_json::from_slice(&recorded)
                             .map_err(|_| Error::Run("MCP replay payload is not JSON".into()))?;
                         value["id"] = actual_id.clone();
+                        let failed = event.kind == mcp_transcript::MessageKind::Error
+                            || value.get("error").is_some()
+                            || value
+                                .get("result")
+                                .and_then(|result| result.get("isError"))
+                                .and_then(serde_json::Value::as_bool)
+                                == Some(true);
+                        observation.finish(pending.remove(&recorded_id.sha256).flatten(), failed);
                         serde_json::to_vec(&value)
                             .map_err(|_| Error::Run("cannot encode MCP replay response".into()))?
                     }
@@ -1184,9 +1202,11 @@ fn forward_messages<ClientWrite: Write, ServerWrite: Write>(
     receive: &Receiver<Incoming>,
     recorder: &mut Recorder,
 ) -> Result<(), Error> {
+    let mut observation = super::tool_tracing::Trace::from_environment();
     let mut client_closed = false;
     let mut server_closed = false;
     let mut server_write = Some(server_write);
+    let mut pending = BTreeMap::<String, Option<u64>>::new();
     let started = Instant::now();
     while !client_closed || !server_closed {
         match receive
@@ -1194,6 +1214,28 @@ fn forward_messages<ClientWrite: Write, ServerWrite: Write>(
             .map_err(|_| Error::Run("MCP relay stream unexpectedly closed".into()))?
         {
             Incoming::Message { direction, message } => {
+                if let Some(id) = message.value.get("id") {
+                    let key = serde_json::to_string(id)
+                        .map_err(|_| Error::Run("MCP relay ID is invalid".into()))?;
+                    if direction == mcp_transcript::Direction::ClientToServer
+                        && message
+                            .value
+                            .get("method")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("tools/call")
+                    {
+                        pending.insert(key, observation.begin("mcp"));
+                    } else if direction == mcp_transcript::Direction::ServerToClient {
+                        let failed = message.value.get("error").is_some()
+                            || message
+                                .value
+                                .get("result")
+                                .and_then(|result| result.get("isError"))
+                                .and_then(serde_json::Value::as_bool)
+                                == Some(true);
+                        observation.finish(pending.remove(&key).flatten(), failed);
+                    }
+                }
                 let output: &mut dyn Write = match direction {
                     mcp_transcript::Direction::ClientToServer => server_write
                         .as_mut()

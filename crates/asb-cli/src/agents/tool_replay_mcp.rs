@@ -507,6 +507,7 @@ fn run_with_source(
     source: &mut impl MessageSource,
     output: &mut impl Write,
 ) -> Result<(), Error> {
+    let mut observation = super::tool_tracing::Trace::from_environment();
     let _lease = options
         .per_call_state
         .as_deref()
@@ -581,9 +582,13 @@ fn run_with_source(
                 pending.push((request, request_trace));
                 continue;
             };
+            let tool_call =
+                request.value.get("method").and_then(Value::as_str) == Some("tools/call");
+            let tool_observation = tool_call.then(|| observation.begin("mcp")).flatten();
             let response = match respond(&options, &mut transcript, &request.value) {
                 Ok(response) => response,
                 Err(error) => {
+                    observation.finish(tool_observation, true);
                     if let (Some(trace), Some(sequence)) = (metadata_trace.as_mut(), request_trace)
                     {
                         trace.response(sequence, "error", None)?;
@@ -609,6 +614,15 @@ fn run_with_source(
                 if let (Some(trace), Some(sequence)) = (metadata_trace.as_mut(), request_trace) {
                     trace.response(sequence, "result", Some(&response))?;
                 }
+                observation.finish(
+                    tool_observation,
+                    response.get("error").is_some()
+                        || response
+                            .get("result")
+                            .and_then(|result| result.get("isError"))
+                            .and_then(Value::as_bool)
+                            == Some(true),
+                );
             } else if let (Some(trace), Some(sequence)) = (metadata_trace.as_mut(), request_trace) {
                 trace.response(sequence, "notification", None)?;
             }

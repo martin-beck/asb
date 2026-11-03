@@ -1,5 +1,6 @@
 //! Native command preparation is complete before process gating or launch.
 use super::*;
+use std::os::fd::AsRawFd;
 
 pub(super) struct NativeRoute<'a> {
     pub connection: Option<&'a crate::endpoint::Connection>,
@@ -39,12 +40,14 @@ pub(super) struct PreparedNative {
     /// The gate turns the descriptor close-on-exec before starting the client.
     #[cfg(unix)]
     gate_trace: Option<std::fs::File>,
+    /// Retained until the agent has inherited the private relay descriptor.
+    _tool_observer: Option<std::fs::File>,
 }
 
 impl NativePlan<'_> {
     pub fn prepare(
         self,
-        measurements: Option<&mut measurements::Session>,
+        mut measurements: Option<&mut measurements::Session>,
     ) -> Result<PreparedNative, Error> {
         let Self {
             config_path,
@@ -202,6 +205,22 @@ impl NativePlan<'_> {
             format: agents::ArtifactFormat::JsonLines,
         });
         let artifact_owner = agents::ArtifactOwner::prepare(&run_dir, &artifact_specs)?;
+        let tool_observation = measurements
+            .as_deref_mut()
+            .map(measurements::Session::perfetto_tool_observer_context)
+            .transpose()
+            .map_err(Error::Run)?
+            .flatten();
+        let mut tool_observer = None;
+        if let Some((file, trace_id, report)) = tool_observation {
+            command.env(
+                "ASB_TOOL_PERFETTO_OBSERVER_FD",
+                file.as_raw_fd().to_string(),
+            );
+            command.env("ASB_TOOL_PERFETTO_TRACE_ID", &trace_id);
+            command.env("ASB_TOOL_PERFETTO_REPORT", &report);
+            tool_observer = Some(file);
+        }
         instrument_phase(measurements, LifecyclePhase::AgentPreparation, || {
             if fresh_state {
                 agents::driver::prepare_fresh_state(&mut command, &run_dir.join("state"))?;
@@ -261,6 +280,7 @@ impl NativePlan<'_> {
             stdin_prompt,
             #[cfg(unix)]
             gate_trace,
+            _tool_observer: tool_observer,
         })
     }
 }
