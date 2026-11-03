@@ -191,6 +191,7 @@ impl Plan {
         let bundled = self.replay_selection.is_some();
         let mut identities = BTreeSet::new();
         let mut total_bytes = 0u64;
+        let mut bounded_bytes = 0u64;
         for (index, input) in self.replay_inputs.iter().enumerate() {
             let expected = if selected {
                 let id = input
@@ -222,11 +223,15 @@ impl Plan {
             {
                 return Err(invalid("input path, size, digest or completeness differs"));
             }
-            total_bytes = total_bytes
+            bounded_bytes = bounded_bytes
                 .checked_add(input.bytes)
                 .filter(|bytes| {
                     *bytes <= crate::cassette::ProofLimits::default().max_selected_bytes
                 })
+                .ok_or_else(|| invalid("selected inputs exceed aggregate byte budget"))?;
+            total_bytes = total_bytes
+                .checked_add(input.bytes)
+                .filter(|bytes| *bytes <= crate::cassette::Limits::default().max_total_bytes)
                 .ok_or_else(|| invalid("selected inputs exceed aggregate byte budget"))?;
             let mut auxiliary_kinds = BTreeSet::new();
             for auxiliary in &input.auxiliary_recordings {
@@ -234,6 +239,13 @@ impl Plan {
                     .track
                     .filter(|_| bundled)
                     .ok_or_else(|| invalid("auxiliary input requires a selected bundle track"))?;
+                let filesystem =
+                    matches!(auxiliary.kind.as_str(), "aux-fs-events" | "aux-fs-payload");
+                let max_auxiliary = if filesystem {
+                    crate::cassette::Limits::default().max_artifact_bytes
+                } else {
+                    crate::cassette::Limits::default().max_track_bytes
+                };
                 if !super::auxiliary_recording_kind(&auxiliary.kind)
                     || auxiliary.kind == "aux-http-"
                     || auxiliary.kind == "aux-meta-"
@@ -247,7 +259,7 @@ impl Plan {
                         &PathBuf::from(format!("inputs/{}-{id}.jsonl", auxiliary.kind)),
                     )
                     || !crate::cassette::valid_digest(&auxiliary.sha256)
-                    || auxiliary.bytes > crate::cassette::Limits::default().max_track_bytes
+                    || auxiliary.bytes > max_auxiliary
                 {
                     return Err(invalid(
                         "auxiliary input identity, path, size or digest differs",
@@ -257,6 +269,14 @@ impl Plan {
                     .checked_add(auxiliary.bytes)
                     .filter(|bytes| *bytes <= crate::cassette::Limits::default().max_total_bytes)
                     .ok_or_else(|| invalid("selected inputs exceed aggregate byte budget"))?;
+                if !filesystem {
+                    bounded_bytes = bounded_bytes
+                        .checked_add(auxiliary.bytes)
+                        .filter(|bytes| {
+                            *bytes <= crate::cassette::ProofLimits::default().max_selected_bytes
+                        })
+                        .ok_or_else(|| invalid("selected inputs exceed aggregate byte budget"))?;
+                }
             }
         }
         if bundled
