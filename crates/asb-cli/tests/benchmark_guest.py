@@ -366,6 +366,20 @@ class GuestBootstrapTests(unittest.TestCase):
             self.assertTrue(task.interrupted)
             self.assertIn("task preserved", result["metadata"]["execution_failure"])
 
+    def test_completed_filesystem_recording_does_not_request_preservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = {"schema_version":1, "exit_code":0, "tree_quiesced":True,
+                        "exported_artifacts":[{"kind":"aux-fs-events"},{"kind":"aux-fs-payload"}]}
+            task = SimpleNamespace(artifacts=Path(directory), agent_timeout=15, interrupted=False,
+                checked=lambda *_args, **_kwargs:json.dumps(metadata).encode(),
+                workspace=SimpleNamespace(container=Container(),
+                    execute=lambda *_args, **_kwargs:{"stdout":b"", "stderr":b"", "exit_code":0}))
+            with patch("asb_guest.prepare_agent", return_value=({"filesystem_recording":True}, {})), \
+                    patch("asb_guest.export_agent_artifacts") as export:
+                execute_agent(task, {}, None, None, None)
+            self.assertFalse(task.interrupted)
+            export.assert_called_once()
+
     def test_local_forwarding_precedes_install_and_is_closed_on_install_failure_or_success(self):
         for failure in (False, True):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
