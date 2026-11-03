@@ -494,7 +494,7 @@ mod tests {
                 .stderr(Stdio::null())
                 .spawn()
                 .unwrap();
-            let helper = Command::new("/bin/sleep")
+            let mut helper = Command::new("/bin/sleep")
                 .arg("30")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -518,6 +518,7 @@ mod tests {
             .unwrap();
             assert!(result.output.status.success());
             assert!(!std::path::Path::new(&format!("/proc/{helper_pid}")).exists());
+            let _ = helper.wait(); // The guest cleanup has already reaped this child.
             assert!(supervisor.try_wait().unwrap().is_none());
             supervisor.kill().unwrap();
             supervisor.wait().unwrap();

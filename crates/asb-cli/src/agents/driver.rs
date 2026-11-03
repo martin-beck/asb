@@ -823,10 +823,12 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             stdin_prompt.as_deref(),
             &mut std::io::stdout(),
             &mut std::io::stderr(),
-            std::time::Duration::from_secs_f64(request.timeout_seconds),
-            filesystem_capture
-                .as_ref()
-                .and_then(|capture| capture.child.as_ref()),
+            crate::runner::workload_process::Supervision {
+                runtime: std::time::Duration::from_secs_f64(request.timeout_seconds),
+                preserved_child: filesystem_capture
+                    .as_ref()
+                    .and_then(|capture| capture.child.as_ref()),
+            },
             |pid| {
                 if let Some(session) = capture.as_mut() {
                     session.agent_process_spawned(pid).map_err(Error::Run)?;
