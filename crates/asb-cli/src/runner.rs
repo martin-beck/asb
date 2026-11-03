@@ -291,12 +291,10 @@ pub(crate) fn run_with_diagnostics(
     }
     if options.native_capsule_replay.is_some()
         && (options.mode != Some(tape::Mode::Replay)
-            || config.concurrency != 1
             || options.repeat.is_some_and(|repeat| repeat != 1))
     {
         return Err(Error::Input(
-            "--native-capsule-replay requires --llm-replay, concurrency = 1, and at most --repeat 1"
-                .into(),
+            "--native-capsule-replay requires --llm-replay and at most --repeat 1".into(),
         ));
     }
     let disk_policy = crate::planning::resolve(&config)?;
@@ -2636,7 +2634,7 @@ mod tests {
     }
 
     #[test]
-    fn native_capsule_replay_rejects_repeat_or_concurrency_before_execution() {
+    fn native_capsule_replay_rejects_repeat_before_execution() {
         let root = std::env::temp_dir().join(format!(
             "asb-native-capsule-replay-preflight-{}",
             crate::workloads::TaskIdentity::local("capsule-replay-preflight", None).attempt_id
@@ -2660,6 +2658,7 @@ mod tests {
             super::RunOptions {
                 mode: Some(crate::tape::Mode::Replay),
                 native_capsule_replay: Some(capsule.to_str().unwrap()),
+                repeat: Some(2),
                 ..Default::default()
             },
             &mut Vec::new(),
