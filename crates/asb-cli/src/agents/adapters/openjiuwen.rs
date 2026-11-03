@@ -100,6 +100,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_estimated_disk_mib(768)
+.with_auxiliary_endpoints(configure_auxiliary_endpoints)
 .with_replay_credential_vars(&["OPENJIUWEN_API_KEY"])
 .with_output_usage(output_usage)
 .with_step_count(step_count)
@@ -317,6 +318,10 @@ fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> 
 
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     let connection = context.connection;
+    // Only an attempt-owned auxiliary session may supply this private route.
+    context
+        .command
+        .env_remove("ASB_OPENJIUWEN_EMBEDDING_TAPE_ORIGIN");
     if connection.authentication == crate::endpoint::Authentication::Bearer {
         context.command.env("ASB_OPENJIUWEN_BEARER_AUTH", "1");
         context.command.env_remove("ANTHROPIC_API_KEY");
@@ -339,6 +344,19 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+fn configure_auxiliary_endpoints(
+    command: &mut std::process::Command,
+    endpoints: &std::collections::BTreeMap<String, String>,
+) -> Result<(), Error> {
+    for (name, endpoint) in endpoints {
+        if name != "embedding" {
+            return Err(Error::Input("unknown OpenJiuwen auxiliary endpoint".into()));
+        }
+        command.env("ASB_OPENJIUWEN_EMBEDDING_TAPE_ORIGIN", endpoint);
+    }
+    Ok(())
+}
+
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
     AgentArtifacts {
         native_tool_sidecar: context
@@ -352,6 +370,32 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auxiliary_embedding_endpoint_is_owned_by_the_adapter() {
+        let agent = crate::agents::find("openjiuwen").unwrap();
+        let mut command = std::process::Command::new("fixture");
+        let endpoints = [("embedding".into(), "http://127.0.0.1:1234".into())].into();
+        agent
+            .configure_auxiliary_endpoints(&mut command, &endpoints)
+            .unwrap();
+        assert!(command.get_envs().any(|(name, value)| {
+            name == "ASB_OPENJIUWEN_EMBEDDING_TAPE_ORIGIN"
+                && value == Some(std::ffi::OsStr::new("http://127.0.0.1:1234"))
+        }));
+        let unknown = [("other".into(), "http://127.0.0.1:1".into())].into();
+        assert!(
+            agent
+                .configure_auxiliary_endpoints(&mut command, &unknown)
+                .is_err()
+        );
+        assert!(
+            crate::agents::find("pi")
+                .unwrap()
+                .configure_auxiliary_endpoints(&mut command, &endpoints)
+                .is_err()
+        );
+    }
+
     #[test]
     fn embedding_tape_routes_only_http_dispatch_and_keeps_provider_identity() {
         let fixture = r#"

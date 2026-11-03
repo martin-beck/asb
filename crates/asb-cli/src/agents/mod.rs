@@ -135,6 +135,20 @@ pub(crate) trait AgentAdapter: Sync {
         false
     }
     fn prepare(&self, context: &mut PreparationContext<'_>) -> Result<(), Error>;
+    /// Apply adapter-owned auxiliary endpoints supplied by the attempt owner.
+    fn configure_auxiliary_endpoints(
+        &self,
+        _command: &mut Command,
+        endpoints: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), Error> {
+        if endpoints.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Input(
+                "agent does not support auxiliary endpoints".into(),
+            ))
+        }
+    }
     fn supports_native_tool_transport(&self) -> bool {
         false
     }
@@ -499,6 +513,8 @@ pub(super) fn final_result_counter(stdout: &str, field: &str) -> Option<u64> {
 
 type CommandBuilder = for<'a> fn(&CommandContext<'a>) -> CommandSpec;
 type PreparationHook = for<'a> fn(&mut PreparationContext<'a>) -> Result<(), Error>;
+type AuxiliaryEndpointsHook =
+    fn(&mut Command, &std::collections::BTreeMap<String, String>) -> Result<(), Error>;
 type ToolReplayHook = for<'a> fn(&mut PreparationContext<'a>, TapeContext<'a>) -> Result<(), Error>;
 type CollectionHook = for<'a> fn(&CollectionContext<'a>) -> AgentArtifacts;
 /// An adapter-selected extension which may attach its own bounded replay
@@ -530,6 +546,7 @@ pub(super) struct StaticAdapter {
     supported_endpoints: &'static [Support],
     command: CommandBuilder,
     prepare: PreparationHook,
+    auxiliary_endpoints: Option<AuxiliaryEndpointsHook>,
     tool_replay: Option<ToolReplayHook>,
     complete_tool_replay: bool,
     mcp_servers: bool,
@@ -560,6 +577,10 @@ pub(super) struct StaticAdapter {
     execution_identity: ExecutionIdentity,
 }
 impl StaticAdapter {
+    pub(super) const fn with_auxiliary_endpoints(mut self, hook: AuxiliaryEndpointsHook) -> Self {
+        self.auxiliary_endpoints = Some(hook);
+        self
+    }
     pub(super) const fn with_estimated_disk_mib(mut self, mib: u64) -> Self {
         self.estimated_disk_mib = mib;
         self
@@ -580,6 +601,7 @@ impl StaticAdapter {
             supported_endpoints,
             command,
             prepare,
+            auxiliary_endpoints: None,
             tool_replay: None,
             complete_tool_replay: false,
             mcp_servers: false,
@@ -855,6 +877,19 @@ impl AgentAdapter for StaticAdapter {
             determinism::prepare(self.id, context)?;
         }
         (self.prepare)(context)
+    }
+    fn configure_auxiliary_endpoints(
+        &self,
+        command: &mut Command,
+        endpoints: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), Error> {
+        match self.auxiliary_endpoints {
+            Some(hook) => hook(command, endpoints),
+            None if endpoints.is_empty() => Ok(()),
+            None => Err(Error::Input(
+                "agent does not support auxiliary endpoints".into(),
+            )),
+        }
     }
     fn process(&self, executable: &str) -> Result<crate::launch::ProcessLaunch, Error> {
         self.process.map_or_else(

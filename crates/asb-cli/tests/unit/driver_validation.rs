@@ -29,6 +29,7 @@ impl Fixture {
             inherit_working_directory: false,
             process_lifetime: Default::default(),
             workload_owner: None,
+            auxiliary_endpoints: Default::default(),
             config: BenchmarkConfig {
                 workspace: self.0.join("workspace").display().to_string(),
                 ..config

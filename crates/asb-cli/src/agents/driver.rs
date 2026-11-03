@@ -85,6 +85,9 @@ pub(crate) struct GuestRequest {
     pub workload_owner: Option<WorkloadOwner>,
     pub config: BenchmarkConfig,
     pub connection: Connection,
+    /// Attempt-owned auxiliary endpoints after guest relay translation.
+    #[serde(default)]
+    pub auxiliary_endpoints: std::collections::BTreeMap<String, String>,
     pub prompt: String,
     #[serde(default)]
     pub max_steps: Option<u64>,
@@ -681,6 +684,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
                 cassette,
             }),
     })?;
+    adapter.configure_auxiliary_endpoints(&mut command, &request.auxiliary_endpoints)?;
     configure_execution_identity(
         &mut command,
         adapter.execution_identity(),
