@@ -37,6 +37,19 @@ class Task:
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_close_keeps_an_explicit_preservation_request(self):
+        class PreservingTask(Task):
+            def __init__(self):
+                super().__init__()
+                self.preserve_requested = True
+                self.interrupted = True
+            def __exit__(self, *_args):
+                self.workspace.cleanup_status = 'stopped-preserved' if self.interrupted else 'removed'
+        status, events, task = self.run_protocol([{"op":"close"}], PreservingTask())
+        self.assertEqual(status, 0)
+        self.assertTrue(task.interrupted)
+        self.assertEqual(events[-1]["cleanup"], "stopped-preserved")
+
     def test_protocol_deadline_counts_actual_monotonic_delay_not_requested_poll_intervals(self):
         clock = SimpleNamespace(now=0.0, monotonic=lambda: clock.now)
         class DelayedQueue:
