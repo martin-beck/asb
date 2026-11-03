@@ -14,6 +14,11 @@ fn snapshot_boundary_service_preserves_marker_and_lifecycle_order() {
 }
 
 #[test]
+fn snapshot_workspace_failure_paths_release_owned_resources() {
+    python_protocol("benchmark_snapshot_workspace.py");
+}
+
+#[test]
 fn snapshot_hardlink_splits_preserve_existing_inode_handles() {
     python_protocol("fixtures/fs_snapshot/test_topology.py");
 }
