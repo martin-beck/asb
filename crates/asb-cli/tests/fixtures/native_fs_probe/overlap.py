@@ -137,4 +137,31 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
             raise AssertionError('accepted truncated packed payload')
     finally:
         truncated.close()
+    short = root / 'short'
+    short.mkdir()
+    (short / 'events.jsonl').write_text(json.dumps(
+        {'sequence': 1, 'op': 'marker', 'path': None, 'marker': 'tool-begin:a'}) + '\n')
+    cursor = module.Replay(short, root / 'short-replay')
+    try:
+        assert cursor.apply_until(1)
+        try:
+            cursor.apply_until(2)
+        except RuntimeError as error:
+            assert 'ended before requested boundary' in str(error)
+        else:
+            raise AssertionError('accepted a missing requested boundary')
+    finally:
+        cursor.close()
+    (short / 'events.jsonl').write_text(json.dumps(
+        {'sequence': 1, 'op': 'marker', 'path': None, 'marker': 'tool-begin:a'}))
+    cursor = module.Replay(short, root / 'partial-replay')
+    try:
+        try:
+            cursor.finish()
+        except RuntimeError as error:
+            assert 'truncated final event' in str(error)
+        else:
+            raise AssertionError('accepted an unterminated final event')
+    finally:
+        cursor.close()
     print('Four concurrent replay coordinators matched overlapping and repeated tool invocations')
