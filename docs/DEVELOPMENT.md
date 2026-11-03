@@ -101,6 +101,15 @@ option. Its local provider verifies that terminal, read, write and patch tools
 are offered; the scripted task actually invokes only terminal. One recording
 and four tape-backed replays pass, but the other advertised tools, arbitrary
 agent behavior and effects outside the mounted workspace are not qualified.
+Set `ASB_HERMES_NATIVE_FILES_FIXTURE=1` as well to drive real `write_file`,
+`read_file`, and `patch` calls from the mock provider. A test-only adapter
+wrapper records their request/results, places operation boundaries and returns
+the recorded results without executing the tools on replay. Four isolated
+replays check each intermediate file state, complete tool-transcript and LLM
+tape consumption. This wrapper is not production code and does not cover the
+other native tools or a complete SWE-bench task. During this test the proxy
+preserves the caller UID and GID on new files and directories when it runs as
+root; other ownership and metadata semantics remain unqualified.
 
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the

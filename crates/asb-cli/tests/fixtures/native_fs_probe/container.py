@@ -8,6 +8,7 @@ fuse_library=Path(os.environ['ASB_CONTAINER_FUSE_LIBRARY']).resolve()
 image=os.environ['ASB_FUSE_TEST_IMAGE']
 agent_fixture=os.environ.get('ASB_HERMES_AGENT_FIXTURE')=='1'
 unrestricted=os.environ.get('ASB_HERMES_UNRESTRICTED_FIXTURE')=='1'
+native_files=os.environ.get('ASB_HERMES_NATIVE_FILES_FIXTURE')=='1'
 node=Path(os.environ['ASB_FIXTURE_NODE']).resolve() if agent_fixture else None
 with tempfile.TemporaryDirectory(dir=base) as tmp, tempfile.TemporaryDirectory(dir=base.parents[2],prefix='asb-s-') as sockets:
  root=Path(tmp)
@@ -53,7 +54,11 @@ fi
   position=cmd.index('--env')
   cmd[position:position]=['--mount', f'type=bind,src={Path(fuse_unmount).resolve()},dst=/usr/bin/fusermount3,readonly']
  hermes_install=os.environ.get('ASB_HERMES_TEST_INSTALL')
+ if native_files and not unrestricted: raise RuntimeError('file-tool fixture requires unrestricted fixture')
  if unrestricted and not agent_fixture: raise RuntimeError('unrestricted fixture requires agent fixture')
+ if native_files:
+  position=cmd.index('--env')
+  cmd[position:position]=['--env','ASB_FIXTURE_NATIVE_FILES=1','--env','ASB_FIXTURE_NATIVE_FILE_TRANSCRIPT=/work/control/files.jsonl']
  if unrestricted:
   position=cmd.index('--env')
   cmd[position:position]=['--env','ASB_FIXTURE_UNRESTRICTED=1']
@@ -94,18 +99,25 @@ fi
  if (root/'evidence/events.jsonl').exists():
   events=[json.loads(x) for x in (root/'evidence/events.jsonl').read_text().splitlines()]
   assert any(e['op']=='write' and e['path']=='/output' for e in events)
+  print('recorded operations:',[(e['op'],e['path']) for e in events])
   if hermes_install:
    expected_files=('asb-real-agent.txt',) if agent_fixture else ('first','second')
-   assert all(any(e['op']=='write' and e['path']=='/'+name for e in events) for name in expected_files)
+   if native_files:
+    assert (root/'backing/asb-real-agent.txt').read_text()=='fixture'
+    assert (root/'backing/asb-real-agent.txt').stat().st_uid==os.getuid()
+    assert (root/'backing/asb-real-agent.txt').stat().st_gid==os.getgid()
+    assert any(e['op']=='rename' and e['destination']=='/asb-real-agent.txt' for e in events)
+   else:
+    assert all(any(e['op']=='write' and e['path']=='/'+name for e in events) for name in expected_files)
    native=[json.loads(line) for line in (root/'control/native.jsonl').read_text().splitlines()]
    if unrestricted:
     tool_names=json.loads((root/'mock-record/tool-names.json').read_text())
     assert {'terminal','read_file','write_file','patch'} <= set(tool_names), tool_names
-   expected_calls=1 if agent_fixture else 2
+   expected_calls=0 if native_files else (1 if agent_fixture else 2)
+   if native_files: assert len((root/'control/files.jsonl').read_text().splitlines())==3
    assert sum(event['event']=='write' for event in native)==expected_calls
    assert sum(event['event']=='output' for event in native)==expected_calls
    assert json.loads((root/'control/record-progress.json').read_text())['complete']
-  print('recorded operations:',[(e['op'],e['path']) for e in events])
   def replay(index):
    destination=root/f'replay-{index}'
    if not hermes_install:
@@ -127,11 +139,14 @@ fi
     try:
      connection,_=listener.accept()
      with connection, connection.makefile('rwb',buffering=0) as stream:
-      for name in (('one',) if agent_fixture else ('one','two')):
+      names=('write','read','patch') if native_files else (('one',) if agent_fixture else ('one','two'))
+      for name in names:
        assert stream.readline().decode().strip()=='tool-end:'+name
        cursor.admit(name)
        assert cursor.apply_until(ends['tool-end:'+name])
-       if agent_fixture:
+       if native_files:
+        assert (destination/'asb-real-agent.txt').read_text()==('fixture' if name=='patch' else 'before')
+       elif agent_fixture:
         assert (destination/'asb-real-agent.txt').read_text()=='fixture'
        else:
         assert (destination/'first').read_text()=='first'
@@ -162,6 +177,11 @@ fi
                '--entrypoint','/asb-hermes/venv/bin/python',image,'/probe/hermes_real_terminal.py']
    if not agent_fixture:
     replay_cmd[2:2]=['--user',f'{os.getuid()}:{os.getgid()}']
+   if native_files:
+    position=replay_cmd.index('--env')
+    replay_cmd[position:position]=['--env','ASB_FIXTURE_NATIVE_FILES=1',
+                                  '--env','ASB_FIXTURE_NATIVE_FILE_TRANSCRIPT=/work/control/files.jsonl',
+                                  '--env',f'ASB_FIXTURE_NATIVE_FILES_PROGRESS=/work/control/files-progress-{index}']
    if unrestricted:
     position=replay_cmd.index('--env')
     replay_cmd[position:position]=['--env','ASB_FIXTURE_UNRESTRICTED=1']
@@ -182,6 +202,8 @@ fi
     cursor.finish()
     progress=json.loads((root/f'control/replay-{index}.json').read_text())
     assert progress['complete'] and progress['invocations']==expected_calls
+    if native_files:
+     assert (root/f'control/files-progress-{index}').read_text()=='3'
     if agent_fixture:
      tape_progress=json.loads((root/f'control/llm-replay-{index}.jsonl.progress.json').read_text())
      assert tape_progress['consumed']==tape_progress['total'] and tape_progress['total']>0

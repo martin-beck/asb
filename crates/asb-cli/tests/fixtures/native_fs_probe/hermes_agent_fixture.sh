@@ -32,8 +32,10 @@ if [ "${ASB_FIXTURE_UNRESTRICTED:-0}" != 1 ]; then set -- "$@" --toolsets termin
 timeout 1800 /asb-hermes/venv/bin/python -c 'import sys; from hermes_cli.main import main; sys.exit(main())' \
   "$@" --usage-file "$ASB_FIXTURE_MOCK_DIR/usage.json" > "$ASB_FIXTURE_MOCK_DIR/agent.log" 2>&1
 test "$(cat asb-real-agent.txt)" = fixture
-if [ "$ASB_HERMES_NATIVE_MODE" = record ]; then
-  test -f /tmp/asb-native-agent-executed
-else
-  test ! -e /tmp/asb-native-agent-executed
+if [ "${ASB_FIXTURE_NATIVE_FILES:-0}" != 1 ]; then
+  if [ "$ASB_HERMES_NATIVE_MODE" = record ]; then
+    test -f /tmp/asb-native-agent-executed
+  else
+    test ! -e /tmp/asb-native-agent-executed
+  fi
 fi

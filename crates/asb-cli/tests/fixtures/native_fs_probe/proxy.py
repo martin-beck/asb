@@ -59,7 +59,7 @@ class Proxy(Operations):
         with self.control.makefile('rwb', buffering=0) as stream:
             for line in stream:
                 marker = line.decode('ascii').strip()
-                if marker not in ('tool-begin:child', 'tool-end:child', 'tool-begin:hermes', 'tool-end:hermes', 'tool-begin:a', 'tool-end:a', 'tool-begin:b', 'tool-end:b', 'tool-begin:bg', 'tool-end:bg', 'tool-begin:after', 'tool-end:after', 'tool-begin:orphan', 'tool-end:orphan', 'tool-begin:one', 'tool-end:one', 'tool-begin:two', 'tool-end:two'):
+                if marker not in ('tool-begin:child', 'tool-end:child', 'tool-begin:hermes', 'tool-end:hermes', 'tool-begin:a', 'tool-end:a', 'tool-begin:b', 'tool-end:b', 'tool-begin:bg', 'tool-end:bg', 'tool-begin:after', 'tool-end:after', 'tool-begin:orphan', 'tool-end:orphan', 'tool-begin:one', 'tool-end:one', 'tool-begin:two', 'tool-end:two', 'tool-begin:write', 'tool-end:write', 'tool-begin:read', 'tool-end:read', 'tool-begin:patch', 'tool-end:patch'):
                     raise RuntimeError('invalid fixture marker')
                 sequence = self.record('marker', None, marker=marker, is_marker=True)
                 stream.write(f'{sequence}\n'.encode('ascii'))
@@ -100,6 +100,13 @@ class Proxy(Operations):
     def create(self, path, mode, fi=None):
         try:
             fd = os.open(self.path(path), fi.flags | os.O_CREAT, mode)
+            if os.geteuid() == 0:
+                uid, gid, _ = fuse_get_context()
+                try:
+                    os.fchown(fd, uid, gid)
+                except OSError:
+                    os.close(fd)
+                    raise
             handle = self.register(fd)
             self.record('create', path, mode=mode, flags=fi.flags, handle=handle)
             fi.fh = fd
@@ -139,7 +146,12 @@ class Proxy(Operations):
         os.symlink(source, self.path(target)); self.record('symlink', target, destination=source)
     def readlink(self, path): return os.readlink(self.path(path))
     def unlink(self, path): os.unlink(self.path(path)); self.record('unlink', path)
-    def mkdir(self, path, mode): os.mkdir(self.path(path), mode); self.record('mkdir', path, mode=mode)
+    def mkdir(self, path, mode):
+        os.mkdir(self.path(path), mode)
+        if os.geteuid() == 0:
+            uid, gid, _ = fuse_get_context()
+            os.chown(self.path(path), uid, gid)
+        self.record('mkdir', path, mode=mode)
     def rmdir(self, path): os.rmdir(self.path(path)); self.record('rmdir', path)
     def flush(self, path, fh): os.fsync(fh.fh)
     def fsync(self, path, datasync, fh): os.fsync(fh.fh)
