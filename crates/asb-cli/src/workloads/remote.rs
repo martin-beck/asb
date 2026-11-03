@@ -272,11 +272,17 @@ fn replay_private_inputs(
     // sidecars it actually published, so a provider-tape-only adapter remains
     // replayable without pretending it supports local-tool, deterministic, or
     // native execution replay.
-    let mut stage = |source: PathBuf, description: &str| -> Result<(), String> {
+    let mut stage = |source: PathBuf,
+                     description: &str,
+                     limit: u64,
+                     target_override: Option<&str>|
+     -> Result<(), String> {
         let metadata = std::fs::symlink_metadata(&source)
             .map_err(|_| format!("{description} is unavailable"))?;
-        if !metadata.file_type().is_file() || metadata.len() > MAX_PRIVATE_REPLAY_INPUT {
-            return Err(format!("{description} is invalid or exceeds 64 MiB"));
+        if !metadata.file_type().is_file() || metadata.len() > limit {
+            return Err(format!(
+                "{description} is invalid or exceeds its size limit"
+            ));
         }
         let mut file =
             std::fs::File::open(&source).map_err(|_| format!("{description} is unavailable"))?;
@@ -299,11 +305,13 @@ fn replay_private_inputs(
         if length != metadata.len() {
             return Err(format!("{description} changed while preparing guest input"));
         }
-        let target = source
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| format!("{description} has no filename"))?
-            .to_owned();
+        let target = target_override.map(str::to_owned).unwrap_or(
+            source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| format!("{description} has no filename"))?
+                .to_owned(),
+        );
         inputs.push(PrivateInput {
             source,
             target,
@@ -318,7 +326,7 @@ fn replay_private_inputs(
         (manifest, "sealed deterministic replay manifest"),
     ] {
         match std::fs::symlink_metadata(&source) {
-            Ok(_) => stage(source, description)?,
+            Ok(_) => stage(source, description, MAX_PRIVATE_REPLAY_INPUT, None)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(format!("{description} is unavailable")),
         }
@@ -329,7 +337,12 @@ fn replay_private_inputs(
                 .map_err(|_| "sealed native replay trace is unavailable".to_owned())?;
             crate::agents::native_trace::canonicalize(&bytes)
                 .map_err(|_| "sealed native replay trace is malformed".to_owned())?;
-            stage(native_trace, "sealed native replay trace")?;
+            stage(
+                native_trace,
+                "sealed native replay trace",
+                MAX_PRIVATE_REPLAY_INPUT,
+                None,
+            )?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err("sealed native replay trace is unavailable".into()),
@@ -338,8 +351,24 @@ fn replay_private_inputs(
         for server in mcp_servers {
             let source = crate::agents::mcp_relay::replay_bundle_path(path, &server.id)
                 .map_err(|error| error.to_string())?;
-            stage(source, "sealed MCP relay sidecar")?;
+            stage(
+                source,
+                "sealed MCP relay sidecar",
+                MAX_PRIVATE_REPLAY_INPUT,
+                None,
+            )?;
         }
+    }
+    let snapshots = replay_sidecar(path, "workspace-snapshots", "tar")?;
+    match std::fs::symlink_metadata(&snapshots) {
+        Ok(_) => stage(
+            snapshots,
+            "sealed workspace snapshot archive",
+            crate::cassette::Limits::default().max_artifact_bytes,
+            Some("workspace-snapshots.tar"),
+        )?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("sealed workspace snapshot archive is unavailable".into()),
     }
     Ok(inputs)
 }
@@ -1737,6 +1766,38 @@ mod tests {
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].bytes, data.len() as u64);
         assert_eq!(inputs[0].sha256, crate::cassette::digest(&data));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_snapshot_input_follows_replica_and_is_stream_hashed() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-snapshot-replay-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let data = vec![42u8; 200_001];
+        std::fs::write(root.join("workspace-snapshots-concurrency-3.tar"), &data).unwrap();
+        let inputs = replay_private_inputs(
+            Some(&root.join("replay-concurrency-3.jsonl")),
+            true,
+            &[],
+            false,
+        )
+        .unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].target, "workspace-snapshots.tar");
+        assert_eq!(inputs[0].sha256, crate::cassette::digest(&data));
+        assert!(
+            replay_private_inputs(
+                Some(&root.join("replay-concurrency-2.jsonl")),
+                true,
+                &[],
+                false
+            )
+            .unwrap()
+            .is_empty()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
