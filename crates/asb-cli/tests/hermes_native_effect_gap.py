@@ -6,6 +6,7 @@ invoking the original terminal tool.
 """
 import concurrent.futures
 import os
+import socket
 from pathlib import Path
 import subprocess
 import sys
@@ -32,7 +33,17 @@ def worker(mode, workspace, sidecar):
         Path('result.txt').write_text('recorded contents')
         return 'write succeeded'
     transport = namespace['Recorder' if mode == 'record' else 'Replayer']()
-    assert transport.invoke(write_fixture, *call) == 'write succeeded'
+    control_fd = os.environ.get('ASB_PROBE_CONTROL_FD')
+    if mode == 'record' and control_fd is not None:
+        with socket.socket(fileno=int(control_fd)) as control:
+            with control.makefile('rwb', buffering=0) as stream:
+                stream.write(b'tool-begin:hermes\n')
+                assert stream.readline().strip().isdigit()
+                assert transport.invoke(write_fixture, *call) == 'write succeeded'
+                stream.write(b'tool-end:hermes\n')
+                assert stream.readline().strip().isdigit()
+    else:
+        assert transport.invoke(write_fixture, *call) == 'write succeeded'
     transport.close()
     if mode == 'record':
         assert called and Path('result.txt').read_text() == 'recorded contents'

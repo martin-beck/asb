@@ -100,11 +100,14 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
             assert child.wait(timeout=5) == 0
             end = mark('tool-end:child')
             assert (backing / 'child').read_bytes() == b'child data'
-            hermes_begin = mark('tool-begin:hermes')
             hermes_sidecar = root / 'hermes.jsonl'
             hermes_script = ROOT / 'crates/asb-cli/tests/hermes_native_effect_gap.py'
-            subprocess.run([python, str(hermes_script), 'record', str(mount), str(hermes_sidecar)], check=True)
-            hermes_end = mark('tool-end:hermes')
+            hermes_env = dict(os.environ, ASB_PROBE_CONTROL_FD=str(control.fileno()))
+            subprocess.run([python, str(hermes_script), 'record', str(mount), str(hermes_sidecar)],
+                           check=True, env=hermes_env, pass_fds=(control.fileno(),))
+            markers_so_far = [json.loads(line) for line in (evidence / 'events.jsonl').read_text().splitlines()]
+            hermes_begin = next(event['sequence'] for event in markers_so_far if event.get('marker') == 'tool-begin:hermes')
+            hermes_end = next(event['sequence'] for event in markers_so_far if event.get('marker') == 'tool-end:hermes')
             assert (backing / 'result.txt').read_text() == 'recorded contents'
             a_begin = mark('tool-begin:a')
             b_begin = mark('tool-begin:b')
