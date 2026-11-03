@@ -55,6 +55,20 @@ class Replay:
             self.sequence = sequence
             self.pending = None
 
+    def payload_chunks(self, event):
+        remaining = event.get('bytes')
+        with (self.evidence / event['object']).open('rb') as source:
+            source.seek(event.get('payload_offset', 0))
+            while remaining is None or remaining > 0:
+                chunk = source.read(65536 if remaining is None else min(65536, remaining))
+                if not chunk:
+                    if remaining:
+                        raise RuntimeError('recorded payload is truncated')
+                    break
+                if remaining is not None:
+                    remaining -= len(chunk)
+                yield chunk
+
     def apply(self, event):
         op = event['op']
         path = self.root / event['path'].lstrip('/') if event['path'] is not None else None
@@ -70,20 +84,18 @@ class Replay:
         elif op == 'write':
             fd = self.handles[event['handle']]
             offset = event['offset']
-            with (self.evidence / event['object']).open('rb') as source:
-                while chunk := source.read(64 * 1024):
-                    count = os.pwrite(fd, chunk, offset)
-                    if count != len(chunk):
-                        raise RuntimeError('short recorded write')
-                    offset += count
+            for chunk in self.payload_chunks(event):
+                count = os.pwrite(fd, chunk, offset)
+                if count != len(chunk):
+                    raise RuntimeError('short recorded write')
+                offset += count
         elif op == 'read':
             fd = self.handles[event['handle']]
             offset = event['offset']
-            with (self.evidence / event['object']).open('rb') as expected:
-                while chunk := expected.read(64 * 1024):
-                    if os.pread(fd, len(chunk), offset) != chunk:
-                        raise RuntimeError('recorded read differs')
-                    offset += len(chunk)
+            for chunk in self.payload_chunks(event):
+                if os.pread(fd, len(chunk), offset) != chunk:
+                    raise RuntimeError('recorded read differs')
+                offset += len(chunk)
         elif op == 'truncate':
             if event['handle'] is None:
                 os.truncate(path, event['size'])

@@ -118,4 +118,23 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(coordinated, range(4)))
+    broken = root / 'broken'
+    broken.mkdir()
+    (broken / 'payload.bin').write_bytes(b'xy')
+    broken_events = [
+        {'sequence':1,'op':'create','path':'/broken','handle':1,'flags':os.O_WRONLY,'mode':0o600},
+        {'sequence':2,'op':'write','path':'/broken','handle':1,'offset':0,
+         'object':'payload.bin','payload_offset':1,'bytes':2},
+    ]
+    (broken / 'events.jsonl').write_text(''.join(json.dumps(event)+'\n' for event in broken_events))
+    truncated=module.Replay(broken,root/'truncated')
+    try:
+        try:
+            truncated.finish()
+        except RuntimeError as error:
+            assert 'truncated' in str(error)
+        else:
+            raise AssertionError('accepted truncated packed payload')
+    finally:
+        truncated.close()
     print('Four concurrent replay coordinators matched overlapping and repeated tool invocations')

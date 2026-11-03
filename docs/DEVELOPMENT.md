@@ -121,6 +121,14 @@ agent has already accessed its plain workspace can change `.git/index` reads.
 The fixture retains per-replica diagnostics on failure. Fixes need to preserve
 the agent's startup behavior and apply operations at the correct time; do not
 normalize away these differences or treat the patch as a substitute for replay.
+The opt-in `fixtures/native_fs_probe/perf.py` measures Git status directly and
+through the proxy on the supplied baseline and verifies that the outputs match.
+On the tested host it took 0.26 seconds directly and 52.3 seconds through the
+original proxy. Packing operation payloads into one append-only file reduced
+the proxy measurement to 48.7 seconds. A diagnostic-only run with attribution
+disabled took 41.5 seconds and is not a valid recording; it shows that removing
+attribution alone does not resolve the delay. The packed format is experimental
+and the fixture checks truncated payload rejection; it is not a cassette format.
 
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the
