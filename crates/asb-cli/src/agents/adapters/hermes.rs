@@ -531,6 +531,7 @@ mod tests {
             "hermes_native_fs_replay.py",
             "hermes_native_parallel_gap.py",
             "hermes_file_tool_replay.py",
+            "hermes_execute_code_replay.py",
         ] {
             let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests")

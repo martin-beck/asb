@@ -59,6 +59,20 @@ def _filesystem_replay_boundary(alias):
         return False
 
 
+def _filesystem_replay_begin(alias):
+    if not os.environ.get("ASB_FS_REPLAY_SOCKET"):
+        return True
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(1800)
+            connection.connect(os.environ["ASB_FS_REPLAY_SOCKET"])
+            connection.sendall(f"tool-begin:{alias}\n".encode("ascii"))
+            with connection.makefile("rb") as response:
+                return response.readline(32).strip().isdigit()
+    except (OSError, UnicodeError):
+        return False
+
+
 def _encoded(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
@@ -417,6 +431,19 @@ class Replayer:
                 {"event": "workspace_effect", "sha256": events[index + 1].get("sha256") if index + 1 < len(events) else None},
             ] or index + 2 != len(events):
                 raise RuntimeError("Hermes native replay sidecar is incomplete")
+        self.children = {index: [] for index in range(len(self.exchanges))}
+        if self.dependencies is not None:
+            alias_indices = {alias: index for index, alias in enumerate(self.aliases)}
+            for index, (request, _) in enumerate(self.exchanges):
+                try:
+                    parent_alias = json.loads(request).get("parent_alias")
+                except (ValueError, TypeError, AttributeError) as error:
+                    raise RuntimeError("Hermes native replay sidecar is invalid") from error
+                if parent_alias is not None:
+                    parent = alias_indices.get(parent_alias)
+                    if parent is None or parent >= index:
+                        raise RuntimeError("Hermes native replay sidecar has invalid nested lineage")
+                    self.children[parent].append(index)
         self.index = 0
         self.failed = False
         self.failure = None
@@ -490,7 +517,10 @@ class Replayer:
     def invoke_file(self, _original, name, args, **kwargs):
         request = _file_request(name, args)
         if self.dependencies is not None:
-            encoded = self._invoke_multi(request)
+            if name == "execute_code":
+                encoded = self._invoke_nested_parent(request)
+            else:
+                encoded = self._invoke_multi(request)
         else:
             encoded = self._invoke_file_serial(request)
         result = json.loads(encoded)
@@ -515,21 +545,88 @@ class Replayer:
         _write_progress(False, "native terminal replay in progress", self.index, len(self.exchanges))
         return response.decode("utf-8")
 
-    def _invoke_multi(self, request):
+    def _invoke_nested_parent(self, request):
         with self.condition:
-            if self.failed or self.closing:
-                raise RuntimeError("Hermes concurrent native replay did not settle")
             candidates = [index for index, (expected, _) in enumerate(self.exchanges)
                           if index not in self.consumed and self.dependencies[index] <= self.delivered
                           and _matches_request(expected, request)]
             if not candidates:
                 self.failed = True
                 self.failure = "native terminal request differs:sequence"
-                _write_progress(False, self.failure, self.index, len(self.exchanges))
                 self.condition.notify_all()
-                return json.dumps({"asb_native_mismatch": "sequence"}, separators=(",", ":"))
+                raise RuntimeError("Hermes nested tool differs from recording")
             index = candidates[0]
             self.consumed.add(index)
+        return self._replay_nested_node(index, preconsumed=True)
+
+    def _replay_nested_node(self, index, preconsumed=False):
+        children = self.children[index]
+        if children and not _filesystem_replay_begin(self.aliases[index]):
+            with self.condition:
+                self.failed = True
+                self.condition.notify_all()
+            raise RuntimeError("Hermes nested filesystem replay start is unavailable")
+        workers = []
+        errors = []
+        def replay_child(child):
+            try:
+                self._replay_nested_node(child)
+            except BaseException as error:
+                with self.condition:
+                    errors.append(error)
+                    self.failed = True
+                    self.condition.notify_all()
+        for child in children:
+            worker = threading.Thread(target=replay_child, args=(child,), daemon=True)
+            workers.append(worker)
+            worker.start()
+        try:
+            result = self._invoke_multi(self.exchanges[index][0], target=index,
+                                        preconsumed=preconsumed)
+        except BaseException:
+            with self.condition:
+                self.failed = True
+                self.condition.notify_all()
+            raise
+        finally:
+            for worker in workers:
+                worker.join(timeout=5)
+        if errors or any(worker.is_alive() for worker in workers):
+            with self.condition:
+                self.failed = True
+                self.condition.notify_all()
+            raise RuntimeError("Hermes nested native replay did not settle")
+        return result
+
+    def _invoke_multi(self, request, target=None, preconsumed=False):
+        with self.condition:
+            if self.failed or self.closing:
+                raise RuntimeError("Hermes concurrent native replay did not settle")
+            if target is not None:
+                deadline = time.monotonic() + 1800
+                while not self.dependencies[target] <= self.delivered:
+                    if self.failed or self.closing or time.monotonic() >= deadline:
+                        raise RuntimeError("Hermes nested native replay dependencies did not settle")
+                    self.condition.wait(timeout=min(1, max(0, deadline - time.monotonic())))
+                if not _matches_request(self.exchanges[target][0], request):
+                    raise RuntimeError("Hermes nested native request differs")
+                if not preconsumed:
+                    if target in self.consumed:
+                        raise RuntimeError("Hermes nested native call was already consumed")
+                    self.consumed.add(target)
+                index = target
+            else:
+                candidates = [index for index, (expected, _) in enumerate(self.exchanges)
+                              if index not in self.consumed and self.dependencies[index] <= self.delivered
+                              and _matches_request(expected, request)]
+                if not candidates:
+                    self.failed = True
+                    self.failure = "native terminal request differs:sequence"
+                    _write_progress(False, self.failure, self.index, len(self.exchanges))
+                    self.condition.notify_all()
+                    return json.dumps({"asb_native_mismatch": "sequence"}, separators=(",", ":"))
+                index = candidates[0]
+                self.consumed.add(index)
             while self.completion_order[self.completion_cursor] != index:
                 if self.failed or self.closing:
                     raise RuntimeError("Hermes concurrent native replay did not settle")
@@ -694,7 +791,7 @@ def install_dispatch_coverage(registry, transport, mode, capture=None):
     covered_dispatch = set()
 
     def dispatch_with_coverage(name, args, **kwargs):
-        if name in ("read_file", "write_file", "patch", "search_files"):
+        if name in ("read_file", "write_file", "patch", "search_files", "execute_code"):
             return transport.invoke_file(original_dispatch, name, args, **kwargs)
         if name not in covered_dispatch:
             if mode == "record":

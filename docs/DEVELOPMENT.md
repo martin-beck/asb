@@ -131,7 +131,9 @@ unqualified. The older test wrapper supplies boundaries and advances the operati
 cursor after the sidecar validates each request and before returning its result. This does
 not prove ordering for a complete agent. The adapter preserves Hermes's normal
 tool catalogue; terminal, process, read_file, write_file, patch, and search_files
-calls have experimental adapter-owned replay. Other calls run during recording
+calls have experimental adapter-owned replay. `execute_code` records its nested
+calls and replays their journal effects without re-executing the Python code.
+Other calls run during recording
 and produce private JSONL evidence with start/end ordering, arguments,
 context, parent aliases, and results or exceptions. Native child requests inherit
 the parent alias through Hermes's propagated thread context, and experimental
