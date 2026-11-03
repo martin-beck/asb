@@ -35,6 +35,39 @@ def upload(container, destination, files, temporary_dir=None, owner=None):
             raise ExecutionError("could not stage the task's private runtime")
 
 
+def upload_files(container, destination, files, temporary_dir=None, owner=None):
+    """Spool file inputs into a tar archive without retaining them in memory."""
+    if owner is not None and (not isinstance(owner,tuple) or len(owner) != 2
+            or any(type(value) is not int or not 0 <= value <= 4294967295 for value in owner)):
+        raise ExecutionError("invalid private guest file owner")
+    class DigestReader:
+        def __init__(self, source):
+            self.source, self.digest, self.count = source, hashlib.sha256(), 0
+        def read(self, size=-1):
+            data = self.source.read(size)
+            self.digest.update(data)
+            self.count += len(data)
+            return data
+    with tempfile.TemporaryFile(dir=temporary_dir) as archive:
+        try:
+            with tarfile.open(fileobj=archive, mode='w') as tar:
+                for name, path, length, expected_digest, mode in files:
+                    entry = tarfile.TarInfo(name)
+                    entry.size, entry.mode = length, mode
+                    if owner is not None:
+                        entry.uid,entry.gid = owner
+                    with open(path, 'rb') as source:
+                        reader = DigestReader(source)
+                        tar.addfile(entry, reader)
+                        if reader.count != length or reader.digest.hexdigest() != expected_digest or source.read(1):
+                            raise ExecutionError('sealed local-tool replay transcript changed before guest staging')
+            archive.seek(0)
+            if not container.put_archive(destination, archive):
+                raise ExecutionError("could not stage the task's private runtime")
+        except (OSError, tarfile.TarError) as error:
+            raise ExecutionError('cannot stage guest private replay input') from error
+
+
 def configured_owner(task, checked):
     container = task.workspace.container
     user = container.attrs.get("Config",{}).get("User","")
