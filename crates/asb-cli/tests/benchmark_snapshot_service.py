@@ -18,6 +18,47 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_replay_waits_for_an_earlier_concurrent_tool(self):
+        applied=[];started=threading.Event()
+        replay=SnapshotReplay([('one',2),('two',3)],applied.append,wait_seconds=2)
+        def later():
+            started.set()
+            return replay.marker('end','two')
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future=pool.submit(later)
+            self.assertTrue(started.wait(1))
+            self.assertEqual(replay.marker('end','one'),2)
+            self.assertEqual(future.result(timeout=2),3)
+        replay.finish()
+        self.assertEqual(applied,[2,3])
+
+    def test_replay_times_out_when_earlier_tool_never_arrives(self):
+        replay=SnapshotReplay([('one',2),('two',3)],lambda _:None,wait_seconds=0.01)
+        with self.assertRaisesRegex(RuntimeError,'timed out'):replay.marker('end','two')
+        with self.assertRaisesRegex(RuntimeError,'unconsumed'):replay.finish()
+
+    def test_replay_socket_orders_concurrent_boundaries(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            path=Path(directory)/'socket';applied=[];started=threading.Event()
+            replay=SnapshotReplay([('one',2),('two',3)],applied.append,wait_seconds=2)
+            server=MarkerServer(path,replay)
+            thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+            def send(alias):
+                with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
+                    client.settimeout(3);client.connect(str(path))
+                    client.sendall(f'tool-end:{alias}\n'.encode())
+                    if alias=='two':started.set()
+                    return client.makefile('rb').readline()
+            try:
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future=pool.submit(send,'two');self.assertTrue(started.wait(1))
+                    self.assertEqual(send('one'),b'2\n')
+                    self.assertEqual(future.result(timeout=2),b'3\n')
+                replay.finish()
+            finally:
+                server.shutdown();server.server_close();thread.join();path.unlink(missing_ok=True)
+            self.assertEqual(applied,[2,3])
+
     def test_snapshot_transport_rejects_incomplete_recording(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);store=root/'store';store.mkdir()
