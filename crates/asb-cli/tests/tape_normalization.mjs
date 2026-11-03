@@ -2,6 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { normalizeWorkspacePaths } from "../assets/scripts/tape-normalization.mjs";
 
+test("preserves the guest snapshot workspace while normalizing host workspaces", () => {
+  const guest = "/asb-snapshot-storage/snapshot/filesystem/workspace/lib/widgets.py";
+  const host = "/srv/data/projects/test/results/batch-1/workspace-concurrency-1/lib/widgets.py";
+  assert.equal(normalizeWorkspacePaths(`diff ${guest} ${host}`), `diff ${guest} <asb-workspace>/lib/widgets.py`);
+  assert.equal(normalizeWorkspacePaths(`diff ${guest} ${host}`, "/replay"), `diff ${guest} /replay/lib/widgets.py`);
+});
+
 function legacy(body) {
   return body
     .replace(/\/?(?:[A-Za-z0-9_.-]+\/)+workspace-concurrency-\d+(?:\.asb-agent-runtime)?/g, "<asb-workspace>")
