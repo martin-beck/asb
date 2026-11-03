@@ -146,6 +146,13 @@ if (control / 'orphan-release').exists():
             wait_for(lambda: (evidence / 'orphan-ready').exists(), 'orphan did not start')
             (evidence / 'orphan-release').touch()
             wait_for(lambda: (evidence / 'orphan-done').exists(), 'orphan did not finish write')
+            orphan_pid = int((evidence / 'orphan-ready').read_text())
+            def orphan_exited():
+                try:
+                    return Path(f'/proc/{orphan_pid}/stat').read_text().rpartition(')')[2].split()[0] == 'Z'
+                except FileNotFoundError:
+                    return True
+            wait_for(orphan_exited, 'orphan did not exit')
             orphan_end = mark('tool-end:orphan')
         finally:
             (evidence / 'write-release').touch()
@@ -247,4 +254,10 @@ if (control / 'orphan-release').exists():
         assert os.stat(destination / 'one').st_ino == os.stat(destination / 'alias').st_ino
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(replay, range(4)))
+    def hermes_coordinated(index):
+        subprocess.run([python, str(HERE / 'hermes_coordinated.py'), str(evidence), str(baseline),
+                        str(hermes_sidecar), str(root / f'hermes-coordinated-{index}'), str(hermes_end)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(hermes_coordinated, range(4)))
     print('FUSE ordering experiment passed: truncate and open-truncate, unrelated reads, four operation replays')

@@ -3,7 +3,7 @@
 The opt-in Linux filesystem ordering experiment at
 `crates/asb-cli/tests/fixtures/native_fs_probe/run.py` requires `/dev/fuse`,
 `fusermount3`, and an interpreter with fusepy. Set `ASB_FUSE_TEST_PYTHON` to
-that interpreter and run the script with Python. It records a forced
+that interpreter and run the script with Python. It records forced
 write/truncate races on hard-linked files, including an `O_TRUNC` open,
 checks that an unrelated read can proceed, and replays the recorded operations
 into four independent directories. The tested FUSE stack delivered `O_TRUNC`
@@ -28,6 +28,10 @@ with a synthetic file write. The filesystem fixture applies those marked
 operations and invokes the replayer without running the original tool in four
 workspaces. This exercises the real sidecar classes, not the complete Hermes
 agent or production integration; the marker wrapper belongs to the test.
+The coordinator fixture delegates request validation to the actual Hermes
+sidecar before applying operations. It checks that a mismatched request leaves
+the replay cursor and workspace untouched, then checks a matching request in
+four isolated workspaces.
 No production code selects tool-call boundaries for that cursor; overlapping
 tools, asynchronous work, delayed IO and full process attribution are unresolved.
 The separate offline `overlap.py` fixture exercises an experimental admission
@@ -40,7 +44,8 @@ and checks this pause and resume separately in four replay workspaces. The
 fixture supplies the markers; the agent does not produce them automatically.
 The overlap fixture includes an experimental condition-based coordinator with
 separate caller threads and checks mismatched, duplicate and out-of-order end
-markers. It is not wired to an agent, and does not match recorded request bodies.
+markers. It is not wired to an agent; the Hermes test delegates matching to the
+sidecar rather than interpreting request bodies in the generic cursor.
 It additionally exercises a background child that writes after its tool-return
 marker and before the next invocation, checking the file is absent at the first
 boundary and present at the second. This does not implement a scheduler for

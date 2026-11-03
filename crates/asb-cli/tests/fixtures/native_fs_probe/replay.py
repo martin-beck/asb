@@ -127,7 +127,7 @@ class Coordinator:
             self.ends = {event['sequence']: event.get('marker')
                          for event in map(json.loads, stream) if event['op'] == 'marker'}
 
-    def invoke(self, tool, end_sequence, timeout):
+    def invoke(self, tool, end_sequence, timeout, validate):
         if self.ends.get(end_sequence) != f'tool-end:{tool}':
             raise RuntimeError('invocation end marker does not match tool')
         deadline = time.monotonic() + timeout
@@ -139,6 +139,8 @@ class Coordinator:
                        and sequence not in self.claimed]
             if earlier:
                 raise RuntimeError('tool invocation arrived out of recorded order')
+            # Validation must succeed before advancing the operation cursor.
+            response = validate()
             self.claimed.add(end_sequence)
             self.replay.admit(tool)
             self.condition.notify_all()
@@ -158,6 +160,7 @@ class Coordinator:
                 self.failure = error
                 self.condition.notify_all()
                 raise
+            return response
 
 
 if __name__ == '__main__':

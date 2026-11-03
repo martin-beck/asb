@@ -76,29 +76,38 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
         coordinator = module.Coordinator(replay)
         try:
             try:
-                coordinator.invoke('b', 6, 1)
+                coordinator.invoke('b', 6, 1, lambda: None)
             except RuntimeError as error:
                 assert 'does not match' in str(error)
             else:
                 raise AssertionError('accepted another tool end marker')
             try:
-                coordinator.invoke('a', 12, 1)
+                coordinator.invoke('a', 12, 1, lambda: None)
             except RuntimeError as error:
                 assert 'out of recorded order' in str(error)
             else:
                 raise AssertionError('accepted later same-tool invocation first')
+            def reject_request():
+                raise ValueError('request mismatch')
+            try:
+                coordinator.invoke('a', 6, 1, reject_request)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('accepted mismatched request')
+            assert replay.sequence == 0 and not (destination / 'b.txt').exists()
             with ThreadPoolExecutor(max_workers=2) as pool:
-                first = pool.submit(coordinator.invoke, 'a', 6, 3)
+                first = pool.submit(coordinator.invoke, 'a', 6, 3, lambda: 'a-result')
                 time.sleep(.1)
                 assert not first.done() and not (destination / 'b.txt').exists()
-                second = pool.submit(coordinator.invoke, 'b', 7, 3)
-                first.result(timeout=3)
-                second.result(timeout=3)
+                second = pool.submit(coordinator.invoke, 'b', 7, 3, lambda: 'b-result')
+                assert first.result(timeout=3) == 'a-result'
+                assert second.result(timeout=3) == 'b-result'
             assert (destination / 'b.txt').read_bytes() == b'from tool b'
-            coordinator.invoke('a', 12, 1)
+            coordinator.invoke('a', 12, 1, lambda: None)
             assert (destination / 'second-a.txt').read_bytes() == b'from tool b'
             try:
-                coordinator.invoke('a', 12, 1)
+                coordinator.invoke('a', 12, 1, lambda: None)
             except RuntimeError as error:
                 assert 'already claimed' in str(error)
             else:
