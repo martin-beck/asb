@@ -66,8 +66,10 @@ chown -R "$ASB_FIXTURE_UID:$ASB_FIXTURE_GID" /work
         subprocess.run(args, check=True, timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         events = [json.loads(line) for line in (work / 'run/filesystem-recording/events.jsonl').read_text().splitlines()]
         markers = {event['marker']:event['sequence'] for event in events if event['op'] == 'marker'}
-        writes = [event['sequence'] for event in events if event['op'] == 'write' and event['path'] == '/result']
-        assert markers['tool-begin:terminal-1'] < writes[0] < markers['tool-end:terminal-1']
+        begin = next(event for event in events if event.get('marker') == 'tool-begin:terminal-1')
+        writes = [event for event in events if event['op'] == 'write' and event['path'] == '/result']
+        assert markers['tool-begin:terminal-1'] < writes[0]['sequence'] < markers['tool-end:terminal-1']
+        assert writes[0]['caller']['tgid'] == begin['origin']['pid']
         assert json.loads((work / 'progress.json').read_text())['complete']
         assert (work / 'mount/result').read_text() == 'captured'
         print('Hermes native call boundaries surround real FUSE filesystem effects')

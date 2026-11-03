@@ -64,6 +64,8 @@ class PayloadTests(unittest.TestCase):
                 events = [json.loads(line) for line in (Path(temporary) / 'events.jsonl').read_text().splitlines()]
                 markers = [event['marker'] for event in events]
                 self.assertEqual(markers[:2], ['tool-begin:terminal-1', 'tool-end:terminal-1'])
+                self.assertEqual(events[0]['origin']['pid'], os.getpid())
+                self.assertEqual(events[0]['origin']['tid'], threading.get_native_id())
                 for alias in ('terminal-2', 'terminal-3'):
                     self.assertEqual(markers.count('tool-begin:' + alias), 1)
                     self.assertEqual(markers.count('tool-end:' + alias), 1)
