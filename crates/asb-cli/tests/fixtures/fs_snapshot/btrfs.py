@@ -19,7 +19,7 @@ loader=os.environ['ASB_SNAPSHOT_LOADER']
 loop=Path(os.environ['ASB_SNAPSHOT_LOOP_DEVICE']).resolve(strict=True)
 image=os.environ['ASB_SNAPSHOT_IMAGE']
 if (not re.fullmatch(r'[A-Za-z0-9_.+-]+',loader) or not (libraries/loader).is_file()
-        or loop.parent != Path('/dev') or not re.fullmatch(r'loop[0-9]+',loop.name)
+        or loop.parent != Path('/dev') or loop.name == 'loop29' or not re.fullmatch(r'loop[0-9]+',loop.name)
         or not stat.S_ISBLK(loop.stat().st_mode)):
  raise ValueError('snapshot fixture requires a loader name and loop device')
 d=Path(tempfile.mkdtemp(dir=root,prefix='btrfs-probe-'))
@@ -30,10 +30,17 @@ try:
 truncate -s 512M /work/disk.img
 /hostlib/LOADER --library-path /hostlib /opt/mkfs.btrfs -q /work/disk.img
 losetup /dev/LOOPDEV /work/disk.img
-cleanup(){ umount /work/fs || true; losetup -d /dev/LOOPDEV || true; chmod -R a+rwX /work; }
+received_attached=0
+cleanup(){ umount /work/recvfs || true; if [ "$received_attached" = 1 ]; then losetup -d /dev/loop29 || true; fi; umount /work/fs || true; losetup -d /dev/LOOPDEV || true; chmod -R a+rwX /work; }
 trap cleanup EXIT
-mkdir /work/fs
+mknod /dev/loop29 b 7 29
+truncate -s 512M /work/received.img
+/hostlib/LOADER --library-path /hostlib /opt/mkfs.btrfs -q /work/received.img
+losetup /dev/loop29 /work/received.img
+received_attached=1
+mkdir /work/fs /work/recvfs
 mount -t btrfs /dev/LOOPDEV /work/fs
+mount -t btrfs /dev/loop29 /work/recvfs
 btrfs_cmd(){ /hostlib/LOADER --library-path /hostlib /opt/btrfs "$@"; }
 btrfs_cmd subvolume create /work/fs/base >/dev/null
 printf old > /work/fs/base/file
@@ -218,12 +225,13 @@ with Path('/work/adapter-increment.btrfs').open('wb') as output:
 if baseline_send.returncode or increment_send.returncode:raise RuntimeError('snapshot stream export failed: '+(baseline_send.stderr+increment_send.stderr).decode()[-500:])
 checks['snapshot_streams_created']=Path('/work/adapter-baseline.btrfs').stat().st_size>0 and Path('/work/adapter-increment.btrfs').stat().st_size>0
 print('snapshot_stream_bytes',Path('/work/adapter-baseline.btrfs').stat().st_size,Path('/work/adapter-increment.btrfs').stat().st_size)
-received=Path('/work/fs/received');received.mkdir()
+received=Path('/work/recvfs/received');received.mkdir()
 for stream in ('adapter-baseline.btrfs','adapter-increment.btrfs'):
  with (Path('/work')/stream).open('rb') as source:
   result=subprocess.run(['/hostlib/LOADER','--library-path','/hostlib','/opt/btrfs','receive',str(received)],stdin=source,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=60)
   if result.returncode:raise RuntimeError('snapshot stream receive failed: '+result.stderr.decode()[-500:])
 checks['incremental_receive_restored']=(received/'snapshot-00000002/trial-result').read_bytes()==b'fixed'
+checks['received_on_separate_filesystem']=received.stat().st_dev!=Path('/work/fs').stat().st_dev
 adapter_before=received/'snapshot-00000001'
 adapter_after=received/'snapshot-00000002'
 def replay_adapter(index):
@@ -253,7 +261,7 @@ if not all(checks.values()):raise RuntimeError('Btrfs snapshot checks failed')
 for fd in fds:os.close(fd)
 EOPY
 '''.replace('LOADER',loader).replace('LOOPDEV',loop.name)
- cmd=['docker','run','--rm','--name',container_name,'--pull=never','--network','none','--device','/dev/loop-control','--device',str(loop),'--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={mkfs},dst=/opt/mkfs.btrfs,readonly','--mount',f'type=bind,src={btrfs},dst=/opt/btrfs,readonly','--mount',f'type=bind,src={rsync},dst=/opt/rsync,readonly','--mount',f'type=bind,src={Path(__file__).with_name("topology.py").resolve()},dst=/opt/topology.py,readonly','--mount',f'type=bind,src={Path(__file__).with_name("mini_swe_client.py").resolve()},dst=/opt/mini_swe_client.py,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/src/agents/adapters/mini_swe.rs").resolve()},dst=/opt/mini_swe.rs,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_service.py").resolve()},dst=/opt/asb_snapshot_service.py,readonly','--mount',f'type=bind,src={libraries},dst=/hostlib,readonly','--entrypoint','/bin/sh',image,'-c',script]
+ cmd=['docker','run','--rm','--name',container_name,'--pull=never','--network','none','--device','/dev/loop-control','--device',str(loop),'--device-cgroup-rule','b 7:* rwm','--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={mkfs},dst=/opt/mkfs.btrfs,readonly','--mount',f'type=bind,src={btrfs},dst=/opt/btrfs,readonly','--mount',f'type=bind,src={rsync},dst=/opt/rsync,readonly','--mount',f'type=bind,src={Path(__file__).with_name("topology.py").resolve()},dst=/opt/topology.py,readonly','--mount',f'type=bind,src={Path(__file__).with_name("mini_swe_client.py").resolve()},dst=/opt/mini_swe_client.py,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/src/agents/adapters/mini_swe.rs").resolve()},dst=/opt/mini_swe.rs,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_service.py").resolve()},dst=/opt/asb_snapshot_service.py,readonly','--mount',f'type=bind,src={libraries},dst=/hostlib,readonly','--entrypoint','/bin/sh',image,'-c',script]
  try:
   r=subprocess.run(cmd,text=True,capture_output=True,timeout=90)
  except subprocess.TimeoutExpired:

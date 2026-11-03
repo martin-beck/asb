@@ -50,9 +50,10 @@ The extended probe also runs the Mini-SWE adapter against a fixture tool once
 and applies its snapshot through four concurrent replay coordinators. The
 Mini-SWE environment and command are fixtures, not a live agent or workload.
 For this fixture the baseline and incremental snapshots are exported with
-`btrfs send`, received back, and the received snapshots feed the replay
-coordinators. Cross-filesystem transport and production cassette integration
-are not qualified by this probe.
+`btrfs send`, received on a separate disposable Btrfs filesystem, and the
+received snapshots feed the replay coordinators. The fixture uses a second
+loop device, loop29, in addition to the configured device. Production cassette
+integration is not qualified by this probe.
 
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without
