@@ -654,7 +654,22 @@ impl Outcome {
             || summary["workload_success"].as_bool().is_some(),
             |outcome| outcome.evaluation.completed(),
         );
-        if !completed_grade
+        // An evaluator can fail only after a bounded execution has been
+        // stopped and its owned resources have been cleaned up.  That is a
+        // terminal *ungraded failure*, not a successful grade, but it must be
+        // able to settle its own replica: otherwise a `--continue` campaign
+        // cannot advance past one preserved failure to independent slots.
+        // Keep this deliberately narrower than an arbitrary unavailable
+        // result: it requires the structured error to agree with a recorded
+        // failed execution.
+        let terminal_ungraded_failure = structured.is_some_and(|outcome| {
+            matches!(
+                outcome.evaluation,
+                crate::workloads::outcome::EvaluationOutcome::Error { .. }
+            ) && outcome.execution_success == Some(false)
+                && summary["process_success"].as_bool() == Some(false)
+        });
+        if !(completed_grade || terminal_ungraded_failure)
             || summary["process_success"].as_bool().is_none()
             || summary["workload_evaluation"] != expected.selection.evaluation_kind
             || !baseline.supports(&expected.selection.evaluation_kind)
@@ -1044,6 +1059,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn cleaned_up_execution_failure_with_evaluator_error_can_settle_a_replica() {
+        let fixture = Fixture::new(false);
+        for index in 0..2 {
+            let mut record = fixture.read(index);
+            record["summary"]["workload_success"] = Value::Null;
+            record["summary"]["process_success"] = json!(false);
+            record["summary"]["benchmark_outcome"] = json!({
+                "schema_version":1,
+                "execution_success":false,
+                "evaluation":{"status":"error","reason":"bounded evaluator did not return a task grade"},
+                "cleanup_confirmed":true,
+                "evidence":[fixture.evidence],
+                "policy":crate::workloads::outcome::MetricPolicy::default(),
+                "lineage":{"execution_attempt":record["summary"]["task"]["attempt_id"],
+                    "evaluation_id":format!("terminal-failure-{index}"),"supersedes":null}
+            });
+            fixture.write(index, &record);
+        }
+        fixture.seal().unwrap();
+        let (_, summaries) = fixture.verify().unwrap();
+        assert!(
+            summaries
+                .iter()
+                .all(|summary| summary["process_success"] == false
+                    && summary["workload_success"].is_null())
+        );
+
+        let mut invalid = fixture.read(0);
+        invalid["summary"]["process_success"] = json!(true);
+        invalid["summary"]["benchmark_outcome"]["execution_success"] = json!(true);
+        fixture.write(0, &invalid);
+        assert!(ValidatedOutcome::read(&fixture.outcome_path(0), &fixture.entry).is_err());
     }
 
     #[test]

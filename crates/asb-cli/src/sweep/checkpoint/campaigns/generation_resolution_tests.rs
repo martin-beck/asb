@@ -1324,7 +1324,7 @@ fn unlinked_child_repair_failed_link_sync_is_confirmed_idempotently_without_exec
 }
 
 #[test]
-fn unlinked_child_late_configuration_aggregate_budget_refuses_before_sources_or_receipts() {
+fn unlinked_child_invalid_population_refuses_before_sources_or_receipts() {
     use crate::cassette::{
         CompatibilityShape, ImportedTrack, Limits, OriginPlan, RecordingReservation,
         RecordingSource,
@@ -1423,8 +1423,9 @@ fn unlinked_child_late_configuration_aggregate_budget_refuses_before_sources_or_
         descriptor
             .validate(&layout.plan, generation, configuration, 1..=5)
             .unwrap();
-        // Each declaration alone is admissible; only the later configuration
-        // exceeds the operation-wide payload budget (no actual payload exists).
+        // Each declaration is internally admissible, but the staged child
+        // does not match the classified original population.  Recovery must
+        // reject that before touching any absent source or old receipt.
         crate::runner::recording::union::admit_population([&*descriptor]).unwrap();
         let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
         fs::write(child.join(manifest_path(configuration)), &bytes).unwrap();
@@ -1455,7 +1456,7 @@ fn unlinked_child_late_configuration_aggregate_budget_refuses_before_sources_or_
     assert!(
         error
             .to_string()
-            .contains("union imports exceed global payload budget"),
+            .contains("staged continuation differs from classified original population"),
         "{error}"
     );
     assert!(!base.join("next.json").exists());
