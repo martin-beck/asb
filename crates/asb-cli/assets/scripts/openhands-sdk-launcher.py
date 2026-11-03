@@ -359,8 +359,16 @@ class NativeTerminalExecutor(ToolExecutor):
             text=True, encoding="utf-8",
         )
 
+    def child_delegate(self) -> Any:
+        if self._mode != "record":
+            return None
+        from openhands.tools.terminal.impl import TerminalExecutor
+        return TerminalExecutor(working_dir=os.getcwd(), terminal_type="subprocess")
+
     def __call__(self, action: Any, conversation: Any = None) -> Any:
-        del conversation
+        return self.execute(action, conversation, self._delegate)
+
+    def execute(self, action: Any, conversation: Any, delegate: Any) -> Any:
         from openhands.sdk import TextContent
         from openhands.tools.terminal import TerminalObservation
         from openhands.tools.terminal.metadata import CmdOutputMetadata
@@ -371,14 +379,14 @@ class NativeTerminalExecutor(ToolExecutor):
             "timeout": action.timeout, "reset": action.reset,
         }
         alias = None
-        if self._delegate is not None or os.environ.get("ASB_FS_REPLAY_SOCKET"):
+        if delegate is not None or os.environ.get("ASB_FS_REPLAY_SOCKET"):
             with self._marker_lock:
                 self._marker_count += 1
                 alias = f"openhands-{self._marker_count}"
-        if self._delegate is not None:
+        if delegate is not None:
             began = filesystem_marker("begin", alias)
             try:
-                observation = self._delegate(action)
+                observation = delegate(action, conversation=conversation)
             finally:
                 ended = filesystem_marker("end", alias)
                 if not began or not ended:
@@ -406,7 +414,7 @@ class NativeTerminalExecutor(ToolExecutor):
         response = json.loads(line)
         if response.get("kind") == "error" or response.get("schema_version") != 1:
             raise RuntimeError("ASB native terminal bridge rejected terminal action")
-        if self._delegate is not None:
+        if delegate is not None:
             return observation
         expected = {"kind", "schema_version", "content", "is_error", "command", "exit_code", "timeout", "metadata"}
         if set(response) != expected or response["kind"] != "terminal_observation":
@@ -443,15 +451,19 @@ class UnrecordedTerminalExecutor(ToolExecutor):
 
 
 class SharedTerminalExecutor(ToolExecutor):
-    """A child conversation borrows, but never closes, the parent transport."""
+    """Each child owns its shell session, but borrows the parent's transport."""
     def __init__(self, transport: ToolExecutor):
         self.transport = transport
+        self.delegate = transport.child_delegate() if isinstance(transport, NativeTerminalExecutor) else None
 
     def __call__(self, action: Any, conversation: Any = None) -> Any:
+        if isinstance(self.transport, NativeTerminalExecutor):
+            return self.transport.execute(action, conversation, self.delegate)
         return self.transport(action, conversation)
 
     def close(self) -> None:
-        pass
+        if self.delegate is not None:
+            self.delegate.close()
 
 
 def install_subagent_terminal(transport: ToolExecutor) -> None:

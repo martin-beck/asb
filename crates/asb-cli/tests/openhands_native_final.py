@@ -454,7 +454,7 @@ class NativeFinalTest(unittest.TestCase):
         observation = Event(text='done', is_error=False, command='echo ok', exit_code=0,
                             timeout=False, metadata=Event(model_dump=lambda: {}))
         class Delegate:
-            def __call__(self, action):
+            def __call__(self, action, conversation=None):
                 events.append('execute')
                 return observation
             def close(self): pass
@@ -481,7 +481,7 @@ class NativeFinalTest(unittest.TestCase):
         observation = Event(text='done', is_error=False, command='true', exit_code=0,
                             timeout=False, metadata=Event(model_dump=lambda: {}))
         class Delegate:
-            def __call__(self, action): return observation
+            def __call__(self, action, conversation=None): return observation
             def close(self): pass
         class Bridge:
             def __init__(self):

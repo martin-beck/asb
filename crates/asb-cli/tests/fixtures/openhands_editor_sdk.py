@@ -19,6 +19,7 @@ from openhands.sdk.subagent import get_registered_agent_definitions
 from openhands.sdk import LLM, Tool
 from openhands.sdk.tool import ToolExecutor, resolve_tool
 from openhands.tools.task import manager
+from openhands.tools.terminal import TerminalAction
 from openhands_cli.utils import get_default_cli_agent
 
 register_builtins_agents(enable_browser=False)
@@ -112,4 +113,20 @@ with tempfile.TemporaryDirectory(dir=root.parent) as directory:
     module.filesystem_replay_boundary = private_boundary
     assert tracker(plan).model_dump(mode='json') == expected
     tape.close()
+# Separate child shell sessions must not leak cwd into the parent or siblings.
+with tempfile.TemporaryDirectory(dir=scratch) as directory:
+    child_dir = Path(directory).resolve()
+    transport = module.NativeTerminalExecutor.__new__(module.NativeTerminalExecutor)
+    transport._mode = 'record'
+    transport._delegate = transport.child_delegate()
+    transport.execute = lambda action, conversation, delegate: delegate(action, conversation=conversation)
+    child = module.SharedTerminalExecutor(transport)
+    sibling = module.SharedTerminalExecutor(transport)
+    try:
+        child(TerminalAction(command=f'cd {child_dir}'))
+        assert str(child_dir) in child(TerminalAction(command='pwd')).text
+        assert str(Path.cwd()) in transport(TerminalAction(command='pwd')).text
+        assert str(Path.cwd()) in sibling(TerminalAction(command='pwd')).text
+    finally:
+        child.close(); sibling.close(); transport._delegate.close()
 print('Installed OpenHands SDK editor recording and replay passed')
