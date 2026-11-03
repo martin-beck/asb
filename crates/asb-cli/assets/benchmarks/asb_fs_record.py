@@ -23,7 +23,7 @@ def _mount_ids(path):
 
 class FilesystemRecorder:
     """Mount the recorder over a task workspace until the attempt settles."""
-    def __init__(self, workspace, run_dir, proxy, binding, library, root_pid=None, control_socket=None):
+    def __init__(self, workspace, run_dir, proxy, binding, library, root_pid=None, control_socket=None, metadata_replay=None):
         self.workspace = Path(workspace).resolve()
         self.run_dir = Path(run_dir).resolve()
         self.proxy = Path(proxy).resolve()
@@ -37,6 +37,7 @@ class FilesystemRecorder:
         self.original_mounts = None
         self.root_pid = root_pid if root_pid is not None else os.getpid()
         self.control_socket = control_socket
+        self.metadata_replay = metadata_replay
 
     def recorder_mounted(self):
         return bool(_mount_ids(self.workspace) - self.original_mounts)
@@ -54,6 +55,9 @@ class FilesystemRecorder:
             env = dict(os.environ, PYTHONPATH=str(self.binding), FUSE_LIBRARY_PATH=str(self.library),
                        ASB_PROBE_ROOT_TGID=str(self.root_pid), ASB_PROBE_ALLOW_OTHER='1', ASB_PROBE_NONEMPTY='1',
                        ASB_PROBE_COMPACT_TOOL_READS='1')
+            if self.metadata_replay is not None:
+                env['ASB_PROBE_METADATA_REPLAY'] = str(self.metadata_replay)
+                env['ASB_PROBE_METADATA_CAPTURE'] = '1'
             if self.control_socket is not None:
                 env['ASB_PROBE_CONTROL_SOCKET'] = str(self.control_socket)
             self.log = (self.run_dir / 'filesystem-recorder.log').open('wb')
