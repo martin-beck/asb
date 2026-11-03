@@ -11,6 +11,7 @@ import shutil
 import socketserver
 import subprocess
 import threading
+import time
 
 _MARKER = re.compile(rb'tool-(begin|end):([A-Za-z0-9_-]{1,80})(?::([0-9]+):([0-9]+))?\n')
 
@@ -236,7 +237,7 @@ class SnapshotReplay:
     The caller owns snapshot verification, initial workspace restoration and
     the actual application mechanism. This protocol is an offline prototype.
     """
-    def __init__(self, boundaries, apply):
+    def __init__(self, boundaries, apply, wait_seconds=1800):
         self.boundaries = list(boundaries)
         if any(not isinstance(item, tuple) or len(item) != 2 or
                not isinstance(item[0], str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', item[0]) or
@@ -244,37 +245,55 @@ class SnapshotReplay:
                for item in self.boundaries):
             raise ValueError('snapshot replay boundaries are malformed')
         self.apply = apply
+        if not isinstance(wait_seconds, (int, float)) or wait_seconds <= 0:
+            raise ValueError('snapshot replay wait is invalid')
+        self.wait_seconds = wait_seconds
         self.position = 0
         self.failed = False
         self.closed = False
         self.lock = threading.RLock()
+        self.changed = threading.Condition(self.lock)
 
     def marker(self, action, alias, process=None, thread=None):
-        with self.lock:
-            if self.closed or self.failed:
-                raise RuntimeError('snapshot replay is not active')
-            if (action != 'end' or self.position >= len(self.boundaries) or
-                    self.boundaries[self.position][0] != alias):
-                self.failed = True
-                raise ValueError('snapshot replay boundary differs from the recording')
+        with self.changed:
+            deadline = time.monotonic() + self.wait_seconds
+            while True:
+                if self.closed or self.failed:
+                    raise RuntimeError('snapshot replay is not active')
+                if action != 'end' or alias not in [item[0] for item in self.boundaries[self.position:]]:
+                    self.failed = True
+                    self.changed.notify_all()
+                    raise ValueError('snapshot replay boundary differs from the recording')
+                if self.boundaries[self.position][0] == alias:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.failed = True
+                    self.changed.notify_all()
+                    raise RuntimeError('snapshot replay timed out waiting for an earlier boundary')
+                self.changed.wait(remaining)
             sequence = self.boundaries[self.position][1]
             try:
                 self.apply(sequence)
             except BaseException:
                 self.failed = True
+                self.changed.notify_all()
                 raise
             self.position += 1
+            self.changed.notify_all()
             return sequence
 
     def invalidate(self):
-        with self.lock:
+        with self.changed:
             self.failed = True
+            self.changed.notify_all()
 
     def finish(self):
-        with self.lock:
+        with self.changed:
             if self.closed:
                 raise RuntimeError('snapshot replay is already closed')
             self.closed = True
+            self.changed.notify_all()
             if self.failed or self.position != len(self.boundaries):
                 raise RuntimeError('snapshot replay has unconsumed or failed boundaries')
 
