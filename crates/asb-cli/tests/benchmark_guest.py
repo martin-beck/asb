@@ -440,6 +440,32 @@ class GuestBootstrapTests(unittest.TestCase):
             self.assertFalse(task.interrupted)
             export.assert_called_once()
 
+    def test_failed_filesystem_replay_preserves_guest_for_diagnosis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def unavailable(_argv, **_kwargs):
+                raise ExecutionError("guest result is missing")
+            task = SimpleNamespace(artifacts=Path(directory), agent_timeout=15, interrupted=False,
+                checked=unavailable, workspace=SimpleNamespace(container=Container(),
+                    execute=lambda *_args, **_kwargs: {"stdout":b"", "stderr":b"", "exit_code":1},
+                    quiesce_unconfirmed_agent=lambda:None))
+            with patch("asb_guest.prepare_agent", return_value=({"filesystem_replay":"/private/evidence"}, {})):
+                result = execute_agent(task, {}, None, None, None)
+            self.assertTrue(task.interrupted)
+            self.assertTrue(task.preserve_requested)
+            self.assertIn("task preserved", result["metadata"]["execution_failure"])
+
+    def test_successful_filesystem_replay_does_not_request_preservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = {"schema_version":1, "exit_code":0, "tree_quiesced":True}
+            task = SimpleNamespace(artifacts=Path(directory), agent_timeout=15, interrupted=False,
+                checked=lambda *_args, **_kwargs:json.dumps(metadata).encode(),
+                workspace=SimpleNamespace(container=Container(),
+                    execute=lambda *_args, **_kwargs:{"stdout":b"", "stderr":b"", "exit_code":0}))
+            with patch("asb_guest.prepare_agent", return_value=({"filesystem_replay":"/private/evidence"}, {})), \
+                    patch("asb_guest.export_agent_artifacts"):
+                execute_agent(task, {}, None, None, None)
+            self.assertFalse(task.interrupted)
+
     def test_local_forwarding_precedes_install_and_is_closed_on_install_failure_or_success(self):
         for failure in (False, True):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
