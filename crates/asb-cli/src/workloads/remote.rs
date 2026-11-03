@@ -792,6 +792,16 @@ pub(crate) fn launch(
         "ASB_WORKLOAD_TOOL_MODE",
         workload_tool_mode(context.tool_mode),
     );
+    command.env(
+        "ASB_EXPERIMENTAL_SNAPSHOT",
+        if std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        {
+            "1"
+        } else {
+            "0"
+        },
+    );
     command.arg(tool.join(helper));
     if let Some(operation) = operation {
         command.arg(operation);

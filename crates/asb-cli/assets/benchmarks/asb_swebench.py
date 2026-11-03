@@ -889,7 +889,8 @@ def main(argv=None):
         signal.signal(signal.SIGTERM, interrupted)
         with DockerSession() as client:
             return serve(SweBenchTask(client, arguments.catalog, arguments.task, arguments.artifacts,
-                                      tool_mode=os.environ.get("ASB_WORKLOAD_TOOL_MODE", "none")),
+                                      tool_mode=os.environ.get("ASB_WORKLOAD_TOOL_MODE", "none"),
+                                      snapshot=os.environ.get("ASB_EXPERIMENTAL_SNAPSHOT") == "1"),
                          sys.stdin, sys.stdout)
     try:
         if arguments.operation == "catalog":

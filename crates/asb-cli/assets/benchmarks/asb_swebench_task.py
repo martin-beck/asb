@@ -17,10 +17,11 @@ SUBMISSION_WORKTREE = "/testbed"
 
 
 class SweBenchTask:
-    def __init__(self, client, catalog_path, task_id, artifacts, tool_mode="none"):
+    def __init__(self, client, catalog_path, task_id, artifacts, tool_mode="none", snapshot=False):
         if tool_mode not in ("none", "record", "replay"):
             raise ValueError("unsupported workload tool mode")
         self.tool_mode = tool_mode
+        self.snapshot = snapshot and tool_mode != "none"
         self.client, self.catalog_path, self.task_id = client, Path(catalog_path), task_id
         self.artifacts = Path(artifacts).absolute()
         self.workspace = None
@@ -49,7 +50,7 @@ class SweBenchTask:
             if self.source_image_tag is not None:
                 atomic_write(self.artifacts / "source-image.json", encoded(source))
             self.workspace = ManagedDockerWorkspace(self.client, image, self.attempt, CONTAINER_WORKDIR,
-                                                    journal=self.journal)
+                                                    journal=self.journal, snapshot=self.snapshot)
             self.workspace.__enter__()
             base = self.row["base_commit"]
             self.checked(["git", "cat-file", "-e", base + "^{commit}"])

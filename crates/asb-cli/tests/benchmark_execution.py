@@ -339,6 +339,17 @@ class ExecutionTests(unittest.TestCase):
         workspace = RUNTIME.ManagedDockerWorkspace(client, image, "asb-" + "a" * 32, "/task")
         return workspace, container, api, creation
 
+    def test_snapshot_container_options_are_explicit_and_isolated(self):
+        ordinary, _, _, normal_creation = self.workspace()
+        with ordinary:pass
+        self.assertNotIn('cap_add',normal_creation[0])
+        snapshot, _, _, snapshot_creation = self.workspace()
+        snapshot.snapshot=True
+        with snapshot:pass
+        self.assertEqual(snapshot_creation[0]['cap_add'],['SYS_ADMIN'])
+        self.assertEqual(snapshot_creation[0]['devices'],['/dev/loop-control:/dev/loop-control:rwm'])
+        self.assertEqual(snapshot_creation[0]['device_cgroup_rules'],['b 7:* rwm'])
+
     def test_gate_stops_before_attachment_and_preserves_argv_env_and_output(self):
         workspace, container, api, creation = self.workspace()
         with workspace:
