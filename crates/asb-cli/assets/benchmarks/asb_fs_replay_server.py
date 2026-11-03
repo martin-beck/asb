@@ -64,10 +64,11 @@ class ReplayServer:
             connection.settimeout(self.timeout)
             with connection, connection.makefile('rwb', buffering=0) as stream:
                 line = stream.readline(256)
-                match = re.fullmatch(rb'tool-end:([A-Za-z0-9_-]{1,80})\n', line)
+                match = re.fullmatch(rb'tool-(begin|end):([A-Za-z0-9_-]{1,80})\n', line)
                 if match is None:
                     raise RuntimeError('invalid replay boundary')
-                alias = match.group(1).decode('ascii')
+                action = match.group(1).decode('ascii')
+                alias = match.group(2).decode('ascii')
                 with self.coordinator.condition:
                     ends = sorted(sequence for sequence, marker in self.coordinator.ends.items()
                                   if marker == 'tool-end:' + alias
@@ -75,8 +76,21 @@ class ReplayServer:
                     if not ends:
                         raise RuntimeError('no matching recorded tool boundary')
                     end = ends[0]
-                    self.coordinator.invoke(alias, end, self.timeout, lambda: None)
-                stream.write(f'{end}\n'.encode('ascii'))
+                    if action == 'begin':
+                        starts = sorted(sequence for sequence, marker in self.coordinator.ends.items()
+                                        if marker == 'tool-begin:' + alias
+                                        and sequence > self.cursor.sequence
+                                        and sequence not in self.coordinator.begun_starts
+                                        and sequence < end)
+                        if not starts:
+                            raise RuntimeError('no matching recorded parent start')
+                        boundary = starts[0]
+                        self.coordinator.begin(alias, boundary, end, self.timeout, lambda: None)
+                    else:
+                        boundary = end
+                        self.coordinator.invoke(alias, end, self.timeout, lambda: None,
+                                                pre_admitted=end in self.coordinator.pre_admitted)
+                stream.write(f'{boundary}\n'.encode('ascii'))
         except Exception as error:
             print(f'filesystem replay boundary failed: {type(error).__name__}: {error}',
                   file=sys.stderr, flush=True)
@@ -103,7 +117,7 @@ class ReplayServer:
         for worker in self.workers:
             worker.join()
         try:
-            if self.errors or self.coordinator.failure is not None:
+            if self.errors or self.coordinator.failure is not None or self.coordinator.pre_admitted:
                 raise RuntimeError('filesystem replay did not complete')
             self.cursor.finish()
         finally:
