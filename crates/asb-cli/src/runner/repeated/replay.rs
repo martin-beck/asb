@@ -133,7 +133,9 @@ impl Inspection {
             };
             bytes = bytes
                 .checked_add(size)
-                .filter(|bytes| *bytes <= Limits::default().max_total_bytes)
+                .filter(|bytes| {
+                    *bytes <= crate::cassette::ProofLimits::default().max_selected_bytes
+                })
                 .ok_or_else(|| {
                     Error::Input("selected replay inputs exceed aggregate byte budget".into())
                 })?;
