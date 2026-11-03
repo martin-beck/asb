@@ -129,6 +129,13 @@ the proxy measurement to 48.7 seconds. A diagnostic-only run with attribution
 disabled took 41.5 seconds and is not a valid recording; it shows that removing
 attribution alone does not resolve the delay. The packed format is experimental
 and the fixture checks truncated payload rejection; it is not a cassette format.
+The proxy now exposes underlying inode numbers, including shared hard-link
+identities. With `ASB_FUSE_PERF_WARM=1`, the measurement first lets direct Git
+refresh the copied checkout's index: on the tested host the two subsequent
+FUSE status calls took 1.53 and 0.99 seconds. With optional index updates
+disabled, the cold-index FUSE status still took 51.7 seconds. A warm index is
+not a replay solution: each workspace can have different index bytes and the
+agent's startup filesystem accesses still need correctly timed replay.
 
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the

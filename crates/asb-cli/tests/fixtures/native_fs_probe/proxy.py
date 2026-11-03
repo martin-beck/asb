@@ -90,7 +90,7 @@ class Proxy(Operations):
     def getattr(self, path, fh=None):
         try: st = os.lstat(self.path(path))
         except OSError as error: raise FuseOSError(error.errno)
-        return {key: getattr(st, key) for key in ('st_atime','st_ctime','st_gid','st_mode','st_mtime','st_nlink','st_size','st_uid')}
+        return {key: getattr(st, key) for key in ('st_atime','st_ctime','st_gid','st_ino','st_mode','st_mtime','st_nlink','st_size','st_uid','st_blocks','st_blksize')}
     def readdir(self, path, fh): return ['.', '..', *os.listdir(self.path(path))]
     def open(self, path, fi):
         try:
@@ -162,5 +162,5 @@ class Proxy(Operations):
             handle = self.handles.pop(fh.fh)
             os.close(fh.fh)
             self.record('release', path, handle=handle)
-FUSE(Proxy(), str(mount), foreground=True, nothreads=False, raw_fi=True,
+FUSE(Proxy(), str(mount), foreground=True, nothreads=False, raw_fi=True, use_ino=True,
      **({'allow_other': True} if os.environ.get('ASB_PROBE_ALLOW_OTHER') == '1' else {}))

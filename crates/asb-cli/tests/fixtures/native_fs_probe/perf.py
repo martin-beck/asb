@@ -15,7 +15,10 @@ with tempfile.TemporaryDirectory(dir=BASE) as temp:
     backing, mount, evidence = (root / name for name in ('backing','mount','evidence'))
     for path in (backing,mount,evidence): path.mkdir()
     subprocess.run(['cp','-a','--reflink=auto',str(source)+'/.',str(backing)],check=True)
-    env = dict(os.environ, ASB_PROBE_ROOT_TGID=str(os.getpid()), GIT_OPTIONAL_LOCKS='0')
+    env = dict(os.environ, ASB_PROBE_ROOT_TGID=str(os.getpid()))
+    warm = env.get('ASB_FUSE_PERF_WARM') == '1'
+    if warm: env.pop('GIT_OPTIONAL_LOCKS',None)
+    else: env['GIT_OPTIONAL_LOCKS']='0'
     def status(path):
         start=time.monotonic()
         result=subprocess.run(['git','-C',str(path),'status','--porcelain=2','--branch'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True,timeout=120)
@@ -31,6 +34,10 @@ with tempfile.TemporaryDirectory(dir=BASE) as temp:
         mounted=True
         through,through_out=status(mount)
         assert through_out==direct_out, 'Git status changed through the proxy'
+        if warm:
+            warm_time,warm_out=status(mount)
+            assert warm_out==direct_out, 'warm Git status changed through the proxy'
+            print(f'second proxy Git status: {warm_time:.3f}s',flush=True)
     finally:
         if mounted: subprocess.run(['fusermount3','-u',str(mount)],check=True)
         try: process.wait(timeout=5)

@@ -52,6 +52,9 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
             if process.poll() is not None:
                 raise RuntimeError('FUSE process exited before mounting')
             mounted = True
+            assert os.stat(mount / 'one').st_ino == os.stat(backing / 'one').st_ino
+            assert os.stat(mount / 'one').st_ino == os.stat(mount / 'alias').st_ino
+            assert os.stat(mount / 'one').st_nlink == 2
             writer_tids = {}
             def write(name):
                 writer_tids[name] = threading.get_native_id()
