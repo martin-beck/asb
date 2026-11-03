@@ -1596,6 +1596,7 @@ mod artifact_publication_tests {
             "benchmark_fs_attribution.py",
             "benchmark_fs_request_shapes.py",
             "benchmark_fs_direct_prefix.py",
+            "benchmark_fs_direct_coordinator.py",
             "benchmark_fs_compact_reads.py",
             "benchmark_fs_initial_reads.py",
             "benchmark_fs_replay_server.py",
