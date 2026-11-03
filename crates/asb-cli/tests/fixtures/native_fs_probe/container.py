@@ -9,14 +9,25 @@ image=os.environ['ASB_FUSE_TEST_IMAGE']
 agent_fixture=os.environ.get('ASB_HERMES_AGENT_FIXTURE')=='1'
 unrestricted=os.environ.get('ASB_HERMES_UNRESTRICTED_FIXTURE')=='1'
 native_files=os.environ.get('ASB_HERMES_NATIVE_FILES_FIXTURE')=='1'
+swe_baseline=os.environ.get('ASB_SWE_TEST_BASELINE')
+swe_patch=os.environ.get('ASB_SWE_TEST_PATCH')
+if bool(swe_baseline) != bool(swe_patch): raise RuntimeError('provide both SWE baseline and patch')
+if swe_baseline and (not agent_fixture or native_files): raise RuntimeError('SWE patch fixture requires terminal agent fixture')
 node=Path(os.environ['ASB_FIXTURE_NODE']).resolve() if agent_fixture else None
 with tempfile.TemporaryDirectory(dir=base) as tmp, tempfile.TemporaryDirectory(dir=base.parents[2],prefix='asb-s-') as sockets:
  root=Path(tmp)
  for part in ('backing','mount','evidence','baseline'): (root/part).mkdir()
+ if swe_baseline:
+  for part in ('backing','baseline'):
+   subprocess.run(['cp','-a','--reflink=auto',str(Path(swe_baseline).resolve())+'/.',str(root/part)],check=True)
  (root/'backing/source').write_text('original')
  (root/'baseline/source').write_text('original')
+ if swe_baseline:
+  (root/'backing/output').write_text('container')
+  (root/'baseline/output').write_text('container')
  (root/'hermes-home').mkdir(mode=0o700)
  (root/'control').mkdir(mode=0o700)
+ if swe_patch: shutil.copyfile(Path(swe_patch),root/'control/candidate.patch')
  (root/'hooks').mkdir(mode=0o700)
  shutil.copyfile(probe.parents[2]/'assets/scripts/hermes-native-tools.py',root/'hooks/sitecustomize.py')
  if agent_fixture:
@@ -29,7 +40,8 @@ with tempfile.TemporaryDirectory(dir=base) as tmp, tempfile.TemporaryDirectory(d
   with (root/'hooks/sitecustomize.py').open('a') as hook:
    hook.write('\n'+(probe/'hermes_agent_boundary.py').read_text())
   (root/'mock-record').mkdir(mode=0o700)
-  (root/'mock-record/command.txt').write_text("printf fixture > asb-real-agent.txt; printf ran > /tmp/asb-native-agent-executed")
+  command=('git apply /work/control/candidate.patch && printf ran > /tmp/asb-native-agent-executed' if swe_patch else 'printf fixture > asb-real-agent.txt; printf ran > /tmp/asb-native-agent-executed')
+  (root/'mock-record/command.txt').write_text(command)
  script='''set -eu
 export ASB_PROBE_ROOT_TGID=$$
 python3 /probe/proxy.py /work/backing /work/mount /work/evidence > /work/proxy.log 2>&1 &
@@ -38,7 +50,11 @@ trap 'fusermount3 -u /work/mount || true; wait "$p" || true' EXIT
 n=0
 while ! mountpoint -q /work/mount; do n=$((n+1)); [ "$n" -lt 100 ] || exit 42; sleep 0.05; done
 cat /work/mount/source
-printf container > /work/mount/output
+if [ "${ASB_FIXTURE_SWE_PATCH:-0}" != 1 ]; then printf container > /work/mount/output; fi
+if [ "${ASB_FIXTURE_SWE_PATCH:-0}" = 1 ]; then
+  setpriv --reuid "$ASB_HERMES_UID" --regid "$ASB_HERMES_GID" --clear-groups git -C /work/mount symbolic-ref --short HEAD > /work/control/git-branch.log 2>&1 || true
+  setpriv --reuid "$ASB_HERMES_UID" --regid "$ASB_HERMES_GID" --clear-groups git -C /work/mount status --short > /work/control/git-status.log 2>&1 || true
+fi
 if [ "${ASB_FIXTURE_HERMES:-0}" = 1 ]; then
   if [ "${ASB_FIXTURE_AGENT:-0}" = 1 ]; then
     (cd /work/mount; HERMES_HOME=/work/hermes-home TERMINAL_ENV=local PYTHONPATH=/work/hooks:/opt ASB_FIXTURE_AGENT_BOUNDARY=1 ASB_FIXTURE_MOCK_DIR=/work/mock-record ASB_FIXTURE_LLM_CASSETTE=/work/control/llm-record.jsonl ASB_FIXTURE_EFFECT_SOCKET=/work/control/record.sock ASB_HERMES_NATIVE_MODE=record ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl ASB_HERMES_NATIVE_PROGRESS=/work/control/record-progress.json setpriv --reuid "$ASB_HERMES_UID" --regid "$ASB_HERMES_GID" --clear-groups /bin/sh /probe/hermes_agent_fixture.sh)
@@ -56,6 +72,9 @@ fi
  hermes_install=os.environ.get('ASB_HERMES_TEST_INSTALL')
  if native_files and not unrestricted: raise RuntimeError('file-tool fixture requires unrestricted fixture')
  if unrestricted and not agent_fixture: raise RuntimeError('unrestricted fixture requires agent fixture')
+ if swe_patch:
+  position=cmd.index('--env')
+  cmd[position:position]=['--env','ASB_FIXTURE_SWE_PATCH=1']
  if native_files:
   position=cmd.index('--env')
   cmd[position:position]=['--env','ASB_FIXTURE_NATIVE_FILES=1','--env','ASB_FIXTURE_NATIVE_FILE_TRANSCRIPT=/work/control/files.jsonl']
@@ -95,14 +114,20 @@ fi
  print('stdout:',result.stdout[:200])
  print('stderr:',result.stderr[:500])
  print('file:',(root/'backing/output').read_text() if (root/'backing/output').exists() else 'missing')
+ if swe_patch:
+  print('git branch probe:',(root/'control/git-branch.log').read_text()[-400:])
+  print('git status probe:',(root/'control/git-status.log').read_text()[-400:])
  if not (root/'evidence/events.jsonl').exists(): raise RuntimeError('container produced no operation log')
  if (root/'evidence/events.jsonl').exists():
   events=[json.loads(x) for x in (root/'evidence/events.jsonl').read_text().splitlines()]
-  assert any(e['op']=='write' and e['path']=='/output' for e in events)
-  print('recorded operations:',[(e['op'],e['path']) for e in events])
+  if not swe_patch: assert any(e['op']=='write' and e['path']=='/output' for e in events)
+  from collections import Counter
+  print('recorded operation counts:',dict(Counter(e['op'] for e in events)))
   if hermes_install:
    expected_files=('asb-real-agent.txt',) if agent_fixture else ('first','second')
-   if native_files:
+   if swe_patch:
+    assert any(e['op']=='marker' and e['marker']=='tool-end:one' for e in events)
+   elif native_files:
     assert (root/'backing/asb-real-agent.txt').read_text()=='fixture'
     assert (root/'backing/asb-real-agent.txt').stat().st_uid==os.getuid()
     assert (root/'backing/asb-real-agent.txt').stat().st_gid==os.getgid()
@@ -144,7 +169,10 @@ fi
        assert stream.readline().decode().strip()=='tool-end:'+name
        cursor.admit(name)
        assert cursor.apply_until(ends['tool-end:'+name])
-       if native_files:
+       if swe_patch:
+        diff=subprocess.run(['git','-C',str(destination),'diff','--name-only'],capture_output=True,text=True,check=True,env=dict(os.environ,GIT_OPTIONAL_LOCKS='0'))
+        assert diff.stdout.strip()
+       elif native_files:
         assert (destination/'asb-real-agent.txt').read_text()==('fixture' if name=='patch' else 'before')
        elif agent_fixture:
         assert (destination/'asb-real-agent.txt').read_text()=='fixture'
@@ -152,13 +180,15 @@ fi
         assert (destination/'first').read_text()=='first'
         assert (destination/'second').exists()==(name=='two')
        stream.write((str(cursor.sequence)+'\n').encode())
-    except BaseException as error: errors.append(error)
+    except BaseException as error:
+     errors.append(error)
+     (root/f'control/replay-server-{index}.error').write_text(f'{type(error).__name__}: {error}')
    server=threading.Thread(target=serve,daemon=True); server.start()
    replay_name='asb-hermes-replay-'+uuid.uuid4().hex
    replay_mock=root/f'mock-replay-{index}'
    if agent_fixture:
     replay_mock.mkdir(mode=0o700)
-    (replay_mock/'command.txt').write_text('printf fixture > asb-real-agent.txt; printf ran > /tmp/asb-native-agent-executed')
+    (replay_mock/'command.txt').write_text(command)
     shutil.copyfile(root/'control/llm-record.jsonl',root/f'control/llm-replay-{index}.jsonl')
    replay_cmd=['docker','run','--rm','--name',replay_name,'--network','none',
                '--mount',f'type=bind,src={root},dst=/work',
@@ -177,6 +207,9 @@ fi
                '--entrypoint','/asb-hermes/venv/bin/python',image,'/probe/hermes_real_terminal.py']
    if not agent_fixture:
     replay_cmd[2:2]=['--user',f'{os.getuid()}:{os.getgid()}']
+   if swe_patch:
+    position=replay_cmd.index('--env')
+    replay_cmd[position:position]=['--env','ASB_FIXTURE_SWE_PATCH=1']
    if native_files:
     position=replay_cmd.index('--env')
     replay_cmd[position:position]=['--env','ASB_FIXTURE_NATIVE_FILES=1',
@@ -209,6 +242,8 @@ fi
      assert tape_progress['consumed']==tape_progress['total'] and tape_progress['total']>0
     assert (destination/'source').read_text()=='original'
     assert (destination/'output').read_text()=='container'
+    if swe_patch:
+     subprocess.run(['git','-C',str(destination),'apply','--reverse','--check',str(root/'control/candidate.patch')],check=True,env=dict(os.environ,GIT_OPTIONAL_LOCKS='0'))
    except BaseException:
     subprocess.run(['docker','rm','-f',replay_name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
     retained=base/('replay-failure-'+uuid.uuid4().hex)
@@ -217,6 +252,8 @@ fi
      for name in ('agent.log','tape.log','mismatch.json'):
       source=replay_mock/name
       if source.is_file(): shutil.copyfile(source,retained/name)
+    server_error=root/f'control/replay-server-{index}.error'
+    if server_error.is_file(): shutil.copyfile(server_error,retained/'server.error')
     print(f'Replay fixture diagnostics retained in {retained}',flush=True)
     raise
    finally:

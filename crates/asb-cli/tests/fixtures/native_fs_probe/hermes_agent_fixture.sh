@@ -31,7 +31,11 @@ set -- -z 'Create the requested fixture file.' --provider openai-api --model fix
 if [ "${ASB_FIXTURE_UNRESTRICTED:-0}" != 1 ]; then set -- "$@" --toolsets terminal; fi
 timeout 1800 /asb-hermes/venv/bin/python -c 'import sys; from hermes_cli.main import main; sys.exit(main())' \
   "$@" --usage-file "$ASB_FIXTURE_MOCK_DIR/usage.json" > "$ASB_FIXTURE_MOCK_DIR/agent.log" 2>&1
-test "$(cat asb-real-agent.txt)" = fixture
+if [ "${ASB_FIXTURE_SWE_PATCH:-0}" = 1 ]; then
+  test -n "$(git diff --name-only)"
+else
+  test "$(cat asb-real-agent.txt)" = fixture
+fi
 if [ "${ASB_FIXTURE_NATIVE_FILES:-0}" != 1 ]; then
   if [ "$ASB_HERMES_NATIVE_MODE" = record ]; then
     test -f /tmp/asb-native-agent-executed

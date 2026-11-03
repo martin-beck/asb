@@ -111,6 +111,17 @@ other native tools or a complete SWE-bench task. During this test the proxy
 preserves the caller UID and GID on new files and directories when it runs as
 root; other ownership and metadata semantics remain unqualified.
 
+For a real-checkout diagnostic, `ASB_SWE_TEST_BASELINE` and
+`ASB_SWE_TEST_PATCH` select a local trial checkout and a previously resolved
+patch. The mock provider directs Hermes to apply that patch; this is a
+deterministic replay test, not evidence that the agent solved the task. The
+test currently fails: FUSE overhead can cause Hermes's Git-status snapshot to
+time out and differ from replay, and replaying startup operations after the
+agent has already accessed its plain workspace can change `.git/index` reads.
+The fixture retains per-replica diagnostics on failure. Fixes need to preserve
+the agent's startup behavior and apply operations at the correct time; do not
+normalize away these differences or treat the patch as a substitute for replay.
+
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the
 recorded response to four clients but does not reproduce a file written by the

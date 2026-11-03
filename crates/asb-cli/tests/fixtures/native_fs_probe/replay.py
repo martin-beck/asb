@@ -15,7 +15,7 @@ class Replay:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=False)
         if baseline is not None:
-            subprocess.run(['/bin/cp', '-a', str(Path(baseline)) + '/.', str(self.root)], check=True)
+            subprocess.run(['/bin/cp', '-a', '--reflink=auto', str(Path(baseline)) + '/.', str(self.root)], check=True)
         self.events = (self.evidence / 'events.jsonl').open(encoding='utf-8')
         self.handles = {}
         self.sequence = 0
@@ -48,7 +48,10 @@ class Replay:
                     if self.admitted.get(tool, 0) == 0:
                         return False
                     self.admitted[tool] -= 1
-            self.apply(event)
+            try:
+                self.apply(event)
+            except Exception as error:
+                raise RuntimeError(f'recorded operation {sequence} ({event["op"]}, {event.get("path")}) failed: {error}') from error
             self.sequence = sequence
             self.pending = None
 
