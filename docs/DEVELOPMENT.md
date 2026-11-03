@@ -55,6 +55,10 @@ and end of each real bash invocation and does not generate workspace snapshot
 effects. A missing marker is recorded as an unreplayable tool failure while the
 original tool still runs. This provides boundaries for a future coordinator;
 production filesystem replay remains unavailable.
+The OpenHands terminal adapter also emits begin/end markers around its real
+terminal delegate without removing its other declared tools. A marker failure
+is reported when its recording closes. This does not capture other OpenHands
+tools or establish full OpenHands replay support.
 The experimental per-replica replay server accepts validated tool-end markers
 and acknowledges each only after applying its recorded operations. Offline
 tests exercise four isolated workspaces and reject missing or invalid calls.

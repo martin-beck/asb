@@ -10,11 +10,31 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
 from typing import Any
 
 from openhands.sdk.tool import ToolExecutor
+
+
+def filesystem_marker(action: str, alias: str) -> bool:
+    """Annotate the independent filesystem journal around a terminal call."""
+    path = os.environ.get("ASB_FS_MARKER_SOCKET")
+    if not path:
+        return True
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(5)
+            connection.connect(path)
+            connection.sendall(
+                f"tool-{action}:{alias}:{os.getpid()}:{threading.get_native_id()}\n".encode("ascii")
+            )
+            with connection.makefile("rb") as response:
+                return response.readline(32).strip().isdigit()
+    except (OSError, UnicodeError):
+        return False
 
 
 def with_terminal_executor(agent: Any, executor: Any) -> Any:
@@ -44,6 +64,9 @@ class NativeTerminalExecutor(ToolExecutor):
 
     def __init__(self, bridge: str, mode: str, sidecar: str, launch_json: str) -> None:
         self._mode = mode
+        self._marker_lock = threading.Lock()
+        self._marker_count = 0
+        self._marker_failed = False
         self._delegate = None
         if mode == "record":
             from openhands.tools.terminal.impl import TerminalExecutor
@@ -67,7 +90,17 @@ class NativeTerminalExecutor(ToolExecutor):
             "timeout": action.timeout, "reset": action.reset,
         }
         if self._delegate is not None:
-            observation = self._delegate(action)
+            with self._marker_lock:
+                self._marker_count += 1
+                alias = f"openhands-{self._marker_count}"
+            began = filesystem_marker("begin", alias)
+            try:
+                observation = self._delegate(action)
+            finally:
+                ended = filesystem_marker("end", alias)
+                if not began or not ended:
+                    with self._marker_lock:
+                        self._marker_failed = True
             request = {"kind": "record_terminal", "schema_version": 1,
                        "action": request, "observation": {
                            "kind": "terminal_observation", "schema_version": 1,
@@ -106,6 +139,8 @@ class NativeTerminalExecutor(ToolExecutor):
         status = self._bridge.wait()
         if status != 0:
             raise RuntimeError("ASB native terminal bridge did not consume the sealed replay")
+        if self._marker_failed:
+            raise RuntimeError("OpenHands filesystem recording boundary was unavailable")
 
 
 class UnrecordedTerminalExecutor(ToolExecutor):

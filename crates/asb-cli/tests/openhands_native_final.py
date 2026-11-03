@@ -1,10 +1,16 @@
 """Offline regression for the native OpenHands launcher response boundary."""
 import importlib.util
+import io
 import json
 import pathlib
+import os
+import socket
 import sys
+import tempfile
 import types
+import threading
 import unittest
+from unittest.mock import patch
 
 
 def module(name):
@@ -57,6 +63,92 @@ def message(source, text):
     return MessageEvent(source=source, llm_message=Event(role='assistant' if source == 'agent' else 'user', content=[TextContent(text=text)]))
 
 class NativeFinalTest(unittest.TestCase):
+    def test_terminal_marker_uses_recorder_socket(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(pathlib.Path(directory) / 'marker.sock')
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(path); listener.listen(1)
+            messages = []
+            def serve():
+                with listener.accept()[0] as connection:
+                    messages.append(connection.recv(256).decode('ascii').strip())
+                    connection.sendall(b'7\n')
+            thread = threading.Thread(target=serve, daemon=True); thread.start()
+            try:
+                with patch.dict(os.environ, {'ASB_FS_MARKER_SOCKET': path}):
+                    self.assertTrue(launcher.filesystem_marker('begin', 'openhands-1'))
+                thread.join(timeout=5)
+                self.assertFalse(thread.is_alive())
+                self.assertRegex(messages[0], r'^tool-begin:openhands-1:\d+:\d+$')
+            finally:
+                listener.close()
+
+    def test_terminal_wrapper_preserves_other_declared_tools(self):
+        terminal = sys.modules.get('openhands.tools.terminal') or module('openhands.tools.terminal')
+        terminal.TerminalTool = type('TerminalTool', (), {'name': 'terminal'})
+        sys.modules['openhands.sdk'].Tool = lambda name, params: Event(name=name, params=params)
+        other = Event(name='file_editor', params={'setting': 'retained'})
+        agent = Event(tools=[Event(name='terminal', params={}), other])
+        agent.model_copy = lambda update: Event(**update)
+        replacement = object()
+        result = launcher.with_terminal_executor(agent, replacement)
+        self.assertIs(result.tools[1], other)
+        self.assertIs(result.tools[0].params['executor'], replacement)
+
+    def test_terminal_recording_marks_real_delegate_without_replacing_other_tools(self):
+        module('openhands.tools'); terminal = module('openhands.tools.terminal')
+        metadata = module('openhands.tools.terminal.metadata')
+        terminal.TerminalObservation = Event
+        metadata.CmdOutputMetadata = Event
+        executor = launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
+        executor._marker_lock = threading.Lock()
+        executor._marker_count = 0
+        executor._marker_failed = False
+        events = []
+        observation = Event(text='done', is_error=False, command='echo ok', exit_code=0,
+                            timeout=False, metadata=Event(model_dump=lambda: {}))
+        class Delegate:
+            def __call__(self, action):
+                events.append('execute')
+                return observation
+            def close(self): pass
+        class Bridge:
+            def __init__(self):
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO('{"kind":"ack","schema_version":1}\n')
+            def wait(self): return 0
+        executor._delegate = Delegate()
+        executor._bridge = Bridge()
+        action = Event(command='echo ok', is_input=False, timeout=None, reset=False)
+        with patch.object(launcher, 'filesystem_marker', side_effect=lambda op, alias: events.append((op, alias)) or True):
+            self.assertIs(executor(action), observation)
+        self.assertEqual(events, [('begin', 'openhands-1'), 'execute', ('end', 'openhands-1')])
+        executor.close()
+
+    def test_marker_failure_does_not_skip_terminal_and_fails_recording_on_close(self):
+        terminal = sys.modules.get('openhands.tools.terminal') or module('openhands.tools.terminal')
+        metadata = sys.modules.get('openhands.tools.terminal.metadata') or module('openhands.tools.terminal.metadata')
+        terminal.TerminalObservation = Event
+        metadata.CmdOutputMetadata = Event
+        executor = launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
+        executor._marker_lock = threading.Lock(); executor._marker_count = 0; executor._marker_failed = False
+        observation = Event(text='done', is_error=False, command='true', exit_code=0,
+                            timeout=False, metadata=Event(model_dump=lambda: {}))
+        class Delegate:
+            def __call__(self, action): return observation
+            def close(self): pass
+        class Bridge:
+            def __init__(self):
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO('{"kind":"ack","schema_version":1}\n')
+            def wait(self): return 0
+        executor._delegate = Delegate(); executor._bridge = Bridge()
+        action = Event(command='true', is_input=False, timeout=None, reset=False)
+        with patch.object(launcher, 'filesystem_marker', return_value=False):
+            self.assertIs(executor(action), observation)
+        with self.assertRaisesRegex(RuntimeError, 'boundary was unavailable'):
+            executor.close()
+
     def test_completed_message_and_finish_action(self):
         self.assertEqual(launcher.final_agent_text(conversation([message('agent', 'answer')])), 'answer')
         finish = ActionEvent(source='agent', tool_name='finish', action=FinishAction(message='done'))
