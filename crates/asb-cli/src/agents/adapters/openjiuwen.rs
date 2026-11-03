@@ -100,6 +100,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_estimated_disk_mib(768)
+.with_auxiliary_plan(auxiliary_recording_plan)
 .with_auxiliary_endpoints(configure_auxiliary_endpoints)
 .with_replay_credential_vars(&["OPENJIUWEN_API_KEY"])
 .with_output_usage(output_usage)
@@ -357,6 +358,40 @@ fn configure_auxiliary_endpoints(
     Ok(())
 }
 
+fn auxiliary_recording_plan(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<super::super::AuxiliaryRecordingPlan>, Error> {
+    let Some(base) = lookup("EMBEDDING_BASE_URL") else {
+        return Ok(Vec::new());
+    };
+    let base = base.trim();
+    if base.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (scheme, remainder) = base
+        .split_once("://")
+        .ok_or_else(|| Error::Input("OpenJiuwen embedding endpoint must be an HTTP URL".into()))?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err(Error::Input(
+            "OpenJiuwen embedding endpoint must be an HTTP URL".into(),
+        ));
+    }
+    // The client constructs and authenticates the complete request URL.
+    // The tape only needs the origin; forwarding the path separately avoids
+    // duplicating provider prefixes and excludes URL userinfo from its argv.
+    let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    if host.is_empty() {
+        return Err(Error::Input(
+            "OpenJiuwen embedding endpoint has no host".into(),
+        ));
+    }
+    Ok(vec![super::super::AuxiliaryRecordingPlan {
+        name: "embedding",
+        upstream: format!("{}://{host}", scheme.to_ascii_lowercase()),
+    }])
+}
+
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
     AgentArtifacts {
         native_tool_sidecar: context
@@ -370,6 +405,52 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auxiliary_plan_keeps_the_selected_origin_without_url_credentials() {
+        let adapter = crate::agents::find("openjiuwen").unwrap();
+        for (input, expected) in [
+            ("https://provider.invalid/v1", "https://provider.invalid"),
+            (
+                "HTTP://user:fixture-secret@[::1]:1234/api?x=y",
+                "http://[::1]:1234",
+            ),
+        ] {
+            let plan = adapter
+                .auxiliary_recording_plan(&|name| {
+                    (name == "EMBEDDING_BASE_URL").then(|| input.to_owned())
+                })
+                .unwrap();
+            assert_eq!(plan.len(), 1);
+            assert_eq!(plan[0].name, "embedding");
+            assert_eq!(plan[0].upstream, expected);
+            assert!(!plan[0].upstream.contains("fixture-secret"));
+        }
+        assert!(
+            adapter
+                .auxiliary_recording_plan(&|_| None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            adapter
+                .auxiliary_recording_plan(&|_| Some(" ".into()))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            adapter
+                .auxiliary_recording_plan(&|_| Some("not-a-url".into()))
+                .is_err()
+        );
+        assert!(
+            crate::agents::find("pi")
+                .unwrap()
+                .auxiliary_recording_plan(&|_| Some("https://example.invalid".into()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn auxiliary_embedding_endpoint_is_owned_by_the_adapter() {
         let agent = crate::agents::find("openjiuwen").unwrap();
