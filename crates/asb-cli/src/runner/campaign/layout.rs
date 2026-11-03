@@ -227,13 +227,14 @@ impl Plan {
                 .filter(|bytes| *bytes <= crate::cassette::Limits::default().max_total_bytes)
                 .ok_or_else(|| invalid("selected inputs exceed aggregate byte budget"))?;
             let mut auxiliary_kinds = BTreeSet::new();
-            for auxiliary in &input.auxiliary_http {
+            for auxiliary in &input.auxiliary_recordings {
                 let id = input
                     .track
                     .filter(|_| bundled)
                     .ok_or_else(|| invalid("auxiliary input requires a selected bundle track"))?;
-                if !auxiliary.kind.starts_with("aux-http-")
-                    || auxiliary.kind.len() <= "aux-http-".len()
+                if !super::auxiliary_recording_kind(&auxiliary.kind)
+                    || auxiliary.kind == "aux-http-"
+                    || auxiliary.kind == "aux-meta-"
                     || auxiliary.kind.len() > 64
                     || !auxiliary.kind.bytes().all(|byte| {
                         byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'

@@ -174,7 +174,7 @@ fn plan(mode: ExecutionMode, concurrency: usize, repeat: u64, measured: bool) ->
                 native_trace: None,
                 native_tool: None,
                 mcp_relays: Vec::new(),
-                auxiliary_http: Vec::new(),
+                auxiliary_recordings: Vec::new(),
                 bytes: 42,
                 sha256: "a".repeat(64),
             });
@@ -235,16 +235,16 @@ fn selected(mut plan: Plan, bundled: bool) -> Plan {
 }
 
 #[test]
-fn auxiliary_http_inputs_are_bound_to_the_selected_bundle_track() {
+fn auxiliary_recordings_inputs_are_bound_to_the_selected_bundle_track() {
     let mut value = selected(plan(ExecutionMode::Replay, 1, 4, false), true);
-    value.replay_inputs[0]
-        .auxiliary_http
-        .push(crate::runner::campaign::AuxiliaryHttpInput {
+    value.replay_inputs[0].auxiliary_recordings.push(
+        crate::runner::campaign::AuxiliaryRecordingInput {
             kind: "aux-http-embedding".into(),
             private: "inputs/aux-http-embedding-64.jsonl".into(),
             bytes: 7,
             sha256: "a".repeat(64),
-        });
+        },
+    );
     value.validate_layout().unwrap();
     let wire = serde_json::to_value(value).unwrap();
     for (field, bad) in [
@@ -253,12 +253,12 @@ fn auxiliary_http_inputs_are_bound_to_the_selected_bundle_track() {
         ("sha256", json!("invalid")),
     ] {
         let mut changed = wire.clone();
-        changed["replay_inputs"][0]["auxiliary_http"][0][field] = bad;
+        changed["replay_inputs"][0]["auxiliary_recordings"][0][field] = bad;
         rejects(changed);
     }
     let mut duplicated = wire;
-    let item = duplicated["replay_inputs"][0]["auxiliary_http"][0].clone();
-    duplicated["replay_inputs"][0]["auxiliary_http"]
+    let item = duplicated["replay_inputs"][0]["auxiliary_recordings"][0].clone();
+    duplicated["replay_inputs"][0]["auxiliary_recordings"]
         .as_array_mut()
         .unwrap()
         .push(item);

@@ -148,7 +148,7 @@ fn selected_recorder_identity_survives_archive_staging_and_saved_plan() {
 }
 
 #[test]
-fn selected_auxiliary_http_is_streamed_with_its_track_and_costed_once() {
+fn selected_auxiliary_recordings_are_streamed_with_their_track_and_costed_once() {
     let fixture = Fixture::new();
     fs::create_dir(fixture.0.join(".asb")).unwrap();
     fs::write(
@@ -163,17 +163,24 @@ fn selected_auxiliary_http_is_streamed_with_its_track_and_costed_once() {
     let path = fixture.0.join("benchmark.toml");
     fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
     let payload = b"{\"fixture\":true}\n";
+    let metadata = b"{\"schema\":1}\n";
     let mut source = manifest(1);
     source.tracks[0].artifacts.push(Artifact {
         kind: "aux-http-embedding".into(),
         bytes: payload.len() as u64,
         sha256: digest(payload),
     });
+    source.tracks[0].artifacts.push(Artifact {
+        kind: "aux-meta-embedding".into(),
+        bytes: metadata.len() as u64,
+        sha256: digest(metadata),
+    });
     let bundle = fixture.zip(
         &source,
         &[
             ("tracks/1.jsonl", b"{}\n"),
             ("artifacts/1/aux-http-embedding.jsonl", payload),
+            ("artifacts/1/aux-meta-embedding.jsonl", metadata),
         ],
     );
     let inspection = crate::runner::repeated::Inspection::prepare_selected(
@@ -192,7 +199,7 @@ fn selected_auxiliary_http_is_streamed_with_its_track_and_costed_once() {
     .unwrap();
     assert_eq!(
         inspection.input_cost().unwrap().bytes,
-        3 + payload.len() as u64
+        3 + payload.len() as u64 + metadata.len() as u64
     );
     drop(crate::runner::repeated::publish_campaign(inspection.observe().unwrap()).unwrap());
     let root = fs::read_dir(fixture.0.join("results/asb-executions"))
@@ -210,9 +217,13 @@ fn selected_auxiliary_http_is_streamed_with_its_track_and_costed_once() {
             .iter()
             .all(|slot| slot.replay_input == Some(0))
     );
-    let auxiliary = &restored.plan.replay_inputs[0].auxiliary_http;
-    assert_eq!(auxiliary.len(), 1);
+    let auxiliary = &restored.plan.replay_inputs[0].auxiliary_recordings;
+    assert_eq!(auxiliary.len(), 2);
     assert_eq!(fs::read(root.join(&auxiliary[0].private)).unwrap(), payload);
+    assert_eq!(
+        fs::read(root.join(&auxiliary[1].private)).unwrap(),
+        metadata
+    );
 }
 
 #[cfg(unix)]
