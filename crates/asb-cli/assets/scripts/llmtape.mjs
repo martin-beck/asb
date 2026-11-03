@@ -10,7 +10,7 @@ import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { quiesceNetworkRequests, networkFetch } from "./network-fetch.mjs";
 import { CaptureSession, completedSseResponse, responseDelivery } from "./capture-session.mjs";
-import { normalizeOpenAiSseWorkspacePaths, normalizeWorkspacePaths } from "./tape-normalization.mjs";
+import { normalizeOpenAiSseWorkspacePaths, normalizeWorkspacePaths, replaceExactWorkspace } from "./tape-normalization.mjs";
 
 const MAX_BODY = 16 * 1024 * 1024;
 const MAX_DELAY_MS = 60 * 60 * 1000;
@@ -131,11 +131,12 @@ async function replayResponse(response, interaction) {
   // before replay so agents never execute commands in the record directory.
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const body = workspace
-    ? normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(
+    ? replaceExactWorkspace(normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(
         interaction.response.body || "",
         "<asb-workspace>",
         workspace,
-      ), "<asb-workspace>", workspace).replaceAll("<asb-workspace>", workspace)
+        true,
+      ), "<asb-workspace>", workspace, true), "<asb-workspace>", workspace)
     : interaction.response.body || "";
   // Request matching intentionally redacts provider-generated tool-call IDs,
   // but Claude requires IDs to be unique across turns. Give each replayed
@@ -346,9 +347,10 @@ function normalizePytestTestMapsAddress(value) {
 // matching and must never rewrite dates, UUIDs or other model-generated data.
 function normalizeRecordedResponse(body) {
   const workspace = process.env.ASB_TAPE_WORKSPACE;
-  return normalizeWorkspacePaths(
-    normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace), workspace)
-      .replaceAll(workspace || "\u0000", "<asb-workspace>"),
+  const marker = "<asb-workspace>";
+  const fragmented = normalizeSseWorkspaceFragments(body, workspace, marker, true);
+  return replaceExactWorkspace(
+    normalizeOpenAiSseWorkspacePaths(fragmented, workspace, marker, true), workspace, marker,
   );
 }
 
@@ -674,7 +676,7 @@ function normalizeCassetteBody(body, url = "") {
 // event boundaries and cannot be normalized by a regex over the raw SSE text.
 // Reassemble each contiguous content block, normalize it, and emit the result
 // in the first fragment while retaining the event boundaries for the client.
-function normalizeSseWorkspaceFragments(body, workspace, replacement = "<asb-workspace>") {
+function normalizeSseWorkspaceFragments(body, workspace, replacement = "<asb-workspace>", exactOnly = false) {
   if (!body.includes("partial_json")) return body;
   const lines = body.split(/(?<=\n)/);
   const groups = [];
@@ -698,7 +700,7 @@ function normalizeSseWorkspaceFragments(body, workspace, replacement = "<asb-wor
     }
   }
   for (const group of groups) {
-    const value = normalizeWorkspaceText(group.parts.join(""), workspace, replacement);
+    const value = normalizeWorkspaceText(group.parts.join(""), workspace, replacement, exactOnly);
     let cursor = 0;
     for (let offset = 0; offset < group.indices.length; offset += 1) {
       const lineIndex = group.indices[offset];
@@ -716,8 +718,9 @@ function normalizeSseWorkspaceFragments(body, workspace, replacement = "<asb-wor
   return lines.join("");
 }
 
-function normalizeWorkspaceText(value, workspace, replacement = "<asb-workspace>") {
-  return normalizeWorkspacePaths(workspace ? value.replaceAll(workspace, replacement) : value, replacement);
+function normalizeWorkspaceText(value, workspace, replacement = "<asb-workspace>", exactOnly = false) {
+  const exact = replaceExactWorkspace(value, workspace, replacement);
+  return exactOnly ? exact : normalizeWorkspacePaths(exact, replacement);
 }
 
 function requestKey(request) {
