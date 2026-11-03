@@ -1,7 +1,7 @@
 //! llmtape provider-response tool-call extraction.
 use crate::proxy::tool_calls::ToolCall;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 const MAX_EVENTS: usize = 16_384;
 
@@ -13,6 +13,7 @@ pub(crate) fn from_cassette(path: &Path) -> Option<Vec<ToolCall>> {
         .map(serde_json::from_str::<Value>)
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
+    let timing_index = TimingIndex::new(&interactions);
     let mut calls = Vec::new();
     for (index, interaction) in interactions.iter().enumerate() {
         let response = interaction
@@ -24,7 +25,7 @@ pub(crate) fn from_cassette(path: &Path) -> Option<Vec<ToolCall>> {
             .pointer("/timing/response_observed_unix_ms")
             .and_then(Value::as_u64)
             .map(u128::from);
-        collect_response(response, timestamp, &interactions[index + 1..], &mut calls);
+        collect_response(response, timestamp, (&timing_index, index), &mut calls);
         if calls.len() >= MAX_EVENTS {
             break;
         }
@@ -35,7 +36,7 @@ pub(crate) fn from_cassette(path: &Path) -> Option<Vec<ToolCall>> {
 fn collect_response(
     response: &str,
     timestamp: Option<u128>,
-    following: &[Value],
+    following: (&TimingIndex, usize),
     calls: &mut Vec<ToolCall>,
 ) {
     // Call identifiers are only unique within a provider response.  llmtape
@@ -80,7 +81,7 @@ fn collect_response(
 fn collect(
     value: &Value,
     timestamp: Option<u128>,
-    following: &[Value],
+    following: (&TimingIndex, usize),
     streamed: bool,
     response_call_ids: &mut HashSet<String>,
     calls: &mut Vec<ToolCall>,
@@ -160,7 +161,7 @@ fn record(
     value: &Value,
     fallback: &str,
     timestamp: Option<u128>,
-    following: &[Value],
+    following: (&TimingIndex, usize),
     streamed: bool,
     response_call_ids: &mut HashSet<String>,
     calls: &mut Vec<ToolCall>,
@@ -228,39 +229,71 @@ fn record(
     });
 }
 
-/// Return timing only for the request that actually carries this call's result.
-/// An unrelated provider exchange may occur between a call and its result.
-fn execution_duration(id: &str, timestamp: Option<u128>, following: &[Value]) -> Option<u128> {
-    let start = timestamp?;
-    following.iter().find_map(|interaction| {
-        let request = interaction
-            .pointer("/request/body")
-            .and_then(Value::as_str)?;
-        request_references_call(request, id).then_some(())?;
-        let end = interaction
-            .pointer("/timing/request_received_unix_ms")
-            .and_then(Value::as_u64)
-            .map(u128::from)?;
-        end.checked_sub(start)
-    })
-}
+// Parse each following request once, then look up the earliest later result.
+// IDs may repeat across responses; the interaction index preserves that boundary.
+struct TimingIndex(HashMap<String, Vec<(usize, u128)>>);
 
-fn request_references_call(request: &str, id: &str) -> bool {
-    serde_json::from_str::<Value>(request)
-        .ok()
-        .is_some_and(|value| value_references_call(&value, id))
-}
-
-fn value_references_call(value: &Value, id: &str) -> bool {
-    match value {
-        Value::Array(values) => values.iter().any(|value| value_references_call(value, id)),
-        Value::Object(values) => values.iter().any(|(key, value)| {
-            matches!(key.as_str(), "tool_call_id" | "call_id" | "tool_use_id")
-                && value.as_str() == Some(id)
-                || value_references_call(value, id)
-        }),
-        _ => false,
+impl TimingIndex {
+    fn new(interactions: &[Value]) -> Self {
+        let mut result: HashMap<String, Vec<(usize, u128)>> = HashMap::new();
+        for (index, interaction) in interactions.iter().enumerate() {
+            let Some(time) = interaction
+                .pointer("/timing/request_received_unix_ms")
+                .and_then(Value::as_u64)
+            else {
+                continue;
+            };
+            let Some(request) = interaction.pointer("/request/body").and_then(Value::as_str) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<Value>(request) else {
+                continue;
+            };
+            let mut ids = HashSet::new();
+            collect_result_ids(&value, &mut ids);
+            for id in ids {
+                result
+                    .entry(id)
+                    .or_default()
+                    .push((index, u128::from(time)));
+            }
+        }
+        Self(result)
     }
+}
+
+fn collect_result_ids(value: &Value, ids: &mut HashSet<String>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_result_ids(value, ids);
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                if matches!(key.as_str(), "tool_call_id" | "call_id" | "tool_use_id")
+                    && let Some(id) = value.as_str()
+                {
+                    ids.insert(id.to_owned());
+                }
+                collect_result_ids(value, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn execution_duration(
+    id: &str,
+    timestamp: Option<u128>,
+    following: (&TimingIndex, usize),
+) -> Option<u128> {
+    let start = timestamp?;
+    let entries = following.0.0.get(id)?;
+    let first = entries.partition_point(|(index, _)| *index <= following.1);
+    entries[first..]
+        .iter()
+        .find_map(|(_, end)| end.checked_sub(start))
 }
 
 fn classify(name: Option<&str>, arguments: Option<&Value>) -> Vec<String> {
@@ -363,6 +396,28 @@ fn is_tool_kind(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timing_index_uses_later_matching_results_and_skips_invalid_timestamps() {
+        let request = |time: Option<u64>, body: &str| serde_json::json!({"request":{"body":body},"timing":{"request_received_unix_ms":time}});
+        let events = vec![
+            request(Some(5), r#"{"tool_call_id":"same"}"#),
+            request(None, r#"{"tool_call_id":"same"}"#),
+            request(Some(9), "invalid"),
+            request(Some(8), r#"{"tool_use_id":"same"}"#),
+            request(
+                Some(25),
+                r#"{"nested":[{"call_id":"same"},{"tool_call_id":"other"}]}"#,
+            ),
+            request(Some(35), r#"{"tool_call_id":"same"}"#),
+        ];
+        let index = TimingIndex::new(&events);
+        assert_eq!(execution_duration("same", Some(10), (&index, 0)), Some(15));
+        assert_eq!(execution_duration("same", Some(26), (&index, 4)), Some(9));
+        assert_eq!(execution_duration("other", Some(10), (&index, 4)), None);
+        assert_eq!(execution_duration("missing", Some(10), (&index, 0)), None);
+        assert_eq!(execution_duration("same", None, (&index, 0)), None);
+    }
 
     #[cfg(unix)]
     #[test]
