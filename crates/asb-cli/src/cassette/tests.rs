@@ -772,6 +772,103 @@ fn auxiliary_artifact_stream_checks_checksum_and_limits_chunk_size() {
 }
 
 #[test]
+fn publication_streams_artifacts_larger_than_in_memory_track_limit() {
+    let fixture = Fixture::new();
+    let destination = fixture.0.join("larger-artifact.zip");
+    let limits = Limits {
+        max_track_bytes: 1024,
+        max_artifact_bytes: 4 * 1024 * 1024,
+        ..Limits::default()
+    };
+    let data = vec![b'a'; 2 * 1024 * 1024];
+    let mut journal = RecordingJournal::create(&destination, manifest(0), 1, limits).unwrap();
+    journal.begin(1, 1).unwrap();
+    let mut provider = b"{}\n".as_slice();
+    let mut payload = data.as_slice();
+    journal
+        .commit_with_artifacts(
+            manifest(1).tracks.remove(0),
+            &mut provider,
+            vec![ArtifactInput {
+                artifact: Artifact {
+                    kind: "large-fixture".into(),
+                    bytes: data.len() as u64,
+                    sha256: digest(&data),
+                },
+                source: &mut payload,
+            }],
+        )
+        .unwrap();
+    journal.finalize().unwrap();
+    let mut archive = Archive::open(&destination, limits).unwrap();
+    assert!(archive.read_artifact(1, "large-fixture").is_err());
+    let mut restored = Vec::new();
+    archive
+        .copy_artifact_to(1, "large-fixture", &mut restored)
+        .unwrap();
+    assert_eq!(restored, data);
+    let too_small = Limits {
+        max_artifact_bytes: 1024,
+        ..limits
+    };
+    assert!(Archive::open(&destination, too_small).is_err());
+}
+
+#[test]
+#[ignore = "writes and verifies a real four-GiB artifact; run explicitly for large-cassette qualification"]
+fn zip64_four_gib_artifact_publication_round_trip() {
+    const BYTES: u64 = 1u64 << 32;
+    // SHA-256 of exactly 2^32 zero bytes, computed independently.
+    const SHA256: &str = "8479e43911dc45e89f934fe48d01297e16f51d17aa561d4d1c216b1ae0fcddca";
+    let fixture = Fixture::new();
+    let destination = fixture.0.join("large-recording.zip");
+    let limits = Limits::default();
+    let mut journal = RecordingJournal::create(&destination, manifest(0), 1, limits).unwrap();
+    journal.begin(1, 1).unwrap();
+    let mut provider = b"{}\n".as_slice();
+    let mut payload = std::io::repeat(0).take(BYTES);
+    journal
+        .commit_with_artifacts(
+            manifest(1).tracks.remove(0),
+            &mut provider,
+            vec![ArtifactInput {
+                artifact: Artifact {
+                    kind: "large-fixture".into(),
+                    bytes: BYTES,
+                    sha256: SHA256.into(),
+                },
+                source: &mut payload,
+            }],
+        )
+        .unwrap();
+    journal.finalize().unwrap();
+    let mut archive = Archive::open(&destination, limits).unwrap();
+    archive
+        .copy_artifact_to(1, "large-fixture", &mut std::io::sink())
+        .unwrap();
+}
+
+#[test]
+#[ignore = "creates a sparse file with a central directory beyond 4 GiB"]
+fn zip64_sparse_archive_with_large_directory_offset() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("large-offset.zip");
+    let mut file = File::create(&path).unwrap();
+    file.seek(SeekFrom::Start(1u64 << 32)).unwrap();
+    let mut writer = ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    writer.start_file("manifest.json", options).unwrap();
+    writer
+        .write_all(&serde_json::to_vec(&manifest(1)).unwrap())
+        .unwrap();
+    writer.start_file("tracks/1.jsonl", options).unwrap();
+    writer.write_all(b"{}\n").unwrap();
+    writer.finish().unwrap();
+    let mut archive = Archive::open(&path, Limits::default()).unwrap();
+    assert_eq!(archive.read_track(1).unwrap(), b"{}\n");
+}
+
+#[test]
 fn auxiliary_artifacts_reject_unlisted_or_duplicate_paths() {
     let fixture = Fixture::new();
     let mut manifest = manifest(1);

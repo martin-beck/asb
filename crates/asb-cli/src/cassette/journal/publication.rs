@@ -358,7 +358,10 @@ impl RecordingJournal {
             for artifact in &track.artifacts {
                 self.publication_fault.check("before-zip-artifact")?;
                 writer
-                    .start_file(track.artifact_entry_name(&artifact.kind), options)
+                    .start_file(
+                        track.artifact_entry_name(&artifact.kind),
+                        options.large_file(artifact.bytes >= u32::MAX as u64),
+                    )
                     .map_err(zip_error)?;
                 let path = self.artifact_path(track.id, &artifact.kind);
                 let copied = std::io::copy(

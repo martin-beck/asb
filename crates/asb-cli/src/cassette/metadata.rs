@@ -13,17 +13,18 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-// Fixed ZIP32 schema widths, shared by validation and recording reservation.
+// Fixed directory header widths, shared by validation and recording reservation.
 const DIRECTORY_HEADER_BYTES: usize = 46;
 const END_RECORD_BYTES: usize = 22;
 
 pub(super) fn recording_directory_size(count: u64) -> Result<u64, Error> {
-    let manifest = DIRECTORY_HEADER_BYTES as u64 + "manifest.json".len() as u64;
-    let track = DIRECTORY_HEADER_BYTES as u64 + format!("tracks/{count}.jsonl").len() as u64;
+    // Each entry may need a ZIP64 extra field with two sizes and an offset.
+    let manifest = DIRECTORY_HEADER_BYTES as u64 + "manifest.json".len() as u64 + 28;
+    let track = DIRECTORY_HEADER_BYTES as u64 + format!("tracks/{count}.jsonl").len() as u64 + 28;
     track
         .checked_mul(count)
         .and_then(|bytes| bytes.checked_add(manifest))
-        .and_then(|bytes| bytes.checked_add(END_RECORD_BYTES as u64))
+        .and_then(|bytes| bytes.checked_add(END_RECORD_BYTES as u64 + 76))
         .ok_or_else(|| Error("recording ZIP directory capacity overflow".into()))
 }
 

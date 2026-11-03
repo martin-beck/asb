@@ -25,6 +25,8 @@ pub struct Limits {
     pub max_tracks: usize,
     /// Maximum uncompressed length of one JSONL track.
     pub max_track_bytes: u64,
+    /// Maximum uncompressed length of one streamed auxiliary artifact.
+    pub max_artifact_bytes: u64,
     /// Maximum aggregate uncompressed track length.
     pub max_total_bytes: u64,
 }
@@ -32,12 +34,13 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_archive_bytes: 2 * 1024 * 1024 * 1024,
+            max_archive_bytes: 64 * 1024 * 1024 * 1024,
             max_directory_bytes: 16 * 1024 * 1024,
             max_manifest_bytes: 16 * 1024 * 1024,
             max_tracks: 65_533,
             max_track_bytes: 256 * 1024 * 1024,
-            max_total_bytes: 2 * 1024 * 1024 * 1024,
+            max_artifact_bytes: 64 * 1024 * 1024 * 1024,
+            max_total_bytes: 128 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -48,6 +51,7 @@ impl Limits {
             || self.max_directory_bytes == 0
             || self.max_manifest_bytes == 0
             || self.max_track_bytes == 0
+            || self.max_artifact_bytes == 0
             || self.max_total_bytes == 0
             || self.max_tracks == 0
             || self.max_tracks > 65_533
@@ -169,6 +173,8 @@ impl Archive {
                 .is_some_and(|id| id > 0 && name == format!("native/{id}.jsonl"));
             let size_limit = if is_manifest {
                 limits.max_manifest_bytes
+            } else if canonical_artifact {
+                limits.max_artifact_bytes
             } else {
                 limits.max_track_bytes
             };
@@ -342,6 +348,22 @@ impl Archive {
 
     /// Decode one sealed auxiliary payload for the selected execution track.
     pub fn read_artifact(&mut self, id: u64, kind: &str) -> Result<Vec<u8>, Error> {
+        let artifact = self
+            .manifest
+            .track(id)?
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == kind)
+            .ok_or_else(|| {
+                Error(format!(
+                    "cassette track {id} has no auxiliary artifact {kind}"
+                ))
+            })?;
+        if artifact.bytes > self.limits.max_track_bytes {
+            return Err(Error(
+                "artifact is too large to load into memory; use streaming extraction".into(),
+            ));
+        }
         let mut bytes = Vec::new();
         self.copy_artifact_to(id, kind, &mut bytes)?;
         Ok(bytes)
@@ -384,7 +406,7 @@ impl Archive {
             size = size
                 .checked_add(read as u64)
                 .ok_or_else(|| Error("cassette auxiliary artifact length overflow".into()))?;
-            if size > expected_bytes || size > self.limits.max_track_bytes {
+            if size > expected_bytes || size > self.limits.max_artifact_bytes {
                 return Err(Error(
                     "cassette decompressed entry exceeds its declared length or limit".into(),
                 ));

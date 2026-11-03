@@ -28,7 +28,7 @@ pub struct RecordingReservation {
     pub manifest_bytes: u64,
     /// Final publication marker with bounded maximum-width observations.
     pub publication_bytes: u64,
-    /// ZIP32 central-directory headers/names and end record.
+    /// Central-directory headers/names and maximum ZIP64 end-record overhead.
     pub directory_bytes: u64,
 }
 
