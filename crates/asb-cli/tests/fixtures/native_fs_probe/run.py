@@ -108,9 +108,9 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     second_truncate = next(i for i, event in enumerate(events) if event['op'] == 'truncate' and event['path'] == '/two-alias')
     assert second_write < second_truncate, ops
     child_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/child']
-    assert child_writes and all(event['caller_pid'] == child_pid for event in child_writes), child_writes
+    assert child_writes and all(event['caller']['tid'] == child_pid and event['caller']['tgid'] == child_pid and event['caller']['ppid'] == os.getpid() and event['caller']['start_ticks'] is not None for event in child_writes), child_writes
     parent_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/one']
-    assert parent_writes and all(event['caller_pid'] == writer_tids['one'] for event in parent_writes), parent_writes
+    assert parent_writes and all(event['caller']['tid'] == writer_tids['one'] and event['caller']['tgid'] == os.getpid() and event['caller']['start_ticks'] is not None for event in parent_writes), parent_writes
     def replay(index):
         destination = root / f'replay-{index}'
         subprocess.run([python, str(HERE / 'replay.py'), str(evidence), str(destination), str(baseline)], check=True)

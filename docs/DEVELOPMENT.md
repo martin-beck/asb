@@ -10,9 +10,11 @@ into four independent directories. The tested FUSE stack delivered `O_TRUNC`
 as a separate truncate callback; this does not prove other kernel behavior.
 The fixture also records FUSE caller IDs and checks writes from a worker thread
 and a separate subprocess. On the tested Linux host the former is the thread ID,
-not the process leader's ID. These IDs are diagnostic only: correlating them to
-tool invocations requires thread-to-process and process-ancestry tracking, and
-the fixture does not establish attribution for delayed or kernel-originated IO.
+not the process leader's ID. The probe resolves it through `/proc` to a thread
+group, parent and start time at callback time, with missing data reported as
+unknown. These identities are diagnostic only: the fixture does not establish
+attribution for delayed IO, short-lived processes, PID namespaces or reuse,
+nor does it associate operations with agent tool invocations.
 This is an experimental fixture, not an ASB replay backend: it changes timing,
 does not capture all filesystem operations, and does not replay tool execution.
 FUSE is not a requirement for ordinary development or CI.

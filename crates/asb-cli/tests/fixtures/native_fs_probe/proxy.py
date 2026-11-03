@@ -4,6 +4,21 @@ from pathlib import Path
 from fuse import FUSE, FuseOSError, Operations, fuse_get_context
 
 backing, mount, evidence = map(Path, sys.argv[1:4])
+
+def caller_identity(tid):
+    """Best-effort identity at callback time; never an authority boundary."""
+    try:
+        status = {}
+        for line in Path(f'/proc/{tid}/status').read_text().splitlines():
+            key, separator, value = line.partition(':')
+            if separator and key in ('Tgid', 'PPid'):
+                status[key] = int(value.strip())
+        stat = Path(f'/proc/{tid}/stat').read_text().rpartition(')')[2].split()
+        return {'tid': tid, 'tgid': status['Tgid'], 'ppid': status['PPid'],
+                'start_ticks': int(stat[19])}
+    except (OSError, KeyError, ValueError, IndexError):
+        return {'tid': tid, 'tgid': None, 'ppid': None, 'start_ticks': None}
+
 class Proxy(Operations):
     def __init__(self):
         self.record_lock = threading.Lock()
@@ -28,7 +43,7 @@ class Proxy(Operations):
     def record(self, op, path, data=None, **detail):
         with self.record_lock:
             self.sequence += 1
-            event = {'sequence': self.sequence, 'op': op, 'path': path, 'caller_pid': fuse_get_context()[2], **detail}
+            event = {'sequence': self.sequence, 'op': op, 'path': path, 'caller': caller_identity(fuse_get_context()[2]), **detail}
             if data is not None:
                 name = f'object-{self.sequence:08d}'
                 with open(evidence / name, 'xb') as f: f.write(data)
