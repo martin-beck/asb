@@ -63,6 +63,31 @@ def message(source, text):
     return MessageEvent(source=source, llm_message=Event(role='assistant' if source == 'agent' else 'user', content=[TextContent(text=text)]))
 
 class NativeFinalTest(unittest.TestCase):
+    def test_tracker_mismatch_restores_persistence_and_does_not_acknowledge(self):
+        class Action:
+            def model_dump(self, mode): return {'command': 'view'}
+        class Observation:
+            def model_dump(self, mode): return {'state': 'different'}
+        class Delegate:
+            save_dir = '/fixture'
+            def __call__(self, action, conversation=None):
+                assert self.save_dir is None
+                return Observation()
+            def close(self): pass
+        with tempfile.TemporaryDirectory() as directory:
+            sidecar = pathlib.Path(directory) / 'tape'
+            sidecar.write_text(json.dumps({'schema_version': 1, 'sequence': 1,
+                'tool': 'openhands.task_tracker', 'request': {'command': 'view'},
+                'result': {'state': 'expected'}}) + '\n')
+            delegate = Delegate()
+            tape = launcher.EditorTape('replay', str(sidecar))
+            with patch.object(launcher, 'filesystem_replay_begin', return_value=True), \
+                    patch.object(launcher, 'filesystem_replay_boundary') as finish:
+                with self.assertRaisesRegex(RuntimeError, 'result differs'):
+                    launcher.TaskTrackerTapeExecutor(delegate, tape)(Action())
+                finish.assert_not_called()
+            self.assertEqual(delegate.save_dir, '/fixture')
+
     def test_delegated_result_mismatch_does_not_acknowledge_completion(self):
         class Action:
             def model_dump(self, mode): return {'task':'fixture'}

@@ -59,9 +59,9 @@ The OpenHands adapter emits begin/end markers around its real terminal and
 file-editor delegates without removing its other declared tools. Editor actions
 and observations use an adapter-owned transcript; replay waits for the journal
 before returning an observation. Marker or transcript failures are reported when
-recording closes. Task tracking still runs when called during recording, but
-marks that recording incomplete until its replay is implemented. This does not
-establish full OpenHands replay support.
+recording closes. Task tracking records its actions and results; replay rebuilds
+its in-memory state while the coordinator applies recorded file effects. This
+does not establish full OpenHands replay support.
 The offline `tests/fixtures/openhands_editor_sdk.py` can be run with an
 installed OpenHands project Python to exercise the actual SDK editor wrapper;
 it does not contact a provider.

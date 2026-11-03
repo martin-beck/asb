@@ -221,13 +221,16 @@ class UnrecordedToolExecutor(ToolExecutor):
 
 class DelegationTapeExecutor(ToolExecutor):
     """Run nested agents in both modes so their provider calls are replayed."""
-    def __init__(self, delegate: Any, tape: EditorTape):
+    def __init__(self, delegate: Any, tape: EditorTape, *, tool: str = "openhands.task",
+                 marker: str = "openhands-task"):
         self.delegate = delegate
         self.tape = tape
+        self.tool = tool
+        self.marker = marker
 
     def __call__(self, action: Any, conversation: Any = None) -> Any:
         sequence = self.tape.reserve()
-        alias = f"openhands-task-{sequence}"
+        alias = f"{self.marker}-{sequence}"
         try:
             request = action.model_dump(mode="json")
         except Exception:
@@ -251,11 +254,11 @@ class DelegationTapeExecutor(ToolExecutor):
             if request is not None:
                 try:
                     self.tape.finish_record(sequence, request, observation.model_dump(mode="json"),
-                                            tool="openhands.task")
+                                            tool=self.tool)
                 except Exception:
                     self.tape.failed = True
             return observation
-        expected = self.tape.replay(sequence, request, tool="openhands.task")
+        expected = self.tape.replay(sequence, request, tool=self.tool)
         if not filesystem_replay_begin(alias):
             raise RuntimeError("OpenHands delegated replay start boundary is unavailable")
         observation = self.delegate(action, conversation=conversation)
@@ -269,6 +272,29 @@ class DelegationTapeExecutor(ToolExecutor):
         self.delegate.close()
 
 
+
+class TaskTrackerTapeExecutor(DelegationTapeExecutor):
+    """Rebuild tracker memory while replay applies recorded filesystem effects."""
+    def __init__(self, delegate: Any, tape: EditorTape):
+        super().__init__(delegate, tape, tool="openhands.task_tracker",
+                         marker="openhands-tracker")
+        self.lock = threading.Lock()
+
+    def __call__(self, action: Any, conversation: Any = None) -> Any:
+        # The tracker writes TASKS.json on plan. During replay, the filesystem
+        # coordinator owns that write; the delegate still updates its in-memory
+        # list, so later view calls observe the same state.
+        with self.lock:
+            if self.tape.mode != "replay":
+                return super().__call__(action, conversation)
+            save_dir = self.delegate.save_dir
+            self.delegate.save_dir = None
+            try:
+                return super().__call__(action, conversation)
+            finally:
+                self.delegate.save_dir = save_dir
+
+
 def install_file_editor_tape(tape: EditorTape) -> None:
     """Keep SDK declarations intact and wrap the editor executor it creates."""
     from openhands.sdk.tool import register_tool
@@ -280,20 +306,16 @@ def install_file_editor_tape(tape: EditorTape) -> None:
         return [item.set_executor(FileEditorTapeExecutor(item.executor, tape)) for item in definitions]
 
     FileEditorTool.create = classmethod(wrapped)
-    # Task tracking is not yet replayable; retain its recording behavior and
-    # refuse to claim complete replay if it is invoked.
     from openhands.tools.task.definition import TaskToolSet
     from openhands.tools.task_tracker.definition import TaskTrackerTool
 
-    def mark_unrecorded(tool_class: Any) -> None:
-        original = tool_class.create
+    tracker_create = TaskTrackerTool.create
 
-        def wrap(_cls: Any, *args: Any, **kwargs: Any) -> Any:
-            return [item.set_executor(UnrecordedToolExecutor(item.executor, tape))
-                    for item in original(*args, **kwargs)]
+    def tracker(_cls: Any, *args: Any, **kwargs: Any) -> Any:
+        return [item.set_executor(TaskTrackerTapeExecutor(item.executor, tape))
+                for item in tracker_create(*args, **kwargs)]
 
-        tool_class.create = classmethod(wrap)
-
+    TaskTrackerTool.create = classmethod(tracker)
     task_create = TaskToolSet.create
 
     def delegated(_cls: Any, *args: Any, **kwargs: Any) -> Any:
@@ -301,7 +323,6 @@ def install_file_editor_tape(tape: EditorTape) -> None:
                 for item in task_create(*args, **kwargs)]
 
     TaskToolSet.create = classmethod(delegated)
-    mark_unrecorded(TaskTrackerTool)
     # The SDK registry captures each class's bound create method at
     # registration time. Re-register through its public API after wrapping.
     for tool_class in (FileEditorTool, TaskToolSet, TaskTrackerTool):

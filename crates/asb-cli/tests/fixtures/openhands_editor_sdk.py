@@ -12,7 +12,8 @@ spec = importlib.util.spec_from_file_location('asb_openhands_editor_test', launc
 module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 from openhands.tools.file_editor.definition import FileEditorAction, FileEditorTool
 from openhands.tools.task.definition import TaskToolSet
-from openhands.tools.task_tracker.definition import TaskTrackerTool
+from openhands.tools.task_tracker.definition import (TaskTrackerTool, TaskTrackerExecutor,
+    TaskTrackerAction, TaskItem)
 from openhands.tools.preset.default import register_builtins_agents
 from openhands.sdk.subagent import get_registered_agent_definitions
 from openhands.sdk import LLM, Tool
@@ -33,7 +34,7 @@ with tempfile.TemporaryDirectory(dir=scratch) as directory:
         persistence_dir=workspace,
         agent=SimpleNamespace(llm=SimpleNamespace(vision_is_active=lambda: False)))
     tool = resolve_tool(Tool(name=FileEditorTool.name), state)[0]
-    for kind, expected in ((TaskTrackerTool, module.UnrecordedToolExecutor),
+    for kind, expected in ((TaskTrackerTool, module.TaskTrackerTapeExecutor),
                            (TaskToolSet, module.DelegationTapeExecutor)):
         definitions = resolve_tool(Tool(name=kind.name), state)
         assert definitions and all(isinstance(item.executor, expected)
@@ -66,4 +67,30 @@ with tempfile.TemporaryDirectory(dir=scratch) as directory:
     replay = executor(action); tape.close()
     assert replay.model_dump(mode='json') == result.model_dump(mode='json')
     assert file.read_text() == 'recorded content\n'
+# Exercise the real tracker implementation, including its in-memory state and
+# persisted task list. Replay must not write the file before its journal boundary.
+with tempfile.TemporaryDirectory(dir=scratch) as directory:
+    workspace = Path(directory).resolve(); sidecar = workspace / 'tracker.jsonl'; sidecar.touch()
+    tape = module.EditorTape('record', str(sidecar))
+    delegate = TaskTrackerExecutor(save_dir=str(workspace))
+    tracker = module.TaskTrackerTapeExecutor(delegate, tape)
+    plan = TaskTrackerAction(command='plan', task_list=[TaskItem(title='child task')])
+    view = TaskTrackerAction(command='view')
+    recorded = [tracker(plan).model_dump(mode='json'), tracker(view).model_dump(mode='json')]
+    tape.close()
+    task_file = workspace / 'TASKS.json'; expected_file = task_file.read_bytes(); task_file.unlink()
+    tape = module.EditorTape('replay', str(sidecar))
+    replay_delegate = TaskTrackerExecutor(save_dir=str(workspace))
+    tracker = module.TaskTrackerTapeExecutor(replay_delegate, tape)
+    module.filesystem_replay_begin = lambda _alias: True
+    def apply_tracker(alias):
+        if alias == 'openhands-tracker-1':
+            assert not task_file.exists(), 'tracker wrote before recorded boundary'
+            task_file.write_bytes(expected_file)
+        return True
+    module.filesystem_replay_boundary = apply_tracker
+    assert [tracker(plan).model_dump(mode='json'), tracker(view).model_dump(mode='json')] == recorded
+    tape.close()
+    assert replay_delegate.save_dir == workspace
+    assert task_file.read_bytes() == expected_file
 print('Installed OpenHands SDK editor recording and replay passed')
