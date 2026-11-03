@@ -17,6 +17,29 @@ def fake_fuse(proxy, *args, **kwargs):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_open_records_initial_regular_file_metadata(self):
+        from types import SimpleNamespace
+        fuse = ModuleType('fuse')
+        fuse.FUSE = fake_fuse
+        fuse.FuseOSError = OSError
+        fuse.Operations = object
+        fuse.fuse_get_context = lambda: (0, 0, 0)
+        script = Path(__file__).parents[1] / 'assets/benchmarks/asb_fs_proxy.py'
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(sys.modules, {'fuse': fuse}), \
+                patch.dict(os.environ, {'ASB_PROBE_BENCHMARK_NO_IDENTITY': '1'}), \
+                patch.object(sys, 'argv', [str(script), temporary, temporary, temporary]):
+            (Path(temporary) / 'file').write_bytes(b'fixture')
+            namespace = runpy.run_path(str(script))
+            proxy = namespace['Proxy']()
+            handle = SimpleNamespace(flags=os.O_RDONLY, fh=None)
+            self.assertEqual(proxy.open('/file', handle), 0)
+            proxy.release('/file', handle)
+            proxy.log.close(); proxy.payload.file.close()
+            event = json.loads((Path(temporary) / 'events.jsonl').read_text().splitlines()[0])
+            self.assertEqual(event['initial_size'], 7)
+            self.assertEqual(event['initial_nlink'], 1)
+            self.assertEqual(event['initial_mode'], (Path(temporary) / 'file').stat().st_mode)
+
     def test_hermes_markers_bind_calls_and_failure_does_not_block_the_tool(self):
         fuse = ModuleType('fuse')
         fuse.FUSE = fake_fuse
