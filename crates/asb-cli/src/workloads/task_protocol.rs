@@ -90,6 +90,12 @@ pub(super) struct PrivateInput {
     pub target: String,
     pub bytes: u64,
     pub sha256: String,
+    #[serde(skip_serializing_if = "is_false")]
+    pub streamed: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Request<'_> {

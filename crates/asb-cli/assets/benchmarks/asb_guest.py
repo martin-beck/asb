@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import posixpath
 import re
+import stat
 import tarfile
 import tempfile
 import time
@@ -19,7 +20,7 @@ import threading
 
 from asb_execution import ExecutionError, principal_observation
 from asb_runtime import bundle
-from asb_staging import upload, stage_runtime, root_execute, prepare_guest_roots
+from asb_staging import upload, stage_runtime, root_execute, prepare_guest_roots, StreamedInput
 from asb_relay import HostRelay, ForwardingCancellation, forward_request
 
 
@@ -244,27 +245,43 @@ def stage_private_inputs(task, inputs, owner=None):
     """Stage runner-sealed replay inputs only into the owned private mount."""
     if not isinstance(inputs,list) or len(inputs) > 16:
         raise ExecutionError("guest private replay inputs exceed their limit")
-    staged,targets,total = [],set(),0
-    for item in inputs:
-        if not isinstance(item,dict) or set(item) != {"source","target","bytes","sha256"}:
-            raise ExecutionError("guest private replay input is invalid")
-        source,target = item["source"],item["target"]
-        if (not isinstance(source,str) or not isinstance(target,str) or not isinstance(item["bytes"],int)
-                or not isinstance(item["sha256"],str) or not Path(source).is_absolute()
-                or Path(source).is_symlink() or not Path(source).is_file()
-                or not re.fullmatch(r"[A-Za-z0-9+_.-]{1,256}",target)
-                or len(item["sha256"]) != 64 or not re.fullmatch(r"[0-9a-f]{64}",item["sha256"])
-                or target in targets or item["bytes"] < 0 or item["bytes"] > 64 * 1024**2):
-            raise ExecutionError("guest private replay input is invalid")
-        content = Path(source).read_bytes()
-        total += len(content)
-        if (len(content) != item["bytes"] or hashlib.sha256(content).hexdigest() != item["sha256"]
-                or total > 64 * 1024**2):
-            raise ExecutionError("sealed local-tool replay transcript changed before guest staging")
-        targets.add(target)
-        staged.append((target,content,0o600))
-    if staged:
-        upload(task.workspace.container,"/opt/asb-private",staged,temporary_dir=task.artifacts,owner=owner)
+    staged,targets,total,streamed_total = [],set(),0,0
+    with ExitStack() as resources:
+        for item in inputs:
+            if not isinstance(item,dict) or set(item) not in ({"source","target","bytes","sha256"}, {"source","target","bytes","sha256","streamed"}):
+                raise ExecutionError("guest private replay input is invalid")
+            source,target = item["source"],item["target"]
+            streamed = item.get("streamed",False)
+            if (type(streamed) is not bool or not isinstance(source,str) or not isinstance(target,str) or type(item["bytes"]) is not int
+                    or not isinstance(item["sha256"],str) or not Path(source).is_absolute()
+                    or Path(source).is_symlink() or not Path(source).is_file()
+                    or not re.fullmatch(r"[A-Za-z0-9+_.-]{1,256}",target)
+                    or len(item["sha256"]) != 64 or not re.fullmatch(r"[0-9a-f]{64}",item["sha256"])
+                    or target in targets or item["bytes"] < 0 or item["bytes"] > (64 * 1024**3 if streamed else 64 * 1024**2)):
+                raise ExecutionError("guest private replay input is invalid")
+            if streamed:
+                flags = os.O_RDONLY | getattr(os,"O_NOFOLLOW",0) | getattr(os,"O_NONBLOCK",0)
+                try:
+                    descriptor = os.open(source,flags)
+                    handle = resources.enter_context(os.fdopen(descriptor,"rb"))
+                    attributes = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(attributes.st_mode) or attributes.st_size != item["bytes"]:
+                        raise ExecutionError("sealed replay input changed before guest staging")
+                except OSError:
+                    raise ExecutionError("sealed replay input is unavailable") from None
+                content = StreamedInput(handle,item["bytes"],item["sha256"])
+                streamed_total += item["bytes"]
+            else:
+                content = Path(source).read_bytes()
+                total += len(content)
+                if len(content) != item["bytes"] or hashlib.sha256(content).hexdigest() != item["sha256"]:
+                    raise ExecutionError("sealed local-tool replay transcript changed before guest staging")
+            if total > 64 * 1024**2 or streamed_total > 128 * 1024**3:
+                raise ExecutionError("guest private replay inputs exceed their total limit")
+            targets.add(target)
+            staged.append((target,content,0o600))
+        if staged:
+            upload(task.workspace.container,"/opt/asb-private",staged,temporary_dir=task.artifacts,owner=owner)
 
 
 def stage_npm_package_tree(task, tree, tools, selected, owner=None):

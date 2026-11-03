@@ -18,6 +18,24 @@ RUNTIME = "/opt/asb-runtime"
 PREFIXES = (RUNTIME, "/opt/asb-project", "/opt/asb-private")
 
 
+class StreamedInput:
+    """Verify a file-backed input while the shared tar staging code reads it."""
+    def __init__(self, source, size, sha256):
+        self.source, self.size, self.sha256 = source, size, sha256
+        self.digest, self.count = hashlib.sha256(), 0
+
+    def read(self, size=-1):
+        data = self.source.read(size)
+        self.count += len(data)
+        self.digest.update(data)
+        return data
+
+    def verify(self):
+        if (self.count != self.size or self.digest.hexdigest() != self.sha256
+                or self.source.read(1)):
+            raise ExecutionError("sealed replay input changed during guest staging")
+
+
 def upload(container, destination, files, temporary_dir=None, owner=None):
     if owner is not None and (not isinstance(owner,tuple) or len(owner) != 2
             or any(type(value) is not int or not 0 <= value <= 4294967295 for value in owner)):
@@ -26,10 +44,17 @@ def upload(container, destination, files, temporary_dir=None, owner=None):
         with tarfile.open(fileobj=archive, mode="w") as tar:
             for name, content, mode in files:
                 entry = tarfile.TarInfo(name)
-                entry.size, entry.mode = len(content), mode
+                entry.size, entry.mode = (content.size if isinstance(content,StreamedInput) else len(content)), mode
                 if owner is not None:
                     entry.uid,entry.gid = owner
-                tar.addfile(entry, io.BytesIO(content))
+                try:
+                    tar.addfile(entry, content if isinstance(content,StreamedInput) else io.BytesIO(content))
+                except OSError:
+                    if isinstance(content,StreamedInput):
+                        raise ExecutionError("sealed replay input could not be streamed for guest staging") from None
+                    raise
+                if isinstance(content,StreamedInput):
+                    content.verify()
         archive.seek(0)
         if not container.put_archive(destination, archive):
             raise ExecutionError("could not stage the task's private runtime")

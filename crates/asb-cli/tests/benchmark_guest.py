@@ -14,7 +14,7 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).parents[1] / "assets/benchmarks"))
 from asb_execution import ExecutionError
-from asb_guest import (execute_agent, export_agent_artifacts, stage_npm_package_tree, propagate_guest_timeout,
+from asb_guest import (execute_agent, export_agent_artifacts, stage_private_inputs, stage_npm_package_tree, propagate_guest_timeout,
                        stage_public_cache, stage_bootstrap, PreparationBudget)
 from asb_runtime import elf as inspect_elf
 
@@ -67,6 +67,31 @@ class ArchiveContainer:
 
 
 class GuestBootstrapTests(unittest.TestCase):
+    def test_large_replay_input_streams_and_rejects_changed_digest_before_upload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'payload'
+            block = b'fixture-data' * 8192
+            digest = hashlib.sha256()
+            with source.open('wb') as output:
+                for _ in range(700):
+                    output.write(block)
+                    digest.update(block)
+            container = Container()
+            task = SimpleNamespace(artifacts=root, workspace=SimpleNamespace(container=container))
+            item = {'source':str(source), 'target':'fs-payload', 'bytes':source.stat().st_size,
+                    'sha256':digest.hexdigest(), 'streamed':True}
+            self.assertGreater(item['bytes'],64 * 1024**2)
+            with patch.object(Path, 'read_bytes', side_effect=AssertionError('must stream')):
+                stage_private_inputs(task,[item])
+            self.assertEqual(len(container.files),1)
+            self.assertEqual(hashlib.sha256(container.files[0][2]).hexdigest(),item['sha256'])
+            container.files.clear()
+            item['sha256'] = '0' * 64
+            with self.assertRaisesRegex(ExecutionError,'changed during'):
+                stage_private_inputs(task,[item])
+            self.assertFalse(container.files)
+
     def test_guest_timeout_propagates_without_inventing_it_from_other_values(self):
         for value, expected in [(True, True), (False, False), ("true", False), (None, False)]:
             result = {"metadata": {"timed_out": value}, "timed_out": False}
