@@ -901,7 +901,7 @@ function isReplayProbe(request) {
 // Replay admission and inference accounting are distinct: embeddings must be
 // replayed, but they are not language-model inference requests.
 function isInferenceRequest(request) {
-  const path = String(request.url || "").split("?", 1)[0];
+  const path = String(request.url || "").split("?", 1)[0].replace(/\/+$/, "");
   return !isReplayProbe(request) && !path.endsWith("/embeddings");
 }
 
