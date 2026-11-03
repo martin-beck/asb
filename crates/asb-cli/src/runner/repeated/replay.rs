@@ -743,10 +743,12 @@ mod tests {
 
     #[test]
     fn auxiliary_recordings_payload_uses_selected_track_for_each_replica() {
-        let root = std::env::temp_dir().join(format!(
-            "asb-replay-auxiliary-http-{}",
-            crate::tools::runtime::unique_id()
-        ));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "asb-replay-auxiliary-http-{}",
+                crate::tools::runtime::unique_id()
+            ));
         fs::create_dir_all(root.join("inputs")).unwrap();
         fs::create_dir_all(root.join("batch")).unwrap();
         fs::write(root.join("inputs/aux-http-embedding-7.jsonl"), b"sealed\n").unwrap();
@@ -755,6 +757,7 @@ mod tests {
             b"metadata\n",
         )
         .unwrap();
+        fs::write(root.join("inputs/aux-fs-payload-7.jsonl"), b"\0\xffpayload").unwrap();
         let input = ReplayInput {
             recorded_max_steps: None,
             recorder: None,
@@ -781,6 +784,12 @@ mod tests {
                     bytes: 9,
                     sha256: crate::cassette::digest(b"metadata\n"),
                 },
+                AuxiliaryRecordingInput {
+                    kind: "aux-fs-payload".into(),
+                    private: "inputs/aux-fs-payload-7.jsonl".into(),
+                    bytes: 9,
+                    sha256: crate::cassette::digest(b"\0\xffpayload"),
+                },
             ],
             bytes: 2,
             sha256: "a".repeat(64),
@@ -801,6 +810,11 @@ mod tests {
                 )))
                 .unwrap(),
                 b"metadata\n"
+            );
+            assert_eq!(
+                fs::read(root.join(format!("batch/aux-fs-payload-concurrency-{replica}.jsonl")))
+                    .unwrap(),
+                b"\0\xffpayload"
             );
         }
         fs::remove_dir_all(root).unwrap();

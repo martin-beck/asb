@@ -164,6 +164,8 @@ fn selected_auxiliary_recordings_are_streamed_with_their_track_and_costed_once()
     fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
     let payload = b"{\"fixture\":true}\n";
     let metadata = b"{\"schema\":1}\n";
+    let fs_events = b"{\"sequence\":1}\n";
+    let fs_payload = b"\0\xff\x80fixture binary\0";
     let mut source = manifest(1);
     source.tracks[0].artifacts.push(Artifact {
         kind: "aux-http-embedding".into(),
@@ -175,12 +177,24 @@ fn selected_auxiliary_recordings_are_streamed_with_their_track_and_costed_once()
         bytes: metadata.len() as u64,
         sha256: digest(metadata),
     });
+    for (kind, data) in [
+        ("aux-fs-events", &fs_events[..]),
+        ("aux-fs-payload", &fs_payload[..]),
+    ] {
+        source.tracks[0].artifacts.push(Artifact {
+            kind: kind.into(),
+            bytes: data.len() as u64,
+            sha256: digest(data),
+        });
+    }
     let bundle = fixture.zip(
         &source,
         &[
             ("tracks/1.jsonl", b"{}\n"),
             ("artifacts/1/aux-http-embedding.jsonl", payload),
             ("artifacts/1/aux-meta-embedding.jsonl", metadata),
+            ("artifacts/1/aux-fs-events.jsonl", fs_events),
+            ("artifacts/1/aux-fs-payload.jsonl", fs_payload),
         ],
     );
     let inspection = crate::runner::repeated::Inspection::prepare_selected(
@@ -199,7 +213,10 @@ fn selected_auxiliary_recordings_are_streamed_with_their_track_and_costed_once()
     .unwrap();
     assert_eq!(
         inspection.input_cost().unwrap().bytes,
-        3 + payload.len() as u64 + metadata.len() as u64
+        3 + payload.len() as u64
+            + metadata.len() as u64
+            + fs_events.len() as u64
+            + fs_payload.len() as u64
     );
     drop(crate::runner::repeated::publish_campaign(inspection.observe().unwrap()).unwrap());
     let root = fs::read_dir(fixture.0.join("results/asb-executions"))
@@ -218,12 +235,16 @@ fn selected_auxiliary_recordings_are_streamed_with_their_track_and_costed_once()
             .all(|slot| slot.replay_input == Some(0))
     );
     let auxiliary = &restored.plan.replay_inputs[0].auxiliary_recordings;
-    assert_eq!(auxiliary.len(), 2);
-    assert_eq!(fs::read(root.join(&auxiliary[0].private)).unwrap(), payload);
-    assert_eq!(
-        fs::read(root.join(&auxiliary[1].private)).unwrap(),
-        metadata
-    );
+    assert_eq!(auxiliary.len(), 4);
+    for (kind, expected) in [
+        ("aux-http-embedding", &payload[..]),
+        ("aux-meta-embedding", &metadata[..]),
+        ("aux-fs-events", &fs_events[..]),
+        ("aux-fs-payload", &fs_payload[..]),
+    ] {
+        let input = auxiliary.iter().find(|item| item.kind == kind).unwrap();
+        assert_eq!(fs::read(root.join(&input.private)).unwrap(), expected);
+    }
 }
 
 #[cfg(unix)]

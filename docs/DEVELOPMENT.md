@@ -175,6 +175,11 @@ untracked or out-of-workspace effects, or support for all native tools.
 The smaller FUSE operation fixture also records and replays chmod, utimens,
 including nanosecond timestamps, and extended-attribute mutations. This is still a partial filesystem prototype;
 other metadata operations, failure semantics and races remain unqualified.
+The cassette replay planner can stage `aux-fs-events` and `aux-fs-payload`
+artifacts for each replica using the existing streamed auxiliary path. These
+inputs are hard links to the sealed source and must be opened read-only; replay
+cursors and workspaces must be separate per replica. The recorder does not yet
+publish these artifacts, and the runtime does not yet consume them.
 
 `python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` checks that
 overlapping terminal calls produce a readable sidecar without serializing

@@ -159,7 +159,9 @@ pub(crate) struct AuxiliaryRecordingInput {
 }
 
 pub(super) fn auxiliary_recording_kind(kind: &str) -> bool {
-    kind.starts_with("aux-http-") || kind.starts_with("aux-meta-")
+    kind.starts_with("aux-http-")
+        || kind.starts_with("aux-meta-")
+        || matches!(kind, "aux-fs-events" | "aux-fs-payload")
 }
 
 /// Whether measurements move with their owned campaign or remain at an explicit

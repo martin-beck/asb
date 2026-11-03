@@ -249,6 +249,7 @@ fn auxiliary_recordings_inputs_are_bound_to_the_selected_bundle_track() {
     let wire = serde_json::to_value(value).unwrap();
     for (field, bad) in [
         ("kind", json!("../embedding")),
+        ("kind", json!("aux-fs-unrecognized")),
         ("private", json!("inputs/aux-http-embedding-65.jsonl")),
         ("sha256", json!("invalid")),
     ] {
