@@ -10,7 +10,7 @@ import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { quiesceNetworkRequests, networkFetch } from "./network-fetch.mjs";
 import { CaptureSession, completedSseResponse, responseDelivery } from "./capture-session.mjs";
-import { normalizeWorkspacePaths } from "./tape-normalization.mjs";
+import { normalizeOpenAiSseWorkspacePaths, normalizeWorkspacePaths } from "./tape-normalization.mjs";
 
 const MAX_BODY = 16 * 1024 * 1024;
 const MAX_DELAY_MS = 60 * 60 * 1000;
@@ -131,11 +131,11 @@ async function replayResponse(response, interaction) {
   // before replay so agents never execute commands in the record directory.
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const body = workspace
-    ? normalizeSseWorkspaceFragments(
+    ? normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(
         normalizeCassetteBody(interaction.response.body || ""),
         "<asb-workspace>",
         workspace,
-      ).replaceAll("<asb-workspace>", workspace)
+      ), "<asb-workspace>", workspace).replaceAll("<asb-workspace>", workspace)
     : interaction.response.body || "";
   // Request matching intentionally redacts provider-generated tool-call IDs,
   // but Claude requires IDs to be unique across turns. Give each replayed
@@ -380,7 +380,7 @@ function normalizeCassetteBody(body, url = "") {
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const callIdentifiers = new Map();
   const normalized = normalizeFunctionRenderingAddress(normalizePytestElapsed(
-    normalizeWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace)
+    normalizeWorkspacePaths(normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace), workspace)
       .replaceAll(workspace || "\u0000", "<asb-workspace>"))
     // Preserve distinct call IDs before the generic UUID normalizer below.
     // OpenCode uses `call-<uuid>` while some OpenAI-compatible clients use
