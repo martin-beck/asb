@@ -27,7 +27,7 @@ success=False
 container_name='asb-btrfs-fixture-'+uuid.uuid4().hex
 try:
  script='''set -eu
-truncate -s 512M /work/disk.img
+truncate -s 4G /work/disk.img
 /hostlib/LOADER --library-path /hostlib /opt/mkfs.btrfs -q /work/disk.img
 losetup /dev/LOOPDEV /work/disk.img
 received_attached=0
@@ -205,8 +205,8 @@ checks['marker_journal_correct']=(len(events)==14 and
 adapter_service=SnapshotService(roots[0],Path('/work/fs/adapter-recorded'),['/hostlib/LOADER','--library-path','/hostlib','/opt/btrfs'])
 adapter_socket=Path('/work/adapter-record.sock');adapter_server=MarkerServer(adapter_socket,adapter_service)
 adapter_thread=threading.Thread(target=adapter_server.serve_forever,daemon=True);adapter_thread.start()
-def adapter_client(root,mode,socket_path):
- env=os.environ.copy();env.update({'ASB_MINI_SWE_TOOL_TAPE':'/work/adapter-tape.jsonl',
+def adapter_client(root,mode,socket_path,tape='/work/adapter-tape.jsonl'):
+ env=os.environ.copy();env.update({'ASB_MINI_SWE_TOOL_TAPE':tape,
   'ASB_MINI_SWE_TOOL_MODE':mode,'ASB_FIXTURE_WORKSPACE':str(root),
   'ASB_FS_MARKER_SOCKET' if mode=='record' else 'ASB_FS_REPLAY_SOCKET':str(socket_path)})
  return subprocess.run(['python3','/opt/mini_swe_client.py'],env=env,capture_output=True,timeout=60)
@@ -249,6 +249,41 @@ def replay_adapter(index):
 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
  checks['adapter_four_concurrent_replays']=all(pool.map(replay_adapter,range(1,5)))
 checks['adapter_original_tool_ran_once']=Path('/work/adapter-invocations').read_bytes()==b'1'
+if os.environ.get('ASB_SNAPSHOT_REAL_WORKSPACE')=='1':
+ source=Path('/testbed')
+ if not (source/'.git').is_dir():raise RuntimeError('SWE-bench task repository is unavailable')
+ swe_base=Path('/work/fs/swe-base')
+ subprocess.run(['/hostlib/LOADER','--library-path','/hostlib','/opt/btrfs','subvolume','create',str(swe_base)],check=True,stdout=subprocess.DEVNULL)
+ copied=sync(source,swe_base)
+ if copied.returncode:raise RuntimeError('cannot copy SWE-bench workspace: '+copied.stderr.decode()[-500:])
+ swe_roots=[Path('/work/fs/swe-'+str(i)) for i in range(5)]
+ for root in swe_roots:
+  subprocess.run(['/hostlib/LOADER','--library-path','/hostlib','/opt/btrfs','subvolume','snapshot',str(swe_base),str(root)],check=True,stdout=subprocess.DEVNULL)
+ baseline=subprocess.run(['git','-C',str(swe_roots[0]),'rev-parse','HEAD'],capture_output=True,check=True).stdout
+ swe_service=SnapshotService(swe_roots[0],Path('/work/fs/swe-recorded'),['/hostlib/LOADER','--library-path','/hostlib','/opt/btrfs'])
+ path=Path('/work/swe-record.sock');swe_server=MarkerServer(path,swe_service)
+ thread=threading.Thread(target=swe_server.serve_forever,daemon=True);thread.start()
+ try:
+  result=adapter_client(swe_roots[0],'record',path,'/work/swe-tape.jsonl')
+  if result.returncode:raise RuntimeError('SWE fixture record failed: '+result.stderr.decode()[-1000:])
+ finally:
+  swe_server.shutdown();swe_server.server_close();thread.join();path.unlink(missing_ok=True)
+ swe_service.finish()
+ def replay_swe(index):
+  root=swe_roots[index];sock=Path(f'/work/swe-replay-{index}.sock')
+  applier=SnapshotApplier('/work/fs/swe-recorded',root,['/hostlib/LOADER','--library-path','/hostlib','/opt/rsync'])
+  replay=SnapshotReplay(load_replay_boundaries('/work/fs/swe-recorded'),applier);server=MarkerServer(sock,replay)
+  thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+  try:
+   result=adapter_client(root,'replay',sock,'/work/swe-tape.jsonl')
+   if result.returncode:raise RuntimeError('SWE fixture replay failed: '+result.stderr.decode()[-1000:])
+   replay.finish()
+   return (root/'trial-result').read_bytes()==b'fixed' and subprocess.run(['git','-C',str(root),'rev-parse','HEAD'],capture_output=True,check=True).stdout==baseline
+  finally:
+   server.shutdown();server.server_close();thread.join();sock.unlink(missing_ok=True)
+ with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+  checks['swe_workspace_four_concurrent_replays']=all(pool.map(replay_swe,range(1,5)))
+ checks['swe_workspace_original_tool_ran_once']=Path('/work/adapter-invocations').read_bytes()==b'11'
 for fd in link_fds+split_fds+dir_fds+nested_fds:os.close(fd)
 for name,passed in checks.items():print(name,passed)
 print('xattr_exercised',xattr)
@@ -256,9 +291,9 @@ if not all(checks.values()):raise RuntimeError('Btrfs snapshot checks failed')
 for fd in fds:os.close(fd)
 EOPY
 '''.replace('LOADER',loader).replace('LOOPDEV',loop.name)
- cmd=['docker','run','--rm','--name',container_name,'--pull=never','--network','none','--device','/dev/loop-control','--device',str(loop),'--device-cgroup-rule','b 7:* rwm','--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={mkfs},dst=/opt/mkfs.btrfs,readonly','--mount',f'type=bind,src={btrfs},dst=/opt/btrfs,readonly','--mount',f'type=bind,src={rsync},dst=/opt/rsync,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_topology.py").resolve()},dst=/opt/asb_snapshot_topology.py,readonly','--mount',f'type=bind,src={Path(__file__).with_name("mini_swe_client.py").resolve()},dst=/opt/mini_swe_client.py,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/src/agents/adapters/mini_swe.rs").resolve()},dst=/opt/mini_swe.rs,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_service.py").resolve()},dst=/opt/asb_snapshot_service.py,readonly','--mount',f'type=bind,src={libraries},dst=/hostlib,readonly','--entrypoint','/bin/sh',image,'-c',script]
+ cmd=['docker','run','--rm','--name',container_name,'--pull=never','--network','none','--env',f'ASB_SNAPSHOT_REAL_WORKSPACE={os.environ.get("ASB_SNAPSHOT_REAL_WORKSPACE","0")}','--device','/dev/loop-control','--device',str(loop),'--device-cgroup-rule','b 7:* rwm','--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={mkfs},dst=/opt/mkfs.btrfs,readonly','--mount',f'type=bind,src={btrfs},dst=/opt/btrfs,readonly','--mount',f'type=bind,src={rsync},dst=/opt/rsync,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_topology.py").resolve()},dst=/opt/asb_snapshot_topology.py,readonly','--mount',f'type=bind,src={Path(__file__).with_name("mini_swe_client.py").resolve()},dst=/opt/mini_swe_client.py,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/src/agents/adapters/mini_swe.rs").resolve()},dst=/opt/mini_swe.rs,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_service.py").resolve()},dst=/opt/asb_snapshot_service.py,readonly','--mount',f'type=bind,src={libraries},dst=/hostlib,readonly','--entrypoint','/bin/sh',image,'-c',script]
  try:
-  r=subprocess.run(cmd,text=True,capture_output=True,timeout=90)
+  r=subprocess.run(cmd,text=True,capture_output=True,timeout=300)
  except subprocess.TimeoutExpired:
   subprocess.run(['docker','stop','-t','5',container_name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=20,check=False)
   raise RuntimeError(f'fixture timed out; retained diagnostics: {d}')

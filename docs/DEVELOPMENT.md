@@ -54,6 +54,10 @@ For this fixture the baseline and incremental snapshots are exported with
 received snapshots feed the replay coordinators. The fixture uses a second
 loop device, loop29, in addition to the configured device. Production cassette
 integration is not qualified by this probe.
+Setting `ASB_SNAPSHOT_REAL_WORKSPACE=1` additionally copies the cached task
+image's `/testbed` into a snapshot-backed workspace and runs the fixture tool
+and four replays against that repository. It requires a task image with a Git
+checkout and still does not run a live agent or official evaluator.
 
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without
