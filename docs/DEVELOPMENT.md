@@ -34,6 +34,10 @@ does not prove how real operations are attributed to overlapping tools. The
 FUSE fixture also brackets a real subprocess write with overlapping test markers
 and checks this pause and resume separately in four replay workspaces. The
 fixture supplies the markers; the agent does not produce them automatically.
+It additionally exercises a background child that writes after its tool-return
+marker and before the next invocation, checking the file is absent at the first
+boundary and present at the second. This does not implement a scheduler for
+background operations between production agent calls.
 This is an experimental fixture, not an ASB replay backend: it changes timing,
 does not capture all filesystem operations, and does not replay tool execution.
 FUSE is not a requirement for ordinary development or CI.

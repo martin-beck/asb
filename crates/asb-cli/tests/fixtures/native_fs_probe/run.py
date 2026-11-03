@@ -115,6 +115,17 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
             assert overlap.wait(timeout=5) == 0
             a_end = mark('tool-end:a')
             b_end = mark('tool-end:b')
+            bg_begin = mark('tool-begin:bg')
+            background = subprocess.Popen([python, '-c',
+                'import sys; from pathlib import Path; sys.stdin.read(1); '
+                'Path("background").write_bytes(b"later write")'], cwd=mount, stdin=subprocess.PIPE)
+            bg_pid = background.pid
+            bg_end = mark('tool-end:bg')
+            background.stdin.write(b'x')
+            background.stdin.close()
+            assert background.wait(timeout=5) == 0
+            after_begin = mark('tool-begin:after')
+            after_end = mark('tool-end:after')
         finally:
             (evidence / 'write-release').touch()
             markers.close()
@@ -146,6 +157,9 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
         ancestry = caller['ancestry']
         assert [entry['tgid'] for entry in ancestry[:3]] == [caller['tgid'], overlap_pid, os.getpid()], ancestry
         assert all(entry['start_ticks'] > 0 for entry in ancestry[:3])
+    background_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/background']
+    assert background_writes and bg_begin < bg_end < background_writes[0]['sequence'] < after_begin < after_end
+    assert all(event['caller']['tgid'] == bg_pid for event in background_writes)
     assert child_writes and all(event['caller']['tid'] == child_pid and event['caller']['tgid'] == child_pid and event['caller']['ppid'] == os.getpid() and event['caller']['start_ticks'] is not None for event in child_writes), child_writes
     parent_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/one']
     assert parent_writes and all(event['caller']['tid'] == writer_tids['one'] and event['caller']['tgid'] == os.getpid() and event['caller']['start_ticks'] is not None for event in parent_writes), parent_writes
@@ -188,6 +202,12 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
             gated.admit('b')
             assert gated.apply_until(a_end) is True
             assert (destination / 'overlap').read_bytes() == b'tool b'
+            gated.admit('bg')
+            assert gated.apply_until(bg_end) is True
+            assert not (destination / 'background').exists()
+            gated.admit('after')
+            assert gated.apply_until(after_begin) is True
+            assert (destination / 'background').read_bytes() == b'later write'
             gated.finish()
         finally:
             gated.close()
