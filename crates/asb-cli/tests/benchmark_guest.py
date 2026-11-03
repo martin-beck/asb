@@ -111,6 +111,32 @@ class GuestBootstrapTests(unittest.TestCase):
                 with self.subTest(receipt=receipt), self.assertRaises(ExecutionError):
                     export_agent_artifacts(task,directory,[receipt])
                 self.assertFalse(any(path.name.endswith(".part") for path in Path(directory).iterdir()))
+
+    def test_guest_artifact_export_accepts_all_eight_driver_slots(self):
+        class MultiContainer:
+            def get_archive(self, source, chunk_size=65536, encode_stream=False):
+                name = source.rsplit('/', 1)[-1]
+                return ArchiveContainer(name, name.encode()).get_archive(source, chunk_size, encode_stream)
+        with tempfile.TemporaryDirectory() as directory:
+            task = SimpleNamespace(workspace=SimpleNamespace(container=MultiContainer()))
+            receipts = []
+            for index in range(8):
+                name = f'artifact-{index}'
+                data = name.encode()
+                receipts.append({'kind':f'fixture-{index}', 'filename':name, 'bytes':len(data),
+                                 'sha256':hashlib.sha256(data).hexdigest()})
+            export_agent_artifacts(task, directory, receipts)
+            for receipt in receipts:
+                self.assertEqual((Path(directory) / receipt['filename']).read_bytes(), receipt['filename'].encode())
+
+    def test_guest_artifact_export_rejects_ninth_slot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task = SimpleNamespace(workspace=SimpleNamespace(container=ArchiveContainer('artifact-8',b'x')))
+            receipt = {'kind':'fixture', 'filename':'artifact-8', 'bytes':1, 'sha256':hashlib.sha256(b'x').hexdigest()}
+            with self.assertRaises(ExecutionError):
+                export_agent_artifacts(task, directory, [receipt])
+            with self.assertRaises(ExecutionError):
+                export_agent_artifacts(task, directory, [receipt] * 9)
     def test_preparation_budget_is_bounded_anchored_and_not_restarted(self):
         for invalid in [True, False, 0, -1, 1801, float("nan"), float("inf"), "900"]:
             with self.subTest(invalid=invalid), self.assertRaises(ExecutionError):

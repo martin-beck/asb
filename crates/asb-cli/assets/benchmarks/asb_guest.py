@@ -23,7 +23,7 @@ from asb_staging import upload, stage_runtime, root_execute, prepare_guest_roots
 from asb_relay import HostRelay, ForwardingCancellation, forward_request
 
 
-MAX_EXPORTED_ARTIFACTS = 4
+MAX_EXPORTED_ARTIFACTS = 8
 MAX_EXPORTED_ARTIFACT_BYTES = 16 * 1024 * 1024
 
 
@@ -45,7 +45,7 @@ def export_agent_artifacts(task, output, receipts):
     for receipt in receipts:
         if (not isinstance(receipt,dict) or set(receipt) != {"kind","filename","bytes","sha256"}
                 or not isinstance(receipt["kind"],str) or not re.fullmatch(r"[a-z0-9-]{1,128}",receipt["kind"])
-                or not isinstance(receipt["filename"],str) or not re.fullmatch(r"artifact-[0-3]",receipt["filename"])
+                or not isinstance(receipt["filename"],str) or not re.fullmatch(r"artifact-[0-7]",receipt["filename"])
                 or type(receipt["bytes"]) is not int or not 0 <= receipt["bytes"] <= MAX_EXPORTED_ARTIFACT_BYTES
                 or not isinstance(receipt["sha256"],str) or not re.fullmatch(r"[0-9a-f]{64}",receipt["sha256"])
                 or receipt["filename"] in seen):
