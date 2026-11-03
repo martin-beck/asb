@@ -183,8 +183,9 @@ tracks each alias's poll/write/output/exit lifecycle independently. This makes
 one alias per invocation the format used by the draft Hermes recorder. Its
 replayer derives completion-before-start dependencies, but this alone does not
 reconstruct completion ordering, filesystem effects, or distinguish repeated
-identical calls. Those cases still need qualification with the cassette reader;
-legacy single-alias recordings must remain readable.
+identical calls. A focused Rust test validates an actual recorder-produced
+multi-session sidecar with the cassette reader, and the fixture checks legacy
+single-alias recordings remain readable.
 
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the

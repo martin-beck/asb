@@ -55,6 +55,8 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     recorder.close()
     assert not failures, failures
     assert json.loads((directory / 'progress.json').read_text())['complete']
+    if os.environ.get('ASB_TEST_CAPTURE'):
+        Path(os.environ['ASB_TEST_CAPTURE']).write_bytes((directory / 'native.jsonl').read_bytes())
     rows = [json.loads(line) for line in (directory / 'native.jsonl').read_text().splitlines()]
     requests = [json.loads(base64.b64decode(row['request_b64']))['command']
                 for row in rows if row['event'] == 'write']
@@ -82,6 +84,23 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     wrong_order.close()
     assert not json.loads((directory / 'progress.json').read_text())['complete']
     rows = [json.loads(line) for line in (directory / 'native.jsonl').read_text().splitlines()]
+    by_alias = {}
+    for row in rows:
+        if row.get('event') in ('poll', 'write', 'output'):
+            by_alias.setdefault(row['alias'], []).append(dict(row, alias='terminal-1'))
+    legacy_rows = [rows[0], {'event':'session_alias','alias':'terminal-1','session':'launch-1'}]
+    for alias in ('terminal-1', 'terminal-2', 'terminal-3'):
+        legacy_rows.extend(by_alias[alias])
+    legacy_rows.extend([{'event':'exit','alias':'terminal-1','success':True}, rows[-1]])
+    legacy = directory / 'legacy.jsonl'
+    legacy.write_text(''.join(json.dumps(row) + '\n' for row in legacy_rows))
+    namespace['SIDECAR'] = legacy
+    legacy_replay = namespace['Replayer']()
+    for request, expected in [('0', 'ok'), ('1', 'ok'), ('2', 'later')]:
+        assert legacy_replay.invoke(None, request, False, None, None, None,
+                                    False, '.', False, False, None) == expected
+    legacy_replay.close()
+    assert json.loads((directory / 'progress.json').read_text())['complete']
     next(row for row in rows if row['event'] == 'output')['response_sha256'] = '0' * 64
     corrupt = directory / 'corrupt.jsonl'
     corrupt.write_text(''.join(json.dumps(row) + '\n' for row in rows))

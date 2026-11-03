@@ -569,6 +569,38 @@ mod tests {
     }
 
     #[test]
+    fn hermes_parallel_recorder_output_passes_cassette_validation() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "asb-hermes-sessions-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+        std::fs::create_dir(&directory).unwrap();
+        let capture = directory.join("native.jsonl");
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/hermes_native_parallel_gap.py");
+        let status = std::process::Command::new("python3")
+            .arg(script)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("ASB_TEST_CAPTURE", &capture)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let bytes = std::fs::read(&capture).unwrap();
+        let native = NativeTrack {
+            complete: true,
+            events: bytes.iter().filter(|b| **b == b'\n').count() as u64,
+            bytes: bytes.len() as u64,
+            sha256: super::super::digest(&bytes),
+        };
+        let transport = NativeToolTransport::from_sidecar(&native, &bytes).unwrap();
+        assert_eq!(transport.sessions().len(), 3);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn interleaved_native_sessions_retain_independent_exchanges() {
         let one = exact_lines();
         let two: Vec<_> = one
