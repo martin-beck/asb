@@ -1,5 +1,20 @@
 # Development
 
+The opt-in, offline `crates/asb-cli/tests/fixtures/fs_snapshot/overlay.py`
+probes four independent fuse-overlayfs workspaces from the same existing Git
+baseline. Set `ASB_SNAPSHOT_GIT_BASELINE` to that workspace,
+`ASB_SNAPSHOT_FUSE_OVERLAYFS` and `ASB_SNAPSHOT_FUSERMOUNT` to installed
+binaries, and `ASB_SNAPSHOT_IMAGE` to an already cached image with Git and
+Python; then run the script with Python. Docker is invoked with networking
+disabled and image pulling disabled. The fixture verifies concurrent Git status
+and recent-log agreement, index isolation, hard-link/rename behavior, and a
+child-process write in only one replica. It reports, but does not require,
+identical metadata fields. It preserves failed fixture logs under `target`.
+It requires `/dev/fuse` and container mount capabilities for this experiment;
+these are not ordinary CI requirements. It does not record or replay an agent,
+prove complete filesystem metadata fidelity, or qualify SWE-bench execution.
+
+
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without
 Docker, providers or installed clients. The opt-in
 `benchmark_live_sdk_session.py` instead needs the installed Terminal-Bench SDK
