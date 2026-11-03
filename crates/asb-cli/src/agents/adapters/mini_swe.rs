@@ -184,7 +184,9 @@ from minisweagent.exceptions import Submitted
 
 _PATH = Path(os.environ["ASB_MINI_SWE_TOOL_TAPE"])
 _MODE = os.environ["ASB_MINI_SWE_TOOL_MODE"]
-_LIMIT = 128
+# Match the shared local-tool transcript capacity rather than stopping normal
+# long-running agents after a much smaller adapter-specific number of calls.
+_LIMIT = 16_384
 _MAX_EFFECT_BYTES = 512 * 1024
 
 

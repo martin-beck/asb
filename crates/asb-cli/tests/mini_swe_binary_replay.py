@@ -36,6 +36,23 @@ sys.modules[exceptions.__name__] = exceptions
 
 
 class BinaryReplayTests(unittest.TestCase):
+    def test_more_than_128_tool_calls_record_and_replay(self):
+        import os
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);tape=root/'tape.jsonl'
+            with patch.dict(os.environ, {'ASB_MINI_SWE_TOOL_TAPE':str(tape), 'ASB_MINI_SWE_TOOL_MODE':'record'}, clear=True):
+                namespace={};exec(compile(transport,'asb_mini_swe_tools.py','exec'),namespace)
+                recorder=namespace['AsbTapeEnvironment'](cwd=str(root))
+                for index in range(129):
+                    recorder._record(f'command-{index}',{'returncode':0,'output':'done'},[])
+            with patch.dict(os.environ, {'ASB_MINI_SWE_TOOL_TAPE':str(tape), 'ASB_MINI_SWE_TOOL_MODE':'replay'}, clear=True):
+                namespace={};exec(compile(transport,'asb_mini_swe_tools.py','exec'),namespace)
+                replay=namespace['AsbTapeEnvironment'](cwd=str(root))
+                for index in range(129):
+                    self.assertEqual(replay.execute({'command':f'command-{index}'})['output'],'done')
+            self.assertFalse((root/'generated.png').exists())
+
     def test_binary_and_text_changes_replay_without_executing_command(self):
         import os
         with tempfile.TemporaryDirectory() as directory:
