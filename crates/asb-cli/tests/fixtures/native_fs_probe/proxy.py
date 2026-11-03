@@ -188,4 +188,5 @@ class Proxy(Operations):
             os.close(fh.fh)
             self.record('release', path, handle=handle)
 FUSE(Proxy(), str(mount), foreground=True, nothreads=False, raw_fi=True, use_ino=True,
-     **({'allow_other': True} if os.environ.get('ASB_PROBE_ALLOW_OTHER') == '1' else {}))
+     **({'allow_other': True} if os.environ.get('ASB_PROBE_ALLOW_OTHER') == '1' else {}),
+     **({'nonempty': True} if os.environ.get('ASB_PROBE_NONEMPTY') == '1' else {}))
