@@ -24,7 +24,7 @@ class GuestSnapshot:
             '/opt/asb-private/asb_snapshot_guest.py','--target','/testbed',
             '--root','/asb-snapshot-storage/snapshot','--socket','/opt/asb-private/snapshot.sock',
             '--output','/asb-snapshot-storage/snapshot-streams','--btrfs',tools['btrfs'],
-            '--mkfs',tools['mkfs.btrfs'],'--rsync',tools['rsync'],'--size',str(4*1024**3),'--apply-final']
+            '--mkfs',tools['mkfs.btrfs'],'--rsync',tools['rsync'],'--apply-final']
         if replay:
             args += ['--replay-archive','/asb-snapshot-storage/workspace-snapshots.tar']
         self.process=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log)

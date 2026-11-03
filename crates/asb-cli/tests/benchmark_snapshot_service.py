@@ -9,6 +9,7 @@ import sys
 import tempfile
 import tarfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -26,6 +27,20 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_guest_supervisor_uses_automatic_capacity_by_default(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);container=SimpleNamespace(id='fixture-container')
+            task=SimpleNamespace(artifacts=root,workspace=SimpleNamespace(container=container))
+            process=SimpleNamespace(stdout=io.BytesIO(b'READY\n'))
+            tools={'btrfs':'/btrfs','mkfs.btrfs':'/mkfs','rsync':'/rsync'}
+            with patch('asb_snapshot_control.upload'), \
+                 patch('asb_snapshot_control.selectors.DefaultSelector') as selectors, \
+                 patch('asb_snapshot_control.subprocess.Popen',return_value=process) as popen:
+                selectors.return_value.__enter__.return_value.select.return_value=[True]
+                supervisor=GuestSnapshot(task,tools,(0,0),['docker'],time.monotonic()+5)
+            self.assertNotIn('--size',popen.call_args.args[0])
+            supervisor.log.close()
+
     def test_replay_waits_without_tool_deadline_and_wakes_on_predecessor(self):
         applied=[];waiting=threading.Event()
         service=SnapshotReplay([('first',2),('second',3)],applied.append)
@@ -159,14 +174,14 @@ class SnapshotServiceTest(unittest.TestCase):
     def test_guest_shutdown_completes_consumed_replay(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);workspace=root/'workspace';workspace.mkdir()
-            path=root/'marker.sock';closed=[]
+            path=root/'marker.sock';closed=[];sizes=[]
             class Workspace:
-                def __init__(self,*args):self.mountpoint=workspace
+                def __init__(self,*args):self.mountpoint=workspace;sizes.append(args[2])
                 def prepare(self,_source):return workspace
                 def close(self):closed.append(True)
             args=['--target',str(workspace),'--root',str(root/'storage'),'--socket',str(path),
                   '--output',str(root/'out'),'--btrfs','btrfs','--mkfs','mkfs',
-                  '--rsync','rsync','--size','1024','--replay-archive',str(root/'archive')]
+                  '--rsync','rsync','--replay-archive',str(root/'archive')]
             output=io.StringIO()
             with patch.object(asb_snapshot_guest,'SnapshotWorkspace',Workspace), \
                  patch.object(asb_snapshot_guest,'unpack_streams'), \
@@ -177,6 +192,7 @@ class SnapshotServiceTest(unittest.TestCase):
                  patch.object(asb_snapshot_guest.sys,'stdout',output):
                 asb_snapshot_guest.main(args)
             self.assertEqual(output.getvalue(),'READY\nSAVED\n')
+            self.assertEqual(sizes,[None])
             self.assertEqual(closed,[True]);self.assertFalse(path.exists())
 
     def test_standalone_service_shutdown_interrupts_idle_client(self):

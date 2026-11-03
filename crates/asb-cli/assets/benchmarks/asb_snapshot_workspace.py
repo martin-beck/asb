@@ -11,7 +11,7 @@ class SnapshotWorkspace:
     def __init__(self, image, mountpoint, size, mkfs, btrfs, rsync):
         self.image, self.mountpoint = Path(image), Path(mountpoint)
         self.size, self.mkfs, self.btrfs, self.rsync = size, list(mkfs), list(btrfs), list(rsync)
-        if type(size) is not int or size <= 0 or not all((self.mkfs, self.btrfs, self.rsync)):
+        if (size is not None and (type(size) is not int or size <= 0)) or not all((self.mkfs, self.btrfs, self.rsync)):
             raise ValueError('snapshot workspace configuration is invalid')
         self.loop = None
         self.mounted = False
@@ -21,8 +21,17 @@ class SnapshotWorkspace:
         if not source.is_dir():
             raise ValueError('snapshot workspace source is unavailable')
         try:
+            size = self.size
+            if size is None:
+                try:
+                    space = os.statvfs(self.image.parent)
+                except OSError as error:
+                    raise RuntimeError('cannot determine snapshot storage capacity') from error
+                size = space.f_bavail * (space.f_frsize or space.f_bsize)
+                if size <= 0:
+                    raise RuntimeError('snapshot storage has no available space')
             with self.image.open('xb') as image:
-                image.truncate(self.size)
+                image.truncate(size)
             subprocess.run(self.mkfs + ['-q', str(self.image)], check=True, stdout=subprocess.DEVNULL, timeout=60)
             # The container may expose loop-control without pre-created loop
             # nodes. Allocate a free number dynamically and create its node

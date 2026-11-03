@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +16,50 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class WorkspaceTest(unittest.TestCase):
+    def test_automatic_image_capacity_tracks_available_project_storage(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);source=root/'source';source.mkdir()
+            workspace=SnapshotWorkspace(root/'image',root/'mount',None,['mkfs'],['btrfs'],['rsync'])
+            space=SimpleNamespace(f_bavail=6*1024*1024,f_frsize=1024)
+            with patch('asb_snapshot_workspace.os.statvfs',return_value=space) as statvfs, \
+                 patch('asb_snapshot_workspace.subprocess.run'), \
+                 patch('builtins.open',unittest.mock.mock_open()), \
+                 patch('asb_snapshot_workspace.fcntl.ioctl',return_value=42), \
+                 patch('asb_snapshot_workspace.os.mknod'):
+                workspace.prepare(source);workspace.close()
+            statvfs.assert_called_once_with(root)
+            self.assertEqual((root/'image').stat().st_size,6*1024**3)
+
+    def test_automatic_capacity_failure_does_not_create_an_image(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);source=root/'source';source.mkdir()
+            workspace=SnapshotWorkspace(root/'image',root/'mount',None,['mkfs'],['btrfs'],['rsync'])
+            with patch('asb_snapshot_workspace.os.statvfs',return_value=SimpleNamespace(f_bavail=0,f_frsize=4096)):
+                with self.assertRaisesRegex(RuntimeError,'no available space'):workspace.prepare(source)
+            self.assertFalse((root/'image').exists())
+
+    def test_automatic_capacity_uses_block_size_when_fragment_size_is_zero(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);source=root/'source';source.mkdir()
+            workspace=SnapshotWorkspace(root/'image',root/'mount',None,['mkfs'],['btrfs'],['rsync'])
+            space=SimpleNamespace(f_bavail=1024,f_frsize=0,f_bsize=4096)
+            with patch('asb_snapshot_workspace.os.statvfs',return_value=space), \
+                 patch('asb_snapshot_workspace.subprocess.run'), \
+                 patch('builtins.open',unittest.mock.mock_open()), \
+                 patch('asb_snapshot_workspace.fcntl.ioctl',return_value=42), \
+                 patch('asb_snapshot_workspace.os.mknod'):
+                workspace.prepare(source);workspace.close()
+            self.assertEqual((root/'image').stat().st_size,4*1024**2)
+
+    def test_capacity_probe_error_does_not_claim_an_image_was_retained(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);source=root/'source';source.mkdir()
+            workspace=SnapshotWorkspace(root/'image',root/'mount',None,['mkfs'],['btrfs'],['rsync'])
+            with patch('asb_snapshot_workspace.os.statvfs',side_effect=OSError('unavailable')):
+                with self.assertRaisesRegex(RuntimeError,'cannot determine snapshot storage capacity'):
+                    workspace.prepare(source)
+            self.assertFalse((root/'image').exists())
+
     def test_loop_allocation_retries_busy_without_detaching_another_owner(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);source=root/'source';source.mkdir();calls=[]

@@ -40,7 +40,7 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     for name in ('target','root','socket','output','btrfs','mkfs','rsync'):
         parser.add_argument('--'+name,required=True)
-    parser.add_argument('--size',type=int,required=True)
+    parser.add_argument('--size',type=int)
     parser.add_argument('--apply-final',action='store_true')
     parser.add_argument('--replay-archive')
     args=parser.parse_args(argv)
