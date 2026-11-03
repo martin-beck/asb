@@ -58,8 +58,10 @@ production filesystem replay remains unavailable.
 The experimental per-replica replay server accepts validated tool-end markers
 and acknowledges each only after applying its recorded operations. Offline
 tests exercise four isolated workspaces and reject missing or invalid calls.
-The server and cursor are not yet started by the guest, do not intercept direct
-agent filesystem access, and do not establish complete replay coverage.
+The guest can start and settle the server through an internal Mini-SWE replay
+request, preserving the supervisor during agent cleanup. The host does not yet
+admit this request. The server does not intercept direct agent filesystem
+access, and these checks do not establish complete replay coverage.
 It additionally exercises a background child that writes after its tool-return
 marker and before the next invocation, checking the file is absent at the first
 boundary and present at the second. This does not implement a scheduler for

@@ -4,7 +4,9 @@ The caller must validate each adapter request before sending its tool-end
 boundary. This module is not yet wired into the ASB guest lifecycle.
 """
 import re
+import os
 import socket
+import sys
 import threading
 from pathlib import Path
 
@@ -20,6 +22,7 @@ class ReplayServer:
             self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 self.listener.bind(str(self.path))
+                os.chmod(self.path, 0o666)
                 self.listener.listen(32)
                 self.listener.settimeout(.2)
             except BaseException:
@@ -102,3 +105,15 @@ class ReplayServer:
         finally:
             self.cursor.close()
             self.path.unlink(missing_ok=True)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 4:
+        raise SystemExit('usage: asb_fs_replay_server.py EVIDENCE WORKSPACE SOCKET')
+    server = ReplayServer(*sys.argv[1:])
+    try:
+        print('READY', flush=True)
+        if sys.stdin.readline() != 'STOP\n':
+            raise RuntimeError('filesystem replay control ended unexpectedly')
+    finally:
+        server.finish()

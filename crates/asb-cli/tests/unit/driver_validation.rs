@@ -46,6 +46,7 @@ impl Fixture {
             runtime_dir: self.0.join("runtime"),
             run_dir: self.0.join("runtime/run"),
             filesystem_recording: false,
+            filesystem_replay: None,
             replay: false,
             timeout_seconds: 1.0,
             namespace_collectors: Vec::new(),
@@ -63,6 +64,28 @@ impl Fixture {
         )
         .unwrap();
     }
+}
+
+#[test]
+fn guest_filesystem_replay_rejects_unbound_or_conflicting_requests() {
+    let fixture = Fixture::new();
+    let mut request = fixture.request();
+    request.filesystem_replay = Some(request.runtime_dir.join("filesystem-replay"));
+    let error = run(request).unwrap_err().to_string();
+    assert!(error.contains("invalid experimental guest filesystem replay request"));
+    let mut request = fixture.request();
+    request.config.agent = "mini-swe".into();
+    request.tool_replay = true;
+    request.filesystem_recording = true;
+    request.filesystem_replay = Some(request.runtime_dir.join("filesystem-replay"));
+    let error = run(request).unwrap_err().to_string();
+    assert!(error.contains("invalid experimental guest filesystem replay request"));
+    let mut request = fixture.request();
+    request.config.agent = "mini-swe".into();
+    request.tool_replay = true;
+    request.filesystem_replay = Some(request.runtime_dir.join("other"));
+    let error = run(request).unwrap_err().to_string();
+    assert!(error.contains("invalid experimental guest filesystem replay request"));
 }
 
 #[test]
