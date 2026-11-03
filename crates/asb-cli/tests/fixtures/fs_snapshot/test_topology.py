@@ -1,11 +1,13 @@
 """Offline tests for the experimental snapshot hard-link split planner."""
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from topology import (apply_transitions, apply_tree_transitions, detach_splits, directories,
+sys.path.insert(0, str(Path(__file__).resolve().parents[5] / 'crates/asb-cli/assets/benchmarks'))
+from asb_snapshot_topology import (apply_transitions, apply_tree_transitions, detach_splits, directories,
                       plan_splits, plan_transitions, plan_tree_transitions, regular_files)
 
 SCRATCH = Path(__file__).resolve().parents[5] / 'target' / 'snapshot-topology-tests'
@@ -84,7 +86,7 @@ class TopologyTest(unittest.TestCase):
             root=Path(directory);(root/'old').mkdir();(root/'old'/'file').write_bytes(b'old')
             plan=plan_tree_transitions({'old/file':(1,20)},{'new/file':(2,20)},regular_files(root),
                                        {'old':(1,10)},{'new':(2,10)},directories(root))
-            with patch('topology.os.replace',side_effect=OSError('injected')):
+            with patch('asb_snapshot_topology.os.replace',side_effect=OSError('injected')):
                 with self.assertRaisesRegex(RuntimeError,'retained staging'):
                     apply_tree_transitions(root,plan)
             staging=list(root.glob('.asb-snapshot-dirs-*'))
@@ -139,7 +141,7 @@ class TopologyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);(root/'a').write_bytes(b'old')
             plan=plan_transitions({'a':(1,10)},{'b':(2,10)},regular_files(root))
-            with patch('topology.os.replace',side_effect=OSError('injected')):
+            with patch('asb_snapshot_topology.os.replace',side_effect=OSError('injected')):
                 with self.assertRaisesRegex(RuntimeError,'retained staging'):
                     apply_transitions(root,plan)
             staging=list(root.glob('.asb-snapshot-moves-*'))

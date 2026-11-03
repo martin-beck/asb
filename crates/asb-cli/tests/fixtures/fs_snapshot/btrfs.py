@@ -53,7 +53,7 @@ python3 - <<'EOPY'
 import errno,os,socket,subprocess,concurrent.futures,sys,threading,json
 from pathlib import Path
 sys.path.insert(0,"/opt")
-from asb_snapshot_service import SnapshotService,SnapshotReplay,MarkerServer,load_replay_boundaries
+from asb_snapshot_service import SnapshotService,SnapshotReplay,SnapshotApplier,MarkerServer,load_replay_boundaries
 roots=[Path('/work/fs/s'+str(i)) for i in range(5)]
 st=[(r/'file').stat() for r in roots]
 checks={
@@ -129,7 +129,7 @@ if ((second/'file').stat().st_ino!=(second/'link').stat().st_ino
  raise RuntimeError('fixture did not produce the expected hard-link split')
 import sys
 sys.path.insert(0,'/opt')
-from topology import regular_files,plan_transitions,apply_transitions,directories,plan_tree_transitions,apply_tree_transitions
+from asb_snapshot_topology import regular_files,plan_transitions,apply_transitions,directories,plan_tree_transitions,apply_tree_transitions
 before_topology=regular_files(second);after_topology=regular_files(third)
 for root in roots[1:]:
  plan=plan_transitions(before_topology,after_topology,regular_files(root))
@@ -236,12 +236,7 @@ adapter_before=received/'snapshot-00000001'
 adapter_after=received/'snapshot-00000002'
 def replay_adapter(index):
  root=roots[index];path=Path(f'/work/adapter-replay-{index}.sock')
- def apply(sequence):
-  if sequence!=2:raise RuntimeError('unexpected adapter snapshot')
-  plan=plan_tree_transitions(regular_files(adapter_before),regular_files(adapter_after),regular_files(root),directories(adapter_before),directories(adapter_after),directories(root))
-  apply_tree_transitions(root,plan)
-  result=sync(adapter_after,root)
-  if result.returncode:raise RuntimeError('adapter rsync failed: '+result.stderr.decode()[-500:])
+ apply=SnapshotApplier(received,root,['/hostlib/LOADER','--library-path','/hostlib','/opt/rsync'])
  replay=SnapshotReplay(load_replay_boundaries('/work/fs/adapter-recorded'),apply);server=MarkerServer(path,replay)
  thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
  try:
@@ -261,7 +256,7 @@ if not all(checks.values()):raise RuntimeError('Btrfs snapshot checks failed')
 for fd in fds:os.close(fd)
 EOPY
 '''.replace('LOADER',loader).replace('LOOPDEV',loop.name)
- cmd=['docker','run','--rm','--name',container_name,'--pull=never','--network','none','--device','/dev/loop-control','--device',str(loop),'--device-cgroup-rule','b 7:* rwm','--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={mkfs},dst=/opt/mkfs.btrfs,readonly','--mount',f'type=bind,src={btrfs},dst=/opt/btrfs,readonly','--mount',f'type=bind,src={rsync},dst=/opt/rsync,readonly','--mount',f'type=bind,src={Path(__file__).with_name("topology.py").resolve()},dst=/opt/topology.py,readonly','--mount',f'type=bind,src={Path(__file__).with_name("mini_swe_client.py").resolve()},dst=/opt/mini_swe_client.py,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/src/agents/adapters/mini_swe.rs").resolve()},dst=/opt/mini_swe.rs,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_service.py").resolve()},dst=/opt/asb_snapshot_service.py,readonly','--mount',f'type=bind,src={libraries},dst=/hostlib,readonly','--entrypoint','/bin/sh',image,'-c',script]
+ cmd=['docker','run','--rm','--name',container_name,'--pull=never','--network','none','--device','/dev/loop-control','--device',str(loop),'--device-cgroup-rule','b 7:* rwm','--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={mkfs},dst=/opt/mkfs.btrfs,readonly','--mount',f'type=bind,src={btrfs},dst=/opt/btrfs,readonly','--mount',f'type=bind,src={rsync},dst=/opt/rsync,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_topology.py").resolve()},dst=/opt/asb_snapshot_topology.py,readonly','--mount',f'type=bind,src={Path(__file__).with_name("mini_swe_client.py").resolve()},dst=/opt/mini_swe_client.py,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/src/agents/adapters/mini_swe.rs").resolve()},dst=/opt/mini_swe.rs,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_service.py").resolve()},dst=/opt/asb_snapshot_service.py,readonly','--mount',f'type=bind,src={libraries},dst=/hostlib,readonly','--entrypoint','/bin/sh',image,'-c',script]
  try:
   r=subprocess.run(cmd,text=True,capture_output=True,timeout=90)
  except subprocess.TimeoutExpired:

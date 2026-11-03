@@ -151,6 +151,38 @@ def load_replay_boundaries(store):
     return expected
 
 
+class SnapshotApplier:
+    """Apply successive received snapshots to one already-restored workspace."""
+    def __init__(self, store, workspace, rsync_command):
+        self.store = Path(store)
+        self.workspace = Path(workspace)
+        self.command = list(rsync_command)
+        self.previous = 1
+        if not self.command or not self.workspace.is_dir():
+            raise ValueError('snapshot replay workspace or sync command is unavailable')
+
+    def __call__(self, sequence):
+        from asb_snapshot_topology import (regular_files, directories,
+                                           plan_tree_transitions, apply_tree_transitions)
+        if sequence != self.previous + 1:
+            raise ValueError('snapshot replay sequence is out of order')
+        before = self.store / f'snapshot-{self.previous:08d}'
+        after = self.store / f'snapshot-{sequence:08d}'
+        if not before.is_dir() or not after.is_dir():
+            raise ValueError('snapshot replay image is unavailable')
+        plan = plan_tree_transitions(regular_files(before), regular_files(after), regular_files(self.workspace),
+                                     directories(before), directories(after), directories(self.workspace))
+        apply_tree_transitions(self.workspace, plan)
+        try:
+            subprocess.run(self.command + ['-aHAX', '--inplace', '--checksum', '--delete',
+                                           str(after)+'/', str(self.workspace)+'/'],
+                           check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=60)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError('snapshot replay sync failed; workspace may be partially updated') from error
+        self.previous = sequence
+
+
 class SnapshotReplay:
     """Apply recorded tool-end boundaries to one isolated replay workspace.
 

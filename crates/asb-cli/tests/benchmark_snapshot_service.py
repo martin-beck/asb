@@ -11,13 +11,23 @@ import unittest
 
 ROOT=Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT/'crates/asb-cli/assets/benchmarks'))
-from asb_snapshot_service import MarkerServer,SnapshotReplay,SnapshotService,load_replay_boundaries
+from asb_snapshot_service import MarkerServer,SnapshotApplier,SnapshotReplay,SnapshotService,load_replay_boundaries
 
 SCRATCH=ROOT/'target'/'snapshot-service-tests'
 SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_snapshot_applier_reports_sync_failure_and_sequence_error(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);store=root/'store';store.mkdir()
+            (store/'snapshot-00000001').mkdir();(store/'snapshot-00000002').mkdir()
+            workspace=root/'workspace';workspace.mkdir()
+            applier=SnapshotApplier(store,workspace,[sys.executable,'-c','import sys; sys.exit(1)'])
+            with self.assertRaisesRegex(ValueError,'out of order'):applier(3)
+            with self.assertRaisesRegex(RuntimeError,'partially updated'):applier(2)
+            self.assertEqual(applier.previous,1)
+
     def test_replay_rejects_mismatch_and_unconsumed_boundaries(self):
         applied=[]
         replay=SnapshotReplay([('one',2),('two',3)],applied.append)
