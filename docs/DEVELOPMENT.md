@@ -12,6 +12,13 @@ This is an experimental fixture, not an ASB replay backend: it changes timing,
 does not capture all filesystem operations, and does not replay tool execution.
 FUSE is not a requirement for ordinary development or CI.
 
+`python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
+diagnostic for a known defect: the current Hermes terminal sidecar replays the
+recorded response to four clients but does not reproduce a file written by the
+recorded tool. It intentionally asserts the existing defect so that a future
+repair must update the assertion to require the file effect without executing
+the original tool. It does not launch the full Hermes agent or evaluate a task.
+
 The opt-in `crates/asb-cli/tests/openjiuwen_embedding_tape.py` exercises the
 installed OpenJiuwen embedding client and the adapter's proposed auxiliary
 tape route with an offline loopback fixture. Set `ASB_OPENJIUWEN_PYTHON` to
