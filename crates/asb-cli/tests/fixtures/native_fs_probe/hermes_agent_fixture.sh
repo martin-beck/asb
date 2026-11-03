@@ -1,14 +1,32 @@
 #!/bin/sh
 set -eu
-/usr/bin/python3 -S /provider.py "$ASB_FIXTURE_MOCK_DIR" > "$ASB_FIXTURE_MOCK_DIR/server.log" 2>&1 &
-server=$!
-trap 'kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true' EXIT
+server=''
+tape=''
+cleanup() {
+  if [ -n "$tape" ]; then kill "$tape" 2>/dev/null || true; wait "$tape" 2>/dev/null || true; fi
+  if [ -n "$server" ]; then kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+if [ "$ASB_HERMES_NATIVE_MODE" = record ]; then
+  /usr/bin/python3 -S /provider.py "$ASB_FIXTURE_MOCK_DIR" > "$ASB_FIXTURE_MOCK_DIR/server.log" 2>&1 &
+  server=$!
+  n=0
+  while [ ! -f "$ASB_FIXTURE_MOCK_DIR/port" ]; do
+    n=$((n+1)); [ "$n" -lt 200 ] || exit 42; sleep 0.05
+  done
+  upstream="http://127.0.0.1:$(cat "$ASB_FIXTURE_MOCK_DIR/port")"
+  ASB_TAPE_READY_FILE="$ASB_FIXTURE_MOCK_DIR/tape-ready.json" /asb-node /asb-scripts/llmtape.mjs record --port 0 --upstream "$upstream" --out "$ASB_FIXTURE_LLM_CASSETTE" > "$ASB_FIXTURE_MOCK_DIR/tape.log" 2>&1 &
+else
+  ASB_TAPE_MISMATCH_EVIDENCE="$ASB_FIXTURE_MOCK_DIR/mismatch.json" ASB_TAPE_READY_FILE="$ASB_FIXTURE_MOCK_DIR/tape-ready.json" /asb-node /asb-scripts/llmtape.mjs replay --port 0 --cassette "$ASB_FIXTURE_LLM_CASSETTE" > "$ASB_FIXTURE_MOCK_DIR/tape.log" 2>&1 &
+fi
+tape=$!
 n=0
-while [ ! -f "$ASB_FIXTURE_MOCK_DIR/port" ]; do
-  n=$((n+1)); [ "$n" -lt 200 ] || exit 42; sleep 0.05
+while [ ! -f "$ASB_FIXTURE_MOCK_DIR/tape-ready.json" ]; do
+  n=$((n+1)); [ "$n" -lt 200 ] || exit 43; sleep 0.05
 done
+port=$(/usr/bin/python3 -S -c 'import json,sys; print(json.load(open(sys.argv[1]))["port"])' "$ASB_FIXTURE_MOCK_DIR/tape-ready.json")
 export OPENAI_API_KEY=fixture-token
-export OPENAI_BASE_URL="http://127.0.0.1:$(cat "$ASB_FIXTURE_MOCK_DIR/port")/v1"
+export OPENAI_BASE_URL="http://127.0.0.1:$port/v1"
 timeout 1800 /asb-hermes/venv/bin/python -c 'import sys; from hermes_cli.main import main; sys.exit(main())' \
   -z 'Create the requested fixture file.' --provider openai-api --model fixture-model --toolsets terminal \
   --usage-file "$ASB_FIXTURE_MOCK_DIR/usage.json" > "$ASB_FIXTURE_MOCK_DIR/agent.log" 2>&1

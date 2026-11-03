@@ -82,15 +82,18 @@ on its temporary container-local FUSE mount so the unprivileged tool can access
 the proxy; this is not a production setting. This mode does not invoke an LLM
 or complete agent.
 
-With that installation, set `ASB_HERMES_AGENT_FIXTURE=1` to launch the Hermes
-CLI itself against a deterministic loopback mock provider: one recording and
-four parallel replays. A test-only wrapper places terminal-call boundaries and
-the operation journal restores its file before returning the recorded result;
-an external sentinel confirms the shell command was not reexecuted. Each
-replay uses the mock provider again, not a recorded LLM tape. The current
-sidecar restricts Hermes to the terminal toolset, so this is not unrestricted
-agent qualification, a SWE-bench task, or a production integration. The
-30-minute timeout in this fixture covers only the actual Hermes CLI command.
+With that installation, set `ASB_HERMES_AGENT_FIXTURE=1` and `ASB_FIXTURE_NODE`
+to a Node executable compatible with the image. The fixture launches the Hermes
+CLI against a deterministic loopback mock provider through the actual LLM tape:
+one recording and four parallel replays. Each replay runs the tape offline with
+no mock server and checks complete tape consumption. A test-only wrapper places
+terminal-call boundaries; the operation journal restores the file before the
+recorded result is returned, and an external sentinel confirms the shell command
+was not reexecuted. Replay homes are isolated but presented at the same path,
+and record and replay use consistent user environments, so generated prompts
+match. The current sidecar restricts Hermes to the terminal toolset, so this is
+not unrestricted agent qualification, a SWE-bench task, or production
+integration. The 30-minute timeout covers only the actual Hermes CLI command.
 
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the
