@@ -5,12 +5,36 @@ delta's output-only usage. This process-local compatibility fix merges the
 cumulative fields; it does not alter model requests or generated content.
 """
 import atexit
+import asyncio
 import base64
 import contextvars
 import hashlib
 import os
 import runpy
+import socket
+import threading
 import sys
+
+async def _snapshot_boundary(mode, action, alias):
+    """Notify the optional workload snapshot service without blocking other tools."""
+    variable = "ASB_FS_MARKER_SOCKET" if mode == "record" else "ASB_FS_REPLAY_SOCKET"
+    path = os.environ.get(variable)
+    if not path:
+        return
+    identity = f":{os.getpid()}:{threading.get_native_id()}" if mode == "record" else ""
+    def exchange():
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(40 if mode == "record" else 1800)
+                connection.connect(path)
+                connection.sendall(f"tool-{action}:{alias}{identity}\n".encode("ascii"))
+                with connection.makefile("rb") as response:
+                    if not response.readline(32).strip().isdigit():
+                        raise RuntimeError("OpenJiuwen snapshot boundary was rejected")
+        except (OSError, UnicodeError) as error:
+            raise RuntimeError("OpenJiuwen snapshot boundary is unavailable") from error
+    await asyncio.to_thread(exchange)
+
 
 # OpenJiuwen exposes its turn limit through this environment setting, not a
 # CLI option. Consume the adapter-private argument before importing its CLI.
@@ -733,6 +757,7 @@ try:
                 # not a provenance marker: a reconstructed result can let a
                 # discarded object's id be reused before execute() runs.
                 _replayed_output_events[id(result)] = (result, output)
+                await _snapshot_boundary("replay", "end", f"openjiuwen-{invocation['ordinal']}")
                 return result
             invocation = None
             invocation_token = None
@@ -745,8 +770,16 @@ try:
                 }
                 _record_dispatch_cursor += 1
                 invocation_token = _record_invocation_stack.set((*stack, invocation["ordinal"]))
+            snapshot_alias = (f"openjiuwen-{invocation['ordinal']}"
+                              if invocation is not None and invocation["depth"] == 0 else None)
             try:
-                output = await original_invoke(self, inputs, **kwargs)
+                if snapshot_alias is not None:
+                    await _snapshot_boundary("record", "begin", snapshot_alias)
+                try:
+                    output = await original_invoke(self, inputs, **kwargs)
+                finally:
+                    if snapshot_alias is not None:
+                        await _snapshot_boundary("record", "end", snapshot_alias)
             finally:
                 if invocation is not None:
                     _record_invocation_stack.reset(invocation_token)
