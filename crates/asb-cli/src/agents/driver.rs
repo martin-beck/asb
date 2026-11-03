@@ -1114,6 +1114,10 @@ impl GuestFilesystemCapture {
                 include_str!("../../assets/benchmarks/asb_fs_attribution.py"),
             ),
             (
+                "asb_fs_metadata_windows.py",
+                include_str!("../../assets/benchmarks/asb_fs_metadata_windows.py"),
+            ),
+            (
                 "asb_fs_record.py",
                 include_str!("../../assets/benchmarks/asb_fs_record.py"),
             ),

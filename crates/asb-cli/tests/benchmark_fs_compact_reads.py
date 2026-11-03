@@ -25,7 +25,7 @@ finally: sys.argv=argv
 
 class CompactReadTest(unittest.TestCase):
     def test_only_uniquely_attributed_tool_reads_are_compacted(self):
-        proxy=module['Proxy'].__new__(module['Proxy']); proxy.record_lock=threading.Lock()
+        proxy=module['Proxy'].__new__(module['Proxy']); proxy.record_lock=threading.Lock(); proxy.metadata_playback=None
         proxy.sequence=0; proxy.log=io.StringIO();proxy.attribution=Attribution()
         class Payload:
             def __init__(self): self.data=bytearray()
@@ -50,7 +50,7 @@ class CompactReadTest(unittest.TestCase):
         self.assertEqual(rows[5]['payload_sha256'],hashlib.sha256(b'abc').hexdigest())
         self.assertNotIn('object',rows[5]);self.assertEqual(proxy.payload.data,b'abc')
     def test_attribution_failure_falls_back_to_full_payload(self):
-        proxy=module['Proxy'].__new__(module['Proxy']); proxy.record_lock=threading.Lock()
+        proxy=module['Proxy'].__new__(module['Proxy']); proxy.record_lock=threading.Lock(); proxy.metadata_playback=None
         proxy.sequence=0; proxy.log=io.StringIO()
         class Broken:
             def observe(self, _event): raise ValueError('fixture')

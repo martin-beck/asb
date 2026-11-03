@@ -134,7 +134,7 @@ def caller_identity(tid):
 class Proxy(Operations):
     use_ns = True
     def __init__(self):
-        self.record_lock = threading.Lock()
+        self.record_lock = threading.RLock()
         self.sequence = 0
         self.handle_lock = threading.Lock()
         self.next_handle = 0
@@ -142,6 +142,21 @@ class Proxy(Operations):
         self.inode_locks = {}
         self.log = open(evidence / 'events.jsonl', 'a', encoding='utf-8', buffering=1)
         self.payload = PayloadStore(evidence / 'payload.bin')
+        self.metadata_playback = None
+        metadata_source = os.environ.get('ASB_PROBE_METADATA_REPLAY')
+        if metadata_source:
+            from asb_fs_metadata_windows import ObservationWindow
+            source = Path(metadata_source)
+            def recorded_events():
+                with (source / 'events.jsonl').open(encoding='utf-8') as stream:
+                    for line in stream:
+                        if not line.endswith('\n'):
+                            raise ValueError('recorded filesystem event stream is truncated')
+                        event = json.loads(line)
+                        yield event
+                        if event.get('op') == 'marker':
+                            return
+            self.metadata_playback = ObservationWindow(recorded_events(), source / 'payload.bin')
         self.attribution = None
         if os.environ.get('ASB_PROBE_COMPACT_TOOL_READS') == '1':
             from asb_fs_attribution import Attribution
@@ -189,6 +204,11 @@ class Proxy(Operations):
         return self.lock_for_stat(os.fstat(fi.fh))
     def record(self, op, path, data=None, is_marker=False, **detail):
         with self.record_lock:
+            playback_boundary = None
+            if self.metadata_playback is not None and not op.startswith('observe-'):
+                playback_boundary = self.metadata_playback.advance()
+                if playback_boundary is None or playback_boundary.get('op') != op or playback_boundary.get('path') != path:
+                    raise RuntimeError('recorded direct filesystem operation differs')
             self.sequence += 1
             event = {'sequence': self.sequence, 'op': op, 'path': path, 'caller': None if is_marker or os.environ.get('ASB_PROBE_BENCHMARK_NO_IDENTITY') == '1' else caller_identity(fuse_get_context()[2]), **detail}
             scope = None
@@ -206,21 +226,25 @@ class Proxy(Operations):
                     position = self.payload.append(data)
                     event.update(object='payload.bin', payload_offset=position, bytes=len(data))
             self.log.write(json.dumps(event, separators=(',', ':')) + '\n')
+            if playback_boundary is not None:
+                self.metadata_playback.operation_applied()
             return self.sequence
     def observe_metadata(self, op, path, operation, **detail):
-        """Optionally retain exact observations for experimental replay work."""
-        if os.environ.get('ASB_PROBE_METADATA_CAPTURE') != '1':
+        """Return recorded results in the opt-in startup replay prototype."""
+        if self.metadata_playback is None and os.environ.get('ASB_PROBE_METADATA_CAPTURE') != '1':
             return operation()
-        try:
-            result = operation()
-        except OSError as error:
-            self.record('observe-' + op, path, error=error.errno, **detail)
-            raise
-        if isinstance(result, bytes):
-            self.record('observe-' + op, path, result, **detail)
-        else:
-            self.record('observe-' + op, path, result=result, **detail)
-        return result
+        with self.record_lock:
+            try:
+                result = (self.metadata_playback.observe('observe-' + op, path, **detail)
+                          if self.metadata_playback is not None else operation())
+            except OSError as error:
+                self.record('observe-' + op, path, error=error.errno, **detail)
+                raise
+            if isinstance(result, bytes):
+                self.record('observe-' + op, path, result, **detail)
+            else:
+                self.record('observe-' + op, path, result=result, **detail)
+            return result
 
     def getattr(self, path, fh=None):
         def lookup():

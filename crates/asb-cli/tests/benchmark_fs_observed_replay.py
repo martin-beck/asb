@@ -4,7 +4,7 @@ import io
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'crates/asb-cli/assets/benchmarks'))
@@ -29,7 +29,7 @@ class ObservedReplayTest(unittest.TestCase):
                 steps.append(('server', args, kwargs))
             def finish(self):
                 steps.append('finish')
-        with patch.object(observed, 'FilesystemRecorder', Recorder), patch.object(observed, 'ReplayServer', Server), contextlib.redirect_stdout(io.StringIO()) as output:
+        with patch.object(observed.Path, 'open', mock_open(read_data='{\"op\":\"open\"}\n')), patch.object(observed, 'FilesystemRecorder', Recorder), patch.object(observed, 'ReplayServer', Server), contextlib.redirect_stdout(io.StringIO()) as output:
             observed.run('/workspace', '/run', '/proxy', '/binding', '/lib', '/evidence', '/socket', io.StringIO('STOP\n'))
         self.assertEqual(output.getvalue(), 'READY\n')
         self.assertEqual(steps[2], ('server', ('/evidence', Path('/backing'), '/socket'), {'direct_trace': Path('/trace')}))
@@ -46,7 +46,7 @@ class ObservedReplayTest(unittest.TestCase):
         class Server:
             def __init__(self, *args, **kwargs): pass
             def finish(self): steps.append('finish')
-        with patch.object(observed, 'FilesystemRecorder', Recorder), patch.object(observed, 'ReplayServer', Server), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(observed.Path, 'open', mock_open(read_data='{\"op\":\"open\"}\n')), patch.object(observed, 'FilesystemRecorder', Recorder), patch.object(observed, 'ReplayServer', Server), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(RuntimeError, 'control ended unexpectedly'):
                 observed.run('/workspace', '/run', '/proxy', '/binding', '/lib', '/evidence', '/socket', io.StringIO(''))
         self.assertEqual(steps, ['finish', 'unmount'])
@@ -61,10 +61,30 @@ class ObservedReplayTest(unittest.TestCase):
             def __exit__(self, *_): steps.append('unmount')
         class Server:
             def __init__(self, *args, **kwargs): raise RuntimeError('startup failed')
-        with patch.object(observed, 'FilesystemRecorder', Recorder), patch.object(observed, 'ReplayServer', Server):
+        with patch.object(observed.Path, 'open', mock_open(read_data='{\"op\":\"open\"}\n')), patch.object(observed, 'FilesystemRecorder', Recorder), patch.object(observed, 'ReplayServer', Server):
             with self.assertRaisesRegex(RuntimeError, 'startup failed'):
                 observed.run('/workspace', '/run', '/proxy', '/binding', '/lib', '/evidence', '/socket', io.StringIO('STOP\n'))
         self.assertEqual(steps, ['unmount'])
+
+    def test_metadata_recording_selects_recorded_metadata_playback(self):
+        calls=[]
+        class Recorder:
+            lower=Path('/backing'); recording=Path('/trace')
+            def __init__(self,*args,**kwargs): calls.append(kwargs)
+            def __enter__(self): return self
+            def __exit__(self,*_): pass
+        class Server:
+            def __init__(self,*args,**kwargs): pass
+            def finish(self): pass
+        with patch.object(observed.Path,'open',mock_open(read_data='{\"op\":\"observe-getattr\"}\n')), patch.object(observed,'FilesystemRecorder',Recorder), patch.object(observed,'ReplayServer',Server), contextlib.redirect_stdout(io.StringIO()):
+            observed.run('/workspace','/run','/proxy','/binding','/lib','/evidence','/socket',io.StringIO('STOP\n'))
+        self.assertEqual(calls[0]['metadata_replay'],'/evidence')
+
+    def test_empty_evidence_fails_before_mount(self):
+        with patch.object(observed.Path,'open',mock_open(read_data='')), patch.object(observed,'FilesystemRecorder') as recorder:
+            with self.assertRaisesRegex(RuntimeError,'empty or truncated'):
+                observed.run('/workspace','/run','/proxy','/binding','/lib','/evidence','/socket',io.StringIO('STOP\n'))
+            recorder.assert_not_called()
 
 
 if __name__ == '__main__':
