@@ -59,9 +59,9 @@ The OpenHands adapter emits begin/end markers around its real terminal and
 file-editor delegates without removing its other declared tools. Editor actions
 and observations use an adapter-owned transcript; replay waits for the journal
 before returning an observation. Marker or transcript failures are reported when
-recording closes. Task tracking and delegated-agent tools still run when called
-during recording, but mark that recording incomplete until their replay is
-implemented. This does not establish full OpenHands replay support.
+recording closes. Task tracking still runs when called during recording, but
+marks that recording incomplete until its replay is implemented. This does not
+establish full OpenHands replay support.
 The offline `tests/fixtures/openhands_editor_sdk.py` can be run with an
 installed OpenHands project Python to exercise the actual SDK editor wrapper;
 it does not contact a provider.
@@ -70,8 +70,11 @@ and acknowledges each only after applying its recorded operations. Offline
 tests exercise four isolated workspaces and reject missing or invalid calls.
 For nested work, a validated parent can be admitted at its recorded begin
 boundary before child calls arrive; its end remains mandatory. Tests cover
-overlapping children and four independent replicas. This protocol is not yet
-connected to OpenHands delegated conversations.
+overlapping children and four independent replicas. The experimental OpenHands
+adapter executes delegated conversations during both record and replay, borrows
+the shared terminal transport and validates the parent observation. Full SDK
+delegation, concurrent terminal ordering and collector attribution are not yet
+qualified.
 The guest can start and settle the server through an internal Mini-SWE replay
 request, preserving the supervisor during agent cleanup. The host does not yet
 admit this request. The server does not intercept direct agent filesystem

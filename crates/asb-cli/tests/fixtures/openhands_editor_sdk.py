@@ -13,6 +13,15 @@ module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 from openhands.tools.file_editor.definition import FileEditorAction, FileEditorTool
 from openhands.tools.task.definition import TaskToolSet
 from openhands.tools.task_tracker.definition import TaskTrackerTool
+from openhands.tools.preset.default import register_builtins_agents
+from openhands.sdk.subagent import get_registered_agent_definitions
+from openhands.sdk import LLM, Tool
+from openhands.sdk.tool import ToolExecutor, resolve_tool
+from openhands.tools.task import manager
+from openhands_cli.utils import get_default_cli_agent
+
+register_builtins_agents(enable_browser=False)
+assert get_registered_agent_definitions(), 'built-in delegated agents were not registered'
 
 scratch = root / 'target/openhands-editor-sdk-fixture'; scratch.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(dir=scratch) as directory:
@@ -23,11 +32,21 @@ with tempfile.TemporaryDirectory(dir=scratch) as directory:
     state = SimpleNamespace(workspace=SimpleNamespace(working_dir=str(workspace)),
         persistence_dir=workspace,
         agent=SimpleNamespace(llm=SimpleNamespace(vision_is_active=lambda: False)))
-    tool = FileEditorTool.create(state)[0]
-    for kind in (TaskTrackerTool, TaskToolSet):
-        definitions = kind.create(state)
-        assert definitions and all(isinstance(item.executor, module.UnrecordedToolExecutor)
+    tool = resolve_tool(Tool(name=FileEditorTool.name), state)[0]
+    for kind, expected in ((TaskTrackerTool, module.UnrecordedToolExecutor),
+                           (TaskToolSet, module.DelegationTapeExecutor)):
+        definitions = resolve_tool(Tool(name=kind.name), state)
+        assert definitions and all(isinstance(item.executor, expected)
                                    for item in definitions)
+    class Terminal(ToolExecutor):
+        def __call__(self, action, conversation=None): return 'transport'
+    agent = get_default_cli_agent(LLM(model='openai/fixture', api_key='fixture',
+                                     base_url='http://127.0.0.1:1/v1', usage_id='fixture'))
+    manager.LocalConversation = lambda *_args, **_kwargs: SimpleNamespace(agent=agent)
+    module.install_subagent_terminal(Terminal())
+    child = manager.LocalConversation()
+    terminal = next(item for item in child.agent.tools if item.name == 'terminal')
+    assert isinstance(terminal.params['executor'], module.SharedTerminalExecutor)
     file = workspace / 'sample.txt'
     action = FileEditorAction(command='create', path=str(file), file_text='recorded content\n')
     result = tool.executor(action); tape.close()
