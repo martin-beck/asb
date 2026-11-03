@@ -29,6 +29,12 @@ complete and unambiguous; otherwise it reports unknown or ambiguous. It is not
 yet wired into direct filesystem replay. Newly recorded reads retain the requested
 size, and writes retain the full request size and SHA-256 even when the kernel
 reports a short write; older journals remain readable but lack that evidence.
+For experimental filesystem recording, reads uniquely attributed to a tool
+store a SHA-256 instead of a duplicate payload. Replay validates the corresponding
+workspace bytes against that digest; direct, ambiguous and unattributed reads
+retain their full payload. A classifier failure falls back to full payloads.
+Writes still retain their recorded effects, and older payload-backed reads remain
+supported.
 An offline direct-prefix validator checks request shapes, handle bindings and
 payload bytes before a replay could skip already-performed startup effects. It
 rejects missing attribution, extra operations and open handles. It is not wired

@@ -10,6 +10,7 @@ agent_fixture=os.environ.get('ASB_HERMES_AGENT_FIXTURE')=='1'
 unrestricted=os.environ.get('ASB_HERMES_UNRESTRICTED_FIXTURE')=='1'
 native_files=os.environ.get('ASB_HERMES_NATIVE_FILES_FIXTURE')=='1'
 mixed=os.environ.get('ASB_HERMES_MIXED_FIXTURE')=='1'
+compact=os.environ.get('ASB_FIXTURE_COMPACT_READS')=='1'
 swe_baseline=os.environ.get('ASB_SWE_TEST_BASELINE')
 swe_patch=os.environ.get('ASB_SWE_TEST_PATCH')
 if bool(swe_baseline) != bool(swe_patch): raise RuntimeError('provide both SWE baseline and patch')
@@ -36,8 +37,11 @@ with tempfile.TemporaryDirectory(dir=base) as tmp, tempfile.TemporaryDirectory(d
    hook_path=root/'hooks/sitecustomize.py'
    hook_source=hook_path.read_text()
    restriction='toolsets._HERMES_CORE_TOOLS[:] = ["terminal"]'
-   assert hook_source.count(restriction)==1
-   hook_path.write_text(hook_source.replace(restriction,'pass  # fixture preserves upstream tools'))
+   if restriction in hook_source:
+    assert hook_source.count(restriction)==1
+    hook_path.write_text(hook_source.replace(restriction,'pass  # fixture preserves upstream tools'))
+   else:
+    assert 'install_dispatch_coverage(registry, transport, MODE)' in hook_source
   with (root/'hooks/sitecustomize.py').open('a') as hook:
    hook.write('\n'+(probe/'hermes_agent_boundary.py').read_text())
   (root/'mock-record').mkdir(mode=0o700)
@@ -51,6 +55,7 @@ trap 'fusermount3 -u /work/mount || true; wait "$p" || true' EXIT
 n=0
 while ! mountpoint -q /work/mount; do n=$((n+1)); [ "$n" -lt 100 ] || exit 42; sleep 0.05; done
 cat /work/mount/source
+if [ "${ASB_FIXTURE_COMPACT_READS:-0}" = 1 ]; then python3 /probe/compact_tool.py; fi
 if [ "${ASB_FIXTURE_SWE_PATCH:-0}" != 1 ]; then printf container > /work/mount/output; fi
 if [ "${ASB_FIXTURE_SWE_PATCH:-0}" = 1 ]; then
   setpriv --reuid "$ASB_HERMES_UID" --regid "$ASB_HERMES_GID" --clear-groups git -C /work/mount symbolic-ref --short HEAD > /work/control/git-branch.log 2>&1 || true
@@ -67,6 +72,11 @@ fi
  name='asb-fuse-probe-'+uuid.uuid4().hex
  cmd=['docker','run','--rm','--name',name,'--network','none','--device','/dev/fuse','--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={root},dst=/work','--mount',f'type=bind,src={probe},dst=/probe,readonly','--mount',f'type=bind,src={fusepy},dst=/opt/fuse.py,readonly','--mount',f'type=bind,src={fuse_library},dst=/opt/libfuse.so.2,readonly','--env','PYTHONPATH=/opt','--env','FUSE_LIBRARY_PATH=/opt/libfuse.so.2','--entrypoint','/bin/sh',image,'-c',script]
  cmd[cmd.index('--env'):cmd.index('--env')]=['--mount',f'type=bind,src={probe.parents[2]/"assets/benchmarks/asb_fs_proxy.py"},dst=/asb-fs-proxy.py,readonly']
+ if compact:
+  position=cmd.index('--env')
+  cmd[position:position]=['--mount',f'type=bind,src={probe.parents[2]/"assets/benchmarks/asb_fs_attribution.py"},dst=/opt/asb_fs_attribution.py,readonly',
+                          '--env','ASB_PROBE_COMPACT_TOOL_READS=1','--env','ASB_FIXTURE_COMPACT_READS=1',
+                          '--env','ASB_PROBE_CONTROL_SOCKET=/work/control/record.sock']
  fuse_unmount=os.environ.get('ASB_CONTAINER_FUSERMOUNT')
  if fuse_unmount:
   position=cmd.index('--env')
@@ -128,6 +138,10 @@ fi
   events=[json.loads(x) for x in (root/'evidence/events.jsonl').read_text().splitlines()]
   if not swe_patch:
    assert any(e['op']=='write' and e['path']=='/output' for e in events)
+   if compact:
+    source_events = [e for e in events if e['op']=='read' and e['path']=='/source']
+    assert any('object' in e for e in source_events), 'direct read lost its payload'
+    assert any('payload_sha256' in e and 'object' not in e for e in source_events), 'tool read was not compacted'
    output_writes = [e for e in events if e['op']=='write' and e['path']=='/output']
    import hashlib
    assert all(e['requested_size'] == len(b'container')

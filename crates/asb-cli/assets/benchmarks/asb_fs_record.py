@@ -52,7 +52,8 @@ class FilesystemRecorder:
                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             self.bound = True
             env = dict(os.environ, PYTHONPATH=str(self.binding), FUSE_LIBRARY_PATH=str(self.library),
-                       ASB_PROBE_ROOT_TGID=str(self.root_pid), ASB_PROBE_ALLOW_OTHER='1', ASB_PROBE_NONEMPTY='1')
+                       ASB_PROBE_ROOT_TGID=str(self.root_pid), ASB_PROBE_ALLOW_OTHER='1', ASB_PROBE_NONEMPTY='1',
+                       ASB_PROBE_COMPACT_TOOL_READS='1')
             if self.control_socket is not None:
                 env['ASB_PROBE_CONTROL_SOCKET'] = str(self.control_socket)
             self.log = (self.run_dir / 'filesystem-recorder.log').open('wb')
