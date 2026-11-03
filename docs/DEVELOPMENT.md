@@ -8,6 +8,8 @@ the interpreter for the project-local OpenJiuwen installation, then run
 one request and uses four independent replay proxies after stopping the fixture
 upstream. It requires Node.js and never contacts a live provider. It does not
 qualify the ASB cassette lifecycle, a complete agent run, or workload grading.
+The replay clients use a placeholder key and restore a fixture cache identity;
+the fixture never saves its record-only key in that identity.
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without
 Docker, providers or installed clients. The opt-in

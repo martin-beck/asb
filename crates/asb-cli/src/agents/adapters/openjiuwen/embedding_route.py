@@ -1,5 +1,25 @@
 """Route OpenJiuwen's embedding HTTP client without changing its identity."""
 
+def _asb_install_embedding_identity(identity):
+    """Restore one recorded cache identity without restoring its credential."""
+    if not isinstance(identity, dict) or set(identity) != {"model", "base_url", "fingerprint"}:
+        raise RuntimeError("ASB OpenJiuwen embedding identity is malformed")
+    if any(not isinstance(identity[key], str) or not identity[key] for key in identity):
+        raise RuntimeError("ASB OpenJiuwen embedding identity is malformed")
+    identity = dict(identity)
+    from openjiuwen.core.memory.lite.embeddings import OpenAICompatibleEmbeddingProvider
+
+    original = OpenAICompatibleEmbeddingProvider.config_fingerprint
+
+    def fingerprint(provider):
+        if (provider.model, provider.base_url, provider.api_key) == (
+            identity["model"], identity["base_url"], "asb-replay-placeholder"
+        ):
+            return identity["fingerprint"]
+        return original.__get__(provider, type(provider))
+
+    OpenAICompatibleEmbeddingProvider.config_fingerprint = property(fingerprint)
+
 def _asb_install_embedding_route(ingress):
     if not ingress:
         return

@@ -47,15 +47,30 @@ def stop(p):
         p.kill(); p.wait(); raise
     assert p.returncode == 0, p.stderr.read().decode(errors='replace')[-1000:]
 
-async def request(root, original_url, port):
+async def request(root, original_url, port, mode):
     worker = r"""
-import asyncio, runpy, sys
+import asyncio, json, runpy, sys
+from pathlib import Path
 from openjiuwen.core.memory.lite.embeddings import OpenAICompatibleEmbeddingProvider
 hook = runpy.run_path(sys.argv[3])
 hook['_asb_install_embedding_route'](f'http://127.0.0.1:{sys.argv[2]}')
+metadata = Path(sys.argv[4])
+mode = sys.argv[5]
 async def main():
-    provider = OpenAICompatibleEmbeddingProvider(api_key='fixture-key', model='fixture-model', base_url=sys.argv[1])
+    key = 'fixture-record-only-key' if mode == 'record' else 'asb-replay-placeholder'
+    if mode == 'replay':
+        identity = json.loads(metadata.read_text())
+        hook['_asb_install_embedding_identity'](identity)
+    provider = OpenAICompatibleEmbeddingProvider(api_key=key, model='fixture-model', base_url=sys.argv[1])
     fingerprint = provider.config_fingerprint
+    if mode == 'record':
+        identity = {'model': provider.model, 'base_url': provider.base_url, 'fingerprint': fingerprint}
+        assert key not in repr(identity)
+        metadata.write_text(json.dumps(identity))
+    else:
+        assert fingerprint == identity['fingerprint']
+        other = OpenAICompatibleEmbeddingProvider(api_key='another-key', model=identity['model'], base_url=identity['base_url'])
+        assert other.config_fingerprint != fingerprint
     try:
         assert await provider.embed_query('fixture input') == [0.25, 0.75]
         assert provider.base_url == sys.argv[1] and provider.config_fingerprint == fingerprint
@@ -64,7 +79,7 @@ async def main():
 asyncio.run(main())
 """
     child = await asyncio.create_subprocess_exec(
-        python, '-c', worker, original_url, str(port), hook_path,
+        python, '-c', worker, original_url, str(port), hook_path, str(root / 'identity.json'), mode,
         cwd=root,
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     _, error = await child.communicate()
@@ -81,8 +96,10 @@ async def main():
         try:
             recorder, port = start(root, 'record', ['record', '--upstream', origin, '--out', str(tape)])
             processes.append(recorder)
-            await request(root, original_url, port)
+            await request(root, original_url, port, 'record')
             stop(recorder); processes.remove(recorder)
+            assert 'fixture-record-only-key' not in tape.read_text()
+            assert 'fixture-record-only-key' not in (root / 'identity.json').read_text()
             assert len(seen) == 1 and seen[0][0] == '/v1/embeddings'
             upstream.shutdown(); thread.join(); upstream.server_close()
             sessions = []
@@ -90,7 +107,7 @@ async def main():
                 replica = root / f'replay-{i}.jsonl'; shutil.copyfile(tape, replica)
                 child, child_port = start(root, f'replay-{i}', ['replay', '--cassette', str(replica)])
                 processes.append(child); sessions.append((child, child_port, replica))
-            await asyncio.gather(*(request(root, original_url, port) for _, port, _ in sessions))
+            await asyncio.gather(*(request(root, original_url, port, 'replay') for _, port, _ in sessions))
             for child, _, replica in sessions:
                 stop(child); processes.remove(child)
                 progress = json.loads(Path(str(replica) + '.progress.json').read_text())

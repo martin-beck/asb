@@ -407,8 +407,11 @@ class Provider:
     def __init__(self):
         self.base_url = 'https://embedding.invalid/v1'
         self.api_key = 'fixture-key'
+        self.model = 'fixture-model'
         self.client = Client()
     def _get_client(self): return self.client
+    @property
+    def config_fingerprint(self): return 'native:' + self.api_key
 module.OpenAICompatibleEmbeddingProvider = Provider
 sys.modules['openjiuwen.core.memory.lite.embeddings'] = module
 exec(sys.stdin.read())
@@ -427,6 +430,18 @@ request = types.SimpleNamespace(url=URL())
 asyncio.run(client.event_hooks['request'][0](request))
 assert request.url == {'scheme': 'http', 'host': '127.0.0.1', 'port': 1234}
 assert p.base_url == 'https://embedding.invalid/v1' and p.api_key == 'fixture-key'
+for invalid in ({}, {'model': 'm', 'base_url': 'u', 'fingerprint': ''}):
+    try: _asb_install_embedding_identity(invalid)
+    except RuntimeError: pass
+    else: raise AssertionError('accepted malformed identity')
+identity = {'model': p.model, 'base_url': p.base_url, 'fingerprint': p.config_fingerprint}
+_asb_install_embedding_identity(identity)
+replay = Provider()
+replay.api_key = 'asb-replay-placeholder'
+assert replay.config_fingerprint == identity['fingerprint']
+assert p.config_fingerprint == 'native:fixture-key'
+replay.model = 'different-model'
+assert replay.config_fingerprint == 'native:asb-replay-placeholder'
 "#;
         use std::io::Write;
         use std::process::{Command, Stdio};
