@@ -113,15 +113,21 @@ class GuestBootstrapTests(unittest.TestCase):
             self.assertEqual(container.files,[])
 
     def test_large_snapshot_archive_uses_streaming_stager(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory);source=root/'snapshot.tar'
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[3]/'target') as directory:
+            root=Path(directory);source=root/'snapshot.tar';storage=root/'storage';storage.mkdir()
             with source.open('wb') as file:file.truncate(64*1024**2+1)
-            task=SimpleNamespace(workspace=SimpleNamespace(container=Container()),artifacts=root)
+            task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),snapshot_storage=storage),artifacts=root)
+            digest=hashlib.sha256()
+            with source.open('rb') as file:
+                for chunk in iter(lambda:file.read(1024*1024),b''):digest.update(chunk)
             item={'source':str(source),'target':'workspace-snapshots.tar','bytes':source.stat().st_size,
-                  'sha256':'a'*64}
+                  'sha256':digest.hexdigest()}
             with patch('asb_guest.upload_files') as upload:
                 stage_private_inputs(task,[item],owner=(123,456))
-            self.assertEqual(upload.call_args.args[2][0][0],'workspace-snapshots.tar')
+            upload.assert_not_called()
+            self.assertEqual((storage/'workspace-snapshots.tar').stat().st_size,item['bytes'])
+            with self.assertRaises(FileExistsError):stage_private_inputs(task,[item])
+            self.assertTrue((storage/'workspace-snapshots.tar').exists())
             item['target']='ordinary.jsonl'
             with self.assertRaises(ExecutionError):stage_private_inputs(task,[item])
     def test_guest_timeout_propagates_without_inventing_it_from_other_values(self):

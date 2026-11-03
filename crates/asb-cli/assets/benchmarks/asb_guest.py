@@ -257,7 +257,34 @@ def stage_private_inputs(task, inputs, owner=None):
         if total > 64 * 1024**2:
             raise ExecutionError("sealed local-tool replay transcript changed before guest staging")
         targets.add(target)
-        staged.append((target,source,item['bytes'],item['sha256'],0o600))
+        if target == 'workspace-snapshots.tar':
+            storage = getattr(task.workspace, 'snapshot_storage', None)
+            if storage is None or not Path(storage).is_dir():
+                raise ExecutionError('snapshot replay requires owned project storage')
+            destination = Path(storage)/target
+            digest = hashlib.sha256()
+            count = 0
+            created = False
+            try:
+                with open(source, 'rb') as src, destination.open('xb') as dst:
+                    created = True
+                    while True:
+                        chunk = src.read(1024*1024)
+                        if not chunk:
+                            break
+                        count += len(chunk)
+                        if count > item['bytes']:
+                            raise ExecutionError('snapshot archive changed during guest staging')
+                        digest.update(chunk)
+                        dst.write(chunk)
+                if count != item['bytes'] or digest.hexdigest() != item['sha256']:
+                    raise ExecutionError('snapshot archive changed during guest staging')
+            except BaseException:
+                if created:
+                    destination.unlink(missing_ok=True)
+                raise
+        else:
+            staged.append((target,source,item['bytes'],item['sha256'],0o600))
     if staged:
         upload_files(task.workspace.container,"/opt/asb-private",staged,temporary_dir=task.artifacts,owner=owner)
 

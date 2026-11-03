@@ -22,11 +22,11 @@ class GuestSnapshot:
         container=task.workspace.container.id
         args=self.docker_command+['exec','--user','0','-i',container,'python3',
             '/opt/asb-private/asb_snapshot_guest.py','--target','/testbed',
-            '--root','/opt/asb-private/snapshot','--socket','/opt/asb-private/snapshot.sock',
-            '--output','/opt/asb-private/snapshot-streams','--btrfs',tools['btrfs'],
+            '--root','/asb-snapshot-storage/snapshot','--socket','/opt/asb-private/snapshot.sock',
+            '--output','/asb-snapshot-storage/snapshot-streams','--btrfs',tools['btrfs'],
             '--mkfs',tools['mkfs.btrfs'],'--rsync',tools['rsync'],'--size',str(4*1024**3),'--apply-final']
         if replay:
-            args += ['--replay-archive','/opt/asb-private/workspace-snapshots.tar']
+            args += ['--replay-archive','/asb-snapshot-storage/workspace-snapshots.tar']
         self.process=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log)
         try:
             with selectors.DefaultSelector() as selector:
@@ -56,9 +56,7 @@ class GuestSnapshot:
                 raise ExecutionError('snapshot workspace did not settle; inspect snapshot-supervisor.log')
             if self.replay:
                 return
-            destination=self.task.artifacts/'snapshot-streams'
-            subprocess.run(self.docker_command+['cp',process_container(self.task)+':/opt/asb-private/snapshot-streams',str(destination)],
-                           check=True,stdout=subprocess.DEVNULL,stderr=self.log,timeout=600)
+            destination=self.task.workspace.snapshot_storage/'snapshot-streams'
             archive=self.task.artifacts/'snapshot-streams.tar'
             with tarfile.open(archive,'x') as output:
                 for path in sorted(destination.iterdir()):
@@ -71,7 +69,3 @@ class GuestSnapshot:
             if process.poll() is None:
                 process.kill();process.wait()
             self.log.close()
-
-
-def process_container(task):
-    return task.workspace.container.id

@@ -34,6 +34,9 @@ class SweBenchTask:
         self.source_image_tag = None
         self.journal = None
 
+    def submission_git_dir(self):
+        return '/asb-snapshot-storage/baseline.git' if self.snapshot else SUBMISSION_GIT_DIR
+
     def __enter__(self):
         from swebench.harness.utils import make_test_spec
         from swebench.image_builder.constants import CONTAINER_WORKDIR
@@ -49,8 +52,13 @@ class SweBenchTask:
             self.source_image_tag = source.get("tag")
             if self.source_image_tag is not None:
                 atomic_write(self.artifacts / "source-image.json", encoded(source))
+            snapshot_storage = None
+            if self.snapshot:
+                snapshot_storage = self.artifacts/'snapshot-storage'
+                snapshot_storage.mkdir(mode=0o700)
             self.workspace = ManagedDockerWorkspace(self.client, image, self.attempt, CONTAINER_WORKDIR,
-                                                    journal=self.journal, snapshot=self.snapshot)
+                                                    journal=self.journal, snapshot=self.snapshot,
+                                                    snapshot_storage=snapshot_storage)
             self.workspace.__enter__()
             base = self.row["base_commit"]
             self.checked(["git", "cat-file", "-e", base + "^{commit}"])
@@ -67,8 +75,8 @@ class SweBenchTask:
             # Keep an independent copy of the verified base Git metadata for
             # submission generation. Agents may modify or delete their own
             # .git directory; that must not destroy the original comparison.
-            self.checked(["cp", "-a", f"{CONTAINER_WORKDIR}/.git", SUBMISSION_GIT_DIR])
-            self.checked(["git", f"--git-dir={SUBMISSION_GIT_DIR}",
+            self.checked(["cp", "-a", f"{CONTAINER_WORKDIR}/.git", self.submission_git_dir()])
+            self.checked(["git", f"--git-dir={self.submission_git_dir()}",
                           f"--work-tree={CONTAINER_WORKDIR}", "cat-file", "-e", base + "^{commit}"])
             self.invocation = {
                 "identity": {"workload": self.catalog["workload"], "task_id": self.task_id,
@@ -98,7 +106,7 @@ class SweBenchTask:
     def capture_submission(self):
         if self.invocation is None:
             raise ExecutionError("task must be prepared before capturing a submission")
-        git = ["git", f"--git-dir={SUBMISSION_GIT_DIR}", f"--work-tree={SUBMISSION_WORKTREE}"]
+        git = ["git", f"--git-dir={self.submission_git_dir()}", f"--work-tree={SUBMISSION_WORKTREE}"]
         untracked = self.checked([*git, "ls-files", "--others", "--exclude-standard", "-z"], MAX_PATCH_BYTES)
         paths = [path.decode("utf-8") for path in untracked.split(b"\x00") if path]
         if len(paths) > 10000 or sum(len(path.encode()) for path in paths) > 512 * 1024:
