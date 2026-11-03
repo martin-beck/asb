@@ -99,17 +99,22 @@ class SweBenchTask:
         """Retain the base and its ancestors, excluding later image history."""
         original = worktree + '/.git'
         old_git = clean_git + '.unfiltered'
+        committer = {'GIT_COMMITTER_NAME':'ASB workload preparation',
+                     'GIT_COMMITTER_EMAIL':'asb-workload@localhost'}
         self.checked(['mkdir', clean_git])
         self.checked(['git', 'init', '--bare', clean_git])
         self.checked(['git', '--git-dir='+clean_git, 'fetch', '--no-tags',
                       '--no-recurse-submodules', '--no-write-fetch-head', worktree, base], timeout=600)
         self.checked(['git', '--git-dir='+clean_git, 'cat-file', '-e', base+'^{commit}'])
         self.checked(['git', '--git-dir='+clean_git, 'config', 'core.bare', 'false'])
-        self.checked(['git', '--git-dir='+clean_git, 'update-ref', 'refs/heads/asb-base', base])
-        self.checked(['git', '--git-dir='+clean_git, 'symbolic-ref', 'HEAD', 'refs/heads/asb-base'])
+        self.checked(['git', '--git-dir='+clean_git, 'update-ref', 'refs/heads/asb-base', base],
+                     environment=committer)
+        self.checked(['git', '--git-dir='+clean_git, 'symbolic-ref', 'HEAD', 'refs/heads/asb-base'],
+                     environment=committer)
         self.checked(['mv', original, old_git])
         self.checked(['mv', clean_git, original])
-        self.checked(['git', '-C', worktree, 'reset', '--mixed', base], timeout=300)
+        self.checked(['git', '-C', worktree, 'reset', '--mixed', base],
+                     environment=committer, timeout=300)
         # The disposable image's unrelated refs and unreachable objects must
         # not remain available to the benchmark agent through this copy.
         self.checked(['rm', '-rf', old_git], timeout=300)
