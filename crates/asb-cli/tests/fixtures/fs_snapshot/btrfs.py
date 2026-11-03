@@ -105,23 +105,41 @@ if ((second/'file').stat().st_ino!=(second/'link').stat().st_ino
         or (third/'file').stat().st_ino!=(second/'file').stat().st_ino
         or (third/'link').stat().st_ino==(second/'link').stat().st_ino):
  raise RuntimeError('fixture did not produce the expected hard-link split')
+import sys
+sys.path.insert(0,'/opt')
+from topology import regular_files,plan_splits,detach_splits
+before_topology=regular_files(second);after_topology=regular_files(third)
 for root in roots[1:]:
- if (root/'file').stat().st_ino!=(root/'link').stat().st_ino:
-  raise RuntimeError('replica hard-link state differs before split')
- (root/'link').unlink()
+ paths=plan_splits(before_topology,after_topology,regular_files(root))
+ if paths!=['link']:
+  raise RuntimeError('snapshot hard-link split plan differs')
+ detach_splits(root,paths)
 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(lambda root:sync(third,root),roots[1:]))
 if any(x.returncode for x in results):raise RuntimeError('third rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
 checks['split_link_correct']=all((r/'file').read_bytes()==b'end' and (r/'link').read_bytes()==b'sep' and (r/'file').stat().st_ino!=(r/'link').stat().st_ino for r in roots[1:])
 checks['split_link_existing_descriptors_correct']=all(os.pread(fd,3,0)==b'end' for fd in fds[1:]+link_fds)
-checks['original_subprocess_only_three_times']=Path('/work/invocations').read_bytes()==b'123'
-for fd in link_fds:os.close(fd)
+split_fds=[os.open(root/'link',os.O_RDONLY) for root in roots[1:]]
+subprocess.run(['python3','-c','import os; from pathlib import Path; Path(\"link\").unlink(); os.link(\"file\",\"link\"); Path(\"/work/invocations\").open(\"ab\").write(b\"4\")'],cwd=roots[0],check=True)
+fourth=capture('captured-4')
+before_topology=regular_files(third);after_topology=regular_files(fourth)
+for root in roots[1:]:
+ paths=plan_splits(before_topology,after_topology,regular_files(root))
+ if paths!=['link']:
+  raise RuntimeError('snapshot hard-link join plan differs')
+ detach_splits(root,paths)
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(lambda root:sync(fourth,root),roots[1:]))
+if any(x.returncode for x in results):raise RuntimeError('fourth rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
+checks['joined_link_correct']=all((r/'file').read_bytes()==b'end' and (r/'link').read_bytes()==b'end' and (r/'file').stat().st_ino==(r/'link').stat().st_ino for r in roots[1:])
+checks['joined_old_descriptors_correct']=all(os.pread(fd,3,0)==b'sep' for fd in split_fds)
+checks['original_subprocess_only_four_times']=Path('/work/invocations').read_bytes()==b'1234'
+for fd in link_fds+split_fds:os.close(fd)
 for name,passed in checks.items():print(name,passed)
 print('xattr_exercised',xattr)
 if not all(checks.values()):raise RuntimeError('Btrfs snapshot checks failed')
 for fd in fds:os.close(fd)
 EOPY
 '''.replace('LOADER',loader).replace('LOOPDEV',loop.name)
- cmd=['docker','run','--rm','--name',container_name,'--pull=never','--network','none','--device','/dev/loop-control','--device',str(loop),'--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={mkfs},dst=/opt/mkfs.btrfs,readonly','--mount',f'type=bind,src={btrfs},dst=/opt/btrfs,readonly','--mount',f'type=bind,src={rsync},dst=/opt/rsync,readonly','--mount',f'type=bind,src={libraries},dst=/hostlib,readonly','--entrypoint','/bin/sh',image,'-c',script]
+ cmd=['docker','run','--rm','--name',container_name,'--pull=never','--network','none','--device','/dev/loop-control','--device',str(loop),'--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={mkfs},dst=/opt/mkfs.btrfs,readonly','--mount',f'type=bind,src={btrfs},dst=/opt/btrfs,readonly','--mount',f'type=bind,src={rsync},dst=/opt/rsync,readonly','--mount',f'type=bind,src={Path(__file__).with_name("topology.py").resolve()},dst=/opt/topology.py,readonly','--mount',f'type=bind,src={libraries},dst=/hostlib,readonly','--entrypoint','/bin/sh',image,'-c',script]
  try:
   r=subprocess.run(cmd,text=True,capture_output=True,timeout=90)
  except subprocess.TimeoutExpired:

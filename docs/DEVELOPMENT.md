@@ -28,9 +28,11 @@ an already cached image. It creates one base and five snapshots, then checks
 hard links, open descriptors and three checksum-based sync boundaries from
 immutable captured snapshots across four replicas, plus symlinks, deletion,
 permissions and available xattrs. It demonstrates that naive in-place sync may
-corrupt a split hard link; the fixture reconciles its known split before the
-third sync. This is not a general inode-topology reconciler. An external counter
-verifies that replay does not rerun the three original fixture subprocesses. The fixture
+corrupt a split hard link. A planner checks source/replica regular-file topology
+and detaches changed identities before the third and fourth syncs, covering a
+split and a join. It reports moves without a surviving path as unsupported;
+this is not a complete inode-topology reconciler. An external counter verifies
+that replay does not rerun the four original fixture subprocesses. The fixture
 requires loop-device access and kernel Btrfs support for this experiment; a VM
 can provide these independently of the host filesystem. Ordinary CI does not
 run it. It does not exercise an agent, concurrent tool mutations, a full guest
