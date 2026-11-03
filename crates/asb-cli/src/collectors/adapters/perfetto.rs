@@ -4,6 +4,7 @@ use super::super::{
 };
 use crate::measurements;
 mod bootstrap;
+mod observer;
 mod project;
 mod service;
 mod state_summary;
@@ -109,8 +110,11 @@ impl CollectorAdapter for PerfettoCollector {
         session: &mut measurements::Session,
         selected: &[String],
     ) -> Result<(), String> {
-        session.state::<PerfettoState>().borrow_mut().enabled =
-            super::super::selected_or_environment("perfetto", selected);
+        let enabled = super::super::selected_or_environment("perfetto", selected);
+        session.state::<PerfettoState>().borrow_mut().enabled = enabled;
+        if enabled {
+            session.enable_perfetto_observer()?;
+        }
         Ok(())
     }
     fn producer_policy(&self, _: &str) -> measurements::ProducerPolicy {
@@ -253,7 +257,14 @@ fn process(
 
 fn finish(session: &mut measurements::Session) -> Result<(), String> {
     let state = session.state::<PerfettoState>();
-    let state = state.borrow();
+    let mut state = state.borrow_mut();
+    if let Some(observer) = state.observer.as_mut() {
+        observer.finish();
+    }
+    if let Some(report) = state.observer_report.as_deref() {
+        state.observer_warning =
+            validate_request_observation_report(report, session.trace_id()).err();
+    }
     if !state.enabled {
         return Ok(());
     }
@@ -272,6 +283,8 @@ fn finish(session: &mut measurements::Session) -> Result<(), String> {
             "capture_complete": state.capture_complete,
             "capture_warning": state.capture_warning,
             "analysis_warning": state.analysis_warning,
+            "request_observation_report": state.observer_report.as_ref().map(|path| measurements::file_name(path)),
+            "request_observation_warning": state.observer_warning,
         }),
     )?;
     write_perfetto_metric_svgs(
@@ -538,6 +551,34 @@ mod report_tests {
         );
         assert!(!graph.svg.contains("Observed thread-time: 0.00"));
     }
+
+    #[test]
+    fn request_observation_reports_are_bounded_and_run_scoped() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-perfetto-request-report-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let report = root.join("perfetto-requests.json");
+        fs::write(
+            &report,
+            r#"{"schema_version":1,"producer":"llmtape","trace_id":"run-1","complete":true}"#,
+        )
+        .unwrap();
+        assert!(validate_request_observation_report(&report, "run-1").is_ok());
+        assert!(
+            validate_request_observation_report(&report, "other-run")
+                .unwrap_err()
+                .contains("does not belong")
+        );
+        fs::write(&report, b"not-json").unwrap();
+        assert!(
+            validate_request_observation_report(&report, "run-1")
+                .unwrap_err()
+                .contains("malformed")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[derive(Default)]
@@ -548,6 +589,9 @@ struct PerfettoState {
     pid: Option<u32>,
     trace_marker: Option<PathBuf>,
     trace_marker_output: Option<File>,
+    observer: Option<observer::Relay>,
+    observer_report: Option<PathBuf>,
+    observer_warning: Option<String>,
     marker_verified: bool,
     marker_warning: Option<String>,
     scope_warning: Option<String>,
@@ -565,6 +609,50 @@ struct PerfettoState {
 // Keep the native trace (the authoritative collector artifact), but bound the
 // optional derived metrics, series, and SVG timeline before invoking it.
 const MAX_TRACE_PROCESSOR_INPUT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_OBSERVATION_REPORT_BYTES: u64 = 64 * 1024;
+
+/// The producer report is diagnostic evidence, not a second source of truth
+/// for task grading or scheduler scope.  Keep malformed, stale, incomplete,
+/// or oversized reports visible to users without allowing an observer failure
+/// to discard an otherwise valid Perfetto capture.
+fn validate_request_observation_report(path: &Path, trace_id: &str) -> Result<(), String> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        format!(
+            "LLM request observation report is unavailable at {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.len() > MAX_OBSERVATION_REPORT_BYTES {
+        return Err(format!(
+            "LLM request observation report at {} exceeds the {} KiB bound",
+            path.display(),
+            MAX_OBSERVATION_REPORT_BYTES / 1024
+        ));
+    }
+    let report: serde_json::Value = serde_json::from_slice(
+        &fs::read(path)
+            .map_err(|error| format!("cannot read LLM request observation report: {error}"))?,
+    )
+    .map_err(|error| format!("LLM request observation report is malformed: {error}"))?;
+    let field = |name: &str| report.get(name).and_then(serde_json::Value::as_str);
+    if report
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+    {
+        return Err("LLM request observation report has an unsupported schema version".into());
+    }
+    if field("producer") != Some("llmtape") {
+        return Err("LLM request observation report has an unexpected producer".into());
+    }
+    if field("trace_id") != Some(trace_id) {
+        return Err("LLM request observation report does not belong to this benchmark run".into());
+    }
+    if report.get("complete").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err("LLM request observation report is incomplete".into());
+    }
+    Ok(())
+}
 
 fn analysis_budget_warning(trace: &Path) -> Option<String> {
     let size = trace.metadata().ok()?.len();
@@ -603,6 +691,32 @@ fn wait_for_capture_ready(collector: &mut Collector, timeout: Duration) -> Resul
 }
 
 impl measurements::Session {
+    fn enable_perfetto_observer(&mut self) -> Result<(), String> {
+        let state = self.state::<PerfettoState>();
+        let mut state = state.borrow_mut();
+        if state.observer.is_none() {
+            state.observer = Some(observer::Relay::new()?);
+        }
+        Ok(())
+    }
+
+    /// Private producer capability. It exposes an observer descriptor, never
+    /// a tracefs pathname or the collector's trace-marker descriptor.
+    pub(crate) fn perfetto_observer_context(
+        &mut self,
+        report: &str,
+    ) -> Result<Option<(File, String, PathBuf)>, String> {
+        let state = self.state::<PerfettoState>();
+        let mut state = state.borrow_mut();
+        let Some(observer) = state.observer.as_ref() else {
+            return Ok(None);
+        };
+        let producer = observer.producer_fd()?;
+        let report = self.dir.join(report);
+        state.observer_report = Some(report.clone());
+        Ok(Some((producer, self.trace_id.clone(), report)))
+    }
+
     pub(crate) fn start_perfetto_for_pid(&mut self, pid: u32) -> Result<(), String> {
         self.state::<PerfettoState>().borrow_mut().pid = Some(pid);
         if !self.state::<PerfettoState>().borrow().enabled {
@@ -699,6 +813,11 @@ impl measurements::Session {
                 state.service = service;
                 state.trace = Some(trace);
                 state.trace_marker = marker_output.as_ref().map(|_| marker.to_path_buf());
+                if let (Some(observer), Some(output)) =
+                    (state.observer.as_ref(), marker_output.as_ref())
+                {
+                    observer.activate(output, pid, &self.trace_id)?;
+                }
                 state.trace_marker_output = marker_output;
             }
             Err(error) if !env_true("ASB_MEASURE_PERFETTO") => write_unavailable(

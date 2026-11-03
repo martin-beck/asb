@@ -2,7 +2,8 @@
 
 use crate::{Error, proxy};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 
 /// Request normalization, ordered matching and full-consumption replay semantics.
 /// Bump for incompatible tape matching changes, not scheduling/measurement changes.
@@ -22,6 +23,10 @@ pub(crate) struct AgentContext<'a> {
     pub agent: Option<&'a str>,
     pub recorder: Option<&'a str>,
     pub invocation_dir: &'a Path,
+    /// Collector-owned observation endpoint for ASB's embedded proxy only.
+    pub perfetto_observer: Option<File>,
+    pub perfetto_trace_id: Option<String>,
+    pub perfetto_report: Option<PathBuf>,
 }
 
 impl Session {
@@ -66,6 +71,9 @@ impl Session {
                 agent,
                 recorder,
                 invocation_dir: Path::new("."),
+                perfetto_observer: None,
+                perfetto_trace_id: None,
+                perfetto_report: None,
             },
         )
     }
@@ -88,6 +96,9 @@ impl Session {
             workspace: context.workspace,
             invocation_dir: context.invocation_dir,
             wire_extension: context.agent.and_then(crate::agents::tape_wire_extension),
+            perfetto_observer: context.perfetto_observer,
+            perfetto_trace_id: context.perfetto_trace_id,
+            perfetto_report: context.perfetto_report,
         };
         proxy::start_recording_chain(&settings, upstream).map(Self)
     }
