@@ -710,12 +710,16 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
     })
 }
 
+fn experimental_filesystem_replay_agent(agent: &str) -> bool {
+    matches!(agent, "mini-swe" | "openhands" | "hermes")
+}
+
 fn run(request: GuestRequest) -> Result<u8, Error> {
     request.capsule.validate()?;
     if let Some(evidence) = &request.filesystem_replay
         && (request.filesystem_recording
             || !request.tool_replay
-            || !matches!(request.config.agent.as_str(), "mini-swe" | "openhands")
+            || !experimental_filesystem_replay_agent(&request.config.agent)
             || evidence != &request.runtime_dir.join("filesystem-replay"))
     {
         return Err(Error::Input(
@@ -1497,6 +1501,16 @@ pub(crate) fn entry() -> std::process::ExitCode {
 #[cfg(all(test, unix))]
 mod artifact_publication_tests {
     use super::*;
+
+    #[test]
+    fn experimental_filesystem_replay_admits_instrumented_agents_only() {
+        for agent in ["mini-swe", "openhands", "hermes"] {
+            assert!(experimental_filesystem_replay_agent(agent));
+        }
+        for agent in ["opencode", "", "Hermes"] {
+            assert!(!experimental_filesystem_replay_agent(agent));
+        }
+    }
 
     #[test]
     fn filesystem_replay_binds_sealed_inputs_without_copying_or_replacing() {
