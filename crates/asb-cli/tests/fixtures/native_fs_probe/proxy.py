@@ -153,6 +153,18 @@ class Proxy(Operations):
             else: os.utime(self.path(path), ns=times)
             st = os.stat(self.path(path))
             self.record('utimens', path, atime_ns=st.st_atime_ns, mtime_ns=st.st_mtime_ns)
+    def getxattr(self, path, name, position=0):
+        return os.getxattr(self.path(path), name, follow_symlinks=False)
+    def listxattr(self, path):
+        return os.listxattr(self.path(path), follow_symlinks=False)
+    def setxattr(self, path, name, value, options, position=0):
+        with self.lock_for_stat(os.lstat(self.path(path))):
+            os.setxattr(self.path(path), name, value, options, follow_symlinks=False)
+            self.record('setxattr', path, value, name=name, options=options)
+    def removexattr(self, path, name):
+        with self.lock_for_stat(os.lstat(self.path(path))):
+            os.removexattr(self.path(path), name, follow_symlinks=False)
+            self.record('removexattr', path, name=name)
     def rename(self, old, new):
         os.rename(self.path(old), self.path(new)); self.record('rename', old, destination=new)
     def link(self, target, source):

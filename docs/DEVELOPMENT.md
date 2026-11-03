@@ -172,8 +172,8 @@ direct APIs and nested or parallel tool calls are not covered by this test.
 Replay applies recorded startup operations after the agent has begun accessing
 the overlay; matching on this case does not establish general startup ordering,
 untracked or out-of-workspace effects, or support for all native tools.
-The smaller FUSE operation fixture also records and replays chmod and utimens,
-including nanosecond timestamps. This is still a partial filesystem prototype;
+The smaller FUSE operation fixture also records and replays chmod, utimens,
+including nanosecond timestamps, and extended-attribute mutations. This is still a partial filesystem prototype;
 other metadata operations, failure semantics and races remain unqualified.
 
 `python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` checks that

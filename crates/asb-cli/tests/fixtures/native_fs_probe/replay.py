@@ -109,6 +109,11 @@ class Replay:
             os.chmod(path, event['mode'])
         elif op == 'utimens':
             os.utime(path, ns=(event['atime_ns'], event['mtime_ns']))
+        elif op == 'setxattr':
+            value = b''.join(self.payload_chunks(event))
+            os.setxattr(path, event['name'], value, event['options'], follow_symlinks=False)
+        elif op == 'removexattr':
+            os.removexattr(path, event['name'], follow_symlinks=False)
         elif op == 'rename':
             os.rename(path, self.root / event['destination'].lstrip('/'))
         elif op == 'link':

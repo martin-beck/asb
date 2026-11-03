@@ -56,6 +56,11 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
             os.chmod(mount / 'other', 0o751)
             os.utime(mount / 'other', ns=(1_600_000_000_123_456_789, 1_600_000_001_987_654_321))
             assert os.stat(mount / 'other').st_mtime_ns == 1_600_000_001_987_654_321
+            os.setxattr(mount / 'other', 'user.asb-fixture', b'first')
+            assert os.getxattr(mount / 'other', 'user.asb-fixture') == b'first'
+            os.removexattr(mount / 'other', 'user.asb-fixture')
+            os.setxattr(mount / 'other', 'user.asb-fixture', b'final')
+            assert 'user.asb-fixture' in os.listxattr(mount / 'other')
             assert os.stat(mount / 'one').st_ino == os.stat(mount / 'alias').st_ino
             assert os.stat(mount / 'one').st_nlink == 2
             writer_tids = {}
@@ -255,6 +260,7 @@ if (control / 'orphan-release').exists():
         assert (destination / 'other').read_bytes() == b'independent'
         assert os.stat(destination / 'other').st_mode & 0o777 == 0o751
         assert os.stat(destination / 'other').st_mtime_ns == 1_600_000_001_987_654_321
+        assert os.getxattr(destination / 'other', 'user.asb-fixture') == b'final'
         assert (destination / 'two').read_bytes() == b''
         assert (destination / 'child').read_bytes() == b'child data'
         subprocess.run([python, str(hermes_script), 'replay-with-effects', str(destination), str(hermes_sidecar)], check=True)
