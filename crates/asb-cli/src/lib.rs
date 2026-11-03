@@ -308,6 +308,7 @@ mod adapter_layout_tests {
                     "native_trace.rs",
                     "tool_replay.rs",
                     "tool_replay_mcp.rs",
+                    "tool_tracing.rs", // Shared MCP and local-tool Perfetto observation.
                 ],
                 root_directories: &[],
                 shared_family_adapters: &[],
