@@ -76,6 +76,24 @@ class DirectPrefixTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_direct_prefix(encode(expected),payload,encode(actual),payload)
 
+    def test_reads_on_independent_handles_can_finish_in_any_order(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'target') as directory:
+            payload = Path(directory)/'payload.bin'; payload.write_bytes(b'oldnew')
+            original = events()
+            other_open = dict(original[0], handle=3, path='/other')
+            other_read = dict(original[1], handle=3, path='/other', payload_offset=3)
+            other_release = {'op':'release','path':'/other','handle':3,'caller':None}
+            expected = [original[0], other_open, original[1], other_read, original[2], other_release] + original[3:]
+            for index, item in enumerate(expected, 1): item['sequence'] = index
+            expected.append({'sequence':len(expected)+1,'op':'marker','marker':'tool-begin:first','origin':None})
+            actual = [dict(item) for item in expected[:-1]]
+            actual[2], actual[3] = actual[3], actual[2]
+            for index, item in enumerate(actual, 1): item['sequence'] = index
+            self.assertEqual(validate_direct_prefix(encode(expected), payload, encode(actual), payload), 10)
+            actual[2]['handle'] = 1
+            with self.assertRaisesRegex(ValueError, 'read group differs'):
+                validate_direct_prefix(encode(expected), payload, encode(actual), payload)
+
     def test_rejects_unclosed_handles_and_old_missing_request_metadata(self):
         with tempfile.TemporaryDirectory(dir=ROOT/'target') as directory:
             payload = Path(directory)/'payload.bin'; payload.write_bytes(b'oldnew')

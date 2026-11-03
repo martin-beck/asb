@@ -91,9 +91,8 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
             elif actual_scope['kind'] != 'direct':
                 raise ValueError('observed direct operation has unproven attribution')
             op = event.get('op')
-            # Parallel read callbacks on one already-open file can complete in
-            # either order. Match their request/result multisets without moving
-            # them across a mutation, a different handle, or a tool boundary.
+            # Parallel reads on already-open handles can complete in either
+            # order. Never move them across another operation or boundary.
             if op == 'read' and actual.get('op') == 'read':
                 expected_reads = [event]
                 actual_reads = [actual]
@@ -102,7 +101,7 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
                     if line is None or not line.endswith('\n'):
                         raise ValueError('direct filesystem prefix is truncated')
                     candidate = json.loads(line)
-                    if candidate.get('op') != 'read' or candidate.get('handle') != event.get('handle'):
+                    if candidate.get('op') != 'read':
                         pending = line
                         break
                     scope = expected_attribution.observe(candidate)
@@ -119,19 +118,18 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
                     if observed_attribution.observe(candidate_actual)['kind'] != 'direct':
                         raise ValueError('observed direct operation has unproven attribution')
                     actual_reads.append(candidate_actual)
-                left_handle = event.get('handle')
-                if left_handle not in handles:
-                    raise ValueError('direct filesystem handle differs')
-                def read_key(item, data, expected_handle):
-                    if item.get('op') != 'read' or item.get('handle') != expected_handle:
+                reverse_handles = {value: key for key, value in handles.items()}
+                def read_key(item, data, mapping):
+                    handle = item.get('handle')
+                    if item.get('op') != 'read' or handle not in mapping:
                         raise ValueError('direct filesystem read group differs')
                     fields = _FIELDS['read']
                     if any(field not in item for field in fields):
                         raise ValueError('direct filesystem read request is incomplete')
-                    return tuple(item[field] for field in fields) + (_digest_range(data, item),)
+                    return (mapping[handle],) + tuple(item[field] for field in fields) + (_digest_range(data, item),)
                 from collections import Counter
-                left = Counter(read_key(item, expected_data, left_handle) for item in expected_reads)
-                right = Counter(read_key(item, observed_data, handles[left_handle]) for item in actual_reads)
+                left = Counter(read_key(item, expected_data, {h: h for h in handles}) for item in expected_reads)
+                right = Counter(read_key(item, observed_data, reverse_handles) for item in actual_reads)
                 if left != right:
                     raise ValueError(f'direct filesystem read group differs at event {count + 1}')
                 count += len(expected_reads)
