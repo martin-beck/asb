@@ -230,6 +230,24 @@ class RuntimeTests(unittest.TestCase):
                 subject.library_paths(text)
 
     @unittest.skipUnless(os.environ.get("ASB_TEST_HOST_ASB"),"needs the just-built ASB executable")
+    def test_auxiliary_runtime_uses_separate_private_loader(self):
+        path = Path(os.environ['ASB_TEST_HOST_ASB']).absolute()
+        files,receipt = subject.bundle_tool(path,'fixture')
+        self.assertTrue(all(name.startswith('tools/fixture/') for name,_,_ in files))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            for name,content,mode in files:
+                target=root/name;target.parent.mkdir(parents=True,exist_ok=True)
+                if name=='tools/fixture/fixture' and receipt['kind']=='bundled-loader':
+                    self.assertNotIn(b'ASB_RUNTIME_EXECUTABLE',content)
+                    content=content.replace(b'/opt/asb-runtime',str(root).encode())
+                target.write_bytes(content);target.chmod(mode)
+            output=subprocess.run([root/'tools/fixture/fixture','--version'],capture_output=True,timeout=10)
+            self.assertEqual(output.returncode,0,output.stderr.decode())
+        for invalid in ('../bad','', 'CAPS'):
+            with self.subTest(invalid=invalid),self.assertRaises(ExecutionError):subject.bundle_tool(path,invalid)
+
+    @unittest.skipUnless(os.environ.get("ASB_TEST_HOST_ASB"),"needs the just-built ASB executable")
     def test_real_asb_bundle_executes_without_injecting_library_paths_into_children(self):
         path = Path(os.environ["ASB_TEST_HOST_ASB"]).absolute()
         files,receipt = subject.bundle(path)
