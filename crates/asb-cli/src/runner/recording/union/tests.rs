@@ -1,6 +1,54 @@
 //! Actual backend publication, no fabricated agent outcomes or paid requests.
 use super::*;
 
+#[test]
+fn import_spool_streams_large_artifacts_and_cleans_up_after_errors() {
+    use std::io::Write;
+    use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+    let fixture = Fixture::new();
+    let (_, _, publication) = fixture.publication();
+    let data = vec![0xabu8; 2 * 1024 * 1024];
+    let mut manifest = publication.manifest.clone();
+    let artifact = crate::cassette::Artifact {
+        kind: "large-fixture".into(),
+        bytes: data.len() as u64,
+        sha256: crate::cassette::digest(&data),
+    };
+    manifest.tracks[0].artifacts.push(artifact.clone());
+    let path = fixture.0.join("source.zip");
+    let mut writer = ZipWriter::new(File::create(&path).unwrap());
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    writer.start_file("manifest.json", options).unwrap();
+    writer
+        .write_all(&serde_json::to_vec(&manifest).unwrap())
+        .unwrap();
+    writer.start_file("tracks/1.jsonl", options).unwrap();
+    writer.write_all(b"{}\n").unwrap();
+    writer
+        .start_file("artifacts/1/large-fixture.jsonl", options)
+        .unwrap();
+    writer.write_all(&data).unwrap();
+    writer.finish().unwrap();
+    let limits = Limits {
+        max_track_bytes: 1024,
+        max_artifact_bytes: 4 * 1024 * 1024,
+        ..Limits::default()
+    };
+    let mut archive = Archive::open(&path, limits).unwrap();
+    assert!(archive.read_artifact(1, &artifact.kind).is_err());
+    let mut spool = ImportSpool::new(&fixture.0).unwrap();
+    let directory = spool.directory.clone();
+    spool.stage(&mut archive, 1, &artifact).unwrap();
+    let mut restored = Vec::new();
+    spool.files[0].1.read_to_end(&mut restored).unwrap();
+    assert_eq!(restored, data);
+    let mut bad = artifact.clone();
+    bad.kind = "missing".into();
+    assert!(spool.stage(&mut archive, 1, &bad).is_err());
+    drop(spool);
+    assert!(!directory.exists());
+}
+
 fn publish(
     root: &Path,
     descriptor: &Descriptor,
