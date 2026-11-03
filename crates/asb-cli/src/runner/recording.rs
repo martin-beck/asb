@@ -768,6 +768,11 @@ fn open_auxiliary_captures(
     proxy: &proxy::Evidence,
     primary: &Path,
 ) -> Result<Vec<(Artifact, File)>, Error> {
+    if !proxy.auxiliary_complete {
+        return Err(Error::Input(
+            "auxiliary capture did not finish successfully".into(),
+        ));
+    }
     let mut kinds = std::collections::BTreeSet::new();
     let mut paths = std::collections::BTreeSet::new();
     let mut opened = Vec::new();
@@ -1018,6 +1023,7 @@ mod tests {
                 capture: capture.clone(),
             }],
             output_files: Vec::new(),
+            auxiliary_complete: true,
             cleanup_confirmed: true,
         };
         let mut streams = open_auxiliary_captures(&evidence, &root.join("primary")).unwrap();

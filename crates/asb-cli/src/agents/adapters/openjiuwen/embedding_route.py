@@ -12,7 +12,7 @@ def _asb_install_embedding_route(ingress):
         raise RuntimeError("ASB OpenJiuwen embedding tape has an invalid port") from error
     if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or not port
             or parsed.username is not None or parsed.password is not None
-            or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+            or parsed.path not in ("", "/", "/v1") or parsed.query or parsed.fragment):
         raise RuntimeError("ASB OpenJiuwen embedding tape must use an owned loopback origin")
 
     from openjiuwen.core.memory.lite.embeddings import OpenAICompatibleEmbeddingProvider

@@ -2696,6 +2696,7 @@ mod tests {
                 &evidence,
                 &crate::proxy::Evidence {
                     auxiliary_captures: Vec::new(),
+                    auxiliary_complete: true,
                     captures: Vec::new(),
                     output_files: Vec::new(),
                     cleanup_confirmed: true,
@@ -2771,6 +2772,7 @@ mod tests {
                     &crate::proxy::Evidence {
                         captures: Vec::new(),
                         auxiliary_captures: Vec::new(),
+                        auxiliary_complete: true,
                         output_files: Vec::new(),
                         cleanup_confirmed: true
                     },

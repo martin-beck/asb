@@ -162,6 +162,7 @@ fn prepared(
             }),
             measurements,
             tape: None,
+            auxiliary_tapes: Default::default(),
             capsule_record: None,
             capsule_replay: None,
             guest_capsule_record: None,
@@ -1087,6 +1088,7 @@ fn finalized_auxiliary_capture_is_streamed_into_its_recorded_track() {
             capture: capture(auxiliary, b"{\"embedding\":true}\n", 0),
         }],
         output_files: vec![primary],
+        auxiliary_complete: true,
         cleanup_confirmed: true,
     };
     let evidence = recorder
@@ -1137,6 +1139,7 @@ fn recording_association_binds_actual_attempt_and_preserves_uncertain_raw_captur
     let proxy = crate::proxy::Evidence {
         captures: vec![capture.clone()],
         auxiliary_captures: Vec::new(),
+        auxiliary_complete: true,
         output_files: vec![producer.clone()],
         cleanup_confirmed: false,
     };
@@ -1588,6 +1591,7 @@ fn missing_fixture_grade_reports_settled_agent_and_proxy_evidence() {
     let proxy = crate::proxy::Evidence {
         captures: Vec::new(),
         auxiliary_captures: Vec::new(),
+        auxiliary_complete: true,
         output_files: Vec::new(),
         cleanup_confirmed: false,
     };

@@ -772,6 +772,7 @@ impl<'a> ReadyAttempt<'a> {
                 workload: workload_session,
                 measurements: measurement_session,
                 tape,
+                auxiliary_tapes: Default::default(),
                 capsule_record,
                 capsule_replay,
                 guest_capsule_record,
@@ -812,8 +813,7 @@ impl<'a> ReadyAttempt<'a> {
         let mut runtime_entered = false;
         let execution = (|| {
             let _launch_failure = workloads::session::LaunchFailureGuard(launch);
-            // Filled by attempt-owned auxiliary sessions before dispatch.
-            let auxiliary_endpoints = std::collections::BTreeMap::new();
+            let auxiliary_endpoints = prepared.auxiliary_tapes.endpoints();
             let tape_url = prepared.tape.as_ref().map(|session| session.url());
             let provider_endpoint =
                 tape_url.or_else(|| providers::local_bridge_endpoint(&config.provider, bridge));
