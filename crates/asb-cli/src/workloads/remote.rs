@@ -30,6 +30,35 @@ const PROGRESS_POLL: Duration = Duration::from_millis(250);
 const PROGRESS_TRANSCRIPT_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_PRIVATE_REPLAY_INPUT: u64 = 64 * 1024 * 1024;
 
+/// Resolve experimental snapshot tools from the project first, then PATH.
+fn snapshot_auxiliary_tools(
+    enabled: bool,
+    tools_root: &Path,
+    search: Option<&std::ffi::OsStr>,
+) -> Result<std::collections::BTreeMap<String, PathBuf>, String> {
+    let mut tools = std::collections::BTreeMap::new();
+    if !enabled {
+        return Ok(tools);
+    }
+    for (name, directory) in [
+        ("btrfs", "btrfs"),
+        ("mkfs.btrfs", "btrfs"),
+        ("rsync", "rsync"),
+    ] {
+        let local = tools_root.join(directory).join("bin").join(name);
+        let executable = if crate::executables::is_executable(&local) {
+            Some(local)
+        } else {
+            crate::tools::host_executable_in_at(Path::new(name), search, tools_root)
+        };
+        let executable = executable.ok_or_else(|| format!(
+            "snapshot workspace needs `{name}`; install btrfs-progs and rsync in the project environment or use a VM with those tools"
+        ))?;
+        tools.insert(name.into(), executable);
+    }
+    Ok(tools)
+}
+
 fn workload_tool_mode(mode: Option<crate::tape::Mode>) -> &'static str {
     match mode {
         Some(crate::tape::Mode::Record) => "record",
@@ -1075,7 +1104,14 @@ impl Session {
             network: std::env::var("ASB_BENCHMARK_NETWORK").ok(),
             artifact_output: &artifact_output,
             private_inputs,
-            auxiliary_tools: Default::default(),
+            auxiliary_tools: snapshot_auxiliary_tools(
+                std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT").as_deref()
+                    == Some(std::ffi::OsStr::new("1"))
+                    && context.tool_tape_cassette.is_some()
+                    && context.config.workload.starts_with("swe-bench"),
+                &tools_root,
+                std::env::var_os("PATH").as_deref(),
+            )?,
             request: json!({"process_lifetime":self.process_lifetime,"config":config,"connection":connection,"prompt":self.invocation.input.instructions,"timeout_seconds":self.agent_timeout.as_secs_f64(),"max_steps":context.max_steps,
                 "project_root":"/opt/asb-project","runtime_dir":"/opt/asb-private","run_dir":"/opt/asb-private/attempt","replay":context.replay,
                 "tape_cassette":tape_cassette,
@@ -1565,6 +1601,44 @@ mod tests {
     }
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_tools_prefer_project_then_path_and_report_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "asb-snapshot-tools-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let tools = root.join("tools");
+        let host = root.join("host");
+        std::fs::create_dir_all(tools.join("btrfs/bin")).unwrap();
+        std::fs::create_dir_all(&host).unwrap();
+        for path in [
+            tools.join("btrfs/bin/btrfs"),
+            host.join("btrfs"),
+            host.join("mkfs.btrfs"),
+            host.join("rsync"),
+        ] {
+            std::fs::write(&path, b"fixture").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(
+            snapshot_auxiliary_tools(false, &tools, None)
+                .unwrap()
+                .is_empty()
+        );
+        let selected = snapshot_auxiliary_tools(true, &tools, Some(host.as_os_str())).unwrap();
+        assert_eq!(selected["btrfs"], tools.join("btrfs/bin/btrfs"));
+        assert_eq!(selected["rsync"], host.join("rsync"));
+        std::fs::remove_file(host.join("rsync")).unwrap();
+        assert!(
+            snapshot_auxiliary_tools(true, &tools, Some(host.as_os_str()))
+                .unwrap_err()
+                .contains("rsync")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn workload_tool_intent_covers_all_modes() {
