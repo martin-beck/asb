@@ -472,13 +472,30 @@ def _request_difference(expected, actual):
     return "encoding"
 
 
+def install_dispatch_coverage(registry, transport, mode):
+    """Preserve the catalogue without claiming unsupported calls were taped."""
+    original_dispatch = registry.dispatch
+    covered_dispatch = set()
+
+    def dispatch_with_coverage(name, args, **kwargs):
+        if name not in covered_dispatch:
+            if mode == "record":
+                with transport.lock:
+                    transport.failed = True
+            else:
+                transport.failed = True
+                transport.failure = "native tool is not recorded"
+                raise RuntimeError("Hermes tool has no recorded replay transport")
+        return original_dispatch(name, args, **kwargs)
+
+    registry.dispatch = dispatch_with_coverage
+    return covered_dispatch
+
+
 try:
-    # Hermes exposes file/code/process tools through its always-enabled core
-    # list even when `--toolsets terminal` is selected. They have no stable
-    # external interception API, so do not advertise them during a complete
-    # ASB tool recording/replay session.
-    import toolsets
-    toolsets._HERMES_CORE_TOOLS[:] = ["terminal"]
+    # Hermes exposes file and code tools through its normal core catalogue.
+    # Preserve that catalogue; unsupported calls run normally when recording
+    # but make the evidence incomplete rather than claiming full coverage.
     import tools.terminal_tool as terminal_tool
     original = terminal_tool.terminal_tool
     transport = Recorder() if MODE == "record" else Replayer() if MODE == "replay" else None
@@ -495,6 +512,7 @@ try:
     # consulted. Rebind that captured terminal entry too, so model dispatch
     # reaches the same adapter-owned wrapper in record and replay.
     from tools.registry import registry
+    covered_dispatch = install_dispatch_coverage(registry, transport, MODE)
 
     def registered_terminal(args, **kw):
         return terminal(
@@ -513,6 +531,7 @@ try:
     entry = registry._tools.get("terminal")
     if entry is not None:
         entry.handler = registered_terminal
+        covered_dispatch.add("terminal")
 
     process_entry = registry._tools.get("process")
     if process_entry is not None:
@@ -522,6 +541,7 @@ try:
             return transport.invoke_process(original_process, args, **kw)
 
         process_entry.handler = registered_process
+        covered_dispatch.add("process")
 
     # Hermes normally persists a large terminal result into its ephemeral
     # sandbox and replaces it with a message containing that sandbox path.

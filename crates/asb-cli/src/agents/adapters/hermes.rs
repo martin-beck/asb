@@ -210,10 +210,6 @@ fn prepare_native_tool_replay(
         .map_err(|_| Error::Run("cannot construct Hermes native-tool Python path".into()))?;
     context
         .command
-        // Only Hermes' terminal tool is exposed while a complete tool tape is
-        // requested. Its file and code tools bypass the terminal protocol.
-        .arg("--toolsets")
-        .arg("terminal")
         .env("PYTHONPATH", python_path)
         .env("ASB_HERMES_NATIVE_MODE", mode)
         .env("ASB_HERMES_NATIVE_SIDECAR", sidecar)
@@ -504,6 +500,21 @@ mod tests {
     }
 
     #[test]
+    fn native_catalogue_preserves_recording_and_replay_coverage() {
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/hermes_native_catalogue.py");
+        let output = std::process::Command::new("python3")
+            .arg(script)
+            .output()
+            .expect("python3 is required for the Hermes adapter test");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn native_terminal_tape_installs_a_private_recording_hook() {
         let root = std::env::temp_dir().join(format!(
             "asb-hermes-native-{}-{}",
@@ -546,8 +557,7 @@ mod tests {
                 .to_string()
         );
         assert!(env["PYTHONPATH"].contains("hermes-native-tools"));
-        assert!(command.get_args().any(|argument| argument == "--toolsets"));
-        assert!(command.get_args().any(|argument| argument == "terminal"));
+        assert!(!command.get_args().any(|argument| argument == "--toolsets"));
         // Declared artifacts are owned by the driver before the injected
         // runtime creates them. Preparation must not pre-create a path in the
         // adapter namespace, or the owner correctly treats it as foreign.
@@ -565,7 +575,7 @@ mod tests {
         assert!(
             std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))
                 .unwrap()
-                .contains("_HERMES_CORE_TOOLS[:] = [\"terminal\"]")
+                .contains("install_dispatch_coverage(registry, transport, MODE)")
         );
         assert!(
             std::fs::read_to_string(root.join("hermes-native-tools/sitecustomize.py"))

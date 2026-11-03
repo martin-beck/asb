@@ -126,8 +126,10 @@ was not executed on replay. That sentinel is deliberately not reproduced, so
 the fixture does not capture effects outside its mounted workspace.
 The test wrapper supplies boundaries and advances the operation cursor after
 the sidecar validates each request and before returning its result. This does
-not prove ordering for a complete agent. The existing sidecar
-also restricts Hermes's advertised core tools. The fixture enables `allow_other`
+not prove ordering for a complete agent. The adapter preserves Hermes's normal
+tool catalogue; calls outside its covered terminal/process dispatch run during
+recording but mark the tape incomplete until replay support is implemented.
+The fixture enables `allow_other`
 on its temporary container-local FUSE mount so the unprivileged tool can access
 the proxy; this is not a production setting. This mode does not invoke an LLM
 or complete agent.
@@ -141,9 +143,8 @@ terminal-call boundaries; the operation journal restores the file before the
 recorded result is returned, and an external sentinel confirms the shell command
 was not reexecuted. Replay homes are isolated but presented at the same path,
 and record and replay use consistent user environments, so generated prompts
-match. The current sidecar restricts Hermes to the terminal toolset, so this is
-not unrestricted agent qualification, a SWE-bench task, or production
-integration. The 30-minute timeout covers only the actual Hermes CLI command.
+match. This terminal-only fixture is not unrestricted agent qualification,
+a SWE-bench task, or production integration. The 30-minute timeout covers only the actual Hermes CLI command.
 For an additional experimental variant, set
 `ASB_HERMES_UNRESTRICTED_FIXTURE=1`. The test modifies only its private copy of
 the sidecar hook to preserve upstream core tools and omits the terminal-only CLI
