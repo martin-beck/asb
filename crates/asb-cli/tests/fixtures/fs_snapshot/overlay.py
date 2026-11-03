@@ -86,9 +86,46 @@ checks['hardlink_rename_preserved']=(roots[0]/'asb-overlay-fixture-link').stat()
 checks['fixture_isolated']=all(not (root/'asb-overlay-fixture-link').exists() for root in roots[1:]) and not Path('/source/asb-overlay-fixture-link').exists()
 subprocess.run(['python3','-c','from pathlib import Path; Path(\"asb-child-fixture\").write_text(\"child\")'],cwd=roots[1],check=True)
 checks['child_write_isolated']=(roots[1]/'asb-child-fixture').read_text()=='child' and all(not (root/'asb-child-fixture').exists() for root in (roots[0],roots[2],roots[3],roots[4],Path('/source')))
+deleted=None
+for raw in tracked:
+ if not raw: continue
+ name=os.fsdecode(raw);candidate=roots[0]/name
+ if name!=selected and not candidate.is_symlink() and candidate.is_file():
+  deleted=name;break
+if deleted is None: raise RuntimeError('fixture requires a second tracked regular file')
+(roots[0]/deleted).unlink()
+(roots[0]/'asb-overlay-binary').write_bytes(bytes(range(256)))
+os.symlink('asb-overlay-binary',roots[0]/'asb-overlay-symlink')
+import json
+Path('/work/manifest.json').write_text(json.dumps({'selected':selected,'selected_hash':fingerprint(roots[0]/selected),'deleted':deleted}))
 for name,passed in checks.items(): print(name,passed)
 print('git_probe_seconds',[r[2] for r in results])
 if not all(checks.values()): raise RuntimeError('snapshot fixture checks failed')
+EOPY
+for i in 0 1 2 3 4; do fusermount3 -u /work/m$i; done
+for p in $pids; do wait "$p"; done
+pids=""
+for i in 0 1 2 3; do
+ mkdir /work/ru$i /work/rw$i
+ /opt/fuse-overlayfs -f -o lowerdir=/work/u0:/source,upperdir=/work/ru$i,workdir=/work/rw$i /work/m$i >/work/replay-log$i 2>&1 & pids="$pids $!"
+done
+for i in 0 1 2 3; do n=0; while ! mountpoint -q /work/m$i; do n=$((n+1)); [ "$n" -lt 100 ] || exit 43; sleep 0.05; done; done
+python3 - <<'EOPY'
+import hashlib,json,os
+from pathlib import Path
+manifest=json.loads(Path('/work/manifest.json').read_text());roots=[Path('/work/m'+str(i)) for i in range(4)]
+def fingerprint(path): return hashlib.sha256(path.read_bytes()).hexdigest()
+checks={
+ 'layer_selected_equal':all(fingerprint(root/manifest['selected'])==manifest['selected_hash'] for root in roots),
+ 'layer_deletion_visible':all(not (root/manifest['deleted']).exists() for root in roots) and (Path('/source')/manifest['deleted']).exists(),
+ 'layer_binary_equal':all((root/'asb-overlay-binary').read_bytes()==bytes(range(256)) for root in roots),
+ 'layer_symlink_preserved':all((root/'asb-overlay-symlink').is_symlink() and os.readlink(root/'asb-overlay-symlink')=='asb-overlay-binary' for root in roots),
+ 'layer_hardlink_preserved':all((root/'asb-overlay-fixture-link').stat().st_ino==(root/'asb-overlay-fixture-renamed').stat().st_ino for root in roots),
+}
+(roots[0]/'asb-overlay-binary').write_bytes(b'changed')
+checks['layer_replay_writes_isolated']=all((root/'asb-overlay-binary').read_bytes()==bytes(range(256)) for root in roots[1:]) and Path('/work/u0/asb-overlay-binary').read_bytes()==bytes(range(256))
+for name,passed in checks.items(): print(name,passed)
+if not all(checks.values()): raise RuntimeError('snapshot layer checks failed')
 EOPY
 '''
  cmd=['docker','run','--rm','--pull=never','--network','none','--device','/dev/fuse','--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={source},dst=/source,readonly','--mount',f'type=bind,src={fuse_overlay},dst=/opt/fuse-overlayfs,readonly','--mount',f'type=bind,src={fusermount},dst=/usr/bin/fusermount3,readonly','--entrypoint','/bin/sh',image,'-c',script]

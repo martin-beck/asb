@@ -11,8 +11,10 @@ and recent-log agreement, index isolation, hard-link/rename behavior, and a
 child-process write in only one replica. It applies a synthetic Git patch to
 four replicas and compares resulting diffs and file bytes. A subprocess makes
 the original synthetic change and an external counter checks that it is not
-rerun when applying the patch. It reports, but does not require,
-identical metadata fields. It preserves failed fixture logs under `target`.
+rerun when applying the patch. It also remounts the recorded overlay as a
+lower layer for four fresh replicas and checks binary data, deletions, symlinks,
+hard links, and isolation of subsequent writes. It reports, but does not
+require, identical metadata fields. It preserves failed fixture logs under `target`.
 It requires `/dev/fuse` and container mount capabilities for this experiment;
 these are not ordinary CI requirements. It does not record or replay an agent,
 prove complete filesystem metadata fidelity, or qualify SWE-bench execution.
