@@ -1,9 +1,9 @@
-"""Offline diagnostic: overlapping Hermes calls must remain replayable.
+"""Overlapping recording calls must produce a readable sidecar.
 
-The current transport marks an interleaved stream complete even though its
-reader rejects that stream. This is a defect diagnostic, not a passing
-qualification of parallel replay. A repair must preserve concurrent execution.
+This checks framing and sequential response lookup, not full parallel replay
+ordering or filesystem-effect reproduction.
 """
+import base64
 import json
 import os
 from pathlib import Path
@@ -44,10 +44,28 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     recorder.close()
     assert not failures, failures
     assert json.loads((directory / 'progress.json').read_text())['complete']
+    rows = [json.loads(line) for line in (directory / 'native.jsonl').read_text().splitlines()]
+    requests = [json.loads(base64.b64decode(row['request_b64']))['command']
+                for row in rows if row['event'] == 'write']
+    assert sorted(requests) == ['0', '1']
+    replay = namespace['Replayer']()
+    for request in requests:
+        assert replay.invoke(None, request, False, None, None, None,
+                             False, '.', False, False, None) == 'ok'
+    replay.close()
+    assert json.loads((directory / 'progress.json').read_text())['complete']
+    namespace['SIDECAR'] = directory / 'failed.jsonl'
+    namespace['PROGRESS'] = directory / 'failed-progress.json'
+    failing = namespace['Recorder']()
+    def fail(*args, **kwargs):
+        raise ValueError('fixture failure')
     try:
-        namespace['Replayer']()
-    except RuntimeError as error:
-        assert str(error) == 'Hermes native replay sidecar is invalid'
+        failing.invoke(fail, 'fail', False, None, None, None,
+                       False, '.', False, False, None)
+    except ValueError:
+        pass
     else:
-        raise AssertionError('parallel sidecar became readable; update diagnostic to verify replay')
-    print('Confirmed: overlapping Hermes calls produce a completed but unreadable sidecar')
+        raise AssertionError('failed tool call was accepted')
+    failing.close()
+    assert not json.loads((directory / 'failed-progress.json').read_text())['complete']
+    print('Overlapping calls record a readable sidecar without serializing execution')

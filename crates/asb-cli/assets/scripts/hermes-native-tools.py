@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
 
 
 MODE = os.environ.get("ASB_HERMES_NATIVE_MODE", "")
@@ -116,6 +117,10 @@ class Recorder:
         SIDECAR.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.file = open(SIDECAR, "x", encoding="utf-8")
         self.entries = []
+        self.lock = threading.RLock()
+        self.pending = {}
+        self.started = 0
+        self.flushed = 0
         self._event({"event": "launch", "session": "launch-1", "program_sha256": _digest(program)})
         self._event({"event": "session_alias", "alias": SESSION, "session": "launch-1"})
         self.complete = False
@@ -131,15 +136,17 @@ class Recorder:
 
     def invoke(self, original, *args, **kwargs):
         request = _request(*args, **kwargs)
+        return self._invoke(original, request, *args, **kwargs)
+
+    def _invoke(self, original, request, *args, **kwargs):
         if len(request) > MAX_PAYLOAD_BYTES:
             self.failed = True
             raise RuntimeError("Hermes terminal request exceeds the native replay bound")
-        self._event({"event": "poll", "alias": SESSION})
-        self._event({
-            "event": "write", "alias": SESSION,
-            "request_sha256": _digest(request),
-            "request_b64": base64.b64encode(request).decode("ascii"),
-        })
+        with self.lock:
+            if self.complete:
+                raise RuntimeError("Hermes native sidecar is already closed")
+            ordinal = self.started
+            self.started += 1
         try:
             output = original(*args, **kwargs)
         except BaseException:
@@ -152,47 +159,38 @@ class Recorder:
         if len(response) > MAX_PAYLOAD_BYTES:
             self.failed = True
             raise RuntimeError("Hermes terminal response exceeds the native replay bound")
-        self._event({
-            "event": "output", "alias": SESSION,
-            "response_sha256": _digest(response),
-            "output_b64": base64.b64encode(response).decode("ascii"),
-        })
-        self.entries.extend((request, response))
+        with self.lock:
+            if self.complete:
+                raise RuntimeError("Hermes native sidecar closed before tool completed")
+            self.pending[ordinal] = (request, response)
+            if sum(len(req) + len(resp) for req, resp in self.pending.values()) > MAX_BYTES:
+                self.failed = True
+                raise RuntimeError("Hermes pending native responses exceed the private sidecar bound")
+            while self.flushed in self.pending:
+                req, resp = self.pending.pop(self.flushed)
+                self._event({"event": "poll", "alias": SESSION})
+                self._event({"event": "write", "alias": SESSION,
+                    "request_sha256": _digest(req), "request_b64": base64.b64encode(req).decode("ascii")})
+                self._event({"event": "output", "alias": SESSION,
+                    "response_sha256": _digest(resp), "output_b64": base64.b64encode(resp).decode("ascii")})
+                self.entries.extend((req, resp))
+                self.flushed += 1
         return output
 
     def invoke_process(self, original, args, **kwargs):
         request = _process_request(args)
-        if len(request) > MAX_PAYLOAD_BYTES:
-            self.failed = True
-            raise RuntimeError("Hermes process request exceeds the native replay bound")
-        self._event({"event": "poll", "alias": SESSION})
-        self._event({"event": "write", "alias": SESSION,
-            "request_sha256": _digest(request),
-            "request_b64": base64.b64encode(request).decode("ascii")})
-        try:
-            output = original(args, **kwargs)
-        except BaseException:
-            self.failed = True
-            raise
-        if not isinstance(output, str):
-            self.failed = True
-            raise RuntimeError("Hermes process tool returned a non-text response")
-        response = output.encode("utf-8")
-        if len(response) > MAX_PAYLOAD_BYTES:
-            self.failed = True
-            raise RuntimeError("Hermes process response exceeds the native replay bound")
-        self._event({"event": "output", "alias": SESSION,
-            "response_sha256": _digest(response),
-            "output_b64": base64.b64encode(response).decode("ascii")})
-        self.entries.extend((request, response))
-        return output
+        return self._invoke(original, request, args, **kwargs)
 
     def close(self):
+        with self.lock:
+            self._close_locked()
+
+    def _close_locked(self):
         if self.complete:
             return
         self.complete = True
         try:
-            if self.failed:
+            if self.failed or self.flushed != self.started:
                 _write_progress(False, "terminal tool did not settle", len(self.entries) // 2)
                 return
             self._event({"event": "exit", "alias": SESSION, "success": True})
