@@ -279,15 +279,17 @@ class TaskTrackerTapeExecutor(DelegationTapeExecutor):
         super().__init__(delegate, tape, tool="openhands.task_tracker",
                          marker="openhands-tracker")
         self.lock = threading.Lock()
+        self.workspace = Path.cwd().resolve()
 
     def __call__(self, action: Any, conversation: Any = None) -> Any:
-        # The tracker writes TASKS.json on plan. During replay, the filesystem
-        # coordinator owns that write; the delegate still updates its in-memory
-        # list, so later view calls observe the same state.
+        # Writes in the captured workspace belong to the filesystem journal.
+        # SDK-owned persistence outside it is not captured: execute that write
+        # normally so subsequent SDK and agent reads can observe it.
         with self.lock:
-            if self.tape.mode != "replay":
-                return super().__call__(action, conversation)
             save_dir = self.delegate.save_dir
+            if (self.tape.mode != "replay" or save_dir is None
+                    or not Path(save_dir).resolve().is_relative_to(self.workspace)):
+                return super().__call__(action, conversation)
             self.delegate.save_dir = None
             try:
                 return super().__call__(action, conversation)
