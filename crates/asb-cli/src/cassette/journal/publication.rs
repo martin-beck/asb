@@ -360,7 +360,9 @@ impl RecordingJournal {
                 writer
                     .start_file(
                         track.artifact_entry_name(&artifact.kind),
-                        options.large_file(artifact.bytes >= u32::MAX as u64),
+                        // Deflate can expand incompressible input slightly;
+                        // reserve ZIP64 before either size reaches ZIP32's limit.
+                        options.large_file(artifact.bytes >= 3 * 1024 * 1024 * 1024),
                     )
                     .map_err(zip_error)?;
                 let path = self.artifact_path(track.id, &artifact.kind);
