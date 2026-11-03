@@ -13,6 +13,10 @@ use std::sync::mpsc::{self, SyncSender};
 use std::time::{Duration, Instant};
 
 const LIMIT: usize = 8 * 1024 * 1024;
+pub(crate) struct Supervision<'a> {
+    pub runtime: Duration,
+    pub preserved_child: Option<&'a std::process::Child>,
+}
 enum Event {
     Data(bool, Vec<u8>),
     Frozen,
@@ -131,8 +135,10 @@ pub(crate) fn start<'a>(
         None,
         stdout,
         stderr,
-        runtime,
-        None,
+        Supervision {
+            runtime,
+            preserved_child: None,
+        },
         |_| Ok(()),
         after_exit,
     )
@@ -143,12 +149,11 @@ pub(crate) fn start_with_spawn<'a>(
     stdin_prompt: Option<&[u8]>,
     stdout: &'a mut dyn Write,
     stderr: &'a mut dyn Write,
-    runtime: Duration,
-    preserved_child: Option<&std::process::Child>,
+    supervision: Supervision<'_>,
     mut on_spawn: impl FnMut(u32) -> Result<(), Error>,
     mut after_exit: impl FnMut(std::process::ExitStatus, u64, bool) -> Result<(), Error>,
 ) -> Result<HeldProcess, Error> {
-    let scope = crate::process_gate::DescendantScope::new_preserving(preserved_child)
+    let scope = crate::process_gate::DescendantScope::new_preserving(supervision.preserved_child)
         .map_err(|_| Error::Run("cannot own workload service descendants".into()))?;
     let started = Instant::now();
     let mut child = OwnedChild::spawn_direct(command)
@@ -187,7 +192,7 @@ pub(crate) fn start_with_spawn<'a>(
     let mut status = None;
     let mut frozen = 0;
     let mut truncated = false;
-    let deadline = started + runtime;
+    let deadline = started + supervision.runtime;
     let mut elapsed_ms = 0;
     let mut timed_out = false;
     loop {
