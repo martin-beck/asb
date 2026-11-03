@@ -207,13 +207,33 @@ class Proxy(Operations):
                     event.update(object='payload.bin', payload_offset=position, bytes=len(data))
             self.log.write(json.dumps(event, separators=(',', ':')) + '\n')
             return self.sequence
+    def observe_metadata(self, op, path, operation, **detail):
+        """Optionally retain exact observations for experimental replay work."""
+        if os.environ.get('ASB_PROBE_METADATA_CAPTURE') != '1':
+            return operation()
+        try:
+            result = operation()
+        except OSError as error:
+            self.record('observe-' + op, path, error=error.errno, **detail)
+            raise
+        if isinstance(result, bytes):
+            self.record('observe-' + op, path, result, **detail)
+        else:
+            self.record('observe-' + op, path, result=result, **detail)
+        return result
+
     def getattr(self, path, fh=None):
-        try: st = os.lstat(self.path(path))
-        except OSError as error: raise FuseOSError(error.errno)
-        attrs = {key: getattr(st, key) for key in ('st_gid','st_ino','st_mode','st_nlink','st_size','st_uid','st_blocks','st_blksize')}
-        attrs.update(st_atime=st.st_atime_ns, st_mtime=st.st_mtime_ns, st_ctime=st.st_ctime_ns)
-        return attrs
-    def readdir(self, path, fh): return ['.', '..', *os.listdir(self.path(path))]
+        def lookup():
+            st = os.lstat(self.path(path))
+            attrs = {key: getattr(st, key) for key in ('st_gid','st_ino','st_mode','st_nlink','st_size','st_uid','st_blocks','st_blksize')}
+            attrs.update(st_atime=st.st_atime_ns, st_mtime=st.st_mtime_ns, st_ctime=st.st_ctime_ns)
+            return attrs
+        try:
+            return self.observe_metadata('getattr', path, lookup)
+        except OSError as error:
+            raise FuseOSError(error.errno)
+    def readdir(self, path, fh):
+        return self.observe_metadata('readdir', path, lambda: ['.', '..', *os.listdir(self.path(path))])
     def open(self, path, fi):
         try:
             fi.fh = os.open(self.path(path), fi.flags)
@@ -278,9 +298,11 @@ class Proxy(Operations):
             st = os.stat(self.path(path))
             self.record('utimens', path, atime_ns=st.st_atime_ns, mtime_ns=st.st_mtime_ns)
     def getxattr(self, path, name, position=0):
-        return os.getxattr(self.path(path), name, follow_symlinks=False)
+        return self.observe_metadata('getxattr', path,
+                                     lambda: os.getxattr(self.path(path), name, follow_symlinks=False), name=name, position=position)
     def listxattr(self, path):
-        return os.listxattr(self.path(path), follow_symlinks=False)
+        return self.observe_metadata('listxattr', path,
+                                     lambda: os.listxattr(self.path(path), follow_symlinks=False))
     def setxattr(self, path, name, value, options, position=0):
         with self.lock_for_stat(os.lstat(self.path(path))):
             os.setxattr(self.path(path), name, value, options, follow_symlinks=False)
@@ -295,7 +317,8 @@ class Proxy(Operations):
         os.link(self.path(source), self.path(target)); self.record('link', source, destination=target)
     def symlink(self, target, source):
         os.symlink(source, self.path(target)); self.record('symlink', target, destination=source)
-    def readlink(self, path): return os.readlink(self.path(path))
+    def readlink(self, path):
+        return self.observe_metadata('readlink', path, lambda: os.readlink(self.path(path)))
     def unlink(self, path): os.unlink(self.path(path)); self.record('unlink', path)
     def mkdir(self, path, mode):
         os.mkdir(self.path(path), mode)
