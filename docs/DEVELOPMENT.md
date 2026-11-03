@@ -73,9 +73,13 @@ existing evidence directories. The host admission guard remains in place.
 For investigating differing initial file bytes, the experimental recorder now
 captures file size, mode and link count at open. A separate planner identifies
 only complete regular-file reads before the first recorded mutation; it skips
-legacy journals lacking that metadata and incomplete or hardlinked files. It
-does not apply those plans or establish equivalent workspace metadata, startup
-ordering or complete replay.
+legacy journals lacking that metadata and incomplete or hardlinked files. The
+experimental coordinator validates every planned destination and all payload
+segments, including overlaps, before applying their recorded bytes ahead of the
+agent. It preserves the existing file inode and modification time, but does not
+establish ctime, inode identity across replicas, unobserved state, direct agent
+I/O or complete replay. An I/O failure during application can leave a partial
+workspace, which must be retained for diagnosis.
 It additionally exercises a background child that writes after its tool-return
 marker and before the next invocation, checking the file is absent at the first
 boundary and present at the second. This does not implement a scheduler for

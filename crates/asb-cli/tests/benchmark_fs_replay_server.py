@@ -45,6 +45,22 @@ class ReplayServerTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(self.replica, range(4)))
 
+    def test_server_prepares_evidenced_initial_bytes_before_ready(self):
+        workspace = self.root / 'workspace'; workspace.mkdir()
+        initial = workspace / 'baseline'; initial.write_bytes(b'xxxxx')
+        mode = initial.stat().st_mode
+        events = [
+            {'sequence':1, 'op':'open', 'path':'/baseline', 'handle':1, 'flags':0,
+             'initial_size':5, 'initial_mode':mode, 'initial_nlink':1},
+            {'sequence':2, 'op':'read', 'path':'/baseline', 'handle':1,
+             'offset':0, 'bytes':5, 'object':'payload.bin', 'payload_offset':0},
+            {'sequence':3, 'op':'release', 'path':'/baseline', 'handle':1},
+        ]
+        (self.evidence / 'events.jsonl').write_text(''.join(json.dumps(event) + '\n' for event in events))
+        server = ReplayServer(self.evidence, workspace, self.root / 'socket', timeout=2)
+        self.assertEqual(initial.read_bytes(), b'hello')
+        server.finish()
+
     def test_uninvoked_boundary_fails_at_finish(self):
         workspace = self.root / 'workspace'; workspace.mkdir()
         server = ReplayServer(self.evidence, workspace, self.root / 'socket', timeout=2)
