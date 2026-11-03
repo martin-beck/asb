@@ -1246,7 +1246,7 @@ pub(crate) fn export_filesystem_recording(
         }
         let mut input = options.open(&path).map_err(crate::io_error)?;
         let metadata = input.metadata().map_err(crate::io_error)?;
-        let limit = crate::cassette::Limits::default().max_track_bytes;
+        let limit = crate::cassette::Limits::default().max_artifact_bytes;
         if !metadata.is_file() || metadata.len() > limit {
             return Err(Error::Run(
                 "filesystem recording is unavailable or too large".into(),

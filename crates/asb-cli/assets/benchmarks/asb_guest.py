@@ -25,8 +25,8 @@ from asb_relay import HostRelay, ForwardingCancellation, forward_request
 
 MAX_EXPORTED_ARTIFACTS = 8
 MAX_EXPORTED_ARTIFACT_BYTES = 16 * 1024 * 1024
-# Matches the cassette track limit. Filesystem streams use file-backed custody.
-MAX_FILESYSTEM_ARTIFACT_BYTES = 256 * 1024 * 1024
+# Matches the cassette artifact limit. Filesystem streams use file-backed custody.
+MAX_FILESYSTEM_ARTIFACT_BYTES = 64 * 1024 * 1024 * 1024
 
 
 class _ArchiveChunks:

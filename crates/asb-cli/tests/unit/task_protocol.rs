@@ -295,6 +295,16 @@ fn replay_sidecar_receipt_rejects_a_duplicate_embedded_control_value() {
 
 #[test]
 fn guest_filesystem_receipts_cross_the_actual_transfer_and_import_boundaries() {
+    guest_filesystem_handoff(17 * 1024 * 1024);
+}
+
+#[test]
+#[ignore = "moves more than 256 MiB across guest export, Docker-tar fixture and host import"]
+fn large_guest_filesystem_receipts_cross_transfer_and_import_boundaries() {
+    guest_filesystem_handoff(256 * 1024 * 1024 + 1);
+}
+
+fn guest_filesystem_handoff(size: usize) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target")
         .join(format!(
@@ -310,7 +320,7 @@ fn guest_filesystem_receipts_cross_the_actual_transfer_and_import_boundaries() {
         b"{\"sequence\":1}\n",
     )
     .unwrap();
-    let payload = vec![0xabu8; 17 * 1024 * 1024];
+    let payload = vec![0xabu8; size];
     std::fs::write(guest.join("filesystem-recording/payload.bin"), &payload).unwrap();
     let mut receipts = Vec::new();
     crate::agents::driver::export_filesystem_recording(&guest, &mut receipts).unwrap();

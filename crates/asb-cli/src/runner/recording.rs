@@ -776,8 +776,11 @@ fn open_sealed_file_artifacts(
     files
         .iter()
         .map(|artifact| {
-            let file = open_payload(&artifact.path)?
-                .ok_or_else(|| Error::Io("file-backed recording artifact is unavailable".into()))?;
+            let file =
+                open_payload_with_limit(&artifact.path, Limits::default().max_artifact_bytes)?
+                    .ok_or_else(|| {
+                        Error::Io("file-backed recording artifact is unavailable".into())
+                    })?;
             if file.metadata().map_err(io_error)?.len() != artifact.bytes {
                 return Err(Error::Io(
                     "file-backed recording artifact length changed".into(),
@@ -971,6 +974,10 @@ fn raw_cleanup_warning(track_id: u64) -> String {
 }
 
 fn open_payload(output: &Path) -> Result<Option<File>, Error> {
+    open_payload_with_limit(output, Limits::default().max_track_bytes)
+}
+
+fn open_payload_with_limit(output: &Path, limit: u64) -> Result<Option<File>, Error> {
     match fs::symlink_metadata(output) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io_error(error)),
@@ -990,7 +997,7 @@ fn open_payload(output: &Path) -> Result<Option<File>, Error> {
     }
     let file = options.open(output).map_err(io_error)?;
     let metadata = file.metadata().map_err(io_error)?;
-    if !metadata.is_file() || metadata.len() > Limits::default().max_track_bytes {
+    if !metadata.is_file() || metadata.len() > limit {
         return Err(Error::Io(
             "recording producer is invalid or oversized".into(),
         ));
@@ -1451,6 +1458,34 @@ mod tests {
         assert_eq!(bytes, b"recorded bytes");
         fs::write(&path, b"short").unwrap();
         assert!(open_sealed_file_artifacts(&[item]).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn large_file_artifacts_use_the_artifact_limit_not_the_track_limit() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "asb-large-fs-{}",
+                crate::tools::runtime::unique_id()
+            ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("payload");
+        let file = File::create(&path).unwrap();
+        let length = Limits::default().max_track_bytes + 1;
+        file.set_len(length).unwrap();
+        let mut item = crate::agents::SealedFileArtifact {
+            kind: "aux-fs-payload".into(),
+            path: path.clone(),
+            bytes: length,
+            sha256: "0".repeat(64),
+        };
+        assert!(open_payload(&path).is_err());
+        assert!(open_sealed_file_artifacts(std::slice::from_ref(&item)).is_ok());
+        item.bytes = Limits::default().max_artifact_bytes + 1;
+        file.set_len(item.bytes).unwrap();
+        assert!(open_sealed_file_artifacts(&[item]).is_err());
+        drop(file);
         fs::remove_dir_all(root).unwrap();
     }
 
