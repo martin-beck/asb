@@ -597,7 +597,7 @@ mod tests {
         assert!(SDK_LAUNCHER.contains("Tool(name=TerminalTool.name, params=params)"));
         assert!(SDK_LAUNCHER.contains("params[\"executor\"] = executor"));
         assert!(SDK_LAUNCHER.contains("agent.model_copy(update={\"tools\": tools})"));
-        assert!(!SDK_LAUNCHER.contains("register_tool("));
+        assert!(SDK_LAUNCHER.contains("register_tool(tool_class.name, tool_class)"));
         assert!(!SDK_LAUNCHER.contains("setattr("));
         assert!(SDK_LAUNCHER.contains("def main()"));
         assert!(SDK_LAUNCHER.contains("__asb-agent-bridge\", \"openhands"));

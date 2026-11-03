@@ -63,6 +63,139 @@ def message(source, text):
     return MessageEvent(source=source, llm_message=Event(role='assistant' if source == 'agent' else 'user', content=[TextContent(text=text)]))
 
 class NativeFinalTest(unittest.TestCase):
+    def test_delegated_result_mismatch_does_not_acknowledge_completion(self):
+        class Action:
+            def model_dump(self, mode): return {'task':'fixture'}
+        class Observation:
+            def model_dump(self, mode): return {'result':'different'}
+        class Delegate:
+            def __call__(self, action, conversation=None): return Observation()
+            def close(self): pass
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory)/'tape'
+            path.write_text(json.dumps({'schema_version':1,'sequence':1,'tool':'openhands.task',
+                                        'request':{'task':'fixture'},'result':{'result':'expected'}})+'\n')
+            tape = launcher.EditorTape('replay', str(path))
+            with patch.object(launcher, 'filesystem_replay_begin', return_value=True), \
+                    patch.object(launcher, 'filesystem_replay_boundary') as finish:
+                with self.assertRaisesRegex(RuntimeError, 'result differs'):
+                    launcher.DelegationTapeExecutor(Delegate(), tape)(Action())
+                finish.assert_not_called()
+
+    def test_delegated_editor_replay_uses_real_nested_coordinator(self):
+        sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / 'assets/benchmarks'))
+        from asb_fs_replay_server import ReplayServer
+        definition = module('openhands.tools.file_editor.definition')
+        class Observation:
+            def __init__(self, value): self.value = value
+            def model_dump(self, mode): return {'value':self.value}
+            @classmethod
+            def model_validate(cls, value): return cls(value['value'])
+        definition.FileEditorObservation = Observation
+        class Action:
+            def __init__(self, value): self.value = value
+            def model_dump(self, mode): return {'value':self.value}
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory); evidence = root/'evidence'; evidence.mkdir()
+            workspace = root/'workspace'; workspace.mkdir()
+            (evidence/'payload.bin').write_bytes(b'child effect')
+            events = [
+                {'sequence':1,'op':'marker','path':None,'marker':'tool-begin:openhands-task-1'},
+                {'sequence':2,'op':'marker','path':None,'marker':'tool-begin:openhands-editor-2'},
+                {'sequence':3,'op':'create','path':'/result','handle':1,'flags':1,'mode':0o600},
+                {'sequence':4,'op':'write','path':'/result','handle':1,'offset':0,'bytes':12,'object':'payload.bin','payload_offset':0},
+                {'sequence':5,'op':'release','path':'/result','handle':1},
+                {'sequence':6,'op':'marker','path':None,'marker':'tool-end:openhands-editor-2'},
+                {'sequence':7,'op':'marker','path':None,'marker':'tool-end:openhands-task-1'},
+            ]
+            (evidence/'events.jsonl').write_text(''.join(json.dumps(event)+'\n' for event in events))
+            entries = [
+                {'schema_version':1,'sequence':1,'tool':'openhands.task','request':{'value':'parent'},'result':{'value':'parent-result'}},
+                {'schema_version':1,'sequence':2,'tool':'openhands.file_editor','request':{'value':'child'},'result':{'value':'child-result'}},
+            ]
+            sidecar = root/'tools.jsonl'; sidecar.write_text(''.join(json.dumps(entry)+'\n' for entry in entries))
+            tape = launcher.EditorTape('replay', str(sidecar))
+            class Editor:
+                def __call__(self, *_args, **_kwargs): raise AssertionError('editor executed during replay')
+                def close(self): pass
+            editor = launcher.FileEditorTapeExecutor(Editor(), tape)
+            class Worker:
+                def __call__(self, action, conversation=None):
+                    assert editor(Action('child')).value == 'child-result'
+                    assert (workspace/'result').read_bytes() == b'child effect'
+                    return Observation('parent-result')
+                def close(self): pass
+            server = ReplayServer(evidence, workspace, root/'socket', timeout=2)
+            with patch.dict(os.environ, {'ASB_FS_REPLAY_SOCKET':str(root/'socket')}):
+                result = launcher.DelegationTapeExecutor(Worker(), tape)(Action('parent'))
+            self.assertEqual(result.value, 'parent-result')
+            tape.close(); server.finish()
+
+    def test_delegated_task_runs_in_both_modes_and_orders_nested_editor(self):
+        definition = module('openhands.tools.file_editor.definition')
+        class Observation:
+            def __init__(self, value): self.value = value
+            def model_dump(self, mode): return {'value': self.value}
+            @classmethod
+            def model_validate(cls, value): return cls(value['value'])
+        definition.FileEditorObservation = Observation
+        class Action:
+            def __init__(self, value): self.value = value
+            def model_dump(self, mode): return {'value':self.value}
+        class Editor:
+            def __call__(self, action, conversation=None): return Observation('child-result')
+            def close(self): pass
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory)/'tape'; path.touch()
+            boundaries = []; calls = []
+            def exercise(mode):
+                tape = launcher.EditorTape(mode, str(path))
+                child = launcher.FileEditorTapeExecutor(Editor(), tape)
+                class Task:
+                    def __call__(self, action, conversation=None):
+                        calls.append(mode)
+                        self_child = child(Action('child'))
+                        assert self_child.value == 'child-result'
+                        return Observation('parent-result')
+                    def close(self): pass
+                task = launcher.DelegationTapeExecutor(Task(), tape)
+                with patch.dict(os.environ, {'ASB_FS_MARKER_SOCKET':'/fixture', 'ASB_FS_REPLAY_SOCKET':'/fixture'}), \
+                        patch.object(launcher, 'filesystem_marker', side_effect=lambda kind, alias: boundaries.append((mode, kind, alias)) or True), \
+                        patch.object(launcher, 'filesystem_replay_begin', side_effect=lambda alias: boundaries.append((mode, 'begin', alias)) or True), \
+                        patch.object(launcher, 'filesystem_replay_boundary', side_effect=lambda alias: boundaries.append((mode, 'end', alias)) or True):
+                    self.assertEqual(task(Action('parent')).value, 'parent-result')
+                tape.close()
+            exercise('record'); exercise('replay')
+            self.assertEqual(calls, ['record', 'replay'])
+            expected = [('begin','openhands-task-1'), ('begin','openhands-editor-2'),
+                        ('end','openhands-editor-2'), ('end','openhands-task-1')]
+            self.assertEqual([(kind, alias) for mode,kind,alias in boundaries if mode=='record'], expected)
+            self.assertEqual([(kind, alias) for mode,kind,alias in boundaries if mode=='replay'],
+                             [('begin','openhands-task-1'),('end','openhands-editor-2'),('end','openhands-task-1')])
+
+    def test_subagent_terminal_borrows_parent_transport_without_closing_it(self):
+        task = module('openhands.tools.task'); manager = module('openhands.tools.task.manager')
+        task.manager = manager
+        terminal = sys.modules.get('openhands.tools.terminal') or module('openhands.tools.terminal')
+        terminal.TerminalTool = type('TerminalTool', (), {'name':'terminal'})
+        sys.modules['openhands.sdk'].Tool = lambda name, params: Event(name=name, params=params)
+        other = Event(name='file_editor', params={})
+        agent = Event(tools=[Event(name='terminal', params={}), other])
+        agent.model_copy = lambda update: Event(**update)
+        manager.LocalConversation = lambda *args, **kwargs: Event(agent=agent)
+        calls = []
+        class Transport:
+            def __call__(self, action, conversation=None): calls.append(action); return 'ok'
+            def close(self): self.fail('child closed parent transport')
+        transport = Transport()
+        launcher.install_subagent_terminal(transport)
+        conversation = manager.LocalConversation()
+        self.assertIs(conversation.agent.tools[1], other)
+        shared = conversation.agent.tools[0].params['executor']
+        self.assertEqual(shared('action'), 'ok')
+        shared.close()
+        self.assertEqual(calls, ['action'])
+
     def test_editor_only_recording_does_not_create_empty_terminal_sidecar(self):
         implementation = module('openhands.tools.terminal.impl')
         class Delegate:
@@ -210,7 +343,7 @@ class NativeFinalTest(unittest.TestCase):
         metadata = sys.modules.get('openhands.tools.terminal.metadata') or module('openhands.tools.terminal.metadata')
         terminal.TerminalObservation = Event; metadata.CmdOutputMetadata = Event
         executor = launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
-        executor._marker_lock = threading.Lock(); executor._marker_count = 0; executor._marker_failed = False
+        executor._marker_lock = threading.Lock(); executor._bridge_lock = threading.Lock(); executor._marker_count = 0; executor._marker_failed = False
         executor._delegate = None
         response = {'kind':'terminal_observation', 'schema_version':1, 'content':'done',
                     'is_error':False, 'command':'true', 'exit_code':0, 'timeout':False, 'metadata':{}}
@@ -239,7 +372,7 @@ class NativeFinalTest(unittest.TestCase):
         metadata = sys.modules.get('openhands.tools.terminal.metadata') or module('openhands.tools.terminal.metadata')
         terminal.TerminalObservation = Event; metadata.CmdOutputMetadata = Event
         executor = launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
-        executor._marker_lock = threading.Lock(); executor._marker_count = 0; executor._marker_failed = False
+        executor._marker_lock = threading.Lock(); executor._bridge_lock = threading.Lock(); executor._marker_count = 0; executor._marker_failed = False
         executor._delegate = None
         response = {'kind':'terminal_observation', 'schema_version':1, 'content':'done',
                     'is_error':False, 'command':'true', 'exit_code':0, 'timeout':False, 'metadata':{}}
@@ -289,6 +422,7 @@ class NativeFinalTest(unittest.TestCase):
         metadata.CmdOutputMetadata = Event
         executor = launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
         executor._marker_lock = threading.Lock()
+        executor._bridge_lock = threading.Lock()
         executor._marker_count = 0
         executor._marker_failed = False
         events = []
@@ -318,7 +452,7 @@ class NativeFinalTest(unittest.TestCase):
         terminal.TerminalObservation = Event
         metadata.CmdOutputMetadata = Event
         executor = launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
-        executor._marker_lock = threading.Lock(); executor._marker_count = 0; executor._marker_failed = False
+        executor._marker_lock = threading.Lock(); executor._bridge_lock = threading.Lock(); executor._marker_count = 0; executor._marker_failed = False
         observation = Event(text='done', is_error=False, command='true', exit_code=0,
                             timeout=False, metadata=Event(model_dump=lambda: {}))
         class Delegate:
