@@ -199,8 +199,10 @@ impl<'a> ConfiguredAttempt<'a> {
                 config.agent
             )));
         }
-        validate_mcp_server_capability(config)?;
-        validate_mcp_relay_capability(config, mcp_tape_mode)?;
+        // This is deliberately retained at admission as a defence-in-depth
+        // guard.  Direct runs and complete sweep populations perform the same
+        // static validation before capacity, dependency, or collector work.
+        validate_mcp_configuration(config, mcp_tape_mode)?;
         let mut discovered_tool_support = None;
         let selected_offer = instrument_phase(
             measurement_session.as_mut(),
@@ -251,6 +253,19 @@ impl<'a> ConfiguredAttempt<'a> {
 /// Reject declarations that an adapter would otherwise ignore.  Ordinary MCP
 /// configuration is adapter-owned, so this check deliberately stays separate
 /// from ASB's semantic local-tool replay capability.
+/// Validate static MCP configuration before any execution-side effects.
+///
+/// This is shared by direct runs and sweep population preflight.  The
+/// configured-attempt call remains a defence-in-depth guard for internal
+/// callers which bypass those public entry points.
+pub(super) fn validate_mcp_configuration(
+    config: &BenchmarkConfig,
+    mcp_tape_mode: Option<tape::Mode>,
+) -> Result<(), Error> {
+    validate_mcp_server_capability(config)?;
+    validate_mcp_relay_capability(config, mcp_tape_mode)
+}
+
 fn validate_mcp_server_capability(config: &BenchmarkConfig) -> Result<(), Error> {
     if !config.mcp_servers.is_empty()
         && let Some(adapter) = agents::find(&config.agent)

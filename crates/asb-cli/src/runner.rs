@@ -49,6 +49,15 @@ const MAX_OUTPUT: usize = 1024 * 1024;
 const MAX_AGENT_RUNTIME: Duration =
     Duration::from_secs(crate::planning::DEFAULT_NATIVE_EXECUTION_SECONDS);
 
+/// Validate static MCP configuration before public execution entry points
+/// allocate resources. Attempt admission repeats this for internal paths.
+pub(crate) fn validate_mcp_configuration(
+    config: &BenchmarkConfig,
+    mcp_tape_mode: Option<tape::Mode>,
+) -> Result<(), Error> {
+    attempt::validate_mcp_configuration(config, mcp_tape_mode)
+}
+
 fn emit_warning(
     warnings: &Mutex<BTreeSet<String>>,
     output: &mut dyn Write,
@@ -266,6 +275,10 @@ pub(crate) fn run_with_diagnostics(
         }),
         ..options
     };
+    // Reject a static MCP mismatch before allocating a campaign, checking
+    // capacity, starting collectors, or discovering/installing dependencies.
+    // Attempt admission repeats this validation for internal call paths.
+    validate_mcp_configuration(&config, options.mcp_mode)?;
     if options.native_capsule_record.is_some()
         && (options.mode != Some(tape::Mode::Record)
             || config.concurrency != 1
@@ -1730,6 +1743,37 @@ mod tests {
     };
     use crate::benchmark::BenchmarkConfig;
     use crate::measurements::TokenUsage;
+
+    #[test]
+    fn direct_mcp_recording_rejects_before_execution_preflight() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-preflight-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = root.join("benchmark.toml");
+        std::fs::write(
+            &config,
+            "agent='pi'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='fixture'\n",
+        )
+        .unwrap();
+        let error = run_with_tape(
+            config.to_str().unwrap(),
+            super::RunOptions {
+                mcp_mode: Some(crate::tape::Mode::Record),
+                ..Default::default()
+            },
+            &mut Vec::new(),
+        )
+        .expect_err("an undeclared MCP relay must fail before execution preflight");
+        assert!(
+            error
+                .to_string()
+                .contains("requires at least one [[mcp_servers]]")
+        );
+        assert!(!root.join("results").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn replay_uses_each_selected_tracks_step_limit_unless_explicitly_overridden() {
