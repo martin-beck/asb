@@ -184,4 +184,26 @@ class CoverageTest(unittest.TestCase):
             self.assertFalse(check(json.dumps(request), json.dumps(request)))
             self.assertFalse(check('not-json', '{}'))
 
+    def test_replay_id_binding_is_bijective_and_rejects_ambiguity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ['ASB_HERMES_NATIVE_SIDECAR'] = str(Path(directory) / 'tape')
+            os.environ['ASB_HERMES_NATIVE_PROGRESS'] = str(Path(directory) / 'progress')
+            source = HOOK.read_text().split('\ntry:\n    # Hermes exposes', 1)[0]
+            namespace = {'__name__': 'hermes_identity_binding_fixture'}
+            exec(compile(source, str(HOOK), 'exec'), namespace)
+            replay = namespace['Replayer'].__new__(namespace['Replayer'])
+            encode = lambda ident, path: json.dumps({'name':'read_file', 'arguments':{'path':path}, 'tool_call_id':ident}).encode()
+            replay.exchanges = [(encode('record-a','one'), b''), (encode('record-b','two'), b'')]
+            replay.recorded_to_runtime = {}; replay.runtime_to_recorded = {}
+            self.assertEqual(replay._select_candidate(encode('runtime-a','one'), [0,1]), 0)
+            self.assertEqual(replay._select_candidate(encode('runtime-a','one'), [0]), 0)
+            self.assertIsNone(replay._select_candidate(encode('runtime-a','two'), [1]))
+            self.assertIsNone(replay._select_candidate(encode('record-a','one'), [0]))
+            self.assertEqual(replay._select_candidate(encode('runtime-b','two'), [1]), 1)
+            self.assertIsNone(replay._select_candidate(encode('runtime-c','changed'), [0,1]))
+            replay.exchanges = [(encode('record-x','same'), b''), (encode('record-y','same'), b'')]
+            replay.recorded_to_runtime = {}; replay.runtime_to_recorded = {}
+            self.assertIsNone(replay._select_candidate(encode('runtime-x','same'), [0,1]))
+            self.assertEqual(replay.recorded_to_runtime, {})
+
 if __name__ == '__main__': unittest.main()

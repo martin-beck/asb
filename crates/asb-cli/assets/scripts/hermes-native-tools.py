@@ -458,15 +458,57 @@ class Replayer:
                     if parent is None or parent >= index:
                         raise RuntimeError("Hermes native replay sidecar has invalid nested lineage")
                     self.children[parent].append(index)
+        self.recorded_to_runtime = {}
+        self.runtime_to_recorded = {}
         self.index = 0
         self.failed = False
         self.failure = None
+
+    def _select_candidate(self, request, eligible):
+        """Bind regenerated IDs only when all other fields select one call."""
+        try:
+            actual = json.loads(request)
+            actual_id = actual.get("tool_call_id") if isinstance(actual, dict) else None
+        except (ValueError, TypeError):
+            return None
+        exact = []
+        remapped = []
+        for index in eligible:
+            expected = self.exchanges[index][0]
+            try:
+                decoded = json.loads(expected)
+                recorded_id = decoded.get("tool_call_id") if isinstance(decoded, dict) else None
+            except (ValueError, TypeError):
+                continue
+            if recorded_id is not None and actual_id is not None:
+                if not isinstance(recorded_id, str) or not isinstance(actual_id, str):
+                    continue
+                if self.recorded_to_runtime.get(recorded_id, actual_id) != actual_id:
+                    continue
+                if self.runtime_to_recorded.get(actual_id, recorded_id) != recorded_id:
+                    continue
+            if _matches_request(expected, request):
+                exact.append((index, recorded_id, actual_id))
+            elif (recorded_id is not None and actual_id is not None
+                  and _differs_only_in_tool_call_id(expected, request)):
+                remapped.append((index, recorded_id, actual_id))
+        if exact:
+            selected = exact[0]
+        elif len(remapped) == 1:
+            selected = remapped[0]
+        else:
+            return None
+        index, recorded_id, actual_id = selected
+        if recorded_id is not None and actual_id is not None:
+            self.recorded_to_runtime[recorded_id] = actual_id
+            self.runtime_to_recorded[actual_id] = recorded_id
+        return index
 
     def invoke(self, _original, *args, **kwargs):
         request = _request(*args, **kwargs)
         if self.dependencies is not None:
             return self._invoke_multi(request)
-        if self.index >= len(self.exchanges) or not _matches_request(self.exchanges[self.index][0], request):
+        if self.index >= len(self.exchanges) or self._select_candidate(request, [self.index]) is None:
             self.failed = True
             expected = self.exchanges[self.index][0] if self.index < len(self.exchanges) else None
             component = "sequence" if expected is None else _request_difference(expected, request)
@@ -509,7 +551,7 @@ class Replayer:
         if len(request) > MAX_PAYLOAD_BYTES:
             self.failed = True
             raise RuntimeError("Hermes process request exceeds the native replay bound")
-        if self.index >= len(self.exchanges) or not _matches_request(self.exchanges[self.index][0], request):
+        if self.index >= len(self.exchanges) or self._select_candidate(request, [self.index]) is None:
             self.failed = True
             self.failure = "native terminal request differs:sequence"
             _write_progress(False, self.failure, self.index, len(self.exchanges))
@@ -544,7 +586,7 @@ class Replayer:
         return result["result"]
 
     def _invoke_file_serial(self, request):
-        if self.index >= len(self.exchanges) or not _matches_request(self.exchanges[self.index][0], request):
+        if self.index >= len(self.exchanges) or self._select_candidate(request, [self.index]) is None:
             self.failed = True
             self.failure = "native terminal request differs:sequence"
             _write_progress(False, self.failure, self.index, len(self.exchanges))
@@ -561,15 +603,14 @@ class Replayer:
 
     def _invoke_nested_parent(self, request):
         with self.condition:
-            candidates = [index for index, (expected, _) in enumerate(self.exchanges)
-                          if index not in self.consumed and self.dependencies[index] <= self.delivered
-                          and _matches_request(expected, request)]
-            if not candidates:
+            eligible = [index for index in range(len(self.exchanges))
+                        if index not in self.consumed and self.dependencies[index] <= self.delivered]
+            index = self._select_candidate(request, eligible)
+            if index is None:
                 self.failed = True
                 self.failure = "native terminal request differs:sequence"
                 self.condition.notify_all()
                 raise RuntimeError("Hermes nested tool differs from recording")
-            index = candidates[0]
             self.consumed.add(index)
         return self._replay_nested_node(index, preconsumed=True)
 
@@ -630,10 +671,10 @@ class Replayer:
                     self.consumed.add(target)
                 index = target
             else:
-                candidates = [index for index, (expected, _) in enumerate(self.exchanges)
-                              if index not in self.consumed and self.dependencies[index] <= self.delivered
-                              and _matches_request(expected, request)]
-                if not candidates:
+                eligible = [index for index in range(len(self.exchanges))
+                            if index not in self.consumed and self.dependencies[index] <= self.delivered]
+                index = self._select_candidate(request, eligible)
+                if index is None:
                     self.failed = True
                     id_only = any(index not in self.consumed and self.dependencies[index] <= self.delivered
                                   and _differs_only_in_tool_call_id(expected, request)
@@ -643,7 +684,6 @@ class Replayer:
                     _write_progress(False, self.failure, self.index, len(self.exchanges))
                     self.condition.notify_all()
                     return json.dumps({"asb_native_mismatch": component}, separators=(",", ":"))
-                index = candidates[0]
                 self.consumed.add(index)
             while self.completion_order[self.completion_cursor] != index:
                 if self.failed or self.closing:
