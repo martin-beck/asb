@@ -1,23 +1,52 @@
 """Offline tests for snapshot lifecycle and adapter marker protocol."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+import io
 from pathlib import Path
 import socket
 import subprocess
 import sys
 import tempfile
+import tarfile
 import threading
 import unittest
 
 ROOT=Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT/'crates/asb-cli/assets/benchmarks'))
 from asb_snapshot_service import MarkerServer,SnapshotService
+from asb_snapshot_guest import unpack_streams
 
 SCRATCH=ROOT/'target'/'snapshot-service-tests'
 SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_snapshot_archive_streams_flat_entries_and_rejects_invalid_entries(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root = Path(directory)
+            def archive(name, entries):
+                path = root/name
+                with tarfile.open(path, 'w') as output:
+                    for entry, content, kind in entries:
+                        info = tarfile.TarInfo(entry)
+                        info.type = kind
+                        info.size = len(content) if kind == tarfile.REGTYPE else 0
+                        output.addfile(info, io.BytesIO(content) if info.size else None)
+                return path
+            valid = [('boundaries.jsonl', b'boundary', tarfile.REGTYPE),
+                     ('markers.jsonl', b'marker', tarfile.REGTYPE),
+                     ('snapshot-00000001.btrfs', b'stream', tarfile.REGTYPE)]
+            unpack_streams(archive('valid.tar', valid), root/'valid')
+            self.assertEqual((root/'valid/snapshot-00000001.btrfs').read_bytes(), b'stream')
+            for index, entries in enumerate((
+                    valid + [('../outside', b'x', tarfile.REGTYPE)],
+                    valid + [('snapshot-00000001.btrfs', b'x', tarfile.REGTYPE)],
+                    valid + [('snapshot-00000002.btrfs', b'', tarfile.SYMTYPE)],
+                    valid[1:])):
+                with self.subTest(index=index), self.assertRaises(ValueError):
+                    unpack_streams(archive(f'invalid-{index}.tar', entries), root/f'invalid-{index}')
+            self.assertFalse((root/'outside').exists())
+
     def test_overlapping_tools_produce_ordered_snapshots_and_final(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory); workspace=root/'workspace';workspace.mkdir()
