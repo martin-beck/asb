@@ -37,6 +37,21 @@ def filesystem_marker(action: str, alias: str) -> bool:
         return False
 
 
+def filesystem_replay_boundary(alias: str) -> bool:
+    path = os.environ.get("ASB_FS_REPLAY_SOCKET")
+    if not path:
+        return True
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(1800)
+            connection.connect(path)
+            connection.sendall(f"tool-end:{alias}\n".encode("ascii"))
+            with connection.makefile("rb") as response:
+                return response.readline(32).strip().isdigit()
+    except (OSError, UnicodeError):
+        return False
+
+
 def with_terminal_executor(agent: Any, executor: Any) -> Any:
     """Return an agent with exactly its SDK TerminalTool executor replaced."""
     from openhands.sdk import Tool
@@ -124,6 +139,12 @@ class NativeTerminalExecutor(ToolExecutor):
         expected = {"kind", "schema_version", "content", "is_error", "command", "exit_code", "timeout", "metadata"}
         if set(response) != expected or response["kind"] != "terminal_observation":
             raise RuntimeError("ASB native terminal bridge returned an invalid observation")
+        if os.environ.get("ASB_FS_REPLAY_SOCKET"):
+            with self._marker_lock:
+                self._marker_count += 1
+                alias = f"openhands-{self._marker_count}"
+            if not filesystem_replay_boundary(alias):
+                raise RuntimeError("OpenHands filesystem replay boundary is unavailable")
         return TerminalObservation(
             content=[TextContent(text=response["content"])],
             is_error=response["is_error"], command=response["command"],

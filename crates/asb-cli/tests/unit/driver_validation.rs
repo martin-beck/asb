@@ -86,6 +86,12 @@ fn guest_filesystem_replay_rejects_unbound_or_conflicting_requests() {
     request.filesystem_replay = Some(request.runtime_dir.join("other"));
     let error = run(request).unwrap_err().to_string();
     assert!(error.contains("invalid experimental guest filesystem replay request"));
+    let mut request = fixture.request();
+    request.config.agent = "openhands".into();
+    request.tool_replay = true;
+    request.filesystem_replay = Some(request.runtime_dir.join("filesystem-replay"));
+    let error = run(request).unwrap_err().to_string();
+    assert!(!error.contains("invalid experimental guest filesystem replay request"));
 }
 
 #[test]
