@@ -8,7 +8,7 @@ import sys
 
 class Replay:
     """Apply a prefix of recorded operations and keep handles for later calls."""
-    def __init__(self, evidence, root, baseline=None):
+    def __init__(self, evidence, root, baseline=None, enforce_admission=False):
         self.evidence = Path(evidence)
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=False)
@@ -18,6 +18,11 @@ class Replay:
         self.handles = {}
         self.sequence = 0
         self.pending = None
+        self.enforce_admission = enforce_admission
+        self.admitted = set()
+
+    def admit(self, tool):
+        self.admitted.add(tool)
 
     def apply_until(self, limit):
         if limit < self.sequence:
@@ -26,14 +31,18 @@ class Replay:
             if self.pending is None:
                 line = self.events.readline()
                 if not line:
-                    return
+                    return True
                 self.pending = json.loads(line)
             event = self.pending
             sequence = event['sequence']
             if sequence != self.sequence + 1:
                 raise RuntimeError('recorded operation sequence has a gap')
             if sequence > limit:
-                return
+                return True
+            if self.enforce_admission and event['op'] == 'marker':
+                marker = event['marker']
+                if marker.startswith('tool-begin:') and marker.removeprefix('tool-begin:') not in self.admitted:
+                    return False
             self.apply(event)
             self.sequence = sequence
             self.pending = None
@@ -88,7 +97,8 @@ class Replay:
             raise RuntimeError('unsupported recorded operation')
 
     def finish(self):
-        self.apply_until(sys.maxsize)
+        if not self.apply_until(sys.maxsize):
+            raise RuntimeError('replay is waiting for a recorded tool invocation')
         if self.handles:
             raise RuntimeError('recorded handles were not closed')
 

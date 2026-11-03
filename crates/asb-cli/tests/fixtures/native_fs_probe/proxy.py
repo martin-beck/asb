@@ -36,7 +36,7 @@ class Proxy(Operations):
         with self.control.makefile('rwb', buffering=0) as stream:
             for line in stream:
                 marker = line.decode('ascii').strip()
-                if marker not in ('tool-begin', 'tool-end'):
+                if marker not in ('tool-begin:child', 'tool-end:child', 'tool-begin:hermes', 'tool-end:hermes'):
                     raise RuntimeError('invalid fixture marker')
                 sequence = self.record('marker', None, marker=marker, is_marker=True)
                 stream.write(f'{sequence}\n'.encode('ascii'))
