@@ -41,6 +41,7 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
     def mounts():
         pairs = [(LOWER,'/lower'),(root,'/work'),(PROBE,'/probe'),
                  (PROBE.parents[2]/'assets/benchmarks/asb_fs_proxy.py','/asb-fs-proxy.py'),
+                 (PROBE.parents[2]/'assets/benchmarks/asb_fs_replay_cursor.py','/asb_fs_replay_cursor.py'),
                  (HERMES,'/asb-hermes'),(NODE,'/asb-node'),
                  (OVERLAY,'/opt/fuse-overlayfs'),(LIB3,'/usr/lib/x86_64-linux-gnu/libfuse3.so.3'),
                  (LIB2,'/opt/libfuse.so.2'),(FUSER,'/usr/bin/fusermount3'),(FUSEPY,'/opt/fuse.py'),
