@@ -824,6 +824,66 @@ fn auxiliary_artifacts_reject_unlisted_or_duplicate_paths() {
 }
 
 #[test]
+fn filesystem_artifacts_stream_through_cassette_and_detect_mutation() {
+    let fixture = Fixture::new();
+    let payload = vec![0xabu8; 17 * 1024 * 1024];
+    let source = fixture.0.join("payload.bin");
+    fs::write(&source, &payload).unwrap();
+    let artifact = Artifact {
+        kind: "aux-fs-payload".into(),
+        bytes: payload.len() as u64,
+        sha256: digest(&payload),
+    };
+    let output = fixture.0.join("recording.zip");
+    let mut journal = RecordingJournal::create(&output, manifest(0), 1, Limits::default()).unwrap();
+    journal.begin(1, 1).unwrap();
+    let mut provider = b"{}\n".as_slice();
+    let mut input = File::open(&source).unwrap();
+    journal
+        .commit_with_artifacts(
+            manifest(1).tracks.remove(0),
+            &mut provider,
+            vec![ArtifactInput {
+                artifact: artifact.clone(),
+                source: &mut input,
+            }],
+        )
+        .unwrap();
+    journal.finalize().unwrap();
+    let mut archive = Archive::open(&output, Limits::default()).unwrap();
+    let mut restored = File::create(fixture.0.join("restored.bin")).unwrap();
+    archive
+        .copy_artifact_to(1, "aux-fs-payload", &mut restored)
+        .unwrap();
+    drop(restored);
+    assert_eq!(fs::read(fixture.0.join("restored.bin")).unwrap(), payload);
+
+    fs::write(&source, vec![0xcdu8; payload.len()]).unwrap();
+    let mut changed = RecordingJournal::create(
+        &fixture.0.join("changed.zip"),
+        manifest(0),
+        1,
+        Limits::default(),
+    )
+    .unwrap();
+    changed.begin(1, 1).unwrap();
+    let mut provider = b"{}\n".as_slice();
+    let mut input = File::open(source).unwrap();
+    assert!(
+        changed
+            .commit_with_artifacts(
+                manifest(1).tracks.remove(0),
+                &mut provider,
+                vec![ArtifactInput {
+                    artifact,
+                    source: &mut input
+                }]
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn journal_publishes_auxiliary_artifacts_with_the_track() {
     let fixture = Fixture::new();
     let destination = fixture.0.join("recording.zip");

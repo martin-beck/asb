@@ -186,6 +186,8 @@ pair when explicitly requested. No production launcher yet starts the recorder
 or makes that request, and the runtime does not yet consume the files.
 An offline integration test passes a 17 MiB binary file through the actual
 guest receipt exporter, streamed archive transfer, and host receipt importer.
+Another test streams a file of that size through cassette publication and
+extraction, and checks that publication rejects a changed source digest.
 
 `python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` checks that
 overlapping terminal calls produce a readable sidecar without serializing
