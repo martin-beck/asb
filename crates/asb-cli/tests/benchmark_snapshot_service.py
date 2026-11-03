@@ -11,7 +11,7 @@ import unittest
 
 ROOT=Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT/'crates/asb-cli/assets/benchmarks'))
-from asb_snapshot_service import MarkerServer,SnapshotReplay,SnapshotService
+from asb_snapshot_service import MarkerServer,SnapshotReplay,SnapshotService,load_replay_boundaries
 
 SCRATCH=ROOT/'target'/'snapshot-service-tests'
 SCRATCH.mkdir(parents=True,exist_ok=True)
@@ -57,6 +57,10 @@ class SnapshotServiceTest(unittest.TestCase):
             self.assertEqual([(e['sequence'],e['kind'],e['alias'],e['snapshot_sequence']) for e in events],
                              [(1,'begin','parent',1),(2,'begin','child',1),
                               (3,'end','child',2),(4,'end','parent',3)])
+            self.assertEqual(load_replay_boundaries(root/'store'),[('child',2),('parent',3)])
+            events[2]['snapshot_sequence']=3
+            (root/'store/markers.jsonl').write_text(''.join(json.dumps(e)+'\n' for e in events))
+            with self.assertRaisesRegex(ValueError,'journals differ'):load_replay_boundaries(root/'store')
 
     def test_incomplete_and_failed_capture_do_not_publish_final(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
@@ -69,6 +73,7 @@ class SnapshotServiceTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'injected'):service.marker('end','tool')
             with self.assertRaisesRegex(RuntimeError,'unfinished'):service.finish()
             self.assertEqual(len((root/'store/boundaries.jsonl').read_text().splitlines()),1)
+            with self.assertRaisesRegex(ValueError,'incomplete'):load_replay_boundaries(root/'store')
 
     def test_marker_journal_failure_invalidates_recording(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:

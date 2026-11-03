@@ -13,7 +13,7 @@ from mini_swe_binary_replay import LocalEnvironment, transport
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'crates/asb-cli/assets/benchmarks'))
-from asb_snapshot_service import MarkerServer, SnapshotReplay, SnapshotService
+from asb_snapshot_service import MarkerServer, SnapshotReplay, SnapshotService, load_replay_boundaries
 
 SCRATCH = ROOT / 'target/mini-swe-snapshot-tests'
 SCRATCH.mkdir(parents=True, exist_ok=True)
@@ -54,7 +54,7 @@ class SnapshotBoundaryTest(unittest.TestCase):
                 replica = root/f'replica-{index}'
                 replica.mkdir()
                 replay_socket = root/f'replay-{index}.sock'
-                replay = SnapshotReplay([('mini-swe-1', 2)],
+                replay = SnapshotReplay(load_replay_boundaries(root/'store'),
                                         lambda _: shutil.copytree(snapshot, replica, dirs_exist_ok=True))
                 replay_server = MarkerServer(replay_socket, replay)
                 replay_thread = threading.Thread(target=replay_server.handle_request, daemon=True)

@@ -53,7 +53,7 @@ python3 - <<'EOPY'
 import errno,os,socket,subprocess,concurrent.futures,sys,threading,json
 from pathlib import Path
 sys.path.insert(0,"/opt")
-from asb_snapshot_service import SnapshotService,SnapshotReplay,MarkerServer
+from asb_snapshot_service import SnapshotService,SnapshotReplay,MarkerServer,load_replay_boundaries
 roots=[Path('/work/fs/s'+str(i)) for i in range(5)]
 st=[(r/'file').stat() for r in roots]
 checks={
@@ -242,7 +242,7 @@ def replay_adapter(index):
   apply_tree_transitions(root,plan)
   result=sync(adapter_after,root)
   if result.returncode:raise RuntimeError('adapter rsync failed: '+result.stderr.decode()[-500:])
- replay=SnapshotReplay([('mini-swe-1',2)],apply);server=MarkerServer(path,replay)
+ replay=SnapshotReplay(load_replay_boundaries('/work/fs/adapter-recorded'),apply);server=MarkerServer(path,replay)
  thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
  try:
   result=adapter_client(root,'replay',path)

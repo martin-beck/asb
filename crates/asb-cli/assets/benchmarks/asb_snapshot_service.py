@@ -110,6 +110,47 @@ class SnapshotService:
                 self.events.close()
 
 
+def load_replay_boundaries(store):
+    """Read a completed snapshot journal and return ordered tool boundaries."""
+    store = Path(store)
+    try:
+        boundaries = [json.loads(line) for line in (store/'boundaries.jsonl').read_text().splitlines()]
+        events = [json.loads(line) for line in (store/'markers.jsonl').read_text().splitlines()]
+    except (OSError, ValueError) as error:
+        raise ValueError('snapshot recording journals are unreadable') from error
+    if len(boundaries) < 2:
+        raise ValueError('snapshot recording is incomplete')
+    for index, item in enumerate(boundaries, 1):
+        if (not isinstance(item, dict) or item.get('sequence') != index or
+                item.get('snapshot') != f'snapshot-{index:08d}' or
+                not (store/item['snapshot']).is_dir()):
+            raise ValueError('snapshot recording boundaries are malformed')
+        expected = 'baseline' if index == 1 else 'final' if index == len(boundaries) else 'tool-end'
+        if item.get('kind') != expected or (expected != 'tool-end' and item.get('alias') is not None):
+            raise ValueError('snapshot recording boundaries are incomplete')
+    active = set()
+    ends = []
+    for index, event in enumerate(events, 1):
+        if not isinstance(event, dict) or event.get('sequence') != index:
+            raise ValueError('snapshot marker journal is malformed')
+        action, alias = event.get('kind'), event.get('alias')
+        if not isinstance(alias, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', alias):
+            raise ValueError('snapshot marker journal is malformed')
+        if action == 'begin' and alias not in active:
+            if event.get('snapshot_sequence') != len(ends) + 1:
+                raise ValueError('snapshot marker journal has an invalid begin state')
+            active.add(alias)
+        elif action == 'end' and alias in active:
+            active.remove(alias)
+            ends.append((alias, event.get('snapshot_sequence')))
+        else:
+            raise ValueError('snapshot marker journal has unmatched boundaries')
+    expected = [(item.get('alias'), item['sequence']) for item in boundaries[1:-1]]
+    if active or ends != expected:
+        raise ValueError('snapshot marker and boundary journals differ')
+    return expected
+
+
 class SnapshotReplay:
     """Apply recorded tool-end boundaries to one isolated replay workspace.
 
