@@ -136,6 +136,14 @@ def _process_request(args):
     return _encoded(value)
 
 
+def _file_request(name, args):
+    value = {"kind": "file-tool", "schema_version": 1, "name": name, "arguments": args}
+    identity = _call_identity()
+    if identity:
+        value["tool_call_id"] = identity
+    return _encoded(value)
+
+
 def _matches_request(expected, actual):
     if expected == actual:
         return True
@@ -244,6 +252,29 @@ class Recorder:
     def invoke_process(self, original, args, **kwargs):
         request = _process_request(args)
         return self._invoke(original, request, args, **kwargs)
+
+    def invoke_file(self, original, name, args, **kwargs):
+        try:
+            request = _file_request(name, args)
+        except (TypeError, ValueError, RecursionError):
+            self.failed = True
+            return self.untaped_capture.invoke(original, name, args, kwargs)
+        if len(request) > MAX_PAYLOAD_BYTES:
+            self.failed = True
+            return self.untaped_capture.invoke(original, name, args, kwargs)
+        saved = []
+        def execute():
+            result = original(name, args, **kwargs)
+            saved.append(result)
+            return json.dumps({"result": result}, ensure_ascii=False, separators=(",", ":"))
+        try:
+            encoded = self._invoke(execute, request)
+        except (RuntimeError, TypeError, ValueError):
+            self.failed = True
+            if saved:
+                return self.untaped_capture.invoke(lambda *_args, **_kwargs: saved[0], name, args, kwargs)
+            raise
+        return json.loads(encoded)["result"]
 
     def close(self):
         with self.lock:
@@ -443,6 +474,34 @@ class Replayer:
             self.failed = True
             raise RuntimeError("Hermes process replay response is not text") from error
 
+    def invoke_file(self, _original, name, args, **kwargs):
+        request = _file_request(name, args)
+        if self.dependencies is not None:
+            encoded = self._invoke_multi(request)
+        else:
+            encoded = self._invoke_file_serial(request)
+        result = json.loads(encoded)
+        if not isinstance(result, dict) or set(result) != {"result"}:
+            self.failed = True
+            raise RuntimeError("Hermes file tool replay result is invalid")
+        return result["result"]
+
+    def _invoke_file_serial(self, request):
+        if self.index >= len(self.exchanges) or not _matches_request(self.exchanges[self.index][0], request):
+            self.failed = True
+            self.failure = "native terminal request differs:sequence"
+            _write_progress(False, self.failure, self.index, len(self.exchanges))
+            raise RuntimeError("Hermes file tool replay differs from recording")
+        response = self.exchanges[self.index][1]
+        if not _filesystem_replay_boundary(self.aliases[self.index]):
+            self.failed = True
+            self.failure = "native filesystem replay boundary unavailable"
+            _write_progress(False, self.failure, self.index, len(self.exchanges))
+            raise RuntimeError("Hermes filesystem replay boundary is unavailable")
+        self.index += 1
+        _write_progress(False, "native terminal replay in progress", self.index, len(self.exchanges))
+        return response.decode("utf-8")
+
     def _invoke_multi(self, request):
         with self.condition:
             if self.failed or self.closing:
@@ -613,6 +672,8 @@ def install_dispatch_coverage(registry, transport, mode, capture=None):
     covered_dispatch = set()
 
     def dispatch_with_coverage(name, args, **kwargs):
+        if name in ("read_file", "write_file", "patch", "search_files"):
+            return transport.invoke_file(original_dispatch, name, args, **kwargs)
         if name not in covered_dispatch:
             if mode == "record":
                 with transport.lock:
