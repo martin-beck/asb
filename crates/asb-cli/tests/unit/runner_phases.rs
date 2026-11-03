@@ -1046,6 +1046,63 @@ fn recording_identity(result: &RunResult<'_>) -> crate::cassette::Compatibility 
 }
 
 #[test]
+fn finalized_auxiliary_capture_is_streamed_into_its_recorded_track() {
+    let fixture = Fixture::new();
+    let campaign = fixture.0.canonicalize().unwrap().join("campaign-aux");
+    std::fs::create_dir_all(campaign.join("batch-1")).unwrap();
+    let destination = super::super::recording::preflight(&fixture.0.join("aux.asb.zip")).unwrap();
+    let recorder = super::super::recording::Recorder::new(
+        destination.clone(),
+        campaign.clone(),
+        "campaign-aux".into(),
+        1,
+        1,
+        None,
+    );
+    let result = result();
+    recorder
+        .prepare(&recording_identity(&result), 1, &[1])
+        .unwrap();
+    let primary = super::super::recording::base(&campaign, 1);
+    let auxiliary = campaign.join("batch-1/embedding.jsonl");
+    std::fs::write(&primary, b"{}\n").unwrap();
+    std::fs::write(&auxiliary, b"{\"embedding\":true}\n").unwrap();
+    let capture =
+        |output: PathBuf, payload: &[u8], inference| crate::proxy::capture::CaptureEvidence {
+            adapter: "llmtape".into(),
+            output,
+            complete: true,
+            accepted: 1,
+            completed: 1,
+            failed: 0,
+            recorded: 1,
+            inference_requests: inference,
+            bytes: payload.len() as u64,
+            sha256: crate::cassette::digest(payload),
+        };
+    let proxy = crate::proxy::Evidence {
+        captures: vec![capture(primary.clone(), b"{}\n", 1)],
+        auxiliary_captures: vec![crate::proxy::AuxiliaryCapture {
+            kind: "aux-http-embedding".into(),
+            capture: capture(auxiliary, b"{\"embedding\":true}\n", 0),
+        }],
+        output_files: vec![primary],
+        cleanup_confirmed: true,
+    };
+    let evidence = recorder
+        .commit(1, replica::Identity::default(), &result, &proxy)
+        .unwrap();
+    assert_eq!(evidence.track.track.artifacts[0].kind, "aux-http-embedding");
+    recorder.finalize(true).unwrap().unwrap();
+    let mut archive =
+        crate::cassette::Archive::open(&destination, crate::cassette::Limits::default()).unwrap();
+    assert_eq!(
+        archive.read_artifact(1, "aux-http-embedding").unwrap(),
+        b"{\"embedding\":true}\n"
+    );
+}
+
+#[test]
 fn recording_association_binds_actual_attempt_and_preserves_uncertain_raw_capture() {
     let fixture = Fixture::new();
     let campaign = fixture.0.canonicalize().unwrap().join("campaign-1");
@@ -1079,6 +1136,7 @@ fn recording_association_binds_actual_attempt_and_preserves_uncertain_raw_captur
     };
     let proxy = crate::proxy::Evidence {
         captures: vec![capture.clone()],
+        auxiliary_captures: Vec::new(),
         output_files: vec![producer.clone()],
         cleanup_confirmed: false,
     };
@@ -1529,6 +1587,7 @@ fn missing_fixture_grade_reports_settled_agent_and_proxy_evidence() {
     };
     let proxy = crate::proxy::Evidence {
         captures: Vec::new(),
+        auxiliary_captures: Vec::new(),
         output_files: Vec::new(),
         cleanup_confirmed: false,
     };
