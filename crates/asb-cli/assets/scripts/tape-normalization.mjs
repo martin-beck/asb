@@ -13,11 +13,27 @@ export function normalizeWorkspacePaths(body, replacement = "<asb-workspace>") {
     });
 }
 
+// Replace only the selected workspace path, never a sibling or an unrelated
+// path that merely contains a directory named workspace.
+export function replaceExactWorkspace(value, workspace, replacement) {
+  if (!workspace) return value;
+  let result = "", position = 0;
+  for (;;) {
+    const found = value.indexOf(workspace, position);
+    if (found < 0) return result + value.slice(position);
+    const before = value[found - 1], after = value[found + workspace.length];
+    const embedded = before !== undefined && /[A-Za-z0-9_./-]/.test(before);
+    const sibling = after !== undefined && /[A-Za-z0-9_.-]/.test(after);
+    result += value.slice(position, found) + (embedded || sibling ? workspace : replacement);
+    position = found + workspace.length;
+  }
+}
+
 // A streamed path can cross JSON event boundaries. Reassemble each logical
 // delta field before rewriting paths, then distribute it back across the same
 // events. Encode slashes in SSE JSON so a later whole-body pass cannot mistake
 // an isolated suffix for a complete relative path; JSON clients decode them.
-export function normalizeOpenAiSseWorkspacePaths(body, workspace, replacement = "<asb-workspace>") {
+export function normalizeOpenAiSseWorkspacePaths(body, workspace, replacement = "<asb-workspace>", exactOnly = false) {
   if (!body.includes("data:")) return body;
   const lines = body.split(/(?<=\n)/);
   const events = new Map();
@@ -58,7 +74,8 @@ export function normalizeOpenAiSseWorkspacePaths(body, workspace, replacement = 
   }
   for (const group of groups.values()) {
     const joined = group.map((part) => part.value).join("");
-    const normalized = normalizeWorkspacePaths(workspace ? joined.replaceAll(workspace, replacement) : joined, replacement);
+    const exact = replaceExactWorkspace(joined, workspace, replacement);
+    const normalized = exactOnly ? exact : normalizeWorkspacePaths(exact, replacement);
     let cursor = 0;
     for (let index = 0; index < group.length; index += 1) {
       let end = index === group.length - 1 ? normalized.length : Math.min(normalized.length, cursor + group[index].value.length);
