@@ -151,7 +151,9 @@ Snapshot workspace images are sparse and default to the storage space available
 on the project filesystem at preparation time. This removes the previous fixed
 4 GiB logical image size; actual writes can still fail if the filesystem fills
 or cannot represent the image. An explicit size remains available for offline
-fixtures. Preparation refuses backing filesystems that allocate a small sparse
-probe eagerly, rather than filling the disk; an automatic VM-backed fallback
-for those filesystems is not yet implemented. This sizing change does not
-establish complete native replay.
+fixtures. On a filesystem that allocates a small sparse probe eagerly, an
+available `qemu-img` and `qemu-storage-daemon` pair can provide a thin qcow2
+image through FUSE. Both tools must currently be installed project-locally or
+available on the host, and the guest needs FUSE and loop support. Automatic
+tool installation and a VM fallback are not yet implemented. This sizing change
+does not establish complete native replay.

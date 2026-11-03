@@ -109,6 +109,39 @@ class GuestBootstrapTests(unittest.TestCase):
             self.assertTrue(guest['snapshot_private_mount'])
             self.assertEqual(environment['ASB_FS_MARKER_SOCKET'],'/opt/asb-private/snapshot.sock')
 
+    def test_snapshot_guest_accepts_optional_qcow_tools(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'.asb').mkdir();(root/'.asb/project.toml').write_text('')
+            execute=lambda *args,**kwargs:{'stdout':b'','stderr':b'','exit_code':0,'timed_out':False,'cancelled':False}
+            task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),image_identity={},execute=execute),
+                                 artifacts=root,checked=lambda _:b'',snapshot=True,tool_mode='record')
+            tools={'btrfs':'a','mkfs.btrfs':'b','rsync':'c','qemu-img':'d','qemu-storage-daemon':'e'}
+            request={'project_root':str(root),'tools_root':str(root),'binary':'fixture',
+                     'request':{'config':{'agent':'fixture'}},'bootstrap':{},'auxiliary_tools':tools}
+            resources=SimpleNamespace(callback=lambda _:None)
+            with patch('asb_guest.bundle',return_value=([],{})), \
+                 patch('asb_guest.stage_runtime',return_value=(0,0)), \
+                 patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \
+                 patch('asb_guest.stage_bootstrap',return_value=[]), \
+                 patch('asb_guest.stage_auxiliary_tools',return_value=tools), \
+                 patch('asb_docker.docker_command',return_value=['docker']), \
+                 patch('asb_snapshot_control.GuestSnapshot') as supervisor:
+                guest,_=prepare_agent(task,request,None,resources=resources)
+            self.assertTrue(guest['snapshot_private_mount'])
+            self.assertEqual(supervisor.call_args.args[1],tools)
+
+    def test_incompatible_optional_qemu_does_not_block_required_tools(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),image_identity={}),
+                                 artifacts=Path(directory),checked=lambda command:None)
+            def bundle(source,name,architecture,root):
+                if name == 'qemu-storage-daemon':
+                    raise ExecutionError('incompatible optional executable')
+                return ([],None)
+            with patch('asb_guest.bundle_tool',side_effect=bundle), patch('asb_guest.upload'):
+                paths=stage_auxiliary_tools(task,{'btrfs':'a','qemu-img':'b','qemu-storage-daemon':'c'},(1,2))
+            self.assertEqual(paths,{'btrfs':'/opt/asb-private/tools/btrfs/btrfs'})
+
     @unittest.skipUnless(os.environ.get('ASB_TEST_HOST_ASB'), 'needs just-built ASB')
     def test_auxiliary_tool_staging_uses_private_prefix(self):
         with tempfile.TemporaryDirectory() as directory:

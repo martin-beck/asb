@@ -295,8 +295,23 @@ def stage_auxiliary_tools(task, tools, owner):
         raise ExecutionError('guest auxiliary tools must be a name-to-path mapping')
     paths = {}
     architecture = getattr(task.workspace,'image_identity',{}).get('architecture')
+    optional = {'qemu-img', 'qemu-storage-daemon'}
+    optional_bundles = {}
+    if optional.issubset(tools):
+        try:
+            optional_bundles = {name: bundle_tool(tools[name],name,architecture,root='/opt/asb-private')
+                                for name in optional}
+        except (ExecutionError, OSError):
+            # A sparse workspace does not use QEMU. An unavailable or
+            # incompatible optional fallback must not prevent its preparation.
+            optional_bundles = {}
     for name, source in tools.items():
-        files, _ = bundle_tool(source,name,architecture,root='/opt/asb-private')
+        if name in optional:
+            if name not in optional_bundles:
+                continue
+            files, _ = optional_bundles[name]
+        else:
+            files, _ = bundle_tool(source,name,architecture,root='/opt/asb-private')
         directories = set()
         for relative,_,_ in files:
             parent = Path(relative).parent
@@ -453,7 +468,7 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
     if getattr(task,'snapshot',False):
         if task.tool_mode not in ('record', 'replay'):
             raise ExecutionError('experimental snapshot requires tool recording or replay')
-        if resources is None or set(auxiliary) != {'btrfs','mkfs.btrfs','rsync'}:
+        if resources is None or not {'btrfs','mkfs.btrfs','rsync'}.issubset(auxiliary):
             raise ExecutionError('experimental snapshot preparation needs staged filesystem tools')
         from asb_docker import docker_command
         from asb_snapshot_control import GuestSnapshot

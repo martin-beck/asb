@@ -25,6 +25,8 @@ class GuestSnapshot:
             '--root','/asb-snapshot-storage/snapshot','--socket','/opt/asb-private/snapshot.sock',
             '--output','/asb-snapshot-storage/snapshot-streams','--btrfs',tools['btrfs'],
             '--mkfs',tools['mkfs.btrfs'],'--rsync',tools['rsync'],'--apply-final']
+        if 'qemu-img' in tools and 'qemu-storage-daemon' in tools:
+            args += ['--qemu-img',tools['qemu-img'],'--qemu-storage',tools['qemu-storage-daemon']]
         if replay:
             args += ['--replay-archive','/asb-snapshot-storage/workspace-snapshots.tar']
         self.process=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log)

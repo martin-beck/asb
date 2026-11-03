@@ -56,6 +56,20 @@ fn snapshot_auxiliary_tools(
         ))?;
         tools.insert(name.into(), executable);
     }
+    // Optional thin-image fallback for filesystems that cannot create sparse
+    // files. A sparse-capable project does not require QEMU to be installed.
+    let qemu = ["qemu-img", "qemu-storage-daemon"].map(|name| {
+        let local = tools_root.join("qemu").join("bin").join(name);
+        if crate::executables::is_executable(&local) {
+            Some(local)
+        } else {
+            crate::tools::host_executable_in_at(Path::new(name), search, tools_root)
+        }
+    });
+    if let [Some(img), Some(storage)] = qemu {
+        tools.insert("qemu-img".into(), img);
+        tools.insert("qemu-storage-daemon".into(), storage);
+    }
     Ok(tools)
 }
 
@@ -1682,6 +1696,21 @@ mod tests {
         let selected = snapshot_auxiliary_tools(true, &tools, Some(host.as_os_str())).unwrap();
         assert_eq!(selected["btrfs"], tools.join("btrfs/bin/btrfs"));
         assert_eq!(selected["rsync"], host.join("rsync"));
+        assert!(!selected.contains_key("qemu-img"));
+        for name in ["qemu-img", "qemu-storage-daemon"] {
+            let path = host.join(name);
+            std::fs::write(&path, b"fixture").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let with_qemu = snapshot_auxiliary_tools(true, &tools, Some(host.as_os_str())).unwrap();
+        assert_eq!(with_qemu["qemu-img"], host.join("qemu-img"));
+        assert_eq!(
+            with_qemu["qemu-storage-daemon"],
+            host.join("qemu-storage-daemon")
+        );
+        std::fs::remove_file(host.join("qemu-storage-daemon")).unwrap();
+        let incomplete = snapshot_auxiliary_tools(true, &tools, Some(host.as_os_str())).unwrap();
+        assert!(!incomplete.contains_key("qemu-img"));
         std::fs::remove_file(host.join("rsync")).unwrap();
         assert!(
             snapshot_auxiliary_tools(true, &tools, Some(host.as_os_str()))

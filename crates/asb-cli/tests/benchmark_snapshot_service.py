@@ -41,6 +41,23 @@ class SnapshotServiceTest(unittest.TestCase):
             self.assertNotIn('--size',popen.call_args.args[0])
             supervisor.log.close()
 
+    def test_guest_supervisor_passes_optional_qcow_tools(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);container=SimpleNamespace(id='fixture-container')
+            task=SimpleNamespace(artifacts=root,workspace=SimpleNamespace(container=container))
+            process=SimpleNamespace(stdout=io.BytesIO(b'READY\n'))
+            tools={'btrfs':'/btrfs','mkfs.btrfs':'/mkfs','rsync':'/rsync',
+                   'qemu-img':'/qemu-img','qemu-storage-daemon':'/qemu-storage'}
+            with patch('asb_snapshot_control.upload'), \
+                 patch('asb_snapshot_control.selectors.DefaultSelector') as selectors, \
+                 patch('asb_snapshot_control.subprocess.Popen',return_value=process) as popen:
+                selectors.return_value.__enter__.return_value.select.return_value=[True]
+                supervisor=GuestSnapshot(task,tools,(0,0),['docker'],time.monotonic()+5)
+            args=popen.call_args.args[0]
+            self.assertEqual(args[args.index('--qemu-img')+1],'/qemu-img')
+            self.assertEqual(args[args.index('--qemu-storage')+1],'/qemu-storage')
+            supervisor.log.close()
+
     def test_replay_waits_without_tool_deadline_and_wakes_on_predecessor(self):
         applied=[];waiting=threading.Event()
         service=SnapshotReplay([('first',2),('second',3)],applied.append)
