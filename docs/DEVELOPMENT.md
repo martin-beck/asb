@@ -173,6 +173,11 @@ Replay applies recorded startup operations after the agent has begun accessing
 the overlay; matching on this case does not establish general startup ordering,
 untracked or out-of-workspace effects, or support for all native tools.
 
+`python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` reproduces a
+separate production defect: overlapping terminal calls can interleave the
+single-session sidecar, which is marked complete but rejected on replay. A
+repair must identify concurrent invocations without serializing the agent.
+
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the
 recorded response to four clients but does not reproduce a file written by the
