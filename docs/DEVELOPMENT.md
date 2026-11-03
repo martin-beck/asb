@@ -25,8 +25,10 @@ Set `ASB_SNAPSHOT_MKFS_BTRFS`, `ASB_SNAPSHOT_BTRFS`, `ASB_SNAPSHOT_RSYNC`,
 `ASB_SNAPSHOT_LIBRARY_DIR`, `ASB_SNAPSHOT_LOADER`, `ASB_SNAPSHOT_LOOP_DEVICE`
 and `ASB_SNAPSHOT_IMAGE` to suitable installed tools, a free loop device and
 an already cached image. It creates one base and five snapshots, then checks
-hard links, open descriptors and two checksum-based sync boundaries across four
-replicas, plus symlinks, deletion, permissions and available xattrs. The fixture
+hard links, open descriptors and two checksum-based sync boundaries from
+immutable captured snapshots across four replicas, plus symlinks, deletion,
+permissions and available xattrs. An external counter verifies that replay does
+not rerun the two original fixture subprocesses. The fixture
 requires loop-device access and kernel Btrfs support for this experiment; a VM
 can provide these independently of the host filesystem. Ordinary CI does not
 run it. It does not exercise an agent, concurrent tool mutations, a full guest
