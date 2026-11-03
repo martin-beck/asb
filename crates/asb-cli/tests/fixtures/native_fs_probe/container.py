@@ -1,4 +1,4 @@
-import concurrent.futures, os, subprocess, tempfile, json, uuid
+import concurrent.futures, os, shutil, subprocess, tempfile, json, uuid
 from pathlib import Path
 probe=Path(__file__).resolve().parent
 base=probe.parents[4]/'target/native-fs-probe'
@@ -12,6 +12,9 @@ with tempfile.TemporaryDirectory(dir=base) as tmp:
  (root/'backing/source').write_text('original')
  (root/'baseline/source').write_text('original')
  (root/'hermes-home').mkdir(mode=0o700)
+ (root/'control').mkdir(mode=0o700)
+ (root/'hooks').mkdir(mode=0o700)
+ shutil.copyfile(probe.parents[2]/'assets/scripts/hermes-native-tools.py',root/'hooks/sitecustomize.py')
  script='''set -eu
 export ASB_PROBE_ROOT_TGID=$$
 python3 /probe/proxy.py /work/backing /work/mount /work/evidence > /work/proxy.log 2>&1 &
@@ -22,7 +25,7 @@ while ! mountpoint -q /work/mount; do n=$((n+1)); [ "$n" -lt 100 ] || exit 42; s
 cat /work/mount/source
 printf container > /work/mount/output
 if [ "${ASB_FIXTURE_HERMES:-0}" = 1 ]; then
-  HERMES_HOME=/work/hermes-home TERMINAL_ENV=local setpriv --reuid "$ASB_HERMES_UID" --regid "$ASB_HERMES_GID" --clear-groups /asb-hermes/venv/bin/python -c 'import json; from tools.terminal_tool import terminal_tool; result=json.loads(terminal_tool("printf hermes > hermes-tool-output",workdir="/work/mount")); assert result["exit_code"] == 0'
+  (cd /work/mount; HERMES_HOME=/work/hermes-home TERMINAL_ENV=local PYTHONPATH=/work/hooks:/opt ASB_HERMES_NATIVE_MODE=record ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl ASB_HERMES_NATIVE_PROGRESS=/work/control/record-progress.json setpriv --reuid "$ASB_HERMES_UID" --regid "$ASB_HERMES_GID" --clear-groups /asb-hermes/venv/bin/python /probe/hermes_real_terminal.py)
 fi
 '''
  name='asb-fuse-probe-'+uuid.uuid4().hex
@@ -53,14 +56,43 @@ fi
  if (root/'evidence/events.jsonl').exists():
   events=[json.loads(x) for x in (root/'evidence/events.jsonl').read_text().splitlines()]
   assert any(e['op']=='write' and e['path']=='/output' for e in events)
-  if hermes_install: assert any(e['op']=='write' and e['path']=='/hermes-tool-output' for e in events)
+  if hermes_install:
+   assert any(e['op']=='write' and e['path']=='/hermes-tool-output' for e in events)
+   native=[json.loads(line) for line in (root/'control/native.jsonl').read_text().splitlines()]
+   assert sum(event['event']=='write' for event in native)==1
+   assert sum(event['event']=='output' for event in native)==1
+   assert json.loads((root/'control/record-progress.json').read_text())['complete']
   print('recorded operations:',[(e['op'],e['path']) for e in events])
   def replay(index):
    destination=root/f'replay-{index}'
    subprocess.run(['python3',str(probe/'replay.py'),str(root/'evidence'),str(destination),str(root/'baseline')],check=True)
    assert (destination/'source').read_text()=='original'
    assert (destination/'output').read_text()=='container'
-   if hermes_install: assert (destination/'hermes-tool-output').read_text()=='hermes'
+   if hermes_install:
+    assert (destination/'hermes-tool-output').read_text()=='hermes'
+    replay_home=root/f'hermes-replay-home-{index}'
+    replay_home.mkdir(mode=0o700)
+    replay_name='asb-hermes-replay-'+uuid.uuid4().hex
+    replay_cmd=['docker','run','--rm','--name',replay_name,'--network','none',
+                '--user',f'{os.getuid()}:{os.getgid()}',
+                '--mount',f'type=bind,src={root},dst=/work',
+                '--mount',f'type=bind,src={destination},dst=/work/mount',
+                '--mount',f'type=bind,src={probe},dst=/probe,readonly',
+                '--mount',f'type=bind,src={Path(hermes_install).resolve()},dst=/asb-hermes,readonly',
+                '--workdir','/work/mount',
+                '--env',f'HERMES_HOME=/work/{replay_home.name}',
+                '--env','TERMINAL_ENV=local','--env','PYTHONPATH=/work/hooks',
+                '--env','ASB_HERMES_NATIVE_MODE=replay',
+                '--env','ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl',
+                '--env',f'ASB_HERMES_NATIVE_PROGRESS=/work/control/replay-{index}.json',
+                '--entrypoint','/asb-hermes/venv/bin/python',image,'/probe/hermes_real_terminal.py']
+    try:
+     subprocess.run(replay_cmd,check=True,timeout=30,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+    except BaseException:
+     subprocess.run(['docker','rm','-f',replay_name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
+     raise
+    progress=json.loads((root/f'control/replay-{index}.json').read_text())
+    assert progress['complete'] and progress['invocations']==1
   with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool: list(pool.map(replay,range(4)))
   print('four independent offline replays: passed')
  if (root/'proxy.log').exists() and result.returncode: print('proxy log:',(root/'proxy.log').read_text()[-1000:])
