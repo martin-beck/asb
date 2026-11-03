@@ -1,7 +1,9 @@
 """Agent/provider/benchmark-neutral execution inside an owned Docker workspace.
 
-No host mounts, host networking or privileged container mode. A stopped shell
-gate reports both namespace and daemon-host PIDs before the caller attaches
+The optional filesystem recording profile exposes the FUSE device and mount
+capability; ordinary execution uses neither. No host workspace mounts, host
+networking or privileged container mode. A stopped shell gate reports both
+namespace and daemon-host PIDs before the caller attaches
 collectors and resumes execution. Docker-daemon PIDs are deliberately not
 claimed to be local-host PIDs: the caller must establish that separately.
 """
@@ -182,11 +184,13 @@ class ManagedDockerWorkspace:
         return workspace
 
     def __init__(self, client, image, attempt, workdir, memory_bytes=4 * 1024**3,
-                 cpus=2, pids=512, journal=None):
+                 cpus=2, pids=512, journal=None, filesystem_capture=False):
         if not re.fullmatch(r"asb-[0-9a-f]{32}", attempt):
             raise ExecutionError("workspace requires a unique ASB attempt identity")
         if not isinstance(workdir, str) or not workdir.startswith("/") or "\x00" in workdir:
             raise ExecutionError("workspace working directory must be absolute")
+        if type(filesystem_capture) is not bool:
+            raise ExecutionError("filesystem capture selection must be boolean")
         if not 128 * 1024**2 <= memory_bytes <= 1024**4 or not 0 < cpus <= 1024 or not 16 <= pids <= 65536:
             raise ExecutionError("invalid container resource limits")
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", image.id):
@@ -195,6 +199,7 @@ class ManagedDockerWorkspace:
         self.limits = {"memory_bytes": memory_bytes, "cpus": cpus, "pids": pids}
         self.container = None
         self.journal = journal
+        self.filesystem_capture = filesystem_capture
         self.active = threading.Lock()
         self.cleanup_status = "not_created"
         self.held_executions = []
@@ -214,6 +219,9 @@ class ManagedDockerWorkspace:
             mem_limit=self.limits["memory_bytes"], nano_cpus=int(self.limits["cpus"] * 10**9),
             pids_limit=self.limits["pids"],
         )
+        if self.filesystem_capture:
+            creation.update(devices=["/dev/fuse:/dev/fuse:rwm"],
+                            cap_add=["SYS_ADMIN"], security_opt=["apparmor=unconfined"])
         if self.journal is not None:
             self.journal.direct_container(creation)
         self.container = self.client.containers.create(**creation)

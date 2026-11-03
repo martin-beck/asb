@@ -196,6 +196,10 @@ This is a container setup requirement for this prototype, not a requirement for
 a particular native host. A production launcher must provision a compatible
 container or VM and its tools, settle the mount before exporting the two
 streams, and preserve the original agent workspace and workload evaluation.
+The managed Docker workspace now has an opt-in mount profile, covered by
+offline creation tests and a disposable SWE-bench image mount/unmount test.
+No production path selects it yet, and tool provisioning and VM fallback remain
+unimplemented.
 
 `python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` checks that
 overlapping terminal calls produce a readable sidecar without serializing
