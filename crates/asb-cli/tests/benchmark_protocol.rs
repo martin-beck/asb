@@ -145,6 +145,11 @@ fn mini_swe_record_replay_preserves_binary_tool_effects() {
 }
 
 #[test]
+fn mini_swe_snapshot_boundaries_capture_tool_execution() {
+    python_protocol("mini_swe_snapshot_boundaries.py");
+}
+
+#[test]
 fn swebench_source_fallback_is_pinned_private_and_attempt_owned() {
     python_protocol("swebench_sources.py");
 }
