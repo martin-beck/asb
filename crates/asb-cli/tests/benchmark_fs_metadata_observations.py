@@ -71,6 +71,10 @@ class MetadataObservationTest(unittest.TestCase):
                 self.assertEqual(proxy.getattr('/file')['st_size'],4)
                 proxy.log.close();proxy.payload.file.close()
             self.assertEqual((backing/'file').read_bytes(),b'actual bytes')
+            recorded=[json.loads(line) for line in (evidence/'events.jsonl').read_text().splitlines()]
+            self.assertEqual([event['op'] for event in recorded],
+                             ['observe-getattr','observe-unmatched','write','observe-getattr'])
+            self.assertEqual(recorded[1]['requested_op'],'getattr')
 
 
 if __name__ == '__main__':
