@@ -463,6 +463,7 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
         supervisor=GuestSnapshot(task,auxiliary,owner,docker_command(),deadline,replay=replay)
         resources.callback(supervisor.close)
         environment['ASB_FS_REPLAY_SOCKET' if replay else 'ASB_FS_MARKER_SOCKET']='/opt/asb-private/snapshot.sock'
+        guest['snapshot_private_mount'] = True
     return guest,environment
 
 

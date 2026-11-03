@@ -2,6 +2,40 @@
 use super::*;
 use crate::endpoint::{Authentication, Interface};
 
+// Run explicitly inside a disposable container with the two mounts described
+// by the snapshot qualification fixture; ordinary CI lacks mount privileges.
+#[cfg(target_os = "linux")]
+#[test]
+#[allow(unsafe_code)]
+fn snapshot_private_mount_keeps_task_bind_visible() {
+    let Some(mode) = std::env::var_os("ASB_TEST_PRIVATE_SNAPSHOT_MOUNT") else {
+        return;
+    };
+    // The test harness runs tests on a thread; fork a single-threaded child
+    // to match the real guest driver and leave the parent namespace intact.
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0);
+    if child == 0 {
+        let valid = if mode == "missing" {
+            super::hide_snapshot_storage().is_err()
+        } else {
+            let private = Path::new("/asb-snapshot-storage/item");
+            let task = Path::new("/tmp/asb-visible/item");
+            fs::read(private).is_ok_and(|bytes| bytes == b"snapshot fixture\n")
+                && fs::read(task).is_ok_and(|bytes| bytes == b"snapshot fixture\n")
+                && super::hide_snapshot_storage().is_ok()
+                && !private.exists()
+                && fs::read(task).is_ok_and(|bytes| bytes == b"snapshot fixture\n")
+                && fs::write(task, b"agent write\n").is_ok()
+        };
+        unsafe { libc::_exit(if valid { 0 } else { 1 }) };
+    }
+    let mut status = 0;
+    assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+    assert!(libc::WIFEXITED(status));
+    assert_eq!(libc::WEXITSTATUS(status), 0);
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -25,6 +59,7 @@ impl Fixture {
             mcp_mode: None,
             mcp_tape_cassette: None,
             native_tool_launch: None,
+            snapshot_private_mount: false,
             capsule: Default::default(),
             inherit_working_directory: false,
             process_lifetime: Default::default(),

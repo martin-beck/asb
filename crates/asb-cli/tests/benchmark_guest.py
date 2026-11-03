@@ -82,10 +82,32 @@ class GuestBootstrapTests(unittest.TestCase):
                  patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \
                  patch('asb_guest.stage_bootstrap',return_value=[]), \
                  patch('asb_guest.stage_auxiliary_tools',return_value={'btrfs':'/opt/asb-private/tools/btrfs/btrfs'}) as stage:
-                _, environment=prepare_agent(task,request,None)
+                guest, environment=prepare_agent(task,request,None)
             stage.assert_called_once_with(task,{'btrfs':'/some/tool'},(0,0))
+            self.assertNotIn('snapshot_private_mount', guest)
             self.assertEqual(json.loads(environment['ASB_AUXILIARY_TOOLS']),
                              {'btrfs':'/opt/asb-private/tools/btrfs/btrfs'})
+
+    def test_snapshot_guest_requests_private_mount_namespace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'.asb').mkdir();(root/'.asb/project.toml').write_text('')
+            execute=lambda *args,**kwargs:{'stdout':b'','stderr':b'','exit_code':0,'timed_out':False,'cancelled':False}
+            task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),image_identity={},execute=execute),
+                                 artifacts=root,checked=lambda _:b'',snapshot=True,tool_mode='record')
+            request={'project_root':str(root),'tools_root':str(root),'binary':'fixture',
+                     'request':{'config':{'agent':'fixture'}},'bootstrap':{},
+                     'auxiliary_tools':{'btrfs':'a','mkfs.btrfs':'b','rsync':'c'}}
+            resources=SimpleNamespace(callback=lambda _:None)
+            with patch('asb_guest.bundle',return_value=([],{})), \
+                 patch('asb_guest.stage_runtime',return_value=(0,0)), \
+                 patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \
+                 patch('asb_guest.stage_bootstrap',return_value=[]), \
+                 patch('asb_guest.stage_auxiliary_tools',return_value={'btrfs':'a','mkfs.btrfs':'b','rsync':'c'}), \
+                 patch('asb_docker.docker_command',return_value=['docker']), \
+                 patch('asb_snapshot_control.GuestSnapshot'):
+                guest, environment=prepare_agent(task,request,None,resources=resources)
+            self.assertTrue(guest['snapshot_private_mount'])
+            self.assertEqual(environment['ASB_FS_MARKER_SOCKET'],'/opt/asb-private/snapshot.sock')
 
     @unittest.skipUnless(os.environ.get('ASB_TEST_HOST_ASB'), 'needs just-built ASB')
     def test_auxiliary_tool_staging_uses_private_prefix(self):
