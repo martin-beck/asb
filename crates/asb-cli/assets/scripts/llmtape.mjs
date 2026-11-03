@@ -892,19 +892,17 @@ function isReplayProbe(request) {
     return (request.method === "HEAD" || request.method === "GET")
       && /(?:\/api\/hello|\/health(?:z)?|\/models|\/api\/tags)(?:[/?]|$)/.test(request.url || "");
   }
-  try {
-    const parsed = JSON.parse(request.body);
-    if (request.url?.includes("/embeddings") && parsed.model === "text-embedding-3-small") {
-      return true;
-    }
-  } catch {
-    // Keep arbitrary malformed bodies fail-closed below.
-  }
-  // OpenJiuwen performs this local vision-capability check before its first
-  // workload request. It has no benchmark semantics and can be omitted when
-  // replaying on a provider/agent path that does not repeat the probe.
-  return typeof request.body === "string"
-    && request.body.includes("What color is this image? Reply with one word.");
+  // A request with a body may be a real inference or embedding operation,
+  // even when its model or prompt resembles a capability check. It must be
+  // matched and consumed as an ordinary recorded exchange.
+  return false;
+}
+
+// Replay admission and inference accounting are distinct: embeddings must be
+// replayed, but they are not language-model inference requests.
+function isInferenceRequest(request) {
+  const path = String(request.url || "").split("?", 1)[0].replace(/\/+$/, "");
+  return !isReplayProbe(request) && !path.endsWith("/embeddings");
 }
 
 // A later exact probe may pass over omitted probes of other classes; an
@@ -1101,7 +1099,7 @@ async function handle(request, response, recording) {
       response_observed_unix_ms: Math.round(performance.timeOrigin + performance.now()),
     },
   };
-  if (capture) capture.append(recording.token, interaction, !isReplayProbe(recordedRequest));
+  if (capture) capture.append(recording.token, interaction, isInferenceRequest(recordedRequest));
   else {
     if (stopping) return;
     appendFileSync(cassette, `${JSON.stringify(interaction)}\n`);

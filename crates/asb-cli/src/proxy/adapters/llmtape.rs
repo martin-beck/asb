@@ -2681,7 +2681,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_skips_openjiuwen_vision_capability_probe() {
+    fn replay_preserves_embedding_and_vision_exchanges() {
         let root = test_root();
         let cassette = root.join("probe.jsonl");
         let embedding = r#"{"model":"text-embedding-3-small","input":["memory"]}"#;
@@ -2712,10 +2712,56 @@ mod tests {
         )
         .unwrap();
         let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/embeddings", embedding).contains("200 OK"));
         assert!(request_to(&session, "/v1/messages", probe).contains("200 OK"));
         assert!(request_to(&session, "/v1/messages", workload).contains("200 OK"));
         session.stop().unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_does_not_skip_unmatched_embedding_or_vision_request() {
+        for (path, body) in [
+            (
+                "/v1/embeddings",
+                r#"{"model":"text-embedding-3-small","input":["memory"]}"#,
+            ),
+            (
+                "/v1/messages",
+                r#"{"model":"m","messages":[{"role":"user","content":"What color is this image? Reply with one word."}]}"#,
+            ),
+        ] {
+            let root = test_root();
+            let cassette = root.join("required.jsonl");
+            let interaction = serde_json::json!({
+                "request": {"method":"POST", "url":path, "body":body},
+                "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{}"}
+            });
+            std::fs::write(&cassette, format!("{interaction}\n")).unwrap();
+            let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+            assert!(
+                request_to(
+                    &session,
+                    "/v1/messages",
+                    r#"{"model":"m","messages":[{"role":"user","content":"different"}]}"#
+                )
+                .contains("409 Conflict")
+            );
+            let progress = std::fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path().join("cassette.jsonl.progress.json"))
+                .find(|path| path.is_file())
+                .unwrap();
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(progress).unwrap()).unwrap();
+            assert_eq!(
+                value["consumed"], 0,
+                "an unmatched recorded interaction was skipped"
+            );
+            assert!(session.stop().is_err());
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

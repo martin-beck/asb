@@ -191,6 +191,21 @@ test("empty and probe-only captures have honest complete/zero-inference observat
   }
 });
 
+test("embedding exchanges are retained without being counted as language-model inference", { timeout: 10000 }, async (t) => {
+  const { port, stop } = await fixture(t, (_req, res) => res.end("{}"));
+  assert.equal((await request(port, "/v1/embeddings?fixture=1", JSON.stringify({ model: "text-embedding-3-small", input: ["memory"] }))).status, 200);
+  assert.equal((await request(port, "/v1/embeddings/", JSON.stringify({ model: "fixture-embedding", input: ["memory"] }))).status, 200);
+  assert.equal((await request(port, "/v1/messages", JSON.stringify({ model: "fixture", messages: [] }))).status, 200);
+  const { value, bytes } = await stop();
+  assert.equal(value.complete, true);
+  assert.equal(value.recorded, 3);
+  assert.equal(value.inference_requests, 1);
+  const entries = bytes.toString().trim().split("\n").map(JSON.parse);
+  assert.equal(entries[0].request.url, "/v1/embeddings?fixture=1");
+  assert.equal(entries[1].request.url, "/v1/embeddings/");
+  assert.equal(entries[2].request.url, "/v1/messages");
+});
+
 test("complete HTTP error is captured and grace drains concurrent already-admitted responses", { timeout: 10000 }, async (t) => {
   let seen = 0;
   let announce;
