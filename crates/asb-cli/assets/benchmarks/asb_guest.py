@@ -477,7 +477,6 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
     lifetime = guest.get("process_lifetime", "quiesce")
     lifetime_options = {}
     if lifetime == "through-evaluation":
-        import os
         import uuid
         container.reload()
         labels = container.attrs.get("Config", {}).get("Labels", {}) or {}
@@ -525,12 +524,19 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
         if preparation_budget is not None:
             preparation_budget.remaining()
             preparation_budget.active = False
+    stderr_tail = bytearray()
+    def agent_output(stream, chunk):
+        if stream == 'stderr':
+            stderr_tail.extend(chunk)
+            del stderr_tail[:-256 * 1024]
+        if on_output is not None:
+            on_output(stream, chunk)
     result = task.workspace.execute(["/opt/asb-runtime/asb", "__asb-agent"], environment=environment,
                                     timeout=request.get("timeout", getattr(task, "agent_timeout", 900)), output_limit=256 * 1024,
                                     gate="application", before_resume=attach,
                                     preparation_timeout=preparation_budget.remaining() if preparation_budget else 90,
                                     on_preparation_failure=preparation_budget.fail if preparation_budget else None,
-                                    on_output=on_output, cancelled=ForwardingCancellation(cancelled, relays),
+                                    on_output=agent_output, cancelled=ForwardingCancellation(cancelled, relays),
                                     transport_factory=transport,
                                     **lifetime_options)
     finish_execution(result)
@@ -551,6 +557,17 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
     except (ExecutionError, ValueError):
         # Keep partial work eligible for evaluation after timeout/client death.
         # Unknown usage is never invented from text or an expected minimum.
+        # Preserve the end of the private guest stderr: the bounded transport
+        # prefix may omit the actual failure after a verbose agent run.
+        if stderr_tail:
+            try:
+                path = task.artifacts / 'guest-error-stderr.log'
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, 'wb') as log:
+                    log.write(stderr_tail)
+                observation['guest_error_log'] = path.name
+            except OSError:
+                pass
         result["metadata"] = {"schema_version": 1, "exit_code": result["exit_code"],
                               "final_response": None, "token_usage": {}, "steps": None}
     # The guest owns the principal execution clock; the outer transport now
