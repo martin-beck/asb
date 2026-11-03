@@ -137,7 +137,10 @@ Other calls run during recording
 and produce private JSONL evidence with start/end ordering, arguments,
 context, parent aliases, and results or exceptions. Native child requests inherit
 the parent alias through Hermes's propagated thread context, and experimental
-filesystem markers bound the parent call. A separate status records capture completeness;
+filesystem markers bound the parent call. Before Hermes's immediate exit, the
+adapter waits at most five seconds for synchronous HTTPX requests already in
+flight; an unresolved request leaves the native recording incomplete. A separate
+status records capture completeness;
 the 8 MiB evidence limit, serialization errors, or unsettled calls mark it
 incomplete. These calls also mark the replay tape incomplete until their effects
 are implemented. Evidence may contain task content and stays in the private
