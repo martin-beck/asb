@@ -163,8 +163,6 @@ fn process(executable: &str) -> Result<crate::launch::ProcessLaunch, Error> {
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     let mut args = vec![
         "-v".into(),
-        "-w".into(),
-        context.config.workspace.clone(),
         "--model".into(),
         context.config.model.clone(),
         "--provider".into(),
@@ -323,6 +321,12 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         "OPENJIUWEN_API_KEY",
         connection.credential.as_deref().unwrap_or("asb-local"),
     );
+    // OpenJiuwen's workspace is its internal rail state; filesystem tools use
+    // the process cwd independently. Keep that state in the attempt runtime.
+    context.command.env(
+        "OPENJIUWEN_WORKSPACE",
+        context.runtime_dir.join("openjiuwen/workspace"),
+    );
     context.command.env(
         "ASB_OPENJIUWEN_NATIVE_TOOL_RECORD",
         context.run_dir.join("openjiuwen/native-tool-sidecar.jsonl"),
@@ -400,6 +404,12 @@ mod tests {
                     .then_some(value.and_then(OsStr::to_str))
             });
             assert_eq!(actual.flatten(), expected);
+            let state = command.get_envs().find_map(|(key, value)| {
+                (key == OsStr::new("OPENJIUWEN_WORKSPACE"))
+                    .then_some(value)
+                    .flatten()
+            });
+            assert_eq!(state, Some(root.join("openjiuwen/workspace").as_os_str()));
         }
     }
 
@@ -592,10 +602,14 @@ for (const request of invalid) {
         });
         assert_eq!(spec.args.first().map(String::as_str), Some("-v"));
         assert_eq!(spec.args.last().map(String::as_str), Some("repair"));
+        // `-w` selects OpenJiuwen's internal state directory, not the
+        // process cwd used by its file and shell tools. Adapter preparation
+        // selects an attempt-local state directory instead of the task tree.
         assert!(
-            spec.args
-                .windows(2)
-                .any(|pair| pair[0] == "-w" && pair[1] == "workspace")
+            !spec
+                .args
+                .iter()
+                .any(|arg| arg == "-w" || arg == "--workspace")
         );
         assert!(
             spec.args
