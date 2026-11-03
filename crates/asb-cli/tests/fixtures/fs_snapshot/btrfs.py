@@ -107,13 +107,13 @@ if ((second/'file').stat().st_ino!=(second/'link').stat().st_ino
  raise RuntimeError('fixture did not produce the expected hard-link split')
 import sys
 sys.path.insert(0,'/opt')
-from topology import regular_files,plan_splits,detach_splits
+from topology import regular_files,plan_transitions,apply_transitions
 before_topology=regular_files(second);after_topology=regular_files(third)
 for root in roots[1:]:
- paths=plan_splits(before_topology,after_topology,regular_files(root))
- if paths!=['link']:
+ plan=plan_transitions(before_topology,after_topology,regular_files(root))
+ if plan!={'moves':[],'detach':['link']}:
   raise RuntimeError('snapshot hard-link split plan differs')
- detach_splits(root,paths)
+ apply_transitions(root,plan)
 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(lambda root:sync(third,root),roots[1:]))
 if any(x.returncode for x in results):raise RuntimeError('third rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
 checks['split_link_correct']=all((r/'file').read_bytes()==b'end' and (r/'link').read_bytes()==b'sep' and (r/'file').stat().st_ino!=(r/'link').stat().st_ino for r in roots[1:])
@@ -123,15 +123,27 @@ subprocess.run(['python3','-c','import os; from pathlib import Path; Path(\"link
 fourth=capture('captured-4')
 before_topology=regular_files(third);after_topology=regular_files(fourth)
 for root in roots[1:]:
- paths=plan_splits(before_topology,after_topology,regular_files(root))
- if paths!=['link']:
+ plan=plan_transitions(before_topology,after_topology,regular_files(root))
+ if plan!={'moves':[],'detach':['link']}:
   raise RuntimeError('snapshot hard-link join plan differs')
- detach_splits(root,paths)
+ apply_transitions(root,plan)
 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(lambda root:sync(fourth,root),roots[1:]))
 if any(x.returncode for x in results):raise RuntimeError('fourth rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
 checks['joined_link_correct']=all((r/'file').read_bytes()==b'end' and (r/'link').read_bytes()==b'end' and (r/'file').stat().st_ino==(r/'link').stat().st_ino for r in roots[1:])
 checks['joined_old_descriptors_correct']=all(os.pread(fd,3,0)==b'sep' for fd in split_fds)
-checks['original_subprocess_only_four_times']=Path('/work/invocations').read_bytes()==b'1234'
+subprocess.run(['python3','-c','import os; from pathlib import Path; os.rename(\"file\",\"moved-file\"); os.rename(\"link\",\"moved-link\"); Path(\"moved-file\").write_bytes(b\"fin\"); Path(\"/work/invocations\").open(\"ab\").write(b\"5\")'],cwd=roots[0],check=True)
+fifth=capture('captured-5')
+before_topology=regular_files(fourth);after_topology=regular_files(fifth)
+for root in roots[1:]:
+ plan=plan_transitions(before_topology,after_topology,regular_files(root))
+ if plan['moves']!=[('file','moved-file')]:
+  raise RuntimeError('snapshot move plan differs')
+ apply_transitions(root,plan)
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(lambda root:sync(fifth,root),roots[1:]))
+if any(x.returncode for x in results):raise RuntimeError('fifth rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
+checks['moved_link_correct']=all((r/'moved-file').read_bytes()==b'fin' and (r/'moved-link').read_bytes()==b'fin' and (r/'moved-file').stat().st_ino==(r/'moved-link').stat().st_ino and not (r/'file').exists() and not (r/'link').exists() for r in roots[1:])
+checks['moved_old_descriptors_correct']=all(os.pread(fd,3,0)==b'fin' for fd in fds[1:]+link_fds) and all(os.pread(fd,3,0)==b'sep' for fd in split_fds)
+checks['original_subprocess_only_five_times']=Path('/work/invocations').read_bytes()==b'12345'
 for fd in link_fds+split_fds:os.close(fd)
 for name,passed in checks.items():print(name,passed)
 print('xattr_exercised',xattr)
