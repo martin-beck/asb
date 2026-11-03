@@ -352,6 +352,7 @@ mod tests {
             &fixture.reference.workload,
             fixture.reference.dataset.clone(),
             &super::super::PreparationContext {
+                tool_mode: None,
                 verify_initial_material: false,
                 budgets: Default::default(),
                 on_allocation: Some(&refused),

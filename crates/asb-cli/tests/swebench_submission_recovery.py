@@ -22,6 +22,11 @@ class LocalWorkspace:
 
 
 class SubmissionRecoveryTests(unittest.TestCase):
+    def test_task_preserves_tool_mode(self):
+        for mode in ('none','record','replay'):
+            self.assertEqual(task_module.SweBenchTask(None,'catalog','fixture','artifacts',tool_mode=mode).tool_mode,mode)
+        with self.assertRaisesRegex(ValueError,'unsupported workload tool mode'):
+            task_module.SweBenchTask(None,'catalog','fixture','artifacts',tool_mode='unexpected')
     def test_preserved_baseline_captures_changes_after_git_metadata_deleted(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
