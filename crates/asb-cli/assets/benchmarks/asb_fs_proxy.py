@@ -132,7 +132,11 @@ class Proxy(Operations):
         try:
             fi.fh = os.open(self.path(path), fi.flags)
             handle = self.register(fi.fh)
-            self.record('open', path, handle=handle, flags=fi.flags)
+            with self.inode_lock(fi):
+                st = os.fstat(fi.fh)
+                self.record('open', path, handle=handle, flags=fi.flags,
+                            initial_size=st.st_size, initial_mode=st.st_mode,
+                            initial_nlink=st.st_nlink)
             return 0
         except OSError as error: raise FuseOSError(error.errno)
     def create(self, path, mode, fi=None):

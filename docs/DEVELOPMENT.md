@@ -70,6 +70,12 @@ The host-side staging plan selects each replica's own sealed event and payload
 files under stable guest-private names. The guest binds those files as hard
 links into its coordinator evidence directory; it rejects missing files and
 existing evidence directories. The host admission guard remains in place.
+For investigating differing initial file bytes, the experimental recorder now
+captures file size, mode and link count at open. A separate planner identifies
+only complete regular-file reads before the first recorded mutation; it skips
+legacy journals lacking that metadata and incomplete or hardlinked files. It
+does not apply those plans or establish equivalent workspace metadata, startup
+ordering or complete replay.
 It additionally exercises a background child that writes after its tool-return
 marker and before the next invocation, checking the file is absent at the first
 boundary and present at the second. This does not implement a scheduler for
