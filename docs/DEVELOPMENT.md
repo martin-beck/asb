@@ -55,10 +55,16 @@ and end of each real bash invocation and does not generate workspace snapshot
 effects. A missing marker is recorded as an unreplayable tool failure while the
 original tool still runs. This provides boundaries for a future coordinator;
 production filesystem replay remains unavailable.
-The OpenHands terminal adapter also emits begin/end markers around its real
-terminal delegate without removing its other declared tools. A marker failure
-is reported when its recording closes. This does not capture other OpenHands
-tools or establish full OpenHands replay support.
+The OpenHands adapter emits begin/end markers around its real terminal and
+file-editor delegates without removing its other declared tools. Editor actions
+and observations use an adapter-owned transcript; replay waits for the journal
+before returning an observation. Marker or transcript failures are reported when
+recording closes. Task tracking and delegated-agent tools still run when called
+during recording, but mark that recording incomplete until their replay is
+implemented. This does not establish full OpenHands replay support.
+The offline `tests/fixtures/openhands_editor_sdk.py` can be run with an
+installed OpenHands project Python to exercise the actual SDK editor wrapper;
+it does not contact a provider.
 The experimental per-replica replay server accepts validated tool-end markers
 and acknowledges each only after applying its recorded operations. Offline
 tests exercise four isolated workspaces and reject missing or invalid calls.
