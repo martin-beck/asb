@@ -161,10 +161,12 @@ Hermes, Node, baseline and patch inputs described above. The test-only wrapper
 supplies tool boundaries and the mock supplies the patch command; it does not
 run the official SWE-bench evaluator or prove that the agent solved the task.
 With `ASB_HERMES_MIXED_FIXTURE=1`, the mock first invokes Hermes's native write,
-read, patch and search tools before the terminal patch command. The fixture
+read, patch, search and skills-list tools before the terminal patch command. The fixture
 checks their successful responses and intermediate file states and consumes
 both tool and LLM transcripts in four replay containers. Those file-tool
 wrappers and transcripts are test-only, not production replay support.
+The experiment intercepts registry dispatch, but agent-loop tools, MCP,
+direct APIs and nested or parallel tool calls are not covered by this test.
 Replay applies recorded startup operations after the agent has begun accessing
 the overlay; matching on this case does not establish general startup ordering,
 untracked or out-of-workspace effects, or support for all native tools.

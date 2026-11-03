@@ -96,7 +96,7 @@ setpriv --reuid "$ASB_UID" --regid "$ASB_GID" --clear-groups git diff --binary >
     assert json.loads((root/'control/record-progress.json').read_text())['complete']
     if mixed:
         file_events=[json.loads(line) for line in (root/'control/files.jsonl').read_text().splitlines()]
-        assert [event['request']['tool'] for event in file_events]==['write_file','read_file','patch','search_files']
+        assert [event['request']['tool'] for event in file_events]==['write_file','read_file','patch','search_files','skills_list']
         for event in file_events:
             output=json.loads(event['output'])
             assert not output.get('error'), output
@@ -137,7 +137,7 @@ setpriv --reuid "$ASB_UID" --regid "$ASB_GID" --clear-groups git diff --binary >
         progress=json.loads((root/f'control/progress-{index}.json').read_text())
         tape=json.loads((root/f'control/llm-{index}.jsonl.progress.json').read_text())
         assert progress['complete'] and progress['invocations']==1
-        if mixed: assert (root/f'control/files-progress-{index}').read_text()=='4'
+        if mixed: assert (root/f'control/files-progress-{index}').read_text()=='5'
         assert tape['consumed']==tape['total'] and tape['total']>0
         assert (root/f'control/replay-{index}.diff').read_bytes()==(root/'control/record.diff').read_bytes()
 

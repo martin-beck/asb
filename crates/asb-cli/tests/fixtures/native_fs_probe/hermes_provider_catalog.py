@@ -39,6 +39,7 @@ class Handler(base.Handler):
         ]
         if os.environ.get('ASB_FIXTURE_MIXED') == '1':
             calls.append(('search_files', {'pattern':'fixture','path':'/work/mount/asb-real-agent.txt','target':'content'}))
+            calls.append(('skills_list', {}))
             calls.append(('terminal', {'command':base.command() if os.environ.get('ASB_FIXTURE_SWE_PATCH') == '1' else 'printf mixed > mixed-marker; printf ran > /tmp/asb-native-agent-executed'}))
         if results < len(calls):
             name, args = calls[results]

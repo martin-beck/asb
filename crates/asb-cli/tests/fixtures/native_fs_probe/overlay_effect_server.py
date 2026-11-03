@@ -18,7 +18,7 @@ cursor = Replay(evidence, Path('/work/mount'), enforce_admission=True, existing=
 try:
     connection, _ = listener.accept()
     with connection, connection.makefile('rwb', buffering=0) as stream:
-        names = ('write','read','patch','search','terminal') if os.environ.get('ASB_FIXTURE_MIXED') == '1' else ('one',)
+        names = ('write','read','patch','search','skills-list','terminal') if os.environ.get('ASB_FIXTURE_MIXED') == '1' else ('one',)
         for name in names:
             if stream.readline().decode().strip() != 'tool-end:' + name:
                 raise RuntimeError('unexpected recorded tool boundary')
