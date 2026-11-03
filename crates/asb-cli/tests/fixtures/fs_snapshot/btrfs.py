@@ -189,6 +189,12 @@ server.shutdown();server.server_close();server_thread.join();socket_path.unlink(
 checks['final_snapshot_sequence']=service.finish()==9
 entries=[json.loads(line) for line in Path('/work/fs/recorded/boundaries.jsonl').read_text().splitlines()]
 checks['boundary_journal_correct']=[entry['alias'] for entry in entries]==[None,'captured-1','captured-2','captured-3','captured-4','captured-5','captured-6','captured-7',None]
+events=[json.loads(line) for line in Path('/work/fs/recorded/markers.jsonl').read_text().splitlines()]
+checks['marker_journal_correct']=(len(events)==14 and
+ all(event['sequence']==index+1 and event['kind']==('begin' if index%2==0 else 'end') and
+     event['alias']==f'captured-{index//2+1}' and event['process']==os.getpid() and
+     event['snapshot_sequence']==index//2+1+(index%2)
+     for index,event in enumerate(events)))
 for fd in link_fds+split_fds+dir_fds+nested_fds:os.close(fd)
 for name,passed in checks.items():print(name,passed)
 print('xattr_exercised',xattr)

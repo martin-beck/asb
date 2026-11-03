@@ -53,6 +53,16 @@ class SnapshotServiceTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'unfinished'):service.finish()
             self.assertEqual(len((root/'store/boundaries.jsonl').read_text().splitlines()),1)
 
+    def test_marker_journal_failure_invalidates_recording(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);workspace=root/'workspace';workspace.mkdir()
+            service=SnapshotService(workspace,root/'store',['fixture'],snapshot=lambda path:path.mkdir())
+            service.events.close()
+            with self.assertRaises(ValueError):service.marker('begin','tool')
+            with self.assertRaisesRegex(RuntimeError,'not active'):service.marker('begin','other')
+            with self.assertRaisesRegex(RuntimeError,'unfinished'):service.finish()
+            self.assertEqual(len((root/'store/boundaries.jsonl').read_text().splitlines()),1)
+
     def test_marker_server_accepts_adapter_protocol_and_rejects_bad_request(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);workspace=root/'workspace';workspace.mkdir()
