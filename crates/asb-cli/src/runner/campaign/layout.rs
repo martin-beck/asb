@@ -226,6 +226,35 @@ impl Plan {
                 .checked_add(input.bytes)
                 .filter(|bytes| *bytes <= crate::cassette::Limits::default().max_total_bytes)
                 .ok_or_else(|| invalid("selected inputs exceed aggregate byte budget"))?;
+            let mut auxiliary_kinds = BTreeSet::new();
+            for auxiliary in &input.auxiliary_http {
+                let id = input
+                    .track
+                    .filter(|_| bundled)
+                    .ok_or_else(|| invalid("auxiliary input requires a selected bundle track"))?;
+                if !auxiliary.kind.starts_with("aux-http-")
+                    || auxiliary.kind.len() <= "aux-http-".len()
+                    || auxiliary.kind.len() > 64
+                    || !auxiliary.kind.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+                    || !auxiliary_kinds.insert(&auxiliary.kind)
+                    || !exact_path(
+                        &auxiliary.private,
+                        &PathBuf::from(format!("inputs/{}-{id}.jsonl", auxiliary.kind)),
+                    )
+                    || !crate::cassette::valid_digest(&auxiliary.sha256)
+                    || auxiliary.bytes > crate::cassette::Limits::default().max_track_bytes
+                {
+                    return Err(invalid(
+                        "auxiliary input identity, path, size or digest differs",
+                    ));
+                }
+                total_bytes = total_bytes
+                    .checked_add(auxiliary.bytes)
+                    .filter(|bytes| *bytes <= crate::cassette::Limits::default().max_total_bytes)
+                    .ok_or_else(|| invalid("selected inputs exceed aggregate byte budget"))?;
+            }
         }
         if bundled
             && (!selected

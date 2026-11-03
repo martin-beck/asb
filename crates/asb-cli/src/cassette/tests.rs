@@ -147,6 +147,74 @@ fn selected_recorder_identity_survives_archive_staging_and_saved_plan() {
     );
 }
 
+#[test]
+fn selected_auxiliary_http_is_streamed_with_its_track_and_costed_once() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.0.join(".asb")).unwrap();
+    fs::write(
+        fixture.0.join(".asb/project.toml"),
+        toml::to_string(&crate::project::ProjectConfig::default()).unwrap(),
+    )
+    .unwrap();
+    let config: crate::benchmark::BenchmarkConfig = toml::from_str(
+        "agent='pi'\nprovider='local'\nmodel='fixture'\nworkload='bug-fix'\nconcurrency=4\n",
+    )
+    .unwrap();
+    let path = fixture.0.join("benchmark.toml");
+    fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+    let payload = b"{\"fixture\":true}\n";
+    let mut source = manifest(1);
+    source.tracks[0].artifacts.push(Artifact {
+        kind: "aux-http-embedding".into(),
+        bytes: payload.len() as u64,
+        sha256: digest(payload),
+    });
+    let bundle = fixture.zip(
+        &source,
+        &[
+            ("tracks/1.jsonl", b"{}\n"),
+            ("artifacts/1/aux-http-embedding.jsonl", payload),
+        ],
+    );
+    let inspection = crate::runner::repeated::Inspection::prepare_selected(
+        &path,
+        config,
+        1,
+        crate::runner::RunOptions {
+            mode: Some(crate::tape::Mode::Replay),
+            cassette: Some(bundle.to_str().unwrap()),
+            replay_seed: Some(42),
+            ..Default::default()
+        },
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        inspection.input_cost().unwrap().bytes,
+        3 + payload.len() as u64
+    );
+    drop(crate::runner::repeated::publish_campaign(inspection.observe().unwrap()).unwrap());
+    let root = fs::read_dir(fixture.0.join("results/asb-executions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let restored = crate::runner::campaign::reading::Layout::read(&root.join("plan.json")).unwrap();
+    assert_eq!(restored.plan.slots.len(), 4);
+    assert!(
+        restored
+            .plan
+            .slots
+            .iter()
+            .all(|slot| slot.replay_input == Some(0))
+    );
+    let auxiliary = &restored.plan.replay_inputs[0].auxiliary_http;
+    assert_eq!(auxiliary.len(), 1);
+    assert_eq!(fs::read(root.join(&auxiliary[0].private)).unwrap(), payload);
+}
+
 #[cfg(unix)]
 #[test]
 fn alternate_recorder_runs_an_agent_offline_and_reports_its_metrics() {

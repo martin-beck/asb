@@ -1,7 +1,7 @@
 //! Run-owned whole-track selection and private JSONL staging; no proxy changes.
 use super::{Plan, ReplayInput, Slot, path_text, private_directory, publish_bytes, publish_stream};
 use crate::cassette::{Compatibility, Limits, SelectionPlan, Selector, Source, SourceInspection};
-use crate::runner::campaign::McpRelayInput;
+use crate::runner::campaign::{AuxiliaryHttpInput, McpRelayInput};
 use crate::{Error, benchmark::BenchmarkConfig, runner::RunOptions};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -125,7 +125,15 @@ impl Inspection {
         let mut bytes = 0u64;
         for id in &ids {
             let size = if let Some(manifest) = self.source.manifest() {
-                manifest.track(*id).map_err(input_error)?.bytes
+                let track = manifest.track(*id).map_err(input_error)?;
+                track
+                    .artifacts
+                    .iter()
+                    .filter(|artifact| artifact.kind.starts_with("aux-http-"))
+                    .try_fold(track.bytes, |total, artifact| {
+                        total.checked_add(artifact.bytes)
+                    })
+                    .ok_or_else(|| Error::Input("selected replay input size overflow".into()))?
             } else {
                 self.source
                     .legacy_bytes(*id)
@@ -184,12 +192,25 @@ impl Prepared {
                     native_trace,
                     native_tool,
                     mcp_relays,
+                    auxiliary_http,
                     recorder,
                     recorded_max_steps,
                 ) = if let Some(manifest) = self.source.manifest() {
                     let track = manifest.track(*id).map_err(input_error)?;
                     let mut mcp_relays = Vec::new();
+                    let mut auxiliary_http = Vec::new();
                     for artifact in &track.artifacts {
+                        if artifact.kind.starts_with("aux-http-") {
+                            auxiliary_http.push(AuxiliaryHttpInput {
+                                kind: artifact.kind.clone(),
+                                private: PathBuf::from(format!(
+                                    "inputs/{}-{id}.jsonl",
+                                    artifact.kind
+                                )),
+                                bytes: artifact.bytes,
+                                sha256: artifact.sha256.clone(),
+                            });
+                        }
                         let Some(server) = artifact.kind.strip_prefix("mcp-relay-") else {
                             continue;
                         };
@@ -240,6 +261,7 @@ impl Prepared {
                             .as_ref()
                             .map(|_| PathBuf::from(format!("inputs/native-tool-{id}.jsonl"))),
                         mcp_relays,
+                        auxiliary_http,
                         track.recorder.clone(),
                         track.recorded_max_steps,
                     )
@@ -261,6 +283,7 @@ impl Prepared {
                         None,
                         None,
                         Vec::new(),
+                        Vec::new(),
                         None,
                         None,
                     )
@@ -271,6 +294,16 @@ impl Prepared {
                     .ok_or_else(|| {
                         Error::Input("selected replay inputs exceed aggregate byte budget".into())
                     })?;
+                for auxiliary in &auxiliary_http {
+                    total = total
+                        .checked_add(auxiliary.bytes)
+                        .filter(|bytes| *bytes <= Limits::default().max_total_bytes)
+                        .ok_or_else(|| {
+                            Error::Input(
+                                "selected replay inputs exceed aggregate byte budget".into(),
+                            )
+                        })?;
+                }
                 let index = inputs.len();
                 inputs.push(ReplayInput {
                     recorded_max_steps,
@@ -287,6 +320,7 @@ impl Prepared {
                     #[cfg(not(test))]
                     native_tool_launch: None,
                     mcp_relays,
+                    auxiliary_http,
                     bytes,
                     sha256,
                 });
@@ -420,6 +454,35 @@ impl Prepared {
                     .map_err(input_error)?;
                 publish_bytes(&root.join(&relay.bundle), &bytes)?;
             }
+            for auxiliary in &input.auxiliary_http {
+                let expected = self
+                    .source
+                    .manifest()
+                    .and_then(|manifest| manifest.track(input.track?).ok())
+                    .and_then(|track| {
+                        track
+                            .artifacts
+                            .iter()
+                            .find(|artifact| artifact.kind == auxiliary.kind)
+                    })
+                    .ok_or_else(|| {
+                        Error::Input("selected auxiliary recording is unavailable".into())
+                    })?;
+                if expected.bytes != auxiliary.bytes || expected.sha256 != auxiliary.sha256 {
+                    return Err(Error::Input(
+                        "selected auxiliary recording changed after planning".into(),
+                    ));
+                }
+                publish_stream(&root.join(&auxiliary.private), |file| {
+                    self.source
+                        .copy_artifact_to(
+                            input.track.expect("selected bundle track"),
+                            &auxiliary.kind,
+                            file,
+                        )
+                        .map_err(input_error)
+                })?;
+            }
         }
         Ok(())
     }
@@ -519,11 +582,20 @@ pub(super) fn stage_selected(
         stage_determinism_manifest(root, input, &destination, slot.replica, concurrency)?;
         stage_native_trace(root, input, &destination, slot.replica, concurrency)?;
         stage_mcp_relays(root, input, &destination)?;
+        stage_auxiliary_http(root, input, &destination)?;
     }
     fs::File::open(base.parent().expect("batch parent"))
         .and_then(|file| file.sync_all())
         .map_err(crate::io_error)?;
     path_text(&base)
+}
+
+fn stage_auxiliary_http(root: &Path, input: &ReplayInput, destination: &Path) -> Result<(), Error> {
+    for auxiliary in &input.auxiliary_http {
+        let target = replay_sidecar(destination, &auxiliary.kind, "jsonl")?;
+        fs::hard_link(root.join(&auxiliary.private), target).map_err(crate::io_error)?;
+    }
+    Ok(())
 }
 
 fn stage_mcp_relays(root: &Path, input: &ReplayInput, destination: &Path) -> Result<(), Error> {
@@ -664,6 +736,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn auxiliary_http_payload_uses_selected_track_for_each_replica() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-replay-auxiliary-http-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        fs::create_dir_all(root.join("inputs")).unwrap();
+        fs::create_dir_all(root.join("batch")).unwrap();
+        fs::write(root.join("inputs/aux-http-embedding-7.jsonl"), b"sealed\n").unwrap();
+        let input = ReplayInput {
+            recorded_max_steps: None,
+            recorder: None,
+            complete: Some(true),
+            track: Some(7),
+            source: PathBuf::from("sealed.asb.zip"),
+            private: PathBuf::from("inputs/track-7.jsonl"),
+            local_tools: None,
+            tool_protocol: None,
+            deterministic_manifest: None,
+            native_trace: None,
+            native_tool: None,
+            mcp_relays: Vec::new(),
+            auxiliary_http: vec![AuxiliaryHttpInput {
+                kind: "aux-http-embedding".into(),
+                private: "inputs/aux-http-embedding-7.jsonl".into(),
+                bytes: 7,
+                sha256: crate::cassette::digest(b"sealed\n"),
+            }],
+            bytes: 2,
+            sha256: "a".repeat(64),
+        };
+        for replica in 1..=4 {
+            let destination = root.join(format!("batch/replay-concurrency-{replica}.jsonl"));
+            stage_auxiliary_http(&root, &input, &destination).unwrap();
+            assert_eq!(
+                fs::read(root.join(format!(
+                    "batch/aux-http-embedding-concurrency-{replica}.jsonl"
+                )))
+                .unwrap(),
+                b"sealed\n"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn selected_local_tool_payload_is_linked_only_into_its_replica_batch() {
         let root =
             std::env::temp_dir().join(format!("asb-replay-local-tools-{}", std::process::id()));
@@ -688,6 +805,7 @@ mod tests {
             native_trace: None,
             native_tool: None,
             mcp_relays: Vec::new(),
+            auxiliary_http: Vec::new(),
             bytes: 2,
             sha256: "a".repeat(64),
         };
@@ -722,6 +840,7 @@ mod tests {
             native_trace: None,
             native_tool: None,
             mcp_relays: Vec::new(),
+            auxiliary_http: Vec::new(),
             bytes: 3,
             sha256: crate::cassette::digest(b"{}\n"),
         };
@@ -756,6 +875,7 @@ mod tests {
             native_trace: None,
             native_tool: None,
             mcp_relays: Vec::new(),
+            auxiliary_http: Vec::new(),
             bytes: 3,
             sha256: crate::cassette::digest(b"{}\n"),
         };
@@ -788,6 +908,7 @@ mod tests {
             native_trace: None,
             native_tool: None,
             mcp_relays: Vec::new(),
+            auxiliary_http: Vec::new(),
             bytes: 2,
             sha256: "a".repeat(64),
         };
@@ -835,6 +956,7 @@ mod tests {
             native_trace: Some(PathBuf::from("inputs/native-trace-7.jsonl")),
             native_tool: None,
             mcp_relays: Vec::new(),
+            auxiliary_http: Vec::new(),
             bytes: 2,
             sha256: "a".repeat(64),
         };
@@ -876,6 +998,7 @@ mod tests {
             native_trace: Some(PathBuf::from("inputs/native-trace-7.jsonl")),
             native_tool: None,
             mcp_relays: Vec::new(),
+            auxiliary_http: Vec::new(),
             bytes: 2,
             sha256: "a".repeat(64),
         };
@@ -916,6 +1039,7 @@ mod tests {
                 id: "filesystem".into(),
                 bundle: PathBuf::from("inputs/mcp-relay-filesystem-7.jsonl"),
             }],
+            auxiliary_http: Vec::new(),
             bytes: 2,
             sha256: "a".repeat(64),
         };

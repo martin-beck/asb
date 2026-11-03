@@ -174,6 +174,7 @@ fn plan(mode: ExecutionMode, concurrency: usize, repeat: u64, measured: bool) ->
                 native_trace: None,
                 native_tool: None,
                 mcp_relays: Vec::new(),
+                auxiliary_http: Vec::new(),
                 bytes: 42,
                 sha256: "a".repeat(64),
             });
@@ -231,6 +232,37 @@ fn selected(mut plan: Plan, bundled: bool) -> Plan {
         });
     }
     plan
+}
+
+#[test]
+fn auxiliary_http_inputs_are_bound_to_the_selected_bundle_track() {
+    let mut value = selected(plan(ExecutionMode::Replay, 1, 4, false), true);
+    value.replay_inputs[0]
+        .auxiliary_http
+        .push(crate::runner::campaign::AuxiliaryHttpInput {
+            kind: "aux-http-embedding".into(),
+            private: "inputs/aux-http-embedding-64.jsonl".into(),
+            bytes: 7,
+            sha256: "a".repeat(64),
+        });
+    value.validate_layout().unwrap();
+    let wire = serde_json::to_value(value).unwrap();
+    for (field, bad) in [
+        ("kind", json!("../embedding")),
+        ("private", json!("inputs/aux-http-embedding-65.jsonl")),
+        ("sha256", json!("invalid")),
+    ] {
+        let mut changed = wire.clone();
+        changed["replay_inputs"][0]["auxiliary_http"][0][field] = bad;
+        rejects(changed);
+    }
+    let mut duplicated = wire;
+    let item = duplicated["replay_inputs"][0]["auxiliary_http"][0].clone();
+    duplicated["replay_inputs"][0]["auxiliary_http"]
+        .as_array_mut()
+        .unwrap()
+        .push(item);
+    rejects(duplicated);
 }
 
 fn rejects(wire: Value) {

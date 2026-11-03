@@ -122,6 +122,9 @@ pub(crate) struct ReplayInput {
     /// bundle is absent rather than launch its original program.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_relays: Vec<McpRelayInput>,
+    /// Sealed adapter-owned auxiliary HTTP recordings for this selected track.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auxiliary_http: Vec<AuxiliaryHttpInput>,
     pub bytes: u64,
     pub sha256: String,
 }
@@ -144,6 +147,15 @@ impl ReplayInput {
 pub(crate) struct McpRelayInput {
     pub id: String,
     pub bundle: PathBuf,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuxiliaryHttpInput {
+    pub kind: String,
+    pub private: PathBuf,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 /// Whether measurements move with their owned campaign or remain at an explicit

@@ -133,6 +133,7 @@ impl Inspection {
                 #[cfg(not(test))]
                 native_tool_launch: None,
                 mcp_relays: Vec::new(),
+                auxiliary_http: Vec::new(),
                 bytes,
                 sha256,
             });
