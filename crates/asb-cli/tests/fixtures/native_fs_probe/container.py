@@ -6,6 +6,7 @@ base.mkdir(parents=True, exist_ok=True)
 fusepy=Path(os.environ['ASB_FUSEPY_MODULE']).resolve()
 fuse_library=Path(os.environ['ASB_CONTAINER_FUSE_LIBRARY']).resolve()
 image=os.environ['ASB_FUSE_TEST_IMAGE']
+agent_fixture=os.environ.get('ASB_HERMES_AGENT_FIXTURE')=='1'
 with tempfile.TemporaryDirectory(dir=base) as tmp, tempfile.TemporaryDirectory(dir=base.parents[2],prefix='asb-s-') as sockets:
  root=Path(tmp)
  for part in ('backing','mount','evidence','baseline'): (root/part).mkdir()
@@ -15,6 +16,11 @@ with tempfile.TemporaryDirectory(dir=base) as tmp, tempfile.TemporaryDirectory(d
  (root/'control').mkdir(mode=0o700)
  (root/'hooks').mkdir(mode=0o700)
  shutil.copyfile(probe.parents[2]/'assets/scripts/hermes-native-tools.py',root/'hooks/sitecustomize.py')
+ if agent_fixture:
+  with (root/'hooks/sitecustomize.py').open('a') as hook:
+   hook.write('\n'+(probe/'hermes_agent_boundary.py').read_text())
+  (root/'mock-record').mkdir(mode=0o700)
+  (root/'mock-record/command.txt').write_text("printf fixture > asb-real-agent.txt; printf ran > /tmp/asb-native-agent-executed")
  script='''set -eu
 export ASB_PROBE_ROOT_TGID=$$
 python3 /probe/proxy.py /work/backing /work/mount /work/evidence > /work/proxy.log 2>&1 &
@@ -25,7 +31,11 @@ while ! mountpoint -q /work/mount; do n=$((n+1)); [ "$n" -lt 100 ] || exit 42; s
 cat /work/mount/source
 printf container > /work/mount/output
 if [ "${ASB_FIXTURE_HERMES:-0}" = 1 ]; then
-  (cd /work/mount; HERMES_HOME=/work/hermes-home TERMINAL_ENV=local PYTHONPATH=/work/hooks:/opt ASB_FIXTURE_EFFECT_SOCKET=/work/control/record.sock ASB_HERMES_NATIVE_MODE=record ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl ASB_HERMES_NATIVE_PROGRESS=/work/control/record-progress.json setpriv --reuid "$ASB_HERMES_UID" --regid "$ASB_HERMES_GID" --clear-groups /asb-hermes/venv/bin/python /probe/hermes_real_terminal.py)
+  if [ "${ASB_FIXTURE_AGENT:-0}" = 1 ]; then
+    (cd /work/mount; HERMES_HOME=/work/hermes-home TERMINAL_ENV=local PYTHONPATH=/work/hooks:/opt ASB_FIXTURE_AGENT_BOUNDARY=1 ASB_FIXTURE_MOCK_DIR=/work/mock-record ASB_FIXTURE_EFFECT_SOCKET=/work/control/record.sock ASB_HERMES_NATIVE_MODE=record ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl ASB_HERMES_NATIVE_PROGRESS=/work/control/record-progress.json setpriv --reuid "$ASB_HERMES_UID" --regid "$ASB_HERMES_GID" --clear-groups /bin/sh /probe/hermes_agent_fixture.sh)
+  else
+    (cd /work/mount; HERMES_HOME=/work/hermes-home TERMINAL_ENV=local PYTHONPATH=/work/hooks:/opt ASB_FIXTURE_EFFECT_SOCKET=/work/control/record.sock ASB_HERMES_NATIVE_MODE=record ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl ASB_HERMES_NATIVE_PROGRESS=/work/control/record-progress.json setpriv --reuid "$ASB_HERMES_UID" --regid "$ASB_HERMES_GID" --clear-groups /asb-hermes/venv/bin/python /probe/hermes_real_terminal.py)
+  fi
 fi
 '''
  name='asb-fuse-probe-'+uuid.uuid4().hex
@@ -35,17 +45,30 @@ fi
   position=cmd.index('--env')
   cmd[position:position]=['--mount', f'type=bind,src={Path(fuse_unmount).resolve()},dst=/usr/bin/fusermount3,readonly']
  hermes_install=os.environ.get('ASB_HERMES_TEST_INSTALL')
+ if agent_fixture and not hermes_install: raise RuntimeError('agent fixture requires ASB_HERMES_TEST_INSTALL')
+ if agent_fixture:
+  position=cmd.index('--env')
+  cmd[position:position]=['--env','ASB_FIXTURE_AGENT=1','--mount',f'type=bind,src={probe.parents[1]/"guest_provider_fixture.py"},dst=/provider.py,readonly']
  if hermes_install:
   position=cmd.index('--env')
   cmd[position:position]=['--mount', f'type=bind,src={Path(hermes_install).resolve()},dst=/asb-hermes,readonly']
   cmd[position:position]=['--env', 'ASB_FIXTURE_HERMES=1', '--env', 'ASB_PROBE_ALLOW_OTHER=1', '--env', 'ASB_PROBE_CONTROL_SOCKET=/work/control/record.sock', '--env', f'ASB_HERMES_UID={os.getuid()}', '--env', f'ASB_HERMES_GID={os.getgid()}']
  try:
-  result=subprocess.run(cmd,capture_output=True,text=True,timeout=30)
+  result=subprocess.run(cmd,capture_output=True,text=True)
  except BaseException:
   subprocess.run(['docker','rm','-f',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
+  retained=base/('failure-'+uuid.uuid4().hex)
+  retained.mkdir(mode=0o700)
+  for source in (root/'proxy.log',root/'mock-record/agent.log',root/'mock-record/server.log'):
+   if source.is_file(): shutil.copyfile(source,retained/(source.parent.name+'-'+source.name))
+  print(f'Fixture diagnostics retained in {retained}',flush=True)
   raise
  if result.returncode:
-  raise RuntimeError(f'container probe failed: {result.stderr[-500:]}')
+  retained=base/('failure-'+uuid.uuid4().hex)
+  retained.mkdir(mode=0o700)
+  for source in (root/'proxy.log',root/'mock-record/agent.log',root/'mock-record/server.log'):
+   if source.is_file(): shutil.copyfile(source,retained/(source.parent.name+'-'+source.name))
+  raise RuntimeError(f'container probe failed; diagnostics in {retained}: {result.stderr[-500:]}')
  assert result.stdout == 'original'
  assert (root/'backing/output').read_text() == 'container'
  print('docker exit:',result.returncode)
@@ -57,10 +80,12 @@ fi
   events=[json.loads(x) for x in (root/'evidence/events.jsonl').read_text().splitlines()]
   assert any(e['op']=='write' and e['path']=='/output' for e in events)
   if hermes_install:
-   assert all(any(e['op']=='write' and e['path']=='/'+name for e in events) for name in ('first','second'))
+   expected_files=('asb-real-agent.txt',) if agent_fixture else ('first','second')
+   assert all(any(e['op']=='write' and e['path']=='/'+name for e in events) for name in expected_files)
    native=[json.loads(line) for line in (root/'control/native.jsonl').read_text().splitlines()]
-   assert sum(event['event']=='write' for event in native)==2
-   assert sum(event['event']=='output' for event in native)==2
+   expected_calls=1 if agent_fixture else 2
+   assert sum(event['event']=='write' for event in native)==expected_calls
+   assert sum(event['event']=='output' for event in native)==expected_calls
    assert json.loads((root/'control/record-progress.json').read_text())['complete']
   print('recorded operations:',[(e['op'],e['path']) for e in events])
   def replay(index):
@@ -84,16 +109,23 @@ fi
     try:
      connection,_=listener.accept()
      with connection, connection.makefile('rwb',buffering=0) as stream:
-      for name in ('one','two'):
+      for name in (('one',) if agent_fixture else ('one','two')):
        assert stream.readline().decode().strip()=='tool-end:'+name
        cursor.admit(name)
        assert cursor.apply_until(ends['tool-end:'+name])
-       assert (destination/'first').read_text()=='first'
-       assert (destination/'second').exists()==(name=='two')
+       if agent_fixture:
+        assert (destination/'asb-real-agent.txt').read_text()=='fixture'
+       else:
+        assert (destination/'first').read_text()=='first'
+        assert (destination/'second').exists()==(name=='two')
        stream.write((str(cursor.sequence)+'\n').encode())
     except BaseException as error: errors.append(error)
    server=threading.Thread(target=serve,daemon=True); server.start()
    replay_name='asb-hermes-replay-'+uuid.uuid4().hex
+   replay_mock=root/f'mock-replay-{index}'
+   if agent_fixture:
+    replay_mock.mkdir(mode=0o700)
+    (replay_mock/'command.txt').write_text('printf fixture > asb-real-agent.txt; printf ran > /tmp/asb-native-agent-executed')
    replay_cmd=['docker','run','--rm','--name',replay_name,'--network','none',
                '--user',f'{os.getuid()}:{os.getgid()}',
                '--mount',f'type=bind,src={root},dst=/work',
@@ -109,13 +141,18 @@ fi
                '--env','ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl',
                '--env',f'ASB_HERMES_NATIVE_PROGRESS=/work/control/replay-{index}.json',
                '--entrypoint','/asb-hermes/venv/bin/python',image,'/probe/hermes_real_terminal.py']
+   if agent_fixture:
+    position=replay_cmd.index('--entrypoint')
+    replay_cmd[position:]=['--env','ASB_FIXTURE_AGENT_BOUNDARY=1','--env',f'ASB_FIXTURE_MOCK_DIR=/work/{replay_mock.name}',
+                           '--mount',f'type=bind,src={probe.parents[1]/"guest_provider_fixture.py"},dst=/provider.py,readonly',
+                           '--entrypoint','/bin/sh',image,'/probe/hermes_agent_fixture.sh']
    try:
-    subprocess.run(replay_cmd,check=True,timeout=30,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+    subprocess.run(replay_cmd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
     server.join(timeout=5)
     assert not server.is_alive() and not errors, errors
     cursor.finish()
     progress=json.loads((root/f'control/replay-{index}.json').read_text())
-    assert progress['complete'] and progress['invocations']==2
+    assert progress['complete'] and progress['invocations']==expected_calls
     assert (destination/'source').read_text()=='original'
     assert (destination/'output').read_text()=='container'
    except BaseException:

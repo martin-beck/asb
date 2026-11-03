@@ -65,7 +65,7 @@ tested host Docker could not bind-mount the user's host FUSE mount, so this
 fixture mounts it inside the container. Set `ASB_CONTAINER_FUSERMOUNT` to an
 image-compatible `fusermount3` when the image does not already contain one.
 The fixture has also passed using the local image for the selected SWE-bench
-trial; it does not launch the SWE-bench harness or an agent.
+trial; it does not launch the SWE-bench harness.
 Optionally set `ASB_HERMES_TEST_INSTALL` to a directory containing a `venv`
 with the pinned Hermes package installed for the image's Python. The fixture
 then runs two real Hermes terminal calls as the invoking user and checks their
@@ -79,7 +79,18 @@ the sidecar validates each request and before returning its result. This does
 not prove ordering for a complete agent. The existing sidecar
 also restricts Hermes's advertised core tools. The fixture enables `allow_other`
 on its temporary container-local FUSE mount so the unprivileged tool can access
-the proxy; this is not a production setting. No LLM or complete agent is invoked.
+the proxy; this is not a production setting. This mode does not invoke an LLM
+or complete agent.
+
+With that installation, set `ASB_HERMES_AGENT_FIXTURE=1` to launch the Hermes
+CLI itself against a deterministic loopback mock provider: one recording and
+four parallel replays. A test-only wrapper places terminal-call boundaries and
+the operation journal restores its file before returning the recorded result;
+an external sentinel confirms the shell command was not reexecuted. Each
+replay uses the mock provider again, not a recorded LLM tape. The current
+sidecar restricts Hermes to the terminal toolset, so this is not unrestricted
+agent qualification, a SWE-bench task, or a production integration. The
+30-minute timeout in this fixture covers only the actual Hermes CLI command.
 
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the
