@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from typing import Any
 
 from openhands.sdk.tool import ToolExecutor
@@ -45,6 +46,7 @@ class NativeTerminalExecutor(ToolExecutor):
     def __init__(self, bridge: str, mode: str, sidecar: str, launch_json: str) -> None:
         self._mode = mode
         self._delegate = None
+        self._bridge_lock = threading.Lock()
         if mode == "record":
             from openhands.tools.terminal.impl import TerminalExecutor
             self._delegate = TerminalExecutor(working_dir=os.getcwd(), terminal_type="subprocess")
@@ -78,9 +80,12 @@ class NativeTerminalExecutor(ToolExecutor):
                        }}
         assert self._bridge.stdin is not None
         assert self._bridge.stdout is not None
-        self._bridge.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
-        self._bridge.stdin.flush()
-        line = self._bridge.stdout.readline()
+        # Pair each bridge request with its response even when the SDK invokes
+        # tools concurrently. The native tool execution remains outside this lock.
+        with self._bridge_lock:
+            self._bridge.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+            self._bridge.stdin.flush()
+            line = self._bridge.stdout.readline()
         if not line:
             raise RuntimeError("ASB native terminal bridge stopped without an observation")
         response = json.loads(line)
