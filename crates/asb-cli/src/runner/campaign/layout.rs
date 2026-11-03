@@ -224,7 +224,9 @@ impl Plan {
             }
             total_bytes = total_bytes
                 .checked_add(input.bytes)
-                .filter(|bytes| *bytes <= crate::cassette::Limits::default().max_total_bytes)
+                .filter(|bytes| {
+                    *bytes <= crate::cassette::ProofLimits::default().max_selected_bytes
+                })
                 .ok_or_else(|| invalid("selected inputs exceed aggregate byte budget"))?;
             let mut auxiliary_kinds = BTreeSet::new();
             for auxiliary in &input.auxiliary_recordings {
