@@ -10,7 +10,7 @@ use crate::workloads::session::{
 use crate::workloads::{Evaluation, TaskIdentity, WorkloadSession};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::Command;
@@ -136,19 +136,41 @@ fn stage_native_capsule(
             {
                 return Err("guest native capsule replay is invalid or exceeds its bound".into());
             }
-            let bytes = std::fs::read(source)
+            let staged = artifact_output.join("native-capsule.zip");
+            let mut input = std::fs::File::open(source)
                 .map_err(|_| "guest native capsule replay is unavailable".to_owned())?;
-            if bytes.len() as u64 != metadata.len() {
+            let mut output = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged)
+                .map_err(|error| format!("cannot stage guest native capsule replay: {error}"))?;
+            let mut hash = Sha256::new();
+            let mut length = 0u64;
+            let mut buffer = [0u8; 64 * 1024];
+            loop {
+                let read = input
+                    .read(&mut buffer)
+                    .map_err(|_| "guest native capsule replay is unavailable".to_owned())?;
+                if read == 0 {
+                    break;
+                }
+                length += read as u64;
+                if length > metadata.len() {
+                    return Err("guest native capsule replay changed before staging".into());
+                }
+                output.write_all(&buffer[..read]).map_err(|error| {
+                    format!("cannot stage guest native capsule replay: {error}")
+                })?;
+                hash.update(&buffer[..read]);
+            }
+            if length != metadata.len() {
                 return Err("guest native capsule replay changed before staging".into());
             }
-            let staged = artifact_output.join("native-capsule.zip");
-            std::fs::write(&staged, &bytes)
-                .map_err(|error| format!("cannot stage guest native capsule replay: {error}"))?;
             private_inputs.push(PrivateInput {
                 source: staged,
                 target: "native-capsule.zip".into(),
-                bytes: bytes.len() as u64,
-                sha256: crate::cassette::digest(&bytes),
+                bytes: length,
+                sha256: format!("{:x}", hash.finalize()),
             });
             Ok(crate::agents::driver::GuestCapsule {
                 mode: crate::agents::driver::GuestCapsuleMode::Replay,
@@ -1543,6 +1565,40 @@ mod tests {
         );
         assert_eq!(guest_tape_cassette(None).unwrap(), None);
         assert!(guest_tape_cassette(Some(Path::new("/"))).is_err());
+    }
+
+    #[test]
+    fn guest_capsule_staging_copies_and_hashes_multiple_chunks() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-guest-capsule-stream-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source");
+        let artifacts = root.join("artifacts");
+        std::fs::create_dir(&artifacts).unwrap();
+        let data = vec![43u8; 200_001];
+        std::fs::write(&source, &data).unwrap();
+        let mut inputs = Vec::new();
+        stage_native_capsule(
+            Some(crate::workloads::session::NativeCapsule::Replay(&source)),
+            &artifacts,
+            &mut inputs,
+        )
+        .unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].bytes, data.len() as u64);
+        assert_eq!(inputs[0].sha256, crate::cassette::digest(&data));
+        assert_eq!(std::fs::read(&inputs[0].source).unwrap(), data);
+        assert!(
+            stage_native_capsule(
+                Some(crate::workloads::session::NativeCapsule::Replay(&source)),
+                &artifacts,
+                &mut Vec::new()
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
