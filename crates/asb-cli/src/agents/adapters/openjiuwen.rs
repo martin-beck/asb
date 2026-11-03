@@ -181,9 +181,12 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
     if let Some(max_steps) = context.max_steps {
         args.extend(["--asb-max-iterations".into(), max_steps.to_string()]);
     }
-    args.extend(["run".into(), "-f".into(), "stream-json".into(), format!(
-        "{}\n\nDo not use todo/planning tools for this run. Execute the requested work directly and return a final response when complete.", context.prompt
-    )]);
+    args.extend([
+        "run".into(),
+        "-f".into(),
+        "stream-json".into(),
+        context.prompt.into(),
+    ]);
     CommandSpec {
         program: "openjiuwen".into(),
         args,
@@ -588,6 +591,7 @@ for (const request of invalid) {
             native_tool: None,
         });
         assert_eq!(spec.args.first().map(String::as_str), Some("-v"));
+        assert_eq!(spec.args.last().map(String::as_str), Some("repair"));
         assert!(
             spec.args
                 .windows(2)
@@ -876,8 +880,10 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
             package.join("harness/cli/agent/factory.py"),
             r#"
 class Config:
-    enable_read_image_multimodal = None
-    parallel_tool_calls = None
+    enable_read_image_multimodal = True
+    parallel_tool_calls = True
+def _build_memory_rail(_cfg): return "memory-enabled"
+def _build_subagents(_model): return ["subagent-enabled"]
 class Agent:
     _deep_config = Config()
 def create_agent(_cfg):
@@ -1043,8 +1049,10 @@ from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 from openjiuwen.core.context_engine.context.context import Context
 async def main():
     agent, _tracker = factory.create_agent(None)
-    assert agent._deep_config.enable_read_image_multimodal is False
-    assert agent._deep_config.parallel_tool_calls is False
+    assert agent._deep_config.enable_read_image_multimodal is True
+    assert agent._deep_config.parallel_tool_calls is True
+    assert factory._build_memory_rail(None) == "memory-enabled"
+    assert factory._build_subagents(None) == ["subagent-enabled"]
     result = []
     context = Context()
     for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool):
