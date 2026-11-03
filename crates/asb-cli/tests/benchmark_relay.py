@@ -343,6 +343,29 @@ class ForwardingTests(unittest.TestCase):
         self.assertEqual(tomllib.loads(project_toml(document)),
                          {key: value for key, value in document.items() if value is not None})
 
+    def test_auxiliary_endpoints_share_relay_without_changing_original(self):
+        original = {"project_configuration": "tools_dir='tools'\n", "request": {
+            "connection": {"base_url": "http://127.0.0.1:1234/v1"},
+            "auxiliary_endpoints": {"embed": "http://127.0.0.1:5678",
+                                    "same": "http://127.0.0.1:1234/v2",
+                                    "remote": "https://example.invalid/api"}}}
+        observed = []
+        class FakeRelay:
+            ports = (20001, 20002)
+        def start(targets):
+            observed.extend(targets)
+            return FakeRelay()
+        changed = forward_request(original, start)
+        self.assertEqual(observed, [("127.0.0.1", 1234), ("127.0.0.1", 5678)])
+        self.assertEqual(changed["request"]["auxiliary_endpoints"], {
+            "embed": "http://127.0.0.1:20002", "same": "http://127.0.0.1:20001/v2",
+            "remote": "https://example.invalid/api"})
+        self.assertEqual(original["request"]["auxiliary_endpoints"]["embed"],
+                         "http://127.0.0.1:5678")
+        with self.assertRaises(ExecutionError):
+            forward_request({"project_configuration": "", "request": {
+                "auxiliary_endpoints": {"bad": 5}}}, start)
+
     def test_destinations_are_explicit_and_loopback_only(self):
         for target in [("192.0.2.1", 80), ("provider.example", 443), ("0.0.0.0", 80)]:
             with self.assertRaises(ExecutionError):
