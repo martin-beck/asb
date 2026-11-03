@@ -1410,6 +1410,10 @@ impl ResultFacts {
             .and_then(|metadata| metadata.native_tool_sidecar.clone())
             .or(adapter_artifacts.native_tool_sidecar.clone());
         let sealed_artifacts = adapter_artifacts.sealed_artifacts.clone();
+        let sealed_file_artifacts = guest
+            .as_ref()
+            .map(|metadata| metadata.sealed_file_artifacts.clone())
+            .unwrap_or_default();
         let mut stderr = bounded(&child.stderr);
         if let Some(error) = provider_cleanup_error.as_ref() {
             stderr.push_str("\nASB provider cleanup error: ");
@@ -1500,6 +1504,7 @@ impl ResultFacts {
             native_trace,
             native_tool_sidecar,
             sealed_artifacts,
+            sealed_file_artifacts,
             cassette: tape_cassette
                 .as_ref()
                 .map(|(_, cassette)| cassette.display().to_string()),

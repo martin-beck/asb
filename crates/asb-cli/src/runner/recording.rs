@@ -593,6 +593,13 @@ impl Recorder {
                     source,
                 });
             }
+            let mut sealed_files = open_sealed_file_artifacts(&result.sealed_file_artifacts)?;
+            for (artifact, source) in &mut sealed_files {
+                artifact_inputs.push(ArtifactInput {
+                    artifact: artifact.clone(),
+                    source,
+                });
+            }
             let mut auxiliary = open_auxiliary_captures(proxy, &output)?;
             for (artifact, source) in &mut auxiliary {
                 artifact_inputs.push(ArtifactInput {
@@ -760,6 +767,32 @@ impl Recorder {
         }
         result
     }
+}
+
+/// Open file-backed artifacts once; the journal checks the digest while staging.
+fn open_sealed_file_artifacts(
+    files: &[crate::agents::SealedFileArtifact],
+) -> Result<Vec<(Artifact, File)>, Error> {
+    files
+        .iter()
+        .map(|artifact| {
+            let file = open_payload(&artifact.path)?
+                .ok_or_else(|| Error::Io("file-backed recording artifact is unavailable".into()))?;
+            if file.metadata().map_err(io_error)?.len() != artifact.bytes {
+                return Err(Error::Io(
+                    "file-backed recording artifact length changed".into(),
+                ));
+            }
+            Ok((
+                Artifact {
+                    kind: artifact.kind.clone(),
+                    bytes: artifact.bytes,
+                    sha256: artifact.sha256.clone(),
+                },
+                file,
+            ))
+        })
+        .collect()
 }
 
 /// Open finalized auxiliary streams once; the journal verifies their exact
@@ -1392,6 +1425,33 @@ mod tests {
                 assert_eq!(fs::read(root.join("sentinel")).unwrap(), b"{}\n");
             }
         }
+    }
+
+    #[test]
+    fn file_backed_artifacts_are_opened_for_streaming_and_length_checked() {
+        use std::io::Read;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "asb-fs-stream-{}",
+                crate::tools::runtime::unique_id()
+            ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("payload");
+        fs::write(&path, b"recorded bytes").unwrap();
+        let item = crate::agents::SealedFileArtifact {
+            kind: "aux-fs-payload".into(),
+            path: path.clone(),
+            bytes: 14,
+            sha256: crate::cassette::digest(b"recorded bytes"),
+        };
+        let mut opened = open_sealed_file_artifacts(std::slice::from_ref(&item)).unwrap();
+        let mut bytes = Vec::new();
+        opened[0].1.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"recorded bytes");
+        fs::write(&path, b"short").unwrap();
+        assert!(open_sealed_file_artifacts(&[item]).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

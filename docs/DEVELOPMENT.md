@@ -178,8 +178,10 @@ other metadata operations, failure semantics and races remain unqualified.
 The cassette replay planner can stage `aux-fs-events` and `aux-fs-payload`
 artifacts for each replica using the existing streamed auxiliary path. These
 inputs are hard links to the sealed source and must be opened read-only; replay
-cursors and workspaces must be separate per replica. The recorder does not yet
-publish these artifacts, and the runtime does not yet consume them.
+cursors and workspaces must be separate per replica. Host import and journal
+publication now support file-backed filesystem receipts without loading the
+payload into memory. The guest recorder and transfer do not yet produce these
+receipts, and the runtime does not yet consume them.
 
 `python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` checks that
 overlapping terminal calls produce a readable sidecar without serializing

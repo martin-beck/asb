@@ -459,6 +459,15 @@ pub(crate) struct SealedArtifact {
     pub bytes: Vec<u8>,
 }
 
+/// Private, file-backed recording payload retained through cassette publication.
+#[derive(Clone, Debug)]
+pub(crate) struct SealedFileArtifact {
+    pub kind: String,
+    pub path: std::path::PathBuf,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
 pub(crate) struct CollectionContext<'a> {
     pub frozen: &'a FrozenArtifacts,
     /// One recorder-owned provider capture handle. Generic lifecycle code

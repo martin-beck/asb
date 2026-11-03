@@ -294,6 +294,46 @@ fn replay_sidecar_receipt_rejects_a_duplicate_embedded_control_value() {
 }
 
 #[test]
+fn guest_filesystem_recordings_are_retained_as_files_and_checked() {
+    use sha2::{Digest, Sha256};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(format!(
+            "asb-guest-fs-{}",
+            crate::workloads::TaskIdentity::local("receipt", None).attempt_id
+        ));
+    std::fs::create_dir_all(&root).unwrap();
+    let bytes = vec![0xabu8; 17 * 1024 * 1024];
+    std::fs::write(root.join("artifact-0"), &bytes).unwrap();
+    let mut value = completion();
+    value["result"]["metadata"]["exported_artifacts"] = json!([{
+        "kind":"aux-fs-payload", "filename":"artifact-0", "bytes":bytes.len(),
+        "sha256":format!("{:x}", Sha256::digest(&bytes))
+    }]);
+    let result =
+        CompletedExecution::decode_with_artifacts(&value, ProcessLifetime::Quiesce, Some(&root))
+            .unwrap()
+            .into_execution()
+            .unwrap();
+    assert!(result.metadata.sealed_artifacts.is_empty());
+    assert_eq!(result.metadata.sealed_file_artifacts.len(), 1);
+    assert_eq!(
+        result.metadata.sealed_file_artifacts[0].bytes,
+        bytes.len() as u64
+    );
+    assert_eq!(
+        result.metadata.sealed_file_artifacts[0].path,
+        root.join("artifact-0")
+    );
+    value["result"]["metadata"]["exported_artifacts"][0]["sha256"] = json!("a".repeat(64));
+    assert!(
+        CompletedExecution::decode_with_artifacts(&value, ProcessLifetime::Quiesce, Some(&root))
+            .is_err()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn guest_sidecar_receipts_fail_closed_for_missing_or_changed_files() {
     let root = std::env::temp_dir().join(format!(
         "asb-guest-artifact-invalid-{}",
