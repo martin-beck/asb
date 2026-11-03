@@ -22,8 +22,8 @@ async function stop(child) {
   if (child.exitCode !== null) return;
   const done=once(child,'exit'); child.kill('SIGTERM'); await done;
 }
-function reasoning(body) {
-  return body.split('\n').filter((line)=>line.startsWith('data: {')).map((line)=>JSON.parse(line.slice(6)).choices[0].delta.reasoning).join('');
+function field(body, read) {
+  return body.split('\n').filter((line)=>line.startsWith('data: {')).map((line)=>read(JSON.parse(line.slice(6)).choices[0].delta)).join('');
 }
 
 test('record and replay preserve split guest paths and remap split host paths', async () => {
@@ -31,8 +31,9 @@ test('record and replay preserve split guest paths and remap split host paths', 
   const recordWorkspace='/srv/record/workspace-concurrency-1';
   const replayWorkspace='/srv/replay/workspace-concurrency-2';
   const guest='/asb-snapshot-storage/snapshot/filesystem/workspace/a';
-  const chunks=['/asb-snapshot-storage/snapshot/files','ystem/workspace/a and /srv/record/workspace-con','currency-1/b'];
-  const body=chunks.map((value)=>`data: ${JSON.stringify({choices:[{index:0,delta:{reasoning:value}}]})}\n\n`).join('')+'data: [DONE]\n\n';
+  const literal=' 2022-12-16T00:00:00Z 1234567890123 123e4567-e89b-12d3-a456-426614174000';
+  const chunks=['/asb-snapshot-storage/snapshot/files','ystem/workspace/a and /srv/record/workspace-con','currency-1/b'+literal];
+  const body=chunks.map((value)=>`data: ${JSON.stringify({choices:[{index:0,delta:{reasoning:value,tool_calls:[{index:0,function:{arguments:value}}]}}]})}\n\n`).join('')+'data: [DONE]\n\n';
   const upstream=http.createServer((_request,response)=>{response.writeHead(200,{'content-type':'text/event-stream'});response.end(body);});
   await new Promise((resolve)=>upstream.listen(0,'127.0.0.1',resolve));
   let record,replay;
@@ -41,13 +42,17 @@ test('record and replay preserve split guest paths and remap split host paths', 
     record=await start(['record','--port','0','--upstream',`http://127.0.0.1:${upstream.address().port}`,'--out',cassette],join(root,'record.ready'),recordWorkspace);
     const options={method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'fixture',messages:[]})};
     const live=await fetch(`http://127.0.0.1:${record.port}/v1/chat/completions`,options);
-    assert.equal(reasoning(await live.text()),`${guest} and ${recordWorkspace}/b`);
+    const liveBody=await live.text();
+    assert.equal(field(liveBody, d=>d.reasoning),`${guest} and ${recordWorkspace}/b${literal}`);
+    assert.equal(field(liveBody, d=>d.tool_calls[0].function.arguments),`${guest} and ${recordWorkspace}/b${literal}`);
     await stop(record.child); record=null;
     await new Promise((resolve)=>upstream.close(resolve));
     replay=await start(['replay','--port','0','--cassette',cassette],join(root,'replay.ready'),replayWorkspace);
     const result=await fetch(`http://127.0.0.1:${replay.port}/v1/chat/completions`,options);
     assert.equal(result.status,200);
-    assert.equal(reasoning(await result.text()),`${guest} and ${replayWorkspace}/b`);
+    const replayBody=await result.text();
+    assert.equal(field(replayBody, d=>d.reasoning),`${guest} and ${replayWorkspace}/b${literal}`);
+    assert.equal(field(replayBody, d=>d.tool_calls[0].function.arguments),`${guest} and ${replayWorkspace}/b${literal}`);
   } finally {
     if (record) await stop(record.child);
     if (replay) await stop(replay.child);
