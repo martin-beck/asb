@@ -27,6 +27,8 @@ class WorkspaceTest(unittest.TestCase):
             workspace=SnapshotWorkspace(root/'image',root/'mount',1024,['mkfs'],['btrfs'],['rsync'])
             with patch('asb_snapshot_workspace.subprocess.run',side_effect=run):
                 with self.assertRaisesRegex(RuntimeError,'preparation failed'):workspace.prepare(source)
+                self.assertIsNone(workspace.loop)
+                self.assertFalse(workspace.mounted)
                 workspace.close()
             self.assertIn(['umount',str(root/'mount')],calls)
             self.assertIn(['losetup','-d','/dev/loop42'],calls)
@@ -39,6 +41,22 @@ class WorkspaceTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'source is unavailable'):workspace.prepare(root/'missing')
             workspace.close()
             self.assertFalse((root/'image').exists())
+
+    def test_failed_unmount_keeps_loop_for_recovery(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);source=root/'source';source.mkdir();calls=[]
+            def run(args,**kwargs):
+                calls.append(args)
+                if args[:2]==['losetup','--find']:
+                    return subprocess.CompletedProcess(args,0,stdout='/dev/loop42\n')
+                if args[0] in ('rsync','umount'):raise subprocess.CalledProcessError(1,args)
+                return subprocess.CompletedProcess(args,0)
+            workspace=SnapshotWorkspace(root/'image',root/'mount',1024,['mkfs'],['btrfs'],['rsync'])
+            with patch('asb_snapshot_workspace.subprocess.run',side_effect=run):
+                with self.assertRaisesRegex(RuntimeError,'cleanup did not settle'):workspace.prepare(source)
+            self.assertTrue(workspace.mounted)
+            self.assertEqual(workspace.loop,'/dev/loop42')
+            self.assertNotIn(['losetup','-d','/dev/loop42'],calls)
 
 
 if __name__=='__main__':unittest.main()

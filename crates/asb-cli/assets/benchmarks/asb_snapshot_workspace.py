@@ -35,8 +35,14 @@ class SnapshotWorkspace:
             subprocess.run(self.rsync + ['-aHAX', str(source)+'/', str(workspace)+'/'], check=True,
                            stdout=subprocess.DEVNULL, timeout=300)
             return workspace
-        except (OSError, subprocess.SubprocessError) as error:
-            raise RuntimeError('snapshot workspace preparation failed; retained image') from error
+        except BaseException as error:
+            try:
+                self.close()
+            except BaseException as cleanup:
+                raise RuntimeError('snapshot workspace preparation failed and cleanup did not settle; retained image') from cleanup
+            if isinstance(error, (OSError, subprocess.SubprocessError)):
+                raise RuntimeError('snapshot workspace preparation failed; retained image') from error
+            raise
 
     def close(self):
         if self.mounted:
