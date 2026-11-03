@@ -23,6 +23,10 @@ printf container > /work/mount/output
 '''
  name='asb-fuse-probe-'+uuid.uuid4().hex
  cmd=['docker','run','--rm','--name',name,'--network','none','--device','/dev/fuse','--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={root},dst=/work','--mount',f'type=bind,src={probe},dst=/probe,readonly','--mount',f'type=bind,src={fusepy},dst=/opt/fuse.py,readonly','--mount',f'type=bind,src={fuse_library},dst=/opt/libfuse.so.2,readonly','--env','PYTHONPATH=/opt','--env','FUSE_LIBRARY_PATH=/opt/libfuse.so.2','--entrypoint','/bin/sh',image,'-c',script]
+ fuse_unmount=os.environ.get('ASB_CONTAINER_FUSERMOUNT')
+ if fuse_unmount:
+  position=cmd.index('--env')
+  cmd[position:position]=['--mount', f'type=bind,src={Path(fuse_unmount).resolve()},dst=/usr/bin/fusermount3,readonly']
  try:
   result=subprocess.run(cmd,capture_output=True,text=True,timeout=30)
  except BaseException:
@@ -30,6 +34,8 @@ printf container > /work/mount/output
   raise
  if result.returncode:
   raise RuntimeError(f'container probe failed: {result.stderr[-500:]}')
+ assert result.stdout == 'original'
+ assert (root/'backing/output').read_text() == 'container'
  print('docker exit:',result.returncode)
  print('stdout:',result.stdout[:200])
  print('stderr:',result.stderr[:500])
@@ -37,6 +43,7 @@ printf container > /work/mount/output
  if not (root/'evidence/events.jsonl').exists(): raise RuntimeError('container produced no operation log')
  if (root/'evidence/events.jsonl').exists():
   events=[json.loads(x) for x in (root/'evidence/events.jsonl').read_text().splitlines()]
+  assert any(e['op']=='write' and e['path']=='/output' for e in events)
   print('recorded operations:',[(e['op'],e['path']) for e in events])
   def replay(index):
    destination=root/f'replay-{index}'

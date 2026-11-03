@@ -62,7 +62,10 @@ fusepy module and image-compatible libfuse2 file. The test mounts `/dev/fuse`
 with `SYS_ADMIN` and an unconfined AppArmor profile; these are fixture-specific
 settings, not a production integration or a requirement for ASB users. On the
 tested host Docker could not bind-mount the user's host FUSE mount, so this
-fixture mounts it inside the container. It does not launch SWE-bench or an agent.
+fixture mounts it inside the container. Set `ASB_CONTAINER_FUSERMOUNT` to an
+image-compatible `fusermount3` when the image does not already contain one.
+The fixture has also passed using the local image for the selected SWE-bench
+trial; it does not launch the SWE-bench harness or an agent.
 
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the
