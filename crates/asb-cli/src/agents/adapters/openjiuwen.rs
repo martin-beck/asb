@@ -181,9 +181,12 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
     if let Some(max_steps) = context.max_steps {
         args.extend(["--asb-max-iterations".into(), max_steps.to_string()]);
     }
-    args.extend(["run".into(), "-f".into(), "stream-json".into(), format!(
-        "{}\n\nDo not use todo/planning tools for this run. Execute the requested work directly and return a final response when complete.", context.prompt
-    )]);
+    args.extend([
+        "run".into(),
+        "-f".into(),
+        "stream-json".into(),
+        context.prompt.into(),
+    ]);
     CommandSpec {
         program: "openjiuwen".into(),
         args,
@@ -588,6 +591,7 @@ for (const request of invalid) {
             native_tool: None,
         });
         assert_eq!(spec.args.first().map(String::as_str), Some("-v"));
+        assert_eq!(spec.args.last().map(String::as_str), Some("repair"));
         assert!(
             spec.args
                 .windows(2)
