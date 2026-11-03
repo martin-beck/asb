@@ -180,6 +180,8 @@ fn prepare_tool_transport(
 const TOOL_TRANSPORT: &str = r#"import hashlib
 import json
 import os
+import socket
+import threading
 from pathlib import Path
 
 from minisweagent.environments.local import LocalEnvironment
@@ -189,6 +191,18 @@ _PATH = Path(os.environ["ASB_MINI_SWE_TOOL_TAPE"])
 _MODE = os.environ["ASB_MINI_SWE_TOOL_MODE"]
 _LIMIT = 128
 _MAX_EFFECT_BYTES = 512 * 1024
+
+
+def _filesystem_marker(action, alias):
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(5)
+            connection.connect(os.environ['ASB_FS_MARKER_SOCKET'])
+            connection.sendall(f'tool-{action}:{alias}:{os.getpid()}:{threading.get_native_id()}\n'.encode('ascii'))
+            with connection.makefile('rb') as response:
+                return response.readline(32).strip().isdigit()
+    except (OSError, UnicodeError):
+        return False
 
 
 class AsbTapeEnvironment(LocalEnvironment):
@@ -312,6 +326,24 @@ class AsbTapeEnvironment(LocalEnvironment):
     def execute(self, action, cwd="", *, timeout=None):
         command = action.get("command", "")
         if _MODE == "record":
+            if os.environ.get('ASB_FS_MARKER_SOCKET'):
+                # The operation journal owns filesystem effects in this
+                # experimental mode. Do not substitute workspace snapshots.
+                alias = f'mini-swe-{len(self._entries) + 1}'
+                began = _filesystem_marker('begin', alias)
+                try:
+                    try:
+                        output = super().execute(action, cwd, timeout=timeout)
+                    except Submitted as submitted:
+                        output = {'submitted': list(submitted.messages)}
+                        raise
+                finally:
+                    ended = _filesystem_marker('end', alias)
+                    if not began or not ended:
+                        self._record_failure(command, 'Mini-SWE filesystem operation boundary is unavailable')
+                    elif 'output' in locals():
+                        self._record(command, output, [])
+                return output
             root = self._root(cwd)
             before = self._snapshot(root)
             try:
@@ -349,6 +381,7 @@ class AsbTapeEnvironment(LocalEnvironment):
                 or failure not in {
                     "Mini-SWE local tool changed a non-text workspace file",
                     "Mini-SWE local tool workspace effects exceed the bounded replay limit",
+                    "Mini-SWE filesystem operation boundary is unavailable",
                 }
                 or entry.get("result") is not None
                 or entry.get("effects")
