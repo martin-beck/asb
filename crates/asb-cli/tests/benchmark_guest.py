@@ -99,6 +99,24 @@ class GuestBootstrapTests(unittest.TestCase):
             self.assertEqual(exported.read_bytes(),payload)
             self.assertEqual(exported.stat().st_mode & 0o777,0o600)
 
+    def test_filesystem_artifact_export_accepts_pax_size_header(self):
+        payload = b"filesystem capture"
+        class PaxContainer:
+            def get_archive(self, source, chunk_size=65536, encode_stream=False):
+                archive = io.BytesIO()
+                with tarfile.open(fileobj=archive, mode="w", format=tarfile.PAX_FORMAT) as outgoing:
+                    member = tarfile.TarInfo("artifact-0")
+                    member.size = len(payload)
+                    member.pax_headers = {"size":str(len(payload))}
+                    outgoing.addfile(member, io.BytesIO(payload))
+                return iter([archive.getvalue()]), {"name":"artifact-0", "linkTarget":""}
+        with tempfile.TemporaryDirectory() as directory:
+            task = SimpleNamespace(workspace=SimpleNamespace(container=PaxContainer()))
+            receipt = {"kind":"aux-fs-payload", "filename":"artifact-0", "bytes":len(payload),
+                       "sha256":hashlib.sha256(payload).hexdigest()}
+            export_agent_artifacts(task, directory, [receipt])
+            self.assertEqual((Path(directory) / "artifact-0").read_bytes(), payload)
+
     def test_guest_artifact_export_streams_fragmented_archive_without_spooling(self):
         payload = b'\x00\xffpayload' * 10000
         class FragmentedContainer:
