@@ -175,16 +175,16 @@ untracked or out-of-workspace effects, or support for all native tools.
 
 `python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` checks that
 overlapping terminal calls produce a readable sidecar without serializing
-their execution. The test does not qualify parallel replay or its ordering.
-It forces the second invocation to finish first, checks invocation-order
-framing, and demonstrates that reversed replay arrival is still rejected.
+their execution. It forces the second invocation to finish first, replays the
+two in either arrival order, and rejects advancing a later dependent call.
+It does not qualify filesystem effects or general parallel replay ordering.
 The cassette validator already allows multiple aliases under one launch and
 tracks each alias's poll/write/output/exit lifecycle independently. This makes
-one alias per invocation a possible format for overlapping calls. The Hermes
-reader currently accepts only one alias, however, and the alias alone does not
+one alias per invocation the format used by the draft Hermes recorder. Its
+replayer derives completion-before-start dependencies, but this alone does not
 reconstruct completion ordering, filesystem effects, or distinguish repeated
-identical calls. The implementation must address those cases, validate with
-the actual cassette reader, and retain legacy single-alias recordings.
+identical calls. Those cases still need qualification with the cassette reader;
+legacy single-alias recordings must remain readable.
 
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the

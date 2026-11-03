@@ -50,25 +50,48 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     threads[1].start()
     for thread in threads:
         thread.join()
+    recorder.invoke(lambda *args: 'later', '2', False, None, None, None,
+                    False, '.', False, False, None)
     recorder.close()
     assert not failures, failures
     assert json.loads((directory / 'progress.json').read_text())['complete']
     rows = [json.loads(line) for line in (directory / 'native.jsonl').read_text().splitlines()]
     requests = [json.loads(base64.b64decode(row['request_b64']))['command']
                 for row in rows if row['event'] == 'write']
-    assert requests == ['0', '1']
+    assert requests == ['0', '1', '2']
     replay = namespace['Replayer']()
-    for request in requests:
+    for request in requests[:2]:
         assert replay.invoke(None, request, False, None, None, None,
                              False, '.', False, False, None) == 'ok'
+    assert replay.invoke(None, '2', False, None, None, None,
+                         False, '.', False, False, None) == 'later'
     replay.close()
     assert json.loads((directory / 'progress.json').read_text())['complete']
     reversed_replay = namespace['Replayer']()
-    response = reversed_replay.invoke(None, '1', False, None, None, None,
-                                      False, '.', False, False, None)
-    assert json.loads(response)['asb_native_mismatch'] == 'command'
+    for request in ('1', '0'):
+        assert reversed_replay.invoke(None, request, False, None, None, None,
+                                      False, '.', False, False, None) == 'ok'
+    assert reversed_replay.invoke(None, '2', False, None, None, None,
+                                  False, '.', False, False, None) == 'later'
     reversed_replay.close()
+    assert json.loads((directory / 'progress.json').read_text())['complete']
+    wrong_order = namespace['Replayer']()
+    response = wrong_order.invoke(None, '2', False, None, None, None,
+                                  False, '.', False, False, None)
+    assert json.loads(response)['asb_native_mismatch'] == 'sequence'
+    wrong_order.close()
     assert not json.loads((directory / 'progress.json').read_text())['complete']
+    rows = [json.loads(line) for line in (directory / 'native.jsonl').read_text().splitlines()]
+    next(row for row in rows if row['event'] == 'output')['response_sha256'] = '0' * 64
+    corrupt = directory / 'corrupt.jsonl'
+    corrupt.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    namespace['SIDECAR'] = corrupt
+    try:
+        namespace['Replayer']()
+    except RuntimeError as error:
+        assert 'digest' in str(error)
+    else:
+        raise AssertionError('mutated parallel sidecar was accepted')
     namespace['SIDECAR'] = directory / 'failed.jsonl'
     namespace['PROGRESS'] = directory / 'failed-progress.json'
     failing = namespace['Recorder']()
