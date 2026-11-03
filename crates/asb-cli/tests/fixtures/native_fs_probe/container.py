@@ -144,7 +144,7 @@ fi
     tool_names=json.loads((root/'mock-record/tool-names.json').read_text())
     assert {'terminal','read_file','write_file','patch'} <= set(tool_names), tool_names
    expected_calls=(1 if mixed else 0) if native_files else (1 if agent_fixture else 2)
-   if native_files: assert len((root/'control/files.jsonl').read_text().splitlines())==3
+   if native_files: assert len((root/'control/files.jsonl').read_text().splitlines())==(4 if mixed else 3)
    assert sum(event['event']=='write' for event in native)==expected_calls
    assert sum(event['event']=='output' for event in native)==expected_calls
    assert json.loads((root/'control/record-progress.json').read_text())['complete']
@@ -169,7 +169,7 @@ fi
     try:
      connection,_=listener.accept()
      with connection, connection.makefile('rwb',buffering=0) as stream:
-      names=(('write','read','patch','terminal') if mixed else ('write','read','patch')) if native_files else (('one',) if agent_fixture else ('one','two'))
+      names=(('write','read','patch','search','terminal') if mixed else ('write','read','patch')) if native_files else (('one',) if agent_fixture else ('one','two'))
       for name in names:
        assert stream.readline().decode().strip()=='tool-end:'+name
        cursor.admit(name)
@@ -178,7 +178,7 @@ fi
         diff=subprocess.run(['git','-C',str(destination),'diff','--name-only'],capture_output=True,text=True,check=True,env=dict(os.environ,GIT_OPTIONAL_LOCKS='0'))
         assert diff.stdout.strip()
        elif native_files:
-        assert (destination/'asb-real-agent.txt').read_text()==('fixture' if name in ('patch','terminal') else 'before')
+        assert (destination/'asb-real-agent.txt').read_text()==('fixture' if name in ('patch','search','terminal') else 'before')
         if mixed: assert (destination/'mixed-marker').exists()==(name=='terminal')
        elif agent_fixture:
         assert (destination/'asb-real-agent.txt').read_text()=='fixture'
@@ -245,7 +245,7 @@ fi
     progress=json.loads((root/f'control/replay-{index}.json').read_text())
     assert progress['complete'] and progress['invocations']==expected_calls
     if native_files:
-     assert (root/f'control/files-progress-{index}').read_text()=='3'
+     assert (root/f'control/files-progress-{index}').read_text()==('4' if mixed else '3')
     if agent_fixture:
      tape_progress=json.loads((root/f'control/llm-replay-{index}.jsonl.progress.json').read_text())
      assert tape_progress['consumed']==tape_progress['total'] and tape_progress['total']>0

@@ -61,7 +61,7 @@ if os.environ.get('ASB_FIXTURE_NATIVE_FILES') == '1':
             _fixture_exchange('tool-end:' + marker)
             return event['output']
         return wrapped
-    for _fixture_tool, _fixture_marker in (('write_file','write'),('read_file','read'),('patch','patch')):
+    for _fixture_tool, _fixture_marker in (('write_file','write'),('read_file','read'),('patch','patch'),('search_files','search')):
         _fixture_entry = _fixture_registry._tools[_fixture_tool]
         _fixture_entry.handler = _fixture_wrap_file_tool(_fixture_tool, _fixture_marker, _fixture_entry.handler)
     @atexit.register
