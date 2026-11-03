@@ -94,6 +94,13 @@ and record and replay use consistent user environments, so generated prompts
 match. The current sidecar restricts Hermes to the terminal toolset, so this is
 not unrestricted agent qualification, a SWE-bench task, or production
 integration. The 30-minute timeout covers only the actual Hermes CLI command.
+For an additional experimental variant, set
+`ASB_HERMES_UNRESTRICTED_FIXTURE=1`. The test modifies only its private copy of
+the sidecar hook to preserve upstream core tools and omits the terminal-only CLI
+option. Its local provider verifies that terminal, read, write and patch tools
+are offered; the scripted task actually invokes only terminal. One recording
+and four tape-backed replays pass, but the other advertised tools, arbitrary
+agent behavior and effects outside the mounted workspace are not qualified.
 
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the

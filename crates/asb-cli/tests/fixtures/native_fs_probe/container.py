@@ -7,6 +7,7 @@ fusepy=Path(os.environ['ASB_FUSEPY_MODULE']).resolve()
 fuse_library=Path(os.environ['ASB_CONTAINER_FUSE_LIBRARY']).resolve()
 image=os.environ['ASB_FUSE_TEST_IMAGE']
 agent_fixture=os.environ.get('ASB_HERMES_AGENT_FIXTURE')=='1'
+unrestricted=os.environ.get('ASB_HERMES_UNRESTRICTED_FIXTURE')=='1'
 node=Path(os.environ['ASB_FIXTURE_NODE']).resolve() if agent_fixture else None
 with tempfile.TemporaryDirectory(dir=base) as tmp, tempfile.TemporaryDirectory(dir=base.parents[2],prefix='asb-s-') as sockets:
  root=Path(tmp)
@@ -18,6 +19,12 @@ with tempfile.TemporaryDirectory(dir=base) as tmp, tempfile.TemporaryDirectory(d
  (root/'hooks').mkdir(mode=0o700)
  shutil.copyfile(probe.parents[2]/'assets/scripts/hermes-native-tools.py',root/'hooks/sitecustomize.py')
  if agent_fixture:
+  if unrestricted:
+   hook_path=root/'hooks/sitecustomize.py'
+   hook_source=hook_path.read_text()
+   restriction='toolsets._HERMES_CORE_TOOLS[:] = ["terminal"]'
+   assert hook_source.count(restriction)==1
+   hook_path.write_text(hook_source.replace(restriction,'pass  # fixture preserves upstream tools'))
   with (root/'hooks/sitecustomize.py').open('a') as hook:
    hook.write('\n'+(probe/'hermes_agent_boundary.py').read_text())
   (root/'mock-record').mkdir(mode=0o700)
@@ -46,10 +53,15 @@ fi
   position=cmd.index('--env')
   cmd[position:position]=['--mount', f'type=bind,src={Path(fuse_unmount).resolve()},dst=/usr/bin/fusermount3,readonly']
  hermes_install=os.environ.get('ASB_HERMES_TEST_INSTALL')
+ if unrestricted and not agent_fixture: raise RuntimeError('unrestricted fixture requires agent fixture')
+ if unrestricted:
+  position=cmd.index('--env')
+  cmd[position:position]=['--env','ASB_FIXTURE_UNRESTRICTED=1']
  if agent_fixture and not hermes_install: raise RuntimeError('agent fixture requires ASB_HERMES_TEST_INSTALL')
  if agent_fixture:
   position=cmd.index('--env')
-  cmd[position:position]=['--env','ASB_FIXTURE_AGENT=1','--mount',f'type=bind,src={probe.parents[1]/"guest_provider_fixture.py"},dst=/provider.py,readonly',
+  cmd[position:position]=['--env','ASB_FIXTURE_AGENT=1','--mount',f'type=bind,src={probe.parents[1]/"guest_provider_fixture.py"},dst=/provider-base.py,readonly',
+                          '--mount',f'type=bind,src={probe/"hermes_provider_catalog.py"},dst=/provider.py,readonly',
                           '--mount',f'type=bind,src={node},dst=/asb-node,readonly',
                           '--mount',f'type=bind,src={probe.parents[2]/"assets/scripts"},dst=/asb-scripts,readonly']
  if hermes_install:
@@ -86,6 +98,9 @@ fi
    expected_files=('asb-real-agent.txt',) if agent_fixture else ('first','second')
    assert all(any(e['op']=='write' and e['path']=='/'+name for e in events) for name in expected_files)
    native=[json.loads(line) for line in (root/'control/native.jsonl').read_text().splitlines()]
+   if unrestricted:
+    tool_names=json.loads((root/'mock-record/tool-names.json').read_text())
+    assert {'terminal','read_file','write_file','patch'} <= set(tool_names), tool_names
    expected_calls=1 if agent_fixture else 2
    assert sum(event['event']=='write' for event in native)==expected_calls
    assert sum(event['event']=='output' for event in native)==expected_calls
@@ -147,13 +162,17 @@ fi
                '--entrypoint','/asb-hermes/venv/bin/python',image,'/probe/hermes_real_terminal.py']
    if not agent_fixture:
     replay_cmd[2:2]=['--user',f'{os.getuid()}:{os.getgid()}']
+   if unrestricted:
+    position=replay_cmd.index('--env')
+    replay_cmd[position:position]=['--env','ASB_FIXTURE_UNRESTRICTED=1']
    if agent_fixture:
     position=replay_cmd.index('--entrypoint')
     replay_cmd[position:]=['--env','ASB_FIXTURE_AGENT_BOUNDARY=1','--env',f'ASB_FIXTURE_MOCK_DIR=/work/{replay_mock.name}',
                            '--env',f'ASB_FIXTURE_LLM_CASSETTE=/work/control/llm-replay-{index}.jsonl',
                            '--mount',f'type=bind,src={node},dst=/asb-node,readonly',
                            '--mount',f'type=bind,src={probe.parents[2]/"assets/scripts"},dst=/asb-scripts,readonly',
-                           '--mount',f'type=bind,src={probe.parents[1]/"guest_provider_fixture.py"},dst=/provider.py,readonly',
+                           '--mount',f'type=bind,src={probe.parents[1]/"guest_provider_fixture.py"},dst=/provider-base.py,readonly',
+                           '--mount',f'type=bind,src={probe/"hermes_provider_catalog.py"},dst=/provider.py,readonly',
                            '--entrypoint','/bin/sh',image,'-c',
                            f'exec setpriv --reuid {os.getuid()} --regid {os.getgid()} --clear-groups /bin/sh /probe/hermes_agent_fixture.sh']
    try:

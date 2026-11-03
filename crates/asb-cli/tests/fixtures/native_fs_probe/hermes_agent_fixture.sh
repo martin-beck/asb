@@ -8,7 +8,7 @@ cleanup() {
 }
 trap cleanup EXIT
 if [ "$ASB_HERMES_NATIVE_MODE" = record ]; then
-  /usr/bin/python3 -S /provider.py "$ASB_FIXTURE_MOCK_DIR" > "$ASB_FIXTURE_MOCK_DIR/server.log" 2>&1 &
+  /usr/bin/python3 -B -S /provider.py "$ASB_FIXTURE_MOCK_DIR" > "$ASB_FIXTURE_MOCK_DIR/server.log" 2>&1 &
   server=$!
   n=0
   while [ ! -f "$ASB_FIXTURE_MOCK_DIR/port" ]; do
@@ -27,9 +27,10 @@ done
 port=$(/usr/bin/python3 -S -c 'import json,sys; print(json.load(open(sys.argv[1]))["port"])' "$ASB_FIXTURE_MOCK_DIR/tape-ready.json")
 export OPENAI_API_KEY=fixture-token
 export OPENAI_BASE_URL="http://127.0.0.1:$port/v1"
+set -- -z 'Create the requested fixture file.' --provider openai-api --model fixture-model
+if [ "${ASB_FIXTURE_UNRESTRICTED:-0}" != 1 ]; then set -- "$@" --toolsets terminal; fi
 timeout 1800 /asb-hermes/venv/bin/python -c 'import sys; from hermes_cli.main import main; sys.exit(main())' \
-  -z 'Create the requested fixture file.' --provider openai-api --model fixture-model --toolsets terminal \
-  --usage-file "$ASB_FIXTURE_MOCK_DIR/usage.json" > "$ASB_FIXTURE_MOCK_DIR/agent.log" 2>&1
+  "$@" --usage-file "$ASB_FIXTURE_MOCK_DIR/usage.json" > "$ASB_FIXTURE_MOCK_DIR/agent.log" 2>&1
 test "$(cat asb-real-agent.txt)" = fixture
 if [ "$ASB_HERMES_NATIVE_MODE" = record ]; then
   test -f /tmp/asb-native-agent-executed
