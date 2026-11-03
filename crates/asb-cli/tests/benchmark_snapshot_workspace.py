@@ -15,6 +15,24 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class WorkspaceTest(unittest.TestCase):
+    def test_loop_allocation_retries_busy_without_detaching_another_owner(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);source=root/'source';source.mkdir();calls=[]
+            def run(args,**kwargs):
+                calls.append(args)
+                if args[:2] == ['losetup','/dev/loop42']:
+                    raise subprocess.CalledProcessError(1,args,stderr=b'Device or resource busy')
+                return subprocess.CompletedProcess(args,0)
+            workspace=SnapshotWorkspace(root/'image',root/'mount',1024,['mkfs'],['btrfs'],['rsync'])
+            with patch('asb_snapshot_workspace.subprocess.run',side_effect=run), \
+                 patch('builtins.open',unittest.mock.mock_open()), \
+                 patch('asb_snapshot_workspace.fcntl.ioctl',side_effect=[42,43]), \
+                 patch('asb_snapshot_workspace.os.mknod'):
+                workspace.prepare(source)
+                workspace.close()
+            self.assertIn(['losetup','-d','/dev/loop43'],calls)
+            self.assertNotIn(['losetup','-d','/dev/loop42'],calls)
+
     def test_failed_copy_can_detach_owned_resources(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);source=root/'source';source.mkdir();calls=[]
