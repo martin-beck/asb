@@ -727,6 +727,11 @@ pub(crate) fn launch(
         .arg("--artifacts")
         .arg(&artifacts)
         .env("PYTHONDONTWRITEBYTECODE", "1");
+    if context.filesystem_recording {
+        command.env("ASB_EXPERIMENTAL_FILESYSTEM_RECORDING", "1");
+    } else {
+        command.env_remove("ASB_EXPERIMENTAL_FILESYSTEM_RECORDING");
+    }
     crate::project::apply_network_proxy(&mut command, project_root)
         .map_err(|error| error.to_string())?;
     let mut controller = Controller::spawn(&mut command)?;

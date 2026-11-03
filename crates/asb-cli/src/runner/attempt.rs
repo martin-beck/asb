@@ -14,6 +14,7 @@ struct Context<'a> {
     tape_cassette: Option<(tape::Mode, PathBuf)>,
     tool_tape_cassette: Option<(tape::Mode, PathBuf)>,
     mcp_tape_cassette: Option<(tape::Mode, PathBuf)>,
+    filesystem_recording: bool,
     network: Option<project::NetworkProjectGuard>,
 }
 
@@ -91,6 +92,14 @@ impl<'a> ConfiguredAttempt<'a> {
             &project_root,
             options.invocation_dir.unwrap_or_else(|| Path::new(".")),
         );
+        let filesystem_recording = std::env::var_os("ASB_EXPERIMENTAL_FILESYSTEM_RECORDING")
+            .as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+            && tool_mode == Some(tape::Mode::Record)
+            && matches!(
+                config.workload.as_str(),
+                "swe-bench" | "swe-bench-lite" | "swe-bench-verified"
+            );
         let context = Context {
             config_path: config_path.into(),
             publication_config,
@@ -103,6 +112,7 @@ impl<'a> ConfiguredAttempt<'a> {
             tape_cassette,
             tool_tape_cassette,
             mcp_tape_cassette,
+            filesystem_recording,
             network: Some(network),
         };
         let config = &context.config;
@@ -509,6 +519,7 @@ impl<'a> ReadyAttempt<'a> {
                 let workload = workloads::prepare_task(&workloads::PreparationContext {
                     verify_initial_material: options.preparation_gate.is_some()
                         || options.verify_initial_material,
+                    filesystem_recording: context.filesystem_recording,
                     budgets: policy.budgets,
                     on_allocation: Some(&allocation),
                     workload: &config.workload,
@@ -849,7 +860,7 @@ impl<'a> ReadyAttempt<'a> {
             let isolated = prepared.workload.execute(
                 &mut workloads::ExecutionContext {
                     launch,
-                    filesystem_recording: false,
+                    filesystem_recording: context.filesystem_recording,
                     auxiliary_endpoints: &auxiliary_endpoints,
                     config,
                     connection: connection.as_ref(),

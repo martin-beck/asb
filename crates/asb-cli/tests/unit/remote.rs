@@ -303,6 +303,7 @@ fn launch_validates_preparation_before_exposing_a_session_and_preserves_on_failu
     let workspace = fixture.root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let context = PreparationContext {
+        filesystem_recording: false,
         verify_initial_material: false,
         budgets: Default::default(),
         on_allocation: None,
@@ -490,6 +491,7 @@ fn launch_validates_preparation_before_exposing_a_session_and_preserves_on_failu
         assert!(!error.contains("cancellation cleanup failed"), "{error}");
     }
     let no_trial = PreparationContext {
+        filesystem_recording: false,
         trial: None,
         ..context
     };

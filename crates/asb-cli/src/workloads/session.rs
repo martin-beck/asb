@@ -101,6 +101,7 @@ impl TaskIdentity {
 
 pub(crate) struct PreparationContext<'a> {
     pub verify_initial_material: bool,
+    pub filesystem_recording: bool,
     pub budgets: crate::planning::PhaseBudgets,
     pub on_allocation: Option<&'a super::recovery::AllocationObserver<'a>>,
     pub workload: &'a str,
@@ -733,6 +734,7 @@ mod tests {
         std::fs::write(root.join("fixture.py"), "original material").unwrap();
         let project = crate::project::ProjectConfig::default();
         let context = PreparationContext {
+            filesystem_recording: false,
             verify_initial_material: true,
             budgets: Default::default(),
             on_allocation: None,
@@ -769,6 +771,7 @@ mod tests {
             ..Default::default()
         };
         let context = super::PreparationContext {
+            filesystem_recording: false,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,
@@ -887,6 +890,7 @@ mod tests {
         std::fs::create_dir_all(&workloads).unwrap();
         super::super::populate(&workloads).unwrap();
         let mut session = super::super::prepare_task(&PreparationContext {
+            filesystem_recording: false,
             verify_initial_material: true,
             budgets: Default::default(),
             on_allocation: None,
@@ -915,6 +919,7 @@ mod tests {
         assert_eq!(session.baseline_passed(), Some(false));
         assert_eq!(session.initial_material_sha256().unwrap(), initial_material);
         let later = super::super::prepare_task(&PreparationContext {
+            filesystem_recording: false,
             verify_initial_material: true,
             budgets: Default::default(),
             on_allocation: None,
@@ -944,6 +949,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            filesystem_recording: false,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,
@@ -983,6 +989,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            filesystem_recording: false,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,
@@ -1019,6 +1026,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            filesystem_recording: false,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,
