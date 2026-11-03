@@ -130,3 +130,13 @@ instructions. Consequently this experiment does not provide the required
 interception-based playback that returns recorded tool results without launching
 recorded tools. It also does not replace the existing LLM and MCP proxies.
 Do not promote a successful VM trace into a claim of complete native-tool replay.
+
+## Experimental snapshot mount visibility
+
+The snapshot supervisor keeps its storage in its own container mount namespace.
+The guest driver enters a private mount namespace and detaches the internal
+storage mount before starting the agent. The task workspace remains available
+through its separate bind mount, and the supervisor retains its original mount.
+This avoids exposing snapshot copies to agent commands such as `find /`.
+This is bookkeeping isolation, not a sandbox or a guarantee of native tool
+replay; the tool interception and snapshot-ordering gaps above still apply.
