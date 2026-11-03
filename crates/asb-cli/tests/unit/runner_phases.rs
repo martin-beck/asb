@@ -162,6 +162,7 @@ fn prepared(
             }),
             measurements,
             tape: None,
+            auxiliary_tapes: Default::default(),
             capsule_record: None,
             capsule_replay: None,
             guest_capsule_record: None,
@@ -1046,6 +1047,208 @@ fn recording_identity(result: &RunResult<'_>) -> crate::cassette::Compatibility 
 }
 
 #[test]
+fn auxiliary_recording_survives_track_publication_and_four_replay_sessions() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    let fixture = Fixture::new();
+    let campaign = fixture.0.canonicalize().unwrap().join("campaign-aux-four");
+    std::fs::create_dir_all(campaign.join("batch-1")).unwrap();
+    let destination =
+        super::super::recording::preflight(&fixture.0.join("aux-four.asb.zip")).unwrap();
+    let recorder = super::super::recording::Recorder::new(
+        destination.clone(),
+        campaign.clone(),
+        "campaign-aux-four".into(),
+        1,
+        1,
+        None,
+    );
+    let result = result();
+    recorder
+        .prepare(&recording_identity(&result), 1, &[1])
+        .unwrap();
+    let primary = super::super::recording::base(&campaign, 1);
+    std::fs::write(&primary, b"{}\n").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut header = Vec::new();
+        let mut byte = [0];
+        while !header.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+        }
+        let headers = String::from_utf8(header).unwrap();
+        let length: usize = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse().unwrap())
+            })
+            .unwrap();
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).unwrap();
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}").unwrap();
+    });
+    let request = |endpoint: &str| {
+        let address = endpoint
+            .trim_start_matches("http://")
+            .trim_end_matches("/v1");
+        let mut socket = TcpStream::connect(address).unwrap();
+        let body = r#"{"model":"embedding","input":["fixture"]}"#;
+        write!(socket, "POST /v1/embeddings HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        assert!(response.contains("200 OK"));
+    };
+    let mut sessions = tape::AuxiliarySessions::default();
+    let raw = campaign.join("batch-1/embedding.jsonl");
+    sessions
+        .start(
+            "embedding",
+            tape::Mode::Record,
+            &raw,
+            Some(&upstream),
+            false,
+            tape::AgentContext {
+                workspace: &fixture.0,
+                agent: None,
+                recorder: None,
+                invocation_dir: &fixture.0,
+            },
+        )
+        .unwrap();
+    request(&sessions.endpoints()["embedding"]);
+    server.join().unwrap();
+    let primary_capture = crate::proxy::capture::CaptureEvidence {
+        adapter: "llmtape".into(),
+        output: primary.clone(),
+        complete: true,
+        accepted: 1,
+        completed: 1,
+        failed: 0,
+        recorded: 1,
+        inference_requests: 1,
+        bytes: 3,
+        sha256: crate::cassette::digest(b"{}\n"),
+    };
+    let mut evidence = crate::proxy::Evidence {
+        captures: vec![primary_capture],
+        auxiliary_captures: Vec::new(),
+        auxiliary_complete: true,
+        output_files: vec![primary],
+        cleanup_confirmed: true,
+    };
+    sessions.finish(&mut evidence).unwrap();
+    recorder
+        .commit(1, replica::Identity::default(), &result, &evidence)
+        .unwrap();
+    recorder.finalize(true).unwrap().unwrap();
+    let mut archive =
+        crate::cassette::Archive::open(&destination, crate::cassette::Limits::default()).unwrap();
+    let replay_file = campaign.join("selected-embedding.jsonl");
+    let mut output = std::fs::File::create(&replay_file).unwrap();
+    archive
+        .copy_artifact_to(1, "aux-http-embedding", &mut output)
+        .unwrap();
+    drop(output);
+    drop(archive);
+    let mut replay = tape::AuxiliarySessions::default();
+    for name in ["replica1", "replica2", "replica3", "replica4"] {
+        replay
+            .start(
+                name,
+                tape::Mode::Replay,
+                &replay_file,
+                None,
+                false,
+                tape::AgentContext {
+                    workspace: &fixture.0,
+                    agent: None,
+                    recorder: None,
+                    invocation_dir: &fixture.0,
+                },
+            )
+            .unwrap();
+    }
+    let endpoints = replay.endpoints();
+    std::thread::scope(|scope| {
+        for endpoint in endpoints.values() {
+            scope.spawn(|| request(endpoint));
+        }
+    });
+    let mut replay_evidence = crate::proxy::Evidence {
+        captures: Vec::new(),
+        auxiliary_captures: Vec::new(),
+        auxiliary_complete: true,
+        output_files: Vec::new(),
+        cleanup_confirmed: true,
+    };
+    replay.finish(&mut replay_evidence).unwrap();
+    assert!(replay_evidence.auxiliary_complete && replay_evidence.cleanup_confirmed);
+}
+
+#[test]
+fn finalized_auxiliary_capture_is_streamed_into_its_recorded_track() {
+    let fixture = Fixture::new();
+    let campaign = fixture.0.canonicalize().unwrap().join("campaign-aux");
+    std::fs::create_dir_all(campaign.join("batch-1")).unwrap();
+    let destination = super::super::recording::preflight(&fixture.0.join("aux.asb.zip")).unwrap();
+    let recorder = super::super::recording::Recorder::new(
+        destination.clone(),
+        campaign.clone(),
+        "campaign-aux".into(),
+        1,
+        1,
+        None,
+    );
+    let result = result();
+    recorder
+        .prepare(&recording_identity(&result), 1, &[1])
+        .unwrap();
+    let primary = super::super::recording::base(&campaign, 1);
+    let auxiliary = campaign.join("batch-1/embedding.jsonl");
+    std::fs::write(&primary, b"{}\n").unwrap();
+    std::fs::write(&auxiliary, b"{\"embedding\":true}\n").unwrap();
+    let capture =
+        |output: PathBuf, payload: &[u8], inference| crate::proxy::capture::CaptureEvidence {
+            adapter: "llmtape".into(),
+            output,
+            complete: true,
+            accepted: 1,
+            completed: 1,
+            failed: 0,
+            recorded: 1,
+            inference_requests: inference,
+            bytes: payload.len() as u64,
+            sha256: crate::cassette::digest(payload),
+        };
+    let proxy = crate::proxy::Evidence {
+        captures: vec![capture(primary.clone(), b"{}\n", 1)],
+        auxiliary_captures: vec![crate::proxy::AuxiliaryCapture {
+            kind: "aux-http-embedding".into(),
+            capture: capture(auxiliary, b"{\"embedding\":true}\n", 0),
+        }],
+        output_files: vec![primary],
+        auxiliary_complete: true,
+        cleanup_confirmed: true,
+    };
+    let evidence = recorder
+        .commit(1, replica::Identity::default(), &result, &proxy)
+        .unwrap();
+    assert_eq!(evidence.track.track.artifacts[0].kind, "aux-http-embedding");
+    recorder.finalize(true).unwrap().unwrap();
+    let mut archive =
+        crate::cassette::Archive::open(&destination, crate::cassette::Limits::default()).unwrap();
+    assert_eq!(
+        archive.read_artifact(1, "aux-http-embedding").unwrap(),
+        b"{\"embedding\":true}\n"
+    );
+}
+
+#[test]
 fn recording_association_binds_actual_attempt_and_preserves_uncertain_raw_capture() {
     let fixture = Fixture::new();
     let campaign = fixture.0.canonicalize().unwrap().join("campaign-1");
@@ -1079,6 +1282,8 @@ fn recording_association_binds_actual_attempt_and_preserves_uncertain_raw_captur
     };
     let proxy = crate::proxy::Evidence {
         captures: vec![capture.clone()],
+        auxiliary_captures: Vec::new(),
+        auxiliary_complete: true,
         output_files: vec![producer.clone()],
         cleanup_confirmed: false,
     };
@@ -1217,6 +1422,7 @@ fn result() -> RunResult<'static> {
         local_tool_transcript: None,
         deterministic_manifest: None,
         sealed_artifacts: Vec::new(),
+        sealed_file_artifacts: Vec::new(),
         cassette: None,
         measurement_directory: None,
         stdout: "submission".into(),
@@ -1529,6 +1735,8 @@ fn missing_fixture_grade_reports_settled_agent_and_proxy_evidence() {
     };
     let proxy = crate::proxy::Evidence {
         captures: Vec::new(),
+        auxiliary_captures: Vec::new(),
+        auxiliary_complete: true,
         output_files: Vec::new(),
         cleanup_confirmed: false,
     };

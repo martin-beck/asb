@@ -30,6 +30,18 @@ class ForeignMembers(dict):
 
 
 class DirectTests(unittest.TestCase):
+    def test_filesystem_capture_profile_is_declared_and_other_mount_profiles_are_unavailable(self):
+        task, _, options = self.fixture()
+        options.update(devices=['/dev/fuse:/dev/fuse:rwm'], cap_add=['SYS_ADMIN'],
+                       security_opt=['apparmor=unconfined'])
+        receipt = declare(options,task.journal.record)
+        self.assertTrue(receipt['available'])
+        self.assertIs(receipt['services']['main']['filesystem_capture'],True)
+        for key in ('devices','cap_add','security_opt'):
+            changed = copy.deepcopy(options)
+            changed.pop(key)
+            self.assertFalse(declare(changed,task.journal.record)['available'])
+
     def fixture(self,mode=None):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

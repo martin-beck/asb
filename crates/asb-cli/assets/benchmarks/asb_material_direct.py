@@ -9,9 +9,14 @@ def declare(options, record):
     identity = {key:record[key] for key in ["attempt","daemon","token"]}
     try:
         allowed = {"image","name","command","detach","working_dir","labels",
-            "mem_limit","nano_cpus","pids_limit","hostname","mac_address","network_mode"}
+            "mem_limit","nano_cpus","pids_limit","hostname","mac_address","network_mode",
+            "devices","cap_add","security_opt"}
         if not isinstance(options,dict) or set(options)-allowed or options.get("detach") is not True:
             raise MaterialError("direct container creation profile is unsupported")
+        mount_options = {key:options[key] for key in ("devices","cap_add","security_opt") if key in options}
+        if mount_options not in ({}, {"devices":["/dev/fuse:/dev/fuse:rwm"],
+                "cap_add":["SYS_ADMIN"], "security_opt":["apparmor=unconfined"]}):
+            raise MaterialError("direct container filesystem capture profile is unsupported")
         mode = options.get("network_mode")
         if mode not in [None,"default","bridge","none"]:
             raise MaterialError("direct container network profile is unsupported")
@@ -21,6 +26,8 @@ def declare(options, record):
         value = services({"services":{"main":service}},record)
         if value["available"] is not True:
             raise MaterialError("direct container role declaration is unavailable")
+        if mount_options:
+            value["services"]["main"]["filesystem_capture"] = True
         # Exact creation bytes are private provenance only. Their physical names,
         # labels and image references must never become baseline identity.
         value["creation_sha256"] = canonical_digest(copy.deepcopy(options),"asb-private-direct-create-v1")

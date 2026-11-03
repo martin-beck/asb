@@ -361,9 +361,13 @@ def forward_request(request, start_relay):
     except (TypeError, ValueError):
         raise ExecutionError("invalid guest project configuration") from None
     connection = request.get("request", {}).get("connection") or {}
+    auxiliary = request.get("request", {}).get("auxiliary_endpoints", {})
+    if not isinstance(auxiliary, dict) or any(not isinstance(value, str) for value in auxiliary.values()):
+        raise ExecutionError("invalid auxiliary endpoint mapping")
     environment = request.setdefault("environment", {})
     proxy = project.get("proxy", {})
     fields = [(connection, "base_url")]
+    fields += [(auxiliary, key) for key in auxiliary]
     fields += [(environment, key) for key in PROXY_NAMES]
     fields += [(proxy, key) for key in ("http", "https", "socks")]
     targets, selections = [], []

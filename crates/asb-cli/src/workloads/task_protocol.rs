@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::Path;
 
 const DEFAULT_AGENT_TIMEOUT_SECONDS: f64 = 900.0;
@@ -271,6 +272,7 @@ fn import_guest_artifacts(
     let mut names = BTreeSet::new();
     let mut total = 0u64;
     for receipt in &metadata.exported_artifacts {
+        let file_backed = matches!(receipt.kind.as_str(), "aux-fs-events" | "aux-fs-payload");
         let valid_kind = !receipt.kind.is_empty()
             && receipt.kind.len() <= 128
             && receipt
@@ -286,13 +288,20 @@ fn import_guest_artifacts(
                 .sha256
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-        total = total
-            .checked_add(receipt.bytes)
-            .ok_or("guest exported artifacts exceed their aggregate bound")?;
+        if !file_backed {
+            total = total
+                .checked_add(receipt.bytes)
+                .ok_or("guest exported artifacts exceed their aggregate bound")?;
+        }
         if !valid_kind
             || !valid_filename
             || !valid_digest
-            || receipt.bytes > MAX_EXPORTED_ARTIFACT_BYTES
+            || receipt.bytes
+                > if file_backed {
+                    crate::cassette::Limits::default().max_track_bytes
+                } else {
+                    MAX_EXPORTED_ARTIFACT_BYTES
+                }
             || total > MAX_EXPORTED_ARTIFACT_BYTES
             || !kinds.insert(&receipt.kind)
             || !names.insert(&receipt.filename)
@@ -307,6 +316,48 @@ fn import_guest_artifacts(
             || attributes.len() != receipt.bytes
         {
             return Err("guest artifact export does not match its receipt".into());
+        }
+        if file_backed {
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            }
+            let mut file = options
+                .open(&path)
+                .map_err(|_| "cannot open guest artifact export")?;
+            let mut digest = Sha256::new();
+            let mut count = 0u64;
+            let mut buffer = [0u8; 65536];
+            loop {
+                let size = file
+                    .read(&mut buffer)
+                    .map_err(|_| "cannot read guest artifact export")?;
+                if size == 0 {
+                    break;
+                }
+                count = count
+                    .checked_add(size as u64)
+                    .ok_or("guest artifact length overflow")?;
+                if count > receipt.bytes {
+                    return Err("guest artifact export exceeds its receipt".into());
+                }
+                digest.update(&buffer[..size]);
+            }
+            if count != receipt.bytes || format!("{:x}", digest.finalize()) != receipt.sha256 {
+                return Err("guest artifact export digest differs from its receipt".into());
+            }
+            metadata
+                .sealed_file_artifacts
+                .push(crate::agents::SealedFileArtifact {
+                    kind: receipt.kind.clone(),
+                    path,
+                    bytes: count,
+                    sha256: receipt.sha256.clone(),
+                });
+            continue;
         }
         let bytes = std::fs::read(&path).map_err(|_| "cannot read guest artifact export")?;
         if bytes.len() as u64 != receipt.bytes

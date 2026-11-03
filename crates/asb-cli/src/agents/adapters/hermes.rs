@@ -346,6 +346,7 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
                         | "native terminal request differs:pty"
                         | "native terminal request differs:notify_on_complete"
                         | "native terminal request differs:watch_patterns"
+                        | "native terminal request differs:tool_call_id"
                         | "native terminal request differs:sequence"
                         | "native terminal request differs:encoding"
                         | "Hermes native replay sidecar is unavailable"
@@ -729,7 +730,13 @@ assert stable(None) is None
 
     #[test]
     fn native_progress_exposes_only_whitelisted_mismatch_fields() {
-        for field in ["command", "timeout", "workdir", "watch_patterns"] {
+        for field in [
+            "command",
+            "timeout",
+            "workdir",
+            "watch_patterns",
+            "tool_call_id",
+        ] {
             let frozen = crate::agents::artifacts::FrozenArtifacts::for_test(
                 "native-tool-progress.json",
                 serde_json::json!({

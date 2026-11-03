@@ -727,6 +727,11 @@ pub(crate) fn launch(
         .arg("--artifacts")
         .arg(&artifacts)
         .env("PYTHONDONTWRITEBYTECODE", "1");
+    if context.filesystem_recording {
+        command.env("ASB_EXPERIMENTAL_FILESYSTEM_RECORDING", "1");
+    } else {
+        command.env_remove("ASB_EXPERIMENTAL_FILESYSTEM_RECORDING");
+    }
     crate::project::apply_network_proxy(&mut command, project_root)
         .map_err(|error| error.to_string())?;
     let mut controller = Controller::spawn(&mut command)?;
@@ -1023,6 +1028,8 @@ impl Session {
             artifact_output: &artifact_output,
             private_inputs,
             request: json!({"process_lifetime":self.process_lifetime,"config":config,"connection":connection,"prompt":self.invocation.input.instructions,"timeout_seconds":self.agent_timeout.as_secs_f64(),"max_steps":context.max_steps,
+                "filesystem_recording":context.filesystem_recording,
+                "auxiliary_endpoints": context.auxiliary_endpoints,
                 "project_root":"/opt/asb-project","runtime_dir":"/opt/asb-private","run_dir":"/opt/asb-private/attempt","replay":context.replay,
                 "tape_cassette":tape_cassette,
                 "tool_replay":context.tool_replay,
@@ -1296,10 +1303,16 @@ impl PreparedBootstrap {
         let binary = runtime_binary()?;
         let tools_root =
             crate::project::resolve(context.project_root, &context.project_config.tools_dir);
-        let installation = crate::install::guest_bootstrap(
+        let additional = if context.filesystem_recording {
+            &["fuse-overlayfs"][..]
+        } else {
+            &[][..]
+        };
+        let installation = crate::install::guest_bootstrap_with_runtimes(
             &context.config.agent,
             context.project_root,
             &tools_root,
+            additional,
         )
         .map_err(|error| {
             format!("cannot prepare selected agent installation artifacts: {error}")

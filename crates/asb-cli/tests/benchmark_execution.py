@@ -326,7 +326,7 @@ class ExecutionTests(unittest.TestCase):
                 self.assertFalse(container.resumed)
                 self.assertIn("kill", container.events)
 
-    def workspace(self):
+    def workspace(self, filesystem_capture=False):
         container = Container()
         api = API(container)
         creation = []
@@ -336,8 +336,17 @@ class ExecutionTests(unittest.TestCase):
             return container
         client = SimpleNamespace(api=api, containers=SimpleNamespace(create=create))
         image = SimpleNamespace(id="sha256:" + "f" * 64, attrs={"RepoDigests": [], "Os": "linux", "Architecture": "amd64"})
-        workspace = RUNTIME.ManagedDockerWorkspace(client, image, "asb-" + "a" * 32, "/task")
+        workspace = RUNTIME.ManagedDockerWorkspace(client, image, "asb-" + "a" * 32, "/task", filesystem_capture=filesystem_capture)
         return workspace, container, api, creation
+
+    def test_filesystem_capture_provisions_mount_only_when_selected(self):
+        workspace, _, _, creation = self.workspace(filesystem_capture=True)
+        with workspace:
+            self.assertEqual(creation[0]['devices'], ['/dev/fuse:/dev/fuse:rwm'])
+            self.assertEqual(creation[0]['cap_add'], ['SYS_ADMIN'])
+            self.assertEqual(creation[0]['security_opt'], ['apparmor=unconfined'])
+        with self.assertRaises(RUNTIME.ExecutionError):
+            self.workspace(filesystem_capture='true')
 
     def test_gate_stops_before_attachment_and_preserves_argv_env_and_output(self):
         workspace, container, api, creation = self.workspace()

@@ -17,7 +17,7 @@ SUBMISSION_WORKTREE = "/testbed"
 
 
 class SweBenchTask:
-    def __init__(self, client, catalog_path, task_id, artifacts):
+    def __init__(self, client, catalog_path, task_id, artifacts, filesystem_capture=False):
         self.client, self.catalog_path, self.task_id = client, Path(catalog_path), task_id
         self.artifacts = Path(artifacts).absolute()
         self.workspace = None
@@ -29,6 +29,7 @@ class SweBenchTask:
         self.attempt = "asb-" + uuid.uuid4().hex
         self.source_image_tag = None
         self.journal = None
+        self.filesystem_capture = filesystem_capture
 
     def __enter__(self):
         from swebench.harness.utils import make_test_spec
@@ -46,7 +47,7 @@ class SweBenchTask:
             if self.source_image_tag is not None:
                 atomic_write(self.artifacts / "source-image.json", encoded(source))
             self.workspace = ManagedDockerWorkspace(self.client, image, self.attempt, CONTAINER_WORKDIR,
-                                                    journal=self.journal)
+                                                    journal=self.journal, filesystem_capture=self.filesystem_capture)
             self.workspace.__enter__()
             base = self.row["base_commit"]
             self.checked(["git", "cat-file", "-e", base + "^{commit}"])

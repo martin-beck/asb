@@ -9,6 +9,11 @@ use support::IsolatedEnvironment;
 static PYTHON_PROTOCOL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
+fn filesystem_recorder_reuses_exact_payloads_with_bounded_index() {
+    python_protocol("benchmark_fs_payload.py");
+}
+
+#[test]
 fn original_sweep_qualification_inventory_is_bounded_and_requires_declared_evidence() {
     python_protocol("benchmark_live_repeated_sweep_original.py");
 }
@@ -168,6 +173,16 @@ fn private_task_protocol_preserves_events_and_cleans_up_on_disconnect() {
 #[test]
 fn guest_bootstrap_reuses_adapters_without_exposing_host_state() {
     python_protocol("benchmark_guest.py");
+}
+
+#[test]
+fn filesystem_recorder_builds_library_in_guest_environment() {
+    python_protocol("benchmark_fuse_build.py");
+}
+
+#[test]
+fn filesystem_recorder_settles_owned_mounts() {
+    python_protocol("benchmark_fs_record.py");
 }
 
 #[test]

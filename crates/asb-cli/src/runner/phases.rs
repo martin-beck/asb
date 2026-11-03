@@ -288,6 +288,7 @@ pub(super) struct PreparedAttempt {
     pub workload: Box<dyn workloads::WorkloadSession>,
     pub measurements: Option<measurements::Session>,
     pub tape: Option<tape::Session>,
+    pub auxiliary_tapes: tape::AuxiliarySessions,
     pub capsule_record: Option<agents::capsule::Capture>,
     pub capsule_replay: Option<agents::capsule::Replay>,
     /// Remote guests capture their own actual workspace. These paths remain
@@ -325,7 +326,7 @@ pub(super) struct SettledAttempt {
 impl ExecutedAttempt {
     pub fn settle(mut self, cassette: Option<&(tape::Mode, PathBuf)>) -> SettledAttempt {
         let mut proxy_validated = false;
-        let proxy_evidence = match self.prepared.tape.take() {
+        let mut proxy_evidence = match self.prepared.tape.take() {
             Some(session) => {
                 let completed = session.finish();
                 proxy_validated = completed.result.is_ok();
@@ -336,10 +337,18 @@ impl ExecutedAttempt {
             }
             None => crate::proxy::Evidence {
                 captures: Vec::new(),
+                auxiliary_captures: Vec::new(),
+                auxiliary_complete: true,
                 output_files: Vec::new(),
                 cleanup_confirmed: true,
             },
         };
+        if let Err(error) =
+            std::mem::take(&mut self.prepared.auxiliary_tapes).finish(&mut proxy_evidence)
+        {
+            proxy_validated = false;
+            self.issues.run_error(error.to_string());
+        }
         // A partially served replay does not establish usage of its whole tape.
         let cassette_usage_verified =
             !matches!(cassette, Some((tape::Mode::Replay, _))) || proxy_validated;

@@ -100,6 +100,8 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_estimated_disk_mib(768)
+.with_auxiliary_plan(auxiliary_recording_plan)
+.with_auxiliary_endpoints(configure_auxiliary_endpoints)
 .with_replay_credential_vars(&["OPENJIUWEN_API_KEY"])
 .with_output_usage(output_usage)
 .with_step_count(step_count)
@@ -156,7 +158,11 @@ fn process(executable: &str) -> Result<crate::launch::ProcessLaunch, Error> {
     let mut command = crate::launch::ProcessLaunch::new(interpreter);
     command
         .arg("-c")
-        .arg(include_str!("openjiuwen/usage_compat.py"))
+        .arg(concat!(
+            include_str!("openjiuwen/embedding_route.py"),
+            "\n",
+            include_str!("openjiuwen/usage_compat.py")
+        ))
         .arg(path);
     Ok(command)
 }
@@ -313,6 +319,10 @@ fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> 
 
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     let connection = context.connection;
+    // Only an attempt-owned auxiliary session may supply this private route.
+    context
+        .command
+        .env_remove("ASB_OPENJIUWEN_EMBEDDING_TAPE_ORIGIN");
     if connection.authentication == crate::endpoint::Authentication::Bearer {
         context.command.env("ASB_OPENJIUWEN_BEARER_AUTH", "1");
         context.command.env_remove("ANTHROPIC_API_KEY");
@@ -335,6 +345,53 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+fn configure_auxiliary_endpoints(
+    command: &mut std::process::Command,
+    endpoints: &std::collections::BTreeMap<String, String>,
+) -> Result<(), Error> {
+    for (name, endpoint) in endpoints {
+        if name != "embedding" {
+            return Err(Error::Input("unknown OpenJiuwen auxiliary endpoint".into()));
+        }
+        command.env("ASB_OPENJIUWEN_EMBEDDING_TAPE_ORIGIN", endpoint);
+    }
+    Ok(())
+}
+
+fn auxiliary_recording_plan(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<super::super::AuxiliaryRecordingPlan>, Error> {
+    let Some(base) = lookup("EMBEDDING_BASE_URL") else {
+        return Ok(Vec::new());
+    };
+    let base = base.trim();
+    if base.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (scheme, remainder) = base
+        .split_once("://")
+        .ok_or_else(|| Error::Input("OpenJiuwen embedding endpoint must be an HTTP URL".into()))?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err(Error::Input(
+            "OpenJiuwen embedding endpoint must be an HTTP URL".into(),
+        ));
+    }
+    // The client constructs and authenticates the complete request URL.
+    // The tape only needs the origin; forwarding the path separately avoids
+    // duplicating provider prefixes and excludes URL userinfo from its argv.
+    let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    if host.is_empty() {
+        return Err(Error::Input(
+            "OpenJiuwen embedding endpoint has no host".into(),
+        ));
+    }
+    Ok(vec![super::super::AuxiliaryRecordingPlan {
+        name: "embedding",
+        upstream: format!("{}://{host}", scheme.to_ascii_lowercase()),
+    }])
+}
+
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
     AgentArtifacts {
         native_tool_sidecar: context
@@ -348,6 +405,146 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auxiliary_plan_keeps_the_selected_origin_without_url_credentials() {
+        let adapter = crate::agents::find("openjiuwen").unwrap();
+        for (input, expected) in [
+            ("https://provider.invalid/v1", "https://provider.invalid"),
+            (
+                "HTTP://user:fixture-secret@[::1]:1234/api?x=y",
+                "http://[::1]:1234",
+            ),
+        ] {
+            let plan = adapter
+                .auxiliary_recording_plan(&|name| {
+                    (name == "EMBEDDING_BASE_URL").then(|| input.to_owned())
+                })
+                .unwrap();
+            assert_eq!(plan.len(), 1);
+            assert_eq!(plan[0].name, "embedding");
+            assert_eq!(plan[0].upstream, expected);
+            assert!(!plan[0].upstream.contains("fixture-secret"));
+        }
+        assert!(
+            adapter
+                .auxiliary_recording_plan(&|_| None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            adapter
+                .auxiliary_recording_plan(&|_| Some(" ".into()))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            adapter
+                .auxiliary_recording_plan(&|_| Some("not-a-url".into()))
+                .is_err()
+        );
+        assert!(
+            crate::agents::find("pi")
+                .unwrap()
+                .auxiliary_recording_plan(&|_| Some("https://example.invalid".into()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn auxiliary_embedding_endpoint_is_owned_by_the_adapter() {
+        let agent = crate::agents::find("openjiuwen").unwrap();
+        let mut command = std::process::Command::new("fixture");
+        let endpoints = [("embedding".into(), "http://127.0.0.1:1234".into())].into();
+        agent
+            .configure_auxiliary_endpoints(&mut command, &endpoints)
+            .unwrap();
+        assert!(command.get_envs().any(|(name, value)| {
+            name == "ASB_OPENJIUWEN_EMBEDDING_TAPE_ORIGIN"
+                && value == Some(std::ffi::OsStr::new("http://127.0.0.1:1234"))
+        }));
+        let unknown = [("other".into(), "http://127.0.0.1:1".into())].into();
+        assert!(
+            agent
+                .configure_auxiliary_endpoints(&mut command, &unknown)
+                .is_err()
+        );
+        assert!(
+            crate::agents::find("pi")
+                .unwrap()
+                .configure_auxiliary_endpoints(&mut command, &endpoints)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn embedding_tape_routes_only_http_dispatch_and_keeps_provider_identity() {
+        let fixture = r#"
+import asyncio, sys, types
+module = types.ModuleType('openjiuwen.core.memory.lite.embeddings')
+class Client:
+    def __init__(self): self.event_hooks = {'request': []}
+class Provider:
+    def __init__(self):
+        self.base_url = 'https://embedding.invalid/v1'
+        self.api_key = 'fixture-key'
+        self.model = 'fixture-model'
+        self.client = Client()
+    def _get_client(self): return self.client
+    @property
+    def config_fingerprint(self): return 'native:' + self.api_key
+module.OpenAICompatibleEmbeddingProvider = Provider
+sys.modules['openjiuwen.core.memory.lite.embeddings'] = module
+exec(sys.stdin.read())
+for bad in ('https://127.0.0.1:1234', 'http://example.invalid:1234',
+            'http://127.0.0.1:1234/path', 'http://127.0.0.1:bad'):
+    try: _asb_install_embedding_route(bad)
+    except RuntimeError: pass
+    else: raise AssertionError('accepted invalid ingress')
+_asb_install_embedding_route('http://127.0.0.1:1234')
+p = Provider()
+client = p._get_client()
+assert p._get_client() is client and len(client.event_hooks['request']) == 1
+class URL:
+    def copy_with(self, **kwargs): return kwargs
+request = types.SimpleNamespace(url=URL())
+asyncio.run(client.event_hooks['request'][0](request))
+assert request.url == {'scheme': 'http', 'host': '127.0.0.1', 'port': 1234}
+assert p.base_url == 'https://embedding.invalid/v1' and p.api_key == 'fixture-key'
+record = Provider()
+record.base_url = 'https://user:fixture-secret@embedding.invalid/v1'
+opaque = _asb_make_embedding_identity(record)
+assert record.config_fingerprint == opaque['fingerprint']
+assert 'fixture-secret' not in repr(opaque)
+assert 'fixture-key' not in repr(opaque)
+restored = Provider()
+restored.base_url = record.base_url
+restored.api_key = 'asb-replay-placeholder'
+_asb_restore_opaque_embedding_identity(opaque)
+assert restored.config_fingerprint == opaque['fingerprint']
+restored.base_url = 'https://different.invalid/v1'
+assert restored.config_fingerprint != opaque['fingerprint']
+for invalid in ({}, {**opaque, 'endpoint_sha256': 'bad'}, {**opaque, 'fingerprint': 'bad'}):
+    try: _asb_restore_opaque_embedding_identity(invalid)
+    except RuntimeError: pass
+    else: raise AssertionError('accepted malformed opaque identity')
+"#;
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("python3")
+            .args(["-c", fixture])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(include_bytes!("openjiuwen/embedding_route.py"))
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
     #[test]
     fn openrouter_messages_negotiates_bearer() {
         let agent = crate::agents::find("openjiuwen").unwrap();
@@ -840,6 +1037,7 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         for relative in [
             "core/foundation/llm/schema",
             "core/foundation/tool",
+            "core/memory/lite",
             "core/context_engine/context",
             "core/single_agent",
             "core/single_agent/agents",
@@ -856,6 +1054,8 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
             "core/foundation/llm/__init__.py",
             "core/foundation/llm/schema/__init__.py",
             "core/foundation/tool/__init__.py",
+            "core/memory/__init__.py",
+            "core/memory/lite/__init__.py",
             "core/context_engine/__init__.py",
             "core/context_engine/context/__init__.py",
             "core/single_agent/__init__.py",
@@ -873,15 +1073,22 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         // feature selection.
         std::fs::write(
             package.join("__init__.py"),
-            "import sys\nassert '--asb-native-tool-replay' not in sys.argv\n",
+            "import sys\nassert '--asb-native-tool-replay' not in sys.argv\nassert '--asb-max-iterations' not in sys.argv\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("core/memory/lite/embeddings.py"),
+            "class OpenAICompatibleEmbeddingProvider:\n def _get_client(self): return None\n",
         )
         .unwrap();
         std::fs::write(
             package.join("harness/cli/agent/factory.py"),
             r#"
 class Config:
-    enable_read_image_multimodal = None
-    parallel_tool_calls = None
+    enable_read_image_multimodal = True
+    parallel_tool_calls = True
+def _build_memory_rail(_cfg): return "memory-enabled"
+def _build_subagents(_model): return ["subagent-enabled"]
 class Agent:
     _deep_config = Config()
 def create_agent(_cfg):
@@ -1047,8 +1254,10 @@ from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 from openjiuwen.core.context_engine.context.context import Context
 async def main():
     agent, _tracker = factory.create_agent(None)
-    assert agent._deep_config.enable_read_image_multimodal is False
-    assert agent._deep_config.parallel_tool_calls is False
+    assert agent._deep_config.enable_read_image_multimodal is True
+    assert agent._deep_config.parallel_tool_calls is True
+    assert factory._build_memory_rail(None) == "memory-enabled"
+    assert factory._build_subagents(None) == ["subagent-enabled"]
     result = []
     context = Context()
     for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool):
@@ -1145,7 +1354,13 @@ asyncio.run(main())
             .direct()
             .arg("--asb-native-tool-replay")
             .arg(&sidecar)
+            .arg("--asb-max-iterations")
+            .arg("200")
             .env("PYTHONPATH", &root)
+            .env(
+                "ASB_OPENJIUWEN_EMBEDDING_TAPE_ORIGIN",
+                "http://127.0.0.1:1234/v1",
+            )
             .env("ASB_TEST_NATIVE_EXECUTED", &marker)
             .env("ASB_TEST_WORKSPACE", &replay_workspace)
             .env("ASB_TEST_RENDER_PREFIX", "replay:")

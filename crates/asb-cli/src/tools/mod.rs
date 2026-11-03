@@ -7,6 +7,7 @@ use std::path::Path;
 pub(crate) mod bpftrace;
 mod cli2key;
 mod flamegraph;
+mod fuse_overlayfs;
 mod harbor;
 mod http;
 mod iostat;
@@ -261,6 +262,7 @@ static REGISTRY: &[&dyn ToolAdapter] = &[
     &bpftrace::ADAPTER,
     &perfetto::ADAPTER,
     &flamegraph::ADAPTER,
+    &fuse_overlayfs::ADAPTER,
     &livecodebench::ADAPTER,
     &swebench::ADAPTER,
     &terminal_bench::ADAPTER,

@@ -122,6 +122,8 @@ struct RunResult<'a> {
     /// Adapter-owned bounded sidecars retained only by the sealed cassette.
     #[serde(skip)]
     sealed_artifacts: Vec<agents::SealedArtifact>,
+    #[serde(skip)]
+    sealed_file_artifacts: Vec<agents::SealedFileArtifact>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cassette: Option<String>,
     /// Actual capture directory, including a CLI --measurements override.
@@ -2696,6 +2698,8 @@ mod tests {
                 true,
                 &evidence,
                 &crate::proxy::Evidence {
+                    auxiliary_captures: Vec::new(),
+                    auxiliary_complete: true,
                     captures: Vec::new(),
                     output_files: Vec::new(),
                     cleanup_confirmed: true,
@@ -2770,6 +2774,8 @@ mod tests {
                     &[],
                     &crate::proxy::Evidence {
                         captures: Vec::new(),
+                        auxiliary_captures: Vec::new(),
+                        auxiliary_complete: true,
                         output_files: Vec::new(),
                         cleanup_confirmed: true
                     },
@@ -2842,6 +2848,7 @@ mod tests {
             native_trace: None,
             native_tool_sidecar: None,
             sealed_artifacts: Vec::new(),
+            sealed_file_artifacts: Vec::new(),
             cassette: None,
             measurement_directory: None,
             stdout: "done".into(),

@@ -14,6 +14,7 @@ struct Context<'a> {
     tape_cassette: Option<(tape::Mode, PathBuf)>,
     tool_tape_cassette: Option<(tape::Mode, PathBuf)>,
     mcp_tape_cassette: Option<(tape::Mode, PathBuf)>,
+    filesystem_recording: bool,
     network: Option<project::NetworkProjectGuard>,
 }
 
@@ -91,6 +92,14 @@ impl<'a> ConfiguredAttempt<'a> {
             &project_root,
             options.invocation_dir.unwrap_or_else(|| Path::new(".")),
         );
+        let filesystem_recording = std::env::var_os("ASB_EXPERIMENTAL_FILESYSTEM_RECORDING")
+            .as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+            && tool_mode == Some(tape::Mode::Record)
+            && matches!(
+                config.workload.as_str(),
+                "swe-bench" | "swe-bench-lite" | "swe-bench-verified"
+            );
         let context = Context {
             config_path: config_path.into(),
             publication_config,
@@ -103,6 +112,7 @@ impl<'a> ConfiguredAttempt<'a> {
             tape_cassette,
             tool_tape_cassette,
             mcp_tape_cassette,
+            filesystem_recording,
             network: Some(network),
         };
         let config = &context.config;
@@ -509,6 +519,7 @@ impl<'a> ReadyAttempt<'a> {
                 let workload = workloads::prepare_task(&workloads::PreparationContext {
                     verify_initial_material: options.preparation_gate.is_some()
                         || options.verify_initial_material,
+                    filesystem_recording: context.filesystem_recording,
                     budgets: policy.budgets,
                     on_allocation: Some(&allocation),
                     workload: &config.workload,
@@ -772,6 +783,7 @@ impl<'a> ReadyAttempt<'a> {
                 workload: workload_session,
                 measurements: measurement_session,
                 tape,
+                auxiliary_tapes: Default::default(),
                 capsule_record,
                 capsule_replay,
                 guest_capsule_record,
@@ -812,6 +824,7 @@ impl<'a> ReadyAttempt<'a> {
         let mut runtime_entered = false;
         let execution = (|| {
             let _launch_failure = workloads::session::LaunchFailureGuard(launch);
+            let auxiliary_endpoints = prepared.auxiliary_tapes.endpoints();
             let tape_url = prepared.tape.as_ref().map(|session| session.url());
             let provider_endpoint =
                 tape_url.or_else(|| providers::local_bridge_endpoint(&config.provider, bridge));
@@ -847,6 +860,8 @@ impl<'a> ReadyAttempt<'a> {
             let isolated = prepared.workload.execute(
                 &mut workloads::ExecutionContext {
                     launch,
+                    filesystem_recording: context.filesystem_recording,
+                    auxiliary_endpoints: &auxiliary_endpoints,
                     config,
                     connection: connection.as_ref(),
                     project_root,
@@ -925,6 +940,7 @@ impl<'a> ReadyAttempt<'a> {
                     invocation: prepared.workload.invocation(),
                     fresh_state: options.batch.is_some(),
                     route: native::NativeRoute {
+                        auxiliary_endpoints: &auxiliary_endpoints,
                         connection: connection.as_ref(),
                         provider_endpoint,
                         provider_credentials,
@@ -1406,6 +1422,10 @@ impl ResultFacts {
             .and_then(|metadata| metadata.native_tool_sidecar.clone())
             .or(adapter_artifacts.native_tool_sidecar.clone());
         let sealed_artifacts = adapter_artifacts.sealed_artifacts.clone();
+        let sealed_file_artifacts = guest
+            .as_ref()
+            .map(|metadata| metadata.sealed_file_artifacts.clone())
+            .unwrap_or_default();
         let mut stderr = bounded(&child.stderr);
         if let Some(error) = provider_cleanup_error.as_ref() {
             stderr.push_str("\nASB provider cleanup error: ");
@@ -1496,6 +1516,7 @@ impl ResultFacts {
             native_trace,
             native_tool_sidecar,
             sealed_artifacts,
+            sealed_file_artifacts,
             cassette: tape_cassette
                 .as_ref()
                 .map(|(_, cassette)| cassette.display().to_string()),
@@ -1574,6 +1595,13 @@ impl Publication<'_, '_> {
         // process or official workload grade. Commit before sealing outputs.
         let recording_error = options.recording.and_then(|recorder| {
             let batch = options.batch.expect("campaign-owned recording");
+            if context.filesystem_recording
+                && !has_filesystem_recording(&result.sealed_file_artifacts)
+            {
+                return Some(Error::Io(
+                    "filesystem recording is incomplete or missing; no complete recording was committed".into(),
+                ));
+            }
             match recorder.commit(batch.number(), options.replica, result, &proxy_evidence) {
                 Ok(evidence) => {
                     result.recording = Some(evidence);
@@ -1758,10 +1786,36 @@ impl Publication<'_, '_> {
     }
 }
 
+fn has_filesystem_recording(artifacts: &[crate::agents::SealedFileArtifact]) -> bool {
+    ["aux-fs-events", "aux-fs-payload"]
+        .iter()
+        .all(|required| artifacts.iter().any(|artifact| artifact.kind == *required))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{sealed_step_count, validate_mcp_relay_capability, validate_mcp_server_capability};
+    use super::{
+        has_filesystem_recording, sealed_step_count, validate_mcp_relay_capability,
+        validate_mcp_server_capability,
+    };
     use crate::benchmark::{BenchmarkConfig, McpServerConfig};
+
+    #[test]
+    fn filesystem_recording_requires_both_owned_files() {
+        let artifact = |kind: &str| crate::agents::SealedFileArtifact {
+            kind: kind.into(),
+            path: "fixture".into(),
+            bytes: 0,
+            sha256: "0".repeat(64),
+        };
+        assert!(!has_filesystem_recording(&[]));
+        assert!(!has_filesystem_recording(&[artifact("aux-fs-events")]));
+        assert!(!has_filesystem_recording(&[artifact("aux-fs-payload")]));
+        assert!(has_filesystem_recording(&[
+            artifact("aux-fs-events"),
+            artifact("aux-fs-payload")
+        ]));
+    }
 
     fn config(agent: &str) -> BenchmarkConfig {
         BenchmarkConfig {

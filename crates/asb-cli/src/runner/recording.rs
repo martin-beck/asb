@@ -593,6 +593,20 @@ impl Recorder {
                     source,
                 });
             }
+            let mut sealed_files = open_sealed_file_artifacts(&result.sealed_file_artifacts)?;
+            for (artifact, source) in &mut sealed_files {
+                artifact_inputs.push(ArtifactInput {
+                    artifact: artifact.clone(),
+                    source,
+                });
+            }
+            let mut auxiliary = open_auxiliary_captures(proxy, &output)?;
+            for (artifact, source) in &mut auxiliary {
+                artifact_inputs.push(ArtifactInput {
+                    artifact: artifact.clone(),
+                    source,
+                });
+            }
             if let Some(file) = &mut file {
                 file.seek(SeekFrom::Start(0)).map_err(io_error)?;
                 journal
@@ -753,6 +767,80 @@ impl Recorder {
         }
         result
     }
+}
+
+/// Open file-backed artifacts once; the journal checks the digest while staging.
+fn open_sealed_file_artifacts(
+    files: &[crate::agents::SealedFileArtifact],
+) -> Result<Vec<(Artifact, File)>, Error> {
+    files
+        .iter()
+        .map(|artifact| {
+            let file = open_payload(&artifact.path)?
+                .ok_or_else(|| Error::Io("file-backed recording artifact is unavailable".into()))?;
+            if file.metadata().map_err(io_error)?.len() != artifact.bytes {
+                return Err(Error::Io(
+                    "file-backed recording artifact length changed".into(),
+                ));
+            }
+            Ok((
+                Artifact {
+                    kind: artifact.kind.clone(),
+                    bytes: artifact.bytes,
+                    sha256: artifact.sha256.clone(),
+                },
+                file,
+            ))
+        })
+        .collect()
+}
+
+/// Open finalized auxiliary streams once; the journal verifies their exact
+/// length and digest while staging, without loading the payload into memory.
+fn open_auxiliary_captures(
+    proxy: &proxy::Evidence,
+    primary: &Path,
+) -> Result<Vec<(Artifact, File)>, Error> {
+    if !proxy.auxiliary_complete {
+        return Err(Error::Input(
+            "auxiliary capture did not finish successfully".into(),
+        ));
+    }
+    let mut kinds = std::collections::BTreeSet::new();
+    let mut paths = std::collections::BTreeSet::new();
+    let mut opened = Vec::new();
+    for auxiliary in &proxy.auxiliary_captures {
+        let capture = &auxiliary.capture;
+        capture.validate()?;
+        if !proxy.cleanup_confirmed
+            || !capture.complete
+            || !auxiliary.kind.starts_with("aux-http-")
+            || auxiliary.kind.len() <= "aux-http-".len()
+            || auxiliary.kind.len() > 64
+            || !auxiliary
+                .kind
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            || !kinds.insert(auxiliary.kind.clone())
+            || capture.output == primary
+            || !paths.insert(capture.output.clone())
+        {
+            return Err(Error::Input(
+                "auxiliary capture is incomplete or has an invalid identity".into(),
+            ));
+        }
+        let file = open_payload(&capture.output)?
+            .ok_or_else(|| Error::Io("auxiliary capture payload is unavailable".into()))?;
+        opened.push((
+            Artifact {
+                kind: auxiliary.kind.clone(),
+                bytes: capture.bytes,
+                sha256: capture.sha256.clone(),
+            },
+            file,
+        ));
+    }
+    Ok(opened)
 }
 
 /// Validate a complete adapter-owned sidecar before the journal sees it.
@@ -939,6 +1027,58 @@ mod tests {
     use super::*;
     std::thread_local! {
         pub(super) static CAPACITY_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn auxiliary_capture_requires_finalized_unique_private_streams() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/auxiliary-capture-tests")
+            .join(crate::tools::runtime::unique_id());
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("embedding.jsonl");
+        fs::write(&path, b"{}\n").unwrap();
+        let capture = proxy::capture::CaptureEvidence {
+            adapter: "llmtape".into(),
+            output: path.clone(),
+            complete: true,
+            accepted: 1,
+            completed: 1,
+            failed: 0,
+            recorded: 1,
+            inference_requests: 0,
+            bytes: 3,
+            sha256: crate::cassette::digest(b"{}\n"),
+        };
+        let mut evidence = proxy::Evidence {
+            captures: Vec::new(),
+            auxiliary_captures: vec![proxy::AuxiliaryCapture {
+                kind: "aux-http-embedding".into(),
+                capture: capture.clone(),
+            }],
+            output_files: Vec::new(),
+            auxiliary_complete: true,
+            cleanup_confirmed: true,
+        };
+        let mut streams = open_auxiliary_captures(&evidence, &root.join("primary")).unwrap();
+        assert_eq!(streams[0].0.bytes, 3);
+        let mut data = Vec::new();
+        streams[0].1.read_to_end(&mut data).unwrap();
+        assert_eq!(data, b"{}\n");
+        evidence.cleanup_confirmed = false;
+        assert!(open_auxiliary_captures(&evidence, &root.join("primary")).is_err());
+        evidence.cleanup_confirmed = true;
+        evidence.auxiliary_complete = false;
+        assert!(open_auxiliary_captures(&evidence, &root.join("primary")).is_err());
+        evidence.auxiliary_complete = true;
+        evidence.auxiliary_captures[0].capture.complete = false;
+        assert!(open_auxiliary_captures(&evidence, &root.join("primary")).is_err());
+        evidence.auxiliary_captures[0].capture = capture.clone();
+        evidence.auxiliary_captures.push(proxy::AuxiliaryCapture {
+            kind: "aux-http-embedding".into(),
+            capture,
+        });
+        assert!(open_auxiliary_captures(&evidence, &root.join("primary")).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1285,6 +1425,33 @@ mod tests {
                 assert_eq!(fs::read(root.join("sentinel")).unwrap(), b"{}\n");
             }
         }
+    }
+
+    #[test]
+    fn file_backed_artifacts_are_opened_for_streaming_and_length_checked() {
+        use std::io::Read;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "asb-fs-stream-{}",
+                crate::tools::runtime::unique_id()
+            ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("payload");
+        fs::write(&path, b"recorded bytes").unwrap();
+        let item = crate::agents::SealedFileArtifact {
+            kind: "aux-fs-payload".into(),
+            path: path.clone(),
+            bytes: 14,
+            sha256: crate::cassette::digest(b"recorded bytes"),
+        };
+        let mut opened = open_sealed_file_artifacts(std::slice::from_ref(&item)).unwrap();
+        let mut bytes = Vec::new();
+        opened[0].1.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"recorded bytes");
+        fs::write(&path, b"short").unwrap();
+        assert!(open_sealed_file_artifacts(&[item]).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

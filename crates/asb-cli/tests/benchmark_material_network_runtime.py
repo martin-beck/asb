@@ -20,6 +20,22 @@ class RuntimeTests(unittest.TestCase):
     fixture = fixtures.NetworkTests.fixture
     observe = fixtures.NetworkTests.observe
 
+    def test_declared_filesystem_capture_accepts_only_the_observed_profile(self):
+        attrs = {"Config":{},"HostConfig":{"NetworkMode":"none",
+            "Devices":[{"PathOnHost":"/dev/fuse","PathInContainer":"/dev/fuse","CgroupPermissions":"rwm"}],
+            "CapAdd":["CAP_SYS_ADMIN"],"SecurityOpt":["apparmor=unconfined"]},
+            "NetworkSettings":{"Networks":{"none":{}}}}
+        declaration = {"filesystem_capture":True}
+        result = runtime.configuration(attrs,"main",declaration)
+        self.assertEqual(result["host"]["Devices"],attrs["HostConfig"]["Devices"])
+        with self.assertRaises(MaterialError):
+            runtime.configuration(attrs,"main",{})
+        for key,value in [("Devices",[]),("CapAdd",[]),("SecurityOpt",[])]:
+            changed = copy.deepcopy(attrs)
+            changed["HostConfig"][key] = value
+            with self.subTest(key=key),self.assertRaises(MaterialError):
+                runtime.configuration(changed,"main",declaration)
+
     def network(self):
         task,network = self.fixture()
         for resource in task.client.containers.values.values():

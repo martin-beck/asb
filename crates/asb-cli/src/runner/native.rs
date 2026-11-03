@@ -2,6 +2,7 @@
 use super::*;
 
 pub(super) struct NativeRoute<'a> {
+    pub auxiliary_endpoints: &'a std::collections::BTreeMap<String, String>,
     pub connection: Option<&'a crate::endpoint::Connection>,
     pub provider_endpoint: Option<&'a str>,
     pub provider_credentials: Option<(&'a str, &'a str)>,
@@ -57,6 +58,7 @@ impl NativePlan<'_> {
             route,
         } = self;
         let NativeRoute {
+            auxiliary_endpoints,
             connection,
             provider_endpoint,
             provider_credentials,
@@ -226,6 +228,9 @@ impl NativePlan<'_> {
                             .map(|(mode, cassette)| agents::TapeContext { mode, cassette }),
                     },
                 )?;
+                if let Some(adapter) = agents::find(&config.agent) {
+                    adapter.configure_auxiliary_endpoints(&mut command, auxiliary_endpoints)?;
+                }
             }
             Ok(())
         })?;
@@ -371,6 +376,7 @@ mod tests {
                 invocation: &invocation,
                 fresh_state: true,
                 route: NativeRoute {
+                    auxiliary_endpoints: &Default::default(),
                     connection: Some(&connection),
                     provider_endpoint: Some(&connection.base_url),
                     provider_credentials: None,
@@ -497,6 +503,7 @@ mod tests {
             invocation: &invocation,
             fresh_state,
             route: NativeRoute {
+                auxiliary_endpoints: &Default::default(),
                 connection: Some(&connection),
                 provider_endpoint: Some(&connection.base_url),
                 provider_credentials: None,

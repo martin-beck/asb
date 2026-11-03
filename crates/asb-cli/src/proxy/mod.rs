@@ -289,8 +289,17 @@ pub(crate) struct Completion {
 
 pub(crate) struct Evidence {
     pub captures: Vec<capture::CaptureEvidence>,
+    /// Finalized, named auxiliary captures owned by the same attempt.
+    pub auxiliary_captures: Vec<AuxiliaryCapture>,
+    /// All selected auxiliary sessions finalized successfully.
+    pub auxiliary_complete: bool,
     pub output_files: Vec<std::path::PathBuf>,
     pub cleanup_confirmed: bool,
+}
+
+pub(crate) struct AuxiliaryCapture {
+    pub kind: String,
+    pub capture: capture::CaptureEvidence,
 }
 
 pub(crate) struct Chain {
@@ -392,6 +401,8 @@ impl Chain {
         Completion {
             result: failure.map_or(Ok(()), Err),
             evidence: Evidence {
+                auxiliary_captures: Vec::new(),
+                auxiliary_complete: true,
                 captures: self
                     .hops
                     .iter()

@@ -135,6 +135,31 @@ pub(crate) trait AgentAdapter: Sync {
         false
     }
     fn prepare(&self, context: &mut PreparationContext<'_>) -> Result<(), Error>;
+    /// Discover adapter-owned auxiliary HTTP upstreams without starting them.
+    #[allow(
+        dead_code,
+        reason = "attempt-owned auxiliary session activation follows"
+    )]
+    fn auxiliary_recording_plan(
+        &self,
+        _lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Vec<AuxiliaryRecordingPlan>, Error> {
+        Ok(Vec::new())
+    }
+    /// Apply adapter-owned auxiliary endpoints supplied by the attempt owner.
+    fn configure_auxiliary_endpoints(
+        &self,
+        _command: &mut Command,
+        endpoints: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), Error> {
+        if endpoints.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Input(
+                "agent does not support auxiliary endpoints".into(),
+            ))
+        }
+    }
     fn supports_native_tool_transport(&self) -> bool {
         false
     }
@@ -434,6 +459,15 @@ pub(crate) struct SealedArtifact {
     pub bytes: Vec<u8>,
 }
 
+/// Private, file-backed recording payload retained through cassette publication.
+#[derive(Clone, Debug)]
+pub(crate) struct SealedFileArtifact {
+    pub kind: String,
+    pub path: std::path::PathBuf,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
 pub(crate) struct CollectionContext<'a> {
     pub frozen: &'a FrozenArtifacts,
     /// One recorder-owned provider capture handle. Generic lifecycle code
@@ -499,6 +533,20 @@ pub(super) fn final_result_counter(stdout: &str, field: &str) -> Option<u64> {
 
 type CommandBuilder = for<'a> fn(&CommandContext<'a>) -> CommandSpec;
 type PreparationHook = for<'a> fn(&mut PreparationContext<'a>) -> Result<(), Error>;
+type AuxiliaryPlanHook =
+    fn(&dyn Fn(&str) -> Option<String>) -> Result<Vec<AuxiliaryRecordingPlan>, Error>;
+
+/// Adapter-owned upstream selection; never rendered as result evidence.
+#[allow(
+    dead_code,
+    reason = "attempt-owned auxiliary session activation follows"
+)]
+pub(crate) struct AuxiliaryRecordingPlan {
+    pub name: &'static str,
+    pub upstream: String,
+}
+type AuxiliaryEndpointsHook =
+    fn(&mut Command, &std::collections::BTreeMap<String, String>) -> Result<(), Error>;
 type ToolReplayHook = for<'a> fn(&mut PreparationContext<'a>, TapeContext<'a>) -> Result<(), Error>;
 type CollectionHook = for<'a> fn(&CollectionContext<'a>) -> AgentArtifacts;
 /// An adapter-selected extension which may attach its own bounded replay
@@ -530,6 +578,8 @@ pub(super) struct StaticAdapter {
     supported_endpoints: &'static [Support],
     command: CommandBuilder,
     prepare: PreparationHook,
+    auxiliary_endpoints: Option<AuxiliaryEndpointsHook>,
+    auxiliary_plan: Option<AuxiliaryPlanHook>,
     tool_replay: Option<ToolReplayHook>,
     complete_tool_replay: bool,
     mcp_servers: bool,
@@ -560,6 +610,14 @@ pub(super) struct StaticAdapter {
     execution_identity: ExecutionIdentity,
 }
 impl StaticAdapter {
+    pub(super) const fn with_auxiliary_plan(mut self, hook: AuxiliaryPlanHook) -> Self {
+        self.auxiliary_plan = Some(hook);
+        self
+    }
+    pub(super) const fn with_auxiliary_endpoints(mut self, hook: AuxiliaryEndpointsHook) -> Self {
+        self.auxiliary_endpoints = Some(hook);
+        self
+    }
     pub(super) const fn with_estimated_disk_mib(mut self, mib: u64) -> Self {
         self.estimated_disk_mib = mib;
         self
@@ -580,6 +638,8 @@ impl StaticAdapter {
             supported_endpoints,
             command,
             prepare,
+            auxiliary_endpoints: None,
+            auxiliary_plan: None,
             tool_replay: None,
             complete_tool_replay: false,
             mcp_servers: false,
@@ -855,6 +915,26 @@ impl AgentAdapter for StaticAdapter {
             determinism::prepare(self.id, context)?;
         }
         (self.prepare)(context)
+    }
+    fn configure_auxiliary_endpoints(
+        &self,
+        command: &mut Command,
+        endpoints: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), Error> {
+        match self.auxiliary_endpoints {
+            Some(hook) => hook(command, endpoints),
+            None if endpoints.is_empty() => Ok(()),
+            None => Err(Error::Input(
+                "agent does not support auxiliary endpoints".into(),
+            )),
+        }
+    }
+    fn auxiliary_recording_plan(
+        &self,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Vec<AuxiliaryRecordingPlan>, Error> {
+        self.auxiliary_plan
+            .map_or_else(|| Ok(Vec::new()), |hook| hook(lookup))
     }
     fn process(&self, executable: &str) -> Result<crate::launch::ProcessLaunch, Error> {
         self.process.map_or_else(

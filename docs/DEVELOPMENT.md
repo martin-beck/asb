@@ -1,5 +1,268 @@
 # Development
 
+The opt-in Linux filesystem ordering experiment at
+`crates/asb-cli/tests/fixtures/native_fs_probe/run.py` requires `/dev/fuse`,
+`fusermount3`, and an interpreter with fusepy. Set `ASB_FUSE_TEST_PYTHON` to
+that interpreter and run the script with Python. It records forced
+write/truncate races on hard-linked files, including an `O_TRUNC` open,
+checks that an unrelated read can proceed, and replays the recorded operations
+into four independent directories. The tested FUSE stack delivered `O_TRUNC`
+as a separate truncate callback; this does not prove other kernel behavior.
+The fixture also records FUSE caller IDs and checks writes from a worker thread
+and a separate subprocess. On the tested Linux host the former is the thread ID,
+not the process leader's ID. The probe resolves it through `/proc` to a thread
+group, parent and start time at callback time, with missing data reported as
+unknown. It also reads a bounded ancestry to the fixture process and checks a
+grandchild write. These identities are diagnostic only: `/proc` reads can race
+with process exit and reparenting, and the fixture does not establish
+attribution for delayed IO, PID namespaces or reuse, nor does it associate
+operations with agent tool invocations automatically.
+An orphaned-grandchild case verifies that a write after reparenting is marked
+with incomplete ancestry instead of being attributed to the fixture root.
+The experimental replay cursor can apply an ordered prefix and resume while
+keeping file handles open. The fixture checks an intermediate write before its
+later truncate and brackets one synchronous subprocess with explicit markers.
+Applying the cursor through its end marker reproduces the subprocess write.
+The Hermes sidecar fixture emits markers around its invocation of the recorder
+with a synthetic file write. The filesystem fixture applies those marked
+operations and invokes the replayer without running the original tool in four
+workspaces. This exercises the real sidecar classes, not the complete Hermes
+agent or production integration; the marker wrapper belongs to the test.
+The coordinator fixture delegates request validation to the actual Hermes
+sidecar before applying operations. It checks that a mismatched request leaves
+the replay cursor and workspace untouched, then checks a matching request in
+four isolated workspaces.
+No production code selects tool-call boundaries for that cursor; overlapping
+tools, asynchronous work, delayed IO and full process attribution are unresolved.
+The separate offline `overlap.py` fixture exercises an experimental admission
+guard with synthetic overlapping invocation markers. It pauses a cursor before
+an uninvoked recorded tool and resumes once that invocation is admitted; it
+consumes a separate admission for each repeated invocation, but does not prove
+how real operations are attributed to overlapping tools. The
+FUSE fixture also brackets a real subprocess write with overlapping test markers
+and checks this pause and resume separately in four replay workspaces. The
+fixture supplies the markers; the agent does not produce them automatically.
+The overlap fixture includes an experimental condition-based coordinator with
+separate caller threads and checks mismatched, duplicate and out-of-order end
+markers. It is not wired to an agent; the Hermes test delegates matching to the
+sidecar rather than interpreting request bodies in the generic cursor.
+It additionally exercises a background child that writes after its tool-return
+marker and before the next invocation, checking the file is absent at the first
+boundary and present at the second. This does not implement a scheduler for
+background operations between production agent calls.
+This is an experimental fixture, not an ASB replay backend: it changes timing,
+does not capture all filesystem operations, and does not replay tool execution.
+FUSE is not a requirement for ordinary development or CI.
+
+The opt-in `fixtures/native_fs_probe/container.py` runs the same experimental
+proxy inside a local Docker image, then replays its operations in four separate
+host directories without network access. Set `ASB_FUSE_TEST_IMAGE`,
+`ASB_FUSEPY_MODULE`, and `ASB_CONTAINER_FUSE_LIBRARY` to an available image,
+fusepy module and image-compatible libfuse2 file. The test mounts `/dev/fuse`
+with `SYS_ADMIN` and an unconfined AppArmor profile; these are fixture-specific
+settings, not a production integration or a requirement for ASB users. On the
+tested host Docker could not bind-mount the user's host FUSE mount, so this
+fixture mounts it inside the container. Set `ASB_CONTAINER_FUSERMOUNT` to an
+image-compatible `fusermount3` when the image does not already contain one.
+The fixture has also passed using the local image for the selected SWE-bench
+trial; it does not launch the SWE-bench harness.
+Optionally set `ASB_HERMES_TEST_INSTALL` to a directory containing a `venv`
+with the pinned Hermes package installed for the image's Python. The fixture
+then runs two real Hermes terminal calls as the invoking user and checks their
+dependent file writes in all four replays. It records them using the actual ASB
+Hermes sidecar and runs its replayer in four offline containers; an external
+sentinel outside the mounted workspace verifies that the original shell command
+was not executed on replay. That sentinel is deliberately not reproduced, so
+the fixture does not capture effects outside its mounted workspace.
+The test wrapper supplies boundaries and advances the operation cursor after
+the sidecar validates each request and before returning its result. This does
+not prove ordering for a complete agent. The existing sidecar
+also restricts Hermes's advertised core tools. The fixture enables `allow_other`
+on its temporary container-local FUSE mount so the unprivileged tool can access
+the proxy; this is not a production setting. This mode does not invoke an LLM
+or complete agent.
+
+With that installation, set `ASB_HERMES_AGENT_FIXTURE=1` and `ASB_FIXTURE_NODE`
+to a Node executable compatible with the image. The fixture launches the Hermes
+CLI against a deterministic loopback mock provider through the actual LLM tape:
+one recording and four parallel replays. Each replay runs the tape offline with
+no mock server and checks complete tape consumption. A test-only wrapper places
+terminal-call boundaries; the operation journal restores the file before the
+recorded result is returned, and an external sentinel confirms the shell command
+was not reexecuted. Replay homes are isolated but presented at the same path,
+and record and replay use consistent user environments, so generated prompts
+match. The current sidecar restricts Hermes to the terminal toolset, so this is
+not unrestricted agent qualification, a SWE-bench task, or production
+integration. The 30-minute timeout covers only the actual Hermes CLI command.
+For an additional experimental variant, set
+`ASB_HERMES_UNRESTRICTED_FIXTURE=1`. The test modifies only its private copy of
+the sidecar hook to preserve upstream core tools and omits the terminal-only CLI
+option. Its local provider verifies that terminal, read, write and patch tools
+are offered; the scripted task actually invokes only terminal. One recording
+and four tape-backed replays pass, but the other advertised tools, arbitrary
+agent behavior and effects outside the mounted workspace are not qualified.
+Set `ASB_HERMES_NATIVE_FILES_FIXTURE=1` as well to drive real `write_file`,
+`read_file`, and `patch` calls from the mock provider. A test-only adapter
+wrapper records their request/results, places operation boundaries and returns
+the recorded results without executing the tools on replay. Four isolated
+replays check each intermediate file state, complete tool-transcript and LLM
+tape consumption. This wrapper is not production code and does not cover the
+other native tools or a complete SWE-bench task. During this test the proxy
+preserves the caller UID and GID on new files and directories when it runs as
+root; other ownership and metadata semantics remain unqualified.
+Adding `ASB_HERMES_MIXED_FIXTURE=1` makes the mock invoke those three native
+file tools followed by the real terminal tool. Four replay checks require each
+intermediate state and confirm the terminal command was not rerun. The file
+wrappers and terminal sidecar remain distinct test transports; this does not
+establish generic support for every Hermes tool.
+
+For a real-checkout diagnostic, `ASB_SWE_TEST_BASELINE` and
+`ASB_SWE_TEST_PATCH` select a local trial checkout and a previously resolved
+patch. The mock provider directs Hermes to apply that patch; this is a
+deterministic replay test, not evidence that the agent solved the task. The
+test currently fails: FUSE overhead can cause Hermes's Git-status snapshot to
+time out and differ from replay, and replaying startup operations after the
+agent has already accessed its plain workspace can change `.git/index` reads.
+The fixture retains per-replica diagnostics on failure. Fixes need to preserve
+the agent's startup behavior and apply operations at the correct time; do not
+normalize away these differences or treat the patch as a substitute for replay.
+The opt-in `fixtures/native_fs_probe/perf.py` measures Git status directly and
+through the proxy on the supplied baseline and verifies that the outputs match.
+On the tested host it took 0.26 seconds directly and 52.3 seconds through the
+original proxy. Packing operation payloads into one append-only file reduced
+the proxy measurement to 48.7 seconds. A diagnostic-only run with attribution
+disabled took 41.5 seconds and is not a valid recording; it shows that removing
+attribution alone does not resolve the delay. The packed format is experimental
+and the fixture checks truncated payload rejection; it is not a cassette format.
+The proxy now exposes underlying inode numbers, including shared hard-link
+identities. With `ASB_FUSE_PERF_WARM=1`, the measurement first lets direct Git
+refresh the copied checkout's index: on the tested host the two subsequent
+FUSE status calls took 1.53 and 0.99 seconds. With optional index updates
+disabled, the cold-index FUSE status still took 51.7 seconds. A warm index is
+not a replay solution: each workspace can have different index bytes and the
+agent's startup filesystem accesses still need correctly timed replay.
+The opt-in `fixtures/native_fs_probe/overlay.py` layers the recording proxy
+over four isolated `fuse-overlayfs` mounts sharing the same local trial
+baseline. It requires the same container FUSE setup plus
+`ASB_CONTAINER_FUSE_OVERLAY` and `ASB_CONTAINER_FUSE3_LIBRARY`. On the tested
+host, index bytes, file inode numbers and change times matched across the four
+overlays; device numbers did not. The lower index remained unchanged, and each
+upper-layer test write was isolated. Four concurrent Git-status calls through
+the proxy took about 0.3 seconds each. This measures a prepared shared baseline,
+not an agent recording or replay, and does not establish general metadata or
+filesystem equivalence.
+The separate opt-in `fixtures/native_fs_probe/swe_overlay_agent.py` combines
+that shared baseline with the local Hermes mock-provider fixture, actual LLM
+tape and terminal sidecar. It records the application of a supplied previously
+resolved patch and performs four concurrent offline replays, comparing each
+complete Git diff to the recording and checking tape consumption and that the
+shell command was not reexecuted. It requires the overlay, FUSE, image,
+Hermes, Node, baseline and patch inputs described above. The test-only wrapper
+supplies tool boundaries and the mock supplies the patch command; it does not
+run the official SWE-bench evaluator or prove that the agent solved the task.
+With `ASB_HERMES_MIXED_FIXTURE=1`, the mock first invokes Hermes's native write,
+read, patch, search and skills-list tools before the terminal patch command. The fixture
+checks their successful responses and intermediate file states and consumes
+both tool and LLM transcripts in four replay containers. Those file-tool
+wrappers and transcripts are test-only, not production replay support.
+The mixed fixture reads the same file both before and after a patch to check
+that repeated tool names advance through distinct recorded boundaries.
+The experiment intercepts registry dispatch, but agent-loop tools, MCP,
+direct APIs and nested or parallel tool calls are not covered by this test.
+Replay applies recorded startup operations after the agent has begun accessing
+the overlay; matching on this case does not establish general startup ordering,
+untracked or out-of-workspace effects, or support for all native tools.
+The smaller FUSE operation fixture also records and replays chmod, utimens,
+including nanosecond timestamps, and extended-attribute mutations. This is still a partial filesystem prototype;
+other metadata operations, failure semantics and races remain unqualified.
+The cassette replay planner can stage `aux-fs-events` and `aux-fs-payload`
+artifacts for each replica using the existing streamed auxiliary path. These
+inputs are hard links to the sealed source and must be opened read-only; replay
+cursors and workspaces must be separate per replica. Host import and journal
+publication now support file-backed filesystem receipts without loading the
+payload into memory. The guest archive transfer accepts these file-backed
+receipts up to the cassette track limit. The guest driver can export a completed
+pair when explicitly requested. No production launcher yet starts the recorder
+or makes that request, and the runtime does not yet consume the files.
+An offline integration test passes a 17 MiB binary file through the actual
+guest receipt exporter, streamed archive transfer, and host receipt importer.
+Another test streams a file of that size through cassette publication and
+extraction, and checks that publication rejects a changed source digest.
+The current SWE-bench guest creation does not grant FUSE mount capability or
+stage FUSE tools. On the selected task image, an offline container probe with
+the tool, library, fusermount and `/dev/fuse` supplied still failed to mount;
+the same probe succeeded with `SYS_ADMIN` and an unconfined AppArmor profile.
+This is a container setup requirement for this prototype, not a requirement for
+a particular native host. A production launcher must provision a compatible
+container or VM and its tools, settle the mount before exporting the two
+streams, and preserve the original agent workspace and workload evaluation.
+The managed Docker workspace now has an opt-in mount profile, covered by
+offline creation tests and a disposable SWE-bench image mount/unmount test.
+No production path selects it yet; recorder dependency provisioning and VM
+fallback remain incomplete.
+The experimental guest lifecycle mounts a recorder over the existing workspace,
+settles it and restores any pre-existing workspace mount. A disposable guest
+test exercised the supervisor with the packaged proxy. The guest driver starts
+and settles this supervisor when its internal recording flag is selected, but
+the normal runner does not select it. This does not establish complete
+filesystem or subprocess replay.
+The draft `fuse-overlayfs` tool installer obtains the pinned upstream static
+binary for Linux x86-64 or aarch64 and can stage it into a guest. An x86-64
+project-local install and mount/unmount in the selected SWE-bench image passed;
+the installer also stages pinned fusepy 3.0.1 for use by the recorder. The
+installed overlay binary and binding passed the four-replica offline fixture
+with libfuse2 built from the installed pinned source inside the selected guest.
+The helper needs guest `tar`, `make` and `cc`; the guest driver invokes it before
+the execution gate when the internal filesystem recording request is selected.
+That internal selection also adds the recorder tool and its three pinned
+assets to guest bootstrap. The runner currently leaves the selection off.
+Automatic toolchain provisioning, selecting that request from a production
+launcher, the aarch64 path, and VM fallback remain unqualified.
+
+`python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` checks that
+overlapping terminal calls produce a readable sidecar without serializing
+their execution. It forces the second invocation to finish first, replays the
+two in either arrival order, preserves recorded response order, rejects
+advancing a later dependent call, and releases waiting calls on mismatch.
+It does not qualify filesystem effects or general parallel replay ordering.
+The cassette validator already allows multiple aliases under one launch and
+tracks each alias's poll/write/output/exit lifecycle independently. This makes
+one alias per invocation the format used by the draft Hermes recorder. Its
+replayer derives completion-before-start dependencies and response ordering.
+It also records Hermes's provider tool-call identity when present, allowing
+otherwise identical calls to be distinguished; nested and non-provider calls
+can lack that identity and remain unqualified. This does not reconstruct
+filesystem effects. A focused Rust test validates an actual recorder-produced
+multi-session sidecar with the cassette reader, and the fixture checks legacy
+single-alias recordings remain readable.
+
+`python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
+diagnostic for a known defect: the current Hermes terminal sidecar replays the
+recorded response to four clients but does not reproduce a file written by the
+recorded tool. It intentionally asserts the existing defect so that a future
+repair must update the assertion to require the file effect without executing
+the original tool. It does not launch the full Hermes agent or evaluate a task.
+
+The opt-in `crates/asb-cli/tests/openjiuwen_embedding_tape.py` exercises the
+installed OpenJiuwen embedding client and the adapter's proposed auxiliary
+tape route with an offline loopback fixture. Set `ASB_OPENJIUWEN_PYTHON` to
+the interpreter for the project-local OpenJiuwen installation, then run
+`python3 crates/asb-cli/tests/openjiuwen_embedding_tape.py`. The test records
+one request and uses four independent replay proxies after stopping the fixture
+upstream. It requires Node.js and never contacts a live provider. It does not
+qualify the ASB cassette lifecycle, a complete agent run, or workload grading.
+The replay clients use a placeholder key and restore an opaque, random fixture
+cache identity; the fixture does not persist the URL or record-only key. Set
+`ASB_TEST_EMBEDDING_USERINFO=1` to additionally compare direct and routed
+authentication for a fake credential-bearing URL. The endpoint digest is used
+to match replay to the configured endpoint; it does not encrypt the URL and
+may reveal a guessable endpoint to an offline dictionary attack. The opaque
+identity is an experiment and is not wired into the ASB cassette lifecycle.
+The installed OpenJiuwen memory manager detects it as a changed provider key
+for a pre-existing index and would rebuild that index, changing agent behavior.
+The fixture verifies this explicitly. A production solution must preserve the
+native identity and cache behavior while keeping credentials out of recordings.
+
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without
 Docker, providers or installed clients. The opt-in
 `benchmark_live_sdk_session.py` instead needs the installed Terminal-Bench SDK

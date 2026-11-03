@@ -29,6 +29,7 @@ impl Fixture {
             inherit_working_directory: false,
             process_lifetime: Default::default(),
             workload_owner: None,
+            auxiliary_endpoints: Default::default(),
             config: BenchmarkConfig {
                 workspace: self.0.join("workspace").display().to_string(),
                 ..config
@@ -44,6 +45,7 @@ impl Fixture {
             project_root: self.0.join("project"),
             runtime_dir: self.0.join("runtime"),
             run_dir: self.0.join("runtime/run"),
+            filesystem_recording: false,
             replay: false,
             timeout_seconds: 1.0,
             namespace_collectors: Vec::new(),

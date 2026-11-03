@@ -101,6 +101,7 @@ impl TaskIdentity {
 
 pub(crate) struct PreparationContext<'a> {
     pub verify_initial_material: bool,
+    pub filesystem_recording: bool,
     pub budgets: crate::planning::PhaseBudgets,
     pub on_allocation: Option<&'a super::recovery::AllocationObserver<'a>>,
     pub workload: &'a str,
@@ -271,6 +272,10 @@ impl Drop for LaunchFailureGuard<'_> {
 /// The runner provides negotiated connections, never workload/agent dispatch.
 pub(crate) struct ExecutionContext<'a> {
     pub launch: Option<&'a dyn LaunchReadiness>,
+    /// Whether this attempt prepares the experimental filesystem recorder.
+    pub filesystem_recording: bool,
+    /// Endpoints owned by this attempt and translated for an isolated guest.
+    pub auxiliary_endpoints: &'a std::collections::BTreeMap<String, String>,
     pub config: &'a crate::benchmark::BenchmarkConfig,
     pub connection: Option<&'a crate::endpoint::Connection>,
     pub project_root: &'a Path,
@@ -729,6 +734,7 @@ mod tests {
         std::fs::write(root.join("fixture.py"), "original material").unwrap();
         let project = crate::project::ProjectConfig::default();
         let context = PreparationContext {
+            filesystem_recording: false,
             verify_initial_material: true,
             budgets: Default::default(),
             on_allocation: None,
@@ -765,6 +771,7 @@ mod tests {
             ..Default::default()
         };
         let context = super::PreparationContext {
+            filesystem_recording: false,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,
@@ -883,6 +890,7 @@ mod tests {
         std::fs::create_dir_all(&workloads).unwrap();
         super::super::populate(&workloads).unwrap();
         let mut session = super::super::prepare_task(&PreparationContext {
+            filesystem_recording: false,
             verify_initial_material: true,
             budgets: Default::default(),
             on_allocation: None,
@@ -911,6 +919,7 @@ mod tests {
         assert_eq!(session.baseline_passed(), Some(false));
         assert_eq!(session.initial_material_sha256().unwrap(), initial_material);
         let later = super::super::prepare_task(&PreparationContext {
+            filesystem_recording: false,
             verify_initial_material: true,
             budgets: Default::default(),
             on_allocation: None,
@@ -940,6 +949,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            filesystem_recording: false,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,
@@ -979,6 +989,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            filesystem_recording: false,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,
@@ -1015,6 +1026,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            filesystem_recording: false,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,

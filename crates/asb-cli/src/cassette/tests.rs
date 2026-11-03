@@ -147,6 +147,106 @@ fn selected_recorder_identity_survives_archive_staging_and_saved_plan() {
     );
 }
 
+#[test]
+fn selected_auxiliary_recordings_are_streamed_with_their_track_and_costed_once() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.0.join(".asb")).unwrap();
+    fs::write(
+        fixture.0.join(".asb/project.toml"),
+        toml::to_string(&crate::project::ProjectConfig::default()).unwrap(),
+    )
+    .unwrap();
+    let config: crate::benchmark::BenchmarkConfig = toml::from_str(
+        "agent='pi'\nprovider='local'\nmodel='fixture'\nworkload='bug-fix'\nconcurrency=4\n",
+    )
+    .unwrap();
+    let path = fixture.0.join("benchmark.toml");
+    fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+    let payload = b"{\"fixture\":true}\n";
+    let metadata = b"{\"schema\":1}\n";
+    let fs_events = b"{\"sequence\":1}\n";
+    let fs_payload = b"\0\xff\x80fixture binary\0";
+    let mut source = manifest(1);
+    source.tracks[0].artifacts.push(Artifact {
+        kind: "aux-http-embedding".into(),
+        bytes: payload.len() as u64,
+        sha256: digest(payload),
+    });
+    source.tracks[0].artifacts.push(Artifact {
+        kind: "aux-meta-embedding".into(),
+        bytes: metadata.len() as u64,
+        sha256: digest(metadata),
+    });
+    for (kind, data) in [
+        ("aux-fs-events", &fs_events[..]),
+        ("aux-fs-payload", &fs_payload[..]),
+    ] {
+        source.tracks[0].artifacts.push(Artifact {
+            kind: kind.into(),
+            bytes: data.len() as u64,
+            sha256: digest(data),
+        });
+    }
+    let bundle = fixture.zip(
+        &source,
+        &[
+            ("tracks/1.jsonl", b"{}\n"),
+            ("artifacts/1/aux-http-embedding.jsonl", payload),
+            ("artifacts/1/aux-meta-embedding.jsonl", metadata),
+            ("artifacts/1/aux-fs-events.jsonl", fs_events),
+            ("artifacts/1/aux-fs-payload.jsonl", fs_payload),
+        ],
+    );
+    let inspection = crate::runner::repeated::Inspection::prepare_selected(
+        &path,
+        config,
+        1,
+        crate::runner::RunOptions {
+            mode: Some(crate::tape::Mode::Replay),
+            cassette: Some(bundle.to_str().unwrap()),
+            replay_seed: Some(42),
+            ..Default::default()
+        },
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        inspection.input_cost().unwrap().bytes,
+        3 + payload.len() as u64
+            + metadata.len() as u64
+            + fs_events.len() as u64
+            + fs_payload.len() as u64
+    );
+    drop(crate::runner::repeated::publish_campaign(inspection.observe().unwrap()).unwrap());
+    let root = fs::read_dir(fixture.0.join("results/asb-executions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let restored = crate::runner::campaign::reading::Layout::read(&root.join("plan.json")).unwrap();
+    assert_eq!(restored.plan.slots.len(), 4);
+    assert!(
+        restored
+            .plan
+            .slots
+            .iter()
+            .all(|slot| slot.replay_input == Some(0))
+    );
+    let auxiliary = &restored.plan.replay_inputs[0].auxiliary_recordings;
+    assert_eq!(auxiliary.len(), 4);
+    for (kind, expected) in [
+        ("aux-http-embedding", &payload[..]),
+        ("aux-meta-embedding", &metadata[..]),
+        ("aux-fs-events", &fs_events[..]),
+        ("aux-fs-payload", &fs_payload[..]),
+    ] {
+        let input = auxiliary.iter().find(|item| item.kind == kind).unwrap();
+        assert_eq!(fs::read(root.join(&input.private)).unwrap(), expected);
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn alternate_recorder_runs_an_agent_offline_and_reports_its_metrics() {
@@ -719,6 +819,66 @@ fn auxiliary_artifacts_reject_unlisted_or_duplicate_paths() {
                 max_tracks: 1,
                 ..Limits::default()
             })
+            .is_err()
+    );
+}
+
+#[test]
+fn filesystem_artifacts_stream_through_cassette_and_detect_mutation() {
+    let fixture = Fixture::new();
+    let payload = vec![0xabu8; 17 * 1024 * 1024];
+    let source = fixture.0.join("payload.bin");
+    fs::write(&source, &payload).unwrap();
+    let artifact = Artifact {
+        kind: "aux-fs-payload".into(),
+        bytes: payload.len() as u64,
+        sha256: digest(&payload),
+    };
+    let output = fixture.0.join("recording.zip");
+    let mut journal = RecordingJournal::create(&output, manifest(0), 1, Limits::default()).unwrap();
+    journal.begin(1, 1).unwrap();
+    let mut provider = b"{}\n".as_slice();
+    let mut input = File::open(&source).unwrap();
+    journal
+        .commit_with_artifacts(
+            manifest(1).tracks.remove(0),
+            &mut provider,
+            vec![ArtifactInput {
+                artifact: artifact.clone(),
+                source: &mut input,
+            }],
+        )
+        .unwrap();
+    journal.finalize().unwrap();
+    let mut archive = Archive::open(&output, Limits::default()).unwrap();
+    let mut restored = File::create(fixture.0.join("restored.bin")).unwrap();
+    archive
+        .copy_artifact_to(1, "aux-fs-payload", &mut restored)
+        .unwrap();
+    drop(restored);
+    assert_eq!(fs::read(fixture.0.join("restored.bin")).unwrap(), payload);
+
+    fs::write(&source, vec![0xcdu8; payload.len()]).unwrap();
+    let mut changed = RecordingJournal::create(
+        &fixture.0.join("changed.zip"),
+        manifest(0),
+        1,
+        Limits::default(),
+    )
+    .unwrap();
+    changed.begin(1, 1).unwrap();
+    let mut provider = b"{}\n".as_slice();
+    let mut input = File::open(source).unwrap();
+    assert!(
+        changed
+            .commit_with_artifacts(
+                manifest(1).tracks.remove(0),
+                &mut provider,
+                vec![ArtifactInput {
+                    artifact,
+                    source: &mut input
+                }]
+            )
             .is_err()
     );
 }
