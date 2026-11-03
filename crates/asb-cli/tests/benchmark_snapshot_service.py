@@ -11,13 +11,25 @@ import unittest
 
 ROOT=Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT/'crates/asb-cli/assets/benchmarks'))
-from asb_snapshot_service import MarkerServer,SnapshotApplier,SnapshotReplay,SnapshotService,load_replay_boundaries
+from asb_snapshot_service import MarkerServer,SnapshotApplier,SnapshotReplay,SnapshotService,load_replay_boundaries,export_snapshot_streams,receive_snapshot_streams
 
 SCRATCH=ROOT/'target'/'snapshot-service-tests'
 SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_snapshot_transport_rejects_incomplete_recording(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);store=root/'store';store.mkdir()
+            (store/'boundaries.jsonl').write_text('')
+            (store/'markers.jsonl').write_text('')
+            with self.assertRaisesRegex(ValueError,'incomplete'):
+                export_snapshot_streams(store,root/'export',['fixture'])
+            with self.assertRaisesRegex(ValueError,'incomplete'):
+                receive_snapshot_streams(store,root/'receive',['fixture'])
+            self.assertFalse((root/'export').exists())
+            self.assertFalse((root/'receive').exists())
+
     def test_snapshot_applier_reports_sync_failure_and_sequence_error(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);store=root/'store';store.mkdir()

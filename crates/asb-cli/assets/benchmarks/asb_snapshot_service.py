@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socketserver
 import subprocess
 import threading
@@ -149,6 +150,52 @@ def load_replay_boundaries(store):
     if active or ends != expected:
         raise ValueError('snapshot marker and boundary journals differ')
     return expected
+
+
+def export_snapshot_streams(store, destination, command):
+    """Export one baseline and incremental Btrfs streams to files."""
+    store, destination = Path(store), Path(destination)
+    load_replay_boundaries(store)
+    entries = [json.loads(line) for line in (store/'boundaries.jsonl').read_text().splitlines()]
+    destination.mkdir(parents=True, exist_ok=False)
+    previous = None
+    try:
+        for entry in entries:
+            snapshot = store / entry['snapshot']
+            stream = destination / (entry['snapshot'] + '.btrfs')
+            args = list(command) + ['send']
+            if previous is not None:
+                args += ['-p', str(previous)]
+            with stream.open('xb') as output:
+                subprocess.run(args + [str(snapshot)], check=True, stdin=subprocess.DEVNULL,
+                               stdout=output, stderr=subprocess.DEVNULL, timeout=300)
+            previous = snapshot
+        for name in ('boundaries.jsonl', 'markers.jsonl'):
+            shutil.copyfile(store/name, destination/name)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError('snapshot stream export failed; retained partial output') from error
+
+
+def receive_snapshot_streams(source, destination, command):
+    """Receive a complete ordered stream set onto a Btrfs filesystem."""
+    source, destination = Path(source), Path(destination)
+    try:
+        entries = [json.loads(line) for line in (source/'boundaries.jsonl').read_text().splitlines()]
+        if len(entries) < 2:
+            raise ValueError('snapshot stream set is incomplete')
+        destination.mkdir(parents=True, exist_ok=False)
+        for index, entry in enumerate(entries, 1):
+            name = f'snapshot-{index:08d}'
+            if not isinstance(entry, dict) or entry.get('sequence') != index or entry.get('snapshot') != name:
+                raise ValueError('snapshot stream set is malformed')
+            with (source/(name+'.btrfs')).open('rb') as stream:
+                subprocess.run(list(command) + ['receive', str(destination)], check=True, stdin=stream,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+        for name in ('boundaries.jsonl', 'markers.jsonl'):
+            shutil.copyfile(source/name, destination/name)
+        return load_replay_boundaries(destination)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError('snapshot stream receive failed; retained partial output') from error
 
 
 class SnapshotApplier:
