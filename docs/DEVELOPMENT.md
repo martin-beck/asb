@@ -188,6 +188,14 @@ An offline integration test passes a 17 MiB binary file through the actual
 guest receipt exporter, streamed archive transfer, and host receipt importer.
 Another test streams a file of that size through cassette publication and
 extraction, and checks that publication rejects a changed source digest.
+The current SWE-bench guest creation does not grant FUSE mount capability or
+stage FUSE tools. On the selected task image, an offline container probe with
+the tool, library, fusermount and `/dev/fuse` supplied still failed to mount;
+the same probe succeeded with `SYS_ADMIN` and an unconfined AppArmor profile.
+This is a container setup requirement for this prototype, not a requirement for
+a particular native host. A production launcher must provision a compatible
+container or VM and its tools, settle the mount before exporting the two
+streams, and preserve the original agent workspace and workload evaluation.
 
 `python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` checks that
 overlapping terminal calls produce a readable sidecar without serializing
