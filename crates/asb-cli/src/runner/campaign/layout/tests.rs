@@ -266,6 +266,36 @@ fn auxiliary_recordings_inputs_are_bound_to_the_selected_bundle_track() {
     rejects(duplicated);
 }
 
+#[test]
+fn filesystem_artifacts_use_streaming_limits_without_weakening_track_limits() {
+    let mut value = selected(plan(ExecutionMode::Replay, 1, 4, false), true);
+    let limits = crate::cassette::Limits::default();
+    let artifact = |kind: &str, bytes| crate::runner::campaign::AuxiliaryRecordingInput {
+        kind: kind.into(),
+        private: format!("inputs/{kind}-64.jsonl").into(),
+        bytes,
+        sha256: "a".repeat(64),
+    };
+    value.replay_inputs[0]
+        .auxiliary_recordings
+        .push(artifact("aux-fs-payload", limits.max_track_bytes + 1));
+    value.validate_layout().unwrap();
+    value.replay_inputs[0].auxiliary_recordings[0].bytes = limits.max_artifact_bytes + 1;
+    assert!(value.validate_layout().is_err());
+    value.replay_inputs[0].auxiliary_recordings[0] =
+        artifact("aux-http-embedding", limits.max_track_bytes + 1);
+    assert!(value.validate_layout().is_err());
+    value.replay_inputs[0].auxiliary_recordings.clear();
+    value.replay_inputs[0].bytes = limits.max_track_bytes + 1;
+    assert!(value.validate_layout().is_err());
+    value.replay_inputs[0].bytes = 1;
+    value.replay_inputs[0].auxiliary_recordings.extend([
+        artifact("aux-fs-events", limits.max_artifact_bytes),
+        artifact("aux-fs-payload", limits.max_artifact_bytes),
+    ]);
+    assert!(value.validate_layout().is_err());
+}
+
 fn rejects(wire: Value) {
     let decoded = serde_json::from_value::<Plan>(wire);
     assert!(decoded.is_err() || decoded.unwrap().validate_layout().is_err());
