@@ -62,7 +62,8 @@ before returning an observation. Marker or transcript failures are reported when
 recording closes. Task tracking records its actions and results; replay rebuilds
 its in-memory state while the coordinator applies recorded workspace effects.
 Tracker persistence outside the workspace is recreated by the SDK itself, since
-the experimental recorder only covers the workspace. This does not establish
+the experimental recorder only covers the workspace. Delegated conversations
+own separate terminal sessions while sharing the recording transport. This does not establish
 full OpenHands replay support.
 The offline `tests/fixtures/openhands_editor_sdk.py` can be run with an
 installed OpenHands project Python to exercise the actual SDK editor wrapper;
