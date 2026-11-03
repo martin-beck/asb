@@ -1595,6 +1595,13 @@ impl Publication<'_, '_> {
         // process or official workload grade. Commit before sealing outputs.
         let recording_error = options.recording.and_then(|recorder| {
             let batch = options.batch.expect("campaign-owned recording");
+            if context.filesystem_recording
+                && !has_filesystem_recording(&result.sealed_file_artifacts)
+            {
+                return Some(Error::Io(
+                    "filesystem recording is incomplete or missing; no complete recording was committed".into(),
+                ));
+            }
             match recorder.commit(batch.number(), options.replica, result, &proxy_evidence) {
                 Ok(evidence) => {
                     result.recording = Some(evidence);
@@ -1779,10 +1786,36 @@ impl Publication<'_, '_> {
     }
 }
 
+fn has_filesystem_recording(artifacts: &[crate::agents::SealedFileArtifact]) -> bool {
+    ["aux-fs-events", "aux-fs-payload"]
+        .iter()
+        .all(|required| artifacts.iter().any(|artifact| artifact.kind == *required))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{sealed_step_count, validate_mcp_relay_capability, validate_mcp_server_capability};
+    use super::{
+        has_filesystem_recording, sealed_step_count, validate_mcp_relay_capability,
+        validate_mcp_server_capability,
+    };
     use crate::benchmark::{BenchmarkConfig, McpServerConfig};
+
+    #[test]
+    fn filesystem_recording_requires_both_owned_files() {
+        let artifact = |kind: &str| crate::agents::SealedFileArtifact {
+            kind: kind.into(),
+            path: "fixture".into(),
+            bytes: 0,
+            sha256: "0".repeat(64),
+        };
+        assert!(!has_filesystem_recording(&[]));
+        assert!(!has_filesystem_recording(&[artifact("aux-fs-events")]));
+        assert!(!has_filesystem_recording(&[artifact("aux-fs-payload")]));
+        assert!(has_filesystem_recording(&[
+            artifact("aux-fs-events"),
+            artifact("aux-fs-payload")
+        ]));
+    }
 
     fn config(agent: &str) -> BenchmarkConfig {
         BenchmarkConfig {
