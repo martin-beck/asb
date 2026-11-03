@@ -1,5 +1,5 @@
 """Local feasibility probe only; not an ASB replay backend."""
-import errno, json, os, stat, sys, threading, time
+import errno, json, os, socket, stat, sys, threading, time
 from pathlib import Path
 from fuse import FUSE, FuseOSError, Operations, fuse_get_context
 
@@ -28,6 +28,18 @@ class Proxy(Operations):
         self.handles = {}
         self.inode_locks = {}
         self.log = open(evidence / 'events.jsonl', 'a', encoding='utf-8', buffering=1)
+        control_fd = os.environ.get('ASB_PROBE_CONTROL_FD')
+        if control_fd is not None:
+            self.control = socket.socket(fileno=int(control_fd))
+            threading.Thread(target=self.control_loop, daemon=True).start()
+    def control_loop(self):
+        with self.control.makefile('rwb', buffering=0) as stream:
+            for line in stream:
+                marker = line.decode('ascii').strip()
+                if marker not in ('tool-begin', 'tool-end'):
+                    raise RuntimeError('invalid fixture marker')
+                sequence = self.record('marker', None, marker=marker, is_marker=True)
+                stream.write(f'{sequence}\n'.encode('ascii'))
     def path(self, path): return backing / path.lstrip('/')
     def register(self, fd):
         with self.handle_lock:
@@ -40,15 +52,16 @@ class Proxy(Operations):
         with self.handle_lock: return self.inode_locks.setdefault((st.st_dev, st.st_ino), threading.RLock())
     def inode_lock(self, fi):
         return self.lock_for_stat(os.fstat(fi.fh))
-    def record(self, op, path, data=None, **detail):
+    def record(self, op, path, data=None, is_marker=False, **detail):
         with self.record_lock:
             self.sequence += 1
-            event = {'sequence': self.sequence, 'op': op, 'path': path, 'caller': caller_identity(fuse_get_context()[2]), **detail}
+            event = {'sequence': self.sequence, 'op': op, 'path': path, 'caller': None if is_marker else caller_identity(fuse_get_context()[2]), **detail}
             if data is not None:
                 name = f'object-{self.sequence:08d}'
                 with open(evidence / name, 'xb') as f: f.write(data)
                 event.update(object=name, bytes=len(data))
             self.log.write(json.dumps(event, separators=(',', ':')) + '\n')
+            return self.sequence
     def getattr(self, path, fh=None):
         try: st = os.lstat(self.path(path))
         except OSError as error: raise FuseOSError(error.errno)

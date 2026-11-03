@@ -5,6 +5,7 @@ import importlib.util
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -36,9 +37,15 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     (baseline / 'two').write_bytes(b'initial')
     os.link(baseline / 'two', baseline / 'two-alias')
     subprocess.run(['/bin/cp', '-a', str(baseline) + '/.', str(backing)], check=True)
-    env = dict(os.environ, ASB_PROBE_HOLD_WRITE='1')
+    control, peer = socket.socketpair()
+    env = dict(os.environ, ASB_PROBE_HOLD_WRITE='1', ASB_PROBE_CONTROL_FD=str(peer.fileno()))
     with (root / 'fuse.log').open('wb') as log:
-        process = subprocess.Popen([python, str(HERE / 'proxy.py'), str(backing), str(mount), str(evidence)], env=env, stdout=log, stderr=log)
+        process = subprocess.Popen([python, str(HERE / 'proxy.py'), str(backing), str(mount), str(evidence)], env=env, stdout=log, stderr=log, pass_fds=(peer.fileno(),))
+        peer.close()
+        markers = control.makefile('rwb', buffering=0)
+        def mark(name):
+            markers.write((name + '\n').encode('ascii'))
+            return int(markers.readline())
         mounted = False
         try:
             wait_for(lambda: os.path.ismount(mount) or process.poll() is not None, 'FUSE mount timed out')
@@ -86,13 +93,17 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
                 writer.result(timeout=5)
                 truncation.result(timeout=5)
             assert (backing / 'two').read_bytes() == b''
+            begin = mark('tool-begin')
             child = subprocess.Popen([python, '-c',
                 'from pathlib import Path; Path("child").write_bytes(b"child data")'], cwd=mount)
             child_pid = child.pid
             assert child.wait(timeout=5) == 0
+            end = mark('tool-end')
             assert (backing / 'child').read_bytes() == b'child data'
         finally:
             (evidence / 'write-release').touch()
+            markers.close()
+            control.close()
             if mounted:
                 subprocess.run(['fusermount3', '-u', str(mount)], check=True)
             try:
@@ -109,6 +120,7 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     second_truncate = next(i for i, event in enumerate(events) if event['op'] == 'truncate' and event['path'] == '/two-alias')
     assert second_write < second_truncate, ops
     child_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/child']
+    assert begin < child_writes[0]['sequence'] < end
     assert child_writes and all(event['caller']['tid'] == child_pid and event['caller']['tgid'] == child_pid and event['caller']['ppid'] == os.getpid() and event['caller']['start_ticks'] is not None for event in child_writes), child_writes
     parent_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/one']
     assert parent_writes and all(event['caller']['tid'] == writer_tids['one'] and event['caller']['tgid'] == os.getpid() and event['caller']['start_ticks'] is not None for event in parent_writes), parent_writes
@@ -128,6 +140,8 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
             pass
         else:
             raise AssertionError('replay cursor moved backwards')
+        staged.apply_until(end)
+        assert (staged_root / 'child').read_bytes() == b'child data'
         staged.finish()
         assert (staged_root / 'one').read_bytes() == b''
         assert (staged_root / 'child').read_bytes() == b'child data'

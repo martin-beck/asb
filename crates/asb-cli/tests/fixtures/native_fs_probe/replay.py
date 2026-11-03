@@ -41,6 +41,8 @@ class Replay:
     def apply(self, event):
         op = event['op']
         path = self.root / event['path'].lstrip('/') if event['path'] is not None else None
+        if op == 'marker':
+            return
         if op in ('open', 'create'):
             flags = event['flags'] | (os.O_CREAT if op == 'create' else 0)
             fd = os.open(path, flags, event.get('mode', 0o600) & 0o7777)
