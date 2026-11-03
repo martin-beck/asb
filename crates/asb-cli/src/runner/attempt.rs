@@ -1604,8 +1604,9 @@ impl Publication<'_, '_> {
             }
             match recorder.commit(batch.number(), options.replica, result, &proxy_evidence) {
                 Ok(evidence) => {
+                    let complete = evidence.track.track.complete;
                     result.recording = Some(evidence);
-                    None
+                    incomplete_recording_error(complete)
                 }
                 Err(error) => Some(error),
             }
@@ -1792,6 +1793,14 @@ fn has_filesystem_recording(artifacts: &[crate::agents::SealedFileArtifact]) -> 
         .all(|required| artifacts.iter().any(|artifact| artifact.kind == *required))
 }
 
+/// Keep the committed cassette as evidence while failing the run when its
+/// provider capture cannot be used as a complete recording.
+fn incomplete_recording_error(complete: bool) -> Option<Error> {
+    (!complete).then(|| {
+        Error::Run("provider recording is incomplete; cassette retained for diagnosis".into())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1799,6 +1808,25 @@ mod tests {
         validate_mcp_server_capability,
     };
     use crate::benchmark::{BenchmarkConfig, McpServerConfig};
+
+    #[test]
+    fn incomplete_recording_fails_disposition_without_changing_grade() {
+        use super::super::disposition::{FailureKind, RunDisposition, RunStatus};
+        assert!(super::incomplete_recording_error(true).is_none());
+        let mut disposition = RunDisposition {
+            status: RunStatus::Completed,
+            failure: None,
+            success: true,
+        };
+        let error = super::incomplete_recording_error(false).unwrap();
+        disposition.recording_failed(error.to_string());
+        assert!(!disposition.success);
+        assert_eq!(disposition.status, RunStatus::Failed);
+        assert_eq!(
+            disposition.failure.unwrap().kind,
+            FailureKind::RecordingError
+        );
+    }
 
     #[test]
     fn filesystem_recording_requires_both_owned_files() {
