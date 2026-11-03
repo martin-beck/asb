@@ -136,6 +136,16 @@ FUSE status calls took 1.53 and 0.99 seconds. With optional index updates
 disabled, the cold-index FUSE status still took 51.7 seconds. A warm index is
 not a replay solution: each workspace can have different index bytes and the
 agent's startup filesystem accesses still need correctly timed replay.
+The opt-in `fixtures/native_fs_probe/overlay.py` layers the recording proxy
+over four isolated `fuse-overlayfs` mounts sharing the same local trial
+baseline. It requires the same container FUSE setup plus
+`ASB_CONTAINER_FUSE_OVERLAY` and `ASB_CONTAINER_FUSE3_LIBRARY`. On the tested
+host, index bytes, file inode numbers and change times matched across the four
+overlays; device numbers did not. The lower index remained unchanged, and each
+upper-layer test write was isolated. Four concurrent Git-status calls through
+the proxy took about 0.3 seconds each. This measures a prepared shared baseline,
+not an agent recording or replay, and does not establish general metadata or
+filesystem equivalence.
 
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the
