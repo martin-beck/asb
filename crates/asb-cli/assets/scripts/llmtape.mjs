@@ -898,6 +898,13 @@ function isReplayProbe(request) {
   return false;
 }
 
+// Replay admission and inference accounting are distinct: embeddings must be
+// replayed, but they are not language-model inference requests.
+function isInferenceRequest(request) {
+  const path = String(request.url || "").split("?", 1)[0];
+  return !isReplayProbe(request) && !path.endsWith("/embeddings");
+}
+
 // A later exact probe may pass over omitted probes of other classes; an
 // unrecorded probe must not consume a different class by accident.
 function maySkipCurrentProbe(request) {
@@ -1092,7 +1099,7 @@ async function handle(request, response, recording) {
       response_observed_unix_ms: Math.round(performance.timeOrigin + performance.now()),
     },
   };
-  if (capture) capture.append(recording.token, interaction, !isReplayProbe(recordedRequest));
+  if (capture) capture.append(recording.token, interaction, isInferenceRequest(recordedRequest));
   else {
     if (stopping) return;
     appendFileSync(cassette, `${JSON.stringify(interaction)}\n`);
