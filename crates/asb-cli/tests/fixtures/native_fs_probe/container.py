@@ -132,6 +132,18 @@ fi
    assert any((e.get('caller') or {}).get('thread_ancestry_complete')
               and (e['caller']['ancestry'][0].get('creator_thread') or {}).get('tid')
               for e in source_reads), 'child creator thread was not captured through FUSE'
+   observed = next(e['caller'] for e in source_reads if (e.get('caller') or {}).get('thread_ancestry_complete')
+                   and (e['caller']['ancestry'][0].get('creator_thread') or {}).get('tid'))
+   ancestor = observed['ancestry'][1]; creator = observed['ancestry'][0]['creator_thread']
+   attribution_path = probe.parents[2]/'assets/benchmarks/asb_fs_attribution.py'
+   attribution_spec = importlib.util.spec_from_file_location('asb_fs_attribution_fixture', attribution_path)
+   attribution_module = importlib.util.module_from_spec(attribution_spec); attribution_spec.loader.exec_module(attribution_module)
+   classifier = attribution_module.Attribution()
+   classifier.observe({'sequence':1, 'op':'marker', 'marker':'tool-begin:fixture', 'origin':{
+       'pid':ancestor['tgid'], 'tid':creator['tid'], 'process_start_ticks':ancestor['start_ticks'],
+       'thread_start_ticks':creator['start_ticks']}})
+   assert classifier.observe({'sequence':2, 'op':'read', 'caller':observed}) == {'kind':'tool', 'alias':'fixture'}
+   classifier.observe({'sequence':3, 'op':'marker', 'marker':'tool-end:fixture'}); classifier.finish()
   from collections import Counter
   print('recorded operation counts:',dict(Counter(e['op'] for e in events)))
   if hermes_install:

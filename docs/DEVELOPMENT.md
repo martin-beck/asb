@@ -23,8 +23,10 @@ The experimental recorder also attempts to identify the creating thread at
 each process ancestry hop using Linux procfs, including process and thread start
 ticks. It caches only positive observations and marks thread lineage incomplete
 when a creator is unavailable. The offline thread-lineage test distinguishes
-children created by concurrent sibling threads; this evidence does not itself
-classify operations or implement direct filesystem replay.
+children created by concurrent sibling threads. An offline attribution prototype
+classifies direct and tool-owned operations only when the required lineage is
+complete and unambiguous; otherwise it reports unknown or ambiguous. It is not
+yet wired into direct filesystem replay.
 The experimental replay cursor can apply an ordered prefix and resume while
 keeping file handles open. The fixture checks an intermediate write before its
 later truncate and brackets one synchronous subprocess with explicit markers.
