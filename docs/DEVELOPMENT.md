@@ -198,8 +198,12 @@ container or VM and its tools, settle the mount before exporting the two
 streams, and preserve the original agent workspace and workload evaluation.
 The managed Docker workspace now has an opt-in mount profile, covered by
 offline creation tests and a disposable SWE-bench image mount/unmount test.
-No production path selects it yet, and tool provisioning and VM fallback remain
-unimplemented.
+No production path selects it yet; recorder dependency provisioning and VM
+fallback remain incomplete.
+The draft `fuse-overlayfs` tool installer obtains the pinned upstream static
+binary for Linux x86-64 or aarch64 and can stage it into a guest. An x86-64
+project-local install and mount/unmount in the selected SWE-bench image passed;
+the aarch64 binary, recorder library and VM fallback remain unqualified.
 
 `python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` checks that
 overlapping terminal calls produce a readable sidecar without serializing
