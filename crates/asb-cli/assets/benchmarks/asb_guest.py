@@ -19,7 +19,7 @@ import threading
 
 from asb_execution import ExecutionError, principal_observation
 from asb_runtime import bundle
-from asb_staging import upload, stage_runtime, root_execute, prepare_guest_roots
+from asb_staging import upload, upload_files, stage_runtime, root_execute, prepare_guest_roots
 from asb_relay import HostRelay, ForwardingCancellation, forward_request
 
 
@@ -251,15 +251,13 @@ def stage_private_inputs(task, inputs, owner=None):
                 or len(item["sha256"]) != 64 or not re.fullmatch(r"[0-9a-f]{64}",item["sha256"])
                 or target in targets or item["bytes"] < 0 or item["bytes"] > 64 * 1024**2):
             raise ExecutionError("guest private replay input is invalid")
-        content = Path(source).read_bytes()
-        total += len(content)
-        if (len(content) != item["bytes"] or hashlib.sha256(content).hexdigest() != item["sha256"]
-                or total > 64 * 1024**2):
+        total += item['bytes']
+        if total > 64 * 1024**2:
             raise ExecutionError("sealed local-tool replay transcript changed before guest staging")
         targets.add(target)
-        staged.append((target,content,0o600))
+        staged.append((target,source,item['bytes'],item['sha256'],0o600))
     if staged:
-        upload(task.workspace.container,"/opt/asb-private",staged,temporary_dir=task.artifacts,owner=owner)
+        upload_files(task.workspace.container,"/opt/asb-private",staged,temporary_dir=task.artifacts,owner=owner)
 
 
 def stage_npm_package_tree(task, tree, tools, selected, owner=None):

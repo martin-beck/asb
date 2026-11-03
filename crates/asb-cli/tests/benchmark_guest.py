@@ -14,7 +14,7 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).parents[1] / "assets/benchmarks"))
 from asb_execution import ExecutionError
-from asb_guest import (execute_agent, export_agent_artifacts, stage_npm_package_tree, propagate_guest_timeout,
+from asb_guest import (execute_agent, export_agent_artifacts, stage_npm_package_tree, stage_private_inputs, propagate_guest_timeout,
                        stage_public_cache, stage_bootstrap, PreparationBudget)
 from asb_runtime import elf as inspect_elf
 
@@ -67,6 +67,18 @@ class ArchiveContainer:
 
 
 class GuestBootstrapTests(unittest.TestCase):
+    def test_private_inputs_stream_and_reject_changed_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'source';payload=b'abc123'*20000;source.write_bytes(payload)
+            container=Container();task=SimpleNamespace(workspace=SimpleNamespace(container=container),artifacts=root)
+            item={'source':str(source),'target':'replay.jsonl','bytes':len(payload),
+                  'sha256':hashlib.sha256(payload).hexdigest()}
+            with patch.object(Path,'read_bytes',side_effect=AssertionError('whole file read')):
+                stage_private_inputs(task,[item],owner=(123,456))
+            self.assertEqual(container.files,[('/opt/asb-private','replay.jsonl',payload)])
+            container.files.clear();source.write_bytes(payload+b'changed')
+            with self.assertRaises(ExecutionError):stage_private_inputs(task,[item])
+            self.assertEqual(container.files,[])
     def test_guest_timeout_propagates_without_inventing_it_from_other_values(self):
         for value, expected in [(True, True), (False, False), ("true", False), (None, False)]:
             result = {"metadata": {"timed_out": value}, "timed_out": False}
