@@ -550,6 +550,7 @@ fn manifest(count: u64) -> Manifest {
         tracks: (1..=count)
             .map(|id| Track {
                 recorder: None,
+                recorded_max_steps: None,
                 id,
                 batch: id,
                 replica: 1,
@@ -583,6 +584,23 @@ fn recorder_identity_is_bounded_and_historical_tracks_remain_readable() {
         value.tracks[0].recorder = Some(bad.into());
         assert!(value.validate(Limits::default()).is_err());
     }
+}
+
+#[test]
+fn track_step_setting_round_trips_and_legacy_absence_stays_unknown() {
+    let mut value = manifest(1);
+    let legacy = serde_json::to_value(&value).unwrap();
+    assert!(legacy["tracks"][0].get("recorded_max_steps").is_none());
+    assert_eq!(
+        serde_json::from_value::<Manifest>(legacy).unwrap().tracks[0].recorded_max_steps,
+        None
+    );
+    value.tracks[0].recorded_max_steps = Some(200);
+    value.validate(Limits::default()).unwrap();
+    let encoded = serde_json::to_vec(&value).unwrap();
+    assert_eq!(serde_json::from_slice::<Manifest>(&encoded).unwrap(), value);
+    value.tracks[0].recorded_max_steps = Some(0);
+    assert!(value.validate(Limits::default()).is_err());
 }
 
 #[test]

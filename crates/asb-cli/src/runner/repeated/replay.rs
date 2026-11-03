@@ -95,6 +95,22 @@ impl Inspection {
                 None,
             )
         };
+        if options.max_steps.is_none()
+            && source.manifest().is_some_and(|manifest| {
+                chosen.iter().any(|id| {
+                    manifest
+                        .track(*id)
+                        .is_ok_and(|track| track.recorded_max_steps.is_some())
+                })
+            })
+            && crate::agents::find(&config.agent)
+                .is_some_and(|adapter| !adapter.supports_max_steps())
+        {
+            return Err(Error::Input(format!(
+                "selected recording contains a step limit that agent `{}` cannot apply",
+                config.agent
+            )));
+        }
         Ok(Some(Self {
             source,
             path: std::path::absolute(path).map_err(crate::io_error)?,
@@ -169,6 +185,7 @@ impl Prepared {
                     native_tool,
                     mcp_relays,
                     recorder,
+                    recorded_max_steps,
                 ) = if let Some(manifest) = self.source.manifest() {
                     let track = manifest.track(*id).map_err(input_error)?;
                     let mut mcp_relays = Vec::new();
@@ -224,6 +241,7 @@ impl Prepared {
                             .map(|_| PathBuf::from(format!("inputs/native-tool-{id}.jsonl"))),
                         mcp_relays,
                         track.recorder.clone(),
+                        track.recorded_max_steps,
                     )
                 } else {
                     let track = self
@@ -244,6 +262,7 @@ impl Prepared {
                         None,
                         Vec::new(),
                         None,
+                        None,
                     )
                 };
                 total = total
@@ -254,6 +273,7 @@ impl Prepared {
                     })?;
                 let index = inputs.len();
                 inputs.push(ReplayInput {
+                    recorded_max_steps,
                     recorder,
                     complete,
                     track: Some(*id),
@@ -292,6 +312,19 @@ impl Prepared {
             if input.recorder.as_deref() != expected_recorder {
                 return Err(Error::Input(
                     "selected recording adapter changed after planning; no agent was started"
+                        .into(),
+                ));
+            }
+            let expected_max_steps = self
+                .source
+                .manifest()
+                .map(|manifest| manifest.track(input.track.expect("selected input identity")))
+                .transpose()
+                .map_err(input_error)?
+                .and_then(|track| track.recorded_max_steps);
+            if input.recorded_max_steps != expected_max_steps {
+                return Err(Error::Input(
+                    "selected recording step setting changed after planning; no agent was started"
                         .into(),
                 ));
             }
@@ -643,6 +676,7 @@ mod tests {
         )
         .unwrap();
         let input = ReplayInput {
+            recorded_max_steps: None,
             recorder: None,
             complete: Some(true),
             track: Some(7),
@@ -676,6 +710,7 @@ mod tests {
         fs::create_dir_all(root.join("batch")).unwrap();
         fs::write(root.join("inputs/local-tools-1.jsonl"), b"{}\n").unwrap();
         let input = ReplayInput {
+            recorded_max_steps: None,
             recorder: None,
             complete: Some(true),
             track: Some(1),
@@ -709,6 +744,7 @@ mod tests {
         fs::create_dir_all(root.join("batch")).unwrap();
         fs::write(root.join("inputs/tool-protocol-1.json"), b"{}\n").unwrap();
         let input = ReplayInput {
+            recorded_max_steps: None,
             recorder: None,
             complete: Some(true),
             track: Some(1),
@@ -740,6 +776,7 @@ mod tests {
         fs::create_dir_all(root.join("batch")).unwrap();
         fs::write(root.join("inputs/determinism-manifest-7.json"), b"{}\n").unwrap();
         let input = ReplayInput {
+            recorded_max_steps: None,
             recorder: None,
             complete: Some(true),
             track: Some(7),
@@ -786,6 +823,7 @@ mod tests {
             .unwrap();
         fs::write(root.join("inputs/native-trace-7.jsonl"), &trace).unwrap();
         let input = ReplayInput {
+            recorded_max_steps: None,
             recorder: None,
             complete: Some(true),
             track: Some(7),
@@ -826,6 +864,7 @@ mod tests {
         fs::create_dir_all(root.join("batch")).unwrap();
         fs::write(root.join("inputs/native-trace-7.jsonl"), b"{}\n").unwrap();
         let input = ReplayInput {
+            recorded_max_steps: None,
             recorder: None,
             complete: Some(true),
             track: Some(7),
@@ -862,6 +901,7 @@ mod tests {
         )
         .unwrap();
         let input = ReplayInput {
+            recorded_max_steps: None,
             recorder: None,
             complete: Some(true),
             track: Some(7),

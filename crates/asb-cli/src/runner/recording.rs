@@ -173,6 +173,7 @@ pub(crate) struct Recorder {
 
 struct Planned {
     configuration: crate::benchmark::BenchmarkConfig,
+    max_steps: Option<u64>,
     selection: crate::workloads::TaskSelection,
     reservation: crate::cassette::RecordingReservation,
 }
@@ -270,6 +271,7 @@ impl Recorder {
                     .zip(plan.recording_reservation.as_ref())
                     .map(|(selection, reservation)| Planned {
                         configuration: plan.configuration.clone(),
+                        max_steps: plan.max_steps,
                         selection: selection.clone(),
                         reservation: reservation.clone(),
                     })
@@ -310,6 +312,7 @@ impl Recorder {
             .collect();
         let planned = Planned {
             configuration: plan.configuration.clone(),
+            max_steps: plan.max_steps,
             selection: plan.recording_selection.clone().ok_or_else(|| {
                 Error::Input("union lost its reserved recording selection".into())
             })?,
@@ -493,6 +496,7 @@ impl Recorder {
                 .transpose()?;
             let track = Track {
                 recorder: capture.map(|capture| capture.adapter.clone()),
+                recorded_max_steps: self.planned.as_ref().and_then(|planned| planned.max_steps),
                 id: (batch - 1) * self.concurrency as u64 + replica.index as u64,
                 batch,
                 replica: replica.index as u64,
@@ -941,6 +945,7 @@ mod tests {
     fn capture_recorder_identity_is_bound_to_track_and_legacy_llmtape() {
         let mut track = Track {
             recorder: Some("other-recorder".into()),
+            recorded_max_steps: None,
             id: 1,
             batch: 1,
             replica: 1,
@@ -1031,6 +1036,7 @@ mod tests {
             )
             .unwrap();
             recorder.planned = Some(Planned {
+                max_steps: None,
                 configuration: configuration.clone(),
                 selection: crate::workloads::TaskSelection {
                     module: None,
@@ -1096,6 +1102,7 @@ mod tests {
             let original = fs::metadata(&output).unwrap();
             let track = Track {
                 recorder: None,
+                recorded_max_steps: None,
                 id: 1,
                 batch: 1,
                 replica: 1,
@@ -1237,6 +1244,7 @@ mod tests {
             let original = fs::metadata(&output).unwrap();
             let track = Track {
                 recorder: None,
+                recorded_max_steps: None,
                 id: 1,
                 batch: 1,
                 replica: 1,

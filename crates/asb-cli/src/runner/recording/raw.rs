@@ -327,6 +327,7 @@ mod tests {
         fn track(&self) -> Track {
             Track {
                 recorder: None,
+                recorded_max_steps: None,
                 id: 1,
                 batch: 1,
                 replica: 1,

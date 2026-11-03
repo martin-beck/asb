@@ -197,6 +197,14 @@ pub(crate) struct RunOptions<'a> {
 }
 
 impl RunOptions<'_> {
+    fn effective_max_steps(&self) -> Option<u64> {
+        self.max_steps.or_else(|| {
+            self.native_tool_inputs
+                .and_then(|inputs| inputs.get(self.replica.index.checked_sub(1)?))
+                .and_then(|input| input.recorded_max_steps)
+        })
+    }
+
     fn effective_tool_mode(&self) -> Option<tape::Mode> {
         if self.tool_mode_explicit {
             self.tool_mode
@@ -1721,6 +1729,34 @@ mod tests {
     };
     use crate::benchmark::BenchmarkConfig;
     use crate::measurements::TokenUsage;
+
+    #[test]
+    fn replay_uses_each_selected_tracks_step_limit_unless_explicitly_overridden() {
+        let input = |limit| {
+            serde_json::from_value::<super::campaign::ReplayInput>(serde_json::json!({
+                "source":"source.asb.zip", "private":"input.jsonl", "bytes":3,
+                "sha256":"a".repeat(64), "recorded_max_steps":limit
+            }))
+            .unwrap()
+        };
+        let first = input(Some(100));
+        let second = input(Some(200));
+        let legacy = input(None::<u64>);
+        let inputs = [&first, &second, &legacy];
+        let mut options = super::RunOptions {
+            native_tool_inputs: Some(&inputs),
+            ..Default::default()
+        };
+        assert_eq!(options.effective_max_steps(), Some(100));
+        options.replica.index = 2;
+        assert_eq!(options.effective_max_steps(), Some(200));
+        options.replica.index = 3;
+        assert_eq!(options.effective_max_steps(), None);
+        options.max_steps = Some(300);
+        assert_eq!(options.effective_max_steps(), Some(300));
+        options.replica.index = 0;
+        assert_eq!(options.effective_max_steps(), Some(300));
+    }
 
     #[test]
     fn concurrent_run_reports_injected_replica_spawn_failure() {

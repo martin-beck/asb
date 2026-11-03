@@ -798,6 +798,7 @@ impl<'a> ReadyAttempt<'a> {
         let config_path = context.config_path.as_path();
         let config = &context.config;
         let options = context.options;
+        let effective_max_steps = options.effective_max_steps();
         let project_root = &context.project_root;
         let project_config = &context.project_config;
         let tape_cassette = &context.tape_cassette;
@@ -851,7 +852,7 @@ impl<'a> ReadyAttempt<'a> {
                     project_root,
                     project_config,
                     replay: tape_mode == Some(tape::Mode::Replay),
-                    max_steps: options.max_steps,
+                    max_steps: effective_max_steps,
                     tape_cassette: tape_cassette
                         .as_ref()
                         .map(|(_, cassette)| cassette.as_path()),
@@ -929,7 +930,7 @@ impl<'a> ReadyAttempt<'a> {
                         provider_credentials,
                         tape_url,
                         tape_mode,
-                        max_steps: options.max_steps,
+                        max_steps: effective_max_steps,
                         tool_tape_mode: tool_tape_cassette.as_ref().map(|(mode, _)| *mode),
                         tool_tape_cassette: tool_tape_cassette
                             .as_ref()
