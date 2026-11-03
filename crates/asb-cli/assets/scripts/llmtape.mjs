@@ -892,19 +892,10 @@ function isReplayProbe(request) {
     return (request.method === "HEAD" || request.method === "GET")
       && /(?:\/api\/hello|\/health(?:z)?|\/models|\/api\/tags)(?:[/?]|$)/.test(request.url || "");
   }
-  try {
-    const parsed = JSON.parse(request.body);
-    if (request.url?.includes("/embeddings") && parsed.model === "text-embedding-3-small") {
-      return true;
-    }
-  } catch {
-    // Keep arbitrary malformed bodies fail-closed below.
-  }
-  // OpenJiuwen performs this local vision-capability check before its first
-  // workload request. It has no benchmark semantics and can be omitted when
-  // replaying on a provider/agent path that does not repeat the probe.
-  return typeof request.body === "string"
-    && request.body.includes("What color is this image? Reply with one word.");
+  // A request with a body may be a real inference or embedding operation,
+  // even when its model or prompt resembles a capability check. It must be
+  // matched and consumed as an ordinary recorded exchange.
+  return false;
 }
 
 // A later exact probe may pass over omitted probes of other classes; an
