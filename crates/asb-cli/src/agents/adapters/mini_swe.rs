@@ -198,8 +198,6 @@ _MAX_EFFECT_BYTES = 512 * 1024
 def _filesystem_marker(action, alias):
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            # A Btrfs snapshot is allowed up to 30 seconds by the service.
-            connection.settimeout(40)
             connection.connect(os.environ['ASB_FS_MARKER_SOCKET'])
             connection.sendall(f'tool-{action}:{alias}:{os.getpid()}:{threading.get_native_id()}\n'.encode('ascii'))
             with connection.makefile('rb') as response:
@@ -212,7 +210,6 @@ def _filesystem_replay_boundary(alias):
     """Wait until the per-replica coordinator has applied this tool's effects."""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(1800)
             connection.connect(os.environ['ASB_FS_REPLAY_SOCKET'])
             connection.sendall(f'tool-end:{alias}\n'.encode('ascii'))
             with connection.makefile('rb') as response:

@@ -8,11 +8,11 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import socketserver
 import subprocess
 import sys
 import threading
-import time
 
 _MARKER = re.compile(rb'tool-(begin|end):([A-Za-z0-9_-]{1,80})(?::([0-9]+):([0-9]+))?\n')
 
@@ -45,7 +45,7 @@ class SnapshotService:
         try:
             subprocess.run(self.command + ['subvolume', 'snapshot', '-r', str(self.workspace), str(destination)],
                            check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=30)
+                           stderr=subprocess.DEVNULL)
         except (OSError, subprocess.SubprocessError) as error:
             raise RuntimeError('workspace snapshot failed; retained snapshot directory') from error
 
@@ -226,7 +226,7 @@ class SnapshotApplier:
             subprocess.run(self.command + ['-aHAX', '--inplace', '--checksum', '--delete',
                                            str(after)+'/', str(self.workspace)+'/'],
                            check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=60)
+                           stderr=subprocess.DEVNULL)
         except (OSError, subprocess.SubprocessError) as error:
             raise RuntimeError('snapshot replay sync failed; workspace may be partially updated') from error
         self.previous = sequence
@@ -238,7 +238,7 @@ class SnapshotReplay:
     The caller owns snapshot verification, initial workspace restoration and
     the actual application mechanism. This protocol is an offline prototype.
     """
-    def __init__(self, boundaries, apply, wait_seconds=1800):
+    def __init__(self, boundaries, apply):
         self.boundaries = list(boundaries)
         if any(not isinstance(item, tuple) or len(item) != 2 or
                not isinstance(item[0], str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', item[0]) or
@@ -246,9 +246,6 @@ class SnapshotReplay:
                for item in self.boundaries):
             raise ValueError('snapshot replay boundaries are malformed')
         self.apply = apply
-        if not isinstance(wait_seconds, (int, float)) or wait_seconds <= 0:
-            raise ValueError('snapshot replay wait is invalid')
-        self.wait_seconds = wait_seconds
         self.position = 0
         self.failed = False
         self.closed = False
@@ -257,7 +254,6 @@ class SnapshotReplay:
 
     def marker(self, action, alias, process=None, thread=None):
         with self.changed:
-            deadline = time.monotonic() + self.wait_seconds
             while True:
                 if self.closed or self.failed:
                     raise RuntimeError('snapshot replay is not active')
@@ -267,12 +263,7 @@ class SnapshotReplay:
                     raise ValueError('snapshot replay boundary differs from the recording')
                 if self.boundaries[self.position][0] == alias:
                     break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    self.failed = True
-                    self.changed.notify_all()
-                    raise RuntimeError('snapshot replay timed out waiting for an earlier boundary')
-                self.changed.wait(remaining)
+                self.changed.wait()
             sequence = self.boundaries[self.position][1]
             try:
                 self.apply(sequence)
@@ -301,7 +292,6 @@ class SnapshotReplay:
 
 class _Handler(socketserver.StreamRequestHandler):
     def handle(self):
-        self.request.settimeout(5)
         try:
             line = self.rfile.readline(256)
             match = _MARKER.fullmatch(line)
@@ -321,8 +311,30 @@ class MarkerServer(socketserver.ThreadingUnixStreamServer):
     block_on_close = True
     def __init__(self, path, snapshots):
         self.snapshots = snapshots
+        self.clients = set()
+        self.clients_lock = threading.Lock()
         super().__init__(str(path), _Handler)
         os.chmod(path, 0o666)
+
+    def get_request(self):
+        client, address = super().get_request()
+        with self.clients_lock:
+            self.clients.add(client)
+        return client, address
+
+    def close_request(self, client):
+        with self.clients_lock:
+            self.clients.discard(client)
+        super().close_request(client)
+
+    def interrupt_clients(self):
+        with self.clients_lock:
+            clients = list(self.clients)
+        for client in clients:
+            try:
+                client.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
 
 def main(argv=None):
@@ -353,10 +365,13 @@ def main(argv=None):
             raise RuntimeError('snapshot service control ended unexpectedly')
     finally:
         server.shutdown()
-        server.server_close()
-        worker.join()
-        Path(args.socket).unlink(missing_ok=True)
-        snapshots.finish()
+        try:
+            snapshots.finish()
+        finally:
+            server.interrupt_clients()
+            server.server_close()
+            worker.join()
+            Path(args.socket).unlink(missing_ok=True)
 
 
 if __name__ == '__main__':
