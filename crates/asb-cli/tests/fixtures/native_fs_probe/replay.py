@@ -19,10 +19,10 @@ class Replay:
         self.sequence = 0
         self.pending = None
         self.enforce_admission = enforce_admission
-        self.admitted = set()
+        self.admitted = {}
 
     def admit(self, tool):
-        self.admitted.add(tool)
+        self.admitted[tool] = self.admitted.get(tool, 0) + 1
 
     def apply_until(self, limit):
         if limit < self.sequence:
@@ -41,8 +41,11 @@ class Replay:
                 return True
             if self.enforce_admission and event['op'] == 'marker':
                 marker = event['marker']
-                if marker.startswith('tool-begin:') and marker.removeprefix('tool-begin:') not in self.admitted:
-                    return False
+                if marker.startswith('tool-begin:'):
+                    tool = marker.removeprefix('tool-begin:')
+                    if self.admitted.get(tool, 0) == 0:
+                        return False
+                    self.admitted[tool] -= 1
             self.apply(event)
             self.sequence = sequence
             self.pending = None

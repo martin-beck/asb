@@ -27,6 +27,11 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
         {'op': 'release', 'path': '/b.txt', 'handle': 1},
         {'op': 'marker', 'path': None, 'marker': 'tool-end:a'},
         {'op': 'marker', 'path': None, 'marker': 'tool-end:b'},
+        {'op': 'marker', 'path': None, 'marker': 'tool-begin:a'},
+        {'op': 'create', 'path': '/second-a.txt', 'handle': 2, 'flags': os.O_WRONLY, 'mode': 0o600},
+        {'op': 'write', 'path': '/second-a.txt', 'handle': 2, 'offset': 0, 'object': 'data'},
+        {'op': 'release', 'path': '/second-a.txt', 'handle': 2},
+        {'op': 'marker', 'path': None, 'marker': 'tool-end:a'},
     ]
     with (evidence / 'events.jsonl').open('w') as output:
         for sequence, event in enumerate(events, 1):
@@ -49,7 +54,16 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
             replay.admit('b')
             assert replay.apply_until(6) is True
             assert (destination / 'b.txt').read_bytes() == b'from tool b'
+            try:
+                replay.finish()
+            except RuntimeError as error:
+                assert 'waiting' in str(error)
+            else:
+                raise AssertionError('repeated invocation reused a prior admission')
+            assert not (destination / 'second-a.txt').exists()
+            replay.admit('a')
             replay.finish()
+            assert (destination / 'second-a.txt').read_bytes() == b'from tool b'
         finally:
             replay.close()
 

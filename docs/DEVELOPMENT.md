@@ -33,7 +33,8 @@ tools, asynchronous work, delayed IO and full process attribution are unresolved
 The separate offline `overlap.py` fixture exercises an experimental admission
 guard with synthetic overlapping invocation markers. It pauses a cursor before
 an uninvoked recorded tool and resumes once that invocation is admitted; it
-does not prove how real operations are attributed to overlapping tools. The
+consumes a separate admission for each repeated invocation, but does not prove
+how real operations are attributed to overlapping tools. The
 FUSE fixture also brackets a real subprocess write with overlapping test markers
 and checks this pause and resume separately in four replay workspaces. The
 fixture supplies the markers; the agent does not produce them automatically.
