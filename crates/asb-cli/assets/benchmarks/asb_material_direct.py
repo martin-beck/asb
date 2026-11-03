@@ -26,6 +26,8 @@ def declare(options, record):
         value = services({"services":{"main":service}},record)
         if value["available"] is not True:
             raise MaterialError("direct container role declaration is unavailable")
+        if mount_options:
+            value["services"]["main"]["filesystem_capture"] = True
         # Exact creation bytes are private provenance only. Their physical names,
         # labels and image references must never become baseline identity.
         value["creation_sha256"] = canonical_digest(copy.deepcopy(options),"asb-private-direct-create-v1")

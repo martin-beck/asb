@@ -135,7 +135,15 @@ def configuration(attributes, role, declaration, network=None):
     for key in ["PidMode","IpcMode","UTSMode","UsernsMode","CgroupnsMode"]:
         if host.get(key) not in [None,"","private"]:
             raise MaterialError("prepared environment shares an uncovered external namespace")
-    for key in ["Privileged","Devices","DeviceRequests","DeviceCgroupRules","VolumesFrom","Links",
+    devices = host.get("Devices") or []
+    fuse_device = [{"PathOnHost":"/dev/fuse","PathInContainer":"/dev/fuse","CgroupPermissions":"rwm"}]
+    if declaration.get("filesystem_capture") is True:
+        if (devices != fuse_device or host.get("CapAdd") != ["CAP_SYS_ADMIN"]
+                or host.get("SecurityOpt") != ["apparmor=unconfined"]):
+            raise MaterialError("prepared filesystem recorder container differs from its creation profile")
+    elif devices:
+        raise MaterialError("prepared environment has uncovered external devices, ports or dependencies")
+    for key in ["Privileged","DeviceRequests","DeviceCgroupRules","VolumesFrom","Links",
                 "PortBindings","PublishAllPorts","ContainerIDFile"]:
         if host.get(key):
             raise MaterialError("prepared environment has uncovered external devices, ports or dependencies")

@@ -34,7 +34,9 @@ class DirectTests(unittest.TestCase):
         task, _, options = self.fixture()
         options.update(devices=['/dev/fuse:/dev/fuse:rwm'], cap_add=['SYS_ADMIN'],
                        security_opt=['apparmor=unconfined'])
-        self.assertTrue(declare(options,task.journal.record)['available'])
+        receipt = declare(options,task.journal.record)
+        self.assertTrue(receipt['available'])
+        self.assertIs(receipt['services']['main']['filesystem_capture'],True)
         for key in ('devices','cap_add','security_opt'):
             changed = copy.deepcopy(options)
             changed.pop(key)
