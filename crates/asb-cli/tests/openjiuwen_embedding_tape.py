@@ -61,16 +61,17 @@ async def main():
     key = 'fixture-record-only-key' if mode in ('record', 'baseline') else 'asb-replay-placeholder'
     if mode == 'replay':
         identity = json.loads(metadata.read_text())
-        hook['_asb_install_embedding_identity'](identity)
+        hook['_asb_restore_opaque_embedding_identity'](identity)
     provider = OpenAICompatibleEmbeddingProvider(api_key=key, model='fixture-model', base_url=sys.argv[1])
+    if mode == 'record':
+        identity = hook['_asb_make_embedding_identity'](provider)
     fingerprint = provider.config_fingerprint
     if mode == 'record':
-        identity = {'model': provider.model, 'base_url': provider.base_url, 'fingerprint': fingerprint}
         assert key not in repr(identity)
         metadata.write_text(json.dumps(identity))
     elif mode == 'replay':
         assert fingerprint == identity['fingerprint']
-        other = OpenAICompatibleEmbeddingProvider(api_key='another-key', model=identity['model'], base_url=identity['base_url'])
+        other = OpenAICompatibleEmbeddingProvider(api_key='another-key', model=identity['model'], base_url=sys.argv[1])
         assert other.config_fingerprint != fingerprint
     try:
         assert await provider.embed_query('fixture input') == [0.25, 0.75]
@@ -107,9 +108,8 @@ async def main():
             assert 'fixture-record-only-key' not in (root / 'identity.json').read_text()
             if userinfo:
                 assert len(seen) == 2 and seen[0] == seen[1]
-                # This is an intentionally fake secret and demonstrates why
-                # the prototype identity must not yet be persisted by ASB.
-                assert 'fixture-url-password' in (root / 'identity.json').read_text()
+                assert 'fixture-url-password' not in (root / 'identity.json').read_text()
+                assert 'fixture-user' not in (root / 'identity.json').read_text()
                 assert 'fixture-url-password' not in tape.read_text()
             else:
                 assert len(seen) == 1 and seen[0][0] == '/v1/embeddings'
@@ -125,7 +125,7 @@ async def main():
                 progress = json.loads(Path(str(replica) + '.progress.json').read_text())
                 assert progress['consumed'] == progress['total'] == 1, progress
             assert len(seen) == (2 if userinfo else 1)
-            print('Actual OpenJiuwen client: one embedding recorded and replayed by four independent llmtape processes after upstream shutdown; configured identity unchanged.')
+            print('Actual OpenJiuwen client: one embedding recorded and replayed by four independent llmtape processes after upstream shutdown; opaque cache identity preserved.')
         finally:
             for child in processes:
                 if child.poll() is None: child.kill(); child.wait()

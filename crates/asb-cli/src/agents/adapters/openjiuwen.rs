@@ -511,18 +511,23 @@ request = types.SimpleNamespace(url=URL())
 asyncio.run(client.event_hooks['request'][0](request))
 assert request.url == {'scheme': 'http', 'host': '127.0.0.1', 'port': 1234}
 assert p.base_url == 'https://embedding.invalid/v1' and p.api_key == 'fixture-key'
-for invalid in ({}, {'model': 'm', 'base_url': 'u', 'fingerprint': ''}):
-    try: _asb_install_embedding_identity(invalid)
+record = Provider()
+record.base_url = 'https://user:fixture-secret@embedding.invalid/v1'
+opaque = _asb_make_embedding_identity(record)
+assert record.config_fingerprint == opaque['fingerprint']
+assert 'fixture-secret' not in repr(opaque)
+assert 'fixture-key' not in repr(opaque)
+restored = Provider()
+restored.base_url = record.base_url
+restored.api_key = 'asb-replay-placeholder'
+_asb_restore_opaque_embedding_identity(opaque)
+assert restored.config_fingerprint == opaque['fingerprint']
+restored.base_url = 'https://different.invalid/v1'
+assert restored.config_fingerprint != opaque['fingerprint']
+for invalid in ({}, {**opaque, 'endpoint_sha256': 'bad'}, {**opaque, 'fingerprint': 'bad'}):
+    try: _asb_restore_opaque_embedding_identity(invalid)
     except RuntimeError: pass
-    else: raise AssertionError('accepted malformed identity')
-identity = {'model': p.model, 'base_url': p.base_url, 'fingerprint': p.config_fingerprint}
-_asb_install_embedding_identity(identity)
-replay = Provider()
-replay.api_key = 'asb-replay-placeholder'
-assert replay.config_fingerprint == identity['fingerprint']
-assert p.config_fingerprint == 'native:fixture-key'
-replay.model = 'different-model'
-assert replay.config_fingerprint == 'native:asb-replay-placeholder'
+    else: raise AssertionError('accepted malformed opaque identity')
 "#;
         use std::io::Write;
         use std::process::{Command, Stdio};

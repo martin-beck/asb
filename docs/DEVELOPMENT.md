@@ -18,12 +18,14 @@ the interpreter for the project-local OpenJiuwen installation, then run
 one request and uses four independent replay proxies after stopping the fixture
 upstream. It requires Node.js and never contacts a live provider. It does not
 qualify the ASB cassette lifecycle, a complete agent run, or workload grading.
-The replay clients use a placeholder key and restore a fixture cache identity;
-the fixture never saves its record-only key in that identity.
-Set `ASB_TEST_EMBEDDING_USERINFO=1` to additionally compare direct and routed
-authentication for a fake credential-bearing URL. That variant confirms the
-prototype identity contains the fake URL password and therefore must not yet
-be used to persist real credential-bearing identities.
+The replay clients use a placeholder key and restore an opaque, random fixture
+cache identity; the fixture does not persist the URL or record-only key. Set
+`ASB_TEST_EMBEDDING_USERINFO=1` to additionally compare direct and routed
+authentication for a fake credential-bearing URL. The endpoint digest is used
+to match replay to the configured endpoint; it does not encrypt the URL and
+may reveal a guessable endpoint to an offline dictionary attack. The opaque
+identity is an experiment, not yet wired into ASB cassette lifecycle or proven
+compatible with pre-existing OpenJiuwen caches.
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without
 Docker, providers or installed clients. The opt-in
