@@ -38,6 +38,9 @@ how real operations are attributed to overlapping tools. The
 FUSE fixture also brackets a real subprocess write with overlapping test markers
 and checks this pause and resume separately in four replay workspaces. The
 fixture supplies the markers; the agent does not produce them automatically.
+The overlap fixture includes an experimental condition-based coordinator with
+separate caller threads and checks mismatched, duplicate and out-of-order end
+markers. It is not wired to an agent, and does not match recorded request bodies.
 It additionally exercises a background child that writes after its tool-return
 marker and before the next invocation, checking the file is absent at the first
 boundary and present at the second. This does not implement a scheduler for

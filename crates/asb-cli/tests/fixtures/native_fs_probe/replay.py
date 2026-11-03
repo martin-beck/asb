@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
+import time
 
 
 class Replay:
@@ -110,6 +112,52 @@ class Replay:
             os.close(fd)
         self.handles.clear()
         self.events.close()
+
+
+class Coordinator:
+    """Experimental condition-based coordinator for explicitly marked calls."""
+    def __init__(self, replay):
+        if not replay.enforce_admission:
+            raise ValueError('coordinator requires invocation admission')
+        self.replay = replay
+        self.condition = threading.Condition()
+        self.claimed = set()
+        self.failure = None
+        with (replay.evidence / 'events.jsonl').open(encoding='utf-8') as stream:
+            self.ends = {event['sequence']: event.get('marker')
+                         for event in map(json.loads, stream) if event['op'] == 'marker'}
+
+    def invoke(self, tool, end_sequence, timeout):
+        if self.ends.get(end_sequence) != f'tool-end:{tool}':
+            raise RuntimeError('invocation end marker does not match tool')
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            if end_sequence in self.claimed:
+                raise RuntimeError('invocation end marker already claimed')
+            earlier = [sequence for sequence, marker in self.ends.items()
+                       if marker == f'tool-end:{tool}' and sequence < end_sequence
+                       and sequence not in self.claimed]
+            if earlier:
+                raise RuntimeError('tool invocation arrived out of recorded order')
+            self.claimed.add(end_sequence)
+            self.replay.admit(tool)
+            self.condition.notify_all()
+            try:
+                while self.replay.sequence < end_sequence:
+                    if self.failure is not None:
+                        raise RuntimeError('concurrent replay failed') from self.failure
+                    self.replay.apply_until(end_sequence)
+                    self.condition.notify_all()
+                    if self.replay.sequence >= end_sequence:
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError('recorded concurrent invocation did not arrive')
+                    self.condition.wait(remaining)
+            except BaseException as error:
+                self.failure = error
+                self.condition.notify_all()
+                raise
 
 
 if __name__ == '__main__':

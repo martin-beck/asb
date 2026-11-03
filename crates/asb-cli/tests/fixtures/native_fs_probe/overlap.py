@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[4]
@@ -69,4 +70,43 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(replica, range(4)))
-    print('Four replicas waited for the overlapping tool before applying its effects')
+    def coordinated(index):
+        destination = root / f'coordinated-{index}'
+        replay = module.Replay(evidence, destination, enforce_admission=True)
+        coordinator = module.Coordinator(replay)
+        try:
+            try:
+                coordinator.invoke('b', 6, 1)
+            except RuntimeError as error:
+                assert 'does not match' in str(error)
+            else:
+                raise AssertionError('accepted another tool end marker')
+            try:
+                coordinator.invoke('a', 12, 1)
+            except RuntimeError as error:
+                assert 'out of recorded order' in str(error)
+            else:
+                raise AssertionError('accepted later same-tool invocation first')
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(coordinator.invoke, 'a', 6, 3)
+                time.sleep(.1)
+                assert not first.done() and not (destination / 'b.txt').exists()
+                second = pool.submit(coordinator.invoke, 'b', 7, 3)
+                first.result(timeout=3)
+                second.result(timeout=3)
+            assert (destination / 'b.txt').read_bytes() == b'from tool b'
+            coordinator.invoke('a', 12, 1)
+            assert (destination / 'second-a.txt').read_bytes() == b'from tool b'
+            try:
+                coordinator.invoke('a', 12, 1)
+            except RuntimeError as error:
+                assert 'already claimed' in str(error)
+            else:
+                raise AssertionError('accepted a duplicate invocation')
+            replay.finish()
+        finally:
+            replay.close()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(coordinated, range(4)))
+    print('Four concurrent replay coordinators matched overlapping and repeated tool invocations')
