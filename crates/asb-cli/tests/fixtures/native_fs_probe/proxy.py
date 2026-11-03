@@ -45,11 +45,21 @@ class Proxy(Operations):
         if control_fd is not None:
             self.control = socket.socket(fileno=int(control_fd))
             threading.Thread(target=self.control_loop, daemon=True).start()
+        control_path = os.environ.get('ASB_PROBE_CONTROL_SOCKET')
+        if control_path:
+            self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.listener.bind(control_path)
+            os.chmod(control_path, 0o666)
+            self.listener.listen(1)
+            threading.Thread(target=self.accept_control, daemon=True).start()
+    def accept_control(self):
+        self.control, _ = self.listener.accept()
+        self.control_loop()
     def control_loop(self):
         with self.control.makefile('rwb', buffering=0) as stream:
             for line in stream:
                 marker = line.decode('ascii').strip()
-                if marker not in ('tool-begin:child', 'tool-end:child', 'tool-begin:hermes', 'tool-end:hermes', 'tool-begin:a', 'tool-end:a', 'tool-begin:b', 'tool-end:b', 'tool-begin:bg', 'tool-end:bg', 'tool-begin:after', 'tool-end:after', 'tool-begin:orphan', 'tool-end:orphan'):
+                if marker not in ('tool-begin:child', 'tool-end:child', 'tool-begin:hermes', 'tool-end:hermes', 'tool-begin:a', 'tool-end:a', 'tool-begin:b', 'tool-end:b', 'tool-begin:bg', 'tool-end:bg', 'tool-begin:after', 'tool-end:after', 'tool-begin:orphan', 'tool-end:orphan', 'tool-begin:one', 'tool-end:one', 'tool-begin:two', 'tool-end:two'):
                     raise RuntimeError('invalid fixture marker')
                 sequence = self.record('marker', None, marker=marker, is_marker=True)
                 stream.write(f'{sequence}\n'.encode('ascii'))

@@ -68,14 +68,15 @@ The fixture has also passed using the local image for the selected SWE-bench
 trial; it does not launch the SWE-bench harness or an agent.
 Optionally set `ASB_HERMES_TEST_INSTALL` to a directory containing a `venv`
 with the pinned Hermes package installed for the image's Python. The fixture
-then runs the real Hermes terminal tool as the invoking user and checks its
-file write in all four replays. It records the invocation using the actual ASB
+then runs two real Hermes terminal calls as the invoking user and checks their
+dependent file writes in all four replays. It records them using the actual ASB
 Hermes sidecar and runs its replayer in four offline containers; an external
 sentinel outside the mounted workspace verifies that the original shell command
 was not executed on replay. That sentinel is deliberately not reproduced, so
 the fixture does not capture effects outside its mounted workspace.
-The fixture applies all recorded operations before that one replayed call; it
-does not prove per-call ordering for a complete agent. The existing sidecar
+The test wrapper supplies boundaries and advances the operation cursor after
+the sidecar validates each request and before returning its result. This does
+not prove ordering for a complete agent. The existing sidecar
 also restricts Hermes's advertised core tools. The fixture enables `allow_other`
 on its temporary container-local FUSE mount so the unprivileged tool can access
 the proxy; this is not a production setting. No LLM or complete agent is invoked.

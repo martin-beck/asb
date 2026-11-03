@@ -1,4 +1,4 @@
-import concurrent.futures, os, shutil, subprocess, tempfile, json, uuid
+import concurrent.futures, importlib.util, os, shutil, socket, subprocess, tempfile, json, threading, uuid
 from pathlib import Path
 probe=Path(__file__).resolve().parent
 base=probe.parents[4]/'target/native-fs-probe'
@@ -6,7 +6,7 @@ base.mkdir(parents=True, exist_ok=True)
 fusepy=Path(os.environ['ASB_FUSEPY_MODULE']).resolve()
 fuse_library=Path(os.environ['ASB_CONTAINER_FUSE_LIBRARY']).resolve()
 image=os.environ['ASB_FUSE_TEST_IMAGE']
-with tempfile.TemporaryDirectory(dir=base) as tmp:
+with tempfile.TemporaryDirectory(dir=base) as tmp, tempfile.TemporaryDirectory(dir=base.parents[2],prefix='asb-s-') as sockets:
  root=Path(tmp)
  for part in ('backing','mount','evidence','baseline'): (root/part).mkdir()
  (root/'backing/source').write_text('original')
@@ -25,7 +25,7 @@ while ! mountpoint -q /work/mount; do n=$((n+1)); [ "$n" -lt 100 ] || exit 42; s
 cat /work/mount/source
 printf container > /work/mount/output
 if [ "${ASB_FIXTURE_HERMES:-0}" = 1 ]; then
-  (cd /work/mount; HERMES_HOME=/work/hermes-home TERMINAL_ENV=local PYTHONPATH=/work/hooks:/opt ASB_HERMES_NATIVE_MODE=record ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl ASB_HERMES_NATIVE_PROGRESS=/work/control/record-progress.json setpriv --reuid "$ASB_HERMES_UID" --regid "$ASB_HERMES_GID" --clear-groups /asb-hermes/venv/bin/python /probe/hermes_real_terminal.py)
+  (cd /work/mount; HERMES_HOME=/work/hermes-home TERMINAL_ENV=local PYTHONPATH=/work/hooks:/opt ASB_FIXTURE_EFFECT_SOCKET=/work/control/record.sock ASB_HERMES_NATIVE_MODE=record ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl ASB_HERMES_NATIVE_PROGRESS=/work/control/record-progress.json setpriv --reuid "$ASB_HERMES_UID" --regid "$ASB_HERMES_GID" --clear-groups /asb-hermes/venv/bin/python /probe/hermes_real_terminal.py)
 fi
 '''
  name='asb-fuse-probe-'+uuid.uuid4().hex
@@ -38,7 +38,7 @@ fi
  if hermes_install:
   position=cmd.index('--env')
   cmd[position:position]=['--mount', f'type=bind,src={Path(hermes_install).resolve()},dst=/asb-hermes,readonly']
-  cmd[position:position]=['--env', 'ASB_FIXTURE_HERMES=1', '--env', 'ASB_PROBE_ALLOW_OTHER=1', '--env', f'ASB_HERMES_UID={os.getuid()}', '--env', f'ASB_HERMES_GID={os.getgid()}']
+  cmd[position:position]=['--env', 'ASB_FIXTURE_HERMES=1', '--env', 'ASB_PROBE_ALLOW_OTHER=1', '--env', 'ASB_PROBE_CONTROL_SOCKET=/work/control/record.sock', '--env', f'ASB_HERMES_UID={os.getuid()}', '--env', f'ASB_HERMES_GID={os.getgid()}']
  try:
   result=subprocess.run(cmd,capture_output=True,text=True,timeout=30)
  except BaseException:
@@ -57,42 +57,72 @@ fi
   events=[json.loads(x) for x in (root/'evidence/events.jsonl').read_text().splitlines()]
   assert any(e['op']=='write' and e['path']=='/output' for e in events)
   if hermes_install:
-   assert any(e['op']=='write' and e['path']=='/hermes-tool-output' for e in events)
+   assert all(any(e['op']=='write' and e['path']=='/'+name for e in events) for name in ('first','second'))
    native=[json.loads(line) for line in (root/'control/native.jsonl').read_text().splitlines()]
-   assert sum(event['event']=='write' for event in native)==1
-   assert sum(event['event']=='output' for event in native)==1
+   assert sum(event['event']=='write' for event in native)==2
+   assert sum(event['event']=='output' for event in native)==2
    assert json.loads((root/'control/record-progress.json').read_text())['complete']
   print('recorded operations:',[(e['op'],e['path']) for e in events])
   def replay(index):
    destination=root/f'replay-{index}'
-   subprocess.run(['python3',str(probe/'replay.py'),str(root/'evidence'),str(destination),str(root/'baseline')],check=True)
-   assert (destination/'source').read_text()=='original'
-   assert (destination/'output').read_text()=='container'
-   if hermes_install:
-    assert (destination/'hermes-tool-output').read_text()=='hermes'
-    replay_home=root/f'hermes-replay-home-{index}'
-    replay_home.mkdir(mode=0o700)
-    replay_name='asb-hermes-replay-'+uuid.uuid4().hex
-    replay_cmd=['docker','run','--rm','--name',replay_name,'--network','none',
-                '--user',f'{os.getuid()}:{os.getgid()}',
-                '--mount',f'type=bind,src={root},dst=/work',
-                '--mount',f'type=bind,src={destination},dst=/work/mount',
-                '--mount',f'type=bind,src={probe},dst=/probe,readonly',
-                '--mount',f'type=bind,src={Path(hermes_install).resolve()},dst=/asb-hermes,readonly',
-                '--workdir','/work/mount',
-                '--env',f'HERMES_HOME=/work/{replay_home.name}',
-                '--env','TERMINAL_ENV=local','--env','PYTHONPATH=/work/hooks',
-                '--env','ASB_HERMES_NATIVE_MODE=replay',
-                '--env','ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl',
-                '--env',f'ASB_HERMES_NATIVE_PROGRESS=/work/control/replay-{index}.json',
-                '--entrypoint','/asb-hermes/venv/bin/python',image,'/probe/hermes_real_terminal.py']
+   if not hermes_install:
+    subprocess.run(['python3',str(probe/'replay.py'),str(root/'evidence'),str(destination),str(root/'baseline')],check=True)
+    assert (destination/'output').read_text()=='container'
+    return
+   spec=importlib.util.spec_from_file_location('fixture_replay',probe/'replay.py')
+   module=importlib.util.module_from_spec(spec)
+   spec.loader.exec_module(module)
+   cursor=module.Replay(root/'evidence',destination,root/'baseline',enforce_admission=True)
+   ends={e['marker']:e['sequence'] for e in events if e['op']=='marker'}
+   replay_home=root/f'hermes-replay-home-{index}'
+   replay_home.mkdir(mode=0o700)
+   sock_path=Path(sockets)/f'r-{index}.sock'
+   listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+   listener.bind(str(sock_path)); listener.listen(1); listener.settimeout(30)
+   errors=[]
+   def serve():
     try:
-     subprocess.run(replay_cmd,check=True,timeout=30,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
-    except BaseException:
-     subprocess.run(['docker','rm','-f',replay_name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
-     raise
+     connection,_=listener.accept()
+     with connection, connection.makefile('rwb',buffering=0) as stream:
+      for name in ('one','two'):
+       assert stream.readline().decode().strip()=='tool-end:'+name
+       cursor.admit(name)
+       assert cursor.apply_until(ends['tool-end:'+name])
+       assert (destination/'first').read_text()=='first'
+       assert (destination/'second').exists()==(name=='two')
+       stream.write((str(cursor.sequence)+'\n').encode())
+    except BaseException as error: errors.append(error)
+   server=threading.Thread(target=serve,daemon=True); server.start()
+   replay_name='asb-hermes-replay-'+uuid.uuid4().hex
+   replay_cmd=['docker','run','--rm','--name',replay_name,'--network','none',
+               '--user',f'{os.getuid()}:{os.getgid()}',
+               '--mount',f'type=bind,src={root},dst=/work',
+               '--mount',f'type=bind,src={destination},dst=/work/mount',
+               '--mount',f'type=bind,src={sockets},dst=/asb-sockets',
+               '--mount',f'type=bind,src={probe},dst=/probe,readonly',
+               '--mount',f'type=bind,src={Path(hermes_install).resolve()},dst=/asb-hermes,readonly',
+               '--workdir','/work/mount',
+               '--env',f'HERMES_HOME=/work/{replay_home.name}',
+               '--env','TERMINAL_ENV=local','--env','PYTHONPATH=/work/hooks',
+               '--env','ASB_HERMES_NATIVE_MODE=replay',
+               '--env',f'ASB_FIXTURE_EFFECT_SOCKET=/asb-sockets/r-{index}.sock',
+               '--env','ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl',
+               '--env',f'ASB_HERMES_NATIVE_PROGRESS=/work/control/replay-{index}.json',
+               '--entrypoint','/asb-hermes/venv/bin/python',image,'/probe/hermes_real_terminal.py']
+   try:
+    subprocess.run(replay_cmd,check=True,timeout=30,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+    server.join(timeout=5)
+    assert not server.is_alive() and not errors, errors
+    cursor.finish()
     progress=json.loads((root/f'control/replay-{index}.json').read_text())
-    assert progress['complete'] and progress['invocations']==1
+    assert progress['complete'] and progress['invocations']==2
+    assert (destination/'source').read_text()=='original'
+    assert (destination/'output').read_text()=='container'
+   except BaseException:
+    subprocess.run(['docker','rm','-f',replay_name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
+    raise
+   finally:
+    listener.close(); cursor.close()
   with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool: list(pool.map(replay,range(4)))
   print('four independent offline replays: passed')
  if (root/'proxy.log').exists() and result.returncode: print('proxy log:',(root/'proxy.log').read_text()[-1000:])
