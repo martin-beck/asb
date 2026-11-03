@@ -16,6 +16,12 @@ SUBMISSION_GIT_DIR = "/opt/asb-swebench-baseline.git"
 SUBMISSION_WORKTREE = "/testbed"
 
 
+def reflog_digest(entries):
+    # Git merges refs by timestamp. Ref-local positions are explicit in %gD,
+    # so canonicalize the cross-ref order without discarding any entry.
+    return hashlib.sha256(b"".join(sorted(entries.splitlines(keepends=True)))).hexdigest()
+
+
 class SweBenchTask:
     def __init__(self, client, catalog_path, task_id, artifacts, tool_mode="none", snapshot=False):
         if tool_mode not in ("none", "record", "replay"):
@@ -171,8 +177,8 @@ class SweBenchTask:
                 # Ref/index, commit, action and actor remain bound. Only raw
                 # timestamp/timezone fields are omitted; SDK reset actors are
                 # explicitly stable rather than inherited from container names.
-                "reflog_sha256":hashlib.sha256(checked(prefix + ["reflog", "show", "--all",
-                    "--format=%gD%x00%H%x00%gs%x00%gn%x00%ge%x00"], 4*1024**2)).hexdigest(),
+                "reflog_sha256":reflog_digest(checked(prefix + ["reflog", "show", "--all",
+                    "--format=%gD%x00%H%x00%gs%x00%gn%x00%ge%x00"], 4*1024**2)),
                 "local_config_sha256":hashlib.sha256(checked(prefix + ["config", "--null", "--local", "--list"], 4*1024**2)).hexdigest()}
         before = git_state()
         if git_state() != before:

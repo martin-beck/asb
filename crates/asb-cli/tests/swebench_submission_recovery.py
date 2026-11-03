@@ -31,6 +31,13 @@ class SubmissionRecoveryTests(unittest.TestCase):
         self.assertEqual(ordinary.submission_git_dir(),task_module.SUBMISSION_GIT_DIR)
         self.assertEqual(snapshot.submission_git_dir(),'/asb-snapshot-storage/baseline.git')
 
+    def test_reflog_digest_ignores_cross_ref_order_but_binds_each_entry(self):
+        first = b'HEAD@{0}\x00commit\x00reset\x00actor\x00email\x00\n'
+        second = b'refs/heads/base@{0}\x00commit\x00create\x00actor\x00email\x00\n'
+        self.assertEqual(task_module.reflog_digest(first + second), task_module.reflog_digest(second + first))
+        self.assertNotEqual(task_module.reflog_digest(first + second), task_module.reflog_digest(first + second.replace(b'actor', b'other')))
+        self.assertNotEqual(task_module.reflog_digest(first + second), task_module.reflog_digest(first))
+
     def test_task_history_keeps_ancestors_and_excludes_later_commit_objects(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);worktree=root/'worktree';worktree.mkdir()
