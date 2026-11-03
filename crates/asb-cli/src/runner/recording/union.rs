@@ -70,7 +70,12 @@ impl ImportSpool {
             options.mode(0o600);
         }
         let mut file = options.open(&path).map_err(io_error)?;
-        self.paths.push(path);
+        self.paths.push(path.clone());
+        // The source cassette remains authoritative. On Unix, unlink the
+        // private staging file immediately so even abrupt termination cannot
+        // leave a plaintext artifact behind; the open descriptor stays usable.
+        #[cfg(unix)]
+        fs::remove_file(&path).map_err(io_error)?;
         archive
             .copy_artifact_to(track, &artifact.kind, &mut file)
             .map_err(recording_error)?;

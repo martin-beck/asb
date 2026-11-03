@@ -39,6 +39,8 @@ fn import_spool_streams_large_artifacts_and_cleans_up_after_errors() {
     let mut spool = ImportSpool::new(&fixture.0).unwrap();
     let directory = spool.directory.clone();
     spool.stage(&mut archive, 1, &artifact).unwrap();
+    #[cfg(unix)]
+    assert!(!directory.join("artifact-0").exists());
     let mut restored = Vec::new();
     spool.files[0].1.read_to_end(&mut restored).unwrap();
     assert_eq!(restored, data);
