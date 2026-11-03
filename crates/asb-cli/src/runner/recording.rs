@@ -1034,6 +1034,9 @@ mod tests {
         evidence.cleanup_confirmed = false;
         assert!(open_auxiliary_captures(&evidence, &root.join("primary")).is_err());
         evidence.cleanup_confirmed = true;
+        evidence.auxiliary_complete = false;
+        assert!(open_auxiliary_captures(&evidence, &root.join("primary")).is_err());
+        evidence.auxiliary_complete = true;
         evidence.auxiliary_captures[0].capture.complete = false;
         assert!(open_auxiliary_captures(&evidence, &root.join("primary")).is_err());
         evidence.auxiliary_captures[0].capture = capture.clone();

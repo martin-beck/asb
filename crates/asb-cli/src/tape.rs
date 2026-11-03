@@ -82,16 +82,10 @@ impl AuxiliarySessions {
                 failure.get_or_insert(error);
             }
             if mode == Mode::Record {
-                let captures = completed.evidence.captures;
-                if captures.len() != 1 {
-                    failure.get_or_insert_with(|| {
-                        Error::Run("auxiliary tape did not produce exactly one capture".into())
-                    });
-                } else {
-                    evidence.auxiliary_captures.push(proxy::AuxiliaryCapture {
-                        kind: format!("aux-http-{name}"),
-                        capture: captures.into_iter().next().expect("one capture"),
-                    });
+                if let Err(error) =
+                    attach_auxiliary_capture(&name, completed.evidence.captures, evidence)
+                {
+                    failure.get_or_insert(error);
                 }
             }
         }
@@ -100,6 +94,28 @@ impl AuxiliarySessions {
         }
         failure.map_or(Ok(()), Err)
     }
+}
+
+fn attach_auxiliary_capture(
+    name: &str,
+    captures: Vec<proxy::capture::CaptureEvidence>,
+    evidence: &mut proxy::Evidence,
+) -> Result<(), Error> {
+    if captures.len() != 1 {
+        return Err(Error::Run(
+            "auxiliary tape did not produce exactly one capture".into(),
+        ));
+    }
+    let capture = captures.into_iter().next().expect("one capture");
+    let complete = capture.complete;
+    evidence.auxiliary_captures.push(proxy::AuxiliaryCapture {
+        kind: format!("aux-http-{name}"),
+        capture,
+    });
+    if !complete {
+        return Err(Error::Run("auxiliary tape capture is incomplete".into()));
+    }
+    Ok(())
 }
 
 pub(crate) struct AgentContext<'a> {
@@ -216,6 +232,33 @@ pub(crate) fn require_replay_cassette(cassette: &Path) -> Result<(), Error> {
 mod auxiliary_tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    fn incomplete_auxiliary_capture_is_retained_but_cannot_report_success() {
+        let capture = proxy::capture::CaptureEvidence {
+            adapter: "llmtape".into(),
+            output: "/fixture/partial".into(),
+            complete: false,
+            accepted: 1,
+            completed: 0,
+            failed: 1,
+            recorded: 0,
+            inference_requests: 0,
+            bytes: 0,
+            sha256: crate::cassette::digest(b""),
+        };
+        let mut evidence = proxy::Evidence {
+            captures: Vec::new(),
+            auxiliary_captures: Vec::new(),
+            auxiliary_complete: true,
+            output_files: Vec::new(),
+            cleanup_confirmed: true,
+        };
+        assert!(attach_auxiliary_capture("embedding", vec![capture], &mut evidence).is_err());
+        assert_eq!(evidence.auxiliary_captures.len(), 1);
+        assert!(!evidence.auxiliary_captures[0].capture.complete);
+        assert!(attach_auxiliary_capture("missing", Vec::new(), &mut evidence).is_err());
+    }
 
     #[test]
     fn recorded_auxiliary_session_returns_named_finalized_capture() {
