@@ -880,10 +880,12 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
             package.join("harness/cli/agent/factory.py"),
             r#"
 class Config:
-    enable_read_image_multimodal = None
-    parallel_tool_calls = None
+    enable_read_image_multimodal = True
+    parallel_tool_calls = True
 class Agent:
     _deep_config = Config()
+def _build_memory_rail(_cfg): return "memory-enabled"
+def _build_subagents(_model): return ["subagent-enabled"]
 def create_agent(_cfg):
     return Agent(), object()
 "#,
@@ -1047,8 +1049,10 @@ from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 from openjiuwen.core.context_engine.context.context import Context
 async def main():
     agent, _tracker = factory.create_agent(None)
-    assert agent._deep_config.enable_read_image_multimodal is False
-    assert agent._deep_config.parallel_tool_calls is False
+    assert agent._deep_config.enable_read_image_multimodal is True
+    assert agent._deep_config.parallel_tool_calls is True
+    assert factory._build_memory_rail(None) == "memory-enabled"
+    assert factory._build_subagents(None) == ["subagent-enabled"]
     result = []
     context = Context()
     for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool):
