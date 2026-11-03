@@ -350,6 +350,18 @@ function normalizePytestTestMapsAddress(value) {
 function normalizeRecordedResponse(body) {
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const marker = "<asb-workspace>";
+  // JSON may escape slashes, so rewrite decoded string values before
+  // serializing rather than relying on bytewise path matching.
+  try {
+    JSON.parse(body); // Validate, but leave numbers and untouched tokens byte-for-byte intact.
+    return body.replace(/"(?:\\.|[^"\\])*"/g, (token) => {
+      const decoded = JSON.parse(token);
+      const rewritten = replaceExactWorkspace(decoded, workspace, marker);
+      return rewritten === decoded ? token : JSON.stringify(rewritten);
+    });
+  } catch {
+    // SSE and non-JSON response bodies are handled as text below.
+  }
   const fragmented = normalizeSseWorkspaceFragments(body, workspace, marker, true);
   return replaceExactWorkspace(
     normalizeOpenAiSseWorkspacePaths(fragmented, workspace, marker, true), workspace, marker,
