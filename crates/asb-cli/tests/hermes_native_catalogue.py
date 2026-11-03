@@ -170,4 +170,18 @@ class CoverageTest(unittest.TestCase):
             with self.assertRaises(ValueError): Client().send(error=True)
             self.assertTrue(drain.wait(.01))
 
+    def test_call_id_diagnostic_does_not_ignore_other_request_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ['ASB_HERMES_NATIVE_SIDECAR'] = str(Path(directory) / 'tape')
+            os.environ['ASB_HERMES_NATIVE_PROGRESS'] = str(Path(directory) / 'progress')
+            source = HOOK.read_text().split('\ntry:\n    # Hermes exposes', 1)[0]
+            namespace = {'__name__': 'hermes_identity_fixture'}
+            exec(compile(source, str(HOOK), 'exec'), namespace)
+            check = namespace['_differs_only_in_tool_call_id']
+            request = {'name':'read_file', 'arguments':{'path':'same'}, 'tool_call_id':'a'}
+            self.assertTrue(check(json.dumps(request), json.dumps({**request, 'tool_call_id':'b'})))
+            self.assertFalse(check(json.dumps(request), json.dumps({**request, 'arguments':{'path':'other'}, 'tool_call_id':'b'})))
+            self.assertFalse(check(json.dumps(request), json.dumps(request)))
+            self.assertFalse(check('not-json', '{}'))
+
 if __name__ == '__main__': unittest.main()

@@ -184,6 +184,19 @@ def _matches_request(expected, actual):
     return False
 
 
+def _differs_only_in_tool_call_id(expected, actual):
+    try:
+        recorded = json.loads(expected)
+        current = json.loads(actual)
+        if not isinstance(recorded, dict) or not isinstance(current, dict):
+            return False
+        recorded_id = recorded.pop("tool_call_id", None)
+        current_id = current.pop("tool_call_id", None)
+        return recorded == current and recorded_id != current_id
+    except (ValueError, TypeError):
+        return False
+
+
 def _write_progress(complete, error=None, invocations=0, expected_invocations=None):
     PROGRESS.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     document = {"schema_version": 1, "mode": MODE, "complete": complete, "invocations": invocations}
@@ -622,10 +635,14 @@ class Replayer:
                               and _matches_request(expected, request)]
                 if not candidates:
                     self.failed = True
-                    self.failure = "native terminal request differs:sequence"
+                    id_only = any(index not in self.consumed and self.dependencies[index] <= self.delivered
+                                  and _differs_only_in_tool_call_id(expected, request)
+                                  for index, (expected, _) in enumerate(self.exchanges))
+                    component = "tool_call_id" if id_only else "sequence"
+                    self.failure = "native terminal request differs:" + component
                     _write_progress(False, self.failure, self.index, len(self.exchanges))
                     self.condition.notify_all()
-                    return json.dumps({"asb_native_mismatch": "sequence"}, separators=(",", ":"))
+                    return json.dumps({"asb_native_mismatch": component}, separators=(",", ":"))
                 index = candidates[0]
                 self.consumed.add(index)
             while self.completion_order[self.completion_cursor] != index:
