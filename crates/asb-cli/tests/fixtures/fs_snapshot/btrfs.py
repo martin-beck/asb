@@ -38,6 +38,8 @@ btrfs_cmd(){ /hostlib/LOADER --library-path /hostlib /opt/btrfs "$@"; }
 btrfs_cmd subvolume create /work/fs/base >/dev/null
 printf old > /work/fs/base/file
 printf remove > /work/fs/base/deleted
+mkdir /work/fs/base/folder
+printf alpha > /work/fs/base/folder/data
 ln /work/fs/base/file /work/fs/base/link
 for i in 0 1 2 3 4; do btrfs_cmd subvolume snapshot /work/fs/base /work/fs/s$i >/dev/null; done
 python3 - <<'EOPY'
@@ -107,7 +109,7 @@ if ((second/'file').stat().st_ino!=(second/'link').stat().st_ino
  raise RuntimeError('fixture did not produce the expected hard-link split')
 import sys
 sys.path.insert(0,'/opt')
-from topology import regular_files,plan_transitions,apply_transitions
+from topology import regular_files,plan_transitions,apply_transitions,directories,plan_tree_transitions,apply_tree_transitions
 before_topology=regular_files(second);after_topology=regular_files(third)
 for root in roots[1:]:
  plan=plan_transitions(before_topology,after_topology,regular_files(root))
@@ -143,8 +145,20 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(p
 if any(x.returncode for x in results):raise RuntimeError('fifth rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
 checks['moved_link_correct']=all((r/'moved-file').read_bytes()==b'fin' and (r/'moved-link').read_bytes()==b'fin' and (r/'moved-file').stat().st_ino==(r/'moved-link').stat().st_ino and not (r/'file').exists() and not (r/'link').exists() for r in roots[1:])
 checks['moved_old_descriptors_correct']=all(os.pread(fd,3,0)==b'fin' for fd in fds[1:]+link_fds) and all(os.pread(fd,3,0)==b'sep' for fd in split_fds)
-checks['original_subprocess_only_five_times']=Path('/work/invocations').read_bytes()==b'12345'
-for fd in link_fds+split_fds:os.close(fd)
+dir_fds=[os.open(root/'folder',os.O_RDONLY|os.O_DIRECTORY) for root in roots[1:]]
+nested_fds=[os.open(root/'folder/data',os.O_RDONLY) for root in roots[1:]]
+subprocess.run(['python3','-c','import os; from pathlib import Path; os.rename(\"folder\",\"renamed-folder\"); Path(\"renamed-folder/data\").write_bytes(b\"bravo\"); Path(\"/work/invocations\").open(\"ab\").write(b\"6\")'],cwd=roots[0],check=True)
+sixth=capture('captured-6')
+for root in roots[1:]:
+ plan=plan_tree_transitions(regular_files(fifth),regular_files(sixth),regular_files(root),directories(fifth),directories(sixth),directories(root))
+ if plan['directory_moves']!=[('folder','renamed-folder')]:raise RuntimeError('snapshot directory move plan differs')
+ apply_tree_transitions(root,plan)
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(lambda root:sync(sixth,root),roots[1:]))
+if any(x.returncode for x in results):raise RuntimeError('sixth rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
+checks['moved_directory_correct']=all((r/'renamed-folder/data').read_bytes()==b'bravo' and not (r/'folder').exists() for r in roots[1:])
+checks['moved_directory_descriptors_correct']=all('data' in os.listdir(fd) for fd in dir_fds) and all(os.pread(fd,5,0)==b'bravo' for fd in nested_fds)
+checks['original_subprocess_only_six_times']=Path('/work/invocations').read_bytes()==b'123456'
+for fd in link_fds+split_fds+dir_fds+nested_fds:os.close(fd)
 for name,passed in checks.items():print(name,passed)
 print('xattr_exercised',xattr)
 if not all(checks.values()):raise RuntimeError('Btrfs snapshot checks failed')

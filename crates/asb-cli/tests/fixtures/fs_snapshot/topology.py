@@ -103,3 +103,82 @@ def detach_splits(replica_root, paths):
     root = Path(replica_root)
     for path in paths:
         (root / path).unlink()
+
+
+def directories(root):
+    """Inventory directory identities within one snapshot filesystem."""
+    root = Path(root)
+    device = root.stat().st_dev
+    result = {}
+    def fail(error):
+        raise error
+    for directory, names, _ in os.walk(root, followlinks=False, onerror=fail):
+        names.sort()
+        path = Path(directory)
+        metadata = os.lstat(path)
+        if metadata.st_dev != device:
+            raise ValueError('nested filesystem requires separate snapshot handling')
+        if path != root:
+            result[path.relative_to(root).as_posix()] = (metadata.st_dev, metadata.st_ino)
+    return result
+
+
+def plan_tree_transitions(before_files, after_files, replica_files,
+                          before_dirs, after_dirs, replica_dirs):
+    """Plan directory moves first and regular-file transitions afterward."""
+    if set(before_dirs) != set(replica_dirs):
+        raise ValueError('replica directory paths differ from the previous snapshot')
+    if len({identity[1] for identity in before_dirs.values()}) != len(before_dirs):
+        raise ValueError('source directory identities are ambiguous')
+    if len(set(replica_dirs.values())) != len(replica_dirs):
+        raise ValueError('replica directory identities are ambiguous')
+    old = {identity[1]: path for path, identity in before_dirs.items()}
+    new = {identity[1]: path for path, identity in after_dirs.items()}
+    if len(new) != len(after_dirs):
+        raise ValueError('snapshot directory identities are ambiguous')
+    raw = sorted((old[inode], path) for inode, path in new.items()
+                 if inode in old and old[inode] != path)
+    moves = []
+    for source, destination in sorted(raw, key=lambda item: (item[0].count('/'), item[0])):
+        if any(source.startswith(parent + '/') and destination == target + source[len(parent):]
+               for parent, target in moves):
+            continue
+        moves.append((source, destination))
+
+    def remap(inventory):
+        result = {}
+        for path, identity in inventory.items():
+            matches = [(source, destination) for source, destination in raw
+                       if path.startswith(source + '/')]
+            if matches:
+                source, destination = max(matches, key=lambda item: len(item[0]))
+                path = destination + path[len(source):]
+            if path in result:
+                raise ValueError('snapshot directory remapping is ambiguous')
+            result[path] = identity
+        return result
+
+    files = plan_transitions(remap(before_files), after_files, remap(replica_files))
+    return {'directory_moves': moves, 'files': files}
+
+
+def apply_tree_transitions(replica_root, plan):
+    """Move directory inodes, then apply the regular-file transition plan."""
+    root = Path(replica_root)
+    if plan['directory_moves']:
+        staging = Path(tempfile.mkdtemp(dir=root, prefix='.asb-snapshot-dirs-'))
+        try:
+            staged = []
+            for index, (source, destination) in enumerate(sorted(
+                    plan['directory_moves'], key=lambda item: (-item[0].count('/'), item[0]))):
+                saved = staging / f'directory-{index}'
+                os.rename(root / source, saved)
+                staged.append((saved, destination))
+            for saved, destination in sorted(staged, key=lambda item: (item[1].count('/'), item[1])):
+                target = root / destination
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(saved, target)
+            staging.rmdir()
+        except Exception as error:
+            raise RuntimeError(f'snapshot directory transition was partial; retained staging at {staging}') from error
+    apply_transitions(root, plan['files'])

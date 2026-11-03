@@ -5,7 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from topology import apply_transitions, detach_splits, plan_splits, plan_transitions, regular_files
+from topology import (apply_transitions, apply_tree_transitions, detach_splits, directories,
+                      plan_splits, plan_transitions, plan_tree_transitions, regular_files)
 
 SCRATCH = Path(__file__).resolve().parents[5] / 'target' / 'snapshot-topology-tests'
 SCRATCH.mkdir(parents=True, exist_ok=True)
@@ -62,6 +63,56 @@ class TopologyTest(unittest.TestCase):
                 self.assertEqual((root/'c').read_bytes(),b'old');self.assertFalse((root/'b').exists())
                 (root/'c').write_bytes(b'new');self.assertEqual(os.pread(fd,3,0),b'new')
             finally:os.close(fd)
+
+    def test_directory_move_preserves_open_directory_and_file_handles(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);(root/'old'/'nested').mkdir(parents=True);(root/'old'/'nested'/'file').write_bytes(b'old')
+            before_dirs={'old':(1,10),'old/nested':(1,11)}
+            after_dirs={'new':(2,10),'new/nested':(2,11)}
+            before_files={'old/nested/file':(1,20)};after_files={'new/nested/file':(2,20)}
+            plan=plan_tree_transitions(before_files,after_files,regular_files(root),before_dirs,after_dirs,directories(root))
+            self.assertEqual(plan['directory_moves'],[('old','new')])
+            dirfd=os.open(root/'old',os.O_RDONLY|os.O_DIRECTORY);fd=os.open(root/'old'/'nested'/'file',os.O_RDONLY)
+            try:
+                apply_tree_transitions(root,plan)
+                self.assertIn('nested',os.listdir(dirfd));(root/'new'/'nested'/'file').write_bytes(b'new')
+                self.assertEqual(os.pread(fd,3,0),b'new');self.assertFalse((root/'old').exists())
+            finally:os.close(dirfd);os.close(fd)
+
+    def test_failed_directory_move_preserves_staged_tree(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);(root/'old').mkdir();(root/'old'/'file').write_bytes(b'old')
+            plan=plan_tree_transitions({'old/file':(1,20)},{'new/file':(2,20)},regular_files(root),
+                                       {'old':(1,10)},{'new':(2,10)},directories(root))
+            with patch('topology.os.replace',side_effect=OSError('injected')):
+                with self.assertRaisesRegex(RuntimeError,'retained staging'):
+                    apply_tree_transitions(root,plan)
+            staging=list(root.glob('.asb-snapshot-dirs-*'))
+            self.assertEqual(len(staging),1)
+            self.assertEqual((staging[0]/'directory-0'/'file').read_bytes(),b'old')
+
+    def test_directory_swap_preserves_file_identities(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);(root/'a').mkdir();(root/'b').mkdir();(root/'a'/'file').write_bytes(b'aaa');(root/'b'/'file').write_bytes(b'bbb')
+            bd={'a':(1,10),'b':(1,20)};ad={'a':(2,20),'b':(2,10)}
+            bf={'a/file':(1,30),'b/file':(1,40)};af={'a/file':(2,40),'b/file':(2,30)}
+            plan=plan_tree_transitions(bf,af,regular_files(root),bd,ad,directories(root))
+            fd=os.open(root/'a'/'file',os.O_RDONLY)
+            try:
+                apply_tree_transitions(root,plan)
+                self.assertEqual((root/'a'/'file').read_bytes(),b'bbb')
+                self.assertEqual((root/'b'/'file').read_bytes(),b'aaa')
+                (root/'b'/'file').write_bytes(b'new');self.assertEqual(os.pread(fd,3,0),b'new')
+            finally:os.close(fd)
+
+    def test_independent_nested_directory_move_survives_parent_move(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);(root/'parent'/'old').mkdir(parents=True);(root/'parent'/'old'/'file').write_bytes(b'x')
+            bd={'parent':(1,10),'parent/old':(1,11)};ad={'renamed':(2,10),'renamed/new':(2,11)}
+            bf={'parent/old/file':(1,20)};af={'renamed/new/file':(2,20)}
+            plan=plan_tree_transitions(bf,af,regular_files(root),bd,ad,directories(root))
+            apply_tree_transitions(root,plan)
+            self.assertEqual((root/'renamed'/'new'/'file').read_bytes(),b'x')
 
     def test_failed_move_preserves_staged_file(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
