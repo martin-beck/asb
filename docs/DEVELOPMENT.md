@@ -110,6 +110,11 @@ tape consumption. This wrapper is not production code and does not cover the
 other native tools or a complete SWE-bench task. During this test the proxy
 preserves the caller UID and GID on new files and directories when it runs as
 root; other ownership and metadata semantics remain unqualified.
+Adding `ASB_HERMES_MIXED_FIXTURE=1` makes the mock invoke those three native
+file tools followed by the real terminal tool. Four replay checks require each
+intermediate state and confirm the terminal command was not rerun. The file
+wrappers and terminal sidecar remain distinct test transports; this does not
+establish generic support for every Hermes tool.
 
 For a real-checkout diagnostic, `ASB_SWE_TEST_BASELINE` and
 `ASB_SWE_TEST_PATCH` select a local trial checkout and a previously resolved

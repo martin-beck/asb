@@ -19,12 +19,13 @@ if os.environ.get('ASB_FIXTURE_AGENT_BOUNDARY') == '1':
         if _fixture_ordinal != 0:
             raise RuntimeError('fixture expected exactly one Hermes terminal call')
         _fixture_ordinal += 1
+        _fixture_terminal_marker = 'terminal' if os.environ.get('ASB_FIXTURE_MIXED') == '1' else 'one'
         if MODE == 'record':
-            _fixture_exchange('tool-begin:one')
+            _fixture_exchange('tool-begin:' + _fixture_terminal_marker)
         value = _fixture_invoke(*args, **kwargs)
         if MODE == 'replay' and transport.failed:
             raise RuntimeError('fixture Hermes request mismatch')
-        _fixture_exchange('tool-end:one')
+        _fixture_exchange('tool-end:' + _fixture_terminal_marker)
         return value
     transport.invoke = _fixture_invoke_marked
 

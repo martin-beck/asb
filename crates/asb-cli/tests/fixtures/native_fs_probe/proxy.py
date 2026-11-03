@@ -60,7 +60,7 @@ class Proxy(Operations):
         with self.control.makefile('rwb', buffering=0) as stream:
             for line in stream:
                 marker = line.decode('ascii').strip()
-                if marker not in ('tool-begin:child', 'tool-end:child', 'tool-begin:hermes', 'tool-end:hermes', 'tool-begin:a', 'tool-end:a', 'tool-begin:b', 'tool-end:b', 'tool-begin:bg', 'tool-end:bg', 'tool-begin:after', 'tool-end:after', 'tool-begin:orphan', 'tool-end:orphan', 'tool-begin:one', 'tool-end:one', 'tool-begin:two', 'tool-end:two', 'tool-begin:write', 'tool-end:write', 'tool-begin:read', 'tool-end:read', 'tool-begin:patch', 'tool-end:patch'):
+                if marker not in ('tool-begin:child', 'tool-end:child', 'tool-begin:hermes', 'tool-end:hermes', 'tool-begin:a', 'tool-end:a', 'tool-begin:b', 'tool-end:b', 'tool-begin:bg', 'tool-end:bg', 'tool-begin:after', 'tool-end:after', 'tool-begin:orphan', 'tool-end:orphan', 'tool-begin:one', 'tool-end:one', 'tool-begin:two', 'tool-end:two', 'tool-begin:write', 'tool-end:write', 'tool-begin:read', 'tool-end:read', 'tool-begin:patch', 'tool-end:patch', 'tool-begin:terminal', 'tool-end:terminal'):
                     raise RuntimeError('invalid fixture marker')
                 sequence = self.record('marker', None, marker=marker, is_marker=True)
                 stream.write(f'{sequence}\n'.encode('ascii'))

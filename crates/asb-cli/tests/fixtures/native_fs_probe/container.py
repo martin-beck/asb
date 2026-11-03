@@ -9,6 +9,7 @@ image=os.environ['ASB_FUSE_TEST_IMAGE']
 agent_fixture=os.environ.get('ASB_HERMES_AGENT_FIXTURE')=='1'
 unrestricted=os.environ.get('ASB_HERMES_UNRESTRICTED_FIXTURE')=='1'
 native_files=os.environ.get('ASB_HERMES_NATIVE_FILES_FIXTURE')=='1'
+mixed=os.environ.get('ASB_HERMES_MIXED_FIXTURE')=='1'
 swe_baseline=os.environ.get('ASB_SWE_TEST_BASELINE')
 swe_patch=os.environ.get('ASB_SWE_TEST_PATCH')
 if bool(swe_baseline) != bool(swe_patch): raise RuntimeError('provide both SWE baseline and patch')
@@ -70,6 +71,10 @@ fi
   position=cmd.index('--env')
   cmd[position:position]=['--mount', f'type=bind,src={Path(fuse_unmount).resolve()},dst=/usr/bin/fusermount3,readonly']
  hermes_install=os.environ.get('ASB_HERMES_TEST_INSTALL')
+ if mixed and not native_files: raise RuntimeError('mixed fixture requires file-tool fixture')
+ if mixed:
+  position=cmd.index('--env')
+  cmd[position:position]=['--env','ASB_FIXTURE_MIXED=1']
  if native_files and not unrestricted: raise RuntimeError('file-tool fixture requires unrestricted fixture')
  if unrestricted and not agent_fixture: raise RuntimeError('unrestricted fixture requires agent fixture')
  if swe_patch:
@@ -138,7 +143,7 @@ fi
    if unrestricted:
     tool_names=json.loads((root/'mock-record/tool-names.json').read_text())
     assert {'terminal','read_file','write_file','patch'} <= set(tool_names), tool_names
-   expected_calls=0 if native_files else (1 if agent_fixture else 2)
+   expected_calls=(1 if mixed else 0) if native_files else (1 if agent_fixture else 2)
    if native_files: assert len((root/'control/files.jsonl').read_text().splitlines())==3
    assert sum(event['event']=='write' for event in native)==expected_calls
    assert sum(event['event']=='output' for event in native)==expected_calls
@@ -164,7 +169,7 @@ fi
     try:
      connection,_=listener.accept()
      with connection, connection.makefile('rwb',buffering=0) as stream:
-      names=('write','read','patch') if native_files else (('one',) if agent_fixture else ('one','two'))
+      names=(('write','read','patch','terminal') if mixed else ('write','read','patch')) if native_files else (('one',) if agent_fixture else ('one','two'))
       for name in names:
        assert stream.readline().decode().strip()=='tool-end:'+name
        cursor.admit(name)
@@ -173,7 +178,8 @@ fi
         diff=subprocess.run(['git','-C',str(destination),'diff','--name-only'],capture_output=True,text=True,check=True,env=dict(os.environ,GIT_OPTIONAL_LOCKS='0'))
         assert diff.stdout.strip()
        elif native_files:
-        assert (destination/'asb-real-agent.txt').read_text()==('fixture' if name=='patch' else 'before')
+        assert (destination/'asb-real-agent.txt').read_text()==('fixture' if name in ('patch','terminal') else 'before')
+        if mixed: assert (destination/'mixed-marker').exists()==(name=='terminal')
        elif agent_fixture:
         assert (destination/'asb-real-agent.txt').read_text()=='fixture'
        else:
@@ -210,6 +216,9 @@ fi
    if swe_patch:
     position=replay_cmd.index('--env')
     replay_cmd[position:position]=['--env','ASB_FIXTURE_SWE_PATCH=1']
+   if mixed:
+    position=replay_cmd.index('--env')
+    replay_cmd[position:position]=['--env','ASB_FIXTURE_MIXED=1']
    if native_files:
     position=replay_cmd.index('--env')
     replay_cmd[position:position]=['--env','ASB_FIXTURE_NATIVE_FILES=1',

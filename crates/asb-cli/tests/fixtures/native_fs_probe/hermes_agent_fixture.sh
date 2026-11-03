@@ -36,7 +36,8 @@ if [ "${ASB_FIXTURE_SWE_PATCH:-0}" = 1 ]; then
 else
   test "$(cat asb-real-agent.txt)" = fixture
 fi
-if [ "${ASB_FIXTURE_NATIVE_FILES:-0}" != 1 ]; then
+if [ "${ASB_FIXTURE_MIXED:-0}" = 1 ]; then test "$(cat mixed-marker)" = mixed; fi
+if [ "${ASB_FIXTURE_NATIVE_FILES:-0}" != 1 ] || [ "${ASB_FIXTURE_MIXED:-0}" = 1 ]; then
   if [ "$ASB_HERMES_NATIVE_MODE" = record ]; then
     test -f /tmp/asb-native-agent-executed
   else

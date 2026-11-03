@@ -37,6 +37,8 @@ class Handler(base.Handler):
             ('read_file', {'path': '/work/mount/asb-real-agent.txt'}),
             ('patch', {'mode': 'replace', 'path': '/work/mount/asb-real-agent.txt', 'old_string': 'before', 'new_string': 'fixture'}),
         ]
+        if os.environ.get('ASB_FIXTURE_MIXED') == '1':
+            calls.append(('terminal', {'command':'printf mixed > mixed-marker; printf ran > /tmp/asb-native-agent-executed'}))
         if results < len(calls):
             name, args = calls[results]
             assert name in [entry.get('function', entry).get('name') for entry in body.get('tools', [])]
