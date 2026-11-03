@@ -59,6 +59,7 @@ class Attribution:
     """Classify against all active markers, preserving uncertainty explicitly."""
     def __init__(self):
         self.active = {}
+        self.handles = {}
         self.sequence = 0
 
     def observe(self, event):
@@ -83,15 +84,37 @@ class Attribution:
             else:
                 raise ValueError('filesystem marker is unsupported')
             return {'kind': 'marker'}
+        op = event.get('op')
+        handle = event.get('handle')
+        if op == 'release':
+            opened_as = self.handles.pop(handle, None)
+            if opened_as is None:
+                return {'kind': 'unknown'}
+            # FUSE release may have no caller. The opener is evidence about
+            # handle lifetime, not a claim about which thread closed it.
+            return {'kind': 'handle-release', 'handle': handle, 'opened_as': opened_as}
         caller = _caller(event.get('caller'))
         if caller is None or any(origin is None for origin in self.active.values()):
-            return {'kind': 'unknown'}
-        owners = [alias for alias, origin in self.active.items() if _belongs(caller, origin)]
-        if len(owners) == 1:
-            return {'kind': 'tool', 'alias': owners[0]}
-        if len(owners) > 1:
-            return {'kind': 'ambiguous', 'aliases': sorted(owners)}
-        return {'kind': 'direct'}
+            scope = {'kind': 'unknown'}
+        else:
+            owners = [alias for alias, origin in self.active.items() if _belongs(caller, origin)]
+            if len(owners) == 1:
+                scope = {'kind': 'tool', 'alias': owners[0]}
+            elif len(owners) > 1:
+                scope = {'kind': 'ambiguous', 'aliases': sorted(owners)}
+            else:
+                scope = {'kind': 'direct'}
+        if op in ('open', 'create') and _positive(handle):
+            if handle in self.handles:
+                raise ValueError('filesystem handle is already open')
+            self.handles[handle] = scope
+        elif _positive(handle) and handle in self.handles:
+            opened_as = self.handles[handle]
+            if (opened_as.get('kind') in ('direct', 'tool')
+                    and scope.get('kind') in ('direct', 'tool') and opened_as != scope):
+                return {'kind': 'shared-handle', 'handle': handle,
+                        'opened_as': opened_as, 'used_as': scope}
+        return scope
 
     def finish(self):
         if self.active:
