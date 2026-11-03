@@ -19,6 +19,10 @@ The experimental replay cursor can apply an ordered prefix and resume while
 keeping file handles open. The fixture checks an intermediate write before its
 later truncate and brackets one synchronous subprocess with explicit markers.
 Applying the cursor through its end marker reproduces the subprocess write.
+The same fixture also invokes the Hermes sidecar recorder with a synthetic file
+write, applies the marked filesystem operations, and then invokes its replayer
+without running the original tool in four workspaces. This exercises the real
+sidecar classes, not the complete Hermes agent or production integration.
 No production code selects tool-call boundaries for that cursor; overlapping
 tools, asynchronous work, delayed IO and full process attribution are unresolved.
 This is an experimental fixture, not an ASB replay backend: it changes timing,

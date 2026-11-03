@@ -100,6 +100,12 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
             assert child.wait(timeout=5) == 0
             end = mark('tool-end')
             assert (backing / 'child').read_bytes() == b'child data'
+            hermes_begin = mark('tool-begin')
+            hermes_sidecar = root / 'hermes.jsonl'
+            hermes_script = ROOT / 'crates/asb-cli/tests/hermes_native_effect_gap.py'
+            subprocess.run([python, str(hermes_script), 'record', str(mount), str(hermes_sidecar)], check=True)
+            hermes_end = mark('tool-end')
+            assert (backing / 'result.txt').read_text() == 'recorded contents'
         finally:
             (evidence / 'write-release').touch()
             markers.close()
@@ -121,6 +127,8 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     assert second_write < second_truncate, ops
     child_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/child']
     assert begin < child_writes[0]['sequence'] < end
+    hermes_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/result.txt']
+    assert hermes_writes and hermes_begin < hermes_writes[0]['sequence'] < hermes_end
     assert child_writes and all(event['caller']['tid'] == child_pid and event['caller']['tgid'] == child_pid and event['caller']['ppid'] == os.getpid() and event['caller']['start_ticks'] is not None for event in child_writes), child_writes
     parent_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/one']
     assert parent_writes and all(event['caller']['tid'] == writer_tids['one'] and event['caller']['tgid'] == os.getpid() and event['caller']['start_ticks'] is not None for event in parent_writes), parent_writes
@@ -142,6 +150,10 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
             raise AssertionError('replay cursor moved backwards')
         staged.apply_until(end)
         assert (staged_root / 'child').read_bytes() == b'child data'
+        assert not (staged_root / 'result.txt').exists()
+        staged.apply_until(hermes_end)
+        assert (staged_root / 'result.txt').read_text() == 'recorded contents'
+        subprocess.run([python, str(hermes_script), 'replay-with-effects', str(staged_root), str(hermes_sidecar)], check=True)
         staged.finish()
         assert (staged_root / 'one').read_bytes() == b''
         assert (staged_root / 'child').read_bytes() == b'child data'
@@ -154,6 +166,7 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
         assert (destination / 'other').read_bytes() == b'independent'
         assert (destination / 'two').read_bytes() == b''
         assert (destination / 'child').read_bytes() == b'child data'
+        subprocess.run([python, str(hermes_script), 'replay-with-effects', str(destination), str(hermes_sidecar)], check=True)
         assert os.stat(destination / 'two').st_ino == os.stat(destination / 'two-alias').st_ino
         assert os.stat(destination / 'one').st_ino == os.stat(destination / 'alias').st_ino
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:

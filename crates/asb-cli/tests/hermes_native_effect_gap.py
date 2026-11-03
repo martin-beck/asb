@@ -38,8 +38,11 @@ def worker(mode, workspace, sidecar):
         assert called and Path('result.txt').read_text() == 'recorded contents'
     else:
         assert not called, 'replay unexpectedly invoked the original tool'
-        # This is the known defect, not the desired end state.
-        assert not Path('result.txt').exists(), 'the known missing-effect defect was repaired; update this test'
+        if mode == 'replay-with-effects':
+            assert Path('result.txt').read_text() == 'recorded contents'
+        else:
+            # This is the known defect, not the desired end state.
+            assert not Path('result.txt').exists(), 'the known missing-effect defect was repaired; update this test'
 
 
 if len(sys.argv) == 4:
