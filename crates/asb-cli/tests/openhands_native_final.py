@@ -61,6 +61,26 @@ def message(source, text):
     return MessageEvent(source=source, llm_message=Event(role='assistant' if source == 'agent' else 'user', content=[TextContent(text=text)]))
 
 class NativeFinalTest(unittest.TestCase):
+    def test_terminal_record_brackets_the_actual_tool_execution(self):
+        terminal=types.ModuleType('openhands.tools.terminal')
+        metadata=types.ModuleType('openhands.tools.terminal.metadata')
+        terminal.TerminalObservation=Event
+        metadata.CmdOutputMetadata=Event
+        timeline=[]
+        observation=Event(text='ok',is_error=False,command='edit',exit_code=0,
+                          timeout=False,metadata=Event(model_dump=lambda:{}))
+        executor=launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
+        executor._sequence=0;executor._sequence_lock=threading.Lock()
+        executor._delegate=lambda action:(timeline.append('execute') or observation)
+        executor._bridge=Event(stdin=io.StringIO(),stdout=io.StringIO('{"kind":"ok","schema_version":1}\n'))
+        action=Event(command='edit',is_input=False,timeout=5,reset=False)
+        with patch.dict(sys.modules,{'openhands.tools':types.ModuleType('openhands.tools'),
+                                    'openhands.tools.terminal':terminal,
+                                    'openhands.tools.terminal.metadata':metadata}), \
+             patch.object(launcher,'snapshot_boundary',side_effect=lambda mode,action,alias:timeline.append(action)):
+            self.assertIs(executor(action),observation)
+        self.assertEqual(timeline,['begin','execute','end'])
+
     def test_terminal_replay_applies_snapshot_before_returning_observation(self):
         terminal=types.ModuleType('openhands.tools.terminal')
         metadata=types.ModuleType('openhands.tools.terminal.metadata')
