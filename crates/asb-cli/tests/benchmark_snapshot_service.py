@@ -129,5 +129,25 @@ class SnapshotServiceTest(unittest.TestCase):
                 server.shutdown();server.server_close();thread.join();path.unlink(missing_ok=True)
             with self.assertRaisesRegex(RuntimeError,'unfinished'):service.finish()
 
+    def test_duplicate_socket_marker_invalidates_incomplete_recording(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);workspace=root/'workspace';workspace.mkdir()
+            service=SnapshotService(workspace,root/'store',['fixture'],snapshot=lambda path:path.mkdir())
+            path=root/'marker.sock';server=MarkerServer(path,service)
+            thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+            def send(data):
+                with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
+                    client.settimeout(3);client.connect(str(path));client.sendall(data)
+                    return client.makefile('rb').readline()
+            try:
+                self.assertEqual(send(b'tool-begin:one:10:11\n'),b'1\n')
+                self.assertEqual(send(b'tool-begin:one:10:11\n'),b'')
+                self.assertEqual(send(b'tool-end:one:10:11\n'),b'')
+            finally:
+                server.shutdown();server.server_close();thread.join();path.unlink(missing_ok=True)
+            with self.assertRaisesRegex(RuntimeError,'unfinished'):service.finish()
+            events=[json.loads(line) for line in (root/'store/markers.jsonl').read_text().splitlines()]
+            self.assertEqual([(event['kind'],event['alias']) for event in events],[('begin','one')])
+
 
 if __name__=='__main__':unittest.main()
