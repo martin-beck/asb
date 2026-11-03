@@ -61,6 +61,9 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     requests = [json.loads(base64.b64decode(row['request_b64']))['command']
                 for row in rows if row['event'] == 'write']
     assert requests == ['0', '1', '2']
+    boundaries = []
+    original_boundary = namespace['_filesystem_replay_boundary']
+    namespace['_filesystem_replay_boundary'] = lambda alias: boundaries.append(alias) or True
     replay = namespace['Replayer']()
     first_returned = threading.Event()
     def replay_first():
@@ -77,6 +80,8 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     assert replay.invoke(None, '2', False, None, None, None,
                          False, '.', False, False, None) == 'later'
     replay.close()
+    assert boundaries == ['terminal-2', 'terminal-1', 'terminal-3']
+    namespace['_filesystem_replay_boundary'] = original_boundary
     assert json.loads((directory / 'progress.json').read_text())['complete']
     reversed_replay = namespace['Replayer']()
     for request in ('1', '0'):

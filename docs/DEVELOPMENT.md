@@ -124,8 +124,11 @@ Hermes sidecar and runs its replayer in four offline containers; an external
 sentinel outside the mounted workspace verifies that the original shell command
 was not executed on replay. That sentinel is deliberately not reproduced, so
 the fixture does not capture effects outside its mounted workspace.
-The test wrapper supplies boundaries and advances the operation cursor after
-the sidecar validates each request and before returning its result. This does
+The experimental Hermes adapter now asks the per-replica coordinator to apply
+recorded terminal effects before returning a replayed result. Its offline fixture
+checks this handoff and rejects a missing coordinator; other Hermes tools remain
+unqualified. The older test wrapper supplies boundaries and advances the operation
+cursor after the sidecar validates each request and before returning its result. This does
 not prove ordering for a complete agent. The adapter preserves Hermes's normal
 tool catalogue; calls outside its covered terminal/process dispatch run during
 recording but mark the tape incomplete until replay support is implemented.

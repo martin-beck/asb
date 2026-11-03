@@ -500,6 +500,27 @@ mod tests {
     }
 
     #[test]
+    fn native_filesystem_replay_applies_effects_before_reply() {
+        for name in [
+            "hermes_native_fs_replay.py",
+            "hermes_native_parallel_gap.py",
+        ] {
+            let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join(name);
+            let output = std::process::Command::new("python3")
+                .arg(script)
+                .output()
+                .expect("python3 is required for the Hermes adapter test");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
     fn native_catalogue_preserves_recording_and_replay_coverage() {
         let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/hermes_native_catalogue.py");
