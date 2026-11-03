@@ -74,6 +74,34 @@ class MetadataReplayTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'absence is unproven'):
                 validate_direct_prefix(lines([listing,mutation,end]),payload,lines([listing,mutation,probe]),payload)
 
+    def test_borrowed_metadata_requires_evidence_and_safe_intervening_events(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'target') as directory:
+            payload=Path(directory)/'payload.bin';payload.write_bytes(b'')
+            attrs=dict(st_gid=1,st_ino=1,st_mode=33188,st_nlink=1,st_size=3,st_uid=1,
+                       st_blocks=1,st_blksize=4096,st_atime=1,st_mtime=1,st_ctime=1)
+            listing={'op':'observe-readdir','path':'/','result':['.','..','target','other'],'caller':CALLER}
+            opened={'op':'open','path':'/other','flags':0,'initial_size':0,'initial_mode':33188,'initial_nlink':1,'handle':1,'caller':CALLER}
+            released={'op':'release','path':'/other','handle':1,'caller':None}
+            target={'op':'observe-getattr','path':'/target','result':attrs,'caller':CALLER}
+            borrow={'op':'observe-borrowed','path':'/target','result':attrs,'requested_op':'getattr','source_sequence':4,'caller':CALLER}
+            end={'op':'marker','marker':'tool-begin:first','origin':None}
+            def lines(entries): return [json.dumps(dict(item,sequence=i))+'\n' for i,item in enumerate(entries,1)]
+            self.assertEqual(validate_direct_prefix(lines([listing,opened,released,target,end]),payload,
+                                                    lines([listing,borrow,opened,released]),payload),4)
+            changed=dict(borrow,result=dict(attrs,st_size=4))
+            with self.assertRaisesRegex(ValueError,'metadata is unproven'):
+                validate_direct_prefix(lines([listing,opened,released,target,end]),payload,
+                                       lines([listing,changed,opened,released]),payload)
+            changed_open=dict(opened,path='/target')
+            with self.assertRaisesRegex(ValueError,'crosses an unsafe'):
+                validate_direct_prefix(lines([listing,changed_open,released,target,end]),payload,
+                                       lines([listing,borrow,changed_open,released]),payload)
+            hardlinked=dict(target,result=dict(attrs,st_nlink=2))
+            forged=dict(borrow,result=dict(attrs,st_nlink=2))
+            with self.assertRaisesRegex(ValueError,'metadata is unproven'):
+                validate_direct_prefix(lines([listing,opened,released,hardlinked,end]),payload,
+                                       lines([listing,forged,opened,released]),payload)
+
     def test_direct_observation_results_are_compared(self):
         with tempfile.TemporaryDirectory(dir=ROOT/'target') as directory:
             payload=Path(directory)/'payload.bin';payload.write_bytes(b'')

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import posixpath
+import stat
 from pathlib import Path
 
 from asb_fs_attribution import Attribution
@@ -64,8 +65,18 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
     handles, used_observed = {}, set()
     count = 0
     with Path(expected_payload).open('rb') as expected_data, Path(observed_payload).open('rb') as observed_data:
-        expected = iter(expected_events); observed = iter(observed_events)
+        expected_lines = []
+        expected_records = []
+        for line in expected_events:
+            if not line.endswith('\n'):
+                raise ValueError('direct filesystem event stream is truncated')
+            item = json.loads(line)
+            expected_lines.append(line); expected_records.append(item)
+            if item.get('op') == 'marker':
+                break
+        expected = iter(expected_lines); observed = iter(observed_events)
         directory_listings = {}
+        borrowed_sequences = set()
         def next_actual():
             while True:
                 line = next(observed, None)
@@ -80,6 +91,36 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
                         raise ValueError('observed direct release has an unproven opener')
                 elif scope['kind'] != 'direct':
                     raise ValueError('observed direct operation has unproven attribution')
+                if actual.get('op') == 'observe-borrowed':
+                    path = actual.get('path'); source = actual.get('source_sequence')
+                    if (actual.get('requested_op') != 'getattr' or not isinstance(path, str)
+                            or path.count('/') != 1 or path in ('/', '/.', '/..')
+                            or type(source) is not int or source <= count or source > len(expected_records)
+                            or source in borrowed_sequences):
+                        raise ValueError('borrowed filesystem metadata is unproven')
+                    target = expected_records[source - 1]
+                    listing = directory_listings.get('/')
+                    result = target.get('result')
+                    fields = {'st_gid','st_ino','st_mode','st_nlink','st_size','st_uid',
+                              'st_blocks','st_blksize','st_atime','st_mtime','st_ctime'}
+                    if (target.get('sequence') != source or target.get('op') != 'observe-getattr'
+                            or target.get('path') != path or listing is None or path[1:] not in listing
+                            or not isinstance(result, dict) or set(result) != fields
+                            or any(type(value) is not int for value in result.values())
+                            or not stat.S_ISREG(result['st_mode']) or result['st_nlink'] != 1
+                            or 'error' in target or 'object' in target or actual.get('result') != result):
+                        raise ValueError('borrowed filesystem metadata is unproven')
+                    for earlier in expected_records[count:source-1]:
+                        op = earlier.get('op'); flags = earlier.get('flags')
+                        readonly_open = (op == 'open' and type(flags) is int
+                                         and flags & os.O_ACCMODE == os.O_RDONLY
+                                         and not flags & (os.O_CREAT | os.O_TRUNC))
+                        if (earlier.get('path') == path or
+                                (op not in _FIELDS or not op.startswith('observe-'))
+                                and op not in ('read', 'release') and not readonly_open):
+                            raise ValueError('borrowed filesystem metadata crosses an unsafe operation')
+                    borrowed_sequences.add(source)
+                    continue
                 if actual.get('op') != 'observe-inferred-absent':
                     return actual, scope
                 path = actual.get('path')
@@ -112,6 +153,10 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
                     raise ValueError('direct filesystem release has an unproven opener')
             elif scope['kind'] != 'direct':
                 raise ValueError('direct filesystem prefix has unproven attribution')
+            if event.get('sequence') in borrowed_sequences:
+                borrowed_sequences.remove(event['sequence'])
+                count += 1
+                continue
             actual, actual_scope = next_actual()
             if actual is None:
                 raise ValueError('direct filesystem replay ended before the recorded prefix')
@@ -208,6 +253,8 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
             if not op.startswith('observe-') and op not in ('read', 'release') and not read_only_open:
                 directory_listings.clear()
             count += 1
+        if borrowed_sequences:
+            raise ValueError('borrowed filesystem metadata was not consumed')
         if handles or expected_attribution.handles or observed_attribution.handles:
             raise ValueError('direct filesystem prefix has open handles')
         if next_actual()[0] is not None:

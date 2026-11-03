@@ -7,6 +7,7 @@ from collections import defaultdict, deque
 import errno
 import os
 import posixpath
+import stat
 from functools import wraps
 from pathlib import Path
 import threading
@@ -35,10 +36,19 @@ class InferredAbsent(FileNotFoundError):
         self.parent = parent
 
 
+class BorrowedMetadata:
+    """A later recorded observation proven stable across earlier operations."""
+    def __init__(self, result, sequence):
+        self.result = result
+        self.sequence = sequence
+
+
 class ObservationWindow:
     def __init__(self, events, payload):
         self.lock = threading.RLock()
         self.events = iter(events)
+        self.buffer = deque()
+        self.borrowed = set()
         self.payload = Path(payload)
         self.pending = defaultdict(deque)
         self.boundary = None
@@ -59,8 +69,21 @@ class ObservationWindow:
             raise ValueError('filesystem observation request is invalid')
         return (op, path, *values)
 
+    def _next_event(self):
+        if self.buffer:
+            return self.buffer.popleft()
+        return next(self.events, None)
+
     def _load(self):
-        for event in self.events:
+        while True:
+            event = self._next_event()
+            if event is None:
+                self.ended = True
+                self.boundary = None
+                return
+            if event.get('sequence') in self.borrowed:
+                self.borrowed.remove(event['sequence'])
+                continue
             op = event.get('op')
             if op not in _FIELDS:
                 self.boundary = event
@@ -68,8 +91,46 @@ class ObservationWindow:
             detail = {name: event.get(name) for name in _FIELDS[op]}
             key = self._key(op, event.get('path'), detail)
             self.pending[key].append(event)
-        self.ended = True
-        self.boundary = None
+
+    def _borrow_stable_getattr(self, path):
+        # Restrict lookahead to a root-level regular file with one link. Never
+        # cross a mutation, a tool marker, or an access to this same path.
+        if path.count('/') != 1 or path in ('/', '/.', '/..') or not self.boundary:
+            return None
+        def safe(event):
+            op = event.get('op')
+            if event.get('path') == path:
+                return False
+            if op in _FIELDS or op in ('read', 'release'):
+                return True
+            flags = event.get('flags')
+            return (op == 'open' and type(flags) is int and flags & os.O_ACCMODE == os.O_RDONLY
+                    and not flags & (os.O_CREAT | os.O_TRUNC))
+        if not safe(self.boundary):
+            return None
+        index = 0
+        while True:
+            if index == len(self.buffer):
+                event = next(self.events, None)
+                if event is None:
+                    return None
+                self.buffer.append(event)
+            event = self.buffer[index]; index += 1
+            if event.get('sequence') in self.borrowed:
+                continue
+            if event.get('op') == 'observe-getattr' and event.get('path') == path:
+                result = event.get('result'); sequence = event.get('sequence')
+                fields = {'st_gid','st_ino','st_mode','st_nlink','st_size','st_uid',
+                          'st_blocks','st_blksize','st_atime','st_mtime','st_ctime'}
+                if (type(sequence) is int and sequence > 0 and isinstance(result, dict)
+                        and set(result) == fields and all(type(value) is int for value in result.values())
+                        and stat.S_ISREG(result['st_mode']) and result['st_nlink'] == 1
+                        and 'error' not in event and 'object' not in event):
+                    self.borrowed.add(sequence)
+                    return BorrowedMetadata(result, sequence)
+                return None
+            if not safe(event):
+                return None
 
     @_synchronized
     def observe(self, op, path, **detail):
@@ -85,6 +146,10 @@ class ObservationWindow:
                 listing = self.directory_listings.get(parent)
                 if listing is not None and name not in listing:
                     raise InferredAbsent(parent)
+                if listing is not None and name in listing:
+                    borrowed = self._borrow_stable_getattr(path)
+                    if borrowed is not None:
+                        return borrowed
             raise RuntimeError('no recorded filesystem observation in the current causal window')
         event = queue.popleft()
         if not queue:
