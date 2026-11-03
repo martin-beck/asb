@@ -9,6 +9,8 @@ use crate::workloads::session::{
 };
 use crate::workloads::{Evaluation, TaskIdentity, WorkloadSession};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::Command;
@@ -217,8 +219,25 @@ fn replay_private_inputs(
         if !metadata.file_type().is_file() || metadata.len() > MAX_PRIVATE_REPLAY_INPUT {
             return Err(format!("{description} is invalid or exceeds 64 MiB"));
         }
-        let bytes = std::fs::read(&source).map_err(|_| format!("{description} is unavailable"))?;
-        if bytes.len() as u64 != metadata.len() {
+        let mut file =
+            std::fs::File::open(&source).map_err(|_| format!("{description} is unavailable"))?;
+        let mut hash = Sha256::new();
+        let mut length = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|_| format!("{description} is unavailable"))?;
+            if read == 0 {
+                break;
+            }
+            length += read as u64;
+            if length > metadata.len() {
+                return Err(format!("{description} changed while preparing guest input"));
+            }
+            hash.update(&buffer[..read]);
+        }
+        if length != metadata.len() {
             return Err(format!("{description} changed while preparing guest input"));
         }
         let target = source
@@ -229,8 +248,8 @@ fn replay_private_inputs(
         inputs.push(PrivateInput {
             source,
             target,
-            bytes: bytes.len() as u64,
-            sha256: crate::cassette::digest(&bytes),
+            bytes: length,
+            sha256: format!("{:x}", hash.finalize()),
         });
         Ok(())
     };
@@ -1524,6 +1543,23 @@ mod tests {
         );
         assert_eq!(guest_tape_cassette(None).unwrap(), None);
         assert!(guest_tape_cassette(Some(Path::new("/"))).is_err());
+    }
+
+    #[test]
+    fn replay_private_input_hashes_multiple_chunks() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-replay-stream-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let data = vec![42u8; 200_001];
+        std::fs::write(root.join("local-tools.jsonl"), &data).unwrap();
+        let inputs =
+            replay_private_inputs(Some(&root.join("replay.jsonl")), true, &[], false).unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].bytes, data.len() as u64);
+        assert_eq!(inputs[0].sha256, crate::cassette::digest(&data));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
