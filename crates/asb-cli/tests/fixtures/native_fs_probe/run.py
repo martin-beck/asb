@@ -129,6 +129,24 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
             assert background.wait(timeout=5) == 0
             after_begin = mark('tool-begin:after')
             after_end = mark('tool-end:after')
+            orphan_begin = mark('tool-begin:orphan')
+            orphan_code = '''import os, sys, time
+from pathlib import Path
+if os.fork(): os._exit(0)
+control = Path(sys.argv[1])
+(control / 'orphan-ready').write_text(str(os.getpid()))
+deadline = time.monotonic() + 10
+while not (control / 'orphan-release').exists() and time.monotonic() < deadline: time.sleep(.01)
+if (control / 'orphan-release').exists():
+    Path('orphan').write_bytes(b'reparented write')
+    (control / 'orphan-done').touch()
+'''
+            orphan_parent = subprocess.Popen([python, '-c', orphan_code, str(evidence)], cwd=mount)
+            assert orphan_parent.wait(timeout=5) == 0
+            wait_for(lambda: (evidence / 'orphan-ready').exists(), 'orphan did not start')
+            (evidence / 'orphan-release').touch()
+            wait_for(lambda: (evidence / 'orphan-done').exists(), 'orphan did not finish write')
+            orphan_end = mark('tool-end:orphan')
         finally:
             (evidence / 'write-release').touch()
             markers.close()
@@ -163,6 +181,10 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     background_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/background']
     assert background_writes and bg_begin < bg_end < background_writes[0]['sequence'] < after_begin < after_end
     assert all(event['caller']['tgid'] == bg_pid for event in background_writes)
+    orphan_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/orphan']
+    assert orphan_writes and orphan_begin < orphan_writes[0]['sequence'] < orphan_end
+    assert all(not event['caller']['ancestry_complete'] for event in orphan_writes)
+    assert all(event['caller']['ancestry_complete'] for event in overlap_writes)
     assert child_writes and all(event['caller']['tid'] == child_pid and event['caller']['tgid'] == child_pid and event['caller']['ppid'] == os.getpid() and event['caller']['start_ticks'] is not None for event in child_writes), child_writes
     parent_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/one']
     assert parent_writes and all(event['caller']['tid'] == writer_tids['one'] and event['caller']['tgid'] == os.getpid() and event['caller']['start_ticks'] is not None for event in parent_writes), parent_writes
@@ -211,7 +233,9 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
             gated.admit('after')
             assert gated.apply_until(after_begin) is True
             assert (destination / 'background').read_bytes() == b'later write'
+            gated.admit('orphan')
             gated.finish()
+            assert (destination / 'orphan').read_bytes() == b'reparented write'
         finally:
             gated.close()
         assert (destination / 'one').read_bytes() == b''

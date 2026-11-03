@@ -27,9 +27,10 @@ def caller_identity(tid):
                 break
             current = parent
         return {'tid': tid, 'tgid': tgid, 'ppid': ppid,
-                'start_ticks': started, 'ancestry': ancestry}
+                'start_ticks': started, 'ancestry': ancestry,
+                'ancestry_complete': bool(ancestry and ancestry[-1]['tgid'] == root)}
     except (OSError, KeyError, ValueError, IndexError):
-        return {'tid': tid, 'tgid': None, 'ppid': None, 'start_ticks': None, 'ancestry': []}
+        return {'tid': tid, 'tgid': None, 'ppid': None, 'start_ticks': None, 'ancestry': [], 'ancestry_complete': False}
 
 class Proxy(Operations):
     def __init__(self):
@@ -48,7 +49,7 @@ class Proxy(Operations):
         with self.control.makefile('rwb', buffering=0) as stream:
             for line in stream:
                 marker = line.decode('ascii').strip()
-                if marker not in ('tool-begin:child', 'tool-end:child', 'tool-begin:hermes', 'tool-end:hermes', 'tool-begin:a', 'tool-end:a', 'tool-begin:b', 'tool-end:b', 'tool-begin:bg', 'tool-end:bg', 'tool-begin:after', 'tool-end:after'):
+                if marker not in ('tool-begin:child', 'tool-end:child', 'tool-begin:hermes', 'tool-end:hermes', 'tool-begin:a', 'tool-end:a', 'tool-begin:b', 'tool-end:b', 'tool-begin:bg', 'tool-end:bg', 'tool-begin:after', 'tool-end:after', 'tool-begin:orphan', 'tool-end:orphan'):
                     raise RuntimeError('invalid fixture marker')
                 sequence = self.record('marker', None, marker=marker, is_marker=True)
                 stream.write(f'{sequence}\n'.encode('ascii'))

@@ -17,6 +17,8 @@ grandchild write. These identities are diagnostic only: `/proc` reads can race
 with process exit and reparenting, and the fixture does not establish
 attribution for delayed IO, PID namespaces or reuse, nor does it associate
 operations with agent tool invocations automatically.
+An orphaned-grandchild case verifies that a write after reparenting is marked
+with incomplete ancestry instead of being attributed to the fixture root.
 The experimental replay cursor can apply an ordered prefix and resume while
 keeping file handles open. The fixture checks an intermediate write before its
 later truncate and brackets one synchronous subprocess with explicit markers.
