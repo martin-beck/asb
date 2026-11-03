@@ -1,10 +1,14 @@
 """Offline regression for the native OpenHands launcher response boundary."""
 import importlib.util
+import io
 import json
 import pathlib
 import sys
+import threading
+import time
 import types
 import unittest
+from unittest.mock import patch
 
 
 def module(name):
@@ -57,6 +61,60 @@ def message(source, text):
     return MessageEvent(source=source, llm_message=Event(role='assistant' if source == 'agent' else 'user', content=[TextContent(text=text)]))
 
 class NativeFinalTest(unittest.TestCase):
+    def test_native_execution_remains_parallel_during_recording(self):
+        terminal=types.ModuleType('openhands.tools.terminal')
+        metadata=types.ModuleType('openhands.tools.terminal.metadata')
+        terminal.TerminalObservation=Event
+        metadata.CmdOutputMetadata=Event
+        barrier=threading.Barrier(2,timeout=2)
+        def delegate(action):
+            barrier.wait()
+            return Event(text='ok',is_error=False,command=action.command,exit_code=0,
+                         timeout=False,metadata=Event(model_dump=lambda:{}))
+        executor=launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
+        executor._bridge_lock=threading.Lock();executor._delegate=delegate
+        executor._bridge=Event(stdin=io.StringIO(),stdout=io.StringIO(
+            '{"kind":"ack","schema_version":1}\n'*2))
+        results=[]
+        def call(command):
+            results.append(executor(Event(command=command,is_input=False,timeout=5,reset=False)).command)
+        with patch.dict(sys.modules,{'openhands.tools':types.ModuleType('openhands.tools'),
+                                    'openhands.tools.terminal':terminal,
+                                    'openhands.tools.terminal.metadata':metadata}):
+            threads=[threading.Thread(target=call,args=(name,)) for name in ('first','second')]
+            for thread in threads: thread.start()
+            for thread in threads: thread.join()
+        self.assertCountEqual(results,['first','second'])
+
+    def test_parallel_callers_receive_their_own_bridge_observation(self):
+        terminal=types.ModuleType('openhands.tools.terminal')
+        metadata=types.ModuleType('openhands.tools.terminal.metadata')
+        terminal.TerminalObservation=Event
+        metadata.CmdOutputMetadata=Event
+        class BridgeIO:
+            def write(self, line):
+                self.command=json.loads(line)['command']
+                time.sleep(0.03)
+            def flush(self): pass
+            def readline(self):
+                return json.dumps({'kind':'terminal_observation','schema_version':1,
+                    'content':self.command,'is_error':False,'command':self.command,
+                    'exit_code':0,'timeout':False,'metadata':{}})+'\n'
+        io_pair=BridgeIO()
+        executor=launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
+        executor._bridge_lock=threading.Lock();executor._delegate=None
+        executor._bridge=Event(stdin=io_pair,stdout=io_pair)
+        results={}
+        def call(command):
+            results[command]=executor(Event(command=command,is_input=False,timeout=5,reset=False)).command
+        with patch.dict(sys.modules,{'openhands.tools':types.ModuleType('openhands.tools'),
+                                    'openhands.tools.terminal':terminal,
+                                    'openhands.tools.terminal.metadata':metadata}):
+            threads=[threading.Thread(target=call,args=(name,)) for name in ('first','second')]
+            for thread in threads: thread.start()
+            for thread in threads: thread.join()
+        self.assertEqual(results,{'first':'first','second':'second'})
+
     def test_completed_message_and_finish_action(self):
         self.assertEqual(launcher.final_agent_text(conversation([message('agent', 'answer')])), 'answer')
         finish = ActionEvent(source='agent', tool_name='finish', action=FinishAction(message='done'))
