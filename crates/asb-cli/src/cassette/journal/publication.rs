@@ -515,7 +515,7 @@ impl RecordingJournal {
                 archive.read_native(track.id)?;
             }
             for artifact in &track.artifacts {
-                archive.read_artifact(track.id, &artifact.kind)?;
+                archive.copy_artifact_to(track.id, &artifact.kind, &mut std::io::sink())?;
             }
         }
         Ok(())
