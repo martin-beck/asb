@@ -93,4 +93,23 @@ with tempfile.TemporaryDirectory(dir=scratch) as directory:
     tape.close()
     assert replay_delegate.save_dir == workspace
     assert task_file.read_bytes() == expected_file
+# OpenHands persists conversations outside the benchmark workspace. Those
+# writes are not in the FUSE journal and must be recreated by the tracker.
+with tempfile.TemporaryDirectory(dir=root.parent) as directory:
+    private = Path(directory).resolve(); sidecar = private / 'tracker.jsonl'; sidecar.touch()
+    assert not private.is_relative_to(Path.cwd().resolve())
+    tape = module.EditorTape('record', str(sidecar))
+    tracker = module.TaskTrackerTapeExecutor(TaskTrackerExecutor(save_dir=str(private)), tape)
+    plan = TaskTrackerAction(command='plan', task_list=[TaskItem(title='private task')])
+    expected = tracker(plan).model_dump(mode='json'); tape.close()
+    tasks = private / 'TASKS.json'; saved = tasks.read_bytes(); tasks.unlink()
+    tape = module.EditorTape('replay', str(sidecar))
+    tracker = module.TaskTrackerTapeExecutor(TaskTrackerExecutor(save_dir=str(private)), tape)
+    def private_boundary(alias):
+        assert alias == 'openhands-tracker-1'
+        assert tasks.read_bytes() == saved, 'private tracker persistence was not recreated'
+        return True
+    module.filesystem_replay_boundary = private_boundary
+    assert tracker(plan).model_dump(mode='json') == expected
+    tape.close()
 print('Installed OpenHands SDK editor recording and replay passed')

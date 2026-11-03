@@ -69,7 +69,7 @@ class NativeFinalTest(unittest.TestCase):
         class Observation:
             def model_dump(self, mode): return {'state': 'different'}
         class Delegate:
-            save_dir = '/fixture'
+            save_dir = str(pathlib.Path.cwd() / 'fixture')
             def __call__(self, action, conversation=None):
                 assert self.save_dir is None
                 return Observation()
@@ -86,7 +86,7 @@ class NativeFinalTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'result differs'):
                     launcher.TaskTrackerTapeExecutor(delegate, tape)(Action())
                 finish.assert_not_called()
-            self.assertEqual(delegate.save_dir, '/fixture')
+            self.assertEqual(delegate.save_dir, str(pathlib.Path.cwd() / 'fixture'))
 
     def test_delegated_result_mismatch_does_not_acknowledge_completion(self):
         class Action:
