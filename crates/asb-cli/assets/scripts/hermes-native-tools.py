@@ -224,6 +224,7 @@ class Replayer:
             completed = set()
             exchanges = []
             dependencies = []
+            completion_order = []
             for event in events[1:-1]:
                 kind, alias = event.get("event"), event.get("alias")
                 if kind == "session_alias":
@@ -254,6 +255,7 @@ class Replayer:
                     entry = sessions[alias]
                     exchanges[entry["index"]] = (entry["request"], response)
                     completed.add(entry["index"])
+                    completion_order.append(entry["index"])
                     entry["phase"] = "output"
                 elif kind == "exit" and sessions[alias]["phase"] == "output" and event.get("success") is True:
                     sessions[alias]["phase"] = "exit"
@@ -265,7 +267,12 @@ class Replayer:
             self.exchanges = exchanges
             self.dependencies = dependencies
             self.consumed = set()
+            self.delivered = set()
+            self.completion_order = completion_order
+            self.completion_cursor = 0
             self.lock = threading.RLock()
+            self.condition = threading.Condition(self.lock)
+            self.closing = False
         else:
             self.exchanges = []
             index = 2
@@ -350,19 +357,29 @@ class Replayer:
             raise RuntimeError("Hermes process replay response is not text") from error
 
     def _invoke_multi(self, request):
-        with self.lock:
+        with self.condition:
+            if self.failed or self.closing:
+                raise RuntimeError("Hermes concurrent native replay did not settle")
             candidates = [index for index, (expected, _) in enumerate(self.exchanges)
-                          if index not in self.consumed and self.dependencies[index] <= self.consumed
+                          if index not in self.consumed and self.dependencies[index] <= self.delivered
                           and expected == request]
             if not candidates:
                 self.failed = True
                 self.failure = "native terminal request differs:sequence"
                 _write_progress(False, self.failure, self.index, len(self.exchanges))
+                self.condition.notify_all()
                 return json.dumps({"asb_native_mismatch": "sequence"}, separators=(",", ":"))
             index = candidates[0]
             self.consumed.add(index)
+            while self.completion_order[self.completion_cursor] != index:
+                if self.failed or self.closing:
+                    raise RuntimeError("Hermes concurrent native replay did not settle")
+                self.condition.wait()
+            self.delivered.add(index)
+            self.completion_cursor += 1
             self.index += 1
             _write_progress(False, "native terminal replay in progress", self.index, len(self.exchanges))
+            self.condition.notify_all()
             try:
                 return self.exchanges[index][1].decode("utf-8")
             except UnicodeDecodeError as error:
@@ -370,6 +387,15 @@ class Replayer:
                 raise RuntimeError("Hermes terminal replay response is not text") from error
 
     def close(self):
+        if self.dependencies is not None:
+            with self.condition:
+                self.closing = True
+                self.condition.notify_all()
+                self._close_replay()
+            return
+        self._close_replay()
+
+    def _close_replay(self):
         complete = not self.failed and self.index == len(self.exchanges)
         _write_progress(
             complete,

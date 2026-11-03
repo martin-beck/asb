@@ -62,9 +62,18 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
                 for row in rows if row['event'] == 'write']
     assert requests == ['0', '1', '2']
     replay = namespace['Replayer']()
-    for request in requests[:2]:
-        assert replay.invoke(None, request, False, None, None, None,
+    first_returned = threading.Event()
+    def replay_first():
+        assert replay.invoke(None, '0', False, None, None, None,
                              False, '.', False, False, None) == 'ok'
+        first_returned.set()
+    first = threading.Thread(target=replay_first)
+    first.start()
+    assert not first_returned.wait(timeout=.1)
+    assert replay.invoke(None, '1', False, None, None, None,
+                         False, '.', False, False, None) == 'ok'
+    first.join(timeout=5)
+    assert first_returned.is_set()
     assert replay.invoke(None, '2', False, None, None, None,
                          False, '.', False, False, None) == 'later'
     replay.close()
@@ -83,6 +92,21 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     assert json.loads(response)['asb_native_mismatch'] == 'sequence'
     wrong_order.close()
     assert not json.loads((directory / 'progress.json').read_text())['complete']
+    cancelled = namespace['Replayer']()
+    cancelled_result = []
+    def waiting_call():
+        try:
+            cancelled.invoke(None, '0', False, None, None, None,
+                             False, '.', False, False, None)
+        except RuntimeError:
+            cancelled_result.append('stopped')
+    waiting = threading.Thread(target=waiting_call)
+    waiting.start()
+    assert json.loads(cancelled.invoke(None, 'unexpected', False, None, None, None,
+                                       False, '.', False, False, None))['asb_native_mismatch'] == 'sequence'
+    waiting.join(timeout=5)
+    assert cancelled_result == ['stopped']
+    cancelled.close()
     rows = [json.loads(line) for line in (directory / 'native.jsonl').read_text().splitlines()]
     by_alias = {}
     for row in rows:
