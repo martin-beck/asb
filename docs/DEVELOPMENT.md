@@ -165,6 +165,8 @@ read, patch, search and skills-list tools before the terminal patch command. The
 checks their successful responses and intermediate file states and consumes
 both tool and LLM transcripts in four replay containers. Those file-tool
 wrappers and transcripts are test-only, not production replay support.
+The mixed fixture reads the same file both before and after a patch to check
+that repeated tool names advance through distinct recorded boundaries.
 The experiment intercepts registry dispatch, but agent-loop tools, MCP,
 direct APIs and nested or parallel tool calls are not covered by this test.
 Replay applies recorded startup operations after the agent has begun accessing

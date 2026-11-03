@@ -144,7 +144,7 @@ fi
     tool_names=json.loads((root/'mock-record/tool-names.json').read_text())
     assert {'terminal','read_file','write_file','patch'} <= set(tool_names), tool_names
    expected_calls=(1 if mixed else 0) if native_files else (1 if agent_fixture else 2)
-   if native_files: assert len((root/'control/files.jsonl').read_text().splitlines())==(5 if mixed else 3)
+   if native_files: assert len((root/'control/files.jsonl').read_text().splitlines())==(6 if mixed else 3)
    assert sum(event['event']=='write' for event in native)==expected_calls
    assert sum(event['event']=='output' for event in native)==expected_calls
    assert json.loads((root/'control/record-progress.json').read_text())['complete']
@@ -158,7 +158,7 @@ fi
    module=importlib.util.module_from_spec(spec)
    spec.loader.exec_module(module)
    cursor=module.Replay(root/'evidence',destination,root/'baseline',enforce_admission=True)
-   ends={e['marker']:e['sequence'] for e in events if e['op']=='marker'}
+   ends=[(e['marker'],e['sequence']) for e in events if e['op']=='marker' and e['marker'].startswith('tool-end:')]
    replay_home=root/f'hermes-replay-home-{index}'
    replay_home.mkdir(mode=0o700)
    sock_path=Path(sockets)/f'r-{index}.sock'
@@ -169,16 +169,17 @@ fi
     try:
      connection,_=listener.accept()
      with connection, connection.makefile('rwb',buffering=0) as stream:
-      names=(('write','read','patch','search','skills-list','terminal') if mixed else ('write','read','patch')) if native_files else (('one',) if agent_fixture else ('one','two'))
-      for name in names:
+      names=(('write','read','patch','search','read','skills-list','terminal') if mixed else ('write','read','patch')) if native_files else (('one',) if agent_fixture else ('one','two'))
+      assert [marker for marker, _ in ends]==['tool-end:'+name for name in names]
+      for position,name in enumerate(names):
        assert stream.readline().decode().strip()=='tool-end:'+name
        cursor.admit(name)
-       assert cursor.apply_until(ends['tool-end:'+name])
+       assert cursor.apply_until(ends[position][1])
        if swe_patch:
         diff=subprocess.run(['git','-C',str(destination),'diff','--name-only'],capture_output=True,text=True,check=True,env=dict(os.environ,GIT_OPTIONAL_LOCKS='0'))
         assert diff.stdout.strip()
        elif native_files:
-        assert (destination/'asb-real-agent.txt').read_text()==('fixture' if name in ('patch','search','skills-list','terminal') else 'before')
+        assert (destination/'asb-real-agent.txt').read_text()==('before' if position < 2 else 'fixture')
         if mixed: assert (destination/'mixed-marker').exists()==(name=='terminal')
        elif agent_fixture:
         assert (destination/'asb-real-agent.txt').read_text()=='fixture'
@@ -245,7 +246,7 @@ fi
     progress=json.loads((root/f'control/replay-{index}.json').read_text())
     assert progress['complete'] and progress['invocations']==expected_calls
     if native_files:
-     assert (root/f'control/files-progress-{index}').read_text()==('5' if mixed else '3')
+     assert (root/f'control/files-progress-{index}').read_text()==('6' if mixed else '3')
     if agent_fixture:
      tape_progress=json.loads((root/f'control/llm-replay-{index}.jsonl.progress.json').read_text())
      assert tape_progress['consumed']==tape_progress['total'] and tape_progress['total']>0
