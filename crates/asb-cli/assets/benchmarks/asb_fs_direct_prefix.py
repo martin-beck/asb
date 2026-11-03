@@ -58,7 +58,12 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
     count = 0
     with Path(expected_payload).open('rb') as expected_data, Path(observed_payload).open('rb') as observed_data:
         expected = iter(expected_events); observed = iter(observed_events)
-        for expected_line in expected:
+        pending = None
+        while True:
+            expected_line = pending if pending is not None else next(expected, None)
+            pending = None
+            if expected_line is None:
+                raise ValueError('direct filesystem prefix has no tool boundary')
             if not expected_line.endswith('\n'):
                 raise ValueError('direct filesystem event stream is truncated')
             event = json.loads(expected_line)
@@ -86,11 +91,58 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
             elif actual_scope['kind'] != 'direct':
                 raise ValueError('observed direct operation has unproven attribution')
             op = event.get('op')
+            # Parallel read callbacks on one already-open file can complete in
+            # either order. Match their request/result multisets without moving
+            # them across a mutation, a different handle, or a tool boundary.
+            if op == 'read' and actual.get('op') == 'read':
+                expected_reads = [event]
+                actual_reads = [actual]
+                while True:
+                    line = next(expected, None)
+                    if line is None or not line.endswith('\n'):
+                        raise ValueError('direct filesystem prefix is truncated')
+                    candidate = json.loads(line)
+                    if candidate.get('op') != 'read' or candidate.get('handle') != event.get('handle'):
+                        pending = line
+                        break
+                    scope = expected_attribution.observe(candidate)
+                    if scope['kind'] != 'direct':
+                        raise ValueError('direct filesystem prefix has unproven attribution')
+                    expected_reads.append(candidate)
+                    try:
+                        actual_line = next(observed)
+                    except StopIteration as error:
+                        raise ValueError('direct filesystem replay ended before the recorded prefix') from error
+                    if not actual_line.endswith('\n'):
+                        raise ValueError('observed direct filesystem event stream is truncated')
+                    candidate_actual = json.loads(actual_line)
+                    if observed_attribution.observe(candidate_actual)['kind'] != 'direct':
+                        raise ValueError('observed direct operation has unproven attribution')
+                    actual_reads.append(candidate_actual)
+                left_handle = event.get('handle')
+                if left_handle not in handles:
+                    raise ValueError('direct filesystem handle differs')
+                def read_key(item, data, expected_handle):
+                    if item.get('op') != 'read' or item.get('handle') != expected_handle:
+                        raise ValueError('direct filesystem read group differs')
+                    fields = _FIELDS['read']
+                    if any(field not in item for field in fields):
+                        raise ValueError('direct filesystem read request is incomplete')
+                    return tuple(item[field] for field in fields) + (_digest_range(data, item),)
+                from collections import Counter
+                left = Counter(read_key(item, expected_data, left_handle) for item in expected_reads)
+                right = Counter(read_key(item, observed_data, handles[left_handle]) for item in actual_reads)
+                if left != right:
+                    raise ValueError(f'direct filesystem read group differs at event {count + 1}')
+                count += len(expected_reads)
+                continue
             fields = _FIELDS.get(op)
             if fields is None or actual.get('op') != op:
-                raise ValueError('direct filesystem operation differs or is unsupported')
-            if any(field not in event or field not in actual or event[field] != actual[field] for field in fields):
-                raise ValueError('direct filesystem request or result differs')
+                raise ValueError(f'direct filesystem operation differs or is unsupported at event {count + 1}')
+            mismatch = next((field for field in fields
+                             if field not in event or field not in actual or event[field] != actual[field]), None)
+            if mismatch is not None:
+                raise ValueError(f'direct filesystem request or result differs at event {count + 1} ({mismatch})')
             if op == 'write':
                 digest = event.get('request_sha256')
                 if (not isinstance(digest, str) or len(digest) != 64
@@ -112,8 +164,6 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
             if op in _PAYLOAD_OPS and _digest_range(expected_data, event) != _digest_range(observed_data, actual):
                 raise ValueError('direct filesystem operation payload differs')
             count += 1
-        else:
-            raise ValueError('direct filesystem prefix has no tool boundary')
         if handles or expected_attribution.handles or observed_attribution.handles:
             raise ValueError('direct filesystem prefix has open handles')
         if next(observed, None) is not None:
