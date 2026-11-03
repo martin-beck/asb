@@ -936,6 +936,7 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         for relative in [
             "core/foundation/llm/schema",
             "core/foundation/tool",
+            "core/memory/lite",
             "core/context_engine/context",
             "core/single_agent",
             "core/single_agent/agents",
@@ -952,6 +953,8 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
             "core/foundation/llm/__init__.py",
             "core/foundation/llm/schema/__init__.py",
             "core/foundation/tool/__init__.py",
+            "core/memory/__init__.py",
+            "core/memory/lite/__init__.py",
             "core/context_engine/__init__.py",
             "core/context_engine/context/__init__.py",
             "core/single_agent/__init__.py",
@@ -969,7 +972,12 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         // feature selection.
         std::fs::write(
             package.join("__init__.py"),
-            "import sys\nassert '--asb-native-tool-replay' not in sys.argv\n",
+            "import sys\nassert '--asb-native-tool-replay' not in sys.argv\nassert '--asb-max-iterations' not in sys.argv\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("core/memory/lite/embeddings.py"),
+            "class OpenAICompatibleEmbeddingProvider:\n def _get_client(self): return None\n",
         )
         .unwrap();
         std::fs::write(
@@ -1245,7 +1253,13 @@ asyncio.run(main())
             .direct()
             .arg("--asb-native-tool-replay")
             .arg(&sidecar)
+            .arg("--asb-max-iterations")
+            .arg("200")
             .env("PYTHONPATH", &root)
+            .env(
+                "ASB_OPENJIUWEN_EMBEDDING_TAPE_ORIGIN",
+                "http://127.0.0.1:1234/v1",
+            )
             .env("ASB_TEST_NATIVE_EXECUTED", &marker)
             .env("ASB_TEST_WORKSPACE", &replay_workspace)
             .env("ASB_TEST_RENDER_PREFIX", "replay:")
