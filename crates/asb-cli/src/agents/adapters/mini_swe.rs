@@ -205,6 +205,19 @@ def _filesystem_marker(action, alias):
         return False
 
 
+def _filesystem_replay_boundary(alias):
+    """Wait until the per-replica coordinator has applied this tool's effects."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(1800)
+            connection.connect(os.environ['ASB_FS_REPLAY_SOCKET'])
+            connection.sendall(f'tool-end:{alias}\n'.encode('ascii'))
+            with connection.makefile('rb') as response:
+                return response.readline(32).strip().isdigit()
+    except (OSError, UnicodeError):
+        return False
+
+
 class AsbTapeEnvironment(LocalEnvironment):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -391,7 +404,13 @@ class AsbTapeEnvironment(LocalEnvironment):
         output = entry.get("result")
         if not isinstance(output, dict):
             raise RuntimeError("Mini-SWE replay local tool result is malformed")
-        self._apply_effects(self._root(cwd), entry.get("effects", []))
+        if os.environ.get('ASB_FS_REPLAY_SOCKET'):
+            if entry.get('effects'):
+                raise RuntimeError('Mini-SWE filesystem replay cannot use snapshot effects')
+            if not _filesystem_replay_boundary(f'mini-swe-{self._position}'):
+                raise RuntimeError('Mini-SWE filesystem replay boundary is unavailable')
+        else:
+            self._apply_effects(self._root(cwd), entry.get("effects", []))
         if "submitted" in output:
             submitted = output["submitted"]
             if not isinstance(submitted, list):
