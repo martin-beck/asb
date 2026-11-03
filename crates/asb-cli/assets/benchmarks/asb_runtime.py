@@ -338,13 +338,15 @@ def bundle(path, architecture=None):
     return files,receipt
 
 
-def bundle_tool(path, name, architecture=None):
+def bundle_tool(path, name, architecture=None, root=ROOT):
     """Bundle an auxiliary executable and its own loader under a private prefix."""
     if not isinstance(name,str) or not re.fullmatch(r'[a-z0-9][a-z0-9_.-]{0,79}',name):
         raise ExecutionError('auxiliary runtime name is invalid')
     files,receipt = bundle(path,architecture)
     prefix = 'tools/'+name
-    tool_root = ROOT+'/'+prefix
+    if not isinstance(root,str) or not root.startswith('/') or '\x00' in root:
+        raise ExecutionError('auxiliary runtime root is invalid')
+    tool_root = root.rstrip('/')+'/'+prefix
     output = []
     for filename,content,mode in files:
         if filename == 'asb':
