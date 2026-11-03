@@ -353,6 +353,19 @@ class GuestBootstrapTests(unittest.TestCase):
             task.evaluate()
             self.assertEqual(calls, ["client", "confirmed-reset", "grade"])
 
+    def test_missing_filesystem_recording_marks_task_for_preservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def unavailable(_argv, **_kwargs):
+                raise ExecutionError("guest result is missing")
+            task = SimpleNamespace(artifacts=Path(directory), agent_timeout=15, interrupted=False,
+                checked=unavailable, workspace=SimpleNamespace(container=Container(),
+                    execute=lambda *_args, **_kwargs: {"stdout":b"", "stderr":b"", "exit_code":1},
+                    quiesce_unconfirmed_agent=lambda:None))
+            with patch("asb_guest.prepare_agent", return_value=({"filesystem_recording":True}, {})):
+                result = execute_agent(task, {}, None, None, None)
+            self.assertTrue(task.interrupted)
+            self.assertIn("task preserved", result["metadata"]["execution_failure"])
+
     def test_local_forwarding_precedes_install_and_is_closed_on_install_failure_or_success(self):
         for failure in (False, True):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
