@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 ROOT=Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT/'crates/asb-cli/assets/benchmarks'))
-from asb_fs_metadata_windows import InferredAbsent, ObservationWindow
+from asb_fs_metadata_windows import BorrowedMetadata, InferredAbsent, ObservationWindow
 
 
 def attrs(size):
@@ -107,6 +107,34 @@ class MetadataWindowTest(unittest.TestCase):
                 window.observe('observe-readdir','/')
             with self.assertRaisesRegex(RuntimeError,'no recorded'):
                 window.observe('observe-getattr','/missing')
+
+    def test_future_stable_metadata_is_borrowed_across_other_read_only_operations(self):
+        events=[{'sequence':1,'op':'observe-readdir','path':'/','result':['.','..','target','other']},
+                {'sequence':2,'op':'open','path':'/other','flags':0},
+                {'sequence':3,'op':'read','path':'/other'},
+                {'sequence':4,'op':'observe-getattr','path':'/target','result':attrs(3)},
+                {'sequence':5,'op':'marker','marker':'tool-begin:first'}]
+        window=ObservationWindow(events,ROOT/'target/unused')
+        window.observe('observe-readdir','/')
+        borrowed=window.observe('observe-getattr','/target')
+        self.assertIsInstance(borrowed,BorrowedMetadata)
+        self.assertEqual((borrowed.result,borrowed.sequence),(attrs(3),4))
+        with self.assertRaisesRegex(RuntimeError,'no recorded'):
+            window.observe('observe-getattr','/target')
+        self.assertEqual(window.advance()['op'],'open');window.operation_applied()
+        self.assertEqual(window.advance()['op'],'read');window.operation_applied()
+        self.assertEqual(window.advance()['op'],'marker');window.operation_applied()
+        self.assertIsNone(window.advance())
+
+    def test_borrowing_cannot_cross_mutation_target_access_or_hardlinks(self):
+        listing={'sequence':1,'op':'observe-readdir','path':'/','result':['.','..','target','other']}
+        for boundary,result in [({'sequence':2,'op':'write','path':'/other'},attrs(3)),
+                                ({'sequence':2,'op':'read','path':'/target'},attrs(3)),
+                                ({'sequence':2,'op':'open','path':'/other','flags':0},dict(attrs(3),st_nlink=2))]:
+            events=[listing,boundary,{'sequence':3,'op':'observe-getattr','path':'/target','result':result}]
+            window=ObservationWindow(events,ROOT/'target/unused');window.observe('observe-readdir','/')
+            with self.assertRaisesRegex(RuntimeError,'no recorded'):
+                window.observe('observe-getattr','/target')
 
     def test_wrong_request_does_not_consume_observation(self):
         window=ObservationWindow([{'op':'observe-readlink','path':'/a','result':'target'}],ROOT/'target/unused')

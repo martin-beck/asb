@@ -252,6 +252,12 @@ class Proxy(Operations):
                 if self.metadata_playback is not None:
                     self.record('observe-unmatched', path, requested_op=op, **detail)
                 raise
+            if self.metadata_playback is not None:
+                from asb_fs_metadata_windows import BorrowedMetadata
+                if isinstance(result, BorrowedMetadata):
+                    self.record('observe-borrowed', path, result=result.result,
+                                source_sequence=result.sequence, requested_op=op, **detail)
+                    return result.result
             if isinstance(result, bytes):
                 self.record('observe-' + op, path, result, **detail)
             else:
