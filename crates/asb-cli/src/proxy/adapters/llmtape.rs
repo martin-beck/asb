@@ -21,6 +21,7 @@ const BUILTIN_PROXY: &str = include_str!("../../../assets/scripts/llmtape.mjs");
 const NETWORK_FETCH: &str = include_str!("../../../assets/scripts/network-fetch.mjs");
 const CAPTURE_SESSION: &str = include_str!("../../../assets/scripts/capture-session.mjs");
 const TAPE_NORMALIZATION: &str = include_str!("../../../assets/scripts/tape-normalization.mjs");
+const REQUEST_TRACING: &str = include_str!("../../../assets/scripts/request-tracing.mjs");
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 static START_LOCK: Mutex<()> = Mutex::new(());
 
@@ -692,6 +693,11 @@ fn resolve_executable(directory: &Path, invocation_dir: &Path) -> Result<ProxyEx
     })?;
     std::fs::write(directory.join("tape-normalization.mjs"), TAPE_NORMALIZATION)
         .map_err(|error| Error::Run(format!("cannot materialize tape normalization: {error}")))?;
+    std::fs::write(directory.join("request-tracing.mjs"), REQUEST_TRACING).map_err(|error| {
+        Error::Run(format!(
+            "cannot materialize tape request observation: {error}"
+        ))
+    })?;
     std::fs::write(&script, BUILTIN_PROXY).map_err(|error| {
         Error::Run(format!(
             "cannot materialize ASB's built-in tape proxy at {}: {error}",

@@ -4,6 +4,11 @@ use super::super::{
 };
 use crate::measurements;
 mod bootstrap;
+// The observer grammar is shared by the staged proxy/tool relay wiring below;
+// keep it compiled with its owning collector rather than duplicating the
+// privacy grammar in producer modules.
+#[allow(dead_code)]
+mod observer;
 mod project;
 mod service;
 mod state_summary;
