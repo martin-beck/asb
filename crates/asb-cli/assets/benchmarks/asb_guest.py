@@ -23,8 +23,37 @@ from asb_staging import upload, stage_runtime, root_execute, prepare_guest_roots
 from asb_relay import HostRelay, ForwardingCancellation, forward_request
 
 
-MAX_EXPORTED_ARTIFACTS = 4
+MAX_EXPORTED_ARTIFACTS = 8
 MAX_EXPORTED_ARTIFACT_BYTES = 16 * 1024 * 1024
+
+
+class _ArchiveChunks:
+    """Read Docker's chunk iterator incrementally with a total wire bound."""
+    def __init__(self, chunks, limit):
+        self.chunks = iter(chunks)
+        self.limit = limit
+        self.total = 0
+        self.buffer = bytearray()
+        self.eof = False
+
+    def read(self, size):
+        if size < 0:
+            raise ExecutionError("guest artifact archive requires bounded reads")
+        while len(self.buffer) < size and not self.eof:
+            try:
+                chunk = next(self.chunks)
+            except StopIteration:
+                self.eof = True
+                break
+            if not isinstance(chunk, bytes):
+                raise ExecutionError("guest artifact archive stream is invalid")
+            self.total += len(chunk)
+            if self.total > self.limit:
+                raise ExecutionError("guest artifact archive exceeds its bound")
+            self.buffer.extend(chunk)
+        result = bytes(self.buffer[:size])
+        del self.buffer[:size]
+        return result
 
 
 def export_agent_artifacts(task, output, receipts):
@@ -45,7 +74,7 @@ def export_agent_artifacts(task, output, receipts):
     for receipt in receipts:
         if (not isinstance(receipt,dict) or set(receipt) != {"kind","filename","bytes","sha256"}
                 or not isinstance(receipt["kind"],str) or not re.fullmatch(r"[a-z0-9-]{1,128}",receipt["kind"])
-                or not isinstance(receipt["filename"],str) or not re.fullmatch(r"artifact-[0-3]",receipt["filename"])
+                or not isinstance(receipt["filename"],str) or not re.fullmatch(r"artifact-[0-7]",receipt["filename"])
                 or type(receipt["bytes"]) is not int or not 0 <= receipt["bytes"] <= MAX_EXPORTED_ARTIFACT_BYTES
                 or not isinstance(receipt["sha256"],str) or not re.fullmatch(r"[0-9a-f]{64}",receipt["sha256"])
                 or receipt["filename"] in seen):
@@ -63,44 +92,38 @@ def export_agent_artifacts(task, output, receipts):
         try:
             if metadata.get("name") != receipt["filename"] or metadata.get("linkTarget"):
                 raise ExecutionError("guest artifact archive identity is invalid")
-            with tempfile.TemporaryFile(dir=destination) as archive:
-                wire = 0
-                for chunk in chunks:
-                    if not isinstance(chunk,bytes):
-                        raise ExecutionError("guest artifact archive stream is invalid")
-                    wire += len(chunk)
-                    if wire > MAX_EXPORTED_ARTIFACT_BYTES + 1024 * 1024:
-                        raise ExecutionError("guest artifact archive exceeds its bound")
-                    archive.write(chunk)
-                archive.seek(0)
-                with tarfile.open(fileobj=archive,mode="r:") as incoming:
-                    members = incoming.getmembers()
-                    if len(members) != 1:
-                        raise ExecutionError("guest artifact archive has invalid entries")
-                    member = members[0]
-                    if (member.name != receipt["filename"] or not member.isfile()
-                            or member.size != receipt["bytes"]):
-                        raise ExecutionError("guest artifact archive payload is invalid")
-                    extracted = incoming.extractfile(member)
-                    if extracted is None:
-                        raise ExecutionError("guest artifact archive payload is unavailable")
-                    digest, copied = hashlib.sha256(), 0
-                    fd = os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
-                    with os.fdopen(fd,"wb") as target:
-                        while True:
-                            block = extracted.read(65536)
-                            if not block:
-                                break
-                            copied += len(block)
-                            if copied > receipt["bytes"]:
-                                raise ExecutionError("guest artifact archive payload exceeds its receipt")
-                            digest.update(block)
-                            target.write(block)
-                        target.flush()
-                        os.fsync(target.fileno())
-                    if copied != receipt["bytes"] or digest.hexdigest() != receipt["sha256"]:
-                        raise ExecutionError("guest artifact export digest differs from its receipt")
-                    os.replace(temporary,final)
+            archive = _ArchiveChunks(chunks, MAX_EXPORTED_ARTIFACT_BYTES + 1024 * 1024)
+            with tarfile.open(fileobj=archive,mode="r|") as incoming:
+                member = incoming.next()
+                if member is None:
+                    raise ExecutionError("guest artifact archive has invalid entries")
+                if (member.name != receipt["filename"] or not member.isfile()
+                        or member.size != receipt["bytes"]):
+                    raise ExecutionError("guest artifact archive payload is invalid")
+                extracted = incoming.extractfile(member)
+                if extracted is None:
+                    raise ExecutionError("guest artifact archive payload is unavailable")
+                digest, copied = hashlib.sha256(), 0
+                fd = os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
+                with os.fdopen(fd,"wb") as target:
+                    while True:
+                        block = extracted.read(65536)
+                        if not block:
+                            break
+                        copied += len(block)
+                        if copied > receipt["bytes"]:
+                            raise ExecutionError("guest artifact archive payload exceeds its receipt")
+                        digest.update(block)
+                        target.write(block)
+                    target.flush()
+                    os.fsync(target.fileno())
+                if copied != receipt["bytes"] or digest.hexdigest() != receipt["sha256"]:
+                    raise ExecutionError("guest artifact export digest differs from its receipt")
+                if incoming.next() is not None:
+                    raise ExecutionError("guest artifact archive has invalid entries")
+            while archive.read(65536):
+                pass
+            os.replace(temporary,final)
         finally:
             if temporary.exists():
                 temporary.unlink()

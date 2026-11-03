@@ -117,6 +117,7 @@ struct RunResult<'a> {
     native_trace: Option<Vec<u8>>,
     /// Complete private native-tool stream supplied by an adapter.  This is
     /// consumed only by recording publication, never user-facing output.
+    #[serde(skip)]
     native_tool_sidecar: Option<Vec<u8>>,
     /// Adapter-owned bounded sidecars retained only by the sealed cassette.
     #[serde(skip)]
@@ -2912,6 +2913,18 @@ mod tests {
         assert!(value.get("execution").is_none());
         assert!(value.get("recording").is_none());
         assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 1);
+    }
+
+    #[test]
+    fn serialized_run_result_omits_private_native_tool_sidecar() {
+        let mut result = result();
+        result.native_tool_sidecar = Some(b"private native fixture".to_vec());
+        let saved = serde_json::to_value(&result).unwrap();
+        assert!(saved.get("native_tool_sidecar").is_none());
+        assert_eq!(
+            result.native_tool_sidecar.as_deref(),
+            Some(&b"private native fixture"[..])
+        );
     }
 
     #[test]
