@@ -43,8 +43,10 @@ printf alpha > /work/fs/base/folder/data
 ln /work/fs/base/file /work/fs/base/link
 for i in 0 1 2 3 4; do btrfs_cmd subvolume snapshot /work/fs/base /work/fs/s$i >/dev/null; done
 python3 - <<'EOPY'
-import errno,os,subprocess,concurrent.futures
+import errno,os,socket,subprocess,concurrent.futures,sys,threading,json
 from pathlib import Path
+sys.path.insert(0,"/opt")
+from asb_snapshot_service import SnapshotService,MarkerServer
 roots=[Path('/work/fs/s'+str(i)) for i in range(5)]
 st=[(r/'file').stat() for r in roots]
 checks={
@@ -53,6 +55,16 @@ checks={
 }
 print('initial_device_equal',len({x.st_dev for x in st})==1)
 fds=[os.open(r/'file',os.O_RDONLY) for r in roots]
+service=SnapshotService(roots[0],Path('/work/fs/recorded'),['/hostlib/LOADER','--library-path','/hostlib','/opt/btrfs'])
+socket_path=Path('/work/snapshot.sock');server=MarkerServer(socket_path,service)
+server_thread=threading.Thread(target=server.serve_forever,daemon=True);server_thread.start()
+def mark(action,alias):
+ with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
+  client.settimeout(30);client.connect(str(socket_path));client.sendall(f'tool-{action}:{alias}:{os.getpid()}:{threading.get_native_id()}\\n'.encode())
+  response=client.makefile('rb').readline()
+  if not response.strip().isdigit():raise RuntimeError('snapshot marker failed')
+  return int(response)
+mark('begin','captured-1')
 subprocess.run(['python3','-c','from pathlib import Path; Path(\"file\").write_bytes(b\"new\"); Path(\"deleted\").unlink(); Path(\"/work/invocations\").open(\"ab\").write(b\"1\")'],cwd=roots[0],check=True)
 checks['record_hardlink_correct']=(roots[0]/'link').read_bytes()==b'new'
 checks['record_open_descriptor_correct']=os.pread(fds[0],3,0)==b'new'
@@ -64,9 +76,8 @@ xattr=True
 try:os.setxattr(roots[0]/'file','user.asb-fixture',b'value')
 except OSError:xattr=False
 def capture(name):
- path=Path('/work/fs')/name
- subprocess.run(['/hostlib/LOADER','--library-path','/hostlib','/opt/btrfs','subvolume','snapshot','-r',str(roots[0]),str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=30,check=True)
- return path
+ sequence=mark('end',name)
+ return Path('/work/fs/recorded')/f'snapshot-{sequence:08d}'
 first=capture('captured-1')
 try:
  (first/'should-not-write').write_bytes(b'bad')
@@ -85,6 +96,7 @@ checks['replay_deletion_correct']=all(not (r/'deleted').exists() and not (r/'del
 checks['replay_mode_correct']=all((r/'file').stat().st_mode & 0o777==0o640 for r in roots[1:])
 checks['base_still_unchanged']=Path('/work/fs/base/file').read_bytes()==b'old' and Path('/work/fs/base/deleted').exists() and not Path('/work/fs/base/binary').exists()
 if xattr:checks['replay_xattr_correct']=all(os.getxattr(r/'file','user.asb-fixture')==b'value' for r in roots[1:])
+mark('begin','captured-2')
 subprocess.run(['python3','-c','from pathlib import Path; Path(\"file\").write_bytes(b\"end\"); Path(\"symlink\").unlink(); Path(\"/work/invocations\").open(\"ab\").write(b\"2\")'],cwd=roots[0],check=True)
 second=capture('captured-2')
 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(lambda root:sync(second,root),roots[1:]))
@@ -95,6 +107,7 @@ checks['second_boundary_hardlinks_correct']=all((r/'file').stat().st_ino==(r/'li
 checks['base_unchanged_after_second_boundary']=(Path('/work/fs/base/file').read_bytes()==b'old' and Path('/work/fs/base/link').read_bytes()==b'old' and Path('/work/fs/base/file').stat().st_ino==Path('/work/fs/base/link').stat().st_ino)
 checks['first_capture_unchanged']=(first/'file').read_bytes()==b'new' and (first/'symlink').is_symlink()
 link_fds=[os.open(root/'link',os.O_RDONLY) for root in roots[1:]]
+mark('begin','captured-3')
 subprocess.run(['python3','-c','from pathlib import Path; Path(\"link\").unlink(); Path(\"link\").write_bytes(b\"sep\"); Path(\"/work/invocations\").open(\"ab\").write(b\"3\")'],cwd=roots[0],check=True)
 third=capture('captured-3')
 control=Path('/work/fs/control')
@@ -121,6 +134,7 @@ if any(x.returncode for x in results):raise RuntimeError('third rsync failed: '+
 checks['split_link_correct']=all((r/'file').read_bytes()==b'end' and (r/'link').read_bytes()==b'sep' and (r/'file').stat().st_ino!=(r/'link').stat().st_ino for r in roots[1:])
 checks['split_link_existing_descriptors_correct']=all(os.pread(fd,3,0)==b'end' for fd in fds[1:]+link_fds)
 split_fds=[os.open(root/'link',os.O_RDONLY) for root in roots[1:]]
+mark('begin','captured-4')
 subprocess.run(['python3','-c','import os; from pathlib import Path; Path(\"link\").unlink(); os.link(\"file\",\"link\"); Path(\"/work/invocations\").open(\"ab\").write(b\"4\")'],cwd=roots[0],check=True)
 fourth=capture('captured-4')
 before_topology=regular_files(third);after_topology=regular_files(fourth)
@@ -133,6 +147,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(p
 if any(x.returncode for x in results):raise RuntimeError('fourth rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
 checks['joined_link_correct']=all((r/'file').read_bytes()==b'end' and (r/'link').read_bytes()==b'end' and (r/'file').stat().st_ino==(r/'link').stat().st_ino for r in roots[1:])
 checks['joined_old_descriptors_correct']=all(os.pread(fd,3,0)==b'sep' for fd in split_fds)
+mark('begin','captured-5')
 subprocess.run(['python3','-c','import os; from pathlib import Path; os.rename(\"file\",\"moved-file\"); os.rename(\"link\",\"moved-link\"); Path(\"moved-file\").write_bytes(b\"fin\"); Path(\"/work/invocations\").open(\"ab\").write(b\"5\")'],cwd=roots[0],check=True)
 fifth=capture('captured-5')
 before_topology=regular_files(fourth);after_topology=regular_files(fifth)
@@ -147,6 +162,7 @@ checks['moved_link_correct']=all((r/'moved-file').read_bytes()==b'fin' and (r/'m
 checks['moved_old_descriptors_correct']=all(os.pread(fd,3,0)==b'fin' for fd in fds[1:]+link_fds) and all(os.pread(fd,3,0)==b'sep' for fd in split_fds)
 dir_fds=[os.open(root/'folder',os.O_RDONLY|os.O_DIRECTORY) for root in roots[1:]]
 nested_fds=[os.open(root/'folder/data',os.O_RDONLY) for root in roots[1:]]
+mark('begin','captured-6')
 subprocess.run(['python3','-c','import os; from pathlib import Path; os.rename(\"folder\",\"renamed-folder\"); Path(\"renamed-folder/data\").write_bytes(b\"bravo\"); Path(\"/work/invocations\").open(\"ab\").write(b\"6\")'],cwd=roots[0],check=True)
 sixth=capture('captured-6')
 for root in roots[1:]:
@@ -157,6 +173,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(p
 if any(x.returncode for x in results):raise RuntimeError('sixth rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
 checks['moved_directory_correct']=all((r/'renamed-folder/data').read_bytes()==b'bravo' and not (r/'folder').exists() for r in roots[1:])
 checks['moved_directory_descriptors_correct']=all('data' in os.listdir(fd) for fd in dir_fds) and all(os.pread(fd,5,0)==b'bravo' for fd in nested_fds)
+mark('begin','captured-7')
 subprocess.run(['python3','-c','import shutil; from pathlib import Path; shutil.rmtree(\"renamed-folder\"); Path(\"renamed-folder\").mkdir(); Path(\"renamed-folder/data\").write_bytes(b\"other\"); Path(\"/work/invocations\").open(\"ab\").write(b\"7\")'],cwd=roots[0],check=True)
 seventh=capture('captured-7')
 for root in roots[1:]:
@@ -168,6 +185,10 @@ if any(x.returncode for x in results):raise RuntimeError('seventh rsync failed: 
 checks['replaced_directory_correct']=all((r/'renamed-folder/data').read_bytes()==b'other' for r in roots[1:])
 checks['replaced_directory_old_descriptors_correct']=all(os.pread(fd,5,0)==b'bravo' for fd in nested_fds) and all(os.fstat(fd).st_nlink==0 for fd in dir_fds)
 checks['original_subprocess_only_seven_times']=Path('/work/invocations').read_bytes()==b'1234567'
+server.shutdown();server.server_close();server_thread.join();socket_path.unlink(missing_ok=True)
+checks['final_snapshot_sequence']=service.finish()==9
+entries=[json.loads(line) for line in Path('/work/fs/recorded/boundaries.jsonl').read_text().splitlines()]
+checks['boundary_journal_correct']=[entry['alias'] for entry in entries]==[None,'captured-1','captured-2','captured-3','captured-4','captured-5','captured-6','captured-7',None]
 for fd in link_fds+split_fds+dir_fds+nested_fds:os.close(fd)
 for name,passed in checks.items():print(name,passed)
 print('xattr_exercised',xattr)
@@ -175,7 +196,7 @@ if not all(checks.values()):raise RuntimeError('Btrfs snapshot checks failed')
 for fd in fds:os.close(fd)
 EOPY
 '''.replace('LOADER',loader).replace('LOOPDEV',loop.name)
- cmd=['docker','run','--rm','--name',container_name,'--pull=never','--network','none','--device','/dev/loop-control','--device',str(loop),'--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={mkfs},dst=/opt/mkfs.btrfs,readonly','--mount',f'type=bind,src={btrfs},dst=/opt/btrfs,readonly','--mount',f'type=bind,src={rsync},dst=/opt/rsync,readonly','--mount',f'type=bind,src={Path(__file__).with_name("topology.py").resolve()},dst=/opt/topology.py,readonly','--mount',f'type=bind,src={libraries},dst=/hostlib,readonly','--entrypoint','/bin/sh',image,'-c',script]
+ cmd=['docker','run','--rm','--name',container_name,'--pull=never','--network','none','--device','/dev/loop-control','--device',str(loop),'--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={mkfs},dst=/opt/mkfs.btrfs,readonly','--mount',f'type=bind,src={btrfs},dst=/opt/btrfs,readonly','--mount',f'type=bind,src={rsync},dst=/opt/rsync,readonly','--mount',f'type=bind,src={Path(__file__).with_name("topology.py").resolve()},dst=/opt/topology.py,readonly','--mount',f'type=bind,src={(project/"crates/asb-cli/assets/benchmarks/asb_snapshot_service.py").resolve()},dst=/opt/asb_snapshot_service.py,readonly','--mount',f'type=bind,src={libraries},dst=/hostlib,readonly','--entrypoint','/bin/sh',image,'-c',script]
  try:
   r=subprocess.run(cmd,text=True,capture_output=True,timeout=90)
  except subprocess.TimeoutExpired:

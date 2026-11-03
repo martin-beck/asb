@@ -41,6 +41,12 @@ can provide these independently of the host filesystem. Ordinary CI does not
 run it. It does not exercise an agent, concurrent tool mutations, a full guest
 filesystem or production record/replay.
 
+The probe uses the experimental `asb_snapshot_service.py` marker socket to
+capture a baseline, tool-end snapshots, and a final snapshot. Its separate
+marker journal records start/end ordering and supplied process and thread IDs.
+This service is not wired into the guest driver or cassette replay; snapshots
+made during overlapping mutations are not yet qualified for replay.
+
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without
 Docker, providers or installed clients. The opt-in

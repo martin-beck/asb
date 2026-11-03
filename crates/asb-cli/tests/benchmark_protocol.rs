@@ -9,6 +9,11 @@ use support::IsolatedEnvironment;
 static PYTHON_PROTOCOL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
+fn snapshot_boundary_service_preserves_marker_and_lifecycle_order() {
+    python_protocol("benchmark_snapshot_service.py");
+}
+
+#[test]
 fn snapshot_hardlink_splits_preserve_existing_inode_handles() {
     python_protocol("fixtures/fs_snapshot/test_topology.py");
 }
