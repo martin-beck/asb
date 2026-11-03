@@ -139,6 +139,8 @@ class Replay:
                     if os.pread(fd, len(chunk), offset) != chunk:
                         raise RuntimeError('recorded read differs')
                     offset += len(chunk)
+        elif op.startswith('observe-'):
+            self.verify_observation(op, path, event)
         elif op == 'truncate':
             if event['handle'] is None:
                 os.truncate(path, event['size'])
@@ -167,6 +169,42 @@ class Replay:
             os.rmdir(path)
         else:
             raise RuntimeError('unsupported recorded operation')
+
+    def verify_observation(self, op, path, event):
+        failure = 'error' in event
+        if failure and (type(event['error']) is not int or event['error'] <= 0 or 'result' in event or 'object' in event):
+            raise RuntimeError('recorded filesystem observation is invalid')
+        if not failure and ((op == 'observe-getxattr' and 'result' in event)
+                            or (op != 'observe-getxattr' and 'result' not in event)):
+            raise RuntimeError('recorded filesystem observation is invalid')
+        def observe():
+            if op == 'observe-getattr':
+                st = os.lstat(path)
+                attrs = {key: getattr(st, key) for key in ('st_gid','st_ino','st_mode','st_nlink','st_size','st_uid','st_blocks','st_blksize')}
+                attrs.update(st_atime=st.st_atime_ns, st_mtime=st.st_mtime_ns, st_ctime=st.st_ctime_ns)
+                return attrs
+            if op == 'observe-readdir':
+                return ['.', '..', *os.listdir(path)]
+            if op == 'observe-readlink':
+                return os.readlink(path)
+            if op == 'observe-getxattr':
+                return os.getxattr(path, event['name'], follow_symlinks=False)
+            if op == 'observe-listxattr':
+                return os.listxattr(path, follow_symlinks=False)
+            raise RuntimeError('unsupported filesystem observation')
+        try:
+            actual = observe()
+        except OSError as error:
+            if type(event.get('error')) is int and event['error'] == error.errno:
+                return
+            raise RuntimeError('recorded filesystem observation error differs') from error
+        if 'error' in event:
+            raise RuntimeError('recorded filesystem observation unexpectedly succeeded')
+        if op == 'observe-getxattr':
+            if actual != b''.join(self.payload_chunks(event)):
+                raise RuntimeError('recorded filesystem observation differs')
+        elif 'result' not in event or actual != event['result']:
+            raise RuntimeError('recorded filesystem observation differs')
 
     def finish(self):
         if not self.apply_until(sys.maxsize):

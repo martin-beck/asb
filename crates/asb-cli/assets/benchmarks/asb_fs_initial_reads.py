@@ -93,7 +93,8 @@ def plan_initial_reads(events):
             if type(handle) is not int or handle not in handles:
                 raise ValueError('filesystem release handle is invalid')
             handles.pop(handle)
-        elif op != 'marker':
+        elif op not in ('marker', 'observe-getattr', 'observe-readdir', 'observe-readlink',
+                       'observe-getxattr', 'observe-listxattr'):
             # An unknown operation may have changed state; never assume it did not.
             break
     result = {}
