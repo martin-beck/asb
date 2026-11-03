@@ -99,6 +99,63 @@ class GuestBootstrapTests(unittest.TestCase):
             self.assertEqual(exported.read_bytes(),payload)
             self.assertEqual(exported.stat().st_mode & 0o777,0o600)
 
+    def test_guest_artifact_export_streams_fragmented_archive_without_spooling(self):
+        payload = b'\x00\xffpayload' * 10000
+        class FragmentedContainer:
+            def get_archive(self, source, chunk_size=65536, encode_stream=False):
+                chunks, metadata = ArchiveContainer('artifact-0', payload).get_archive(source)
+                def fragments():
+                    for chunk in chunks:
+                        for offset in range(0, len(chunk), 97):
+                            yield chunk[offset:offset + 97]
+                return fragments(), metadata
+        with tempfile.TemporaryDirectory() as directory:
+            task = SimpleNamespace(workspace=SimpleNamespace(container=FragmentedContainer()))
+            receipt = {'kind':'fixture','filename':'artifact-0','bytes':len(payload),
+                       'sha256':hashlib.sha256(payload).hexdigest()}
+            with patch('asb_guest.tempfile.TemporaryFile', side_effect=AssertionError('archive was spooled')):
+                export_agent_artifacts(task, directory, [receipt])
+            self.assertEqual((Path(directory) / 'artifact-0').read_bytes(), payload)
+
+    def test_guest_artifact_export_rejects_extra_tar_entry_without_publishing(self):
+        payload = b'fixture'
+        class ExtraContainer:
+            def get_archive(self, source, chunk_size=65536, encode_stream=False):
+                data = io.BytesIO()
+                with tarfile.open(fileobj=data, mode='w') as archive:
+                    for name in ('artifact-0', 'extra'):
+                        member = tarfile.TarInfo(name)
+                        member.size = len(payload)
+                        archive.addfile(member, io.BytesIO(payload))
+                return iter([data.getvalue()]), {'name':'artifact-0','linkTarget':''}
+        with tempfile.TemporaryDirectory() as directory:
+            task = SimpleNamespace(workspace=SimpleNamespace(container=ExtraContainer()))
+            receipt = {'kind':'fixture','filename':'artifact-0','bytes':len(payload),
+                       'sha256':hashlib.sha256(payload).hexdigest()}
+            with self.assertRaises(ExecutionError):
+                export_agent_artifacts(task, directory, [receipt])
+            self.assertFalse((Path(directory) / 'artifact-0').exists())
+            self.assertFalse((Path(directory) / '.artifact-0.part').exists())
+
+    def test_guest_artifact_export_checks_trailing_wire_bytes(self):
+        payload = b'x'
+        class ExcessContainer:
+            def get_archive(self, source, chunk_size=65536, encode_stream=False):
+                chunks, metadata = ArchiveContainer('artifact-0', payload).get_archive(source)
+                def extended():
+                    yield from chunks
+                    for _ in range(18):
+                        yield b'\0' * 65536
+                return extended(), metadata
+        with tempfile.TemporaryDirectory() as directory:
+            task = SimpleNamespace(workspace=SimpleNamespace(container=ExcessContainer()))
+            receipt = {'kind':'fixture','filename':'artifact-0','bytes':1,
+                       'sha256':hashlib.sha256(payload).hexdigest()}
+            with patch('asb_guest.MAX_EXPORTED_ARTIFACT_BYTES', 1024):
+                with self.assertRaisesRegex(ExecutionError, 'archive exceeds'):
+                    export_agent_artifacts(task, directory, [receipt])
+            self.assertFalse((Path(directory) / 'artifact-0').exists())
+
     def test_guest_artifact_export_rejects_changed_or_oversized_receipts(self):
         with tempfile.TemporaryDirectory() as directory:
             payload = b"x"
