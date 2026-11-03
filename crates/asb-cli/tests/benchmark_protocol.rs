@@ -14,6 +14,11 @@ fn snapshot_boundary_service_preserves_marker_and_lifecycle_order() {
 }
 
 #[test]
+fn snapshot_workspace_failure_paths_release_resources() {
+    python_protocol("benchmark_snapshot_workspace.py");
+}
+
+#[test]
 fn snapshot_hardlink_splits_preserve_existing_inode_handles() {
     python_protocol("fixtures/fs_snapshot/test_topology.py");
 }
@@ -142,6 +147,11 @@ fn swebench_submission_survives_agent_git_metadata_removal() {
 #[test]
 fn mini_swe_record_replay_preserves_binary_tool_effects() {
     python_protocol("mini_swe_binary_replay.py");
+}
+
+#[test]
+fn mini_swe_snapshot_boundaries_capture_tool_execution() {
+    python_protocol("mini_swe_snapshot_boundaries.py");
 }
 
 #[test]

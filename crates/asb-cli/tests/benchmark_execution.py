@@ -349,6 +349,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(snapshot_creation[0]['cap_add'],['SYS_ADMIN'])
         self.assertEqual(snapshot_creation[0]['devices'],['/dev/loop-control:/dev/loop-control:rwm'])
         self.assertEqual(snapshot_creation[0]['device_cgroup_rules'],['b 7:* rwm'])
+        self.assertEqual(snapshot_creation[0]['security_opt'],['apparmor=unconfined'])
 
     def test_gate_stops_before_attachment_and_preserves_argv_env_and_output(self):
         workspace, container, api, creation = self.workspace()

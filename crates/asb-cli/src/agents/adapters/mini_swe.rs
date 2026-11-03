@@ -180,6 +180,8 @@ fn prepare_tool_transport(
 const TOOL_TRANSPORT: &str = r#"import hashlib
 import json
 import os
+import socket
+import threading
 from pathlib import Path
 
 from minisweagent.environments.local import LocalEnvironment
@@ -189,6 +191,32 @@ _PATH = Path(os.environ["ASB_MINI_SWE_TOOL_TAPE"])
 _MODE = os.environ["ASB_MINI_SWE_TOOL_MODE"]
 _LIMIT = 128
 _MAX_EFFECT_BYTES = 512 * 1024
+
+
+def _filesystem_marker(action, alias):
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            # A Btrfs snapshot is allowed up to 30 seconds by the service.
+            connection.settimeout(40)
+            connection.connect(os.environ['ASB_FS_MARKER_SOCKET'])
+            connection.sendall(f'tool-{action}:{alias}:{os.getpid()}:{threading.get_native_id()}\n'.encode('ascii'))
+            with connection.makefile('rb') as response:
+                return response.readline(32).strip().isdigit()
+    except (OSError, UnicodeError):
+        return False
+
+
+def _filesystem_replay_boundary(alias):
+    """Wait until the per-replica coordinator has applied this tool's effects."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(1800)
+            connection.connect(os.environ['ASB_FS_REPLAY_SOCKET'])
+            connection.sendall(f'tool-end:{alias}\n'.encode('ascii'))
+            with connection.makefile('rb') as response:
+                return response.readline(32).strip().isdigit()
+    except (OSError, UnicodeError):
+        return False
 
 
 class AsbTapeEnvironment(LocalEnvironment):
@@ -312,6 +340,26 @@ class AsbTapeEnvironment(LocalEnvironment):
     def execute(self, action, cwd="", *, timeout=None):
         command = action.get("command", "")
         if _MODE == "record":
+            if os.environ.get('ASB_FS_MARKER_SOCKET'):
+                # The boundary service owns workspace effects in this mode.
+                alias = f'mini-swe-{len(self._entries) + 1}'
+                if not _filesystem_marker('begin', alias):
+                    self._record_failure(command, 'Mini-SWE filesystem operation boundary is unavailable')
+                    raise RuntimeError('Mini-SWE filesystem operation boundary is unavailable')
+                try:
+                    try:
+                        output = super().execute(action, cwd, timeout=timeout)
+                    except Submitted as submitted:
+                        output = {'submitted': list(submitted.messages)}
+                        raise
+                finally:
+                    ended = _filesystem_marker('end', alias)
+                    if not ended:
+                        self._record_failure(command, 'Mini-SWE filesystem operation boundary is unavailable')
+                        raise RuntimeError('Mini-SWE filesystem operation boundary is unavailable')
+                    elif 'output' in locals():
+                        self._record(command, output, [])
+                return output
             root = self._root(cwd)
             before = self._snapshot(root)
             try:
@@ -349,6 +397,7 @@ class AsbTapeEnvironment(LocalEnvironment):
                 or failure not in {
                     "Mini-SWE local tool changed a non-text workspace file",
                     "Mini-SWE local tool workspace effects exceed the bounded replay limit",
+                    "Mini-SWE filesystem operation boundary is unavailable",
                 }
                 or entry.get("result") is not None
                 or entry.get("effects")
@@ -358,7 +407,13 @@ class AsbTapeEnvironment(LocalEnvironment):
         output = entry.get("result")
         if not isinstance(output, dict):
             raise RuntimeError("Mini-SWE replay local tool result is malformed")
-        self._apply_effects(self._root(cwd), entry.get("effects", []))
+        if os.environ.get('ASB_FS_REPLAY_SOCKET'):
+            if entry.get('effects'):
+                raise RuntimeError('Mini-SWE filesystem replay cannot use snapshot effects')
+            if not _filesystem_replay_boundary(f'mini-swe-{self._position}'):
+                raise RuntimeError('Mini-SWE filesystem replay boundary is unavailable')
+        else:
+            self._apply_effects(self._root(cwd), entry.get("effects", []))
         if "submitted" in output:
             submitted = output["submitted"]
             if not isinstance(submitted, list):
