@@ -18,12 +18,18 @@ cursor = Replay(evidence, Path('/work/mount'), enforce_admission=True, existing=
 try:
     connection, _ = listener.accept()
     with connection, connection.makefile('rwb', buffering=0) as stream:
-        if stream.readline().decode().strip() != 'tool-end:one':
-            raise RuntimeError('unexpected recorded tool boundary')
-        cursor.admit('one')
-        if not cursor.apply_until(ends['tool-end:one']):
-            raise RuntimeError('unadmitted operation before tool end')
-        stream.write((str(cursor.sequence) + '\n').encode())
+        names = ('write','read','patch','search','terminal') if os.environ.get('ASB_FIXTURE_MIXED') == '1' else ('one',)
+        for name in names:
+            if stream.readline().decode().strip() != 'tool-end:' + name:
+                raise RuntimeError('unexpected recorded tool boundary')
+            cursor.admit(name)
+            if not cursor.apply_until(ends['tool-end:' + name]):
+                raise RuntimeError('unadmitted operation before tool end')
+            if len(names) > 1:
+                content = Path('/work/mount/asb-real-agent.txt').read_text()
+                if content != ('before' if name in ('write','read') else 'fixture'):
+                    raise RuntimeError('file state differs at a tool boundary')
+            stream.write((str(cursor.sequence) + '\n').encode())
     cursor.finish()
 finally:
     cursor.close(); listener.close(); sock_path.unlink(missing_ok=True)

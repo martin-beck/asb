@@ -23,6 +23,7 @@ LIB2 = Path(os.environ['ASB_CONTAINER_FUSE_LIBRARY']).resolve()
 FUSER = Path(os.environ['ASB_CONTAINER_FUSERMOUNT']).resolve()
 FUSEPY = Path(os.environ['ASB_FUSEPY_MODULE']).resolve()
 uid, gid = os.getuid(), os.getgid()
+mixed=os.environ.get('ASB_HERMES_MIXED_FIXTURE')=='1'
 
 with tempfile.TemporaryDirectory(dir=BASE) as tmp:
     root = Path(tmp)
@@ -34,7 +35,7 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
     restriction = 'toolsets._HERMES_CORE_TOOLS[:] = ["terminal"]'
     assert hook.count(restriction) == 1
     (root / 'hooks/sitecustomize.py').write_text(hook.replace(restriction, 'pass  # fixture retains core tools') + '\n' + (PROBE / 'hermes_agent_boundary.py').read_text())
-    command = 'git apply /work/control/candidate.patch && printf ran > /tmp/asb-native-agent-executed'
+    command = 'git apply /work/control/candidate.patch && ' + ('printf mixed > mixed-marker; ' if mixed else '') + 'printf ran > /tmp/asb-native-agent-executed'
     (root / 'mock-record/command.txt').write_text(command)
 
     def mounts():
@@ -73,7 +74,8 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
     common='''export HERMES_HOME=/work/home-record TERMINAL_ENV=local PYTHONPATH=/work/hooks:/opt
 export ASB_FIXTURE_AGENT_BOUNDARY=1 ASB_FIXTURE_UNRESTRICTED=1 ASB_FIXTURE_SWE_PATCH=1
 export ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl
-'''
+''' + ('''export ASB_FIXTURE_NATIVE_FILES=1 ASB_FIXTURE_MIXED=1 ASB_FIXTURE_NATIVE_FILE_TRANSCRIPT=/work/control/files.jsonl
+''' if mixed else '')
     record_script='''set -eu
 /opt/fuse-overlayfs -o allow_other,lowerdir=/lower,upperdir=/work/record-upper,workdir=/work/record-work /work/lower-view
 export ASB_PROBE_ROOT_TGID=$$ ASB_PROBE_ALLOW_OTHER=1 ASB_PROBE_CONTROL_SOCKET=/work/control/record.sock PYTHONPATH=/opt FUSE_LIBRARY_PATH=/opt/libfuse.so.2
@@ -92,11 +94,19 @@ setpriv --reuid "$ASB_UID" --regid "$ASB_GID" --clear-groups git diff --binary >
     native=[json.loads(line) for line in (root/'control/native.jsonl').read_text().splitlines()]
     assert sum(item['event']=='write' for item in native)==1
     assert json.loads((root/'control/record-progress.json').read_text())['complete']
+    if mixed:
+        file_events=[json.loads(line) for line in (root/'control/files.jsonl').read_text().splitlines()]
+        assert [event['request']['tool'] for event in file_events]==['write_file','read_file','patch','search_files']
+        for event in file_events:
+            output=json.loads(event['output'])
+            assert not output.get('error'), output
+        assert 'before' in file_events[1]['output']
+        assert 'fixture' in file_events[3]['output']
     offered=set(json.loads((root/'mock-record/tool-names.json').read_text()))
     assert {'terminal','read_file','write_file','patch'} <= offered
     assert (root/'control/record.diff').stat().st_size > 0
     events=[json.loads(line) for line in (root/'evidence/events.jsonl').read_text().splitlines()]
-    assert any(item.get('marker')=='tool-end:one' for item in events)
+    assert any(item.get('marker')==('tool-end:terminal' if mixed else 'tool-end:one') for item in events)
 
     def replay(index):
         for suffix in ('upper','work','home','mock'):
@@ -107,11 +117,12 @@ setpriv --reuid "$ASB_UID" --regid "$ASB_GID" --clear-groups git diff --binary >
 /opt/fuse-overlayfs -o allow_other,lowerdir=/lower,upperdir=/work/upper-{i},workdir=/work/work-{i} /work/mount
 cleanup() {{ code=$?; trap - EXIT; cd /; if [ -n "${{effect:-}}" ]; then kill "$effect" 2>/dev/null || true; wait "$effect" 2>/dev/null || true; fi; n=0; while ! fusermount3 -u /work/mount 2>/work/control/unmount-{i}.log; do n=$((n+1)); if [ "$n" -ge 100 ]; then code=1; break; fi; sleep .1; done; chown -R "$ASB_UID:$ASB_GID" /work/upper-{i} /work/work-{i} || code=1; exit "$code"; }}
 trap cleanup EXIT
-setpriv --reuid "$ASB_UID" --regid "$ASB_GID" --clear-groups /usr/bin/python3 -B -S /probe/overlay_effect_server.py {i} > /work/control/effect-mock-{i}.log 2>&1 &
+ASB_FIXTURE_MIXED={mixed} setpriv --reuid "$ASB_UID" --regid "$ASB_GID" --clear-groups /usr/bin/python3 -B -S /probe/overlay_effect_server.py {i} > /work/control/effect-mock-{i}.log 2>&1 &
 effect=$!
 n=0; while [ ! -S /work/control/effect-{i}.sock ]; do n=$((n+1)); [ "$n" -lt 200 ] || exit 43; sleep .05; done
 export HERMES_HOME=/work/home-record TERMINAL_ENV=local PYTHONPATH=/work/hooks:/opt
 export ASB_FIXTURE_AGENT_BOUNDARY=1 ASB_FIXTURE_UNRESTRICTED=1 ASB_FIXTURE_SWE_PATCH=1
+export ASB_FIXTURE_NATIVE_FILES={mixed} ASB_FIXTURE_MIXED={mixed} ASB_FIXTURE_NATIVE_FILE_TRANSCRIPT=/work/control/files.jsonl ASB_FIXTURE_NATIVE_FILES_PROGRESS=/work/control/files-progress-{i}
 export ASB_HERMES_NATIVE_MODE=replay ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl ASB_HERMES_NATIVE_PROGRESS=/work/control/progress-{i}.json
 export ASB_FIXTURE_MOCK_DIR=/work/mock-{i} ASB_FIXTURE_LLM_CASSETTE=/work/control/llm-{i}.jsonl ASB_FIXTURE_EFFECT_SOCKET=/work/control/effect-{i}.sock
 cd /work/mount
@@ -120,12 +131,13 @@ wait "$effect"
 effect=
 setpriv --reuid "$ASB_UID" --regid "$ASB_GID" --clear-groups git apply --reverse --check /work/control/candidate.patch
 setpriv --reuid "$ASB_UID" --regid "$ASB_GID" --clear-groups git diff --binary > /work/control/replay-{i}.diff
-'''.format(i=index)
+'''.format(i=index,mixed=int(mixed))
         # Each container sees its own home at the same path.
         launch(f'mock-{index}',script,['--mount',f'type=bind,src={root/f"home-{index}"},dst=/work/home-record'])
         progress=json.loads((root/f'control/progress-{index}.json').read_text())
         tape=json.loads((root/f'control/llm-{index}.jsonl.progress.json').read_text())
         assert progress['complete'] and progress['invocations']==1
+        if mixed: assert (root/f'control/files-progress-{index}').read_text()=='4'
         assert tape['consumed']==tape['total'] and tape['total']>0
         assert (root/f'control/replay-{index}.diff').read_bytes()==(root/'control/record.diff').read_bytes()
 
