@@ -1,5 +1,14 @@
 # Development
 
+The opt-in `crates/asb-cli/tests/openjiuwen_embedding_tape.py` exercises the
+installed OpenJiuwen embedding client and the adapter's proposed auxiliary
+tape route with an offline loopback fixture. Set `ASB_OPENJIUWEN_PYTHON` to
+the interpreter for the project-local OpenJiuwen installation, then run
+`python3 crates/asb-cli/tests/openjiuwen_embedding_tape.py`. The test records
+one request and uses four independent replay proxies after stopping the fixture
+upstream. It requires Node.js and never contacts a live provider. It does not
+qualify the ASB cassette lifecycle, a complete agent run, or workload grading.
+
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without
 Docker, providers or installed clients. The opt-in
 `benchmark_live_sdk_session.py` instead needs the installed Terminal-Bench SDK
