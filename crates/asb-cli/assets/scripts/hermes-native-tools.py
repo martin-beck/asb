@@ -41,6 +41,21 @@ def _filesystem_marker(action, alias):
         return False
 
 
+def _filesystem_replay_boundary(alias):
+    """Wait for the replica coordinator to apply this recorded tool's effects."""
+    if not os.environ.get("ASB_FS_REPLAY_SOCKET"):
+        return True
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(1800)
+            connection.connect(os.environ["ASB_FS_REPLAY_SOCKET"])
+            connection.sendall(f"tool-end:{alias}\n".encode("ascii"))
+            with connection.makefile("rb") as response:
+                return response.readline(32).strip().isdigit()
+    except (OSError, UnicodeError):
+        return False
+
+
 def _encoded(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
@@ -277,6 +292,7 @@ class Replayer:
             sessions = {}
             completed = set()
             exchanges = []
+            aliases_by_index = []
             dependencies = []
             completion_order = []
             for event in events[1:-1]:
@@ -298,6 +314,7 @@ class Replayer:
                         raise RuntimeError("Hermes native replay sidecar digest is invalid")
                     sessions[alias].update(phase="write", request=request, index=len(exchanges))
                     exchanges.append(None)
+                    aliases_by_index.append(alias)
                     dependencies.append(sessions[alias]["dependencies"])
                 elif kind == "output" and sessions[alias]["phase"] == "write":
                     try:
@@ -319,6 +336,7 @@ class Replayer:
                     any(entry["phase"] != "exit" for entry in sessions.values())):
                 raise RuntimeError("Hermes native replay sidecar is incomplete")
             self.exchanges = exchanges
+            self.aliases = aliases_by_index
             self.dependencies = dependencies
             self.consumed = set()
             self.delivered = set()
@@ -329,6 +347,7 @@ class Replayer:
             self.closing = False
         else:
             self.exchanges = []
+            self.aliases = []
             index = 2
             while index + 2 < len(events) and events[index] == {"event": "poll", "alias": SESSION}:
                 write, output = events[index + 1], events[index + 2]
@@ -344,6 +363,7 @@ class Replayer:
                 if write.get("request_sha256") != _digest(request) or output.get("response_sha256") != _digest(response):
                     raise RuntimeError("Hermes native replay sidecar digest is invalid")
                 self.exchanges.append((request, response))
+                self.aliases.append(SESSION)
                 index += 3
             if events[index:index + 2] != [
                 {"event": "exit", "alias": SESSION, "success": True},
@@ -373,6 +393,11 @@ class Replayer:
             # disclosing either side of the tool exchange.
             return json.dumps({"asb_native_mismatch": component}, separators=(",", ":"))
         response = self.exchanges[self.index][1]
+        if not _filesystem_replay_boundary(self.aliases[self.index]):
+            self.failed = True
+            self.failure = "native filesystem replay boundary unavailable"
+            _write_progress(False, self.failure, self.index, len(self.exchanges))
+            raise RuntimeError("Hermes filesystem replay boundary is unavailable")
         self.index += 1
         # Persist a bounded cursor after every successful replayed call.  A
         # provider-tape rejection can terminate Hermes before its exit hook,
@@ -402,6 +427,11 @@ class Replayer:
             _write_progress(False, self.failure, self.index, len(self.exchanges))
             return json.dumps({"asb_native_mismatch": "sequence"}, separators=(",", ":"))
         response = self.exchanges[self.index][1]
+        if not _filesystem_replay_boundary(self.aliases[self.index]):
+            self.failed = True
+            self.failure = "native filesystem replay boundary unavailable"
+            _write_progress(False, self.failure, self.index, len(self.exchanges))
+            raise RuntimeError("Hermes filesystem replay boundary is unavailable")
         self.index += 1
         _write_progress(False, "native terminal replay in progress", self.index, len(self.exchanges))
         try:
@@ -429,6 +459,19 @@ class Replayer:
                 if self.failed or self.closing:
                     raise RuntimeError("Hermes concurrent native replay did not settle")
                 self.condition.wait()
+            # Do not hold the transport lock while the coordinator waits:
+            # other concurrent calls may still need to enter the replay queue.
+            self.condition.release()
+            try:
+                applied = _filesystem_replay_boundary(self.aliases[index])
+            finally:
+                self.condition.acquire()
+            if not applied or self.failed or self.closing:
+                self.failed = True
+                self.failure = "native filesystem replay boundary unavailable"
+                _write_progress(False, self.failure, self.index, len(self.exchanges))
+                self.condition.notify_all()
+                raise RuntimeError("Hermes filesystem replay boundary is unavailable")
             self.delivered.add(index)
             self.completion_cursor += 1
             self.index += 1
