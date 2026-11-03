@@ -37,7 +37,11 @@ class Replay:
             if self.pending is None:
                 line = self.events.readline()
                 if not line:
+                    if limit != sys.maxsize and self.sequence < limit:
+                        raise RuntimeError('recorded operation stream ended before requested boundary')
                     return True
+                if not line.endswith('\n'):
+                    raise RuntimeError('recorded operation stream has a truncated final event')
                 self.pending = json.loads(line)
             event = self.pending
             sequence = event['sequence']

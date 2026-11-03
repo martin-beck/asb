@@ -46,6 +46,10 @@ The overlap fixture includes an experimental condition-based coordinator with
 separate caller threads and checks mismatched, duplicate and out-of-order end
 markers. It is not wired to an agent; the Hermes test delegates matching to the
 sidecar rather than interpreting request bodies in the generic cursor.
+The cursor rejects an incomplete final event and a stream that ends before an
+explicitly requested boundary; reaching ordinary end of stream during finish
+is still valid. These checks do not prove that an otherwise well-formed journal
+contains every operation that should have been recorded.
 It additionally exercises a background child that writes after its tool-return
 marker and before the next invocation, checking the file is absent at the first
 boundary and present at the second. This does not implement a scheduler for
