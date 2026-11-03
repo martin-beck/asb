@@ -16,11 +16,10 @@ const NPM_MANIFEST: &str = r#"{
 }
 "#;
 
-// OpenCode discovers locally configured MCP tools asynchronously. A short
-// startup budget can leave the first provider request tool-less, making a
-// recorded request shape impossible to replay deterministically. Keep this
-// readiness policy in the owning adapter configuration.
-const LOCAL_TOOL_STARTUP_TIMEOUT_MS: u64 = 60_000;
+// OpenCode applies its MCP timeout to tool calls as well as startup. Match
+// ASB's largest accepted agent execution budget so the owning process deadline,
+// rather than a shorter transport timeout, controls a running tool call.
+const LOCAL_TOOL_TIMEOUT_MS: u64 = 86_400_000;
 // OpenCode regenerates these private output and delegated-task identifiers on
 // replay; the actual tool output and task state remain comparison-significant.
 const TAPE_WIRE_EXTENSION: &str = r#"
@@ -360,7 +359,7 @@ fn config(
                 "type":"local",
                 "command":command,
                 "enabled":true,
-                "timeout":LOCAL_TOOL_STARTUP_TIMEOUT_MS
+                "timeout":LOCAL_TOOL_TIMEOUT_MS
             }
         });
         // The public OpenCode configuration exposes these as every built-in
@@ -471,10 +470,7 @@ mod tests {
             serde_json::json!(["asb-tool-replay-mcp", "--tape"])
         );
         assert_eq!(config["mcp"]["asb_local_tools"]["enabled"], true);
-        assert_eq!(
-            config["mcp"]["asb_local_tools"]["timeout"],
-            LOCAL_TOOL_STARTUP_TIMEOUT_MS
-        );
+        assert_eq!(config["mcp"]["asb_local_tools"]["timeout"], 86_400_000);
         assert_eq!(config["permission"]["bash"], "deny");
         assert_eq!(config["permission"]["asb_local_tools_*"], "allow");
     }
