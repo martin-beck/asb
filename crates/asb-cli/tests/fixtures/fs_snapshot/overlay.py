@@ -69,7 +69,7 @@ for raw in tracked:
   selected=os.fsdecode(raw);break
 if selected is None: raise RuntimeError('fixture requires one clean tracked text file')
 base_file=Path('/source')/selected;base_hash=fingerprint(base_file)
-with (roots[0]/selected).open('ab') as stream: stream.write(b'\\n')
+subprocess.run(['python3','-c','from pathlib import Path; import sys; p=Path(sys.argv[1]); p.write_bytes(p.read_bytes()+bytes([10])); Path(\"/work/tool-invocations\").open(\"ab\").write(b\"called\")',selected],cwd=roots[0],check=True)
 patch=git_at(roots[0],'diff','--binary','--',selected)
 if not patch: raise RuntimeError('fixture change did not produce a patch')
 def apply_effect(root):
@@ -79,6 +79,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool: replica_effec
 checks['replayed_patch_contents_equal']=all(item[0]==fingerprint(roots[0]/selected) for item in replica_effects)
 checks['replayed_patch_diffs_equal']=all(item[1]==patch for item in replica_effects)
 checks['base_file_unchanged']=fingerprint(base_file)==base_hash
+checks['tool_executed_only_once']=Path('/work/tool-invocations').read_bytes()==b'called'
 a=roots[0]/'asb-overlay-fixture-file';a.write_text('one');os.link(a,roots[0]/'asb-overlay-fixture-link');os.rename(a,roots[0]/'asb-overlay-fixture-renamed')
 checks['hardlink_rename_preserved']=(roots[0]/'asb-overlay-fixture-link').stat().st_ino==(roots[0]/'asb-overlay-fixture-renamed').stat().st_ino
 checks['fixture_isolated']=all(not (root/'asb-overlay-fixture-link').exists() for root in roots[1:]) and not Path('/source/asb-overlay-fixture-link').exists()

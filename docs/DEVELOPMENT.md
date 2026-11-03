@@ -9,8 +9,9 @@ Python; then run the script with Python. Docker is invoked with networking
 disabled and image pulling disabled. The fixture verifies concurrent Git status
 and recent-log agreement, index isolation, hard-link/rename behavior, and a
 child-process write in only one replica. It applies a synthetic Git patch to
-three replicas and compares resulting diffs and file bytes without rerunning
-the original change. It reports, but does not require,
+three replicas and compares resulting diffs and file bytes. A subprocess makes
+the original synthetic change and an external counter checks that it is not
+rerun when applying the patch. It reports, but does not require,
 identical metadata fields. It preserves failed fixture logs under `target`.
 It requires `/dev/fuse` and container mount capabilities for this experiment;
 these are not ordinary CI requirements. It does not record or replay an agent,
