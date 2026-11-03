@@ -25,6 +25,12 @@ class LocalWorkspace:
 
 
 class SubmissionRecoveryTests(unittest.TestCase):
+    def test_snapshot_baseline_uses_attempt_storage(self):
+        ordinary=task_module.SweBenchTask(None,'catalog','fixture','artifacts')
+        snapshot=task_module.SweBenchTask(None,'catalog','fixture','artifacts',tool_mode='replay',snapshot=True)
+        self.assertEqual(ordinary.submission_git_dir(),task_module.SUBMISSION_GIT_DIR)
+        self.assertEqual(snapshot.submission_git_dir(),'/asb-snapshot-storage/baseline.git')
+
     def test_task_preserves_tool_mode(self):
         for mode in ('none','record','replay'):
             self.assertEqual(task_module.SweBenchTask(None,'catalog','fixture','artifacts',tool_mode=mode).tool_mode,mode)
