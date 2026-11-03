@@ -49,8 +49,9 @@ def stop(p):
 
 async def request(root, original_url, port, mode):
     worker = r"""
-import asyncio, json, runpy, sys
+import asyncio, json, runpy, sqlite3, sys, types
 from pathlib import Path
+from openjiuwen.core.memory.lite.manager import MemoryIndexManager, META_KEY
 from openjiuwen.core.memory.lite.embeddings import OpenAICompatibleEmbeddingProvider
 hook = runpy.run_path(sys.argv[3])
 metadata = Path(sys.argv[4])
@@ -64,7 +65,26 @@ async def main():
         hook['_asb_restore_opaque_embedding_identity'](identity)
     provider = OpenAICompatibleEmbeddingProvider(api_key=key, model='fixture-model', base_url=sys.argv[1])
     if mode == 'record':
+        # Existing memory databases store the native fingerprint. Verify the
+        # experiment's behavioral consequence with OpenJiuwen's real index
+        # manager rather than treating matching HTTP responses as sufficient.
+        previous = provider.config_fingerprint
+        manager = object.__new__(MemoryIndexManager)
+        manager.db = sqlite3.connect(':memory:')
+        manager.db.row_factory = sqlite3.Row
+        manager.db.execute('CREATE TABLE meta (key TEXT, value TEXT)')
+        manager.db.execute('INSERT INTO meta VALUES (?, ?)', (META_KEY, json.dumps({
+            'provider': provider.id, 'model': provider.model,
+            'providerKey': previous, 'chunkTokens': 512,
+        })))
+        manager.provider = provider
+        manager.provider_key = previous
+        manager.settings = types.SimpleNamespace(chunking={'tokens': 512})
+        assert not await manager._needs_rebuild_on_config_change()
         identity = hook['_asb_make_embedding_identity'](provider)
+        manager.provider_key = provider.config_fingerprint
+        assert await manager._needs_rebuild_on_config_change()
+        manager.db.close()
     fingerprint = provider.config_fingerprint
     if mode == 'record':
         assert key not in repr(identity)

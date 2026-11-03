@@ -24,8 +24,11 @@ cache identity; the fixture does not persist the URL or record-only key. Set
 authentication for a fake credential-bearing URL. The endpoint digest is used
 to match replay to the configured endpoint; it does not encrypt the URL and
 may reveal a guessable endpoint to an offline dictionary attack. The opaque
-identity is an experiment, not yet wired into ASB cassette lifecycle or proven
-compatible with pre-existing OpenJiuwen caches.
+identity is an experiment and is not wired into the ASB cassette lifecycle.
+The installed OpenJiuwen memory manager detects it as a changed provider key
+for a pre-existing index and would rebuild that index, changing agent behavior.
+The fixture verifies this explicitly. A production solution must preserve the
+native identity and cache behavior while keeping credentials out of recordings.
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without
 Docker, providers or installed clients. The opt-in
