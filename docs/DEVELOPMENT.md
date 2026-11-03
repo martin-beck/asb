@@ -184,6 +184,8 @@ payload into memory. The guest archive transfer accepts these file-backed
 receipts up to the cassette track limit. The guest driver can export a completed
 pair when explicitly requested. No production launcher yet starts the recorder
 or makes that request, and the runtime does not yet consume the files.
+An offline integration test passes a 17 MiB binary file through the actual
+guest receipt exporter, streamed archive transfer, and host receipt importer.
 
 `python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` checks that
 overlapping terminal calls produce a readable sidecar without serializing

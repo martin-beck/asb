@@ -1084,7 +1084,7 @@ fn export_sealed_artifacts(
 
 /// Stream completed filesystem recordings to the private export area. The
 /// caller must settle the recording process before invoking this function.
-fn export_filesystem_recording(
+pub(crate) fn export_filesystem_recording(
     run_dir: &Path,
     receipts: &mut Vec<GuestArtifactReceipt>,
 ) -> Result<(), Error> {
