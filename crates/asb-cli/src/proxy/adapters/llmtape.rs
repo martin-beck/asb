@@ -9,6 +9,7 @@ use crate::proxy::{ProxyAdapter, ProxySession};
 use crate::tape::Mode;
 use std::any::Any;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -36,6 +37,9 @@ struct Settings {
     /// Opaque adapter-owned request extension; llmtape materializes and
     /// invokes it without interpreting its wire protocol.
     wire_extension: Option<&'static str>,
+    perfetto_observer: Option<std::fs::File>,
+    perfetto_trace_id: Option<String>,
+    perfetto_report: Option<PathBuf>,
 }
 
 struct RunningLlmtape {
@@ -119,6 +123,14 @@ impl ProxyAdapter for LlmtapeAdapter {
             workspace: request.workspace.to_path_buf(),
             invocation_dir: request.invocation_dir.to_path_buf(),
             wire_extension: request.wire_extension,
+            perfetto_observer: request
+                .perfetto_observer
+                .as_ref()
+                .map(std::fs::File::try_clone)
+                .transpose()
+                .map_err(crate::io_error)?,
+            perfetto_trace_id: request.perfetto_trace_id.clone(),
+            perfetto_report: request.perfetto_report.clone(),
         }))
     }
 
@@ -206,8 +218,37 @@ impl ProxyAdapter for LlmtapeAdapter {
         command.env_remove("ASB_TAPE_CAPTURE_NONCE");
         command.env_remove("ASB_TAPE_MISMATCH_EVIDENCE");
         command.env_remove("ASB_TAPE_AGENT_WIRE_EXTENSION");
+        command.env_remove("ASB_TAPE_PERFETTO_OBSERVER_FD");
+        command.env_remove("ASB_TAPE_PERFETTO_TRACE_ID");
+        command.env_remove("ASB_TAPE_PERFETTO_REQUEST_REPORT");
         if let Some(path) = wire_extension {
             command.env("ASB_TAPE_AGENT_WIRE_EXTENSION", path);
+        }
+        // An external ASB_LLM_TAPE override is an independently supplied
+        // executable.  It must never receive the private observer capability
+        // (nor a collector-owned report destination); only our materialized
+        // built-in proxy is entitled to emit these observations.
+        let observer = if builtin {
+            request
+                .perfetto_observer
+                .as_ref()
+                .map(std::fs::File::try_clone)
+                .transpose()
+                .map_err(crate::io_error)?
+        } else {
+            None
+        };
+        if let Some(observer) = observer.as_ref() {
+            command.env(
+                "ASB_TAPE_PERFETTO_OBSERVER_FD",
+                observer.as_raw_fd().to_string(),
+            );
+            if let (Some(trace_id), Some(report)) =
+                (&request.perfetto_trace_id, &request.perfetto_report)
+            {
+                command.env("ASB_TAPE_PERFETTO_TRACE_ID", trace_id);
+                command.env("ASB_TAPE_PERFETTO_REQUEST_REPORT", report);
+            }
         }
         let capture = (builtin && request.mode == Mode::Record).then(|| {
             (
@@ -838,6 +879,9 @@ mod tests {
             workspace: std::path::Path::new("/fixture/workspace"),
             invocation_dir: std::path::Path::new("/fixture/nested"),
             wire_extension: None,
+            perfetto_observer: None,
+            perfetto_trace_id: None,
+            perfetto_report: None,
         };
         let settings = super::ADAPTER.recording_settings(&request).unwrap();
         let settings = settings.downcast_ref::<super::Settings>().unwrap();

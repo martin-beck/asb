@@ -41,6 +41,9 @@ fn record_uses_one_filesystem_resolved_destination_for_producer_and_receipt() {
             workspace: fixture.0.clone(),
             invocation_dir: fixture.0.clone(),
             wire_extension: None,
+            perfetto_observer: Some(std::fs::File::open("/dev/null").unwrap()),
+            perfetto_trace_id: Some("private-trace-id".into()),
+            perfetto_report: Some(fixture.0.join("private-report.json")),
         };
         let mut session = ADAPTER
             .start(Some("http://127.0.0.1:1/v1"), Some(&settings))
@@ -75,6 +78,9 @@ fn external_override_never_receives_private_capture_capability_or_invents_eviden
             workspace: fixture.0.clone(),
             invocation_dir: fixture.0.clone(),
             wire_extension: None,
+            perfetto_observer: None,
+            perfetto_trace_id: None,
+            perfetto_report: None,
         };
         let mut session = ADAPTER
             .start(Some("http://127.0.0.1:1/v1"), Some(&settings))
@@ -88,7 +94,7 @@ fn external_override_never_receives_private_capture_capability_or_invents_eviden
     let script = fixture.0.join("override");
     let marker = fixture.0.join("clean-env");
     let proxy = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts/llmtape.mjs");
-    crate::write_test_file(&fixture.0, &script, format!("#!/bin/sh\nif [ \"${{ASB_TAPE_CAPTURE_NONCE+x}}\" = x ] || [ \"${{ASB_TAPE_CAPTURE_RECEIPT+x}}\" = x ]; then exit 67; fi\nprintf clean > {}\nexec node {} \"$@\"\n", shell_quote(&marker), shell_quote(&proxy))).unwrap();
+    crate::write_test_file(&fixture.0, &script, format!("#!/bin/sh\nif [ \"${{ASB_TAPE_CAPTURE_NONCE+x}}\" = x ] || [ \"${{ASB_TAPE_CAPTURE_RECEIPT+x}}\" = x ] || [ \"${{ASB_TAPE_PERFETTO_OBSERVER_FD+x}}\" = x ] || [ \"${{ASB_TAPE_PERFETTO_TRACE_ID+x}}\" = x ] || [ \"${{ASB_TAPE_PERFETTO_REQUEST_REPORT+x}}\" = x ]; then exit 67; fi\nprintf clean > {}\nexec node {} \"$@\"\n", shell_quote(&marker), shell_quote(&proxy))).unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
     let mut child = Command::new(std::env::current_exe().unwrap());
     child.args(["--exact", "proxy::adapters::llmtape::boundary_tests::external_override_never_receives_private_capture_capability_or_invents_evidence", "--nocapture"])
@@ -243,6 +249,9 @@ fn existing_recording_destinations_are_refused_before_starting_a_proxy() {
             workspace: fixture.0.clone(),
             invocation_dir: fixture.0.clone(),
             wire_extension: None,
+            perfetto_observer: None,
+            perfetto_trace_id: None,
+            perfetto_report: None,
         };
         let error = ADAPTER
             .start(Some("http://127.0.0.1:1/v1"), Some(&settings))
@@ -275,6 +284,9 @@ fn startup_errors_are_specific_and_remove_only_their_private_scratch() {
             workspace: root.0.join("workspace"),
             invocation_dir: root.0.clone(),
             wire_extension: None,
+            perfetto_observer: None,
+            perfetto_trace_id: None,
+            perfetto_report: None,
         };
         let error = match scenario.as_str() {
             "missing-upstream" => ADAPTER.start(None, Some(&settings)).err().unwrap(),

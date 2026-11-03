@@ -17,6 +17,9 @@ pub(crate) struct RecordingRequest<'a> {
     pub workspace: &'a std::path::Path,
     pub invocation_dir: &'a std::path::Path,
     pub wire_extension: Option<&'static str>,
+    pub perfetto_observer: Option<std::fs::File>,
+    pub perfetto_trace_id: Option<String>,
+    pub perfetto_report: Option<std::path::PathBuf>,
 }
 
 /// An adapter starts one hop using its own optional typed configuration.
@@ -534,6 +537,9 @@ mod tests {
             workspace: std::path::Path::new("."),
             invocation_dir: std::path::Path::new("."),
             wire_extension: None,
+            perfetto_observer: None,
+            perfetto_trace_id: None,
+            perfetto_report: None,
         };
         let selected = resolve_recorder(registry, request.recorder).unwrap();
         selected
@@ -663,6 +669,9 @@ mod tests {
             workspace: std::path::Path::new("."),
             invocation_dir: std::path::Path::new("."),
             wire_extension: None,
+            perfetto_observer: None,
+            perfetto_trace_id: None,
+            perfetto_report: None,
         };
         let settings = selected.recording_settings(&request).unwrap();
         let captured = settings

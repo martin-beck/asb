@@ -701,6 +701,18 @@ impl<'a> ReadyAttempt<'a> {
             {
                 emit_warning(warnings, output, "Selected external workload runs only an adapter smoke exercise, not an upstream benchmark task. Benchmark task success will be unavailable; an official dataset and evaluator are not integrated yet.".into())?;
             }
+            let perfetto_observer = tape_cassette
+                .is_some()
+                .then(|| {
+                    measurement_session
+                        .as_mut()
+                        .map(|session| session.perfetto_observer_context("perfetto-requests.json"))
+                        .transpose()
+                })
+                .transpose()
+                .map_err(Error::Run)?
+                .flatten()
+                .flatten();
             let tape_session = instrument_phase(
                 measurement_session.as_mut(),
                 LifecyclePhase::ProxyPreparation,
@@ -742,6 +754,17 @@ impl<'a> ReadyAttempt<'a> {
                                 invocation_dir: options
                                     .invocation_dir
                                     .unwrap_or_else(|| Path::new(".")),
+                                perfetto_observer: perfetto_observer
+                                    .as_ref()
+                                    .map(|(file, _, _)| file.try_clone())
+                                    .transpose()
+                                    .map_err(|error| Error::Run(error.to_string()))?,
+                                perfetto_trace_id: perfetto_observer
+                                    .as_ref()
+                                    .map(|(_, trace_id, _)| trace_id.clone()),
+                                perfetto_report: perfetto_observer
+                                    .as_ref()
+                                    .map(|(_, _, report)| report.clone()),
                             },
                         )?))
                     } else {
