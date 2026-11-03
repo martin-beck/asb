@@ -147,4 +147,27 @@ class CoverageTest(unittest.TestCase):
                                        ('end', 'terminal-1'), ('end', 'untaped-1')])
             self.assertIsNone(namespace['PARENT_CALL'].get())
 
+    def test_http_drain_waits_for_inflight_request_and_unwinds_exceptions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ['ASB_HERMES_NATIVE_SIDECAR'] = str(Path(directory) / 'tape')
+            os.environ['ASB_HERMES_NATIVE_PROGRESS'] = str(Path(directory) / 'progress')
+            source = HOOK.read_text().split('\ntry:\n    # Hermes exposes', 1)[0]
+            namespace = {'__name__': 'hermes_http_drain_fixture'}
+            exec(compile(source, str(HOOK), 'exec'), namespace)
+            started = threading.Event(); release = threading.Event()
+            class Client:
+                def send(self, error=False):
+                    started.set(); assert release.wait(5)
+                    if error: raise ValueError('fixture')
+                    return 'response'
+            drain = namespace['SynchronousHttpDrain'](); drain.install(Client)
+            result = []
+            worker = threading.Thread(target=lambda: result.append(Client().send()))
+            worker.start(); self.assertTrue(started.wait(5))
+            self.assertFalse(drain.wait(.01))
+            release.set(); self.assertTrue(drain.wait(5)); worker.join(5)
+            self.assertEqual(result, ['response'])
+            with self.assertRaises(ValueError): Client().send(error=True)
+            self.assertTrue(drain.wait(.01))
+
 if __name__ == '__main__': unittest.main()

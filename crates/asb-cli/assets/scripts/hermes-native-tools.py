@@ -8,6 +8,7 @@ terminal request and response.  The sidecar is private to an ASB attempt.
 import atexit
 import base64
 import contextvars
+import functools
 import hashlib
 import json
 import os
@@ -808,10 +809,44 @@ def install_dispatch_coverage(registry, transport, mode, capture=None):
     return covered_dispatch
 
 
+class SynchronousHttpDrain:
+    """Let already-started HTTPX requests settle before Hermes calls os._exit."""
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.active = 0
+
+    def install(self, client_class):
+        original = client_class.send
+        @functools.wraps(original)
+        def send(client, *args, **kwargs):
+            with self.condition:
+                self.active += 1
+            try:
+                return original(client, *args, **kwargs)
+            finally:
+                with self.condition:
+                    self.active -= 1
+                    self.condition.notify_all()
+        client_class.send = send
+
+    def wait(self, timeout):
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            while self.active:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self.condition.wait(remaining)
+            return True
+
+
 try:
     # Hermes exposes file and code tools through its normal core catalogue.
     # Preserve that catalogue; unsupported calls run normally when recording
     # but make the evidence incomplete rather than claiming full coverage.
+    import httpx
+    http_drain = SynchronousHttpDrain()
+    http_drain.install(httpx.Client)
     import tools.terminal_tool as terminal_tool
     original = terminal_tool.terminal_tool
     transport = Recorder() if MODE == "record" else Replayer() if MODE == "replay" else None
@@ -895,6 +930,8 @@ try:
     original_os_exit = os._exit
 
     def closing_os_exit(code):
+        if not http_drain.wait(5):
+            transport.failed = True
         transport.close()
         original_os_exit(code)
 
