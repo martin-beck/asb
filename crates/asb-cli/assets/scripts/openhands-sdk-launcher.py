@@ -1,8 +1,7 @@
 """ASB-owned OpenHands SDK launcher for sealed native terminal replay.
 
-Python only adapts the installed SDK's public TerminalAction and
-TerminalObservation types. It does not open, parse, or retain a cassette or
-native sidecar: the ASB Rust bridge is the sole sidecar consumer.
+Python adapts the installed SDK's terminal and file-editor tool types. The
+Rust bridge owns the terminal sidecar; this adapter owns the editor transcript.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ import socket
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from typing import Any
 
 from openhands.sdk.tool import ToolExecutor
@@ -72,6 +72,164 @@ def with_terminal_executor(agent: Any, executor: Any) -> Any:
     if not configured:
         raise ValueError("OpenHands agent does not declare a TerminalTool")
     return agent.model_copy(update={"tools": tools})
+
+
+class EditorTape:
+    """Adapter-owned editor transcript; no editor calls are disabled."""
+
+    def __init__(self, mode: str, path: str):
+        self.mode = mode
+        self.path = Path(path)
+        self.lock = threading.RLock()
+        self.started = 0
+        self.flushed = 0
+        self.pending: dict[int, dict[str, Any]] = {}
+        self.failed = False
+        self.closed = False
+        self.entries = []
+        if mode == "replay":
+            data = self.path.read_bytes()
+            if len(data) > 64 * 1024 * 1024 or (data and not data.endswith(b"\n")):
+                raise RuntimeError("OpenHands editor transcript is invalid")
+            self.entries = [json.loads(line) for line in data.splitlines()]
+            if len(self.entries) > 16384:
+                raise RuntimeError("OpenHands editor transcript is invalid")
+
+    def reserve(self) -> int:
+        with self.lock:
+            if self.closed:
+                raise RuntimeError("OpenHands editor transcript is closed")
+            self.started += 1
+            return self.started
+
+    def finish_record(self, sequence: int, request: Any, observation: Any) -> None:
+        event = {"schema_version": 1, "sequence": sequence, "tool": "openhands.file_editor",
+                 "request": request, "result": observation}
+        with self.lock:
+            try:
+                encoded = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+                if sequence > 16384 or len(encoded.encode("utf-8")) + 1 > 2 * 1024 * 1024:
+                    raise ValueError("editor transcript event exceeds bound")
+                self.pending[sequence] = encoded
+                with self.path.open("a", encoding="utf-8") as output:
+                    while self.flushed + 1 in self.pending:
+                        self.flushed += 1
+                        output.write(self.pending.pop(self.flushed) + "\n")
+                    output.flush()
+                    os.fsync(output.fileno())
+            except (OSError, TypeError, ValueError):
+                self.failed = True
+
+    def replay(self, sequence: int, request: Any) -> Any:
+        with self.lock:
+            if sequence > len(self.entries):
+                raise RuntimeError("OpenHands editor replay has no recorded call")
+            event = self.entries[sequence - 1]
+            if (not isinstance(event, dict) or event.get("schema_version") != 1
+                    or event.get("sequence") != sequence or event.get("tool") != "openhands.file_editor"
+                    or event.get("request") != request or set(event) != {"schema_version", "sequence", "tool", "request", "result"}):
+                raise RuntimeError("OpenHands editor call differs from the recording")
+            return event["result"]
+
+    def close(self) -> None:
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+            if self.failed or (self.mode == "record" and self.flushed != self.started):
+                raise RuntimeError("OpenHands editor recording did not settle")
+            if self.mode == "replay" and self.started != len(self.entries):
+                raise RuntimeError("OpenHands editor replay did not consume the transcript")
+
+
+class FileEditorTapeExecutor(ToolExecutor):
+    def __init__(self, delegate: Any, tape: EditorTape):
+        self.delegate = delegate
+        self.tape = tape
+
+    def __call__(self, action: Any, conversation: Any = None) -> Any:
+        from openhands.tools.file_editor.definition import FileEditorObservation
+        sequence = self.tape.reserve()
+        alias = f"openhands-editor-{sequence}"
+        try:
+            request = action.model_dump(mode="json")
+        except Exception:
+            if self.tape.mode != "record":
+                raise
+            self.tape.failed = True
+            request = None
+        if self.tape.mode == "record":
+            if not os.environ.get("ASB_FS_MARKER_SOCKET"):
+                self.tape.failed = True
+            began = filesystem_marker("begin", alias)
+            try:
+                observation = self.delegate(action, conversation=conversation)
+            except BaseException:
+                self.tape.failed = True
+                raise
+            finally:
+                ended = filesystem_marker("end", alias)
+                if not began or not ended:
+                    self.tape.failed = True
+            if request is not None:
+                try:
+                    self.tape.finish_record(sequence, request, observation.model_dump(mode="json"))
+                except Exception:
+                    self.tape.failed = True
+            return observation
+        result = self.tape.replay(sequence, request)
+        observation = FileEditorObservation.model_validate(result)
+        if not os.environ.get("ASB_FS_REPLAY_SOCKET") or not filesystem_replay_boundary(alias):
+            raise RuntimeError("OpenHands editor filesystem replay boundary is unavailable")
+        return observation
+
+    def close(self) -> None:
+        self.delegate.close()
+
+
+class UnrecordedToolExecutor(ToolExecutor):
+    """Let unsupported tools run during recording but never claim a full tape."""
+    def __init__(self, delegate: Any, tape: EditorTape):
+        self.delegate = delegate
+        self.tape = tape
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if self.tape.mode != "record":
+            raise RuntimeError("OpenHands tool has no recorded replay transport")
+        self.tape.failed = True
+        return self.delegate(*args, **kwargs)
+
+    def close(self) -> None:
+        self.delegate.close()
+
+
+def install_file_editor_tape(tape: EditorTape) -> None:
+    """Keep SDK declarations intact and wrap the editor executor it creates."""
+    from openhands.tools.file_editor.definition import FileEditorTool
+    create = FileEditorTool.create
+
+    def wrapped(_cls: Any, conversation_state: Any) -> Any:
+        definitions = create(conversation_state)
+        return [item.set_executor(FileEditorTapeExecutor(item.executor, tape)) for item in definitions]
+
+    FileEditorTool.create = classmethod(wrapped)
+    # Default OpenHands also exposes task tracking and delegated agents. Keep
+    # them usable while recording, but refuse a complete replay claim until
+    # their own state and nested provider traffic have a transport.
+    from openhands.tools.task.definition import TaskToolSet
+    from openhands.tools.task_tracker.definition import TaskTrackerTool
+
+    def mark_unrecorded(tool_class: Any) -> None:
+        original = tool_class.create
+
+        def wrap(_cls: Any, *args: Any, **kwargs: Any) -> Any:
+            return [item.set_executor(UnrecordedToolExecutor(item.executor, tape))
+                    for item in original(*args, **kwargs)]
+
+        tool_class.create = classmethod(wrap)
+
+    mark_unrecorded(TaskToolSet)
+    mark_unrecorded(TaskTrackerTool)
 
 
 class NativeTerminalExecutor(ToolExecutor):
@@ -185,6 +343,8 @@ def main() -> int:
     from openhands.sdk import LLM, LocalConversation
     from openhands_cli.utils import get_default_cli_agent
 
+    editor_tape = EditorTape(options.mode, os.environ["ASB_OPENHANDS_EDITOR_TAPE"])
+    install_file_editor_tape(editor_tape)
     llm = LLM(model=os.environ["LLM_MODEL"], api_key=os.environ["LLM_API_KEY"],
               base_url=os.environ.get("LLM_BASE_URL"), usage_id="agent")
     sidecar = options.sidecar or os.environ.get("ASB_OPENHANDS_NATIVE_RECORD_SIDECAR", "")
@@ -220,7 +380,10 @@ def main() -> int:
         try:
             conversation.close()
         finally:
-            executor.close()
+            try:
+                executor.close()
+            finally:
+                editor_tape.close()
     return 0
 
 

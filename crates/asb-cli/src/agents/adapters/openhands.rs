@@ -10,11 +10,18 @@ use crate::{Error, install::Recipe};
 /// A future ASB-owned launcher may import the helper and provide a typed SDK
 /// `ToolExecutor` once the bounded native-cassette schema is available.
 const SDK_LAUNCHER: &str = include_str!("../../../assets/scripts/openhands-sdk-launcher.py");
-const ARTIFACTS: &[super::super::ArtifactSpec] = &[super::super::ArtifactSpec {
-    namespace: "openhands",
-    filename: "native-tool-sidecar.jsonl",
-    format: super::super::ArtifactFormat::JsonLines,
-}];
+const ARTIFACTS: &[super::super::ArtifactSpec] = &[
+    super::super::ArtifactSpec {
+        namespace: "openhands",
+        filename: "native-tool-sidecar.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "tool-replay",
+        filename: "local-tools.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+];
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "openhands",
     "openhands",
@@ -167,6 +174,21 @@ fn prepare_native_tool_replay(
             output.join("native-tool-sidecar.jsonl"),
         );
     }
+    let editor_tape = match tape.mode {
+        crate::tape::Mode::Record => {
+            let path = context.run_dir.join("tool-replay/local-tools.jsonl");
+            std::fs::create_dir_all(path.parent().expect("transcript parent"))
+                .map_err(crate::io_error)?;
+            std::fs::write(&path, b"").map_err(crate::io_error)?;
+            path
+        }
+        crate::tape::Mode::Replay => {
+            super::super::tool_replay_mcp::replay_transcript(context, tape.cassette)?
+        }
+    };
+    context
+        .command
+        .env("ASB_OPENHANDS_EDITOR_TAPE", editor_tape);
     Ok(())
 }
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
@@ -529,14 +551,23 @@ mod tests {
             environment(&command).get("ASB_OPENHANDS_NATIVE_RECORD_SIDECAR"),
             Some(&sidecar.display().to_string())
         );
+        let editor = run.join("tool-replay/local-tools.jsonl");
+        assert_eq!(
+            environment(&command).get("ASB_OPENHANDS_EDITOR_TAPE"),
+            Some(&editor.display().to_string())
+        );
         // ArtifactOwner, not adapter preparation, owns this pre-claimed
         // namespace. The SDK bridge may now create the single declared file.
         assert!(run.join("openhands").is_dir());
         std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
         std::fs::write(&sidecar, b"{\"schema_version\":1}\n").unwrap();
+        let editor_event = br#"{"schema_version":1,"sequence":1,"tool":"openhands.file_editor","request":{"command":"view"},"result":{"content":[]}}
+"#;
+        crate::agents::tool_replay::Transcript::decode(editor_event).unwrap();
+        std::fs::write(&editor, editor_event).unwrap();
         let frozen = owner.freeze();
         assert!(!frozen.error);
-        let artifacts = collect(&CollectionContext {
+        let artifacts = ADAPTER.collect(&CollectionContext {
             frozen: &frozen,
             provider_capture: None,
             run_dir: &run,
@@ -548,6 +579,10 @@ mod tests {
         assert_eq!(
             artifacts.native_tool_sidecar.as_deref(),
             Some(b"{\"schema_version\":1}\n".as_slice())
+        );
+        assert_eq!(
+            artifacts.local_tool_transcript.as_deref(),
+            Some(editor_event.as_slice())
         );
         std::fs::remove_dir_all(root).unwrap();
     }

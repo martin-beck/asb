@@ -63,6 +63,137 @@ def message(source, text):
     return MessageEvent(source=source, llm_message=Event(role='assistant' if source == 'agent' else 'user', content=[TextContent(text=text)]))
 
 class NativeFinalTest(unittest.TestCase):
+    def test_unrecorded_default_tool_still_runs_but_cannot_claim_complete_recording(self):
+        class Delegate:
+            def __call__(self, value): return 'ran:' + value
+            def close(self): pass
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'editor.jsonl'; path.touch()
+            tape = launcher.EditorTape('record', str(path))
+            executor = launcher.UnrecordedToolExecutor(Delegate(), tape)
+            self.assertEqual(executor('task'), 'ran:task')
+            with self.assertRaisesRegex(RuntimeError, 'recording did not settle'):
+                tape.close()
+            replay = launcher.EditorTape('replay', str(path))
+            with self.assertRaisesRegex(RuntimeError, 'no recorded replay transport'):
+                launcher.UnrecordedToolExecutor(Delegate(), replay)('task')
+
+    def test_editor_transcript_preserves_start_order_for_overlapping_calls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'editor.jsonl'; path.touch()
+            tape = launcher.EditorTape('record', str(path))
+            one, two = tape.reserve(), tape.reserve()
+            tape.finish_record(two, {'call': 2}, {'result': 2})
+            self.assertEqual(path.read_text(), '')
+            tape.finish_record(one, {'call': 1}, {'result': 1})
+            tape.close()
+            self.assertEqual([json.loads(line)['sequence'] for line in path.read_text().splitlines()], [1, 2])
+
+    def test_editor_recording_without_filesystem_capture_fails_after_real_call(self):
+        definition = module('openhands.tools.file_editor.definition')
+        definition.FileEditorObservation = Event
+        class Delegate:
+            def __call__(self, action, conversation=None): return Event(model_dump=lambda mode: {'result':'ok'})
+            def close(self): pass
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'editor.jsonl'; path.touch()
+            tape = launcher.EditorTape('record', str(path))
+            executor = launcher.FileEditorTapeExecutor(Delegate(), tape)
+            action = Event(model_dump=lambda mode: {'command':'edit'})
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertIsInstance(executor(action), Event)
+            with self.assertRaisesRegex(RuntimeError, 'recording did not settle'):
+                tape.close()
+
+    def test_editor_serialization_failure_does_not_skip_the_real_call(self):
+        definition = sys.modules.get('openhands.tools.file_editor.definition') or module('openhands.tools.file_editor.definition')
+        definition.FileEditorObservation = Event
+        called = []
+        class Delegate:
+            def __call__(self, action, conversation=None):
+                called.append(True)
+                return Event(model_dump=lambda mode: {'result':'ok'})
+            def close(self): pass
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'editor.jsonl'; path.touch()
+            tape = launcher.EditorTape('record', str(path))
+            executor = launcher.FileEditorTapeExecutor(Delegate(), tape)
+            def broken(mode): raise ValueError('cannot serialize')
+            action = Event(model_dump=broken)
+            with patch.dict(os.environ, {'ASB_FS_MARKER_SOCKET':'/fixture'}), \
+                    patch.object(launcher, 'filesystem_marker', return_value=True):
+                self.assertIsInstance(executor(action), Event)
+            self.assertEqual(called, [True])
+            with self.assertRaisesRegex(RuntimeError, 'recording did not settle'):
+                tape.close()
+
+    def test_editor_record_and_replay_preserve_tool_and_apply_effect_before_response(self):
+        definition = module('openhands.tools.file_editor.definition')
+        class EditorObservation:
+            def __init__(self, content): self.content = content
+            def model_dump(self, mode): return {'content': self.content}
+            @classmethod
+            def model_validate(cls, value): return cls(value['content'])
+        definition.FileEditorObservation = EditorObservation
+        class Action:
+            def __init__(self, value): self.value = value
+            def model_dump(self, mode): return {'command': 'edit', 'value': self.value}
+        class Delegate:
+            def __init__(self): self.calls = 0
+            def __call__(self, action, conversation=None):
+                self.calls += 1
+                return EditorObservation('edited')
+            def close(self): pass
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'editor.jsonl'
+            tape = launcher.EditorTape('record', str(path)); delegate = Delegate()
+            executor = launcher.FileEditorTapeExecutor(delegate, tape)
+            markers = []
+            with patch.dict(os.environ, {'ASB_FS_MARKER_SOCKET':'/fixture'}), \
+                    patch.object(launcher, 'filesystem_marker', side_effect=lambda action, alias: markers.append((action, alias)) or True):
+                self.assertEqual(executor(Action('a')).content, 'edited')
+            tape.close()
+            self.assertEqual(delegate.calls, 1)
+            self.assertEqual(markers, [('begin','openhands-editor-1'),('end','openhands-editor-1')])
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved['tool'], 'openhands.file_editor')
+            replay = launcher.EditorTape('replay', str(path)); delegate = Delegate()
+            executor = launcher.FileEditorTapeExecutor(delegate, replay)
+            effect = pathlib.Path(directory) / 'effect'
+            def apply(alias):
+                self.assertEqual(alias, 'openhands-editor-1')
+                effect.write_text('recorded effect')
+                return True
+            with patch.dict(os.environ, {'ASB_FS_REPLAY_SOCKET':'/fixture'}), \
+                    patch.object(launcher, 'filesystem_replay_boundary', side_effect=apply):
+                self.assertEqual(executor(Action('a')).content, 'edited')
+            self.assertEqual(delegate.calls, 0)
+            self.assertEqual(effect.read_text(), 'recorded effect')
+            replay.close()
+
+    def test_editor_replay_rejects_mismatch_and_missing_boundary(self):
+        definition = sys.modules.get('openhands.tools.file_editor.definition') or module('openhands.tools.file_editor.definition')
+        class EditorObservation:
+            @classmethod
+            def model_validate(cls, value): return value
+        definition.FileEditorObservation = EditorObservation
+        action = Event(model_dump=lambda mode: {'command':'edit'})
+        entry = {'schema_version':1,'sequence':1,'tool':'openhands.file_editor',
+                 'request':{'command':'edit'},'result':{'content':'ok'}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'editor.jsonl'; path.write_text(json.dumps(entry)+'\n')
+            tape = launcher.EditorTape('replay', str(path))
+            executor = launcher.FileEditorTapeExecutor(Event(close=lambda:None), tape)
+            wrong = Event(model_dump=lambda mode: {'command':'other'})
+            with self.assertRaisesRegex(RuntimeError, 'differs'):
+                executor(wrong)
+            tape = launcher.EditorTape('replay', str(path))
+            executor = launcher.FileEditorTapeExecutor(Event(close=lambda:None), tape)
+            with patch.dict(os.environ, {'ASB_FS_REPLAY_SOCKET':'/fixture'}), \
+                    patch.object(launcher, 'filesystem_replay_boundary', return_value=False):
+                with self.assertRaisesRegex(RuntimeError, 'boundary is unavailable'):
+                    executor(action)
+
     def test_terminal_replay_waits_for_filesystem_effects_after_bridge_validation(self):
         terminal = sys.modules.get('openhands.tools.terminal') or module('openhands.tools.terminal')
         metadata = sys.modules.get('openhands.tools.terminal.metadata') or module('openhands.tools.terminal.metadata')
