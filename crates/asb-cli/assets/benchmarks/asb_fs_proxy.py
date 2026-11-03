@@ -1,9 +1,37 @@
 """Local feasibility probe only; not an ASB replay backend."""
-import errno, json, os, re, socket, stat, sys, threading, time
+import errno, hashlib, json, os, re, socket, stat, sys, threading, time
+from collections import OrderedDict
 from pathlib import Path
 from fuse import FUSE, FuseOSError, Operations, fuse_get_context
 
 backing, mount, evidence = map(Path, sys.argv[1:4])
+
+
+class PayloadStore:
+    """Reuse recently seen exact payloads without changing event ordering."""
+    def __init__(self, path, capacity=32768):
+        self.file = open(path, 'a+b', buffering=0)
+        self.recent = OrderedDict()
+        self.capacity = capacity
+
+    def append(self, data):
+        key = (len(data), hashlib.sha256(data).digest())
+        offset = self.recent.get(key)
+        if offset is not None:
+            self.file.seek(offset)
+            if self.file.read(len(data)) == data:
+                self.recent.move_to_end(key)
+                return offset
+        self.file.seek(0, os.SEEK_END)
+        offset = self.file.tell()
+        if self.file.write(data) != len(data):
+            raise RuntimeError('short payload write')
+        if self.capacity:
+            self.recent[key] = offset
+            self.recent.move_to_end(key)
+            if len(self.recent) > self.capacity:
+                self.recent.popitem(last=False)
+        return offset
 
 def caller_identity(tid):
     """Best-effort bounded ancestry at callback time; not an authority boundary."""
@@ -42,7 +70,7 @@ class Proxy(Operations):
         self.handles = {}
         self.inode_locks = {}
         self.log = open(evidence / 'events.jsonl', 'a', encoding='utf-8', buffering=1)
-        self.payload = open(evidence / 'payload.bin', 'ab', buffering=0)
+        self.payload = PayloadStore(evidence / 'payload.bin')
         control_fd = os.environ.get('ASB_PROBE_CONTROL_FD')
         if control_fd is not None:
             self.control = socket.socket(fileno=int(control_fd))
@@ -82,9 +110,7 @@ class Proxy(Operations):
             self.sequence += 1
             event = {'sequence': self.sequence, 'op': op, 'path': path, 'caller': None if is_marker or os.environ.get('ASB_PROBE_BENCHMARK_NO_IDENTITY') == '1' else caller_identity(fuse_get_context()[2]), **detail}
             if data is not None:
-                position = self.payload.tell()
-                if self.payload.write(data) != len(data):
-                    raise RuntimeError('short payload write')
+                position = self.payload.append(data)
                 event.update(object='payload.bin', payload_offset=position, bytes=len(data))
             self.log.write(json.dumps(event, separators=(',', ':')) + '\n')
             return self.sequence

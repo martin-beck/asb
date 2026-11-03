@@ -9,6 +9,11 @@ use support::IsolatedEnvironment;
 static PYTHON_PROTOCOL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
+fn filesystem_recorder_reuses_exact_payloads_with_bounded_index() {
+    python_protocol("benchmark_fs_payload.py");
+}
+
+#[test]
 fn original_sweep_qualification_inventory_is_bounded_and_requires_declared_evidence() {
     python_protocol("benchmark_live_repeated_sweep_original.py");
 }
