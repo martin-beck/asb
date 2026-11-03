@@ -1,7 +1,7 @@
 """Local feasibility probe only; not an ASB replay backend."""
 import errno, json, os, stat, sys, threading, time
 from pathlib import Path
-from fuse import FUSE, FuseOSError, Operations
+from fuse import FUSE, FuseOSError, Operations, fuse_get_context
 
 backing, mount, evidence = map(Path, sys.argv[1:4])
 class Proxy(Operations):
@@ -28,7 +28,7 @@ class Proxy(Operations):
     def record(self, op, path, data=None, **detail):
         with self.record_lock:
             self.sequence += 1
-            event = {'sequence': self.sequence, 'op': op, 'path': path, **detail}
+            event = {'sequence': self.sequence, 'op': op, 'path': path, 'caller_pid': fuse_get_context()[2], **detail}
             if data is not None:
                 name = f'object-{self.sequence:08d}'
                 with open(evidence / name, 'xb') as f: f.write(data)

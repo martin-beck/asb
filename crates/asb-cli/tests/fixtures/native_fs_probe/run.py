@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 
 HERE = Path(__file__).resolve().parent
@@ -43,7 +44,9 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
             if process.poll() is not None:
                 raise RuntimeError('FUSE process exited before mounting')
             mounted = True
+            writer_tids = {}
             def write(name):
+                writer_tids[name] = threading.get_native_id()
                 fd = os.open(mount / name, os.O_WRONLY)
                 try:
                     os.pwrite(fd, b'changed', 0)
@@ -82,6 +85,11 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
                 writer.result(timeout=5)
                 truncation.result(timeout=5)
             assert (backing / 'two').read_bytes() == b''
+            child = subprocess.Popen([python, '-c',
+                'from pathlib import Path; Path("child").write_bytes(b"child data")'], cwd=mount)
+            child_pid = child.pid
+            assert child.wait(timeout=5) == 0
+            assert (backing / 'child').read_bytes() == b'child data'
         finally:
             (evidence / 'write-release').touch()
             if mounted:
@@ -99,12 +107,17 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     second_write = next(i for i, event in enumerate(events) if event['op'] == 'write' and event['path'] == '/two')
     second_truncate = next(i for i, event in enumerate(events) if event['op'] == 'truncate' and event['path'] == '/two-alias')
     assert second_write < second_truncate, ops
+    child_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/child']
+    assert child_writes and all(event['caller_pid'] == child_pid for event in child_writes), child_writes
+    parent_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/one']
+    assert parent_writes and all(event['caller_pid'] == writer_tids['one'] for event in parent_writes), parent_writes
     def replay(index):
         destination = root / f'replay-{index}'
         subprocess.run([python, str(HERE / 'replay.py'), str(evidence), str(destination), str(baseline)], check=True)
         assert (destination / 'one').read_bytes() == b''
         assert (destination / 'other').read_bytes() == b'independent'
         assert (destination / 'two').read_bytes() == b''
+        assert (destination / 'child').read_bytes() == b'child data'
         assert os.stat(destination / 'two').st_ino == os.stat(destination / 'two-alias').st_ino
         assert os.stat(destination / 'one').st_ino == os.stat(destination / 'alias').st_ino
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
