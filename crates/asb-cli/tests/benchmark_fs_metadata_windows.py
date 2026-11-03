@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 ROOT=Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT/'crates/asb-cli/assets/benchmarks'))
-from asb_fs_metadata_windows import ObservationWindow
+from asb_fs_metadata_windows import InferredAbsent, ObservationWindow
 
 
 def attrs(size):
@@ -77,6 +77,36 @@ class MetadataWindowTest(unittest.TestCase):
             results=list(pool.map(lambda _:window.observe('observe-getattr','/a')['st_size'],range(32)))
         self.assertEqual(sorted(results),list(range(32)))
         self.assertIsNone(window.advance())
+
+    def test_missing_name_is_proven_only_by_current_complete_parent_listing(self):
+        events=[{'op':'observe-readdir','path':'/','result':['.','..','present']},
+                {'op':'open','path':'/present','flags':0},
+                {'op':'write','path':'/present'}]
+        window=ObservationWindow(events,ROOT/'target/unused')
+        with self.assertRaisesRegex(RuntimeError,'no recorded'):
+            window.observe('observe-getattr','/missing')
+        window.observe('observe-readdir','/')
+        with self.assertRaises(InferredAbsent) as caught:
+            window.observe('observe-getattr','/missing')
+        self.assertEqual(caught.exception.errno,errno.ENOENT)
+        self.assertEqual(caught.exception.parent,'/')
+        with self.assertRaisesRegex(RuntimeError,'no recorded'):
+            window.observe('observe-getattr','/present')
+        with self.assertRaisesRegex(RuntimeError,'no recorded'):
+            window.observe('observe-getattr','/other/../missing')
+        self.assertEqual(window.advance()['op'],'open');window.operation_applied()
+        with self.assertRaises(InferredAbsent): window.observe('observe-getattr','/missing')
+        self.assertEqual(window.advance()['op'],'write');window.operation_applied()
+        with self.assertRaisesRegex(RuntimeError,'no recorded'):
+            window.observe('observe-getattr','/missing')
+
+    def test_incomplete_or_malformed_listings_do_not_prove_absence(self):
+        for result in (['.', 'name'], ['.', '..', 'name', 'name'], ['.', '..', 'bad/name']):
+            window=ObservationWindow([{'op':'observe-readdir','path':'/','result':result}],ROOT/'target/unused')
+            with self.assertRaisesRegex(ValueError,'listing is invalid'):
+                window.observe('observe-readdir','/')
+            with self.assertRaisesRegex(RuntimeError,'no recorded'):
+                window.observe('observe-getattr','/missing')
 
     def test_wrong_request_does_not_consume_observation(self):
         window=ObservationWindow([{'op':'observe-readlink','path':'/a','result':'target'}],ROOT/'target/unused')

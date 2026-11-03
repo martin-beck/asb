@@ -5,6 +5,8 @@ intervening recorded operation before moving to the following window.
 """
 from collections import defaultdict, deque
 import errno
+import os
+import posixpath
 from functools import wraps
 from pathlib import Path
 import threading
@@ -26,6 +28,13 @@ def _synchronized(method):
     return locked
 
 
+class InferredAbsent(FileNotFoundError):
+    """A complete, unchanged recorded parent listing proves this absence."""
+    def __init__(self, parent):
+        super().__init__(errno.ENOENT, 'recorded parent listing proves absence')
+        self.parent = parent
+
+
 class ObservationWindow:
     def __init__(self, events, payload):
         self.lock = threading.RLock()
@@ -35,6 +44,8 @@ class ObservationWindow:
         self.boundary = None
         self.ended = False
         self.in_flight = False
+        self.in_flight_event = None
+        self.directory_listings = {}
         self._load()
 
     @staticmethod
@@ -67,6 +78,13 @@ class ObservationWindow:
         key = self._key(op, path, detail)
         queue = self.pending.get(key)
         if not queue:
+            parts = path.split('/')
+            if (op == 'observe-getattr' and len(parts) >= 2 and all(part not in ('', '.', '..') for part in parts[1:])):
+                parent, name = posixpath.split(path)
+                parent = parent or '/'
+                listing = self.directory_listings.get(parent)
+                if listing is not None and name not in listing:
+                    raise InferredAbsent(parent)
             raise RuntimeError('no recorded filesystem observation in the current causal window')
         event = queue.popleft()
         if not queue:
@@ -99,6 +117,11 @@ class ObservationWindow:
         elif op in ('observe-readdir', 'observe-listxattr'):
             if not isinstance(result, list) or any(not isinstance(value, str) for value in result):
                 raise ValueError('recorded filesystem observation is invalid')
+            if op == 'observe-readdir':
+                if (len(result) != len(set(result)) or '.' not in result or '..' not in result
+                        or any('/' in value or not value for value in result)):
+                    raise ValueError('recorded filesystem directory listing is invalid')
+                self.directory_listings[path] = frozenset(result)
         elif op == 'observe-readlink' and not isinstance(result, str):
             raise ValueError('recorded filesystem observation is invalid')
         return result
@@ -119,11 +142,21 @@ class ObservationWindow:
             return None
         self.boundary = None
         self.in_flight = True
+        self.in_flight_event = event
         return event
 
     @_synchronized
     def operation_applied(self):
         if not self.in_flight or self.boundary is not None or self.pending or self.ended:
             raise RuntimeError('filesystem observation window is not ready to advance')
+        event = self.in_flight_event
+        op = event.get('op')
+        flags = event.get('flags')
+        read_only_open = (op == 'open' and type(flags) is int
+                          and flags & os.O_ACCMODE == os.O_RDONLY
+                          and not flags & (os.O_CREAT | os.O_TRUNC))
+        if op not in ('read', 'release') and not read_only_open:
+            self.directory_listings.clear()
         self.in_flight = False
+        self.in_flight_event = None
         self._load()
