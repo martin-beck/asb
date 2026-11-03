@@ -81,12 +81,11 @@ impl AuxiliarySessions {
             if let Err(error) = completed.result {
                 failure.get_or_insert(error);
             }
-            if mode == Mode::Record {
-                if let Err(error) =
+            if mode == Mode::Record
+                && let Err(error) =
                     attach_auxiliary_capture(&name, completed.evidence.captures, evidence)
-                {
-                    failure.get_or_insert(error);
-                }
+            {
+                failure.get_or_insert(error);
             }
         }
         if failure.is_some() {
