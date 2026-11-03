@@ -181,8 +181,9 @@ inputs are hard links to the sealed source and must be opened read-only; replay
 cursors and workspaces must be separate per replica. Host import and journal
 publication now support file-backed filesystem receipts without loading the
 payload into memory. The guest archive transfer accepts these file-backed
-receipts up to the cassette track limit; the guest recorder does not yet
-produce them, and the runtime does not yet consume them.
+receipts up to the cassette track limit. The guest driver can export a completed
+pair when explicitly requested. No production launcher yet starts the recorder
+or makes that request, and the runtime does not yet consume the files.
 
 `python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` checks that
 overlapping terminal calls produce a readable sidecar without serializing

@@ -45,6 +45,7 @@ impl Fixture {
             project_root: self.0.join("project"),
             runtime_dir: self.0.join("runtime"),
             run_dir: self.0.join("runtime/run"),
+            filesystem_recording: false,
             replay: false,
             timeout_seconds: 1.0,
             namespace_collectors: Vec::new(),

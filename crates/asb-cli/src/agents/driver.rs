@@ -6,7 +6,7 @@ use crate::{Error, benchmark::BenchmarkConfig, endpoint::Connection, project};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -94,6 +94,9 @@ pub(crate) struct GuestRequest {
     pub project_root: PathBuf,
     pub runtime_dir: PathBuf,
     pub run_dir: PathBuf,
+    /// The attempt owns completed filesystem operation streams in run_dir.
+    #[serde(default)]
+    pub filesystem_recording: bool,
     #[serde(default)]
     pub replay: bool,
     /// Exact provider-tape path forwarded by the owning runner.  It is never
@@ -956,6 +959,9 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         namespace_collectors,
     };
     result.exported_artifacts = export_sealed_artifacts(&request.run_dir, &sealed)?;
+    if request.filesystem_recording {
+        export_filesystem_recording(&request.run_dir, &mut result.exported_artifacts)?;
+    }
     publish_artifacts(&mut result, artifact_owner, frozen.diagnostic(), |result| {
         publish_result(&request.run_dir, result)
     })?;
@@ -1076,6 +1082,87 @@ fn export_sealed_artifacts(
         .collect()
 }
 
+/// Stream completed filesystem recordings to the private export area. The
+/// caller must settle the recording process before invoking this function.
+fn export_filesystem_recording(
+    run_dir: &Path,
+    receipts: &mut Vec<GuestArtifactReceipt>,
+) -> Result<(), Error> {
+    if receipts.len() + 2 > MAX_EXPORTED_ARTIFACTS {
+        return Err(Error::Run(
+            "guest exported artifact count exceeds its bound".into(),
+        ));
+    }
+    let directory = run_dir.join("exports");
+    fs::create_dir_all(&directory).map_err(crate::io_error)?;
+    for (kind, name) in [
+        ("aux-fs-events", "events.jsonl"),
+        ("aux-fs-payload", "payload.bin"),
+    ] {
+        let path = run_dir.join("filesystem-recording").join(name);
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let mut input = options.open(&path).map_err(crate::io_error)?;
+        let metadata = input.metadata().map_err(crate::io_error)?;
+        let limit = crate::cassette::Limits::default().max_track_bytes;
+        if !metadata.is_file() || metadata.len() > limit {
+            return Err(Error::Run(
+                "filesystem recording is unavailable or too large".into(),
+            ));
+        }
+        let filename = format!("artifact-{}", receipts.len());
+        let mut output_options = fs::OpenOptions::new();
+        output_options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            output_options.mode(0o600);
+        }
+        let mut output = output_options
+            .open(directory.join(&filename))
+            .map_err(crate::io_error)?;
+        let mut hash = Sha256::new();
+        let mut bytes = 0u64;
+        let mut buffer = [0u8; 65536];
+        loop {
+            let count = input.read(&mut buffer).map_err(crate::io_error)?;
+            if count == 0 {
+                break;
+            }
+            bytes = bytes
+                .checked_add(count as u64)
+                .ok_or_else(|| Error::Run("filesystem recording size overflow".into()))?;
+            if bytes > metadata.len() {
+                return Err(Error::Run(
+                    "filesystem recording changed during export".into(),
+                ));
+            }
+            hash.update(&buffer[..count]);
+            output
+                .write_all(&buffer[..count])
+                .map_err(crate::io_error)?;
+        }
+        if bytes != metadata.len() {
+            return Err(Error::Run(
+                "filesystem recording changed during export".into(),
+            ));
+        }
+        output.sync_all().map_err(crate::io_error)?;
+        receipts.push(GuestArtifactReceipt {
+            kind: kind.into(),
+            filename,
+            bytes,
+            sha256: format!("{:x}", hash.finalize()),
+        });
+    }
+    Ok(())
+}
+
 fn publish_artifacts(
     result: &mut GuestResult,
     artifact_owner: super::ArtifactOwner,
@@ -1148,6 +1235,36 @@ pub(crate) fn entry() -> std::process::ExitCode {
 #[cfg(all(test, unix))]
 mod artifact_publication_tests {
     use super::*;
+
+    #[test]
+    fn filesystem_recording_exports_file_backed_receipts() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "asb-guest-fs-export-{}",
+                crate::tools::runtime::unique_id()
+            ));
+        fs::create_dir_all(root.join("filesystem-recording")).unwrap();
+        let events = b"{\"sequence\":1}\n";
+        let payload = vec![0xabu8; 17 * 1024 * 1024];
+        fs::write(root.join("filesystem-recording/events.jsonl"), events).unwrap();
+        fs::write(root.join("filesystem-recording/payload.bin"), &payload).unwrap();
+        let mut receipts = Vec::new();
+        export_filesystem_recording(&root, &mut receipts).unwrap();
+        assert_eq!(receipts.len(), 2);
+        for (receipt, expected) in receipts.iter().zip([events.as_slice(), payload.as_slice()]) {
+            assert_eq!(receipt.bytes, expected.len() as u64);
+            assert_eq!(receipt.sha256, format!("{:x}", Sha256::digest(expected)));
+            assert_eq!(
+                fs::read(root.join("exports").join(&receipt.filename)).unwrap(),
+                expected
+            );
+        }
+        let missing = root.join("missing");
+        fs::create_dir(&missing).unwrap();
+        assert!(export_filesystem_recording(&missing, &mut Vec::new()).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn replay_sidecars_leave_the_controller_result_before_receipt_export() {
