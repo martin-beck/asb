@@ -174,6 +174,10 @@ def _trace_once(item):
 _recorded_outputs = {}
 _replayed_renders = {}
 _replayed_output_events = {}
+
+class _NativeStringResult(str):
+    """Give each string result its own identity for native-tool provenance."""
+
 # Private, process-local provenance. A final ToolMessage is eligible only
 # when AbilityManager rendered the exact output returned by a wrapped native
 # tool. Values and tool-call ids are not provenance: synthetic messages can
@@ -732,9 +736,13 @@ try:
                     raise RuntimeError(
                         "ASB OpenJiuwen native replay sidecar has no rendered tool result"
                     )
-                result = ToolOutput.model_validate(_materialize_workspace(
-                    envelope["tool_output"]
-                ))
+                value = _materialize_workspace(envelope["tool_output"])
+                if isinstance(value, str):
+                    result = _NativeStringResult(value)
+                elif isinstance(value, dict):
+                    result = ToolOutput.model_validate(value)
+                else:
+                    raise RuntimeError("ASB OpenJiuwen native replay tool output has an unsupported type")
                 rendered = envelope["rendered"]
                 if isinstance(rendered, str):
                     _replayed_renders[id(result)] = _materialize_workspace(rendered)
@@ -768,11 +776,22 @@ try:
             if invocation is not None and invocation["depth"] != 0:
                 return output
             if _record_path:
+                # Web tools may return the same interned string for multiple
+                # invocations. Preserve the string value while giving each
+                # result distinct identity at the rendering boundary.
+                if isinstance(output, str):
+                    output = _NativeStringResult(output)
                 # Keep the opaque sidecar portable across fresh replay
                 # workspaces. The foreground client still receives the live
                 # output; only the sealed replay artifact uses this marker.
+                if isinstance(output, str):
+                    tool_output = output
+                elif isinstance(output, ToolOutput):
+                    tool_output = output.model_dump()
+                else:
+                    raise RuntimeError("ASB OpenJiuwen native recording tool output has an unsupported type")
                 encoded = _canonical({
-                    "tool_output": _normalize_workspace(output.model_dump()),
+                    "tool_output": _normalize_workspace(tool_output),
                     "rendered": None,
                     "message": None,
                 })
@@ -819,6 +838,18 @@ try:
         ("code", CodeTool),
     ):
         _wrap_native_tool(_tool_name, _tool_type)
+    # Web tools return strings and otherwise perform live network requests on
+    # replay. Capture their native results in the same ordered sidecar.
+    for _module, _tool_name, _class_name in (
+        ("fetch_webpage", "fetch_webpage", "WebFetchWebpageTool"),
+        ("free_search", "free_search", "WebFreeSearchTool"),
+        ("paid_search", "paid_search", "WebPaidSearchTool"),
+    ):
+        try:
+            _web_module = __import__(f"openjiuwen.harness.tools.web.{_module}", fromlist=[_class_name])
+        except ImportError:
+            continue
+        _wrap_native_tool(_tool_name, getattr(_web_module, _class_name))
 except ImportError:
     pass
 
