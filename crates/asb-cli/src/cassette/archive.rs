@@ -53,7 +53,7 @@ impl Limits {
             || self.max_tracks > 65_533
         {
             return Err(Error(
-                "cassette reader limits must be positive; this ZIP32 schema supports at most 65533 payload entries"
+                "cassette reader limits must be positive and support at most 65533 payload entries"
                     .into(),
             ));
         }
@@ -74,7 +74,7 @@ pub struct Archive {
 
 impl Archive {
     /// Open and validate metadata/manifest only. Payload CRC/digests are checked
-    /// when selected. Schema one uses bounded single-disk ZIP32, not ZIP64.
+    /// when selected. Single-disk ZIP32 and ZIP64 metadata are bounded.
     pub fn open(path: &Path, limits: Limits) -> Result<Self, Error> {
         limits.validate()?;
         Self::from_file(open_file(path)?, limits)

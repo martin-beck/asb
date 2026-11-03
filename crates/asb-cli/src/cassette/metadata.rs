@@ -64,25 +64,81 @@ impl MetadataReader {
             })
             .ok_or_else(|| Error("cassette ZIP directory is missing or truncated".into()))?;
         let end = &tail[offset..];
-        let entries = word(end, 10) as usize;
-        let bytes = dword(end, 12);
-        let start = dword(end, 16);
+        let entries32 = word(end, 10) as u64;
+        let bytes32 = dword(end, 12);
+        let start32 = dword(end, 16);
         let eocd_offset = length - tail_len + offset as u64;
-        if word(end, 4) != 0
-            || word(end, 6) != 0
-            || word(end, 8) as usize != entries
-            || entries == 0
-            || entries == u16::MAX as usize
-            || entries > limits.max_tracks.saturating_add(1)
-            || bytes > limits.max_directory_bytes
-            || bytes == u32::MAX as u64
-            || start == u32::MAX as u64
-            || start.checked_add(bytes) != Some(eocd_offset)
-        {
-            return Err(Error("unsupported or excessive cassette ZIP directory (requires bounded single-disk ZIP32)".into()));
+        if word(end, 4) != 0 || word(end, 6) != 0 || word(end, 8) as u64 != entries32 {
+            return Err(Error(
+                "unsupported or excessive cassette ZIP directory".into(),
+            ));
         }
-        let snapshot_len = bytes
-            .checked_add(end.len() as u64)
+        let locator_offset = eocd_offset.checked_sub(20);
+        let mut locator = [0u8; 20];
+        let has_locator = if let Some(position) = locator_offset {
+            file.seek(SeekFrom::Start(position)).map_err(error)?;
+            file.read_exact(&mut locator).map_err(error)?;
+            &locator[..4] == b"PK\x06\x07"
+        } else {
+            false
+        };
+        let mut zip64_header = None;
+        let (entries, bytes, start, directory_end) = if has_locator {
+            let position = qword(&locator, 8);
+            let mut header = [0u8; 56];
+            if dword(&locator, 4) != 0
+                || dword(&locator, 16) != 1
+                || position
+                    .checked_add(56)
+                    .is_none_or(|end| end > locator_offset.unwrap())
+            {
+                return Err(Error("invalid ZIP64 locator".into()));
+            }
+            file.seek(SeekFrom::Start(position)).map_err(error)?;
+            file.read_exact(&mut header).map_err(error)?;
+            let size = qword(&header, 4);
+            let entries = qword(&header, 32);
+            let bytes = qword(&header, 40);
+            let start = qword(&header, 48);
+            if &header[..4] != b"PK\x06\x06"
+                || size < 44
+                || position
+                    .checked_add(12)
+                    .and_then(|end| end.checked_add(size))
+                    != locator_offset
+                || dword(&header, 16) != 0
+                || dword(&header, 20) != 0
+                || qword(&header, 24) != entries
+                || (entries32 != u16::MAX as u64 && entries32 != entries)
+                || (bytes32 != u32::MAX as u64 && bytes32 != bytes)
+                || (start32 != u32::MAX as u64 && start32 != start)
+            {
+                return Err(Error("invalid ZIP64 directory".into()));
+            }
+            zip64_header = Some(header);
+            (entries, bytes, start, position)
+        } else {
+            if entries32 == u16::MAX as u64
+                || bytes32 == u32::MAX as u64
+                || start32 == u32::MAX as u64
+            {
+                return Err(Error("missing ZIP64 directory".into()));
+            }
+            (entries32, bytes32, start32, eocd_offset)
+        };
+        if entries == 0
+            || entries > limits.max_tracks.saturating_add(1) as u64
+            || bytes > limits.max_directory_bytes
+            || start.checked_add(bytes) != Some(directory_end)
+        {
+            return Err(Error(
+                "unsupported or excessive cassette ZIP directory".into(),
+            ));
+        }
+        let entries =
+            usize::try_from(entries).map_err(|_| Error("cassette entry count overflow".into()))?;
+        let snapshot_len = length
+            .checked_sub(start)
             .filter(|length| *length <= limits.max_directory_bytes)
             .and_then(|length| usize::try_from(length).ok())
             .ok_or_else(|| {
@@ -95,10 +151,20 @@ impl MetadataReader {
         metadata
             .try_reserve_exact(snapshot_len)
             .map_err(|_| Error("cannot allocate bounded cassette directory snapshot".into()))?;
-        metadata.resize(count, 0);
+        metadata.resize(snapshot_len, 0);
         file.read_exact(&mut metadata).map_err(error)?;
-        validate_directory(&metadata, entries, start)?;
-        metadata.extend_from_slice(end);
+        let overlap = start.max(length - tail_len);
+        if metadata[(overlap - start) as usize..]
+            != tail[(overlap - (length - tail_len)) as usize..]
+            || zip64_header.is_some_and(|header| {
+                metadata.get(count..count + header.len()) != Some(header.as_slice())
+            })
+        {
+            return Err(Error(
+                "cassette ZIP directory changed during inspection".into(),
+            ));
+        }
+        validate_directory(&metadata[..count], entries, start)?;
         let phase = Arc::new(AtomicBool::new(true));
         Ok((
             Self {
@@ -125,13 +191,7 @@ fn validate_directory(bytes: &[u8], count: usize, start: u64) -> Result<(), Erro
         let header = bytes
             .get(cursor..cursor.checked_add(DIRECTORY_HEADER_BYTES).ok_or_else(bad)?)
             .ok_or_else(bad)?;
-        if &header[..4] != b"PK\x01\x02"
-            || word(header, 34) != 0
-            || [20, 24, 42]
-                .iter()
-                .any(|index| dword(header, *index) == u32::MAX as u64)
-            || dword(header, 42) >= start
-        {
+        if &header[..4] != b"PK\x01\x02" || word(header, 34) != 0 {
             return Err(bad());
         }
         let name_len = word(header, 28) as usize;
@@ -144,17 +204,39 @@ fn validate_directory(bytes: &[u8], count: usize, start: u64) -> Result<(), Erro
         let extra_end = extra_start.checked_add(extra_len).ok_or_else(bad)?;
         let extra = bytes.get(extra_start..extra_end).ok_or_else(bad)?;
         let mut field = 0usize;
+        let mut zip64 = None;
         while field < extra.len() {
             let info = extra
                 .get(field..field.checked_add(4).ok_or_else(bad)?)
                 .ok_or_else(bad)?;
-            if word(info, 0) == 1 {
-                return Err(bad());
-            } // ZIP64 extra field
-            field = field
+            let next = field
                 .checked_add(4 + word(info, 2) as usize)
                 .filter(|end| *end <= extra.len())
                 .ok_or_else(bad)?;
+            if word(info, 0) == 1 {
+                if zip64.is_some() {
+                    return Err(bad());
+                }
+                zip64 = Some(&extra[field + 4..next]);
+            }
+            field = next;
+        }
+        let mut zip64_offset = 0usize;
+        let mut resolved = [0u64; 3];
+        for (slot, index) in [24usize, 20, 42].into_iter().enumerate() {
+            let value = dword(header, index);
+            resolved[slot] = if value == u32::MAX as u64 {
+                let values = zip64.ok_or_else(bad)?;
+                let end = zip64_offset.checked_add(8).ok_or_else(bad)?;
+                let bytes = values.get(zip64_offset..end).ok_or_else(bad)?;
+                zip64_offset = end;
+                qword(bytes, 0)
+            } else {
+                value
+            };
+        }
+        if resolved[2] >= start || zip64.is_some_and(|values| values.len() != zip64_offset) {
+            return Err(bad());
         }
         cursor = extra_end
             .checked_add(comment_len)
@@ -216,6 +298,13 @@ fn dword(bytes: &[u8], index: usize) -> u64 {
             .try_into()
             .expect("bounded ZIP field"),
     ) as u64
+}
+fn qword(bytes: &[u8], index: usize) -> u64 {
+    u64::from_le_bytes(
+        bytes[index..index + 8]
+            .try_into()
+            .expect("bounded ZIP64 field"),
+    )
 }
 fn error(error: io::Error) -> Error {
     Error(format!("cassette metadata I/O error: {error}"))
