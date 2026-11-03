@@ -385,43 +385,6 @@ elif _record_path:
         json.loads(_event("session_alias", alias=_native_alias, session="openjiuwen-native-1")),
     ]
 
-# Vector-memory requests and asynchronously-created subagents have state that
-# does not belong to this benchmark attempt (an embedding cache and scheduling
-# respectively).  They make the provider request order depend on leftovers
-# outside the sealed tape.  The normal interactive client keeps them; ASB's
-# record/replay launch profile deliberately uses only the selected foreground
-# agent and its sealed direct-tool sidecar.
-if _record_path or _replay_path:
-    try:
-        from openjiuwen.harness.cli.agent import factory as _agent_factory
-
-        _agent_factory._build_memory_rail = lambda _cfg: None
-        _agent_factory._build_subagents = lambda _model: []
-
-        # The upstream CLI otherwise starts an asynchronous image-capability
-        # probe in every fresh process.  It is unrelated to these text-only
-        # benchmarks, consumes an unrecorded provider request, and makes a
-        # fresh replay begin on a different request than its recording.  Pin
-        # this adapter launch profile to text-only before the agent is started;
-        # interactive OpenJiuwen remains unchanged.
-        _create_agent = _agent_factory.create_agent
-
-        def _create_text_only_agent(*args, **kwargs):
-            agent, tracker = _create_agent(*args, **kwargs)
-            config = getattr(agent, "_deep_config", None)
-            if config is not None:
-                config.enable_read_image_multimodal = False
-                # Native direct tools are captured as an ordered adapter
-                # transcript. Keep the benchmark launch profile serial so a
-                # batch of concurrent tool completions cannot reorder the
-                # model-facing results between record and replay.
-                config.parallel_tool_calls = False
-            return agent, tracker
-
-        _agent_factory.create_agent = _create_text_only_agent
-    except ImportError:
-        pass
-
 try:
     from openjiuwen.harness.tools.filesystem import (
         EditFileTool,
