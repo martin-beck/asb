@@ -20,7 +20,7 @@ with tempfile.TemporaryDirectory(dir=base) as temporary:
     work = Path(temporary)
     for name in ('mount', 'run'):
         (work / name).mkdir()
-    script = '''import os
+    script = '''import os, subprocess, sys
 from pathlib import Path
 hook = Path('/hook.py')
 source = hook.read_text().split('\\ntry:\\n    # Hermes exposes', 1)[0]
@@ -29,6 +29,7 @@ exec(compile(source, str(hook), 'exec'), namespace)
 recorder = namespace['Recorder']()
 def tool(*_args):
     Path('/work/mount/result').write_text('captured')
+    subprocess.run([sys.executable, '-c', "from pathlib import Path; Path('/work/mount/child').write_text('child')"], check=True)
     return 'completed'
 assert recorder.invoke(tool, 'write', False, None, None, None, False, '.', False, False, None) == 'completed'
 recorder.close()
@@ -70,6 +71,9 @@ chown -R "$ASB_FIXTURE_UID:$ASB_FIXTURE_GID" /work
         writes = [event for event in events if event['op'] == 'write' and event['path'] == '/result']
         assert markers['tool-begin:terminal-1'] < writes[0]['sequence'] < markers['tool-end:terminal-1']
         assert writes[0]['caller']['tgid'] == begin['origin']['pid']
+        child = next(event for event in events if event['op'] == 'write' and event['path'] == '/child')
+        assert markers['tool-begin:terminal-1'] < child['sequence'] < markers['tool-end:terminal-1']
+        assert any(item['tgid'] == begin['origin']['pid'] for item in child['caller']['ancestry'])
         assert json.loads((work / 'progress.json').read_text())['complete']
         assert (work / 'mount/result').read_text() == 'captured'
         print('Hermes native call boundaries surround real FUSE filesystem effects')
