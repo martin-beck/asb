@@ -128,7 +128,13 @@ fi
   events=[json.loads(x) for x in (root/'evidence/events.jsonl').read_text().splitlines()]
   if not swe_patch:
    assert any(e['op']=='write' and e['path']=='/output' for e in events)
+   output_writes = [e for e in events if e['op']=='write' and e['path']=='/output']
+   import hashlib
+   assert all(e['requested_size'] == len(b'container')
+              and e['request_sha256'] == hashlib.sha256(b'container').hexdigest()
+              for e in output_writes)
    source_reads = [e for e in events if e['op']=='read' and e['path']=='/source']
+   assert all(e['requested_size'] >= e['bytes'] for e in source_reads)
    assert any((e.get('caller') or {}).get('thread_ancestry_complete')
               and (e['caller']['ancestry'][0].get('creator_thread') or {}).get('tid')
               for e in source_reads), 'child creator thread was not captured through FUSE'

@@ -1589,6 +1589,7 @@ mod artifact_publication_tests {
         for name in [
             "benchmark_fs_thread_lineage.py",
             "benchmark_fs_attribution.py",
+            "benchmark_fs_request_shapes.py",
         ] {
             let script = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests")
