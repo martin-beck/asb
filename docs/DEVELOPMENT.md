@@ -146,6 +146,18 @@ upper-layer test write was isolated. Four concurrent Git-status calls through
 the proxy took about 0.3 seconds each. This measures a prepared shared baseline,
 not an agent recording or replay, and does not establish general metadata or
 filesystem equivalence.
+The separate opt-in `fixtures/native_fs_probe/swe_overlay_agent.py` combines
+that shared baseline with the local Hermes mock-provider fixture, actual LLM
+tape and terminal sidecar. It records the application of a supplied previously
+resolved patch and performs four concurrent offline replays, comparing each
+complete Git diff to the recording and checking tape consumption and that the
+shell command was not reexecuted. It requires the overlay, FUSE, image,
+Hermes, Node, baseline and patch inputs described above. The test-only wrapper
+supplies tool boundaries and the mock supplies the patch command; it does not
+run the official SWE-bench evaluator or prove that the agent solved the task.
+Replay applies recorded startup operations after the agent has begun accessing
+the overlay; matching on this case does not establish general startup ordering,
+untracked or out-of-workspace effects, or support for all native tools.
 
 `python3 crates/asb-cli/tests/hermes_native_effect_gap.py` is an offline
 diagnostic for a known defect: the current Hermes terminal sidecar replays the

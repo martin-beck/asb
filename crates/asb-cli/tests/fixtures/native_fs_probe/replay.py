@@ -10,10 +10,14 @@ import time
 
 class Replay:
     """Apply a prefix of recorded operations and keep handles for later calls."""
-    def __init__(self, evidence, root, baseline=None, enforce_admission=False):
+    def __init__(self, evidence, root, baseline=None, enforce_admission=False, existing=False):
         self.evidence = Path(evidence)
         self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=False)
+        if existing:
+            if baseline is not None or not self.root.is_dir():
+                raise ValueError('existing replay root must be an existing directory without a baseline')
+        else:
+            self.root.mkdir(parents=True, exist_ok=False)
         if baseline is not None:
             subprocess.run(['/bin/cp', '-a', '--reflink=auto', str(Path(baseline)) + '/.', str(self.root)], check=True)
         self.events = (self.evidence / 'events.jsonl').open(encoding='utf-8')
