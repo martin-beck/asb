@@ -366,6 +366,21 @@ class ForwardingTests(unittest.TestCase):
             forward_request({"project_configuration": "", "request": {
                 "auxiliary_endpoints": {"bad": 5}}}, start)
 
+    def test_auxiliary_endpoint_uses_real_owned_relay(self):
+        target = self.server.server_address
+        request = {"project_configuration": "tools_dir='tools'\n", "request": {
+            "auxiliary_endpoints": {"embedding": f"http://127.0.0.1:{target[1]}"}}}
+        changed = forward_request(request, self.start)
+        endpoint = changed["request"]["auxiliary_endpoints"]["embedding"]
+        port = int(endpoint.rsplit(":", 1)[1])
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+            client.sendall(b"auxiliary request")
+            client.shutdown(socket.SHUT_WR)
+            response = bytearray()
+            while chunk := client.recv(4096):
+                response.extend(chunk)
+        self.assertEqual(response, b"auxiliary requestafter-half-close")
+
     def test_destinations_are_explicit_and_loopback_only(self):
         for target in [("192.0.2.1", 80), ("provider.example", 443), ("0.0.0.0", 80)]:
             with self.assertRaises(ExecutionError):
