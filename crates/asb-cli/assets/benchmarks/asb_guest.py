@@ -249,9 +249,11 @@ def stage_private_inputs(task, inputs, owner=None):
                 or Path(source).is_symlink() or not Path(source).is_file()
                 or not re.fullmatch(r"[A-Za-z0-9+_.-]{1,256}",target)
                 or len(item["sha256"]) != 64 or not re.fullmatch(r"[0-9a-f]{64}",item["sha256"])
-                or target in targets or item["bytes"] < 0 or item["bytes"] > 64 * 1024**2):
+                or target in targets or item["bytes"] < 0
+                or item["bytes"] > (64 * 1024**3 if target == 'workspace-snapshots.tar' else 64 * 1024**2)):
             raise ExecutionError("guest private replay input is invalid")
-        total += item['bytes']
+        if target != 'workspace-snapshots.tar':
+            total += item['bytes']
         if total > 64 * 1024**2:
             raise ExecutionError("sealed local-tool replay transcript changed before guest staging")
         targets.add(target)
@@ -422,15 +424,18 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
                 path.chmod(0o600)
             raise ExecutionError("selected agent runtime installation failed; inspect private install artifacts")
     if getattr(task,'snapshot',False):
-        if task.tool_mode != 'record':
-            raise ExecutionError('experimental snapshot replay is not yet integrated')
+        if task.tool_mode not in ('record', 'replay'):
+            raise ExecutionError('experimental snapshot requires tool recording or replay')
         if resources is None or set(auxiliary) != {'btrfs','mkfs.btrfs','rsync'}:
             raise ExecutionError('experimental snapshot preparation needs staged filesystem tools')
         from asb_docker import docker_command
         from asb_snapshot_control import GuestSnapshot
-        supervisor=GuestSnapshot(task,auxiliary,owner,docker_command(),deadline)
+        replay = task.tool_mode == 'replay'
+        if replay and not any(item['target'] == 'workspace-snapshots.tar' for item in request.get('private_inputs', [])):
+            raise ExecutionError('snapshot replay archive is missing from the selected cassette')
+        supervisor=GuestSnapshot(task,auxiliary,owner,docker_command(),deadline,replay=replay)
         resources.callback(supervisor.close)
-        environment['ASB_FS_MARKER_SOCKET']='/opt/asb-private/snapshot.sock'
+        environment['ASB_FS_REPLAY_SOCKET' if replay else 'ASB_FS_MARKER_SOCKET']='/opt/asb-private/snapshot.sock'
     return guest,environment
 
 

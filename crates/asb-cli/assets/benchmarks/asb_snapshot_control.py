@@ -10,8 +10,9 @@ from asb_staging import upload
 
 
 class GuestSnapshot:
-    def __init__(self, task, tools, owner, docker_command, deadline):
+    def __init__(self, task, tools, owner, docker_command, deadline, replay=False):
         self.task=task;self.docker_command=list(docker_command);self.process=None
+        self.replay=replay
         self.log=(task.artifacts/'snapshot-supervisor.log').open('wb')
         files=[]
         for name in ('asb_snapshot_guest.py','asb_snapshot_service.py',
@@ -24,6 +25,8 @@ class GuestSnapshot:
             '--root','/opt/asb-private/snapshot','--socket','/opt/asb-private/snapshot.sock',
             '--output','/opt/asb-private/snapshot-streams','--btrfs',tools['btrfs'],
             '--mkfs',tools['mkfs.btrfs'],'--rsync',tools['rsync'],'--size',str(4*1024**3),'--apply-final']
+        if replay:
+            args += ['--replay-archive','/opt/asb-private/workspace-snapshots.tar']
         self.process=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log)
         try:
             with selectors.DefaultSelector() as selector:
@@ -51,6 +54,8 @@ class GuestSnapshot:
             stdout,_=process.communicate(b'STOP\n',timeout=600)
             if process.returncode or b'SAVED\n' not in stdout:
                 raise ExecutionError('snapshot workspace did not settle; inspect snapshot-supervisor.log')
+            if self.replay:
+                return
             destination=self.task.artifacts/'snapshot-streams'
             subprocess.run(self.docker_command+['cp',process_container(self.task)+':/opt/asb-private/snapshot-streams',str(destination)],
                            check=True,stdout=subprocess.DEVNULL,stderr=self.log,timeout=600)
