@@ -382,6 +382,27 @@ class GuestBootstrapTests(unittest.TestCase):
             task.evaluate()
             self.assertEqual(calls, ["client", "confirmed-reset", "grade"])
 
+    def test_missing_guest_result_preserves_bounded_stderr_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); forwarded=[]
+            def unavailable(_argv, **_kwargs):
+                raise ExecutionError('result unavailable')
+            def execute(_argv, **options):
+                options['on_output']('stderr', b'x'*(256*1024))
+                options['on_output']('stderr', b'actual guest error')
+                return {'stdout':b'', 'stderr':b'x', 'exit_code':1}
+            task=SimpleNamespace(artifacts=root,agent_timeout=15,checked=unavailable,
+                workspace=SimpleNamespace(container=Container(),execute=execute,
+                    quiesce_unconfirmed_agent=lambda:None))
+            with patch('asb_guest.prepare_agent',return_value=({},{})):
+                execute_agent(task,{},None,lambda stream,chunk:forwarded.append((stream,len(chunk))),None)
+            path=root/'guest-error-stderr.log'
+            self.assertEqual(path.stat().st_mode & 0o777,0o600)
+            self.assertEqual(path.stat().st_size,256*1024)
+            self.assertTrue(path.read_bytes().endswith(b'actual guest error'))
+            self.assertEqual(len(forwarded),2)
+            self.assertEqual(json.loads((root/'execution.json').read_text())['guest_error_log'],path.name)
+
     def test_local_forwarding_precedes_install_and_is_closed_on_install_failure_or_success(self):
         for failure in (False, True):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
