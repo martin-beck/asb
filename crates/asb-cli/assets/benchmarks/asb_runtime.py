@@ -336,3 +336,27 @@ def bundle(path, architecture=None):
                "files":[{"name":name,"sha256":hashlib.sha256(content).hexdigest(),"bytes":len(content)}
                         for name,content,_ in files]}
     return files,receipt
+
+
+def bundle_tool(path, name, architecture=None):
+    """Bundle an auxiliary executable and its own loader under a private prefix."""
+    if not isinstance(name,str) or not re.fullmatch(r'[a-z0-9][a-z0-9_.-]{0,79}',name):
+        raise ExecutionError('auxiliary runtime name is invalid')
+    files,receipt = bundle(path,architecture)
+    prefix = 'tools/'+name
+    tool_root = ROOT+'/'+prefix
+    output = []
+    for filename,content,mode in files:
+        if filename == 'asb':
+            filename = name
+            if receipt['kind'] == 'bundled-loader':
+                launcher = content.decode('utf-8')
+                launcher = '\n'.join(line for line in launcher.split('\n')
+                                     if not line.startswith('export ASB_RUNTIME_EXECUTABLE='))
+                content = launcher.replace(ROOT,tool_root).replace('/bin/asb','/bin/'+name).encode('utf-8')
+        elif filename == 'bin/asb':
+            filename = 'bin/'+name
+        output.append((prefix+'/'+filename,content,mode))
+    receipt = dict(receipt,files=[{'name':filename,'sha256':hashlib.sha256(content).hexdigest(),
+                                   'bytes':len(content)} for filename,content,_ in output])
+    return output,receipt
