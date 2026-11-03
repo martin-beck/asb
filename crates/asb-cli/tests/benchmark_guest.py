@@ -111,6 +111,19 @@ class GuestBootstrapTests(unittest.TestCase):
             container.files.clear();source.write_bytes(payload+b'changed')
             with self.assertRaises(ExecutionError):stage_private_inputs(task,[item])
             self.assertEqual(container.files,[])
+
+    def test_large_snapshot_archive_uses_streaming_stager(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'snapshot.tar'
+            with source.open('wb') as file:file.truncate(64*1024**2+1)
+            task=SimpleNamespace(workspace=SimpleNamespace(container=Container()),artifacts=root)
+            item={'source':str(source),'target':'workspace-snapshots.tar','bytes':source.stat().st_size,
+                  'sha256':'a'*64}
+            with patch('asb_guest.upload_files') as upload:
+                stage_private_inputs(task,[item],owner=(123,456))
+            self.assertEqual(upload.call_args.args[2][0][0],'workspace-snapshots.tar')
+            item['target']='ordinary.jsonl'
+            with self.assertRaises(ExecutionError):stage_private_inputs(task,[item])
     def test_guest_timeout_propagates_without_inventing_it_from_other_values(self):
         for value, expected in [(True, True), (False, False), ("true", False), (None, False)]:
             result = {"metadata": {"timed_out": value}, "timed_out": False}
