@@ -31,6 +31,28 @@ class SubmissionRecoveryTests(unittest.TestCase):
         self.assertEqual(ordinary.submission_git_dir(),task_module.SUBMISSION_GIT_DIR)
         self.assertEqual(snapshot.submission_git_dir(),'/asb-snapshot-storage/baseline.git')
 
+    def test_task_history_keeps_ancestors_and_excludes_later_commit_objects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);worktree=root/'worktree';worktree.mkdir()
+            def git(*args,check=True):
+                return subprocess.run(['git',*args],cwd=worktree,check=check,capture_output=True)
+            git('init','-q');git('config','user.name','Fixture');git('config','user.email','fixture@example.invalid')
+            (worktree/'source').write_text('ancestor\n');git('add','source');git('commit','-qm','ancestor')
+            ancestor=git('rev-parse','HEAD').stdout.decode().strip()
+            (worktree/'source').write_text('base\n');git('commit','-qam','base')
+            base=git('rev-parse','HEAD').stdout.decode().strip()
+            (worktree/'source').write_text('later fix\n');git('commit','-qam','future fix')
+            future=git('rev-parse','HEAD').stdout.decode().strip()
+            git('reset','--hard',base)
+            task=task_module.SweBenchTask(None,root/'catalog','fixture',root/'artifacts')
+            task.workspace=LocalWorkspace(worktree)
+            task.prepare_base_history(str(worktree),str(root/'fresh.git'),base)
+            self.assertEqual(git('rev-parse','HEAD').stdout.decode().strip(),base)
+            self.assertEqual(git('status','--porcelain').stdout,b'')
+            self.assertEqual(git('cat-file','-e',ancestor+'^{commit}',check=False).returncode,0)
+            self.assertNotEqual(git('cat-file','-e',future+'^{commit}',check=False).returncode,0)
+            self.assertFalse((root/'fresh.git.unfiltered').exists())
+
     def test_task_preserves_tool_mode(self):
         for mode in ('none','record','replay'):
             self.assertEqual(task_module.SweBenchTask(None,'catalog','fixture','artifacts',tool_mode=mode).tool_mode,mode)
