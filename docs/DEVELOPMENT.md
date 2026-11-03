@@ -12,9 +12,11 @@ The fixture also records FUSE caller IDs and checks writes from a worker thread
 and a separate subprocess. On the tested Linux host the former is the thread ID,
 not the process leader's ID. The probe resolves it through `/proc` to a thread
 group, parent and start time at callback time, with missing data reported as
-unknown. These identities are diagnostic only: the fixture does not establish
-attribution for delayed IO, short-lived processes, PID namespaces or reuse,
-nor does it associate operations with agent tool invocations.
+unknown. It also reads a bounded ancestry to the fixture process and checks a
+grandchild write. These identities are diagnostic only: `/proc` reads can race
+with process exit and reparenting, and the fixture does not establish
+attribution for delayed IO, PID namespaces or reuse, nor does it associate
+operations with agent tool invocations automatically.
 The experimental replay cursor can apply an ordered prefix and resume while
 keeping file handles open. The fixture checks an intermediate write before its
 later truncate and brackets one synchronous subprocess with explicit markers.

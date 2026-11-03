@@ -6,18 +6,30 @@ from fuse import FUSE, FuseOSError, Operations, fuse_get_context
 backing, mount, evidence = map(Path, sys.argv[1:4])
 
 def caller_identity(tid):
-    """Best-effort identity at callback time; never an authority boundary."""
-    try:
-        status = {}
-        for line in Path(f'/proc/{tid}/status').read_text().splitlines():
+    """Best-effort bounded ancestry at callback time; not an authority boundary."""
+    def status(pid):
+        fields = {}
+        for line in Path(f'/proc/{pid}/status').read_text().splitlines():
             key, separator, value = line.partition(':')
             if separator and key in ('Tgid', 'PPid'):
-                status[key] = int(value.strip())
-        stat = Path(f'/proc/{tid}/stat').read_text().rpartition(')')[2].split()
-        return {'tid': tid, 'tgid': status['Tgid'], 'ppid': status['PPid'],
-                'start_ticks': int(stat[19])}
+                fields[key] = int(value.strip())
+        parts = Path(f'/proc/{pid}/stat').read_text().rpartition(')')[2].split()
+        return fields['Tgid'], fields['PPid'], int(parts[19])
+    try:
+        tgid, ppid, started = status(tid)
+        ancestry = []
+        current = tgid
+        root = int(os.environ['ASB_PROBE_ROOT_TGID'])
+        for _ in range(64):
+            group, parent, start = status(current)
+            ancestry.append({'tgid': group, 'start_ticks': start})
+            if group == root or parent <= 0 or parent == group:
+                break
+            current = parent
+        return {'tid': tid, 'tgid': tgid, 'ppid': ppid,
+                'start_ticks': started, 'ancestry': ancestry}
     except (OSError, KeyError, ValueError, IndexError):
-        return {'tid': tid, 'tgid': None, 'ppid': None, 'start_ticks': None}
+        return {'tid': tid, 'tgid': None, 'ppid': None, 'start_ticks': None, 'ancestry': []}
 
 class Proxy(Operations):
     def __init__(self):

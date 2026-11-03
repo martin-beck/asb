@@ -38,7 +38,7 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     os.link(baseline / 'two', baseline / 'two-alias')
     subprocess.run(['/bin/cp', '-a', str(baseline) + '/.', str(backing)], check=True)
     control, peer = socket.socketpair()
-    env = dict(os.environ, ASB_PROBE_HOLD_WRITE='1', ASB_PROBE_CONTROL_FD=str(peer.fileno()))
+    env = dict(os.environ, ASB_PROBE_HOLD_WRITE='1', ASB_PROBE_CONTROL_FD=str(peer.fileno()), ASB_PROBE_ROOT_TGID=str(os.getpid()))
     with (root / 'fuse.log').open('wb') as log:
         process = subprocess.Popen([python, str(HERE / 'proxy.py'), str(backing), str(mount), str(evidence)], env=env, stdout=log, stderr=log, pass_fds=(peer.fileno(),))
         peer.close()
@@ -109,7 +109,8 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
             a_begin = mark('tool-begin:a')
             b_begin = mark('tool-begin:b')
             overlap = subprocess.Popen([python, '-c',
-                'from pathlib import Path; Path("overlap").write_bytes(b"tool b")'], cwd=mount)
+                'import subprocess,sys; subprocess.run([sys.executable, "-c", '
+                '\'from pathlib import Path; Path("overlap").write_bytes(b"tool b")\'], check=True)'], cwd=mount)
             overlap_pid = overlap.pid
             assert overlap.wait(timeout=5) == 0
             a_end = mark('tool-end:a')
@@ -139,7 +140,12 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
     assert hermes_writes and hermes_begin < hermes_writes[0]['sequence'] < hermes_end
     overlap_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/overlap']
     assert overlap_writes and a_begin < b_begin < overlap_writes[0]['sequence'] < a_end < b_end
-    assert all(event['caller']['tgid'] == overlap_pid for event in overlap_writes)
+    for event in overlap_writes:
+        caller = event['caller']
+        assert caller['tgid'] != overlap_pid and caller['ppid'] == overlap_pid, caller
+        ancestry = caller['ancestry']
+        assert [entry['tgid'] for entry in ancestry[:3]] == [caller['tgid'], overlap_pid, os.getpid()], ancestry
+        assert all(entry['start_ticks'] > 0 for entry in ancestry[:3])
     assert child_writes and all(event['caller']['tid'] == child_pid and event['caller']['tgid'] == child_pid and event['caller']['ppid'] == os.getpid() and event['caller']['start_ticks'] is not None for event in child_writes), child_writes
     parent_writes = [event for event in events if event['op'] == 'write' and event['path'] == '/one']
     assert parent_writes and all(event['caller']['tid'] == writer_tids['one'] and event['caller']['tgid'] == os.getpid() and event['caller']['start_ticks'] is not None for event in parent_writes), parent_writes
