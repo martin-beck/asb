@@ -5,10 +5,12 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from types import SimpleNamespace
+import docker
 
 ROOT=Path(__file__).resolve().parents[5]
 sys.path.insert(0,str(ROOT/'crates/asb-cli/assets/benchmarks'))
-from asb_runtime import bundle_tool
+from asb_guest import stage_auxiliary_tools
 
 scratch=ROOT/'target/snapshot-auxiliary-test'
 scratch.mkdir(parents=True,exist_ok=True)
@@ -19,19 +21,24 @@ tools={'btrfs':os.environ['ASB_SNAPSHOT_BTRFS'],
 container='asb-aux-probe-'+uuid.uuid4().hex
 with tempfile.TemporaryDirectory(dir=scratch) as directory:
     root=Path(directory)
-    for tool,source in tools.items():
-        files,_=bundle_tool(source,tool,root='/opt/asb-private')
-        for name,data,mode in files:
-            target=root/name;target.parent.mkdir(parents=True,exist_ok=True)
-            target.write_bytes(data);target.chmod(mode)
     try:
         subprocess.run(['docker','run','-d','--name',container,'--pull=never','--network','none',
                         '--entrypoint','/bin/sh',image,'-c','exec tail -f /dev/null'],
                        stdout=subprocess.DEVNULL,check=True,timeout=30)
         subprocess.run(['docker','exec',container,'mkdir','-p','/opt/asb-private'],check=True,timeout=30)
-        subprocess.run(['docker','cp',str(root)+ '/.',container+':/opt/asb-private'],check=True,timeout=60)
+        client=docker.from_env(timeout=60)
+        try:
+            guest=client.containers.get(container)
+            def checked(command):
+                result=guest.exec_run(command)
+                if result.exit_code:raise RuntimeError('guest directory preparation failed')
+                return result.output
+            task=SimpleNamespace(workspace=SimpleNamespace(container=guest,image_identity={}),artifacts=root,checked=checked)
+            staged=stage_auxiliary_tools(task,tools,(0,0))
+        finally:
+            client.close()
         for tool in tools:
-            command=f'/opt/asb-private/tools/{tool}/{tool}'
+            command=staged[tool]
             result=subprocess.run(['docker','exec',container,command,'--version'],capture_output=True,text=True,timeout=30)
             if result.returncode or not result.stdout.strip():
                 raise RuntimeError(f'{tool} did not execute in the task image: {result.stderr[-500:]}')
