@@ -431,6 +431,7 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
             network: None,
             artifact_output: Path::new("fixture-artifacts"),
             private_inputs: Vec::new(),
+            auxiliary_tools: Default::default(),
             request: json!({"replay":true}),
         }),
     }

@@ -78,6 +78,9 @@ pub(super) struct AgentRequest<'a> {
     /// artifacts. This is transport state, never durable benchmark evidence.
     pub artifact_output: &'a Path,
     pub private_inputs: Vec<PrivateInput>,
+    /// Optional workload-owned executables to stage for guest preparation.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub auxiliary_tools: std::collections::BTreeMap<String, std::path::PathBuf>,
     pub request: Value,
 }
 

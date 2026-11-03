@@ -15,7 +15,7 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).parents[1] / "assets/benchmarks"))
 from asb_execution import ExecutionError
-from asb_guest import (execute_agent, export_agent_artifacts, stage_npm_package_tree, stage_private_inputs, stage_auxiliary_tools, propagate_guest_timeout,
+from asb_guest import (execute_agent, export_agent_artifacts, stage_npm_package_tree, stage_private_inputs, stage_auxiliary_tools, prepare_agent, propagate_guest_timeout,
                        stage_public_cache, stage_bootstrap, PreparationBudget)
 from asb_runtime import elf as inspect_elf
 
@@ -68,6 +68,25 @@ class ArchiveContainer:
 
 
 class GuestBootstrapTests(unittest.TestCase):
+    def test_guest_preparation_forwards_staged_auxiliary_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'.asb').mkdir();(root/'.asb/project.toml').write_text('')
+            execute=lambda *args,**kwargs:{'stdout':b'','stderr':b'','exit_code':0,'timed_out':False,'cancelled':False}
+            task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),image_identity={},execute=execute),
+                                 artifacts=root,checked=lambda _:b'')
+            request={'project_root':str(root),'tools_root':str(root),'binary':'fixture',
+                     'request':{'config':{'agent':'fixture'}},'bootstrap':{},
+                     'auxiliary_tools':{'btrfs':'/some/tool'}}
+            with patch('asb_guest.bundle',return_value=([],{})), \
+                 patch('asb_guest.stage_runtime',return_value=(0,0)), \
+                 patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \
+                 patch('asb_guest.stage_bootstrap',return_value=[]), \
+                 patch('asb_guest.stage_auxiliary_tools',return_value={'btrfs':'/opt/asb-private/tools/btrfs/btrfs'}) as stage:
+                _, environment=prepare_agent(task,request,None)
+            stage.assert_called_once_with(task,{'btrfs':'/some/tool'},(0,0))
+            self.assertEqual(json.loads(environment['ASB_AUXILIARY_TOOLS']),
+                             {'btrfs':'/opt/asb-private/tools/btrfs/btrfs'})
+
     @unittest.skipUnless(os.environ.get('ASB_TEST_HOST_ASB'), 'needs just-built ASB')
     def test_auxiliary_tool_staging_uses_private_prefix(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -396,7 +396,10 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
     if request["bootstrap"].get("public_package_cache",False):
         stage_public_cache(container, project,temporary_dir=task.artifacts,owner=owner)
         check_budget()
-    environment = request.get("environment", {})
+    environment = dict(request.get("environment", {}))
+    auxiliary = stage_auxiliary_tools(task,request.get("auxiliary_tools",{}),owner)
+    if auxiliary:
+        environment['ASB_AUXILIARY_TOOLS'] = json.dumps(auxiliary,sort_keys=True,separators=(',',':'))
     for selected in [*runtimes, *([] if package_tree is not None else [tool])]:
         result = task.workspace.execute(["/bin/sh", "-c", 'cd /opt/asb-project && exec /opt/asb-runtime/asb tool install "$1"', "asb", selected],
                                         environment=environment, timeout=min(900,preparation_budget.remaining()) if preparation_budget else 900, output_limit=256 * 1024,
