@@ -25,6 +25,8 @@ from asb_relay import HostRelay, ForwardingCancellation, forward_request
 
 MAX_EXPORTED_ARTIFACTS = 8
 MAX_EXPORTED_ARTIFACT_BYTES = 16 * 1024 * 1024
+# Matches the cassette track limit. Filesystem streams use file-backed custody.
+MAX_FILESYSTEM_ARTIFACT_BYTES = 256 * 1024 * 1024
 
 
 class _ArchiveChunks:
@@ -72,15 +74,18 @@ def export_agent_artifacts(task, output, receipts):
         raise ExecutionError("guest artifact export destination is unavailable")
     seen, total = set(), 0
     for receipt in receipts:
+        filesystem = isinstance(receipt,dict) and receipt.get("kind") in ("aux-fs-events", "aux-fs-payload")
+        limit = MAX_FILESYSTEM_ARTIFACT_BYTES if filesystem else MAX_EXPORTED_ARTIFACT_BYTES
         if (not isinstance(receipt,dict) or set(receipt) != {"kind","filename","bytes","sha256"}
                 or not isinstance(receipt["kind"],str) or not re.fullmatch(r"[a-z0-9-]{1,128}",receipt["kind"])
                 or not isinstance(receipt["filename"],str) or not re.fullmatch(r"artifact-[0-7]",receipt["filename"])
-                or type(receipt["bytes"]) is not int or not 0 <= receipt["bytes"] <= MAX_EXPORTED_ARTIFACT_BYTES
+                or type(receipt["bytes"]) is not int or not 0 <= receipt["bytes"] <= limit
                 or not isinstance(receipt["sha256"],str) or not re.fullmatch(r"[0-9a-f]{64}",receipt["sha256"])
                 or receipt["filename"] in seen):
             raise ExecutionError("guest artifact receipt is invalid")
         seen.add(receipt["filename"])
-        total += receipt["bytes"]
+        if not filesystem:
+            total += receipt["bytes"]
         if total > MAX_EXPORTED_ARTIFACT_BYTES:
             raise ExecutionError("guest artifact receipts exceed their aggregate bound")
         source = "/opt/asb-private/attempt/exports/" + receipt["filename"]
@@ -92,7 +97,7 @@ def export_agent_artifacts(task, output, receipts):
         try:
             if metadata.get("name") != receipt["filename"] or metadata.get("linkTarget"):
                 raise ExecutionError("guest artifact archive identity is invalid")
-            archive = _ArchiveChunks(chunks, MAX_EXPORTED_ARTIFACT_BYTES + 1024 * 1024)
+            archive = _ArchiveChunks(chunks, limit + 1024 * 1024)
             with tarfile.open(fileobj=archive,mode="r|") as incoming:
                 member = incoming.next()
                 if member is None:

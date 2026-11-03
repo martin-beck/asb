@@ -169,6 +169,21 @@ class GuestBootstrapTests(unittest.TestCase):
                     export_agent_artifacts(task,directory,[receipt])
                 self.assertFalse(any(path.name.endswith(".part") for path in Path(directory).iterdir()))
 
+    def test_filesystem_recording_can_exceed_small_sidecar_limit(self):
+        payload = b'\x00\xff' * (9 * 1024 * 1024)
+        with tempfile.TemporaryDirectory() as directory:
+            task = SimpleNamespace(workspace=SimpleNamespace(container=ArchiveContainer('artifact-0',payload)))
+            receipt = {'kind':'aux-fs-payload', 'filename':'artifact-0', 'bytes':len(payload),
+                       'sha256':hashlib.sha256(payload).hexdigest()}
+            export_agent_artifacts(task,directory,[receipt])
+            exported = Path(directory) / 'artifact-0'
+            self.assertEqual(exported.stat().st_size,len(payload))
+            self.assertEqual(hashlib.sha256(exported.read_bytes()).hexdigest(),receipt['sha256'])
+            oversized = dict(receipt, filename='artifact-1')
+            with patch('asb_guest.MAX_FILESYSTEM_ARTIFACT_BYTES', len(payload) - 1):
+                with self.assertRaises(ExecutionError):
+                    export_agent_artifacts(task,directory,[oversized])
+
     def test_guest_artifact_export_accepts_all_eight_driver_slots(self):
         class MultiContainer:
             def get_archive(self, source, chunk_size=65536, encode_stream=False):
