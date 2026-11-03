@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import sys
+import threading
 import types
 import unittest
 from unittest.mock import MagicMock, patch
@@ -60,6 +61,26 @@ def message(source, text):
     return MessageEvent(source=source, llm_message=Event(role='assistant' if source == 'agent' else 'user', content=[TextContent(text=text)]))
 
 class NativeFinalTest(unittest.TestCase):
+    def test_terminal_replay_applies_snapshot_before_returning_observation(self):
+        terminal=types.ModuleType('openhands.tools.terminal')
+        metadata=types.ModuleType('openhands.tools.terminal.metadata')
+        terminal.TerminalObservation=Event
+        metadata.CmdOutputMetadata=Event
+        action=Event(command='edit',is_input=False,timeout=5,reset=False)
+        response={'kind':'terminal_observation','schema_version':1,'content':'ok',
+                  'is_error':False,'command':'edit','exit_code':0,'timeout':False,'metadata':{}}
+        executor=launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
+        executor._sequence=0;executor._sequence_lock=threading.Lock();executor._delegate=None
+        executor._bridge=Event(stdin=io.StringIO(),stdout=io.StringIO(json.dumps(response)+'\n'))
+        with patch.dict(sys.modules,{'openhands.tools':types.ModuleType('openhands.tools'),
+                                    'openhands.tools.terminal':terminal,
+                                    'openhands.tools.terminal.metadata':metadata}), \
+             patch.object(launcher,'snapshot_boundary') as boundary:
+            result=executor(action)
+        boundary.assert_called_once_with('replay','end','openhands-1')
+        self.assertEqual(result.exit_code,0)
+        self.assertEqual(json.loads(executor._bridge.stdin.getvalue())['command'],'edit')
+
     def test_optional_snapshot_boundaries_use_adapter_alias_and_fail_on_rejection(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(launcher.socket, 'socket') as factory:
             launcher.snapshot_boundary('record', 'begin', 'openhands-1')
