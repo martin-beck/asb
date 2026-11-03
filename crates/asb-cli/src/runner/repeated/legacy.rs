@@ -84,7 +84,9 @@ impl Inspection {
                 let bytes = file.metadata().map_err(io_error)?.len();
                 total = total
                     .checked_add(bytes)
-                    .filter(|total| *total <= crate::cassette::Limits::default().max_total_bytes)
+                    .filter(|total| {
+                        *total <= crate::cassette::ProofLimits::default().max_selected_bytes
+                    })
                     .ok_or_else(|| {
                         Error::Input("replay inputs exceed 2 GiB aggregate bound".into())
                     })?;

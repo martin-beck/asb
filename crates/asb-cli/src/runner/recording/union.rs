@@ -25,6 +25,76 @@ pub(crate) enum Staging {
     RecoverUnused,
 }
 
+/// Project-local temporary custody while importing several artifact streams.
+/// The original cassette and the journal's partial records remain recoverable.
+struct ImportSpool {
+    directory: PathBuf,
+    files: Vec<(crate::cassette::Artifact, File)>,
+    paths: Vec<PathBuf>,
+}
+
+impl ImportSpool {
+    fn new(parent: &Path) -> Result<Self, Error> {
+        let directory = parent.join(format!(
+            ".asb-import-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&directory).map_err(io_error)?;
+        Ok(Self {
+            directory,
+            files: Vec::new(),
+            paths: Vec::new(),
+        })
+    }
+
+    fn stage(
+        &mut self,
+        archive: &mut Archive,
+        track: u64,
+        artifact: &crate::cassette::Artifact,
+    ) -> Result<(), Error> {
+        let path = self
+            .directory
+            .join(format!("artifact-{}", self.paths.len()));
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path).map_err(io_error)?;
+        self.paths.push(path.clone());
+        // The source cassette remains authoritative. On Unix, unlink the
+        // private staging file immediately so even abrupt termination cannot
+        // leave a plaintext artifact behind; the open descriptor stays usable.
+        #[cfg(unix)]
+        fs::remove_file(&path).map_err(io_error)?;
+        archive
+            .copy_artifact_to(track, &artifact.kind, &mut file)
+            .map_err(recording_error)?;
+        file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+        self.files.push((artifact.clone(), file));
+        Ok(())
+    }
+}
+
+impl Drop for ImportSpool {
+    fn drop(&mut self) {
+        self.files.clear();
+        for path in &self.paths {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir(&self.directory);
+    }
+}
+
 /// Pure admission of all configuration declarations, without payload I/O.
 /// Retained-node recovery calls this before source archive or journal reads;
 /// fresh planning also uses it after deriving descriptors from source indexes.
@@ -308,19 +378,23 @@ impl Descriptor {
                     .map_err(recording_error)?
                     .clone();
                 let payload = archive.read_track(imported.slot).map_err(recording_error)?;
-                let mut artifact_payloads = Vec::new();
+                let mut artifact_payloads = if track.artifacts.is_empty() {
+                    None
+                } else {
+                    Some(ImportSpool::new(self.destination.parent().ok_or_else(
+                        || Error::Input("recording destination has no parent".into()),
+                    )?)?)
+                };
                 for artifact in &track.artifacts {
-                    artifact_payloads.push((
-                        artifact.clone(),
-                        std::io::Cursor::new(
-                            archive
-                                .read_artifact(imported.slot, &artifact.kind)
-                                .map_err(recording_error)?,
-                        ),
-                    ));
+                    artifact_payloads.as_mut().expect("artifact spool").stage(
+                        &mut archive,
+                        imported.slot,
+                        artifact,
+                    )?;
                 }
                 let artifact_inputs = artifact_payloads
                     .iter_mut()
+                    .flat_map(|spool| spool.files.iter_mut())
                     .map(|(artifact, bytes)| crate::cassette::ArtifactInput {
                         artifact: artifact.clone(),
                         source: bytes,

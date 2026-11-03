@@ -631,6 +631,90 @@ fn auxiliary_artifacts_are_sealed_and_read_by_catalogue_identity() {
 }
 
 #[test]
+fn zip64_entry_sizes_remain_readable_and_are_checked() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("zip64-entry.zip");
+    let mut writer = ZipWriter::new(File::create(&path).unwrap());
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    writer.start_file("manifest.json", options).unwrap();
+    writer
+        .write_all(&serde_json::to_vec(&manifest(1)).unwrap())
+        .unwrap();
+    writer
+        .start_file("tracks/1.jsonl", options.large_file(true))
+        .unwrap();
+    writer.write_all(b"{}\n").unwrap();
+    writer.finish().unwrap();
+    let mut archive = Archive::open(&path, Limits::default()).unwrap();
+    assert_eq!(archive.read_track(1).unwrap(), b"{}\n");
+    drop(archive);
+    let mut bytes = fs::read(&path).unwrap();
+    let entries: Vec<_> = bytes
+        .windows(4)
+        .enumerate()
+        .filter_map(|(index, signature)| (signature == b"PK\x01\x02").then_some(index))
+        .collect();
+    let second = entries[1];
+    let name = u16::from_le_bytes(bytes[second + 28..second + 30].try_into().unwrap()) as usize;
+    let extra = second + 46 + name;
+    assert_eq!(&bytes[extra..extra + 2], &1u16.to_le_bytes());
+    bytes[extra..extra + 2].copy_from_slice(&2u16.to_le_bytes());
+    fs::write(&path, bytes).unwrap();
+    assert!(Archive::open(&path, Limits::default()).is_err());
+}
+
+#[test]
+fn zip64_footer_is_bounded_and_requires_consistent_locator() {
+    let fixture = Fixture::new();
+    let path = fixture.zip(&manifest(1), &[("tracks/1.jsonl", b"{}\n")]);
+    let original = fs::read(&path).unwrap();
+    let eocd = original.len() - 22;
+    assert_eq!(&original[eocd..eocd + 4], b"PK\x05\x06");
+    let end = &original[eocd..];
+    let entries = u16::from_le_bytes(end[10..12].try_into().unwrap()) as u64;
+    let dir_bytes = u32::from_le_bytes(end[12..16].try_into().unwrap()) as u64;
+    let dir_start = u32::from_le_bytes(end[16..20].try_into().unwrap()) as u64;
+    let mut large = original[..eocd].to_vec();
+    large.extend_from_slice(b"PK\x06\x06");
+    large.extend_from_slice(&44u64.to_le_bytes());
+    large.extend_from_slice(&45u16.to_le_bytes());
+    large.extend_from_slice(&45u16.to_le_bytes());
+    large.extend_from_slice(&0u32.to_le_bytes());
+    large.extend_from_slice(&0u32.to_le_bytes());
+    large.extend_from_slice(&entries.to_le_bytes());
+    large.extend_from_slice(&entries.to_le_bytes());
+    large.extend_from_slice(&dir_bytes.to_le_bytes());
+    large.extend_from_slice(&dir_start.to_le_bytes());
+    large.extend_from_slice(b"PK\x06\x07");
+    large.extend_from_slice(&0u32.to_le_bytes());
+    large.extend_from_slice(&(eocd as u64).to_le_bytes());
+    large.extend_from_slice(&1u32.to_le_bytes());
+    let mut footer = end.to_vec();
+    footer[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+    large.extend_from_slice(&footer);
+    fs::write(&path, &large).unwrap();
+    let mut archive = Archive::open(&path, Limits::default()).unwrap();
+    assert_eq!(archive.read_track(1).unwrap(), b"{}\n");
+    drop(archive);
+    let locator = eocd + 56;
+    for (offset, replacement) in [
+        (locator + 4, 1u64),            // nonzero ZIP64 disk
+        (eocd + 4, 43),                 // too-short ZIP64 record
+        (eocd + 24, entries + 1),       // inconsistent entry count
+        (eocd + 48, dir_start + 1),     // inconsistent directory offset
+        (locator + 8, eocd as u64 + 1), // inconsistent locator
+    ] {
+        let mut invalid = large.clone();
+        invalid[offset..offset + 8].copy_from_slice(&replacement.to_le_bytes());
+        fs::write(&path, invalid).unwrap();
+        assert!(
+            Archive::open(&path, Limits::default()).is_err(),
+            "offset {offset}"
+        );
+    }
+}
+
+#[test]
 fn auxiliary_artifact_stream_checks_checksum_and_limits_chunk_size() {
     struct ChunkWriter {
         data: Vec<u8>,
@@ -685,6 +769,103 @@ fn auxiliary_artifact_stream_checks_checksum_and_limits_chunk_size() {
             .copy_artifact_to(1, "local-tools", &mut Vec::new())
             .is_err()
     );
+}
+
+#[test]
+fn publication_streams_artifacts_larger_than_in_memory_track_limit() {
+    let fixture = Fixture::new();
+    let destination = fixture.0.join("larger-artifact.zip");
+    let limits = Limits {
+        max_track_bytes: 1024,
+        max_artifact_bytes: 4 * 1024 * 1024,
+        ..Limits::default()
+    };
+    let data = vec![b'a'; 2 * 1024 * 1024];
+    let mut journal = RecordingJournal::create(&destination, manifest(0), 1, limits).unwrap();
+    journal.begin(1, 1).unwrap();
+    let mut provider = b"{}\n".as_slice();
+    let mut payload = data.as_slice();
+    journal
+        .commit_with_artifacts(
+            manifest(1).tracks.remove(0),
+            &mut provider,
+            vec![ArtifactInput {
+                artifact: Artifact {
+                    kind: "large-fixture".into(),
+                    bytes: data.len() as u64,
+                    sha256: digest(&data),
+                },
+                source: &mut payload,
+            }],
+        )
+        .unwrap();
+    journal.finalize().unwrap();
+    let mut archive = Archive::open(&destination, limits).unwrap();
+    assert!(archive.read_artifact(1, "large-fixture").is_err());
+    let mut restored = Vec::new();
+    archive
+        .copy_artifact_to(1, "large-fixture", &mut restored)
+        .unwrap();
+    assert_eq!(restored, data);
+    let too_small = Limits {
+        max_artifact_bytes: 1024,
+        ..limits
+    };
+    assert!(Archive::open(&destination, too_small).is_err());
+}
+
+#[test]
+#[ignore = "writes and verifies a real four-GiB artifact; run explicitly for large-cassette qualification"]
+fn zip64_four_gib_artifact_publication_round_trip() {
+    const BYTES: u64 = 1u64 << 32;
+    // SHA-256 of exactly 2^32 zero bytes, computed independently.
+    const SHA256: &str = "8479e43911dc45e89f934fe48d01297e16f51d17aa561d4d1c216b1ae0fcddca";
+    let fixture = Fixture::new();
+    let destination = fixture.0.join("large-recording.zip");
+    let limits = Limits::default();
+    let mut journal = RecordingJournal::create(&destination, manifest(0), 1, limits).unwrap();
+    journal.begin(1, 1).unwrap();
+    let mut provider = b"{}\n".as_slice();
+    let mut payload = std::io::repeat(0).take(BYTES);
+    journal
+        .commit_with_artifacts(
+            manifest(1).tracks.remove(0),
+            &mut provider,
+            vec![ArtifactInput {
+                artifact: Artifact {
+                    kind: "large-fixture".into(),
+                    bytes: BYTES,
+                    sha256: SHA256.into(),
+                },
+                source: &mut payload,
+            }],
+        )
+        .unwrap();
+    journal.finalize().unwrap();
+    let mut archive = Archive::open(&destination, limits).unwrap();
+    archive
+        .copy_artifact_to(1, "large-fixture", &mut std::io::sink())
+        .unwrap();
+}
+
+#[test]
+#[ignore = "creates a sparse file with a central directory beyond 4 GiB"]
+fn zip64_sparse_archive_with_large_directory_offset() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("large-offset.zip");
+    let mut file = File::create(&path).unwrap();
+    file.seek(SeekFrom::Start(1u64 << 32)).unwrap();
+    let mut writer = ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    writer.start_file("manifest.json", options).unwrap();
+    writer
+        .write_all(&serde_json::to_vec(&manifest(1)).unwrap())
+        .unwrap();
+    writer.start_file("tracks/1.jsonl", options).unwrap();
+    writer.write_all(b"{}\n").unwrap();
+    writer.finish().unwrap();
+    let mut archive = Archive::open(&path, Limits::default()).unwrap();
+    assert_eq!(archive.read_track(1).unwrap(), b"{}\n");
 }
 
 #[test]
