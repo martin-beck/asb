@@ -25,7 +25,6 @@ async def _snapshot_boundary(mode, action, alias):
     def exchange():
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                connection.settimeout(40 if mode == "record" else 1800)
                 connection.connect(path)
                 connection.sendall(f"tool-{action}:{alias}{identity}\n".encode("ascii"))
                 with connection.makefile("rb") as response:

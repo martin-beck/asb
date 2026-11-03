@@ -8,7 +8,7 @@ import socketserver
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
 SOURCE = ROOT / 'crates/asb-cli/src/agents/adapters/openjiuwen/usage_compat.py'
@@ -22,6 +22,14 @@ boundary = namespace['_snapshot_boundary']
 
 
 class MarkerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_marker_wait_has_no_adapter_deadline(self):
+        connection=MagicMock();connection.__enter__.return_value=connection
+        connection.makefile.return_value.__enter__.return_value.readline.return_value=b'1\n'
+        with patch.dict(os.environ, {'ASB_FS_MARKER_SOCKET':'/fixture'}, clear=True), \
+             patch.object(socket,'socket',return_value=connection):
+            await boundary('record','begin','openjiuwen-1')
+        connection.settimeout.assert_not_called()
+
     async def test_record_and_replay_send_the_native_invocation_alias(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             path = str(Path(directory) / 'marker.sock')

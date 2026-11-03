@@ -68,15 +68,24 @@ def main(argv=None):
         if sys.stdin.readline()!='STOP\n':
             service.invalidate()
             raise RuntimeError('snapshot supervisor control ended unexpectedly')
-        server.shutdown();server.server_close();worker.join();server=None
-        Path(args.socket).unlink(missing_ok=True)
-        service.finish();service=None
+        server.shutdown()
+        try:
+            # Closing the service wakes replay markers whose predecessor never
+            # arrived. Joining server threads first would otherwise deadlock.
+            service.finish()
+        finally:
+            server.interrupt_clients()
+            server.server_close();worker.join();server=None
+            Path(args.socket).unlink(missing_ok=True)
+        service=None
         if not args.replay_archive:
             export_snapshot_streams(store,args.output,[args.btrfs])
         print('SAVED',flush=True)
     finally:
         if server is not None:
-            server.shutdown();server.server_close();worker.join()
+            if service is not None:
+                service.invalidate()
+            server.shutdown();server.interrupt_clients();server.server_close();worker.join()
             Path(args.socket).unlink(missing_ok=True)
         if service is not None:
             service.invalidate()

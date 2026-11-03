@@ -28,7 +28,6 @@ def snapshot_boundary(mode: str, action: str, alias: str) -> None:
     suffix = f':{os.getpid()}:{threading.get_native_id()}' if mode == 'record' else ''
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(40 if mode == 'record' else 1800)
             connection.connect(path)
             connection.sendall(f'tool-{action}:{alias}{suffix}\n'.encode('ascii'))
             with connection.makefile('rb') as response:

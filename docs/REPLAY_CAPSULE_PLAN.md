@@ -140,3 +140,9 @@ through its separate bind mount, and the supervisor retains its original mount.
 This avoids exposing snapshot copies to agent commands such as `find /`.
 This is bookkeeping isolation, not a sandbox or a guarantee of native tool
 replay; the tool interception and snapshot-ordering gaps above still apply.
+
+Snapshot marker capture and replay do not impose a separate per-tool deadline.
+An out-of-order marker waits for its recorded predecessor until the execution
+ends or the service is invalidated. Shutdown wakes pending markers and closes
+idle client connections before joining server threads. This does not establish
+that overlapping filesystem mutations can be replayed correctly.

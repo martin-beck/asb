@@ -172,6 +172,7 @@ class NativeFinalTest(unittest.TestCase):
              patch.object(launcher.socket, 'socket', return_value=connection):
             launcher.snapshot_boundary('replay','end','openhands-1')
         connection.connect.assert_called_once_with('/tmp/fixture')
+        connection.settimeout.assert_not_called()
         connection.sendall.assert_called_once_with(b'tool-end:openhands-1\n')
         connection.makefile.return_value=io.BytesIO(b'')
         with patch.dict(os.environ, {'ASB_FS_MARKER_SOCKET':'/tmp/fixture'}, clear=True), \
