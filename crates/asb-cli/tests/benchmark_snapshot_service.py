@@ -9,18 +9,30 @@ import sys
 import tempfile
 import tarfile
 import threading
+from types import SimpleNamespace
 import unittest
 
 ROOT=Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT/'crates/asb-cli/assets/benchmarks'))
 from asb_snapshot_service import MarkerServer,SnapshotService
 from asb_snapshot_guest import unpack_streams
+from asb_snapshot_control import GuestSnapshot
 
 SCRATCH=ROOT/'target'/'snapshot-service-tests'
 SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_snapshot_settlement_points_to_retained_guest_failure(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);(root/'guest-error-stderr.log').write_text('failure')
+            process=SimpleNamespace(returncode=1,communicate=lambda *_args,**_kwargs:(b'',None),poll=lambda:1)
+            supervisor=GuestSnapshot.__new__(GuestSnapshot)
+            supervisor.task=SimpleNamespace(artifacts=root);supervisor.process=process
+            supervisor.log=io.BytesIO();supervisor.replay=False
+            with self.assertRaisesRegex(RuntimeError,'guest-error-stderr.log'):
+                supervisor.close()
+
     def test_snapshot_archive_streams_flat_entries_and_rejects_invalid_entries(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root = Path(directory)
