@@ -160,6 +160,26 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
             actual, actual_scope = next_actual()
             if actual is None:
                 raise ValueError('direct filesystem replay ended before the recorded prefix')
+            skipped = actual.get('skipped_observations', [])
+            if (not isinstance(skipped, list) or any(type(number) is not int or number <= 0 for number in skipped)
+                    or skipped != sorted(set(skipped)) or (skipped and actual.get('op', '').startswith('observe-'))):
+                raise ValueError('skipped filesystem observations are invalid')
+            for sequence in skipped:
+                if event.get('sequence') != sequence or event.get('op') not in (
+                        'observe-getattr', 'observe-readdir', 'observe-readlink',
+                        'observe-getxattr', 'observe-listxattr'):
+                    raise ValueError('skipped filesystem observation is unproven')
+                count += 1
+                expected_line = next(expected, None)
+                if expected_line is None or not expected_line.endswith('\n'):
+                    raise ValueError('direct filesystem event stream is truncated')
+                event = json.loads(expected_line)
+                scope = expected_attribution.observe(event)
+                if scope['kind'] == 'handle-release':
+                    if scope['opened_as'] != {'kind':'direct'}:
+                        raise ValueError('direct filesystem release has an unproven opener')
+                elif scope['kind'] != 'direct':
+                    raise ValueError('direct filesystem prefix has unproven attribution')
             op = event.get('op')
             # Parallel reads on already-open handles can complete in either
             # order. Never move them across another operation or boundary.

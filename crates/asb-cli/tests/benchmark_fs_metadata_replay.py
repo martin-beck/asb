@@ -102,6 +102,26 @@ class MetadataReplayTest(unittest.TestCase):
                 validate_direct_prefix(lines([listing,opened,released,hardlinked,end]),payload,
                                        lines([listing,forged,opened,released]),payload)
 
+    def test_skipped_observations_are_audited_before_boundary(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'target') as directory:
+            payload=Path(directory)/'payload.bin';payload.write_bytes(b'')
+            one={'op':'observe-getattr','path':'/one','result':{'st_size':1},'caller':CALLER}
+            two={'op':'observe-readlink','path':'/two','result':'one','caller':CALLER}
+            opened={'op':'open','path':'/file','handle':1,'flags':0,'initial_size':0,
+                    'initial_mode':33188,'initial_nlink':1,'caller':CALLER}
+            released={'op':'release','path':'/file','handle':1,'caller':None}
+            end={'op':'marker','marker':'tool-begin:first','origin':None}
+            def lines(entries): return [json.dumps(dict(item,sequence=i))+'\n' for i,item in enumerate(entries,1)]
+            expected=[one,two,opened,released,end]
+            actual=[dict(opened,skipped_observations=[1,2]),released]
+            self.assertEqual(validate_direct_prefix(lines(expected),payload,lines(actual),payload),4)
+            for ids in ([2,1],[1,1],[1,3],[1,2,3]):
+                with self.assertRaisesRegex(ValueError,'skipped filesystem observation'):
+                    validate_direct_prefix(lines(expected),payload,lines([dict(opened,skipped_observations=ids),released]),payload)
+            forged=dict(one,skipped_observations=[1])
+            with self.assertRaisesRegex(ValueError,'skipped filesystem observations are invalid'):
+                validate_direct_prefix(lines(expected),payload,lines([forged,two,opened,released]),payload)
+
     def test_direct_observation_results_are_compared(self):
         with tempfile.TemporaryDirectory(dir=ROOT/'target') as directory:
             payload=Path(directory)/'payload.bin';payload.write_bytes(b'')
