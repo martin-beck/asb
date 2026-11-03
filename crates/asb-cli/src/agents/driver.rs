@@ -97,6 +97,10 @@ pub(crate) struct GuestRequest {
     /// The attempt owns completed filesystem operation streams in run_dir.
     #[serde(default)]
     pub filesystem_recording: bool,
+    /// Experimental guest-private replay evidence directory; the host replay
+    /// admission guard does not yet permit this path in production.
+    #[serde(default)]
+    pub filesystem_replay: Option<PathBuf>,
     #[serde(default)]
     pub replay: bool,
     /// Exact provider-tape path forwarded by the owning runner.  It is never
@@ -708,6 +712,16 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
 
 fn run(request: GuestRequest) -> Result<u8, Error> {
     request.capsule.validate()?;
+    if let Some(evidence) = &request.filesystem_replay
+        && (request.filesystem_recording
+            || !request.tool_replay
+            || request.config.agent != "mini-swe"
+            || evidence != &request.runtime_dir.join("filesystem-replay"))
+    {
+        return Err(Error::Input(
+            "invalid experimental guest filesystem replay request".into(),
+        ));
+    }
     let retained =
         request.process_lifetime == crate::workloads::session::ProcessLifetime::ThroughEvaluation;
     if retained {
@@ -780,6 +794,18 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             &request.run_dir,
             &workspace,
             &library,
+            &control,
+        )?)
+    } else if let Some(evidence) = &request.filesystem_replay {
+        let control = request
+            .runtime_dir
+            .join("agent-state/filesystem-replay.sock");
+        command.env("ASB_FS_REPLAY_SOCKET", &control);
+        Some(GuestFilesystemCapture::start_replay(
+            &request.project_root,
+            &request.run_dir,
+            &workspace,
+            evidence,
             &control,
         )?)
     } else {
@@ -1032,6 +1058,53 @@ struct GuestFilesystemCapture {
 }
 
 impl GuestFilesystemCapture {
+    fn start_replay(
+        project_root: &Path,
+        run_dir: &Path,
+        workspace: &Path,
+        evidence: &Path,
+        control_socket: &Path,
+    ) -> Result<Self, Error> {
+        let cursor = run_dir.join("asb_fs_replay_cursor.py");
+        let server = run_dir.join("asb_fs_replay_server.py");
+        fs::write(
+            &cursor,
+            include_str!("../../assets/benchmarks/asb_fs_replay_cursor.py"),
+        )
+        .map_err(crate::io_error)?;
+        fs::write(
+            &server,
+            include_str!("../../assets/benchmarks/asb_fs_replay_server.py"),
+        )
+        .map_err(crate::io_error)?;
+        let log = fs::File::create(run_dir.join("filesystem-replay-supervisor.log"))
+            .map_err(crate::io_error)?;
+        let mut child = Command::new(crate::python_runtime::project_python(project_root))
+            .arg(&server)
+            .arg(evidence)
+            .arg(workspace)
+            .arg(control_socket)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(log)
+            .spawn()
+            .map_err(|_| Error::Run("cannot start guest filesystem replay coordinator".into()))?;
+        let mut ready = String::new();
+        let output = child.stdout.take().ok_or_else(|| {
+            Error::Run("filesystem replay coordinator readiness is unavailable".into())
+        })?;
+        if BufReader::new(output).read_line(&mut ready).is_err() || ready != "READY\n" {
+            drop(child.stdin.take());
+            let _ = child.wait();
+            return Err(Error::Run(
+                "guest filesystem replay coordinator failed to start; inspect its private log"
+                    .into(),
+            ));
+        }
+        Ok(Self { child: Some(child) })
+    }
+
     fn start(
         project_root: &Path,
         tools_dir: &str,
@@ -1094,7 +1167,7 @@ impl GuestFilesystemCapture {
         let status = child.wait().map_err(crate::io_error)?;
         if write.is_err() || !status.success() {
             return Err(Error::Run(
-                "guest filesystem recorder did not settle; inspect its private supervisor log"
+                "guest filesystem supervisor did not settle; inspect its private supervisor log"
                     .into(),
             ));
         }
@@ -1393,6 +1466,46 @@ pub(crate) fn entry() -> std::process::ExitCode {
 #[cfg(all(test, unix))]
 mod artifact_publication_tests {
     use super::*;
+
+    #[test]
+    fn filesystem_replay_supervisor_runs_and_rejects_unconsumed_calls() {
+        use std::os::unix::{fs::symlink, net::UnixStream};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!("r-{}", crate::tools::runtime::unique_id()));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let python = crate::python_runtime::project_python(&root);
+        let run = root.join("run");
+        let workspace = root.join("workspace");
+        let evidence = root.join("evidence");
+        let socket = root.join("replay.sock");
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::create_dir_all(&run).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&evidence).unwrap();
+        symlink("/usr/bin/python3", &python).unwrap();
+        fs::write(evidence.join("events.jsonl"), concat!(
+            "{\"sequence\":1,\"op\":\"marker\",\"path\":null,\"marker\":\"tool-begin:mini-swe-1\"}\n",
+            "{\"sequence\":2,\"op\":\"marker\",\"path\":null,\"marker\":\"tool-end:mini-swe-1\"}\n"
+        )).unwrap();
+        let mut replay =
+            GuestFilesystemCapture::start_replay(&root, &run, &workspace, &evidence, &socket)
+                .unwrap();
+        let mut client = UnixStream::connect(&socket).unwrap();
+        client.write_all(b"tool-end:mini-swe-1\n").unwrap();
+        let mut reply = String::new();
+        BufReader::new(client).read_line(&mut reply).unwrap();
+        assert_eq!(reply, "2\n");
+        replay.stop().unwrap();
+        assert!(!socket.exists());
+        let mut replay =
+            GuestFilesystemCapture::start_replay(&root, &run, &workspace, &evidence, &socket)
+                .unwrap();
+        assert!(replay.stop().is_err());
+        assert!(!socket.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn filesystem_capture_supervisor_requires_readiness_and_settles() {

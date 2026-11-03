@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -70,6 +71,44 @@ class ReplayServerTests(unittest.TestCase):
             client.connect(str(path)); client.sendall(b'tool-end:')
             with self.assertRaises(RuntimeError):
                 server.finish()
+
+    def test_supervisor_requires_ready_boundary_and_clean_stop(self):
+        workspace = self.root / 'workspace'; workspace.mkdir()
+        path = self.root / 'socket'
+        script = Path(__file__).parents[1] / 'assets/benchmarks/asb_fs_replay_server.py'
+        process = subprocess.Popen([sys.executable, str(script), str(self.evidence),
+                                    str(workspace), str(path)], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(process.stdout.readline(), 'READY\n')
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect(str(path)); client.sendall(b'tool-end:mini-swe-1\n')
+                self.assertEqual(client.recv(32), b'5\n')
+            output, error = process.communicate('STOP\n', timeout=5)
+            self.assertEqual(process.returncode, 0, error)
+            self.assertFalse(path.exists())
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
+    def test_supervisor_rejects_incomplete_journal(self):
+        workspace = self.root / 'workspace'; workspace.mkdir()
+        path = self.root / 'socket'
+        script = Path(__file__).parents[1] / 'assets/benchmarks/asb_fs_replay_server.py'
+        process = subprocess.Popen([sys.executable, str(script), str(self.evidence),
+                                    str(workspace), str(path)], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(process.stdout.readline(), 'READY\n')
+            output, error = process.communicate('STOP\n', timeout=5)
+            self.assertNotEqual(process.returncode, 0)
+            self.assertIn('waiting for a recorded tool invocation', error)
+            self.assertFalse(path.exists())
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
 
 
 if __name__ == '__main__':
