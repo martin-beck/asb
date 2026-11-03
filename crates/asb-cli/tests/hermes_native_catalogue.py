@@ -1,6 +1,8 @@
 """Hermes keeps its normal catalogue and marks untaped calls honestly."""
 import os
 import json
+import base64
+import contextvars
 from pathlib import Path
 import tempfile
 import threading
@@ -113,5 +115,36 @@ class CoverageTest(unittest.TestCase):
             status = json.loads((Path(directory) / 'untaped-tools-status.json').read_text())
             self.assertEqual(status['calls_completed'], 2)
             self.assertTrue(status['complete'])
+
+    def test_untaped_parent_links_recorded_native_child_across_context_thread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ['ASB_HERMES_NATIVE_SIDECAR'] = str(Path(directory) / 'native')
+            os.environ['ASB_HERMES_NATIVE_PROGRESS'] = str(Path(directory) / 'progress')
+            source = HOOK.read_text().split('\ntry:\n    # Hermes exposes', 1)[0]
+            namespace = {'__name__': 'hermes_nested_lineage_fixture'}
+            exec(compile(source, str(HOOK), 'exec'), namespace)
+            markers = []
+            namespace['_filesystem_marker'] = lambda action, alias: markers.append((action, alias)) or True
+            capture = namespace['UntapedToolCapture'](Path(directory) / 'untaped-tools.jsonl')
+            native = namespace['Recorder']()
+            def parent(_name, _args, **_kwargs):
+                ctx = contextvars.copy_context()
+                errors = []
+                def child():
+                    try:
+                        ctx.run(native.invoke, lambda *_: 'child-result', 'pwd', False, None,
+                                None, None, False, '.', False, False, None)
+                    except BaseException as error: errors.append(error)
+                worker = threading.Thread(target=child); worker.start(); worker.join(5)
+                self.assertFalse(worker.is_alive()); self.assertEqual(errors, [])
+                return 'parent-result'
+            self.assertEqual(capture.invoke(parent, 'execute_code', {'code': 'fixture'}, {}), 'parent-result')
+            native.close(); capture.close()
+            rows = [json.loads(line) for line in (Path(directory) / 'native').read_text().splitlines()]
+            request = next(json.loads(base64.b64decode(row['request_b64'])) for row in rows if row['event'] == 'write')
+            self.assertEqual(request['parent_alias'], 'untaped-1')
+            self.assertEqual(markers, [('begin', 'untaped-1'), ('begin', 'terminal-1'),
+                                       ('end', 'terminal-1'), ('end', 'untaped-1')])
+            self.assertIsNone(namespace['PARENT_CALL'].get())
 
 if __name__ == '__main__': unittest.main()
