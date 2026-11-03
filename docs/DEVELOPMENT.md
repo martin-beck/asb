@@ -1,5 +1,15 @@
 # Development
 
+The opt-in Linux filesystem ordering experiment at
+`crates/asb-cli/tests/fixtures/native_fs_probe/run.py` requires `/dev/fuse`,
+`fusermount3`, and an interpreter with fusepy. Set `ASB_FUSE_TEST_PYTHON` to
+that interpreter and run the script with Python. It records a forced
+write/truncate race on hard-linked files, checks that an unrelated read can
+proceed, and replays the recorded operations into four independent directories.
+This is an experimental fixture, not an ASB replay backend: it changes timing,
+does not capture all filesystem operations, and does not replay tool execution.
+FUSE is not a requirement for ordinary development or CI.
+
 The opt-in `crates/asb-cli/tests/openjiuwen_embedding_tape.py` exercises the
 installed OpenJiuwen embedding client and the adapter's proposed auxiliary
 tape route with an offline loopback fixture. Set `ASB_OPENJIUWEN_PYTHON` to

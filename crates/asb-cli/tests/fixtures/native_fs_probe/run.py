@@ -1,0 +1,86 @@
+"""Opt-in Linux FUSE ordering experiment; this is not a replay backend."""
+import concurrent.futures
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import time
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[4]
+python = os.environ.get('ASB_FUSE_TEST_PYTHON')
+if not python or not shutil.which('fusermount3'):
+    raise SystemExit('Set ASB_FUSE_TEST_PYTHON to Python with fusepy; install fusermount3.')
+base = ROOT / 'target' / 'native-fs-probe'
+base.mkdir(parents=True, exist_ok=True)
+
+def wait_for(predicate, message):
+    deadline = time.monotonic() + 4
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise RuntimeError(message)
+        time.sleep(.01)
+
+with tempfile.TemporaryDirectory(dir=base) as temp:
+    root = Path(temp)
+    baseline, backing, mount, evidence = (root / name for name in ('baseline', 'backing', 'mount', 'evidence'))
+    for directory in (baseline, backing, mount, evidence):
+        directory.mkdir()
+    (baseline / 'one').write_bytes(b'initial')
+    os.link(baseline / 'one', baseline / 'alias')
+    (baseline / 'other').write_bytes(b'independent')
+    subprocess.run(['/bin/cp', '-a', str(baseline) + '/.', str(backing)], check=True)
+    env = dict(os.environ, ASB_PROBE_HOLD_WRITE='1')
+    with (root / 'fuse.log').open('wb') as log:
+        process = subprocess.Popen([python, str(HERE / 'proxy.py'), str(backing), str(mount), str(evidence)], env=env, stdout=log, stderr=log)
+        mounted = False
+        try:
+            wait_for(lambda: os.path.ismount(mount) or process.poll() is not None, 'FUSE mount timed out')
+            if process.poll() is not None:
+                raise RuntimeError('FUSE process exited before mounting')
+            mounted = True
+            def write():
+                fd = os.open(mount / 'one', os.O_WRONLY)
+                try:
+                    os.pwrite(fd, b'changed', 0)
+                finally:
+                    os.close(fd)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                writer = pool.submit(write)
+                try:
+                    wait_for(lambda: (evidence / 'write-applied').exists(), 'write did not reach the test barrier')
+                    truncation = pool.submit(os.truncate, mount / 'alias', 0)
+                    unrelated = pool.submit((mount / 'other').read_bytes)
+                    assert unrelated.result(timeout=2) == b'independent'
+                    time.sleep(.1)
+                    assert not truncation.done(), 'dependent truncate passed the write barrier'
+                finally:
+                    (evidence / 'write-release').touch()
+                writer.result(timeout=5)
+                truncation.result(timeout=5)
+            assert (backing / 'alias').read_bytes() == b''
+        finally:
+            (evidence / 'write-release').touch()
+            if mounted:
+                subprocess.run(['fusermount3', '-u', str(mount)], check=True)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                process.wait(timeout=5)
+        if process.returncode != 0:
+            raise RuntimeError(f'FUSE process failed: {process.returncode}')
+    events = [json.loads(line) for line in (evidence / 'events.jsonl').read_text().splitlines()]
+    ops = [event['op'] for event in events]
+    assert ops.index('write') < ops.index('truncate'), ops
+    def replay(index):
+        destination = root / f'replay-{index}'
+        subprocess.run([python, str(HERE / 'replay.py'), str(evidence), str(destination), str(baseline)], check=True)
+        assert (destination / 'one').read_bytes() == b''
+        assert (destination / 'other').read_bytes() == b'independent'
+        assert os.stat(destination / 'one').st_ino == os.stat(destination / 'alias').st_ino
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(replay, range(4)))
+    print('FUSE ordering experiment passed: dependent truncate, unrelated read, four operation replays')

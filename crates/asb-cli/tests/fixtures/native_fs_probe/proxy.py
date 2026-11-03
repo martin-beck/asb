@@ -1,0 +1,100 @@
+"""Local feasibility probe only; not an ASB replay backend."""
+import errno, json, os, stat, sys, threading, time
+from pathlib import Path
+from fuse import FUSE, FuseOSError, Operations
+
+backing, mount, evidence = map(Path, sys.argv[1:4])
+class Proxy(Operations):
+    def __init__(self):
+        self.record_lock = threading.Lock()
+        self.sequence = 0
+        self.handle_lock = threading.Lock()
+        self.next_handle = 0
+        self.handles = {}
+        self.inode_locks = {}
+        self.log = open(evidence / 'events.jsonl', 'a', encoding='utf-8', buffering=1)
+    def path(self, path): return backing / path.lstrip('/')
+    def register(self, fd):
+        with self.handle_lock:
+            self.next_handle += 1
+            self.handles[fd] = self.next_handle
+            return self.next_handle
+    def handle(self, fi):
+        with self.handle_lock: return self.handles[fi.fh]
+    def lock_for_stat(self, st):
+        with self.handle_lock: return self.inode_locks.setdefault((st.st_dev, st.st_ino), threading.RLock())
+    def inode_lock(self, fi):
+        return self.lock_for_stat(os.fstat(fi.fh))
+    def record(self, op, path, data=None, **detail):
+        with self.record_lock:
+            self.sequence += 1
+            event = {'sequence': self.sequence, 'op': op, 'path': path, **detail}
+            if data is not None:
+                name = f'object-{self.sequence:08d}'
+                with open(evidence / name, 'xb') as f: f.write(data)
+                event.update(object=name, bytes=len(data))
+            self.log.write(json.dumps(event, separators=(',', ':')) + '\n')
+    def getattr(self, path, fh=None):
+        try: st = os.lstat(self.path(path))
+        except OSError as error: raise FuseOSError(error.errno)
+        return {key: getattr(st, key) for key in ('st_atime','st_ctime','st_gid','st_mode','st_mtime','st_nlink','st_size','st_uid')}
+    def readdir(self, path, fh): return ['.', '..', *os.listdir(self.path(path))]
+    def open(self, path, fi):
+        try:
+            fi.fh = os.open(self.path(path), fi.flags)
+            handle = self.register(fi.fh)
+            self.record('open', path, handle=handle, flags=fi.flags)
+            return 0
+        except OSError as error: raise FuseOSError(error.errno)
+    def create(self, path, mode, fi=None):
+        try:
+            fd = os.open(self.path(path), fi.flags | os.O_CREAT, mode)
+            handle = self.register(fd)
+            self.record('create', path, mode=mode, flags=fi.flags, handle=handle)
+            fi.fh = fd
+            return 0
+        except OSError as error: raise FuseOSError(error.errno)
+    def read(self, path, size, offset, fh):
+        with self.inode_lock(fh):
+            data = os.pread(fh.fh, size, offset)
+            self.record('read', path, data, offset=offset, handle=self.handle(fh))
+            return data
+    def write(self, path, data, offset, fh):
+        with self.inode_lock(fh):
+            written = os.pwrite(fh.fh, data, offset)
+            if os.environ.get('ASB_PROBE_HOLD_WRITE') == '1' and data.startswith(b'changed'):
+                (evidence / 'write-applied').touch()
+                deadline = time.monotonic() + 5
+                while not (evidence / 'write-release').exists() and time.monotonic() < deadline:
+                    time.sleep(0.005)
+            self.record('write', path, data[:written], offset=offset, handle=self.handle(fh))
+            return written
+    def truncate(self, path, length, fh=None):
+        lock = self.lock_for_stat(os.stat(self.path(path))) if fh is None else self.inode_lock(fh)
+        if os.environ.get('ASB_PROBE_HOLD_TRUNCATE_LOOKUP') == '1' and path == '/victim':
+            (evidence / 'truncate-lookup').touch()
+            deadline = time.monotonic() + 5
+            while not (evidence / 'truncate-release').exists() and time.monotonic() < deadline:
+                time.sleep(0.005)
+        with lock:
+            if fh is None: os.truncate(self.path(path), length)
+            else: os.ftruncate(fh.fh, length)
+            self.record('truncate', path, size=length, handle=self.handle(fh) if fh is not None else None)
+    def rename(self, old, new):
+        os.rename(self.path(old), self.path(new)); self.record('rename', old, destination=new)
+    def link(self, target, source):
+        os.link(self.path(source), self.path(target)); self.record('link', source, destination=target)
+    def symlink(self, target, source):
+        os.symlink(source, self.path(target)); self.record('symlink', target, destination=source)
+    def readlink(self, path): return os.readlink(self.path(path))
+    def unlink(self, path): os.unlink(self.path(path)); self.record('unlink', path)
+    def mkdir(self, path, mode): os.mkdir(self.path(path), mode); self.record('mkdir', path, mode=mode)
+    def rmdir(self, path): os.rmdir(self.path(path)); self.record('rmdir', path)
+    def flush(self, path, fh): os.fsync(fh.fh)
+    def fsync(self, path, datasync, fh): os.fsync(fh.fh)
+    def release(self, path, fh):
+        with self.handle_lock:
+            handle = self.handles.pop(fh.fh)
+            os.close(fh.fh)
+            self.record('release', path, handle=handle)
+FUSE(Proxy(), str(mount), foreground=True, nothreads=False, raw_fi=True)
