@@ -113,6 +113,12 @@ class InitialReadTests(unittest.TestCase):
         self.assertEqual(result['/file']['size'], 6)
         self.assertEqual(result['/file']['segments'], [(0, 3, 0), (3, 3, 7)])
 
+    def test_metadata_observations_do_not_end_initial_read_window(self):
+        metadata = dict(op='observe-getattr', path='/file', result={'st_size':6})
+        self.assertIn('/file', plan_initial_reads(events(metadata, opened(), read(0, 6))))
+        unknown = dict(op='observe-unknown', path='/file')
+        self.assertEqual(plan_initial_reads(events(unknown, opened(), read(0, 6))), {})
+
     def test_partial_and_missing_metadata_never_produce_a_plan(self):
         self.assertEqual(plan_initial_reads(events(opened(), read(0, 2), read(3, 3))), {})
         legacy = dict(op='open', path='/file', handle=1, flags=os.O_RDONLY)

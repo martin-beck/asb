@@ -25,6 +25,11 @@ _FIELDS = {
     'unlink': ('path',),
     'mkdir': ('path', 'mode'),
     'rmdir': ('path',),
+    'observe-getattr': ('path',),
+    'observe-readdir': ('path',),
+    'observe-readlink': ('path',),
+    'observe-getxattr': ('path', 'name', 'position'),
+    'observe-listxattr': ('path',),
 }
 _HANDLE_OPS = {'read', 'write', 'release', 'truncate'}
 _PAYLOAD_OPS = {'read', 'write', 'setxattr'}
@@ -159,6 +164,20 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
                         raise ValueError('direct filesystem handle differs')
                     if op == 'release':
                         handles.pop(left); used_observed.remove(right)
+            if op.startswith('observe-'):
+                for item in (event, actual):
+                    failure = 'error' in item
+                    if failure and (type(item['error']) is not int or item['error'] <= 0 or 'result' in item or 'object' in item):
+                        raise ValueError('direct filesystem observation is invalid')
+                    if not failure and ((op == 'observe-getxattr' and 'result' in item)
+                                        or (op != 'observe-getxattr' and 'result' not in item)):
+                        raise ValueError('direct filesystem observation is invalid')
+                for field in ('error', 'result'):
+                    if (field in event) != (field in actual) or event.get(field) != actual.get(field):
+                        raise ValueError(f'direct filesystem observation differs at event {count + 1}')
+                if op == 'observe-getxattr' and 'error' not in event:
+                    if _digest_range(expected_data, event) != _digest_range(observed_data, actual):
+                        raise ValueError('direct filesystem observation payload differs')
             if op in _PAYLOAD_OPS and _digest_range(expected_data, event) != _digest_range(observed_data, actual):
                 raise ValueError('direct filesystem operation payload differs')
             count += 1
