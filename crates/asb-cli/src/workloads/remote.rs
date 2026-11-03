@@ -147,6 +147,7 @@ fn stage_native_capsule(
                 target: "native-capsule.zip".into(),
                 bytes: bytes.len() as u64,
                 sha256: crate::cassette::digest(&bytes),
+                streamed: false,
             });
             Ok(crate::agents::driver::GuestCapsule {
                 mode: crate::agents::driver::GuestCapsuleMode::Replay,
@@ -173,6 +174,66 @@ fn deterministic_manifest_sidecar(path: &Path) -> Result<PathBuf, String> {
 
 fn native_trace_sidecar(path: &Path) -> Result<PathBuf, String> {
     replay_sidecar(path, "native-trace", "jsonl")
+}
+
+fn filesystem_private_inputs(path: &Path) -> Result<Vec<PrivateInput>, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut inputs = Vec::new();
+    for kind in ["aux-fs-events", "aux-fs-payload"] {
+        let source = replay_sidecar(path, kind, "jsonl")?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let mut file = options
+            .open(&source)
+            .map_err(|_| format!("sealed {kind} replay input is unavailable"))?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| format!("sealed {kind} replay input is unavailable"))?;
+        let limit = crate::cassette::Limits::default().max_artifact_bytes;
+        if !metadata.is_file() || metadata.len() > limit {
+            return Err(format!(
+                "sealed {kind} replay input is invalid or too large"
+            ));
+        }
+        let mut digest = Sha256::new();
+        let mut count = 0u64;
+        let mut buffer = [0u8; 65536];
+        loop {
+            let size = file
+                .read(&mut buffer)
+                .map_err(|_| format!("cannot read sealed {kind} replay input"))?;
+            if size == 0 {
+                break;
+            }
+            count = count
+                .checked_add(size as u64)
+                .filter(|value| *value <= limit)
+                .ok_or_else(|| format!("sealed {kind} replay input grew too large"))?;
+            digest.update(&buffer[..size]);
+        }
+        if count != metadata.len() {
+            return Err(format!("sealed {kind} replay input changed while staging"));
+        }
+        let target = source
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| format!("sealed {kind} replay input has no filename"))?
+            .to_owned();
+        inputs.push(PrivateInput {
+            source,
+            target,
+            bytes: count,
+            sha256: format!("{:x}", digest.finalize()),
+            streamed: true,
+        });
+    }
+    Ok(inputs)
 }
 
 fn replay_sidecar(path: &Path, stem: &str, extension: &str) -> Result<PathBuf, String> {
@@ -231,6 +292,7 @@ fn replay_private_inputs(
             target,
             bytes: bytes.len() as u64,
             sha256: crate::cassette::digest(&bytes),
+            streamed: false,
         });
         Ok(())
     };
@@ -957,6 +1019,18 @@ impl Session {
             &context.config.mcp_servers,
             context.mcp_mode == Some(crate::tape::Mode::Replay),
         )?;
+        if context.tool_replay
+            && std::env::var_os("ASB_EXPERIMENTAL_FILESYSTEM_REPLAY").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+        {
+            let cassette = context
+                .tool_tape_cassette
+                .ok_or("filesystem replay needs a selected tool cassette")?;
+            private_inputs.extend(filesystem_private_inputs(cassette)?);
+            return Err(
+                "filesystem replay coordination is not implemented; no replay was started".into(),
+            );
+        }
         let capsule = stage_native_capsule(
             context.native_capsule(),
             &artifact_output,
@@ -975,6 +1049,7 @@ impl Session {
                     target: "native-tool-sidecar.jsonl".into(),
                     bytes: bytes.len() as u64,
                     sha256: crate::cassette::digest(&bytes),
+                    streamed: false,
                 });
                 Ok::<crate::cassette::NativeToolLaunch, String>(launch.clone())
             })
@@ -1009,6 +1084,7 @@ impl Session {
                 target: asset.target.into(),
                 bytes: asset.bytes.len() as u64,
                 sha256: crate::cassette::digest(asset.bytes),
+                streamed: false,
             });
         }
         let payload = AgentRequest {
@@ -1524,6 +1600,32 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn filesystem_replay_inputs_stream_both_replica_files_and_reject_missing() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!("fs-inputs-{}", crate::tools::runtime::unique_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let replay = root.join("replay-2.jsonl");
+        let events = root.join("aux-fs-events-2.jsonl");
+        let payload = root.join("aux-fs-payload-2.jsonl");
+        std::fs::write(&events, b"event").unwrap();
+        assert!(filesystem_private_inputs(&replay).is_err());
+        std::fs::write(&payload, b"payload").unwrap();
+        let inputs = filesystem_private_inputs(&replay).unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert!(inputs.iter().all(|input| input.streamed));
+        assert_eq!(inputs[0].sha256, crate::cassette::digest(b"event"));
+        assert_eq!(inputs[1].sha256, crate::cassette::digest(b"payload"));
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&payload).unwrap();
+            std::os::unix::fs::symlink(&events, &payload).unwrap();
+            assert!(filesystem_private_inputs(&replay).is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn guest_tape_projection_uses_private_alias_and_preserves_replica_suffix() {
