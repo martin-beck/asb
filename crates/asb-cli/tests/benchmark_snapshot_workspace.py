@@ -60,6 +60,19 @@ class WorkspaceTest(unittest.TestCase):
                     workspace.prepare(source)
             self.assertFalse((root/'image').exists())
 
+    def test_non_sparse_storage_does_not_expand_the_image_to_all_free_space(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);source=root/'source';source.mkdir()
+            workspace=SnapshotWorkspace(root/'image',root/'mount',None,['mkfs'],['btrfs'],['rsync'])
+            space=SimpleNamespace(f_bavail=100*1024*1024,f_frsize=1024)
+            with patch('asb_snapshot_workspace.os.statvfs',return_value=space), \
+                 patch('asb_snapshot_workspace.os.fstat',return_value=SimpleNamespace(st_blocks=8*1024**2//512)), \
+                 patch('asb_snapshot_workspace.subprocess.run') as run:
+                with self.assertRaisesRegex(RuntimeError,'does not support sparse files'):
+                    workspace.prepare(source)
+            self.assertEqual((root/'image').stat().st_size,8*1024**2)
+            run.assert_not_called()
+
     def test_loop_allocation_retries_busy_without_detaching_another_owner(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);source=root/'source';source.mkdir();calls=[]

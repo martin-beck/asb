@@ -31,6 +31,14 @@ class SnapshotWorkspace:
                 if size <= 0:
                     raise RuntimeError('snapshot storage has no available space')
             with self.image.open('xb') as image:
+                # Do not expand an image to all available space on a backing
+                # filesystem that eagerly allocates truncated zeroes. The
+                # small probe is not a workspace size limit.
+                probe = min(size, 8 * 1024**2)
+                image.truncate(probe)
+                image.flush()
+                if os.fstat(image.fileno()).st_blocks * 512 >= probe:
+                    raise RuntimeError('snapshot storage does not support sparse files; use a sparse-capable project filesystem or VM')
                 image.truncate(size)
             subprocess.run(self.mkfs + ['-q', str(self.image)], check=True, stdout=subprocess.DEVNULL, timeout=60)
             # The container may expose loop-control without pre-created loop
