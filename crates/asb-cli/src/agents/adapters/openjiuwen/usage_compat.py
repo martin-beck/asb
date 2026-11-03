@@ -12,15 +12,6 @@ import os
 import runpy
 import sys
 
-# Configure before importing the rest of the client: OpenJiuwen otherwise
-# creates its own log files relative to the benchmark checkout.
-_log_directory = os.environ.get("ASB_OPENJIUWEN_LOG_DIR")
-if _log_directory:
-    from openjiuwen.core.common.logging.log_config import configure_log_config, get_log_config_snapshot
-    _logging_config = get_log_config_snapshot()
-    _logging_config["log_path"] = _log_directory
-    configure_log_config(_logging_config)
-
 # OpenJiuwen exposes its turn limit through this environment setting, not a
 # CLI option. Consume the adapter-private argument before importing its CLI.
 if "--asb-max-iterations" in sys.argv:
@@ -58,6 +49,15 @@ if "--asb-native-tool-replay" in sys.argv:
         raise SystemExit("ASB OpenJiuwen native replay sidecar is missing")
     _replay_path = sys.argv[_index + 1]
     del sys.argv[_index:_index + 2]
+
+# Configure before importing the rest of the client: OpenJiuwen otherwise
+# creates its own log files relative to the benchmark checkout.
+_log_directory = os.environ.get("ASB_OPENJIUWEN_LOG_DIR")
+if _log_directory:
+    from openjiuwen.core.common.logging.log_config import configure_log_config, get_log_config_snapshot
+    _logging_config = get_log_config_snapshot()
+    _logging_config["log_path"] = _log_directory
+    configure_log_config(_logging_config)
 
 try:
     from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
