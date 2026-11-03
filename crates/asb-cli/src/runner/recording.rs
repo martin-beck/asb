@@ -688,6 +688,10 @@ impl Recorder {
                 if let Some(identity)=raw_identity { state.raw_identities.insert(id,identity); }
             }
             let mut published = journal.finalize().map_err(recording_error)?;
+            let complete = published.manifest.tracks.iter().filter(|track| track.complete).count();
+            if let Some(warning) = incomplete_track_warning(complete, published.manifest.tracks.len()) {
+                published.warnings.push(warning);
+            }
             if producers_quiescent {
                 let mut cleanup_failures=0;
                 for track in &published.manifest.tracks {
@@ -705,8 +709,8 @@ impl Recorder {
                         }
                     }
                 }
-                if cleanup_failures>0 { published.warnings.push(format!("published cassette is usable; {cleanup_failures} raw capture cleanups were incomplete or durability-unconfirmed; inspect artifacts (at most 16 details retained)")); }
-            } else { published.cleanup_complete=false; published.warnings.push("published cassette is usable; raw captures retained because producer cleanup is unconfirmed".into()); }
+                if cleanup_failures>0 { published.warnings.push(format!("published cassette retained; {cleanup_failures} raw capture cleanups were incomplete or durability-unconfirmed; inspect artifacts (at most 16 details retained)")); }
+            } else { published.cleanup_complete=false; published.warnings.push("published cassette retained; raw captures retained because producer cleanup is unconfirmed".into()); }
             Ok(Some(published))
         })
     }
@@ -876,9 +880,16 @@ fn cleanup_raw(output: &Path, track: &Track, original: Option<&fs::Metadata>) ->
     raw::cleanup(output, track, original)
 }
 
+fn incomplete_track_warning(complete: usize, total: usize) -> Option<String> {
+    (complete < total).then(|| format!(
+        "published cassette contains {} incomplete track(s); incomplete tracks cannot serve as complete recordings",
+        total - complete
+    ))
+}
+
 fn raw_cleanup_warning(track_id: u64) -> String {
     format!(
-        "published cassette is usable; track {track_id} raw capture cleanup incomplete; private evidence retained"
+        "published cassette retained; track {track_id} raw capture cleanup incomplete; private evidence retained"
     )
 }
 
@@ -980,11 +991,24 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_recordings_have_an_explicit_warning() {
+        assert_eq!(incomplete_track_warning(2, 2), None);
+        let warning = incomplete_track_warning(0, 1).unwrap();
+        assert!(warning.contains("1 incomplete track"));
+        assert!(!warning.contains("usable"));
+        assert!(
+            incomplete_track_warning(1, 3)
+                .unwrap()
+                .contains("2 incomplete track")
+        );
+    }
+
+    #[test]
     fn raw_cleanup_warning_has_only_a_stable_track_label() {
         let warning = raw_cleanup_warning(7);
         assert_eq!(
             warning,
-            "published cassette is usable; track 7 raw capture cleanup incomplete; private evidence retained"
+            "published cassette retained; track 7 raw capture cleanup incomplete; private evidence retained"
         );
         assert!(!warning.contains('/'));
     }
