@@ -63,6 +63,7 @@ class SweBenchTask:
                 raise CatalogError("prepared repository does not match the official base commit")
             if self.checked(["git", "status", "--porcelain", "--untracked-files=all"]).strip():
                 raise CatalogError("prepared task repository is not clean")
+            self.prepare_base_history(str(CONTAINER_WORKDIR), '/opt/'+self.attempt+'-base-history.git', base)
             # Keep an independent copy of the verified base Git metadata for
             # submission generation. Agents may modify or delete their own
             # .git directory; that must not destroy the original comparison.
@@ -86,13 +87,32 @@ class SweBenchTask:
             self.__exit__(None, None, None)
             raise
 
-    def checked(self, argv, output_limit=256 * 1024, environment=None):
-        result = self.workspace.execute(argv, environment=environment, timeout=60, output_limit=output_limit, cancelled=self.cancelled)
+    def checked(self, argv, output_limit=256 * 1024, environment=None, timeout=60):
+        result = self.workspace.execute(argv, environment=environment, timeout=timeout, output_limit=output_limit, cancelled=self.cancelled)
         if result["timed_out"] or result["cancelled"] or result["exit_code"] != 0 or result["output_truncated"]:
             # Command output can contain agent-controlled data. Keep diagnostics
             # structured and do not echo it into human/measurement records.
             raise ExecutionError(f"task repository operation {argv[0]} {argv[1]} failed (exit {result['exit_code']}, timeout {result['timed_out']}, truncated {result['output_truncated']})")
         return result["stdout"]
+
+    def prepare_base_history(self, worktree, clean_git, base):
+        """Retain the base and its ancestors, excluding later image history."""
+        original = worktree + '/.git'
+        old_git = clean_git + '.unfiltered'
+        self.checked(['mkdir', clean_git])
+        self.checked(['git', 'init', '--bare', clean_git])
+        self.checked(['git', '--git-dir='+clean_git, 'fetch', '--no-tags',
+                      '--no-recurse-submodules', '--no-write-fetch-head', worktree, base], timeout=600)
+        self.checked(['git', '--git-dir='+clean_git, 'cat-file', '-e', base+'^{commit}'])
+        self.checked(['git', '--git-dir='+clean_git, 'config', 'core.bare', 'false'])
+        self.checked(['git', '--git-dir='+clean_git, 'update-ref', 'refs/heads/asb-base', base])
+        self.checked(['git', '--git-dir='+clean_git, 'symbolic-ref', 'HEAD', 'refs/heads/asb-base'])
+        self.checked(['mv', original, old_git])
+        self.checked(['mv', clean_git, original])
+        self.checked(['git', '-C', worktree, 'reset', '--mixed', base], timeout=300)
+        # The disposable image's unrelated refs and unreachable objects must
+        # not remain available to the benchmark agent through this copy.
+        self.checked(['rm', '-rf', old_git], timeout=300)
 
     def capture_submission(self):
         if self.invocation is None:

@@ -1262,6 +1262,12 @@ catalog installer, SDK dependency and installed-task discovery. They do not
 fall back to synthetic trial IDs. The development run path connects those
 sessions to actual instance execution and official grading, reusing the
 selected Rust agent adapter inside the task environment. ASB automatically
+rebuilds each task checkout's local Git object database from the selected base
+commit and its ancestors before starting the agent. This avoids exposing later
+commits shipped in a prebuilt image as local task material; it does not prevent
+the agent from accessing publicly available information through its configured
+network. Submission capture retains a separate copy of that base history.
+ASB automatically
 stages its running executable: a static ELF directly, or a dynamic ELF with
 its matching loader and libraries for the same-architecture Linux task image.
 The scoped launcher does not replace guest system libraries or export a
