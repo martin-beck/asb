@@ -2,6 +2,7 @@
 from pathlib import Path
 import selectors
 import subprocess
+import tarfile
 import time
 
 from asb_execution import ExecutionError
@@ -53,7 +54,12 @@ class GuestSnapshot:
             destination=self.task.artifacts/'snapshot-streams'
             subprocess.run(self.docker_command+['cp',process_container(self.task)+':/opt/asb-private/snapshot-streams',str(destination)],
                            check=True,stdout=subprocess.DEVNULL,stderr=self.log,timeout=600)
-            raise ExecutionError('experimental snapshot streams are retained but cassette publication is not yet integrated')
+            archive=self.task.artifacts/'snapshot-streams.tar'
+            with tarfile.open(archive,'x') as output:
+                for path in sorted(destination.iterdir()):
+                    if not path.is_file() or path.is_symlink():
+                        raise ExecutionError('snapshot export contains an unexpected entry')
+                    output.add(path,arcname=path.name,recursive=False)
         except (OSError,subprocess.SubprocessError) as error:
             raise ExecutionError('snapshot streams could not be exported from the guest') from error
         finally:

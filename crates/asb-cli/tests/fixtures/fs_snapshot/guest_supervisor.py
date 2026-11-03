@@ -14,7 +14,6 @@ ROOT=Path(__file__).resolve().parents[5]
 sys.path.insert(0,str(ROOT/'crates/asb-cli/assets/benchmarks'))
 from asb_execution import ManagedDockerWorkspace
 from asb_guest import stage_auxiliary_tools
-from asb_execution import ExecutionError
 from asb_snapshot_control import GuestSnapshot
 
 scratch=ROOT/'target/snapshot-supervisor-probe';scratch.mkdir(parents=True,exist_ok=True)
@@ -44,12 +43,11 @@ try:
              'mark("begin");pathlib.Path("/testbed/asb-fixture").write_text("fixed");mark("end")\n')
     result=container.exec_run(['python3','-c',program])
     if result.exit_code:raise RuntimeError('guest tool boundary failed')
-    try:supervisor.close()
-    except ExecutionError as error:
-     if 'cassette publication is not yet integrated' not in str(error):raise
-    else:raise RuntimeError('incomplete cassette unexpectedly accepted')
+    supervisor.close()
     if not (Path(directory)/'snapshot-streams/snapshot-00000002.btrfs').is_file():
      raise RuntimeError('snapshot stream missing from controller artifacts')
+    if not (Path(directory)/'snapshot-streams.tar').is_file():
+     raise RuntimeError('snapshot archive missing from controller artifacts')
     if container.exec_run(['test','-s','/testbed/asb-fixture']).exit_code:
      raise RuntimeError('final workspace changes did not return to task checkout')
     print('guest supervisor captured and exported tool boundary')

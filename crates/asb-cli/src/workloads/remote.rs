@@ -1343,6 +1343,18 @@ impl Session {
             .into_iter()
             .collect();
         let mut result = completed.into_execution()?;
+        if std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+            && context.tool_tape_cassette.is_some()
+            && !context.tool_replay
+            && context.config.workload.starts_with("swe-bench")
+        {
+            let archive = self.artifacts.join("snapshot-streams.tar");
+            if !archive.is_file() {
+                return Err("snapshot stream archive is missing from controller artifacts".into());
+            }
+            result.metadata.snapshot_artifact = Some(archive);
+        }
         result.collector_errors = collector_errors;
         Ok(result)
     }
