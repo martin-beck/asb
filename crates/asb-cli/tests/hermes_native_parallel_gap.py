@@ -125,6 +125,34 @@ with tempfile.TemporaryDirectory(dir=base) as temp:
                                     False, '.', False, False, None) == expected
     legacy_replay.close()
     assert json.loads((directory / 'progress.json').read_text())['complete']
+    local = threading.local()
+    namespace['_call_identity'] = lambda: getattr(local, 'identity', '')
+    namespace['SIDECAR'] = directory / 'identical.jsonl'
+    keyed = namespace['Recorder']()
+    overlap = threading.Barrier(2)
+    def keyed_call(identity):
+        local.identity = identity
+        def original(*args):
+            overlap.wait(timeout=5)
+            return identity
+        keyed.invoke(original, 'same command', False, None, None, None,
+                     False, '.', False, False, None)
+    keyed_threads = [threading.Thread(target=keyed_call, args=(identity,)) for identity in ('call-a', 'call-b')]
+    for thread in keyed_threads: thread.start()
+    for thread in keyed_threads: thread.join()
+    keyed.close()
+    keyed_replay = namespace['Replayer']()
+    # Start in recorded completion order so a synchronous fixture cannot wait
+    # for another replay call that has not started yet.
+    for index in keyed_replay.completion_order:
+        recorded = json.loads(keyed_replay.exchanges[index][0])
+        local.identity = recorded['tool_call_id']
+        assert keyed_replay.invoke(None, 'same command', False, None, None, None,
+                                   False, '.', False, False, None) == local.identity
+    keyed_replay.close()
+    assert json.loads((directory / 'progress.json').read_text())['complete']
+    local.identity = ''
+    namespace['SIDECAR'] = directory / 'native.jsonl'
     next(row for row in rows if row['event'] == 'output')['response_sha256'] = '0' * 64
     corrupt = directory / 'corrupt.jsonl'
     corrupt.write_text(''.join(json.dumps(row) + '\n' for row in rows))

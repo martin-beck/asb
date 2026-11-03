@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory(dir=BASE) as tmp:
     common='''export HERMES_HOME=/work/home-record TERMINAL_ENV=local PYTHONPATH=/work/hooks:/opt
 export ASB_FIXTURE_AGENT_BOUNDARY=1 ASB_FIXTURE_UNRESTRICTED=1 ASB_FIXTURE_SWE_PATCH=1
 export ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl
-''' + ('''export ASB_FIXTURE_NATIVE_FILES=1 ASB_FIXTURE_MIXED=1 ASB_FIXTURE_NATIVE_FILE_TRANSCRIPT=/work/control/files.jsonl
+''' + ('''export ASB_FIXTURE_NATIVE_FILES=1 ASB_FIXTURE_MIXED=1 ASB_FIXTURE_CHECK_TOOL_ID=1 ASB_FIXTURE_NATIVE_FILE_TRANSCRIPT=/work/control/files.jsonl
 ''' if mixed else '')
     record_script='''set -eu
 /opt/fuse-overlayfs -o allow_other,lowerdir=/lower,upperdir=/work/record-upper,workdir=/work/record-work /work/lower-view
@@ -123,7 +123,7 @@ effect=$!
 n=0; while [ ! -S /work/control/effect-{i}.sock ]; do n=$((n+1)); [ "$n" -lt 200 ] || exit 43; sleep .05; done
 export HERMES_HOME=/work/home-record TERMINAL_ENV=local PYTHONPATH=/work/hooks:/opt
 export ASB_FIXTURE_AGENT_BOUNDARY=1 ASB_FIXTURE_UNRESTRICTED=1 ASB_FIXTURE_SWE_PATCH=1
-export ASB_FIXTURE_NATIVE_FILES={mixed} ASB_FIXTURE_MIXED={mixed} ASB_FIXTURE_NATIVE_FILE_TRANSCRIPT=/work/control/files.jsonl ASB_FIXTURE_NATIVE_FILES_PROGRESS=/work/control/files-progress-{i}
+export ASB_FIXTURE_NATIVE_FILES={mixed} ASB_FIXTURE_MIXED={mixed} ASB_FIXTURE_CHECK_TOOL_ID={mixed} ASB_FIXTURE_NATIVE_FILE_TRANSCRIPT=/work/control/files.jsonl ASB_FIXTURE_NATIVE_FILES_PROGRESS=/work/control/files-progress-{i}
 export ASB_HERMES_NATIVE_MODE=replay ASB_HERMES_NATIVE_SIDECAR=/work/control/native.jsonl ASB_HERMES_NATIVE_PROGRESS=/work/control/progress-{i}.json
 export ASB_FIXTURE_MOCK_DIR=/work/mock-{i} ASB_FIXTURE_LLM_CASSETTE=/work/control/llm-{i}.jsonl ASB_FIXTURE_EFFECT_SOCKET=/work/control/effect-{i}.sock
 cd /work/mount

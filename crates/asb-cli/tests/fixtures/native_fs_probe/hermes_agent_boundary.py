@@ -67,6 +67,10 @@ if os.environ.get('ASB_FIXTURE_NATIVE_FILES') == '1':
         # proxy path. This is a fixture experiment, not complete interception:
         # agent-loop tools and direct agent APIs can bypass this registry.
         entry = _fixture_registry.get_entry(tool_name)
+        if os.environ.get('ASB_FIXTURE_CHECK_TOOL_ID') == '1':
+            from tools.approval import _approval_tool_call_id
+            if not _approval_tool_call_id.get().startswith('fixture-'):
+                raise RuntimeError('fixture tool dispatch lost provider call identity')
         if tool_name in ('terminal', 'process') or (entry and entry.toolset.startswith('mcp-')):
             return _fixture_original_dispatch(tool_name, args, **kwargs)
         marker = {'write_file':'write','read_file':'read','patch':'patch','search_files':'search'}.get(

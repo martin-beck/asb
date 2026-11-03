@@ -182,9 +182,11 @@ It does not qualify filesystem effects or general parallel replay ordering.
 The cassette validator already allows multiple aliases under one launch and
 tracks each alias's poll/write/output/exit lifecycle independently. This makes
 one alias per invocation the format used by the draft Hermes recorder. Its
-replayer derives completion-before-start dependencies and response ordering,
-but this alone does not reconstruct filesystem effects or distinguish repeated
-identical calls. A focused Rust test validates an actual recorder-produced
+replayer derives completion-before-start dependencies and response ordering.
+It also records Hermes's provider tool-call identity when present, allowing
+otherwise identical calls to be distinguished; nested and non-provider calls
+can lack that identity and remain unqualified. This does not reconstruct
+filesystem effects. A focused Rust test validates an actual recorder-produced
 multi-session sidecar with the cassette reader, and the fixture checks legacy
 single-alias recordings remain readable.
 

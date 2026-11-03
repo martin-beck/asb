@@ -54,8 +54,18 @@ def _stable_workdir(workdir):
     return "." if not relative.parts else f"./{relative.as_posix()}"
 
 
+def _call_identity():
+    # Hermes sets this context while dispatching a provider tool call. Nested
+    # and non-provider calls may legitimately have no such identity.
+    try:
+        from tools.approval import _approval_tool_call_id
+        return _approval_tool_call_id.get()
+    except (ImportError, AttributeError):
+        return ""
+
+
 def _request(command, background, timeout, _task_id, _session_id, force, workdir, pty, notify_on_complete, watch_patterns):
-    return _encoded({
+    value = {
         "kind": "terminal",
         "schema_version": 1,
         "command": command,
@@ -70,19 +80,41 @@ def _request(command, background, timeout, _task_id, _session_id, force, workdir
         "pty": pty,
         "notify_on_complete": notify_on_complete,
         "watch_patterns": watch_patterns,
-    })
+    }
+    identity = _call_identity()
+    if identity:
+        value["tool_call_id"] = identity
+    return _encoded(value)
 
 
 def _process_request(args):
     """Identity for a registry status action, excluding its ephemeral ID."""
-    return _encoded({
+    value = {
         "kind": "process",
         "schema_version": 1,
         "action": args.get("action"),
         "offset": args.get("offset", 0),
         "limit": args.get("limit", 200),
         "timeout": args.get("timeout"),
-    })
+    }
+    identity = _call_identity()
+    if identity:
+        value["tool_call_id"] = identity
+    return _encoded(value)
+
+
+def _matches_request(expected, actual):
+    if expected == actual:
+        return True
+    try:
+        recorded = json.loads(expected)
+        current = json.loads(actual)
+    except (ValueError, TypeError):
+        return False
+    if "tool_call_id" not in recorded:
+        current.pop("tool_call_id", None)
+        return recorded == current
+    return False
 
 
 def _write_progress(complete, error=None, invocations=0, expected_invocations=None):
@@ -304,7 +336,7 @@ class Replayer:
         request = _request(*args, **kwargs)
         if self.dependencies is not None:
             return self._invoke_multi(request)
-        if self.index >= len(self.exchanges) or self.exchanges[self.index][0] != request:
+        if self.index >= len(self.exchanges) or not _matches_request(self.exchanges[self.index][0], request):
             self.failed = True
             expected = self.exchanges[self.index][0] if self.index < len(self.exchanges) else None
             component = "sequence" if expected is None else _request_difference(expected, request)
@@ -342,7 +374,7 @@ class Replayer:
         if len(request) > MAX_PAYLOAD_BYTES:
             self.failed = True
             raise RuntimeError("Hermes process request exceeds the native replay bound")
-        if self.index >= len(self.exchanges) or self.exchanges[self.index][0] != request:
+        if self.index >= len(self.exchanges) or not _matches_request(self.exchanges[self.index][0], request):
             self.failed = True
             self.failure = "native terminal request differs:sequence"
             _write_progress(False, self.failure, self.index, len(self.exchanges))
@@ -362,7 +394,7 @@ class Replayer:
                 raise RuntimeError("Hermes concurrent native replay did not settle")
             candidates = [index for index, (expected, _) in enumerate(self.exchanges)
                           if index not in self.consumed and self.dependencies[index] <= self.delivered
-                          and expected == request]
+                          and _matches_request(expected, request)]
             if not candidates:
                 self.failed = True
                 self.failure = "native terminal request differs:sequence"
@@ -412,7 +444,7 @@ def _request_difference(expected, actual):
         actual = json.loads(actual)
     except (TypeError, ValueError):
         return "encoding"
-    for field in ("command", "background", "timeout", "force", "workdir", "pty", "notify_on_complete", "watch_patterns"):
+    for field in ("tool_call_id", "command", "background", "timeout", "force", "workdir", "pty", "notify_on_complete", "watch_patterns"):
         if expected.get(field) != actual.get(field):
             return field
     return "encoding"
