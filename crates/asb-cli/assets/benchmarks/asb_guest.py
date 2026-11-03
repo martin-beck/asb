@@ -25,8 +25,8 @@ from asb_relay import HostRelay, ForwardingCancellation, forward_request
 
 MAX_EXPORTED_ARTIFACTS = 8
 MAX_EXPORTED_ARTIFACT_BYTES = 16 * 1024 * 1024
-# Matches the cassette track limit. Filesystem streams use file-backed custody.
-MAX_FILESYSTEM_ARTIFACT_BYTES = 256 * 1024 * 1024
+# Matches the cassette artifact limit. Filesystem streams use file-backed custody.
+MAX_FILESYSTEM_ARTIFACT_BYTES = 64 * 1024 * 1024 * 1024
 
 
 class _ArchiveChunks:
@@ -536,6 +536,16 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
         # Unknown usage is never invented from text or an expected minimum.
         result["metadata"] = {"schema_version": 1, "exit_code": result["exit_code"],
                               "final_response": None, "token_usage": {}, "steps": None}
+    if guest.get("filesystem_recording"):
+        receipts = result["metadata"].get("exported_artifacts")
+        kinds = {receipt.get("kind") for receipt in receipts if isinstance(receipt,dict)} if isinstance(receipts,list) else set()
+        if not {"aux-fs-events", "aux-fs-payload"} <= kinds:
+            # The capture can still exist inside the task container when guest
+            # result publication failed. Keep that owned container for recovery.
+            task.interrupted = True
+            task.preserve_requested = True
+            if not result["metadata"].get("execution_failure"):
+                result["metadata"]["execution_failure"] = "filesystem recording export did not complete; task preserved"
     # The guest owns the principal execution clock; the outer transport now
     # allows separate settlement time, so carry the guest's timeout fact out.
     propagate_guest_timeout(result, observation)

@@ -811,7 +811,7 @@ impl RecordingJournal {
                 }
                 for artifact in &track.artifacts {
                     let path = self.artifact_path(track.id, &artifact.kind);
-                    let length = open_regular(&path, self.limits.max_track_bytes)?
+                    let length = open_regular(&path, self.limits.max_artifact_bytes)?
                         .metadata()
                         .map_err(io_error)?
                         .len();

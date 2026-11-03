@@ -298,7 +298,7 @@ fn import_guest_artifacts(
             || !valid_digest
             || receipt.bytes
                 > if file_backed {
-                    crate::cassette::Limits::default().max_track_bytes
+                    crate::cassette::Limits::default().max_artifact_bytes
                 } else {
                     MAX_EXPORTED_ARTIFACT_BYTES
                 }

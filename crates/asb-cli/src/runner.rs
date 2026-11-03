@@ -1592,9 +1592,12 @@ pub(crate) fn run_guest_process(
     stderr: &mut dyn Write,
     runtime: Duration,
     on_spawn: &mut dyn FnMut(u32) -> Result<(), Error>,
+    preserved_child: Option<&std::process::Child>,
 ) -> Result<GuestProcessOutput, Error> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = preserved_child;
     #[cfg(target_os = "linux")]
-    let mut descendants = crate::process_gate::DescendantScope::new()
+    let mut descendants = crate::process_gate::DescendantScope::new_preserving(preserved_child)
         .map_err(|error| Error::Run(format!("cannot retain guest agent descendants: {error}")))?;
     let mut child = OwnedChild::spawn_direct(command)
         .map_err(|error| Error::Run(format!("cannot start guest agent: {error}")))?;
@@ -2474,6 +2477,7 @@ mod tests {
             &mut stderr,
             std::time::Duration::from_secs(10),
             &mut |_| Ok(()),
+            None,
         )
         .unwrap();
         assert!(result.output.status.success());

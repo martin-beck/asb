@@ -30,7 +30,7 @@ impl Default for ProofLimits {
             max_reference_bytes: 256 * 1024 * 1024,
             max_metadata_bytes: 256 * 1024 * 1024,
             max_directory_bytes: 64 * 1024 * 1024,
-            max_archive_bytes: 2 * 1024 * 1024 * 1024,
+            max_archive_bytes: 128 * 1024 * 1024 * 1024,
             max_selected_bytes: 2 * 1024 * 1024 * 1024,
         }
     }

@@ -99,6 +99,24 @@ class GuestBootstrapTests(unittest.TestCase):
             self.assertEqual(exported.read_bytes(),payload)
             self.assertEqual(exported.stat().st_mode & 0o777,0o600)
 
+    def test_filesystem_artifact_export_accepts_pax_size_header(self):
+        payload = b"filesystem capture"
+        class PaxContainer:
+            def get_archive(self, source, chunk_size=65536, encode_stream=False):
+                archive = io.BytesIO()
+                with tarfile.open(fileobj=archive, mode="w", format=tarfile.PAX_FORMAT) as outgoing:
+                    member = tarfile.TarInfo("artifact-0")
+                    member.size = len(payload)
+                    member.pax_headers = {"size":str(len(payload))}
+                    outgoing.addfile(member, io.BytesIO(payload))
+                return iter([archive.getvalue()]), {"name":"artifact-0", "linkTarget":""}
+        with tempfile.TemporaryDirectory() as directory:
+            task = SimpleNamespace(workspace=SimpleNamespace(container=PaxContainer()))
+            receipt = {"kind":"aux-fs-payload", "filename":"artifact-0", "bytes":len(payload),
+                       "sha256":hashlib.sha256(payload).hexdigest()}
+            export_agent_artifacts(task, directory, [receipt])
+            self.assertEqual((Path(directory) / "artifact-0").read_bytes(), payload)
+
     def test_guest_artifact_export_streams_fragmented_archive_without_spooling(self):
         payload = b'\x00\xffpayload' * 10000
         class FragmentedContainer:
@@ -352,6 +370,34 @@ class GuestBootstrapTests(unittest.TestCase):
             self.assertEqual(result["metadata"]["token_usage"], {})
             task.evaluate()
             self.assertEqual(calls, ["client", "confirmed-reset", "grade"])
+
+    def test_missing_filesystem_recording_marks_task_for_preservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def unavailable(_argv, **_kwargs):
+                raise ExecutionError("guest result is missing")
+            task = SimpleNamespace(artifacts=Path(directory), agent_timeout=15, interrupted=False,
+                checked=unavailable, workspace=SimpleNamespace(container=Container(),
+                    execute=lambda *_args, **_kwargs: {"stdout":b"", "stderr":b"", "exit_code":1},
+                    quiesce_unconfirmed_agent=lambda:None))
+            with patch("asb_guest.prepare_agent", return_value=({"filesystem_recording":True}, {})):
+                result = execute_agent(task, {}, None, None, None)
+            self.assertTrue(task.interrupted)
+            self.assertTrue(task.preserve_requested)
+            self.assertIn("task preserved", result["metadata"]["execution_failure"])
+
+    def test_completed_filesystem_recording_does_not_request_preservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = {"schema_version":1, "exit_code":0, "tree_quiesced":True,
+                        "exported_artifacts":[{"kind":"aux-fs-events"},{"kind":"aux-fs-payload"}]}
+            task = SimpleNamespace(artifacts=Path(directory), agent_timeout=15, interrupted=False,
+                checked=lambda *_args, **_kwargs:json.dumps(metadata).encode(),
+                workspace=SimpleNamespace(container=Container(),
+                    execute=lambda *_args, **_kwargs:{"stdout":b"", "stderr":b"", "exit_code":0}))
+            with patch("asb_guest.prepare_agent", return_value=({"filesystem_recording":True}, {})), \
+                    patch("asb_guest.export_agent_artifacts") as export:
+                execute_agent(task, {}, None, None, None)
+            self.assertFalse(task.interrupted)
+            export.assert_called_once()
 
     def test_local_forwarding_precedes_install_and_is_closed_on_install_failure_or_success(self):
         for failure in (False, True):
