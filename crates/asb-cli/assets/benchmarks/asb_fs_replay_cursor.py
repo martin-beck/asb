@@ -1,4 +1,5 @@
 """Replay a small recorded operation fixture; not an ASB replay backend."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -100,10 +101,30 @@ class Replay:
         elif op == 'read':
             fd = self.handles[event['handle']]
             offset = event['offset']
-            for chunk in self.payload_chunks(event):
-                if os.pread(fd, len(chunk), offset) != chunk:
+            if 'payload_sha256' in event:
+                digest = event['payload_sha256']
+                length = event.get('bytes')
+                requested = event.get('requested_size')
+                if (not isinstance(digest, str) or len(digest) != 64
+                        or any(char not in '0123456789abcdef' for char in digest)
+                        or type(length) is not int or length < 0
+                        or type(requested) is not int or requested < length
+                        or 'object' in event or 'payload_offset' in event):
+                    raise RuntimeError('recorded read digest is invalid')
+                remaining = length
+                actual = hashlib.sha256()
+                while remaining:
+                    chunk = os.pread(fd, min(remaining, 65536), offset)
+                    if not chunk:
+                        raise RuntimeError('recorded read differs')
+                    actual.update(chunk); offset += len(chunk); remaining -= len(chunk)
+                if actual.hexdigest() != digest:
                     raise RuntimeError('recorded read differs')
-                offset += len(chunk)
+            else:
+                for chunk in self.payload_chunks(event):
+                    if os.pread(fd, len(chunk), offset) != chunk:
+                        raise RuntimeError('recorded read differs')
+                    offset += len(chunk)
         elif op == 'truncate':
             if event['handle'] is None:
                 os.truncate(path, event['size'])

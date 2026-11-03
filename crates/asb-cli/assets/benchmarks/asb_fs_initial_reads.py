@@ -2,6 +2,7 @@
 
 This produces evidence plans only; it does not modify a replay workspace.
 """
+import hashlib
 import json
 import os
 import stat
@@ -51,7 +52,7 @@ def plan_initial_reads(events):
             if not stat.S_ISREG(mode) or links != 1:
                 handles[handle] = None
                 continue
-            entry = candidates.setdefault(path, {'size': size, 'mode': mode, 'segments': [], 'valid': True})
+            entry = candidates.setdefault(path, {'size': size, 'mode': mode, 'segments': [], 'checks': [], 'valid': True})
             if entry['size'] != size or entry['mode'] != mode:
                 entry['valid'] = False
             handles[handle] = path
@@ -66,14 +67,27 @@ def plan_initial_reads(events):
                     existing['valid'] = False
                 continue
             entry = candidates[path]
-            offset, length, payload_offset = event.get('offset'), event.get('bytes'), event.get('payload_offset')
-            if (event.get('path') != path or event.get('object') != 'payload.bin'
-                    or type(offset) is not int or offset < 0 or type(length) is not int or length < 0
-                    or type(payload_offset) is not int or payload_offset < 0 or offset + length > entry['size']):
+            offset, length = event.get('offset'), event.get('bytes')
+            if (event.get('path') != path or type(offset) is not int or offset < 0
+                    or type(length) is not int or length < 0 or offset + length > entry['size']):
                 entry['valid'] = False
                 continue
-            if length:
-                entry['segments'].append((offset, length, payload_offset))
+            if 'payload_sha256' in event:
+                digest, requested = event.get('payload_sha256'), event.get('requested_size')
+                if (not isinstance(digest, str) or len(digest) != 64
+                        or any(char not in '0123456789abcdef' for char in digest)
+                        or type(requested) is not int or requested < length
+                        or 'object' in event or 'payload_offset' in event):
+                    entry['valid'] = False
+                    continue
+                entry['checks'].append((offset, length, digest))
+            else:
+                payload_offset = event.get('payload_offset')
+                if event.get('object') != 'payload.bin' or type(payload_offset) is not int or payload_offset < 0:
+                    entry['valid'] = False
+                    continue
+                if length:
+                    entry['segments'].append((offset, length, payload_offset))
         elif op == 'release':
             handle = event.get('handle')
             if type(handle) is not int or handle not in handles:
@@ -93,7 +107,7 @@ def plan_initial_reads(events):
                 break
             end = max(end, offset + length)
         if end == entry['size']:
-            result[path] = {'size': entry['size'], 'mode': entry['mode'], 'segments': segments}
+            result[path] = {'size': entry['size'], 'mode': entry['mode'], 'segments': segments, 'checks': entry['checks']}
     return result
 
 
@@ -150,6 +164,17 @@ def restore_initial_reads(evidence, workspace, scratch):
                     covered = max(covered, pos)
             if covered != plan['size']:
                 raise ValueError('initial read plan is incomplete')
+            for offset, length, digest in plan['checks']:
+                staged.seek(offset)
+                remaining = length
+                actual = hashlib.sha256()
+                while remaining:
+                    chunk = staged.read(min(65536, remaining))
+                    if not chunk:
+                        raise ValueError('initial read digest range is truncated')
+                    actual.update(chunk); remaining -= len(chunk)
+                if actual.hexdigest() != digest:
+                    raise ValueError('initial read digest differs')
             current.seek(0); staged.seek(0)
             differs = False
             while True:

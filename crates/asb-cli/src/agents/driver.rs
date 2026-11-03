@@ -1154,6 +1154,11 @@ impl GuestFilesystemCapture {
             include_str!("../../assets/benchmarks/asb_fs_proxy.py"),
         )
         .map_err(crate::io_error)?;
+        fs::write(
+            run_dir.join("asb_fs_attribution.py"),
+            include_str!("../../assets/benchmarks/asb_fs_attribution.py"),
+        )
+        .map_err(crate::io_error)?;
         let binding =
             project::resolve(project_root, tools_dir).join("fuse-overlayfs/binding/runtime");
         let log =
@@ -1591,6 +1596,9 @@ mod artifact_publication_tests {
             "benchmark_fs_attribution.py",
             "benchmark_fs_request_shapes.py",
             "benchmark_fs_direct_prefix.py",
+            "benchmark_fs_compact_reads.py",
+            "benchmark_fs_initial_reads.py",
+            "benchmark_fs_replay_server.py",
         ] {
             let script = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests")

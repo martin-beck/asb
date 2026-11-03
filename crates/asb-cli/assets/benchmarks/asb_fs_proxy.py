@@ -142,6 +142,10 @@ class Proxy(Operations):
         self.inode_locks = {}
         self.log = open(evidence / 'events.jsonl', 'a', encoding='utf-8', buffering=1)
         self.payload = PayloadStore(evidence / 'payload.bin')
+        self.attribution = None
+        if os.environ.get('ASB_PROBE_COMPACT_TOOL_READS') == '1':
+            from asb_fs_attribution import Attribution
+            self.attribution = Attribution()
         control_fd = os.environ.get('ASB_PROBE_CONTROL_FD')
         if control_fd is not None:
             control = socket.socket(fileno=int(control_fd))
@@ -187,9 +191,20 @@ class Proxy(Operations):
         with self.record_lock:
             self.sequence += 1
             event = {'sequence': self.sequence, 'op': op, 'path': path, 'caller': None if is_marker or os.environ.get('ASB_PROBE_BENCHMARK_NO_IDENTITY') == '1' else caller_identity(fuse_get_context()[2]), **detail}
+            scope = None
+            if self.attribution is not None:
+                try:
+                    scope = self.attribution.observe(event)
+                except (TypeError, ValueError, KeyError):
+                    # Fall back to complete payloads if attribution fails; do
+                    # not alter the caller's filesystem operation.
+                    self.attribution = None
             if data is not None:
-                position = self.payload.append(data)
-                event.update(object='payload.bin', payload_offset=position, bytes=len(data))
+                if op == 'read' and scope is not None and scope.get('kind') == 'tool':
+                    event.update(payload_sha256=hashlib.sha256(data).hexdigest(), bytes=len(data))
+                else:
+                    position = self.payload.append(data)
+                    event.update(object='payload.bin', payload_offset=position, bytes=len(data))
             self.log.write(json.dumps(event, separators=(',', ':')) + '\n')
             return self.sequence
     def getattr(self, path, fh=None):

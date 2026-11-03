@@ -1,4 +1,5 @@
 """Offline coverage for conservative initial-read planning."""
+import hashlib
 import io
 import json
 import os
@@ -76,6 +77,22 @@ class InitialReadTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     restore_initial_reads(evidence, workspace, evidence)
                 self.assertEqual(target.read_bytes(), b'xxxxxx')
+
+    def test_compact_digest_is_checked_before_initial_state_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); evidence = root/'evidence'; evidence.mkdir()
+            workspace = root/'workspace'; workspace.mkdir(); target = workspace/'file'; target.write_bytes(b'xxxxxx')
+            mode = target.stat().st_mode; (evidence/'payload.bin').write_bytes(b'abcdef')
+            digest = dict(op='read', path='/file', handle=1, offset=1, bytes=3, requested_size=3,
+                          payload_sha256=hashlib.sha256(b'bcd').hexdigest())
+            (evidence/'events.jsonl').write_text(events(opened(mode=mode), read(0,6), digest).getvalue())
+            self.assertEqual(restore_initial_reads(evidence,workspace,evidence),1)
+            self.assertEqual(target.read_bytes(),b'abcdef')
+            target.write_bytes(b'xxxxxx'); digest['payload_sha256']=hashlib.sha256(b'bad').hexdigest()
+            (evidence/'events.jsonl').write_text(events(opened(mode=mode), read(0,6), digest).getvalue())
+            with self.assertRaisesRegex(ValueError,'digest differs'):
+                restore_initial_reads(evidence,workspace,evidence)
+            self.assertEqual(target.read_bytes(),b'xxxxxx')
 
     def test_all_destinations_are_checked_before_any_write(self):
         with tempfile.TemporaryDirectory() as directory:
