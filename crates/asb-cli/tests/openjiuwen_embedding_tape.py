@@ -47,7 +47,7 @@ def stop(p):
         p.kill(); p.wait(); raise
     assert p.returncode == 0, p.stderr.read().decode(errors='replace')[-1000:]
 
-async def request(original_url, port):
+async def request(root, original_url, port):
     worker = r"""
 import asyncio, runpy, sys
 from openjiuwen.core.memory.lite.embeddings import OpenAICompatibleEmbeddingProvider
@@ -65,6 +65,7 @@ asyncio.run(main())
 """
     child = await asyncio.create_subprocess_exec(
         python, '-c', worker, original_url, str(port), hook_path,
+        cwd=root,
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     _, error = await child.communicate()
     if child.returncode: raise RuntimeError(error.decode(errors='replace')[-2000:])
@@ -80,7 +81,7 @@ async def main():
         try:
             recorder, port = start(root, 'record', ['record', '--upstream', origin, '--out', str(tape)])
             processes.append(recorder)
-            await request(original_url, port)
+            await request(root, original_url, port)
             stop(recorder); processes.remove(recorder)
             assert len(seen) == 1 and seen[0][0] == '/v1/embeddings'
             upstream.shutdown(); thread.join(); upstream.server_close()
@@ -89,7 +90,7 @@ async def main():
                 replica = root / f'replay-{i}.jsonl'; shutil.copyfile(tape, replica)
                 child, child_port = start(root, f'replay-{i}', ['replay', '--cassette', str(replica)])
                 processes.append(child); sessions.append((child, child_port, replica))
-            await asyncio.gather(*(request(original_url, port) for _, port, _ in sessions))
+            await asyncio.gather(*(request(root, original_url, port) for _, port, _ in sessions))
             for child, _, replica in sessions:
                 stop(child); processes.remove(child)
                 progress = json.loads(Path(str(replica) + '.progress.json').read_text())
