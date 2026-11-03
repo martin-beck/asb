@@ -130,8 +130,9 @@ checks this handoff and rejects a missing coordinator; other Hermes tools remain
 unqualified. The older test wrapper supplies boundaries and advances the operation
 cursor after the sidecar validates each request and before returning its result. This does
 not prove ordering for a complete agent. The adapter preserves Hermes's normal
-tool catalogue; calls outside its covered terminal/process dispatch run during
-recording and produce private JSONL evidence with start/end ordering, arguments,
+tool catalogue; terminal, process, read_file, write_file, patch, and search_files
+calls have experimental adapter-owned replay. Other calls run during recording
+and produce private JSONL evidence with start/end ordering, arguments,
 context, and results or exceptions. A separate status records capture completeness;
 the 8 MiB evidence limit, serialization errors, or unsettled calls mark it
 incomplete. These calls also mark the replay tape incomplete until their effects
