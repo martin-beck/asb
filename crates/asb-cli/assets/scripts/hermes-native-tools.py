@@ -14,6 +14,7 @@ from pathlib import Path
 import socket
 import sys
 import threading
+import time
 
 
 MODE = os.environ.get("ASB_HERMES_NATIVE_MODE", "")
@@ -253,6 +254,8 @@ class Recorder:
             return
         self.complete = True
         try:
+            if hasattr(self, "untaped_capture"):
+                self.untaped_capture.close()
             if self.failed or self.flushed != self.started:
                 _write_progress(False, "terminal tool did not settle", len(self.entries) // 2)
                 return
@@ -515,9 +518,98 @@ def _request_difference(expected, actual):
     return "encoding"
 
 
-def install_dispatch_coverage(registry, transport, mode):
+class UntapedToolCapture:
+    """Private evidence for unsupported tools; never changes tool outcomes."""
+    LIMIT = 8 * 1024 * 1024
+
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.start = time.monotonic_ns()
+        self.sequence = 0
+        self.completed = 0
+        self.bytes_written = 0
+        self.incomplete = False
+
+    @staticmethod
+    def _fallback(value):
+        if isinstance(value, (set, frozenset)):
+            return sorted(value, key=lambda item: repr(item))
+        if isinstance(value, Path):
+            return str(value)
+        raise TypeError("unsupported value in untaped tool evidence")
+
+    def _write(self, event):
+        try:
+            payload = (json.dumps(event, ensure_ascii=False, separators=(",", ":"),
+                                  default=self._fallback) + "\n").encode("utf-8")
+            if self.bytes_written + len(payload) > self.LIMIT:
+                self.incomplete = True
+                return
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(self.path, flags, 0o600)
+            with os.fdopen(fd, "ab") as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            self.bytes_written += len(payload)
+        except (OSError, ValueError, TypeError, RecursionError):
+            self.incomplete = True
+
+    def close(self):
+        with self.lock:
+            if not self.sequence:
+                return
+            status = {"schema_version": 1, "calls_started": self.sequence,
+                      "calls_completed": self.completed, "bytes_written": self.bytes_written,
+                      "complete": not self.incomplete and self.completed == self.sequence}
+            try:
+                path = self.path.with_name("untaped-tools-status.json")
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                fd = os.open(path, flags, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as output:
+                    json.dump(status, output, separators=(",", ":"))
+                    output.flush()
+                    os.fsync(output.fileno())
+            except OSError:
+                self.incomplete = True
+
+    def invoke(self, original, name, args, kwargs):
+        with self.lock:
+            self.sequence += 1
+            sequence = self.sequence
+            self._write({"schema_version": 1, "event": "begin", "sequence": sequence,
+                         "relative_ns": time.monotonic_ns() - self.start,
+                         "tool": name, "arguments": args, "context": kwargs,
+                         "tool_call_id": _call_identity()})
+        try:
+            result = original(name, args, **kwargs)
+        except BaseException as error:
+            with self.lock:
+                self._write({"schema_version": 1, "event": "error", "sequence": sequence,
+                             "relative_ns": time.monotonic_ns() - self.start,
+                             "error_type": type(error).__name__, "error": str(error)})
+                self.completed += 1
+            raise
+        with self.lock:
+            self._write({"schema_version": 1, "event": "end", "sequence": sequence,
+                         "relative_ns": time.monotonic_ns() - self.start, "result": result})
+            self.completed += 1
+        return result
+
+
+def install_dispatch_coverage(registry, transport, mode, capture=None):
     """Preserve the catalogue without claiming unsupported calls were taped."""
     original_dispatch = registry.dispatch
+    if capture is None and mode == "record":
+        capture = UntapedToolCapture(SIDECAR.with_name("untaped-tools.jsonl"))
+    if mode == "record":
+        transport.untaped_capture = capture
     covered_dispatch = set()
 
     def dispatch_with_coverage(name, args, **kwargs):
@@ -525,6 +617,7 @@ def install_dispatch_coverage(registry, transport, mode):
             if mode == "record":
                 with transport.lock:
                     transport.failed = True
+                return capture.invoke(original_dispatch, name, args, kwargs)
             else:
                 transport.failed = True
                 transport.failure = "native tool is not recorded"

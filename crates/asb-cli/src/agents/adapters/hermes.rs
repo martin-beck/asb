@@ -57,6 +57,16 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     },
     super::super::ArtifactSpec {
         namespace: "hermes",
+        filename: "untaped-tools.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "hermes",
+        filename: "untaped-tools-status.json",
+        format: super::super::ArtifactFormat::Json,
+    },
+    super::super::ArtifactSpec {
+        namespace: "hermes",
         filename: "native-tool-progress.json",
         format: super::super::ArtifactFormat::Json,
     },
@@ -314,6 +324,22 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
         artifacts.token_usage = Some(super::super::usage_fields(value).with_derived_total());
         artifacts.steps = value.get("api_calls").and_then(serde_json::Value::as_u64);
     }
+    if let Some(bytes) = context.frozen.bytes("untaped-tools.jsonl") {
+        artifacts
+            .sealed_artifacts
+            .push(super::super::SealedArtifact {
+                kind: "hermes-untaped-tools".into(),
+                bytes: bytes.to_vec(),
+            });
+    }
+    if let Some(bytes) = context.frozen.bytes("untaped-tools-status.json") {
+        artifacts
+            .sealed_artifacts
+            .push(super::super::SealedArtifact {
+                kind: "hermes-untaped-tools-status".into(),
+                bytes: bytes.to_vec(),
+            });
+    }
     let Some(progress) = context.frozen.document("native-tool-progress.json") else {
         return artifacts;
     };
@@ -518,6 +544,40 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+    }
+
+    #[test]
+    fn untaped_evidence_is_retained_for_incomplete_recording() {
+        let envelope = serde_json::json!({
+            "schema_version": 1,
+            "documents": {"native-tool-progress.json": {
+                "schema_version": 1, "mode": "record", "complete": false
+            }},
+            "bytes": {
+                "untaped-tools.jsonl": b"{\"event\":\"begin\"}\n".as_slice(),
+                "untaped-tools-status.json": b"{\"complete\":true}".as_slice()
+            }
+        });
+        let frozen = crate::agents::artifacts::FrozenArtifacts::from_deferred_collection_bytes(
+            &serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
+        let result = collect(&CollectionContext {
+            frozen: &frozen,
+            provider_capture: None,
+            run_dir: Path::new("/fixture"),
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert!(!result.errors.is_empty());
+        assert_eq!(result.sealed_artifacts.len(), 2);
+        assert_eq!(result.sealed_artifacts[0].kind, "hermes-untaped-tools");
+        assert_eq!(
+            result.sealed_artifacts[1].kind,
+            "hermes-untaped-tools-status"
+        );
     }
 
     #[test]

@@ -131,7 +131,12 @@ unqualified. The older test wrapper supplies boundaries and advances the operati
 cursor after the sidecar validates each request and before returning its result. This does
 not prove ordering for a complete agent. The adapter preserves Hermes's normal
 tool catalogue; calls outside its covered terminal/process dispatch run during
-recording but mark the tape incomplete until replay support is implemented.
+recording and produce private JSONL evidence with start/end ordering, arguments,
+context, and results or exceptions. A separate status records capture completeness;
+the 8 MiB evidence limit, serialization errors, or unsettled calls mark it
+incomplete. These calls also mark the replay tape incomplete until their effects
+are implemented. Evidence may contain task content and stays in the private
+attempt and cassette, never in reports.
 The fixture enables `allow_other`
 on its temporary container-local FUSE mount so the unprivileged tool can access
 the proxy; this is not a production setting. This mode does not invoke an LLM
