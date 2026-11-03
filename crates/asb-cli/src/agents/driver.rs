@@ -770,12 +770,17 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             &project.tools_dir,
             &request.run_dir,
         )?;
+        let control = request
+            .runtime_dir
+            .join("agent-state/filesystem-markers.sock");
+        command.env("ASB_FS_MARKER_SOCKET", &control);
         Some(GuestFilesystemCapture::start(
             &request.project_root,
             &project.tools_dir,
             &request.run_dir,
             &workspace,
             &library,
+            &control,
         )?)
     } else {
         None
@@ -1019,6 +1024,7 @@ impl GuestFilesystemCapture {
         run_dir: &Path,
         workspace: &Path,
         library: &Path,
+        control_socket: &Path,
     ) -> Result<Self, Error> {
         let proxy = run_dir.join("asb-fs-proxy.py");
         fs::write(
@@ -1038,6 +1044,7 @@ impl GuestFilesystemCapture {
             .arg(proxy)
             .arg(binding)
             .arg(library)
+            .arg(control_socket)
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1392,15 +1399,28 @@ mod artifact_publication_tests {
         )
         .unwrap();
         fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
-        let mut capture =
-            GuestFilesystemCapture::start(&root, "tools", &run, &root, &root.join("libfuse.so"))
-                .unwrap();
+        let mut capture = GuestFilesystemCapture::start(
+            &root,
+            "tools",
+            &run,
+            &root,
+            &root.join("libfuse.so"),
+            &root.join("marker.sock"),
+        )
+        .unwrap();
         capture.stop().unwrap();
         capture.stop().unwrap();
         fs::write(&python, "#!/bin/sh\nprintf 'FAILED\\n'\n").unwrap();
         assert!(
-            GuestFilesystemCapture::start(&root, "tools", &run, &root, &root.join("libfuse.so"))
-                .is_err()
+            GuestFilesystemCapture::start(
+                &root,
+                "tools",
+                &run,
+                &root,
+                &root.join("libfuse.so"),
+                &root.join("marker.sock")
+            )
+            .is_err()
         );
         fs::remove_dir_all(root).unwrap();
     }

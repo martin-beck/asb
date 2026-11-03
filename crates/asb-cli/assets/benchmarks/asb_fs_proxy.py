@@ -73,20 +73,24 @@ class Proxy(Operations):
         self.payload = PayloadStore(evidence / 'payload.bin')
         control_fd = os.environ.get('ASB_PROBE_CONTROL_FD')
         if control_fd is not None:
-            self.control = socket.socket(fileno=int(control_fd))
-            threading.Thread(target=self.control_loop, daemon=True).start()
+            control = socket.socket(fileno=int(control_fd))
+            threading.Thread(target=self.control_loop, args=(control,), daemon=True).start()
         control_path = os.environ.get('ASB_PROBE_CONTROL_SOCKET')
         if control_path:
             self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.listener.bind(control_path)
             os.chmod(control_path, 0o666)
-            self.listener.listen(1)
+            self.listener.listen(32)
             threading.Thread(target=self.accept_control, daemon=True).start()
     def accept_control(self):
-        self.control, _ = self.listener.accept()
-        self.control_loop()
-    def control_loop(self):
-        with self.control.makefile('rwb', buffering=0) as stream:
+        while True:
+            try:
+                control, _ = self.listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.control_loop, args=(control,), daemon=True).start()
+    def control_loop(self, control):
+        with control, control.makefile('rwb', buffering=0) as stream:
             for line in stream:
                 marker = line.decode('ascii').strip()
                 if not re.fullmatch(r'tool-(?:begin|end):[A-Za-z0-9_-]{1,80}', marker):

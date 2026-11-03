@@ -1,9 +1,11 @@
 """Offline coverage for the filesystem recorder's payload storage."""
 from pathlib import Path
 import json
+import os
 import runpy
 import sys
 import tempfile
+import threading
 from types import ModuleType
 import unittest
 from unittest.mock import patch
@@ -15,6 +17,69 @@ def fake_fuse(proxy, *args, **kwargs):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_hermes_markers_bind_calls_and_failure_does_not_block_the_tool(self):
+        fuse = ModuleType('fuse')
+        fuse.FUSE = fake_fuse
+        fuse.FuseOSError = OSError
+        fuse.Operations = object
+        fuse.fuse_get_context = lambda: (0, 0, 0)
+        base = Path(__file__).parents[1]
+        proxy_script = base / 'assets/benchmarks/asb_fs_proxy.py'
+        hook = base / 'assets/scripts/hermes-native-tools.py'
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(sys.modules, {'fuse': fuse}), \
+                patch.object(sys, 'argv', [str(proxy_script), temporary, temporary, temporary]):
+            namespace = runpy.run_path(str(proxy_script))
+            socket_path = str(Path(temporary) / 'markers.sock')
+            variables = {'ASB_PROBE_CONTROL_SOCKET':socket_path, 'ASB_FS_MARKER_SOCKET':socket_path,
+                         'ASB_HERMES_NATIVE_MODE':'record',
+                         'ASB_HERMES_NATIVE_SIDECAR':str(Path(temporary) / 'native.jsonl'),
+                         'ASB_HERMES_NATIVE_PROGRESS':str(Path(temporary) / 'progress.json')}
+            with patch.dict(os.environ, variables):
+                proxy = namespace['Proxy']()
+                source = hook.read_text().split('\ntry:\n    # Hermes exposes', 1)[0]
+                hermes = {'__name__':'marker_test'}
+                exec(compile(source, str(hook), 'exec'), hermes)
+                recorder = hermes['Recorder']()
+                self.assertEqual(recorder.invoke(lambda *_args:'tool result', 'echo', False, None,
+                    None, None, False, '.', False, False, None), 'tool result')
+                barrier = threading.Barrier(2)
+                failures = []
+                def call():
+                    try:
+                        def tool(*_args):
+                            barrier.wait(timeout=5)
+                            return 'parallel result'
+                        recorder.invoke(tool, 'parallel', False, None, None, None, False, '.', False, False, None)
+                    except BaseException as error:
+                        failures.append(error)
+                threads = [threading.Thread(target=call) for _ in range(2)]
+                for thread in threads: thread.start()
+                for thread in threads: thread.join(timeout=10)
+                self.assertFalse(failures)
+                self.assertTrue(all(not thread.is_alive() for thread in threads))
+                recorder.close()
+                proxy.listener.close()
+                proxy.log.close()
+                proxy.payload.file.close()
+                events = [json.loads(line) for line in (Path(temporary) / 'events.jsonl').read_text().splitlines()]
+                markers = [event['marker'] for event in events]
+                self.assertEqual(markers[:2], ['tool-begin:terminal-1', 'tool-end:terminal-1'])
+                for alias in ('terminal-2', 'terminal-3'):
+                    self.assertEqual(markers.count('tool-begin:' + alias), 1)
+                    self.assertEqual(markers.count('tool-end:' + alias), 1)
+                    self.assertLess(markers.index('tool-begin:' + alias), markers.index('tool-end:' + alias))
+                self.assertTrue(json.loads((Path(temporary) / 'progress.json').read_text())['complete'])
+                os.environ['ASB_FS_MARKER_SOCKET'] = str(Path(temporary) / 'missing.sock')
+                os.environ['ASB_HERMES_NATIVE_SIDECAR'] = str(Path(temporary) / 'second.jsonl')
+                os.environ['ASB_HERMES_NATIVE_PROGRESS'] = str(Path(temporary) / 'second-progress.json')
+                failed = {'__name__':'marker_failure_test'}
+                exec(compile(source, str(hook), 'exec'), failed)
+                recorder = failed['Recorder']()
+                self.assertEqual(recorder.invoke(lambda *_args:'still runs', 'echo', False, None,
+                    None, None, False, '.', False, False, None), 'still runs')
+                recorder.close()
+                self.assertFalse(json.loads((Path(temporary) / 'second-progress.json').read_text())['complete'])
+
     def test_recorded_events_keep_independent_order_with_reused_payload(self):
         fuse = ModuleType('fuse')
         fuse.FUSE = fake_fuse

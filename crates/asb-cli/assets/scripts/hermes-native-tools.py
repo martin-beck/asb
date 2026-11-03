@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import socket
 import sys
 import threading
 
@@ -22,6 +23,22 @@ DIAGNOSTIC = Path(os.environ["ASB_HERMES_NATIVE_DIAGNOSTIC"]) if os.environ.get(
 MAX_BYTES = 4 * 1024 * 1024
 MAX_PAYLOAD_BYTES = 512 * 1024
 SESSION = "terminal-1"
+
+
+def _filesystem_marker(action, alias):
+    """Associate a native call with the independent filesystem event stream."""
+    path = os.environ.get("ASB_FS_MARKER_SOCKET")
+    if not path:
+        return True
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(5)
+            connection.connect(path)
+            connection.sendall(f"tool-{action}:{alias}\n".encode("ascii"))
+            with connection.makefile("rb") as response:
+                return response.readline(32).strip().isdigit()
+    except (OSError, UnicodeError):
+        return False
 
 
 def _encoded(value):
@@ -181,11 +198,16 @@ class Recorder:
             self._event({"event": "poll", "alias": alias})
             self._event({"event": "write", "alias": alias,
                 "request_sha256": _digest(request), "request_b64": base64.b64encode(request).decode("ascii")})
+            if not _filesystem_marker("begin", alias):
+                self.failed = True
         try:
             output = original(*args, **kwargs)
         except BaseException:
             self.failed = True
             raise
+        finally:
+            if not _filesystem_marker("end", alias):
+                self.failed = True
         if not isinstance(output, str):
             self.failed = True
             raise RuntimeError("Hermes terminal tool returned a non-text response")
