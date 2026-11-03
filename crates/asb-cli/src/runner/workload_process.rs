@@ -30,6 +30,9 @@ pub(crate) struct HeldProcess {
 }
 
 impl HeldProcess {
+    pub(crate) fn release_preserved_child(&mut self, pid: u32) {
+        self._scope.release_preserved(pid);
+    }
     /// The SDK's namespace teardown is the terminal owner of this process.
     /// Reader threads keep inherited service output open and drain/discard it;
     /// closing those pipes at client exit could kill a valid service by SIGPIPE.
@@ -129,6 +132,7 @@ pub(crate) fn start<'a>(
         stdout,
         stderr,
         runtime,
+        None,
         |_| Ok(()),
         after_exit,
     )
@@ -140,10 +144,11 @@ pub(crate) fn start_with_spawn<'a>(
     stdout: &'a mut dyn Write,
     stderr: &'a mut dyn Write,
     runtime: Duration,
+    preserved_child: Option<&std::process::Child>,
     mut on_spawn: impl FnMut(u32) -> Result<(), Error>,
     mut after_exit: impl FnMut(std::process::ExitStatus, u64, bool) -> Result<(), Error>,
 ) -> Result<HeldProcess, Error> {
-    let scope = crate::process_gate::DescendantScope::new()
+    let scope = crate::process_gate::DescendantScope::new_preserving(preserved_child)
         .map_err(|_| Error::Run("cannot own workload service descendants".into()))?;
     let started = Instant::now();
     let mut child = OwnedChild::spawn_direct(command)

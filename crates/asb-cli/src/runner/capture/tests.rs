@@ -26,6 +26,7 @@ fn guest_execution_reports_its_own_timeout() {
         &mut Vec::new(),
         Duration::from_millis(50),
         &mut |_| Ok(()),
+        None,
     )
     .unwrap();
     assert!(result.timed_out);
