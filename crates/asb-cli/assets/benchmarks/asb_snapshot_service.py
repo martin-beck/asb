@@ -10,6 +10,7 @@ import re
 import shutil
 import socketserver
 import subprocess
+import sys
 import threading
 import time
 
@@ -310,7 +311,8 @@ class _Handler(socketserver.StreamRequestHandler):
             process, thread = (int(value) if value is not None else None for value in match.group(3, 4))
             sequence = self.server.snapshots.marker(match.group(1).decode(), match.group(2).decode(), process, thread)
             self.wfile.write(f'{sequence}\n'.encode('ascii'))
-        except (OSError, ValueError, RuntimeError):
+        except (OSError, ValueError, RuntimeError) as error:
+            print(f"snapshot boundary failed: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
             self.server.snapshots.invalidate()
 
 
