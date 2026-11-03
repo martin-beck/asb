@@ -126,3 +126,33 @@ test('Anthropic streamed tool arguments keep unrelated workspace paths', async (
     await rm(root,{recursive:true,force:true});
   }
 });
+
+test('non-streaming JSON handles escaped workspace paths without touching siblings', async () => {
+  const root=await mkdtemp(join(tmpdir(),'asb-json-paths-'));
+  const recordWorkspace='/srv/record/workspace';
+  const replayWorkspace='/srv/replay/workspace';
+  const payload={choices:[{message:{content:`${recordWorkspace}/a /other/project/workspace/b ${recordWorkspace}-backup/c`}}]};
+  const encoded=JSON.stringify(payload).replace(/}$/, ',\"counter\":9007199254740993}').replaceAll('/', '\\/');
+  const upstream=http.createServer((_request,response)=>{response.writeHead(200,{'content-type':'application/json'});response.end(encoded);});
+  await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));
+  let record,replay;
+  const options={method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'fixture',messages:[]})};
+  try {
+    const cassette=join(root,'capture.jsonl');
+    record=await start(['record','--port','0','--upstream',`http://127.0.0.1:${upstream.address().port}`,'--out',cassette],join(root,'record.ready'),recordWorkspace);
+    const liveText=await (await fetch(`http://127.0.0.1:${record.port}/v1/chat/completions`,options)).text();
+    assert.equal(JSON.parse(liveText).choices[0].message.content,payload.choices[0].message.content);
+    await stop(record.child); record=null;
+    await new Promise(resolve=>upstream.close(resolve));
+    replay=await start(['replay','--port','0','--cassette',cassette],join(root,'replay.ready'),replayWorkspace);
+    const replayText=await (await fetch(`http://127.0.0.1:${replay.port}/v1/chat/completions`,options)).text();
+    assert.ok(replayText.includes('9007199254740993'));
+    const value=JSON.parse(replayText);
+    assert.equal(value.choices[0].message.content,`${replayWorkspace}/a /other/project/workspace/b ${recordWorkspace}-backup/c`);
+  } finally {
+    if (record) await stop(record.child);
+    if (replay) await stop(replay.child);
+    if (upstream.listening) await new Promise(resolve=>upstream.close(resolve));
+    await rm(root,{recursive:true,force:true});
+  }
+});
