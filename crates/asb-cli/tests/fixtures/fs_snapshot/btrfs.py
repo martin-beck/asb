@@ -53,7 +53,7 @@ python3 - <<'EOPY'
 import errno,os,socket,subprocess,concurrent.futures,sys,threading,json
 from pathlib import Path
 sys.path.insert(0,"/opt")
-from asb_snapshot_service import SnapshotService,SnapshotReplay,SnapshotApplier,MarkerServer,load_replay_boundaries
+from asb_snapshot_service import SnapshotService,SnapshotReplay,SnapshotApplier,MarkerServer,load_replay_boundaries,export_snapshot_streams,receive_snapshot_streams
 roots=[Path('/work/fs/s'+str(i)) for i in range(5)]
 st=[(r/'file').stat() for r in roots]
 checks={
@@ -223,18 +223,12 @@ finally:
 adapter_service.finish()
 adapter_before=Path('/work/fs/adapter-recorded/snapshot-00000001')
 adapter_after=Path('/work/fs/adapter-recorded/snapshot-00000002')
-with Path('/work/adapter-baseline.btrfs').open('wb') as output:
- baseline_send=subprocess.run(['/hostlib/LOADER','--library-path','/hostlib','/opt/btrfs','send',str(adapter_before)],stdout=output,stderr=subprocess.PIPE,timeout=60)
-with Path('/work/adapter-increment.btrfs').open('wb') as output:
- increment_send=subprocess.run(['/hostlib/LOADER','--library-path','/hostlib','/opt/btrfs','send','-p',str(adapter_before),str(adapter_after)],stdout=output,stderr=subprocess.PIPE,timeout=60)
-if baseline_send.returncode or increment_send.returncode:raise RuntimeError('snapshot stream export failed: '+(baseline_send.stderr+increment_send.stderr).decode()[-500:])
-checks['snapshot_streams_created']=Path('/work/adapter-baseline.btrfs').stat().st_size>0 and Path('/work/adapter-increment.btrfs').stat().st_size>0
-print('snapshot_stream_bytes',Path('/work/adapter-baseline.btrfs').stat().st_size,Path('/work/adapter-increment.btrfs').stat().st_size)
-received=Path('/work/recvfs/received');received.mkdir()
-for stream in ('adapter-baseline.btrfs','adapter-increment.btrfs'):
- with (Path('/work')/stream).open('rb') as source:
-  result=subprocess.run(['/hostlib/LOADER','--library-path','/hostlib','/opt/btrfs','receive',str(received)],stdin=source,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=60)
-  if result.returncode:raise RuntimeError('snapshot stream receive failed: '+result.stderr.decode()[-500:])
+streams=Path('/work/adapter-streams')
+command=['/hostlib/LOADER','--library-path','/hostlib','/opt/btrfs']
+export_snapshot_streams('/work/fs/adapter-recorded',streams,command)
+received=Path('/work/recvfs/received')
+checks['received_journal_correct']=receive_snapshot_streams(streams,received,command)==[('mini-swe-1',2)]
+checks['snapshot_streams_created']=all((streams/f'snapshot-{index:08d}.btrfs').stat().st_size>0 for index in range(1,4))
 checks['incremental_receive_restored']=(received/'snapshot-00000002/trial-result').read_bytes()==b'fixed'
 checks['received_on_separate_filesystem']=received.stat().st_dev!=Path('/work/fs').stat().st_dev
 adapter_before=received/'snapshot-00000001'
@@ -242,7 +236,7 @@ adapter_after=received/'snapshot-00000002'
 def replay_adapter(index):
  root=roots[index];path=Path(f'/work/adapter-replay-{index}.sock')
  apply=SnapshotApplier(received,root,['/hostlib/LOADER','--library-path','/hostlib','/opt/rsync'])
- replay=SnapshotReplay(load_replay_boundaries('/work/fs/adapter-recorded'),apply);server=MarkerServer(path,replay)
+ replay=SnapshotReplay(load_replay_boundaries(received),apply);server=MarkerServer(path,replay)
  thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
  try:
   result=adapter_client(root,'replay',path)
