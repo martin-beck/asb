@@ -203,7 +203,10 @@ fallback remain incomplete.
 The draft `fuse-overlayfs` tool installer obtains the pinned upstream static
 binary for Linux x86-64 or aarch64 and can stage it into a guest. An x86-64
 project-local install and mount/unmount in the selected SWE-bench image passed;
-the aarch64 binary, recorder library and VM fallback remain unqualified.
+the installer also stages pinned fusepy 3.0.1 for use by the recorder. The
+installed overlay binary and binding passed the four-replica offline fixture
+with a separately supplied libfuse2. Automatic compatible-library provisioning,
+the aarch64 binary, and VM fallback remain unqualified.
 
 `python3 crates/asb-cli/tests/hermes_native_parallel_gap.py` checks that
 overlapping terminal calls produce a readable sidecar without serializing
