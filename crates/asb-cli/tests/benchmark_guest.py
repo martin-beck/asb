@@ -67,6 +67,22 @@ class ArchiveContainer:
 
 
 class GuestBootstrapTests(unittest.TestCase):
+    def test_filesystem_replay_inputs_use_distinct_stable_guest_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            container = Container()
+            task = SimpleNamespace(artifacts=root, workspace=SimpleNamespace(container=container))
+            items = []
+            for source_name, target, content in [('events-2', 'asb-fs-events.jsonl', b'events'),
+                                                  ('payload-2', 'asb-fs-payload.bin', b'payload')]:
+                source = root / source_name
+                source.write_bytes(content)
+                items.append({'source': str(source), 'target': target, 'bytes': len(content),
+                              'sha256': hashlib.sha256(content).hexdigest(), 'streamed': True})
+            stage_private_inputs(task, items)
+            self.assertEqual({name.rsplit('/', 1)[-1]: data for _, name, data in container.files},
+                             {'asb-fs-events.jsonl': b'events', 'asb-fs-payload.bin': b'payload'})
+
     def test_large_replay_input_streams_and_rejects_changed_digest_before_upload(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

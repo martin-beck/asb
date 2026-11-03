@@ -180,7 +180,10 @@ fn filesystem_private_inputs(path: &Path) -> Result<Vec<PrivateInput>, String> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
     let mut inputs = Vec::new();
-    for kind in ["aux-fs-events", "aux-fs-payload"] {
+    for (kind, target) in [
+        ("aux-fs-events", "asb-fs-events.jsonl"),
+        ("aux-fs-payload", "asb-fs-payload.bin"),
+    ] {
         let source = replay_sidecar(path, kind, "jsonl")?;
         let mut options = std::fs::OpenOptions::new();
         options.read(true);
@@ -220,14 +223,9 @@ fn filesystem_private_inputs(path: &Path) -> Result<Vec<PrivateInput>, String> {
         if count != metadata.len() {
             return Err(format!("sealed {kind} replay input changed while staging"));
         }
-        let target = source
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| format!("sealed {kind} replay input has no filename"))?
-            .to_owned();
         inputs.push(PrivateInput {
             source,
-            target,
+            target: target.into(),
             bytes: count,
             sha256: format!("{:x}", digest.finalize()),
             streamed: true,
@@ -1019,10 +1017,10 @@ impl Session {
             &context.config.mcp_servers,
             context.mcp_mode == Some(crate::tape::Mode::Replay),
         )?;
-        if context.tool_replay
+        let filesystem_replay_requested = context.tool_replay
             && std::env::var_os("ASB_EXPERIMENTAL_FILESYSTEM_REPLAY").as_deref()
-                == Some(std::ffi::OsStr::new("1"))
-        {
+                == Some(std::ffi::OsStr::new("1"));
+        if filesystem_replay_requested {
             let cassette = context
                 .tool_tape_cassette
                 .ok_or("filesystem replay needs a selected tool cassette")?;
@@ -1105,6 +1103,7 @@ impl Session {
             private_inputs,
             request: json!({"process_lifetime":self.process_lifetime,"config":config,"connection":connection,"prompt":self.invocation.input.instructions,"timeout_seconds":self.agent_timeout.as_secs_f64(),"max_steps":context.max_steps,
                 "filesystem_recording":context.filesystem_recording,
+                "filesystem_replay":filesystem_replay_requested.then_some("/opt/asb-private/filesystem-replay"),
                 "auxiliary_endpoints": context.auxiliary_endpoints,
                 "project_root":"/opt/asb-project","runtime_dir":"/opt/asb-private","run_dir":"/opt/asb-private/attempt","replay":context.replay,
                 "tape_cassette":tape_cassette,
@@ -1615,6 +1614,10 @@ mod tests {
         std::fs::write(&payload, b"payload").unwrap();
         let inputs = filesystem_private_inputs(&replay).unwrap();
         assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].target, "asb-fs-events.jsonl");
+        assert_eq!(inputs[1].target, "asb-fs-payload.bin");
+        assert_eq!(inputs[0].source, events);
+        assert_eq!(inputs[1].source, payload);
         assert!(inputs.iter().all(|input| input.streamed));
         assert_eq!(inputs[0].sha256, crate::cassette::digest(b"event"));
         assert_eq!(inputs[1].sha256, crate::cassette::digest(b"payload"));
