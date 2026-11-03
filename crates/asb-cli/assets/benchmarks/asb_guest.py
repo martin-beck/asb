@@ -563,6 +563,13 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
             task.preserve_requested = True
             if not result["metadata"].get("execution_failure"):
                 result["metadata"]["execution_failure"] = "filesystem recording export did not complete; task preserved"
+    if guest.get("filesystem_replay") and result.get("exit_code") != 0:
+        # The private replay coordinator log and workspace explain divergence.
+        # Retain the owned task rather than deleting the only diagnostic copy.
+        task.interrupted = True
+        task.preserve_requested = True
+        if not result["metadata"].get("execution_failure"):
+            result["metadata"]["execution_failure"] = "filesystem replay failed; task preserved for diagnosis"
     # The guest owns the principal execution clock; the outer transport now
     # allows separate settlement time, so carry the guest's timeout fact out.
     propagate_guest_timeout(result, observation)

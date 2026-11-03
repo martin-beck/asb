@@ -75,7 +75,9 @@ class ReplayServer:
                     end = ends[0]
                     self.coordinator.invoke(alias, end, self.timeout, lambda: None)
                 stream.write(f'{end}\n'.encode('ascii'))
-        except Exception:
+        except Exception as error:
+            print(f'filesystem replay boundary failed: {type(error).__name__}: {error}',
+                  file=sys.stderr, flush=True)
             with self.lock:
                 self.errors.append('filesystem replay boundary failed')
         finally:
