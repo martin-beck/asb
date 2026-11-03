@@ -64,6 +64,10 @@ installed Mini-SWE agent and local environment with deterministic simulated
 model responses, then replays its two tool boundaries in four replicas. This
 uses host Python 3.12 inside the disposable container and does not qualify a
 live provider, official evaluator, or the production guest lifecycle.
+The probe exports the complete task baseline and its increments and receives
+them on the second filesystem before four concurrent replays. A cached
+Matplotlib trial produced a roughly 599 MB baseline and sub-kilobyte increments
+for the simulated two-command run; avoiding a duplicate baseline is future work.
 
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without

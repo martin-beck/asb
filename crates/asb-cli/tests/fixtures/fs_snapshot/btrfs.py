@@ -34,7 +34,7 @@ received_attached=0
 cleanup(){ umount /work/recvfs || true; if [ "$received_attached" = 1 ]; then losetup -d /dev/loop29 || true; fi; umount /work/fs || true; losetup -d /dev/LOOPDEV || true; chmod -R a+rwX /work; }
 trap cleanup EXIT
 mknod /dev/loop29 b 7 29
-truncate -s 512M /work/received.img
+truncate -s 4G /work/received.img
 /hostlib/LOADER --library-path /hostlib /opt/mkfs.btrfs -q /work/received.img
 losetup /dev/loop29 /work/received.img
 received_attached=1
@@ -269,10 +269,15 @@ if os.environ.get('ASB_SNAPSHOT_REAL_WORKSPACE')=='1':
  finally:
   swe_server.shutdown();swe_server.server_close();thread.join();path.unlink(missing_ok=True)
  swe_service.finish()
+ swe_streams=Path('/work/swe-streams');swe_received=Path('/work/recvfs/swe-received')
+ export_snapshot_streams('/work/fs/swe-recorded',swe_streams,command)
+ swe_boundaries=receive_snapshot_streams(swe_streams,swe_received,command)
+ checks['swe_task_cross_filesystem_received']=swe_received.stat().st_dev!=Path('/work/fs').stat().st_dev
+ print('swe_stream_bytes',[(item.name,item.stat().st_size) for item in sorted(swe_streams.glob('*.btrfs'))])
  def replay_swe(index):
   root=swe_roots[index];sock=Path(f'/work/swe-replay-{index}.sock')
-  applier=SnapshotApplier('/work/fs/swe-recorded',root,['/hostlib/LOADER','--library-path','/hostlib','/opt/rsync'])
-  replay=SnapshotReplay(load_replay_boundaries('/work/fs/swe-recorded'),applier);server=MarkerServer(sock,replay)
+  applier=SnapshotApplier(swe_received,root,['/hostlib/LOADER','--library-path','/hostlib','/opt/rsync'])
+  replay=SnapshotReplay(swe_boundaries,applier);server=MarkerServer(sock,replay)
   thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
   try:
    result=client(root,'replay',sock,'/work/swe-tape.jsonl')
