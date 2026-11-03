@@ -7,6 +7,7 @@ terminal request and response.  The sidecar is private to an ASB attempt.
 """
 import atexit
 import base64
+import contextvars
 import hashlib
 import json
 import os
@@ -24,6 +25,7 @@ DIAGNOSTIC = Path(os.environ["ASB_HERMES_NATIVE_DIAGNOSTIC"]) if os.environ.get(
 MAX_BYTES = 4 * 1024 * 1024
 MAX_PAYLOAD_BYTES = 512 * 1024
 SESSION = "terminal-1"
+PARENT_CALL = contextvars.ContextVar("asb_hermes_parent_call", default=None)
 
 
 def _filesystem_marker(action, alias):
@@ -117,6 +119,9 @@ def _request(command, background, timeout, _task_id, _session_id, force, workdir
     identity = _call_identity()
     if identity:
         value["tool_call_id"] = identity
+    parent = PARENT_CALL.get()
+    if parent:
+        value["parent_alias"] = parent
     return _encoded(value)
 
 
@@ -133,6 +138,9 @@ def _process_request(args):
     identity = _call_identity()
     if identity:
         value["tool_call_id"] = identity
+    parent = PARENT_CALL.get()
+    if parent:
+        value["parent_alias"] = parent
     return _encoded(value)
 
 
@@ -141,6 +149,9 @@ def _file_request(name, args):
     identity = _call_identity()
     if identity:
         value["tool_call_id"] = identity
+    parent = PARENT_CALL.get()
+    if parent:
+        value["parent_alias"] = parent
     return _encoded(value)
 
 
@@ -224,12 +235,14 @@ class Recorder:
                 "request_sha256": _digest(request), "request_b64": base64.b64encode(request).decode("ascii")})
             if not _filesystem_marker("begin", alias):
                 self.failed = True
+        token = PARENT_CALL.set(alias)
         try:
             output = original(*args, **kwargs)
         except BaseException:
             self.failed = True
             raise
         finally:
+            PARENT_CALL.reset(token)
             if not _filesystem_marker("end", alias):
                 self.failed = True
         if not isinstance(output, str):
@@ -642,10 +655,15 @@ class UntapedToolCapture:
         with self.lock:
             self.sequence += 1
             sequence = self.sequence
+            alias = f"untaped-{sequence}"
             self._write({"schema_version": 1, "event": "begin", "sequence": sequence,
+                         "alias": alias, "parent_alias": PARENT_CALL.get(),
                          "relative_ns": time.monotonic_ns() - self.start,
                          "tool": name, "arguments": args, "context": kwargs,
                          "tool_call_id": _call_identity()})
+            if not _filesystem_marker("begin", alias):
+                self.incomplete = True
+        token = PARENT_CALL.set(alias)
         try:
             result = original(name, args, **kwargs)
         except BaseException as error:
@@ -655,6 +673,10 @@ class UntapedToolCapture:
                              "error_type": type(error).__name__, "error": str(error)})
                 self.completed += 1
             raise
+        finally:
+            PARENT_CALL.reset(token)
+            if not _filesystem_marker("end", alias):
+                self.incomplete = True
         with self.lock:
             self._write({"schema_version": 1, "event": "end", "sequence": sequence,
                          "relative_ns": time.monotonic_ns() - self.start, "result": result})

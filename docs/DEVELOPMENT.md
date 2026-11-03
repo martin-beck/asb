@@ -133,7 +133,9 @@ not prove ordering for a complete agent. The adapter preserves Hermes's normal
 tool catalogue; terminal, process, read_file, write_file, patch, and search_files
 calls have experimental adapter-owned replay. Other calls run during recording
 and produce private JSONL evidence with start/end ordering, arguments,
-context, and results or exceptions. A separate status records capture completeness;
+context, parent aliases, and results or exceptions. Native child requests inherit
+the parent alias through Hermes's propagated thread context, and experimental
+filesystem markers bound the parent call. A separate status records capture completeness;
 the 8 MiB evidence limit, serialization errors, or unsettled calls mark it
 incomplete. These calls also mark the replay tape incomplete until their effects
 are implemented. Evidence may contain task content and stays in the private
