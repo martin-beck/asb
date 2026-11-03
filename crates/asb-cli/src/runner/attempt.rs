@@ -812,6 +812,8 @@ impl<'a> ReadyAttempt<'a> {
         let mut runtime_entered = false;
         let execution = (|| {
             let _launch_failure = workloads::session::LaunchFailureGuard(launch);
+            // Filled by attempt-owned auxiliary sessions before dispatch.
+            let auxiliary_endpoints = std::collections::BTreeMap::new();
             let tape_url = prepared.tape.as_ref().map(|session| session.url());
             let provider_endpoint =
                 tape_url.or_else(|| providers::local_bridge_endpoint(&config.provider, bridge));
@@ -847,6 +849,7 @@ impl<'a> ReadyAttempt<'a> {
             let isolated = prepared.workload.execute(
                 &mut workloads::ExecutionContext {
                     launch,
+                    auxiliary_endpoints: &auxiliary_endpoints,
                     config,
                     connection: connection.as_ref(),
                     project_root,
@@ -925,6 +928,7 @@ impl<'a> ReadyAttempt<'a> {
                     invocation: prepared.workload.invocation(),
                     fresh_state: options.batch.is_some(),
                     route: native::NativeRoute {
+                        auxiliary_endpoints: &auxiliary_endpoints,
                         connection: connection.as_ref(),
                         provider_endpoint,
                         provider_credentials,

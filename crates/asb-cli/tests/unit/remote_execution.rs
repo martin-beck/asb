@@ -54,6 +54,7 @@ if not raw: closed();sys.exit(0)
 request=json.loads(raw);assert request['op']=='agent';record('agent')
 log.with_name('preparation-seconds').write_text(json.dumps(request['preparation_seconds']))
 log.with_name('agent-max-steps').write_text(json.dumps(request['request']['max_steps']))
+log.with_name('agent-auxiliary-endpoints').write_text(json.dumps(request['request']['auxiliary_endpoints']))
 assert request['request']['config']['concurrency']==1
 assert request['request']['config']['workspace']=='/fixture-task'
 assert request['timeout']==1
@@ -255,6 +256,7 @@ fn actual_python_producer_and_rust_session_keep_both_grades_and_consume_close_pe
         let connection = connection();
         let mut progress = ProgressSpy::default();
         let mut context = ExecutionContext {
+            auxiliary_endpoints: &Default::default(),
             config: &config,
             connection: Some(&connection),
             project_root: &fixture.0,
@@ -335,6 +337,7 @@ fn actual_python_task_loop_forwards_declared_termination_without_changing_grade_
             let project = crate::project::ProjectConfig::default();
             let connection = connection();
             let mut context = ExecutionContext {
+                auxiliary_endpoints: &Default::default(),
                 config: &config,
                 connection: Some(&connection),
                 project_root: &fixture.0,
@@ -501,6 +504,7 @@ fn unmeasured_shared_launch_requires_valid_target_and_aborts_before_cancellation
             aborted: Cell::new(false),
         };
         let mut context = ExecutionContext {
+            auxiliary_endpoints: &Default::default(),
             launch: Some(&launch),
             config: &config,
             connection: Some(&connection),
@@ -584,6 +588,7 @@ fn completed_guest_survives_capture_end_errors_and_still_grades_then_closes() {
         let project = crate::project::ProjectConfig::default();
         let connection = connection();
         let mut context = ExecutionContext {
+            auxiliary_endpoints: &Default::default(),
             launch: None,
             config: &config,
             connection: Some(&connection),
@@ -641,7 +646,9 @@ fn prepared_protocol_preserves_output_exit_time_and_grades_only_after_completion
         let config = configuration();
         let project = crate::project::ProjectConfig::default();
         let connection = connection();
+        let auxiliary_endpoints = [("fixture".into(), "http://127.0.0.1:6789".into())].into();
         let mut context = ExecutionContext {
+            auxiliary_endpoints: &auxiliary_endpoints,
             launch: None,
             config: &config,
             connection: Some(&connection),
@@ -667,6 +674,11 @@ fn prepared_protocol_preserves_output_exit_time_and_grades_only_after_completion
             std::fs::read_to_string(fixture.0.join("agent-max-steps")).unwrap(),
             "200"
         );
+        let forwarded: Value = serde_json::from_str(
+            &std::fs::read_to_string(fixture.0.join("agent-auxiliary-endpoints")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(forwarded["fixture"], "http://127.0.0.1:6789");
         assert_eq!(result.output.status.code(), Some(7));
         assert_eq!(result.output.stdout, b"ok");
         assert_eq!(result.output.stderr, b"diag");
@@ -697,6 +709,7 @@ fn unknown_grade_settlement_never_repeats_evaluation_or_cancellation() {
     let project = crate::project::ProjectConfig::default();
     let connection = connection();
     let mut context = ExecutionContext {
+        auxiliary_endpoints: &Default::default(),
         launch: None,
         config: &config,
         connection: Some(&connection),
@@ -755,6 +768,7 @@ fn protocol_errors_preserve_original_reason_and_cancel_instead_of_grading() {
         let project = crate::project::ProjectConfig::default();
         let connection = connection();
         let mut context = ExecutionContext {
+            auxiliary_endpoints: &Default::default(),
             launch: None,
             config: &config,
             connection: Some(&connection),
@@ -820,6 +834,7 @@ fn broken_human_output_does_not_cancel_a_completed_guest_submission_or_grader() 
     let project = crate::project::ProjectConfig::default();
     let connection = connection();
     let mut context = ExecutionContext {
+        auxiliary_endpoints: &Default::default(),
         launch: None,
         config: &config,
         connection: Some(&connection),
@@ -872,6 +887,7 @@ fn broken_output_and_deadline_use_same_preserving_error_envelope() {
         let project = crate::project::ProjectConfig::default();
         let connection = connection();
         let mut context = ExecutionContext {
+            auxiliary_endpoints: &Default::default(),
             launch: None,
             config: &config,
             connection: Some(&connection),
@@ -925,6 +941,7 @@ fn production_preparation_still_rejects_unregistered_agent_without_protocol_disp
     let project = crate::project::ProjectConfig::default();
     let connection = connection();
     let mut context = ExecutionContext {
+        auxiliary_endpoints: &Default::default(),
         launch: None,
         config: &config,
         connection: Some(&connection),
@@ -976,6 +993,7 @@ fn measured_protocol_rejects_unverified_target_and_execution_end_before_start() 
         .unwrap();
         measurements.event(LifecycleEvent::RunStarted).unwrap();
         let mut context = ExecutionContext {
+            auxiliary_endpoints: &Default::default(),
             launch: None,
             config: &config,
             connection: Some(&connection),
@@ -1039,6 +1057,7 @@ fn completed_metadata_retains_unknown_timing_and_requires_valid_service_handoff(
         let project = crate::project::ProjectConfig::default();
         let connection = connection();
         let mut context = ExecutionContext {
+            auxiliary_endpoints: &Default::default(),
             launch: None,
             config: &config,
             connection: Some(&connection),
@@ -1097,6 +1116,7 @@ fn completed_metadata_retains_unknown_timing_and_requires_valid_service_handoff(
         let project = crate::project::ProjectConfig::default();
         let connection = connection();
         let mut context = ExecutionContext {
+            auxiliary_endpoints: &Default::default(),
             launch: None,
             config: &config,
             connection: Some(&connection),
