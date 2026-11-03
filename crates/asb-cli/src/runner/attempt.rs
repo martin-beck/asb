@@ -519,7 +519,13 @@ impl<'a> ReadyAttempt<'a> {
                 let workload = workloads::prepare_task(&workloads::PreparationContext {
                     verify_initial_material: options.preparation_gate.is_some()
                         || options.verify_initial_material,
-                    filesystem_recording: context.filesystem_recording,
+                    filesystem_recording: context.filesystem_recording
+                        || uses_experimental_filesystem_replay(
+                            std::env::var_os("ASB_EXPERIMENTAL_FILESYSTEM_REPLAY").as_deref()
+                                == Some(std::ffi::OsStr::new("1")),
+                            options.effective_tool_mode(),
+                            &config.workload,
+                        ),
                     budgets: policy.budgets,
                     on_allocation: Some(&allocation),
                     workload: &config.workload,

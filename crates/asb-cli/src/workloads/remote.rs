@@ -1373,12 +1373,22 @@ struct PreparedBootstrap {
     installation: crate::install::GuestBootstrap,
 }
 
+fn needs_filesystem_observer(recording: bool, tool_replay: bool, enabled: bool) -> bool {
+    recording || (tool_replay && enabled)
+}
+
 impl PreparedBootstrap {
     fn prepare(context: &ExecutionContext<'_>) -> Result<Self, String> {
         let binary = runtime_binary()?;
         let tools_root =
             crate::project::resolve(context.project_root, &context.project_config.tools_dir);
-        let additional = if context.filesystem_recording {
+        let observer = needs_filesystem_observer(
+            context.filesystem_recording,
+            context.tool_replay,
+            std::env::var_os("ASB_EXPERIMENTAL_FILESYSTEM_REPLAY").as_deref()
+                == Some(std::ffi::OsStr::new("1")),
+        );
+        let additional = if observer {
             &["fuse-overlayfs"][..]
         } else {
             &[][..]
@@ -1599,6 +1609,14 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn filesystem_observer_runtime_is_staged_only_when_needed() {
+        assert!(needs_filesystem_observer(true, false, false));
+        assert!(needs_filesystem_observer(false, true, true));
+        assert!(!needs_filesystem_observer(false, true, false));
+        assert!(!needs_filesystem_observer(false, false, true));
+    }
 
     #[test]
     fn filesystem_replay_inputs_stream_both_replica_files_and_reject_missing() {

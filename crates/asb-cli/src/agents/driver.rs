@@ -808,10 +808,18 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             .runtime_dir
             .join("agent-state/filesystem-replay.sock");
         command.env("ASB_FS_REPLAY_SOCKET", &control);
-        Some(GuestFilesystemCapture::start_replay(
+        let (_, project) = project::load(&request.project_root)?;
+        let library = prepare_filesystem_library(
             &request.project_root,
+            &project.tools_dir,
+            &request.run_dir,
+        )?;
+        Some(GuestFilesystemCapture::start_observed_replay(
+            &request.project_root,
+            &project.tools_dir,
             &request.run_dir,
             &workspace,
+            &library,
             evidence,
             &control,
         )?)
@@ -1087,6 +1095,85 @@ struct GuestFilesystemCapture {
 }
 
 impl GuestFilesystemCapture {
+    fn start_observed_replay(
+        project_root: &Path,
+        tools_dir: &str,
+        run_dir: &Path,
+        workspace: &Path,
+        library: &Path,
+        evidence: &Path,
+        control_socket: &Path,
+    ) -> Result<Self, Error> {
+        for (name, content) in [
+            (
+                "asb_fs_proxy.py",
+                include_str!("../../assets/benchmarks/asb_fs_proxy.py"),
+            ),
+            (
+                "asb_fs_attribution.py",
+                include_str!("../../assets/benchmarks/asb_fs_attribution.py"),
+            ),
+            (
+                "asb_fs_record.py",
+                include_str!("../../assets/benchmarks/asb_fs_record.py"),
+            ),
+            (
+                "asb_fs_replay_cursor.py",
+                include_str!("../../assets/benchmarks/asb_fs_replay_cursor.py"),
+            ),
+            (
+                "asb_fs_replay_server.py",
+                include_str!("../../assets/benchmarks/asb_fs_replay_server.py"),
+            ),
+            (
+                "asb_fs_direct_prefix.py",
+                include_str!("../../assets/benchmarks/asb_fs_direct_prefix.py"),
+            ),
+            (
+                "asb_fs_initial_reads.py",
+                include_str!("../../assets/benchmarks/asb_fs_initial_reads.py"),
+            ),
+            (
+                "asb_fs_observed_replay.py",
+                include_str!("../../assets/benchmarks/asb_fs_observed_replay.py"),
+            ),
+        ] {
+            fs::write(run_dir.join(name), content).map_err(crate::io_error)?;
+        }
+        let binding =
+            project::resolve(project_root, tools_dir).join("fuse-overlayfs/binding/runtime");
+        let log = fs::File::create(run_dir.join("filesystem-replay-supervisor.log"))
+            .map_err(crate::io_error)?;
+        let mut child = Command::new(crate::python_runtime::project_python(project_root))
+            .arg(run_dir.join("asb_fs_observed_replay.py"))
+            .arg(workspace)
+            .arg(run_dir)
+            .arg(run_dir.join("asb_fs_proxy.py"))
+            .arg(binding)
+            .arg(library)
+            .arg(evidence)
+            .arg(control_socket)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(log)
+            .spawn()
+            .map_err(|_| Error::Run("cannot start observed filesystem replay".into()))?;
+        let mut ready = String::new();
+        let output = child.stdout.take().ok_or_else(|| {
+            Error::Run("filesystem replay coordinator readiness is unavailable".into())
+        })?;
+        if BufReader::new(output).read_line(&mut ready).is_err() || ready != "READY\n" {
+            drop(child.stdin.take());
+            let _ = child.wait();
+            return Err(Error::Run(
+                "observed filesystem replay failed to start; inspect its private log".into(),
+            ));
+        }
+        Ok(Self { child: Some(child) })
+    }
+
+    #[cfg(test)]
     fn start_replay(
         project_root: &Path,
         run_dir: &Path,
@@ -1597,6 +1684,7 @@ mod artifact_publication_tests {
             "benchmark_fs_request_shapes.py",
             "benchmark_fs_direct_prefix.py",
             "benchmark_fs_direct_coordinator.py",
+            "benchmark_fs_observed_replay.py",
             "benchmark_fs_compact_reads.py",
             "benchmark_fs_initial_reads.py",
             "benchmark_fs_replay_server.py",
