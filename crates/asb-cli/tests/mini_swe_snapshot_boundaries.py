@@ -3,7 +3,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import socketserver
 import sys
 import tempfile
 import threading
@@ -14,7 +13,7 @@ from mini_swe_binary_replay import LocalEnvironment, transport
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'crates/asb-cli/assets/benchmarks'))
-from asb_snapshot_service import MarkerServer, SnapshotService
+from asb_snapshot_service import MarkerServer, SnapshotReplay, SnapshotService
 
 SCRATCH = ROOT / 'target/mini-swe-snapshot-tests'
 SCRATCH.mkdir(parents=True, exist_ok=True)
@@ -55,12 +54,9 @@ class SnapshotBoundaryTest(unittest.TestCase):
                 replica = root/f'replica-{index}'
                 replica.mkdir()
                 replay_socket = root/f'replay-{index}.sock'
-                class Handler(socketserver.StreamRequestHandler):
-                    def handle(self):
-                        if self.rfile.readline() == b'tool-end:mini-swe-1\n':
-                            shutil.copytree(snapshot, replica, dirs_exist_ok=True)
-                            self.wfile.write(b'1\n')
-                replay_server = socketserver.UnixStreamServer(str(replay_socket), Handler)
+                replay = SnapshotReplay([('mini-swe-1', 2)],
+                                        lambda _: shutil.copytree(snapshot, replica, dirs_exist_ok=True))
+                replay_server = MarkerServer(replay_socket, replay)
                 replay_thread = threading.Thread(target=replay_server.handle_request, daemon=True)
                 replay_thread.start()
                 try:
@@ -73,6 +69,7 @@ class SnapshotBoundaryTest(unittest.TestCase):
                             replay_result = namespace['AsbTapeEnvironment'](cwd=str(replica)).execute({'command': 'run tests'})
                     self.assertEqual(replay_result, result)
                     self.assertEqual((replica/'generated.png').read_bytes(), b'\x89PNG\x00\xff\x01')
+                    replay.finish()
                 finally:
                     replay_thread.join(timeout=3); replay_server.server_close(); replay_socket.unlink(missing_ok=True)
 

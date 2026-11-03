@@ -11,13 +11,30 @@ import unittest
 
 ROOT=Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT/'crates/asb-cli/assets/benchmarks'))
-from asb_snapshot_service import MarkerServer,SnapshotService
+from asb_snapshot_service import MarkerServer,SnapshotReplay,SnapshotService
 
 SCRATCH=ROOT/'target'/'snapshot-service-tests'
 SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_replay_rejects_mismatch_and_unconsumed_boundaries(self):
+        applied=[]
+        replay=SnapshotReplay([('one',2),('two',3)],applied.append)
+        self.assertEqual(replay.marker('end','one'),2)
+        with self.assertRaisesRegex(ValueError,'differs'):replay.marker('end','wrong')
+        with self.assertRaisesRegex(RuntimeError,'unconsumed'):replay.finish()
+        self.assertEqual(applied,[2])
+        replay=SnapshotReplay([('one',2)],applied.append)
+        with self.assertRaisesRegex(RuntimeError,'unconsumed'):replay.finish()
+
+    def test_replay_apply_failure_invalidates_state(self):
+        def fail(_):raise RuntimeError('injected apply error')
+        replay=SnapshotReplay([('one',2)],fail)
+        with self.assertRaisesRegex(RuntimeError,'injected'):replay.marker('end','one')
+        with self.assertRaisesRegex(RuntimeError,'not active'):replay.marker('end','one')
+        with self.assertRaisesRegex(RuntimeError,'unconsumed'):replay.finish()
+
     def test_overlapping_tools_produce_ordered_snapshots_and_final(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory); workspace=root/'workspace';workspace.mkdir()
