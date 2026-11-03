@@ -24,13 +24,18 @@ creates a disposable sparse Btrfs image inside a network-disabled container.
 Set `ASB_SNAPSHOT_MKFS_BTRFS`, `ASB_SNAPSHOT_BTRFS`, `ASB_SNAPSHOT_RSYNC`,
 `ASB_SNAPSHOT_LIBRARY_DIR`, `ASB_SNAPSHOT_LOADER`, `ASB_SNAPSHOT_LOOP_DEVICE`
 and `ASB_SNAPSHOT_IMAGE` to suitable installed tools, a free loop device and
-an already cached image. It creates one base and five snapshots, then checks
-hard links, open descriptors and three checksum-based sync boundaries from
+an already cached image. It creates one base and five writable workspaces,
+then captures read-only snapshots and checks
+hard links, open descriptors and seven checksum-based sync boundaries from
 immutable captured snapshots across four replicas, plus symlinks, deletion,
 permissions and available xattrs. It demonstrates that naive in-place sync may
-corrupt a split hard link; the fixture reconciles its known split before the
-third sync. This is not a general inode-topology reconciler. An external counter
-verifies that replay does not rerun the three original fixture subprocesses. The fixture
+corrupt a split hard link. A planner compares source and replica topology, then
+stages file and directory moves to preserve descriptors; the fixture covers a
+split, join, file rename, directory rename and a directory replacement with no
+surviving descendants. Offline tests cover swaps and retained staging on move
+failure. Replacement with surviving descendants, inode reuse, nested filesystems
+and concurrent mutations remain unqualified. An external counter verifies that
+replay does not rerun the seven original fixture subprocesses. The fixture
 requires loop-device access and kernel Btrfs support for this experiment; a VM
 can provide these independently of the host filesystem. Ordinary CI does not
 run it. It does not exercise an agent, concurrent tool mutations, a full guest

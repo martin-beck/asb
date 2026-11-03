@@ -38,6 +38,8 @@ btrfs_cmd(){ /hostlib/LOADER --library-path /hostlib /opt/btrfs "$@"; }
 btrfs_cmd subvolume create /work/fs/base >/dev/null
 printf old > /work/fs/base/file
 printf remove > /work/fs/base/deleted
+mkdir /work/fs/base/folder
+printf alpha > /work/fs/base/folder/data
 ln /work/fs/base/file /work/fs/base/link
 for i in 0 1 2 3 4; do btrfs_cmd subvolume snapshot /work/fs/base /work/fs/s$i >/dev/null; done
 python3 - <<'EOPY'
@@ -105,23 +107,75 @@ if ((second/'file').stat().st_ino!=(second/'link').stat().st_ino
         or (third/'file').stat().st_ino!=(second/'file').stat().st_ino
         or (third/'link').stat().st_ino==(second/'link').stat().st_ino):
  raise RuntimeError('fixture did not produce the expected hard-link split')
+import sys
+sys.path.insert(0,'/opt')
+from topology import regular_files,plan_transitions,apply_transitions,directories,plan_tree_transitions,apply_tree_transitions
+before_topology=regular_files(second);after_topology=regular_files(third)
 for root in roots[1:]:
- if (root/'file').stat().st_ino!=(root/'link').stat().st_ino:
-  raise RuntimeError('replica hard-link state differs before split')
- (root/'link').unlink()
+ plan=plan_transitions(before_topology,after_topology,regular_files(root))
+ if plan!={'moves':[],'detach':['link']}:
+  raise RuntimeError('snapshot hard-link split plan differs')
+ apply_transitions(root,plan)
 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(lambda root:sync(third,root),roots[1:]))
 if any(x.returncode for x in results):raise RuntimeError('third rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
 checks['split_link_correct']=all((r/'file').read_bytes()==b'end' and (r/'link').read_bytes()==b'sep' and (r/'file').stat().st_ino!=(r/'link').stat().st_ino for r in roots[1:])
 checks['split_link_existing_descriptors_correct']=all(os.pread(fd,3,0)==b'end' for fd in fds[1:]+link_fds)
-checks['original_subprocess_only_three_times']=Path('/work/invocations').read_bytes()==b'123'
-for fd in link_fds:os.close(fd)
+split_fds=[os.open(root/'link',os.O_RDONLY) for root in roots[1:]]
+subprocess.run(['python3','-c','import os; from pathlib import Path; Path(\"link\").unlink(); os.link(\"file\",\"link\"); Path(\"/work/invocations\").open(\"ab\").write(b\"4\")'],cwd=roots[0],check=True)
+fourth=capture('captured-4')
+before_topology=regular_files(third);after_topology=regular_files(fourth)
+for root in roots[1:]:
+ plan=plan_transitions(before_topology,after_topology,regular_files(root))
+ if plan!={'moves':[],'detach':['link']}:
+  raise RuntimeError('snapshot hard-link join plan differs')
+ apply_transitions(root,plan)
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(lambda root:sync(fourth,root),roots[1:]))
+if any(x.returncode for x in results):raise RuntimeError('fourth rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
+checks['joined_link_correct']=all((r/'file').read_bytes()==b'end' and (r/'link').read_bytes()==b'end' and (r/'file').stat().st_ino==(r/'link').stat().st_ino for r in roots[1:])
+checks['joined_old_descriptors_correct']=all(os.pread(fd,3,0)==b'sep' for fd in split_fds)
+subprocess.run(['python3','-c','import os; from pathlib import Path; os.rename(\"file\",\"moved-file\"); os.rename(\"link\",\"moved-link\"); Path(\"moved-file\").write_bytes(b\"fin\"); Path(\"/work/invocations\").open(\"ab\").write(b\"5\")'],cwd=roots[0],check=True)
+fifth=capture('captured-5')
+before_topology=regular_files(fourth);after_topology=regular_files(fifth)
+for root in roots[1:]:
+ plan=plan_transitions(before_topology,after_topology,regular_files(root))
+ if plan['moves']!=[('file','moved-file')]:
+  raise RuntimeError('snapshot move plan differs')
+ apply_transitions(root,plan)
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(lambda root:sync(fifth,root),roots[1:]))
+if any(x.returncode for x in results):raise RuntimeError('fifth rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
+checks['moved_link_correct']=all((r/'moved-file').read_bytes()==b'fin' and (r/'moved-link').read_bytes()==b'fin' and (r/'moved-file').stat().st_ino==(r/'moved-link').stat().st_ino and not (r/'file').exists() and not (r/'link').exists() for r in roots[1:])
+checks['moved_old_descriptors_correct']=all(os.pread(fd,3,0)==b'fin' for fd in fds[1:]+link_fds) and all(os.pread(fd,3,0)==b'sep' for fd in split_fds)
+dir_fds=[os.open(root/'folder',os.O_RDONLY|os.O_DIRECTORY) for root in roots[1:]]
+nested_fds=[os.open(root/'folder/data',os.O_RDONLY) for root in roots[1:]]
+subprocess.run(['python3','-c','import os; from pathlib import Path; os.rename(\"folder\",\"renamed-folder\"); Path(\"renamed-folder/data\").write_bytes(b\"bravo\"); Path(\"/work/invocations\").open(\"ab\").write(b\"6\")'],cwd=roots[0],check=True)
+sixth=capture('captured-6')
+for root in roots[1:]:
+ plan=plan_tree_transitions(regular_files(fifth),regular_files(sixth),regular_files(root),directories(fifth),directories(sixth),directories(root))
+ if plan['directory_moves']!=[('folder','renamed-folder')]:raise RuntimeError('snapshot directory move plan differs')
+ apply_tree_transitions(root,plan)
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(lambda root:sync(sixth,root),roots[1:]))
+if any(x.returncode for x in results):raise RuntimeError('sixth rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
+checks['moved_directory_correct']=all((r/'renamed-folder/data').read_bytes()==b'bravo' and not (r/'folder').exists() for r in roots[1:])
+checks['moved_directory_descriptors_correct']=all('data' in os.listdir(fd) for fd in dir_fds) and all(os.pread(fd,5,0)==b'bravo' for fd in nested_fds)
+subprocess.run(['python3','-c','import shutil; from pathlib import Path; shutil.rmtree(\"renamed-folder\"); Path(\"renamed-folder\").mkdir(); Path(\"renamed-folder/data\").write_bytes(b\"other\"); Path(\"/work/invocations\").open(\"ab\").write(b\"7\")'],cwd=roots[0],check=True)
+seventh=capture('captured-7')
+for root in roots[1:]:
+ plan=plan_tree_transitions(regular_files(sixth),regular_files(seventh),regular_files(root),directories(sixth),directories(seventh),directories(root))
+ if plan['directory_replacements']!=['renamed-folder']:raise RuntimeError('snapshot directory replacement plan differs')
+ apply_tree_transitions(root,plan)
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(lambda root:sync(seventh,root),roots[1:]))
+if any(x.returncode for x in results):raise RuntimeError('seventh rsync failed: '+next(x.stderr.decode(errors='replace')[-300:] for x in results if x.returncode))
+checks['replaced_directory_correct']=all((r/'renamed-folder/data').read_bytes()==b'other' for r in roots[1:])
+checks['replaced_directory_old_descriptors_correct']=all(os.pread(fd,5,0)==b'bravo' for fd in nested_fds) and all(os.fstat(fd).st_nlink==0 for fd in dir_fds)
+checks['original_subprocess_only_seven_times']=Path('/work/invocations').read_bytes()==b'1234567'
+for fd in link_fds+split_fds+dir_fds+nested_fds:os.close(fd)
 for name,passed in checks.items():print(name,passed)
 print('xattr_exercised',xattr)
 if not all(checks.values()):raise RuntimeError('Btrfs snapshot checks failed')
 for fd in fds:os.close(fd)
 EOPY
 '''.replace('LOADER',loader).replace('LOOPDEV',loop.name)
- cmd=['docker','run','--rm','--name',container_name,'--pull=never','--network','none','--device','/dev/loop-control','--device',str(loop),'--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={mkfs},dst=/opt/mkfs.btrfs,readonly','--mount',f'type=bind,src={btrfs},dst=/opt/btrfs,readonly','--mount',f'type=bind,src={rsync},dst=/opt/rsync,readonly','--mount',f'type=bind,src={libraries},dst=/hostlib,readonly','--entrypoint','/bin/sh',image,'-c',script]
+ cmd=['docker','run','--rm','--name',container_name,'--pull=never','--network','none','--device','/dev/loop-control','--device',str(loop),'--cap-add','SYS_ADMIN','--security-opt','apparmor=unconfined','--mount',f'type=bind,src={d},dst=/work','--mount',f'type=bind,src={mkfs},dst=/opt/mkfs.btrfs,readonly','--mount',f'type=bind,src={btrfs},dst=/opt/btrfs,readonly','--mount',f'type=bind,src={rsync},dst=/opt/rsync,readonly','--mount',f'type=bind,src={Path(__file__).with_name("topology.py").resolve()},dst=/opt/topology.py,readonly','--mount',f'type=bind,src={libraries},dst=/hostlib,readonly','--entrypoint','/bin/sh',image,'-c',script]
  try:
   r=subprocess.run(cmd,text=True,capture_output=True,timeout=90)
  except subprocess.TimeoutExpired:

@@ -9,6 +9,11 @@ use support::IsolatedEnvironment;
 static PYTHON_PROTOCOL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
+fn snapshot_hardlink_splits_preserve_existing_inode_handles() {
+    python_protocol("fixtures/fs_snapshot/test_topology.py");
+}
+
+#[test]
 fn original_sweep_qualification_inventory_is_bounded_and_requires_declared_evidence() {
     python_protocol("benchmark_live_repeated_sweep_original.py");
 }
