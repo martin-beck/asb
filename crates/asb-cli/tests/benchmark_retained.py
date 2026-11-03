@@ -144,7 +144,7 @@ class RetainedTests(unittest.TestCase):
                     environment=coverage_env({"PATH":os.environ.get("PATH",""),"HOME":directory,
                                  "PYTHONPATH":str(metadata.parent),"PYTHONDONTWRITEBYTECODE":"1"})
                     before={str(item.relative_to(artifacts)):item.read_bytes() for item in artifacts.rglob("*") if item.is_file()}
-                    command=[binary,"workload","recover",str(path),"--inspect-grade"]
+                    command=[binary,"--project-dir",str(root),"workload","recover",str(path),"--inspect-grade"]
                     output=subprocess.run(command+["--json"],env=environment,cwd=directory,capture_output=True,timeout=15)
                     self.assertEqual(output.returncode,0,output.stderr.decode())
                     report=json.loads(output.stdout)
