@@ -862,6 +862,7 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         ));
         let package = root.join("openjiuwen");
         for relative in [
+            "core/common/logging",
             "core/foundation/llm/schema",
             "core/foundation/tool",
             "core/context_engine/context",
@@ -876,6 +877,8 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         for relative in [
             "__init__.py",
             "core/__init__.py",
+            "core/common/__init__.py",
+            "core/common/logging/__init__.py",
             "core/foundation/__init__.py",
             "core/foundation/llm/__init__.py",
             "core/foundation/llm/schema/__init__.py",
@@ -901,6 +904,19 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         )
         .unwrap();
         std::fs::write(
+            package.join("core/common/logging/log_config.py"),
+            r#"
+import os
+from pathlib import Path
+def get_log_config_snapshot(): return {"level": "INFO", "log_path": "original"}
+def configure_log_config(config):
+    assert config["level"] == "INFO"
+    assert config["log_path"] == os.environ["ASB_OPENJIUWEN_LOG_DIR"]
+    Path(os.environ["ASB_TEST_LOG_CONFIGURED"]).write_text("ready")
+"#,
+        )
+        .unwrap();
+        std::fs::write(
             package.join("harness/cli/agent/factory.py"),
             r#"
 class Config:
@@ -918,6 +934,10 @@ def create_agent(_cfg):
         std::fs::write(
             package.join("core/foundation/llm/schema/message_chunk.py"),
             r#"
+import os
+from pathlib import Path
+if os.environ.get("ASB_OPENJIUWEN_LOG_DIR"):
+    assert Path(os.environ["ASB_TEST_LOG_CONFIGURED"]).read_text() == "ready"
 class AssistantMessageChunk:
     usage_metadata = None
     def __add__(self, other): return other
@@ -1157,6 +1177,7 @@ asyncio.run(main())
         });
         let sidecar = root.join("native.jsonl");
         let marker = root.join("executed");
+        let log_marker = root.join("log-configured");
         let record_workspace = root.join("record-workspace");
         let replay_workspace = root.join("replay-workspace");
         let record = super::process(entry.to_str().unwrap())
@@ -1164,6 +1185,8 @@ asyncio.run(main())
             .direct()
             .env("PYTHONPATH", &root)
             .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_OPENJIUWEN_LOG_DIR", root.join("private-logs"))
+            .env("ASB_TEST_LOG_CONFIGURED", &log_marker)
             .env("ASB_TEST_WORKSPACE", &record_workspace)
             .env("ASB_TEST_RENDER_PREFIX", "record:")
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_RECORD", &sidecar)
@@ -1203,6 +1226,8 @@ asyncio.run(main())
             .arg(&sidecar)
             .env("PYTHONPATH", &root)
             .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_OPENJIUWEN_LOG_DIR", root.join("private-logs"))
+            .env("ASB_TEST_LOG_CONFIGURED", &log_marker)
             .env("ASB_TEST_WORKSPACE", &replay_workspace)
             .env("ASB_TEST_RENDER_PREFIX", "replay:")
             .env("ASB_FS_REPLAY_SOCKET", &socket)
