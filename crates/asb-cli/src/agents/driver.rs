@@ -715,7 +715,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     if let Some(evidence) = &request.filesystem_replay
         && (request.filesystem_recording
             || !request.tool_replay
-            || request.config.agent != "mini-swe"
+            || !matches!(request.config.agent.as_str(), "mini-swe" | "openhands")
             || evidence != &request.runtime_dir.join("filesystem-replay"))
     {
         return Err(Error::Input(

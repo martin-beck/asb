@@ -63,6 +63,51 @@ def message(source, text):
     return MessageEvent(source=source, llm_message=Event(role='assistant' if source == 'agent' else 'user', content=[TextContent(text=text)]))
 
 class NativeFinalTest(unittest.TestCase):
+    def test_terminal_replay_waits_for_filesystem_effects_after_bridge_validation(self):
+        terminal = sys.modules.get('openhands.tools.terminal') or module('openhands.tools.terminal')
+        metadata = sys.modules.get('openhands.tools.terminal.metadata') or module('openhands.tools.terminal.metadata')
+        terminal.TerminalObservation = Event; metadata.CmdOutputMetadata = Event
+        executor = launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
+        executor._marker_lock = threading.Lock(); executor._marker_count = 0; executor._marker_failed = False
+        executor._delegate = None
+        response = {'kind':'terminal_observation', 'schema_version':1, 'content':'done',
+                    'is_error':False, 'command':'true', 'exit_code':0, 'timeout':False, 'metadata':{}}
+        class Bridge:
+            def __init__(self):
+                self.stdin = io.StringIO(); self.stdout = io.StringIO(json.dumps(response) + '\n')
+            def wait(self): return 0
+        executor._bridge = Bridge()
+        action = Event(command='true', is_input=False, timeout=None, reset=False)
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / 'result'
+            def apply(alias):
+                self.assertEqual(alias, 'openhands-1')
+                self.assertTrue(executor._bridge.stdin.getvalue())
+                output.write_text('journal effect')
+                return True
+            with patch.dict(os.environ, {'ASB_FS_REPLAY_SOCKET':'/fixture'}), \
+                    patch.object(launcher, 'filesystem_replay_boundary', side_effect=apply):
+                result = executor(action)
+            self.assertEqual(result.content[0].text, 'done')
+            self.assertEqual(output.read_text(), 'journal effect')
+            executor.close()
+
+    def test_terminal_replay_rejects_unavailable_filesystem_coordinator(self):
+        terminal = sys.modules.get('openhands.tools.terminal') or module('openhands.tools.terminal')
+        metadata = sys.modules.get('openhands.tools.terminal.metadata') or module('openhands.tools.terminal.metadata')
+        terminal.TerminalObservation = Event; metadata.CmdOutputMetadata = Event
+        executor = launcher.NativeTerminalExecutor.__new__(launcher.NativeTerminalExecutor)
+        executor._marker_lock = threading.Lock(); executor._marker_count = 0; executor._marker_failed = False
+        executor._delegate = None
+        response = {'kind':'terminal_observation', 'schema_version':1, 'content':'done',
+                    'is_error':False, 'command':'true', 'exit_code':0, 'timeout':False, 'metadata':{}}
+        executor._bridge = Event(stdin=io.StringIO(), stdout=io.StringIO(json.dumps(response)+'\n'), wait=lambda:0)
+        action = Event(command='true', is_input=False, timeout=None, reset=False)
+        with patch.dict(os.environ, {'ASB_FS_REPLAY_SOCKET':'/missing'}):
+            with self.assertRaisesRegex(RuntimeError, 'boundary is unavailable'):
+                executor(action)
+        executor.close()
+
     def test_terminal_marker_uses_recorder_socket(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(pathlib.Path(directory) / 'marker.sock')
