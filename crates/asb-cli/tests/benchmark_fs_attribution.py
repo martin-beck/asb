@@ -47,6 +47,24 @@ class AttributionTest(unittest.TestCase):
         a.observe({'sequence':7,'op':'marker','marker':'tool-end:b'})
         a.finish()
 
+    def test_handle_release_preserves_opener_without_guessing_closer(self):
+        a = module.Attribution(); parent = {'tgid':100, 'start_ticks':11}
+        direct = caller(130,100,23,[parent]); tool = caller(110,100,21,[parent])
+        self.assertEqual(a.observe({'sequence':1,'op':'open','handle':7,'caller':direct}), {'kind':'direct'})
+        a.observe({'sequence':2,'op':'marker','marker':'tool-begin:a','origin':origin(100,110,11,21)})
+        self.assertEqual(a.observe({'sequence':3,'op':'read','handle':7,'caller':tool}),
+                         {'kind':'shared-handle','handle':7,'opened_as':{'kind':'direct'},'used_as':{'kind':'tool','alias':'a'}})
+        self.assertEqual(a.observe({'sequence':4,'op':'release','handle':7,'caller':None}),
+                         {'kind':'handle-release','handle':7,'opened_as':{'kind':'direct'}})
+        self.assertEqual(a.observe({'sequence':5,'op':'release','handle':999,'caller':None}), {'kind':'unknown'})
+        a.observe({'sequence':6,'op':'marker','marker':'tool-end:a'}); a.finish()
+
+    def test_duplicate_handle_open_is_rejected(self):
+        a = module.Attribution(); current = caller(130,100,23,[{'tgid':100, 'start_ticks':11}])
+        a.observe({'sequence':1,'op':'open','handle':1,'caller':current})
+        with self.assertRaisesRegex(ValueError,'already open'):
+            a.observe({'sequence':2,'op':'open','handle':1,'caller':current})
+
     def test_stale_generation_and_incomplete_marker(self):
         a = module.Attribution()
         a.observe({'sequence':1,'op':'marker','marker':'tool-begin:a','origin':origin(100,110,11,21)})
