@@ -64,6 +64,20 @@ class Replay:
             self.sequence = sequence
             self.pending = None
 
+    def skip_validated_direct_prefix(self, count):
+        """Advance only after an independent direct-prefix validator succeeds."""
+        if (type(count) is not int or count < 0 or self.sequence != 0
+                or self.pending is not None or self.handles):
+            raise RuntimeError('invalid direct filesystem prefix state')
+        for expected in range(1, count + 1):
+            line = self.events.readline()
+            if not line or not line.endswith('\n'):
+                raise RuntimeError('direct filesystem prefix is truncated')
+            event = json.loads(line)
+            if event.get('sequence') != expected or event.get('op') == 'marker':
+                raise RuntimeError('direct filesystem prefix differs from validation')
+            self.sequence = expected
+
     def payload_chunks(self, event):
         remaining = event.get('bytes')
         with (self.evidence / event['object']).open('rb') as source:

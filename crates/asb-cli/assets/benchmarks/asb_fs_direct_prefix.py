@@ -119,3 +119,22 @@ def validate_direct_prefix(expected_events, expected_payload, observed_events, o
         if next(observed, None) is not None:
             raise ValueError('direct filesystem replay has additional operations')
     return count
+
+
+def validate_no_direct_tail(events, prefix_count):
+    """Reject later direct or unclassified operations until live replay exists."""
+    attribution = Attribution()
+    for line in events:
+        if not line.endswith('\n'):
+            raise ValueError('filesystem event stream is truncated')
+        event = json.loads(line)
+        scope = attribution.observe(event)
+        if event['sequence'] <= prefix_count:
+            continue
+        if scope['kind'] in ('unknown', 'ambiguous', 'shared-handle', 'direct'):
+            raise ValueError('filesystem replay has direct or unclassified operations after startup')
+        if scope['kind'] == 'handle-release' and scope['opened_as'].get('kind') != 'tool':
+            raise ValueError('filesystem replay has an unproven handle release after startup')
+    attribution.finish()
+    if attribution.handles:
+        raise ValueError('filesystem replay has unsettled handles')
