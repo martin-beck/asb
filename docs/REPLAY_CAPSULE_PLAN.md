@@ -106,3 +106,27 @@ capsules do not solve that ordering problem. Host overlay/user-namespace
 availability does not imply the same facilities are usable inside the normal
 Docker guest. These gaps must be repaired and qualified before claiming full
 native replay.
+
+## Virtual-machine feasibility findings
+
+A software-emulated VM experiment recorded a normal Pi invocation against a
+local mock provider inside a filesystem extracted from a SWE-bench task image.
+The agent used its native Bash tool to write a file; four offline replays had
+matching consoles and independent disks containing that effect. A separate
+workload-filesystem probe exercised Git, Python and HTTP with the same result.
+These experiments did not run the official evaluator or a real provider and do
+not establish agent or workload qualification.
+
+The prototype required QEMU's documented block replay layer and network replay
+filter. An earlier direct disk setup and a virtio-network configuration stalled
+in some replay attempts; a different emulated network device succeeded in the
+small test. Treat device selection, transport behavior, extraction fidelity,
+performance, architecture coverage and failure cleanup as open engineering
+questions, not portable guarantees. QEMU's record/replay configuration is
+documented at <https://www.qemu.org/docs/master/system/replay.html>.
+
+Whole-machine replay re-executes guest instructions, including subprocess
+instructions. Consequently this experiment does not provide the required
+interception-based playback that returns recorded tool results without launching
+recorded tools. It also does not replace the existing LLM and MCP proxies.
+Do not promote a successful VM trace into a claim of complete native-tool replay.
