@@ -238,6 +238,9 @@ pub(crate) struct GuestResult {
     /// directory after this small result record crosses the guest boundary.
     #[serde(skip)]
     pub sealed_artifacts: Vec<super::SealedArtifact>,
+    /// Controller-local snapshot stream archive, never serialized to the guest.
+    #[serde(skip)]
+    pub snapshot_artifact: Option<PathBuf>,
     /// Small receipts for opaque sidecars. Their bytes remain in the guest
     /// until the workload controller copies each verified file directly to its
     /// private host artifact directory.
@@ -930,6 +933,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         native_tool_sidecar: None,
         deferred_collection: None,
         sealed_artifacts: Vec::new(),
+        snapshot_artifact: None,
         exported_artifacts: Vec::new(),
         adapter_errors: Vec::new(),
         execution_failure: {
@@ -1235,6 +1239,7 @@ mod artifact_publication_tests {
                 native_tool_sidecar: None,
                 deferred_collection: None,
                 sealed_artifacts: Vec::new(),
+                snapshot_artifact: None,
                 exported_artifacts: Vec::new(),
                 adapter_errors: Vec::new(),
                 execution_failure: None,

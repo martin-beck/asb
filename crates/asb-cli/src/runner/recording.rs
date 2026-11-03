@@ -25,7 +25,13 @@ fn capture_matches_track(track: &Track, capture: &proxy::capture::CaptureEvidenc
             .unwrap_or(crate::proxy::legacy_recorder_name())
             == capture.adapter
         && capture.sha256 == track.sha256
-        && capture.complete == track.complete
+        && (capture.complete == track.complete
+            || (capture.complete
+                && !track.complete
+                && track
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact.kind == "workspace-snapshots")))
 }
 
 /// Adapter-owned sidecars share a deliberately small aggregate budget.  Relay
@@ -500,7 +506,10 @@ impl Recorder {
                 id: (batch - 1) * self.concurrency as u64 + replica.index as u64,
                 batch,
                 replica: replica.index as u64,
-                complete: capture.is_some_and(|capture| capture.complete),
+                // Snapshot replay is not yet connected; preserve the payload
+                // without advertising this track as fully replayable.
+                complete: capture.is_some_and(|capture| capture.complete)
+                    && result.snapshot_artifact.is_none(),
                 process_success: Some(result.process_success),
                 workload_success: result.workload_success,
                 bytes,
@@ -556,6 +565,29 @@ impl Recorder {
                 sha256: crate::cassette::digest(bytes.get_ref()),
             });
             let mut artifact_inputs = Vec::new();
+            let mut snapshot_file = result
+                .snapshot_artifact
+                .as_deref()
+                .map(|path| {
+                    open_payload_with_limit(path, Limits::default().max_artifact_bytes)?
+                        .ok_or_else(|| Error::Io("snapshot recording archive is missing".into()))
+                })
+                .transpose()?;
+            let snapshot_artifact = if let Some(source) = snapshot_file.as_mut() {
+                let (bytes, sha256) =
+                    payload_identity_with_limit(source, Limits::default().max_artifact_bytes)?;
+                source.seek(SeekFrom::Start(0)).map_err(io_error)?;
+                Some(Artifact {
+                    kind: "workspace-snapshots".into(),
+                    bytes,
+                    sha256,
+                })
+            } else {
+                None
+            };
+            if let (Some(artifact), Some(source)) = (snapshot_artifact, snapshot_file.as_mut()) {
+                artifact_inputs.push(ArtifactInput { artifact, source });
+            }
             if let (Some(artifact), Some(source)) =
                 (local_tools_artifact.clone(), local_tools.as_mut())
             {
@@ -688,6 +720,10 @@ impl Recorder {
                 if let Some(identity)=raw_identity { state.raw_identities.insert(id,identity); }
             }
             let mut published = journal.finalize().map_err(recording_error)?;
+            let complete = published.manifest.tracks.iter().filter(|track| track.complete).count();
+            if let Some(warning) = incomplete_track_warning(complete, published.manifest.tracks.len()) {
+                published.warnings.push(warning);
+            }
             if producers_quiescent {
                 let mut cleanup_failures=0;
                 for track in &published.manifest.tracks {
@@ -705,8 +741,8 @@ impl Recorder {
                         }
                     }
                 }
-                if cleanup_failures>0 { published.warnings.push(format!("published cassette is usable; {cleanup_failures} raw capture cleanups were incomplete or durability-unconfirmed; inspect artifacts (at most 16 details retained)")); }
-            } else { published.cleanup_complete=false; published.warnings.push("published cassette is usable; raw captures retained because producer cleanup is unconfirmed".into()); }
+                if cleanup_failures>0 { published.warnings.push(format!("published cassette retained; {cleanup_failures} raw capture cleanups were incomplete or durability-unconfirmed; inspect artifacts (at most 16 details retained)")); }
+            } else { published.cleanup_complete=false; published.warnings.push("published cassette retained; raw captures retained because producer cleanup is unconfirmed".into()); }
             Ok(Some(published))
         })
     }
@@ -876,13 +912,24 @@ fn cleanup_raw(output: &Path, track: &Track, original: Option<&fs::Metadata>) ->
     raw::cleanup(output, track, original)
 }
 
+fn incomplete_track_warning(complete: usize, total: usize) -> Option<String> {
+    (complete < total).then(|| format!(
+        "published cassette contains {} incomplete track(s); incomplete tracks cannot serve as complete recordings",
+        total - complete
+    ))
+}
+
 fn raw_cleanup_warning(track_id: u64) -> String {
     format!(
-        "published cassette is usable; track {track_id} raw capture cleanup incomplete; private evidence retained"
+        "published cassette retained; track {track_id} raw capture cleanup incomplete; private evidence retained"
     )
 }
 
 fn open_payload(output: &Path) -> Result<Option<File>, Error> {
+    open_payload_with_limit(output, Limits::default().max_track_bytes)
+}
+
+fn open_payload_with_limit(output: &Path, limit: u64) -> Result<Option<File>, Error> {
     match fs::symlink_metadata(output) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io_error(error)),
@@ -902,7 +949,7 @@ fn open_payload(output: &Path) -> Result<Option<File>, Error> {
     }
     let file = options.open(output).map_err(io_error)?;
     let metadata = file.metadata().map_err(io_error)?;
-    if !metadata.is_file() || metadata.len() > Limits::default().max_track_bytes {
+    if !metadata.is_file() || metadata.len() > limit {
         return Err(Error::Io(
             "recording producer is invalid or oversized".into(),
         ));
@@ -910,7 +957,10 @@ fn open_payload(output: &Path) -> Result<Option<File>, Error> {
     Ok(Some(file))
 }
 fn payload_identity(file: &mut File) -> Result<(u64, String), Error> {
-    let limit = Limits::default().max_track_bytes;
+    payload_identity_with_limit(file, Limits::default().max_track_bytes)
+}
+
+fn payload_identity_with_limit(file: &mut File, limit: u64) -> Result<(u64, String), Error> {
     if file.metadata().map_err(io_error)?.len() > limit {
         return Err(Error::Io("recording payload exceeds limit".into()));
     }
@@ -980,11 +1030,46 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_artifact_uses_artifact_limit_instead_of_track_limit() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-snapshot-limit-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("snapshot");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(Limits::default().max_track_bytes + 1).unwrap();
+        drop(file);
+        let mut file = std::fs::File::open(&path).unwrap();
+        assert!(payload_identity(&mut file).is_err());
+        assert_eq!(
+            payload_identity_with_limit(&mut file, Limits::default().max_artifact_bytes)
+                .unwrap()
+                .0,
+            Limits::default().max_track_bytes + 1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incomplete_recordings_have_an_explicit_warning() {
+        assert_eq!(incomplete_track_warning(2, 2), None);
+        let warning = incomplete_track_warning(0, 1).unwrap();
+        assert!(warning.contains("1 incomplete track"));
+        assert!(!warning.contains("usable"));
+        assert!(
+            incomplete_track_warning(1, 3)
+                .unwrap()
+                .contains("2 incomplete track")
+        );
+    }
+
+    #[test]
     fn raw_cleanup_warning_has_only_a_stable_track_label() {
         let warning = raw_cleanup_warning(7);
         assert_eq!(
             warning,
-            "published cassette is usable; track 7 raw capture cleanup incomplete; private evidence retained"
+            "published cassette retained; track 7 raw capture cleanup incomplete; private evidence retained"
         );
         assert!(!warning.contains('/'));
     }
