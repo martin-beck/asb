@@ -7,6 +7,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'assets/benchmarks'))
 from asb_fs_initial_reads import plan_initial_reads, restore_initial_reads
@@ -28,6 +29,25 @@ def read(offset, size, handle=1, path='/file', payload=0):
 
 
 class InitialReadTests(unittest.TestCase):
+    def test_four_workspaces_prepare_independent_initial_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); evidence = root / 'evidence'; evidence.mkdir()
+            workspaces = []
+            for index in range(4):
+                workspace = root / f'workspace-{index}'; workspace.mkdir()
+                (workspace / 'file').write_bytes(b'xxxxxx')
+                workspaces.append(workspace)
+            mode = (workspaces[0] / 'file').stat().st_mode
+            (evidence / 'payload.bin').write_bytes(b'abcdef')
+            (evidence / 'events.jsonl').write_text(events(opened(mode=mode), read(0, 6)).getvalue())
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                self.assertEqual(list(pool.map(lambda workspace: restore_initial_reads(
+                    evidence, workspace, evidence), workspaces)), [1, 1, 1, 1])
+            for workspace in workspaces:
+                self.assertEqual((workspace / 'file').read_bytes(), b'abcdef')
+            (workspaces[0] / 'file').write_bytes(b'changed')
+            self.assertEqual((workspaces[1] / 'file').read_bytes(), b'abcdef')
+
     def test_restore_verifies_overlaps_and_preserves_inode_and_mtime(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); evidence = root / 'evidence'; evidence.mkdir()
