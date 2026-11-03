@@ -1,10 +1,13 @@
 """Offline regression for the native OpenHands launcher response boundary."""
 import importlib.util
+import io
 import json
+import os
 import pathlib
 import sys
 import types
 import unittest
+from unittest.mock import MagicMock, patch
 
 
 def module(name):
@@ -57,6 +60,24 @@ def message(source, text):
     return MessageEvent(source=source, llm_message=Event(role='assistant' if source == 'agent' else 'user', content=[TextContent(text=text)]))
 
 class NativeFinalTest(unittest.TestCase):
+    def test_optional_snapshot_boundaries_use_adapter_alias_and_fail_on_rejection(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(launcher.socket, 'socket') as factory:
+            launcher.snapshot_boundary('record', 'begin', 'openhands-1')
+            factory.assert_not_called()
+        connection=MagicMock()
+        connection.__enter__.return_value=connection
+        connection.makefile.return_value=io.BytesIO(b'2\n')
+        with patch.dict(os.environ, {'ASB_FS_REPLAY_SOCKET':'/tmp/fixture'}, clear=True), \
+             patch.object(launcher.socket, 'socket', return_value=connection):
+            launcher.snapshot_boundary('replay','end','openhands-1')
+        connection.connect.assert_called_once_with('/tmp/fixture')
+        connection.sendall.assert_called_once_with(b'tool-end:openhands-1\n')
+        connection.makefile.return_value=io.BytesIO(b'')
+        with patch.dict(os.environ, {'ASB_FS_MARKER_SOCKET':'/tmp/fixture'}, clear=True), \
+             patch.object(launcher.socket, 'socket', return_value=connection), \
+             self.assertRaisesRegex(RuntimeError, 'rejected'):
+            launcher.snapshot_boundary('record','begin','openhands-1')
+
     def test_completed_message_and_finish_action(self):
         self.assertEqual(launcher.final_agent_text(conversation([message('agent', 'answer')])), 'answer')
         finish = ActionEvent(source='agent', tool_name='finish', action=FinishAction(message='done'))
