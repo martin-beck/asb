@@ -1350,8 +1350,12 @@ pub(crate) fn perfetto_config(pid: Option<u32>) -> String {
             "      tids_to_trace: {pid}\n      tracefs_options {{ name: \"event-fork\" state: STATE_ENABLED }}\n"
         )
     });
-    // Collect only events consumed by scheduler/process-lifetime queries.
-    // Redundant sched_stat events multiply traffic on a busy shared host.
+    // Keep scheduler/process lifetime events for ASB's derived metrics and
+    // raw syscall boundaries for Perfetto's native per-thread slices.  The
+    // latter are intentionally not parsed into ASB metrics: entry-to-exit
+    // duration includes descheduling and blocking, not CPU or I/O wait time.
+    // Redundant sched_stat events still multiply traffic on a busy shared
+    // host without adding useful data.
     let configuration = r#"duration_ms: 3600000
 write_into_file: true
 file_write_period_ms: 1000
@@ -1374,6 +1378,8 @@ data_sources {
       ftrace_events: "sched/sched_process_free"
       ftrace_events: "task/task_newtask"
       ftrace_events: "task/task_rename"
+      ftrace_events: "raw_syscalls/sys_enter"
+      ftrace_events: "raw_syscalls/sys_exit"
       ftrace_events: "ftrace/print"
     }
   }
@@ -1530,7 +1536,7 @@ mod marker_tests {
     }
 
     #[test]
-    fn config_collects_scheduler_process_and_trace_marker_events() {
+    fn config_collects_scheduler_process_syscall_and_trace_marker_events() {
         let config = perfetto_config(None);
         for event in [
             "sched/sched_switch",
@@ -1538,6 +1544,8 @@ mod marker_tests {
             "sched/sched_wakeup_new",
             "sched/sched_process_exit",
             "task/task_newtask",
+            "raw_syscalls/sys_enter",
+            "raw_syscalls/sys_exit",
             "ftrace/print",
         ] {
             assert!(config.contains(event), "missing {event}");
