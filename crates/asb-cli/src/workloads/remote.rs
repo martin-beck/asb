@@ -30,6 +30,14 @@ const PROGRESS_POLL: Duration = Duration::from_millis(250);
 const PROGRESS_TRANSCRIPT_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_PRIVATE_REPLAY_INPUT: u64 = 64 * 1024 * 1024;
 
+fn workload_tool_mode(mode: Option<crate::tape::Mode>) -> &'static str {
+    match mode {
+        Some(crate::tape::Mode::Record) => "record",
+        Some(crate::tape::Mode::Replay) => "replay",
+        None => "none",
+    }
+}
+
 fn controller_command(program: impl AsRef<std::ffi::OsStr>) -> Result<ControllerCommand, String> {
     let mut command = ControllerCommand::new(program)?;
     command.current_dir(crate::project::network_invocation_dir());
@@ -751,6 +759,10 @@ pub(crate) fn launch(
         .map_err(|error| error.to_string())?;
     let mut command = controller_command(tool.join("venv/bin/python"))?;
     command.stderr(error_log);
+    command.env(
+        "ASB_WORKLOAD_TOOL_MODE",
+        workload_tool_mode(context.tool_mode),
+    );
     command.arg(tool.join(helper));
     if let Some(operation) = operation {
         command.arg(operation);
@@ -1552,6 +1564,19 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn workload_tool_intent_covers_all_modes() {
+        assert_eq!(workload_tool_mode(None), "none");
+        assert_eq!(
+            workload_tool_mode(Some(crate::tape::Mode::Record)),
+            "record"
+        );
+        assert_eq!(
+            workload_tool_mode(Some(crate::tape::Mode::Replay)),
+            "replay"
+        );
+    }
 
     #[test]
     fn guest_tape_projection_uses_private_alias_and_preserves_replica_suffix() {

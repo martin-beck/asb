@@ -507,6 +507,7 @@ impl<'a> ReadyAttempt<'a> {
                     ))
                 })?;
                 let workload = workloads::prepare_task(&workloads::PreparationContext {
+                    tool_mode: options.effective_tool_mode(),
                     verify_initial_material: options.preparation_gate.is_some()
                         || options.verify_initial_material,
                     budgets: policy.budgets,
