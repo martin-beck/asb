@@ -187,6 +187,26 @@ pub(crate) fn publish_support(root: &std::path::Path) -> Result<(), crate::Error
             include_str!("../../assets/benchmarks/asb_guest.py"),
         ),
         (
+            "asb_snapshot_guest.py",
+            include_str!("../../assets/benchmarks/asb_snapshot_guest.py"),
+        ),
+        (
+            "asb_snapshot_control.py",
+            include_str!("../../assets/benchmarks/asb_snapshot_control.py"),
+        ),
+        (
+            "asb_snapshot_service.py",
+            include_str!("../../assets/benchmarks/asb_snapshot_service.py"),
+        ),
+        (
+            "asb_snapshot_workspace.py",
+            include_str!("../../assets/benchmarks/asb_snapshot_workspace.py"),
+        ),
+        (
+            "asb_snapshot_topology.py",
+            include_str!("../../assets/benchmarks/asb_snapshot_topology.py"),
+        ),
+        (
             "asb_runtime.py",
             include_str!("../../assets/benchmarks/asb_runtime.py"),
         ),

@@ -421,6 +421,16 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
                 path.write_bytes(detail.output)
                 path.chmod(0o600)
             raise ExecutionError("selected agent runtime installation failed; inspect private install artifacts")
+    if getattr(task,'snapshot',False):
+        if task.tool_mode != 'record':
+            raise ExecutionError('experimental snapshot replay is not yet integrated')
+        if resources is None or set(auxiliary) != {'btrfs','mkfs.btrfs','rsync'}:
+            raise ExecutionError('experimental snapshot preparation needs staged filesystem tools')
+        from asb_docker import docker_command
+        from asb_snapshot_control import GuestSnapshot
+        supervisor=GuestSnapshot(task,auxiliary,owner,docker_command(),deadline)
+        resources.callback(supervisor.close)
+        environment['ASB_FS_MARKER_SOCKET']='/opt/asb-private/snapshot.sock'
     return guest,environment
 
 

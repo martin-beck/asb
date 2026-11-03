@@ -219,7 +219,7 @@ class ManagedDockerWorkspace:
             # Experimental isolated container/VM backend; ordinary workloads
             # retain their existing container configuration.
             creation.update(cap_add=['SYS_ADMIN'], devices=['/dev/loop-control:/dev/loop-control:rwm'],
-                            device_cgroup_rules=['b 7:* rwm'])
+                            device_cgroup_rules=['b 7:* rwm'], security_opt=['apparmor=unconfined'])
         if self.journal is not None:
             self.journal.direct_container(creation)
         self.container = self.client.containers.create(**creation)
