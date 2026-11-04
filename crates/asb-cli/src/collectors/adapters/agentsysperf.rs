@@ -210,7 +210,7 @@ fn analyze_unix(session: &Session, records: &std::path::Path) -> Value {
     if !status.success() {
         return json!({"schema_version": 1, "status": "unavailable", "reason": "AgentSysPerf analysis failed", "exit": status.code()});
     }
-    match serde_json::from_slice::<Value>(&stdout.expect("checked above")) {
+    match analysis_findings(&stdout.expect("checked above")) {
         Ok(findings) if findings.is_array() => {
             json!({"schema_version": 1, "status": "observed", "findings": findings})
         }
@@ -218,6 +218,19 @@ fn analyze_unix(session: &Session, records: &std::path::Path) -> Value {
             json!({"schema_version": 1, "status": "unavailable", "reason": "AgentSysPerf analysis did not return a JSON finding list"})
         }
     }
+}
+
+/// AgentSysPerf currently prints a one-line progress preamble before its JSON
+/// report.  Keep that human text in the private bounded stdout artifact, then
+/// accept only a complete JSON array beginning at the first array delimiter.
+/// This is intentionally not a line scraper: trailing bytes or any non-array
+/// JSON remain unavailable rather than becoming a partial diagnosis.
+fn analysis_findings(stdout: &[u8]) -> Result<Value, serde_json::Error> {
+    let start = stdout
+        .iter()
+        .position(|byte| *byte == b'[')
+        .unwrap_or(stdout.len());
+    serde_json::from_slice(&stdout[start..])
 }
 
 fn read_bounded(path: &std::path::Path) -> Option<Vec<u8>> {
@@ -527,7 +540,7 @@ mod tests {
         let executable = bin.join("agentsysperf");
         fs::write(
             &executable,
-            "#!/bin/sh\ntest \"$AGENTSYSPERF_HOME\" = \"$PWD/agentsysperf-home\" || exit 7\nprintf '[{\"analyzer\":\"fixture\"}]'\n",
+            "#!/bin/sh\ntest \"$AGENTSYSPERF_HOME\" = \"$PWD/agentsysperf-home\" || exit 7\nprintf 'Analyzing 1 record...\\n\\n[{\"analyzer\":\"fixture\"}]'\n",
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -539,5 +552,16 @@ mod tests {
         assert!(root.join("agentsysperf-analysis.stderr.log").is_file());
         drop(session);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn analysis_parser_accepts_only_a_complete_json_array_after_preamble() {
+        assert_eq!(
+            analysis_findings(b"Analyzing 1 record...\n\n[{\"analyzer\":\"fixture\"}]").unwrap()[0]
+                ["analyzer"],
+            "fixture"
+        );
+        assert!(analysis_findings(b"preamble {\"not\":\"an array\"}").is_err());
+        assert!(analysis_findings(b"[{}] trailing").is_err());
     }
 }
