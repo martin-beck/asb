@@ -267,6 +267,15 @@ recorded.
 If perf permissions,
 samples, or FlameGraph tools are unavailable, `flamegraph.json` records the
 reason and status as `unavailable`; an ordinary `asb run` is unaffected.
+Perf keeps a bounded per-run cache of mapped executables and matching debug
+files so guest stacks can still be decoded after the guest exits. Installers
+may place a separate GNU debug file in the project tool directory at
+`symbols/.build-id/XX/REMAINDER.debug`, using the executable's build ID.
+The report links `perf-symbol-quality.json` and `perf-symbol-custody.json`:
+these show unresolved frame counts and recorded images or debug files that
+could not be retained. Deleted images, stripped third-party tools and kernel
+address restrictions can still leave unknown frames. The cache can use up to
+2 GiB per run, plus temporary copying space.
 Selecting `flamegraph` also selects `perf`. ASB installs the required `perf`
 tool in the project automatically when installing FlameGraph, using setup,
 or starting an existing flamegraph-only configuration. `asb tool install perf`

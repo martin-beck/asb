@@ -235,14 +235,7 @@ def verify_buildids(text, cache_home):
     return {'missing': sorted(missing), 'missing_debug': sorted(missing_debug), 'unverified': unverified}
 
 
-def cache_mapped_file(pid, start, path, key, cache_home, perf, uid, gid, max_bytes=MAX_IMAGE_BYTES, expected_buildid=None):
-    current = identity(pid)
-    if current is None or current[1] != start:
-        return False
-    try:
-        fd = os.open(f'/proc/{pid}/root{path}', os.O_RDONLY | os.O_CLOEXEC)
-    except OSError:
-        return False
+def cache_fd(fd, key, cache_home, perf, uid, gid, max_bytes=MAX_IMAGE_BYTES, expected_buildid=None):
     try:
         before = os.fstat(fd)
         if (before.st_dev, before.st_ino) != key or not stat.S_ISREG(before.st_mode):
@@ -251,9 +244,6 @@ def cache_mapped_file(pid, start, path, key, cache_home, perf, uid, gid, max_byt
             return False
         buildid = elf_buildid(fd)
         if expected_buildid is not None and buildid != expected_buildid:
-            return False
-        current = identity(pid)
-        if current is None or current[1] != start:
             return False
         # Copy to an exclusive, user-owned staging inode before publishing any
         # cache entry. A changing source must never leave a trusted cache file.
@@ -296,6 +286,35 @@ def cache_mapped_file(pid, start, path, key, cache_home, perf, uid, gid, max_byt
             os.unlink(stage_path)
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def cache_mapped_file(pid, start, path, key, cache_home, perf, uid, gid, max_bytes=MAX_IMAGE_BYTES, expected_buildid=None):
+    current = identity(pid)
+    if current is None or current[1] != start:
+        return False
+    try:
+        fd = os.open(f'/proc/{pid}/root{path}', os.O_RDONLY | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        current = identity(pid)
+        if current is None or current[1] != start:
+            return False
+        return cache_fd(fd, key, cache_home, perf, uid, gid, max_bytes, expected_buildid)
+    finally:
+        os.close(fd)
+
+
+def cache_pinned_file(root_fd, path, expected_buildid, cache_home, perf, uid, gid, max_bytes):
+    if not path.startswith('/') or '..' in path.split('/') or len(path) > 4096:
+        return False
+    try:
+        fd = os.open(path.lstrip('/'), os.O_RDONLY | os.O_CLOEXEC, dir_fd=root_fd)
+    except OSError:
+        return False
+    try:
+        current = os.fstat(fd)
+        return cache_fd(fd, (current.st_dev, current.st_ino), cache_home, perf, uid, gid, max_bytes, expected_buildid)
     finally:
         os.close(fd)
 
@@ -362,6 +381,54 @@ def publish_host_debug(buildid, symbol_root, cache_home, uid, gid, max_bytes):
         return None
 
 
+def settle_recorded_images(root_fd, data, cache_home, perf, symbol_root, uid, gid, remaining, slots=MAX_IMAGES):
+    """Recover recorded images still present in the pinned guest filesystem."""
+    initial_remaining = remaining
+    def drop_privileges():
+        if os.geteuid() == 0:
+            os.setgroups([])
+            os.setgid(gid)
+            os.setuid(uid)
+    environment = {'HOME': cache_home, 'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'DEBUGINFOD_URLS': ''}
+    with tempfile.TemporaryFile(dir=cache_home) as output:
+        if os.geteuid() == 0:
+            os.fchown(output.fileno(), uid, gid)
+        try:
+            result = subprocess.run([perf, 'buildid-list', '-i', data], stdin=subprocess.DEVNULL,
+                                    stdout=output, stderr=subprocess.DEVNULL, timeout=15,
+                                    env=environment, check=False, preexec_fn=drop_privileges)
+            length = os.fstat(output.fileno()).st_size
+            if result.returncode != 0 or not 0 < length <= 4 * 1024 * 1024:
+                return None
+            output.seek(0)
+            listing = output.read().decode('utf-8', errors='replace')
+            initial = verify_buildids(listing, cache_home)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+    wanted = set(initial['missing'])
+    recovered = 0
+    for line in listing.splitlines():
+        fields = line.split(None, 1)
+        if len(fields) != 2 or fields[0] not in wanted or not fields[1].startswith('/'):
+            continue
+        if remaining <= 0 or recovered >= slots:
+            break
+        copied = cache_pinned_file(root_fd, fields[1], fields[0], cache_home, perf, uid, gid, remaining)
+        if copied:
+            used, buildid = copied
+            remaining -= used
+            recovered += 1
+            wanted.discard(buildid)
+            if symbol_root and remaining > 0:
+                retained = publish_host_debug(buildid, symbol_root, cache_home, uid, gid, remaining)
+                if retained is not None:
+                    remaining -= retained
+    final = verify_buildids(listing, cache_home)
+    return {'recovered_recorded_images': recovered, 'recovered_bytes': initial_remaining - remaining,
+            'missing_recorded_images': len(final['missing']),
+            'missing_debug_images': len(final['missing_debug']), 'unverified_entries': final['unverified']}
+
+
 def main():
     if sys.argv[1:2] == ['--verify']:
         try:
@@ -374,6 +441,9 @@ def main():
     cache_home, perf = sys.argv[5:7]
     symbol_root = sys.argv[7] if len(sys.argv) > 7 else None
     control = sys.argv[8] if len(sys.argv) > 8 else None
+    recorder = (int(sys.argv[9]), int(sys.argv[10])) if len(sys.argv) > 11 else None
+    data = sys.argv[11] if recorder else None
+    root_fd = None
     seen = set()
     members = [(root, start)]
     size = 0
@@ -393,6 +463,18 @@ def main():
         current = identity(root)
         if current is None or current[1] != start:
             return 2
+        if recorder:
+            current_recorder = identity(recorder[0])
+            if current_recorder is None or current_recorder[1] != recorder[1]:
+                return 2
+            try:
+                root_fd = os.open(f'/proc/{root}/root', os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+            except OSError:
+                return 2
+            after = identity(root)
+            if after is None or after[1] != start:
+                os.close(root_fd)
+                return 2
         with open(request, 'rb', buffering=0) as reader, open(ack, 'wb', buffering=0) as writer:
             if reader.read(7) != b'enable\n':
                 return 2
@@ -400,6 +482,8 @@ def main():
     while not stopping:
         members = tree(members)
         if members is None:
+            while recorder and not stopping:
+                time.sleep(0.1)
             break
         for pid, generation in members:
             for path, key in mappings(pid):
@@ -440,11 +524,24 @@ def main():
                 else:
                     skipped += 1
         time.sleep(0.5)
-    print(json.dumps({'schema_version': 1, 'scope': 'sampled-live-mappings',
-                      'retained_images': len(seen), 'retained_bytes': size,
+    recorded = None
+    if recorder and root_fd is not None:
+        deadline = time.monotonic() + 35
+        while time.monotonic() < deadline:
+            current = identity(recorder[0])
+            if current is None or current[1] != recorder[1]:
+                recorded = settle_recorded_images(root_fd, data, cache_home, perf, symbol_root, uid, gid, MAX_TOTAL_BYTES - size, MAX_IMAGES - len(seen))
+                if recorded is not None:
+                    size += recorded['recovered_bytes']
+                break
+            time.sleep(0.05)
+        os.close(root_fd)
+    print(json.dumps({'schema_version': 1, 'scope': 'sampled-live-mappings-and-recorded-build-ids',
+                      'retained_images': len(seen) + (recorded['recovered_recorded_images'] if recorded else 0), 'retained_bytes': size,
                       'skipped_observations': skipped, 'interval_ms': 500,
-                      'limitation': 'short-lived mappings between samples may be missed'}, sort_keys=True), flush=True)
-    return 0
+                      'recorded_images': recorded,
+                      'limitation': 'deleted or otherwise inaccessible images cannot be recovered'}, sort_keys=True), flush=True)
+    return 2 if recorder and recorded is None else 0
 
 
 if __name__ == '__main__':

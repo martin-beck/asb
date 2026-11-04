@@ -16,6 +16,32 @@ spec.loader.exec_module(module)
 
 
 class CustodyTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('cc'), 'requires a C compiler')
+    def test_settlement_recovers_short_lived_recorded_image_from_pinned_root(self):
+        with tempfile.TemporaryDirectory(prefix='asb-symbol-settle-') as directory:
+            root = Path(directory); guest = root / 'guest'; guest.mkdir()
+            source = root / 'test.c'; source.write_text('int main(void) { return 0; }\n')
+            image = guest / 'short-lived'
+            subprocess.run(['cc', '-g', '-Wl,--build-id', '-o', str(image), str(source)], check=True)
+            with image.open('rb') as stream:
+                buildid = module.elf_buildid(stream.fileno())
+            home = root / 'home'; home.mkdir()
+            perf = root / 'perf'
+            perf.write_text("#!/usr/bin/python3\nimport os,pathlib,shutil,sys\n"
+                f"identity={buildid!r}\n"
+                "if sys.argv[1]=='buildid-list': print(identity+' /short-lived')\n"
+                "else:\n p=pathlib.Path(os.environ['HOME'])/'.debug/.build-id'/identity[:2]/identity[2:];p.mkdir(parents=True,exist_ok=True);shutil.copyfile(sys.argv[3],p/'elf')\n")
+            perf.chmod(0o755)
+            root_fd = os.open(guest, os.O_PATH | os.O_DIRECTORY)
+            try:
+                result = module.settle_recorded_images(root_fd, str(root / 'perf.data'), str(home), str(perf), None, os.getuid(), os.getgid(), 16 * 1024 * 1024)
+                self.assertEqual(result['recovered_recorded_images'], 1)
+                self.assertEqual(result['missing_recorded_images'], 0)
+                self.assertFalse(module.cache_pinned_file(root_fd, '/../test', buildid, str(home), str(perf), os.getuid(), os.getgid(), 1000000))
+                self.assertFalse(module.cache_pinned_file(root_fd, '/short-lived', 'deadbeef', str(home), str(perf), os.getuid(), os.getgid(), 1000000))
+            finally:
+                os.close(root_fd)
+
     @unittest.skipUnless(shutil.which('cc') and shutil.which('objcopy'), 'requires compiler and binutils')
     def test_project_debug_file_must_match_and_never_replaces_existing_cache(self):
         with tempfile.TemporaryDirectory(prefix='asb-symbol-companion-') as directory:

@@ -93,14 +93,25 @@ impl CollectorAdapter for PerfCollector {
         Some("perf")
     }
     fn prioritizes_artifact(&self, name: &str) -> bool {
-        name == "perf-symbol-quality.json"
+        matches!(
+            name,
+            "perf-symbol-quality.json" | "perf-symbol-custody.json"
+        )
     }
     fn display_artifact(&self, name: &str) -> Option<ArtifactDisplay> {
-        (name == "perf-symbol-quality.json").then_some(ArtifactDisplay::Status {
-            class: "perf-symbol-quality",
-            label: "Perf symbol quality",
-            suffix: "See the decoded and unknown frame counts in the quality artifact.",
-        })
+        match name {
+            "perf-symbol-quality.json" => Some(ArtifactDisplay::Status {
+                class: "perf-symbol-quality",
+                label: "Perf symbol quality",
+                suffix: "See the decoded and unknown frame counts in the quality artifact.",
+            }),
+            "perf-symbol-custody.json" => Some(ArtifactDisplay::Status {
+                class: "perf-symbol-custody",
+                label: "Perf symbol custody",
+                suffix: "See the helper output for recorded images and unavailable debug files.",
+            }),
+            _ => None,
+        }
     }
     fn requires_pid(&self) -> bool {
         true
@@ -900,6 +911,12 @@ mod tests {
         assert!(
             super::ADAPTER
                 .display_artifact("perf-symbol-quality.json")
+                .is_some()
+        );
+        assert!(super::ADAPTER.prioritizes_artifact("perf-symbol-custody.json"));
+        assert!(
+            super::ADAPTER
+                .display_artifact("perf-symbol-custody.json")
                 .is_some()
         );
         assert!(

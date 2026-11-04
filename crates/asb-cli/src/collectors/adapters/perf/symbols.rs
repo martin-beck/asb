@@ -9,6 +9,13 @@ impl measurements::Session {
     pub(super) fn start_perf_symbols(&mut self, pid: u32) -> Result<(), String> {
         let identity = measurements::ProcessIdentity::read(pid)
             .ok_or("perf symbol target is no longer available")?;
+        let recorder = self
+            .collectors
+            .iter()
+            .find(|collector| collector.name == "perf")
+            .and_then(|collector| collector.producer.id())
+            .and_then(measurements::ProcessIdentity::read)
+            .ok_or("perf recorder identity is unavailable for symbol settlement")?;
         let directory = self
             .dir
             .canonicalize()
@@ -58,7 +65,10 @@ impl measurements::Session {
             .arg(&cache)
             .arg(executable)
             .arg(symbols)
-            .arg(ready.argument());
+            .arg(ready.argument())
+            .arg(recorder.pid.to_string())
+            .arg(recorder.start_time_ticks.to_string())
+            .arg(directory.join("perf.data"));
         let (command, route) = measurements::producer_command(&mut launch)?;
         let captures = [
             crate::evidence::Capture::create(&directory.join("perf-symbol-custody.stdout"))?,
