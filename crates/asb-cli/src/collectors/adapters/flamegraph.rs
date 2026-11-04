@@ -283,11 +283,15 @@ impl measurements::Session {
             self.tool_dir.as_deref(),
             "perf",
         ));
+        script.arg("script");
         if let Some(cache) = self.artifact(super::super::SharedArtifact::PerfSymbolCache) {
             script.env("HOME", cache).env("DEBUGINFOD_URLS", "");
+            if cache.join("symfs-ready").is_file() {
+                script.arg("--symfs").arg(cache.join("symfs"));
+            }
         }
         let script = script
-            .args(["script", "-i"])
+            .arg("-i")
             .arg(data)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

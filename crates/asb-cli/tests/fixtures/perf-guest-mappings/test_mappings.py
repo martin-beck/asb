@@ -33,6 +33,10 @@ class GuestMappingsTest(unittest.TestCase):
             output = io.BytesIO()
             self.assertEqual(module.copy_image(*args, output), image.stat().st_size)
             self.assertEqual(output.getvalue(), image.read_bytes())
+            stamp = (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            self.assertEqual(module.copy_image(*args, io.BytesIO(), expected_stamp=stamp), info.st_size)
+            with self.assertRaisesRegex(ValueError, 'observed mapping'):
+                module.copy_image(*args, io.BytesIO(), expected_stamp=(info.st_size, info.st_mtime_ns + 1, info.st_ctime_ns))
             class ShortWriter(io.BytesIO):
                 def write(self, data):
                     return super().write(data[:1])
@@ -54,6 +58,19 @@ class GuestMappingsTest(unittest.TestCase):
                 module.copy_image(proc, 10, 99, *args[3:], io.BytesIO())
             with self.assertRaisesRegex(ValueError, 'invalid'):
                 module.copy_image(proc, 10, 100, '/../tool', *args[4:], io.BytesIO())
+
+    def test_stamped_scan_verifies_the_mapped_inode(self):
+        with tempfile.TemporaryDirectory() as path:
+            proc = Path(path)
+            process(proc, 10, 1, 100)
+            root = proc / '10' / 'root' / 'usr' / 'bin'; root.mkdir(parents=True)
+            image = root / 'tool'; image.write_bytes(b'\x7fELFpayload')
+            info = image.stat()
+            (proc / '10' / 'maps').write_text(
+                f'001-002 r-xp 0 {os.major(info.st_dev):x}:{os.minor(info.st_dev):x} {info.st_ino} /usr/bin/tool\n')
+            row = module.scan(proc, [(10, 100)], include_stamps=True)['mappings'][0]
+            self.assertEqual((row['size'], row['mtime_ns'], row['ctime_ns']),
+                             (info.st_size, info.st_mtime_ns, info.st_ctime_ns))
 
     def test_follows_only_verified_descendants_and_retains_reparented_roots(self):
         with tempfile.TemporaryDirectory() as path:

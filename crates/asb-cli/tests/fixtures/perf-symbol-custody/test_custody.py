@@ -18,6 +18,48 @@ spec.loader.exec_module(module)
 
 
 class CustodyTest(unittest.TestCase):
+    def test_guest_helper_output_is_bounded_and_timeout_is_enforced(self):
+        with tempfile.TemporaryDirectory(prefix='asb-guest-command-') as directory:
+            root = Path(directory); docker = root / 'docker'; script = root / 'helper'
+            script.write_text('fixture')
+            docker.write_text('#!/usr/bin/python3\nimport sys,time\n'
+                              'data=sys.stdin.read()\n'
+                              'time.sleep(0.2 if "slow" in sys.argv else 0)\n'
+                              'sys.stdout.buffer.write(b"x" * 100)\n')
+            docker.chmod(0o755)
+            with mock.patch.dict(os.environ, {'PATH': str(root)}):
+                with tempfile.TemporaryFile(dir=root) as out:
+                    self.assertTrue(module.guest_command('a' * 64, script, ['scan'], out, 100, 2))
+                    self.assertEqual(out.tell(), 100)
+                with tempfile.TemporaryFile(dir=root) as out:
+                    self.assertFalse(module.guest_command('a' * 64, script, ['scan'], out, 99, 2))
+                with tempfile.TemporaryFile(dir=root) as out:
+                    self.assertFalse(module.guest_command('a' * 64, script, ['slow'], out, 100, 0.01))
+                with tempfile.TemporaryFile(dir=root) as out:
+                    self.assertFalse(module.guest_command('invalid', script, ['scan'], out, 100, 2))
+
+    @unittest.skipUnless(shutil.which('cc'), 'requires a C compiler')
+    def test_symfs_requires_every_recorded_image_and_matching_build_ids(self):
+        with tempfile.TemporaryDirectory(prefix='asb-symbol-mirror-') as directory:
+            root = Path(directory); source = root / 'test.c'; binary = root / 'binary'
+            source.write_text('int main(void) { return 0; }\n')
+            subprocess.run(['cc', '-g', '-Wl,--build-id', '-o', str(binary), str(source)], check=True)
+            with binary.open('rb') as image:
+                buildid = module.elf_buildid(image.fileno())
+            cached = root / '.debug/.build-id' / buildid[:2] / buildid[2:] / 'elf'
+            cached.parent.mkdir(parents=True)
+            shutil.copyfile(binary, cached)
+            noid = root / 'symfs/guest/noid'
+            noid.parent.mkdir(parents=True)
+            noid.write_bytes(b'\x7fELFno-build-id')
+            listing = f'{buildid} /guest/withid\n    /guest/noid\n'
+            self.assertFalse(module.prepare_symfs(listing + '    /guest/missing\n', root, set()))
+            self.assertFalse((root / 'symfs-ready').exists())
+            self.assertFalse(module.prepare_symfs(listing, root, {'/guest/noid'}))
+            self.assertTrue(module.prepare_symfs(listing, root, set()))
+            self.assertTrue((root / 'symfs-ready').is_file())
+            self.assertTrue(os.path.samefile(cached, root / 'symfs/guest/withid'))
+
     def test_container_identity_requires_one_cgroup_and_same_process_generation(self):
         container = 'b' * 64
         with mock.patch.object(module, 'identity', side_effect=[(1, 7), (1, 7)]), \

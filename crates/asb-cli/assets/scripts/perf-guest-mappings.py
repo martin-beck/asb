@@ -31,7 +31,7 @@ def identity(proc, pid):
         return None
 
 
-def scan(proc, roots):
+def scan(proc, roots, include_stamps=False):
     """Return a bounded tree and executable file mappings for current roots."""
     proc = Path(proc)
     if (not roots or len(roots) > MAX_ROOTS or any(
@@ -93,8 +93,25 @@ def scan(proc, roots):
                         continue
                     if inode <= 0:
                         continue
-                    mappings.append({'pid': pid, 'start': start, 'path': path,
-                                     'major': major, 'minor': minor, 'inode': inode})
+                    row = {'pid': pid, 'start': start, 'path': path,
+                           'major': major, 'minor': minor, 'inode': inode}
+                    if include_stamps:
+                        try:
+                            fd = os.open(proc / str(pid) / 'root' / path.lstrip('/'),
+                                         os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+                            try:
+                                info = os.fstat(fd)
+                                if ((os.major(info.st_dev), os.minor(info.st_dev), info.st_ino)
+                                        != (major, minor, inode) or not stat.S_ISREG(info.st_mode)
+                                        or os.pread(fd, 4, 0) != b'\x7fELF'):
+                                    continue
+                                row.update(size=info.st_size, mtime_ns=info.st_mtime_ns, ctime_ns=info.st_ctime_ns)
+                            finally:
+                                os.close(fd)
+                        except OSError:
+                            inaccessible += 1
+                            continue
+                    mappings.append(row)
                     if len(mappings) > MAX_MAPPINGS:
                         raise ValueError('guest image mappings exceed bound')
         except OSError:
@@ -105,7 +122,7 @@ def scan(proc, roots):
     return {'schema_version': 1, 'members': members, 'mappings': mappings, 'inaccessible': inaccessible}
 
 
-def copy_image(proc, pid, start, path, major, minor, inode, output, limit=MAX_IMAGE_BYTES):
+def copy_image(proc, pid, start, path, major, minor, inode, output, limit=MAX_IMAGE_BYTES, expected_stamp=None):
     """Stream one stable mapped ELF; callers must discard bytes on any error."""
     proc = Path(proc)
     if (pid <= 1 or start <= 0 or not path.startswith('/') or '..' in path.split('/')
@@ -120,6 +137,8 @@ def copy_image(proc, pid, start, path, major, minor, inode, output, limit=MAX_IM
         before = os.fstat(source.fileno())
         if ((os.major(before.st_dev), os.minor(before.st_dev), before.st_ino) != (major, minor, inode)
                 or not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= limit
+                or (expected_stamp is not None and
+                    (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != expected_stamp)
                 or source.read(4) != b'\x7fELF'):
             raise ValueError('guest image does not match the observed mapping')
         source.seek(0)
@@ -146,12 +165,13 @@ def copy_image(proc, pid, start, path, major, minor, inode, output, limit=MAX_IM
 
 def main():
     if len(sys.argv) >= 2 and sys.argv[1] == 'copy':
-        if len(sys.argv) != 8:
+        if len(sys.argv) not in (8, 11):
             raise ValueError('expected image process and mapping identity')
         pid, start = map(int, sys.argv[2:4])
         path = sys.argv[4]
         major, minor, inode = map(int, sys.argv[5:8])
-        copy_image(Path('/proc'), pid, start, path, major, minor, inode, sys.stdout.buffer)
+        stamp = tuple(map(int, sys.argv[8:11])) if len(sys.argv) == 11 else None
+        copy_image(Path('/proc'), pid, start, path, major, minor, inode, sys.stdout.buffer, expected_stamp=stamp)
         return
     if len(sys.argv) == 3 and sys.argv[1] == 'scan-roots':
         if len(os.fsencode(sys.argv[2])) > 65536:
@@ -159,7 +179,7 @@ def main():
         roots = json.loads(sys.argv[2])
         if not isinstance(roots, list):
             raise ValueError('invalid guest process roots')
-        result = scan(Path('/proc'), roots)
+        result = scan(Path('/proc'), roots, include_stamps=True)
         print(json.dumps(result, ensure_ascii=True, separators=(',', ':')))
         return
     if len(sys.argv) != 4 or sys.argv[1] != 'scan':
