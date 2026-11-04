@@ -350,7 +350,7 @@ class ExecutionTests(unittest.TestCase):
             snapshot.snapshot_storage=Path(directory)
             with snapshot:pass
         self.assertEqual(snapshot_creation[0]['volumes'][directory]['bind'],'/asb-snapshot-storage')
-        self.assertEqual(snapshot_creation[0]['cap_add'],['SYS_ADMIN'])
+        self.assertEqual(snapshot_creation[0]['cap_add'],['SYS_ADMIN', 'SYS_PTRACE'])
         self.assertEqual(snapshot_creation[0]['devices'],['/dev/loop-control:/dev/loop-control:rwm'])
         self.assertEqual(snapshot_creation[0]['device_cgroup_rules'],['b 7:* rwm','c 10:229 rwm'])
         self.assertEqual(snapshot_creation[0]['security_opt'],['apparmor=unconfined'])
