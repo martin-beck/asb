@@ -1150,6 +1150,15 @@ async def main():
         result = await ReadFileTool().invoke({{"concurrent": label}})
         completion_order.append(label)
         return result
+    if os.environ.get("ASB_TEST_CANCEL_WAITING_ROOT"):
+        pending = asyncio.create_task(concurrent_root("first"))
+        try:
+            await asyncio.wait_for(asyncio.shield(pending), timeout=0.05)
+            raise AssertionError("later recorded completion was released early")
+        except asyncio.TimeoutError:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        return
     await asyncio.gather(concurrent_root("first"), concurrent_root("second"))
     assert completion_order == ["second", "first"], completion_order
     async def concurrent_context(label):
@@ -1246,6 +1255,22 @@ asyncio.run(main())
             !marker.exists(),
             "native tool replay executed a direct tool"
         );
+        let cancelled = super::process(entry.to_str().unwrap())
+            .unwrap()
+            .direct()
+            .arg("--asb-native-tool-replay")
+            .arg(&sidecar)
+            .env("PYTHONPATH", &root)
+            .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_TEST_WORKSPACE", &replay_workspace)
+            .env("ASB_TEST_RENDER_PREFIX", "replay:")
+            .env("ASB_TEST_CANCEL_WAITING_ROOT", "1")
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
+            .output()
+            .unwrap();
+        assert!(!cancelled.status.success());
+        assert!(String::from_utf8_lossy(&cancelled.stderr).contains("unconsumed"));
+        assert!(!marker.exists(), "cancelled replay executed a direct tool");
         let missing_nesting = root.join("native-missing-nesting.jsonl");
         let remove_nesting = std::process::Command::new(python.trim())
             .args([
