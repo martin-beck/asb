@@ -663,8 +663,10 @@ mod tests {
     fn native_guest_service_records_goose_dispatch_without_replacing_tools() {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::{fs::PermissionsExt, net::UnixStream};
-        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
-        std::fs::create_dir_all(&base).unwrap();
+        // Unix sockets limit the supplied pathname, so use a short path
+        // relative to Cargo's test working directory even in deep checkouts.
+        let base = Path::new("target");
+        std::fs::create_dir_all(base).unwrap();
         let root = base.join(format!("goose-guest-{}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         let executable = root.join("goose-executable");

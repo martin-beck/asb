@@ -1344,6 +1344,7 @@ mod tests {
                 "pi",
                 "openhands",
                 "openjiuwen",
+                "goose",
                 "hermes",
                 "continue"
             ]
