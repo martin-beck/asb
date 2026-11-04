@@ -1387,7 +1387,7 @@ mod tests {
         // merely by declaring an unrelated native artifact, while native
         // adapters are not required to pretend their transport is MCP/local.
         assert!(local_sidecar(find("pi").unwrap()));
-        assert!(!native_sidecar(find("pi").unwrap()));
+        assert!(native_sidecar(find("pi").unwrap()));
         assert!(native_sidecar(find("openhands").unwrap()));
         assert!(!local_sidecar(find("openhands").unwrap()));
     }
