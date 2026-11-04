@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { connect } from 'node:net';
+import { connect, createServer } from 'node:net';
 import { once } from 'node:events';
 import { ContinueBroker, brokerRequest } from '../assets/scripts/continue-native-broker.mjs';
 import { createNativeDispatcher } from '../assets/scripts/continue-native-dispatch.mjs';
 import { sealBroker, replayBroker } from '../assets/scripts/continue-native-custody.mjs';
 import { createHash } from 'node:crypto';
+import { recordBoundaries, replayEffects, snapshotBoundary } from '../assets/scripts/continue-snapshot-boundary.mjs';
 
 const root = mkdtempSync(join(tmpdir(), 'asb-continue-broker-'));
 const socket = join(root, 'broker.sock');
@@ -123,5 +124,42 @@ try {
   assert.equal(await restoredDispatch({name:'Fetch',arguments:{url:'fixture'}},{},async()=>{throw new Error('must not execute')}), 'captured');
   await restored.finish();
   assert.equal(applied,1);
+  // Exercise the real adapter marker protocol with a local fixture service.
+  // This models effect application; it is not a Btrfs snapshot qualification.
+  const markerSocket = join(root, 'marker.sock');
+  const workspaceFile = join(root, 'workspace.txt');
+  const markers = [];
+  let replaying = false;
+  const marker = createServer(client => {
+    let data = '';
+    client.on('data', chunk => {
+      data += chunk;
+      if (!data.includes('\n')) return;
+      markers.push(data.trim());
+      if (replaying) writeFileSync(workspaceFile, 'after');
+      client.end('1\n');
+    });
+  });
+  await new Promise(resolve => marker.listen(markerSocket, resolve));
+  writeFileSync(workspaceFile, 'before');
+  const filesystemRecord = new ContinueBroker('record');
+  await filesystemRecord.listen(socket);
+  const writeRecord = createNativeDispatcher('record', socket, recordBoundaries(markerSocket));
+  await writeRecord({name:'Write',arguments:{path:'workspace.txt'}},{},async()=>{writeFileSync(workspaceFile,'after'); return 'ok';});
+  const filesystemEvents = await filesystemRecord.finish();
+  assert.equal(readFileSync(workspaceFile,'utf8'),'after');
+  writeFileSync(workspaceFile, 'before');
+  replaying = true;
+  const filesystemReplay = new ContinueBroker('replay', filesystemEvents, replayEffects(markerSocket));
+  await filesystemReplay.listen(socket);
+  const writeReplay = createNativeDispatcher('replay', socket);
+  assert.equal(await writeReplay({name:'Write',arguments:{path:'workspace.txt'}},{},async()=>{throw new Error('live write must not run')}),'ok');
+  assert.equal(readFileSync(workspaceFile,'utf8'),'after');
+  await filesystemReplay.finish();
+  assert.match(markers[0], /^tool-begin:continue-0:\d+:\d+$/);
+  assert.match(markers[1], /^tool-end:continue-0:\d+:\d+$/);
+  assert.equal(markers[2], 'tool-end:continue-0');
+  await new Promise(resolve => marker.close(resolve));
+  await assert.rejects(snapshotBoundary(markerSocket,'record','begin',0), /unavailable/);
   console.log('Continue broker parent/child ordering checks passed');
 } finally { rmSync(root, { recursive: true, force: true }); }
