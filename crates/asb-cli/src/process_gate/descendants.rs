@@ -54,15 +54,33 @@ impl DescendantScope {
     /// submission. A short TERM grace is followed by KILL; repeated sweeps
     /// retain and reap double-forked helpers as their parents exit.
     pub(crate) fn quiesce(&mut self) -> io::Result<()> {
-        self.quiesce_with_trace(false)
+        self.quiesce_with_trace(false, None)
+    }
+
+    /// Keep one separately owned service alive while reaping agent descendants.
+    /// The borrowed child handle keeps its PID reserved until the service owner
+    /// explicitly waits for it; callers must settle that handle afterwards.
+    pub(crate) fn quiesce_except(&mut self, service: &mut std::process::Child) -> io::Result<()> {
+        if service.try_wait()?.is_some() {
+            return Err(io::Error::other(
+                "owned auxiliary service exited before agent cleanup",
+            ));
+        }
+        self.quiesce_with_trace(false, Some(service.id()))?;
+        if service.try_wait()?.is_some() {
+            return Err(io::Error::other(
+                "owned auxiliary service exited during agent cleanup",
+            ));
+        }
+        Ok(())
     }
 
     /// Only the native gate owns lifecycle-traced tasks on its calling thread.
     pub(super) fn quiesce_traced(&mut self) -> io::Result<()> {
-        self.quiesce_with_trace(true)
+        self.quiesce_with_trace(true, None)
     }
 
-    fn quiesce_with_trace(&mut self, traced: bool) -> io::Result<()> {
+    fn quiesce_with_trace(&mut self, traced: bool, service: Option<u32>) -> io::Result<()> {
         self.attempted = true;
         if self.owner != std::process::id() {
             return Err(io::Error::other(
@@ -81,12 +99,20 @@ impl DescendantScope {
             if traced && let Err(error) = resume_owned_trace_stops() {
                 first_error.get_or_insert(error);
             }
-            let children = match children(self.owner) {
+            let mut children = match children(self.owner) {
                 Ok(children) => children,
                 Err(error) => return Err(first_error.unwrap_or(error)),
             };
+            if let Some(service) = service {
+                if !children.contains(&service) {
+                    first_error.get_or_insert_with(|| {
+                        io::Error::other("owned auxiliary service is no longer a child")
+                    });
+                }
+                children.retain(|pid| *pid != service);
+            }
             if children.is_empty() {
-                return Ok(());
+                return first_error.map_or(Ok(()), Err);
             }
             if traced && let Err(error) = resume_consumed_trace_stops(&children) {
                 first_error.get_or_insert(error);
@@ -540,6 +566,44 @@ mod tests {
             observed["sibling_alive"], false,
             "first EPERM starved a separately owned sibling; all fixture cleanup already complete"
         );
+    }
+
+    #[test]
+    fn separately_owned_service_survives_agent_descendant_cleanup() {
+        let _view = CurrentTaskView::enter();
+        let mut scope = DescendantScope::new().unwrap();
+        let mut service = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut agent_child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let service_identity = pin(service.id());
+        let agent_identity = pin(agent_child.id());
+        let result = scope.quiesce_except(&mut service);
+        let service_alive = !exited(&service_identity, 0);
+        let agent_reaped = was_reaped(&agent_identity);
+        let _ = service.kill();
+        let _ = service.wait();
+        if !agent_reaped {
+            let _ = agent_child.kill();
+        }
+        let _ = agent_child.wait();
+        result.unwrap();
+        assert!(service_alive);
+        assert!(agent_reaped);
+    }
+
+    #[test]
+    fn already_exited_service_cannot_be_excluded() {
+        let _view = CurrentTaskView::enter();
+        let mut scope = DescendantScope::new().unwrap();
+        let mut service = std::process::Command::new("/bin/true").spawn().unwrap();
+        let identity = pin(service.id());
+        assert!(exited(&identity, 3000));
+        assert!(scope.quiesce_except(&mut service).is_err());
     }
 
     #[test]

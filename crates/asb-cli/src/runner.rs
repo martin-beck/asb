@@ -1606,6 +1606,7 @@ fn wait_with_output(
 
 pub(crate) fn run_guest_process(
     command: &mut Command,
+    #[allow(unused_mut, unused_variables)] mut auxiliary: Option<&mut std::process::Child>,
     stdin_prompt: Option<&[u8]>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -1635,7 +1636,10 @@ pub(crate) fn run_guest_process(
         PresentationPolicy::CancelOnTransportFailure,
         &mut || {
             #[cfg(target_os = "linux")]
-            return descendants.quiesce();
+            return match auxiliary.as_deref_mut() {
+                Some(service) => descendants.quiesce_except(service),
+                None => descendants.quiesce(),
+            };
             #[cfg(not(target_os = "linux"))]
             Ok(())
         },
@@ -2540,6 +2544,7 @@ mod tests {
         let mut stderr = Vec::new();
         let result = super::run_guest_process(
             &mut command,
+            None,
             None,
             &mut stdout,
             &mut stderr,

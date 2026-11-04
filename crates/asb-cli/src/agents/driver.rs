@@ -898,6 +898,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             .map_err(crate::io_error)?;
         let captured = crate::runner::run_guest_process(
             &mut command,
+            None,
             stdin_prompt.as_deref(),
             #[cfg(unix)]
             &mut transport_out,
