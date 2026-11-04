@@ -29,6 +29,15 @@ def build(source, target, output, symbol_root, *, offline=False):
     # override from the ASB build must not silently change that selection.
     environment.pop('RUSTUP_TOOLCHAIN', None)
     environment.pop('ASB_GOOSE_NATIVE_CAPABILITY', None)
+    # Frame-pointer unwinding is perf's default and otherwise loses Rust call
+    # chains even when matching debug information is available.
+    flag = '-Cforce-frame-pointers=yes'
+    if 'CARGO_ENCODED_RUSTFLAGS' in environment:
+        previous = environment['CARGO_ENCODED_RUSTFLAGS']
+        environment['CARGO_ENCODED_RUSTFLAGS'] = previous + ('\x1f' if previous else '') + flag
+    else:
+        previous = environment.get('RUSTFLAGS', '').strip()
+        environment['RUSTFLAGS'] = (previous + ' ' + flag).strip()
     # Keep release optimization while retaining names and line tables for
     # agent-scoped perf profiles. The previously stripped executable made
     # flamegraphs unable to identify Goose's own code.
