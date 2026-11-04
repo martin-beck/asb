@@ -898,6 +898,41 @@ fn is_asb_source_checkout(root: &Path) -> bool {
         && root.join("workloads").is_dir()
 }
 
+/// Prefer the initialized invocation project over the location of an input
+/// configuration, which may be stored outside that project.
+pub(crate) fn load_for_invocation(
+    input: &Path,
+    invocation: Option<&Path>,
+) -> Result<(PathBuf, ProjectConfig), Error> {
+    if let Some(invocation) = invocation {
+        let (root, config) = load(invocation)?;
+        if root.join(CONFIG_DIR).join(CONFIG_FILE).is_file() {
+            return Ok((root, config));
+        }
+    }
+    load(input)
+}
+
+/// Anchor relative runtime paths in the selected project when the input file
+/// belongs to another project. Preserve normal in-project config semantics.
+pub(crate) fn configuration_anchor(
+    input: &Path,
+    invocation: Option<&Path>,
+) -> Result<PathBuf, Error> {
+    let Some(invocation) = invocation else {
+        return Ok(input.to_path_buf());
+    };
+    let (selected, _) = load_for_invocation(input, Some(invocation))?;
+    let (input_root, _) = load(input)?;
+    if fs::canonicalize(&selected).ok() == fs::canonicalize(&input_root).ok() {
+        return Ok(input.to_path_buf());
+    }
+    let name = input
+        .file_name()
+        .ok_or_else(|| Error::Input("benchmark configuration has no filename".into()))?;
+    Ok(selected.join(name))
+}
+
 pub fn load(start: &Path) -> Result<(PathBuf, ProjectConfig), Error> {
     // Relative paths such as `.` cannot be walked into their parent with
     // PathBuf::pop; anchor them first so subdirectories find the project.
@@ -989,6 +1024,34 @@ mod coverage_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invocation_project_takes_precedence_over_external_input_project() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        let selected = root.join("selected");
+        let foreign = root.join("foreign");
+        for (project, tools) in [(&selected, "selected-tools"), (&foreign, "foreign-tools")] {
+            fs::create_dir_all(project.join(CONFIG_DIR)).unwrap();
+            let config = ProjectConfig {
+                tools_dir: tools.into(),
+                ..ProjectConfig::default()
+            };
+            fs::write(
+                project.join(CONFIG_DIR).join(CONFIG_FILE),
+                toml::to_string(&config).unwrap(),
+            )
+            .unwrap();
+        }
+        let input = foreign.join("benchmark.toml");
+        fs::write(&input, "fixture").unwrap();
+        let (root, config) = load_for_invocation(&input, Some(&selected)).unwrap();
+        assert_eq!(root, selected);
+        assert_eq!(config.tools_dir, "selected-tools");
+        let (root, config) = load_for_invocation(&input, None).unwrap();
+        assert_eq!(root, foreign);
+        assert_eq!(config.tools_dir, "foreign-tools");
+        fs::remove_dir_all(selected.parent().unwrap()).unwrap();
+    }
 
     #[test]
     fn project_config_replacement_never_exposes_partial_content() {

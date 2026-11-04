@@ -149,8 +149,12 @@ impl BatchRun<'_> {
             output,
             warnings,
         );
-        publish_configured_logs(
+        let runtime_anchor = crate::project::configuration_anchor(
             self.config_path,
+            self.options.invocation_dir.as_deref(),
+        )?;
+        publish_configured_logs(
+            &runtime_anchor,
             &self.plan.configuration.log_file,
             &batch_log_file,
             self.plan.concurrency,

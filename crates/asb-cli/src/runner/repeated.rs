@@ -261,7 +261,8 @@ impl Inspection {
             return Err(Error::Input("--repeat cannot combine with a nondefault planning.repetition; choose automated batches or manually identified configurations".into()));
         }
         let admission = crate::planning::BatchAdmissionPolicy::current();
-        let (project_root, settings) = crate::project::load(config_path)?;
+        let (project_root, settings) =
+            crate::project::load_for_invocation(config_path, options.invocation_dir)?;
         let project_root = project_root.canonicalize().map_err(io_error)?;
         let campaign = crate::workloads::TaskIdentity::local("execution-campaign", None).attempt_id;
         let measured = options.measurement_dir.is_some()

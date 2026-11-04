@@ -484,8 +484,9 @@ fn run_loaded(
         }
     }
     let configured_log = public_direct_run(&options).then(|| config.log_file.clone());
+    let runtime_anchor = project::configuration_anchor(config_path, options.invocation_dir)?;
     if configured_log.is_some() {
-        (config, _) = isolated_direct_config(config_path, config)?;
+        (config, _) = isolated_direct_config(&runtime_anchor, config)?;
     }
     let mut cohort = measurements::ExecutionCohort {
         id: workloads::TaskIdentity::local("execution-cohort", None).attempt_id,
@@ -506,7 +507,12 @@ fn run_loaded(
     let concurrency = config.concurrency;
     let result = run_dispatched(config_path, config, options, output, warnings);
     if let Some(configured_log) = configured_log {
-        publish_configured_logs(config_path, &configured_log, &generated_log, concurrency)?;
+        publish_configured_logs(
+            &runtime_anchor,
+            &configured_log,
+            &generated_log,
+            concurrency,
+        )?;
     }
     result
 }

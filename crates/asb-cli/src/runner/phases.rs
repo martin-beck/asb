@@ -28,7 +28,8 @@ impl<'a> AdmittedAttempt<'a> {
         if let Some(observer) = options.on_completion {
             observer.starting(options.replica, options.execution_cohort)?;
         }
-        let (project_root, project_config) = project::load(config_path)?;
+        let (project_root, project_config) =
+            project::load_for_invocation(config_path, options.invocation_dir)?;
         let project_root = project_root.canonicalize().map_err(|error| {
             Error::Input(format!(
                 "cannot resolve benchmark project directory: {error}"
