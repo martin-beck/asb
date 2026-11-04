@@ -578,6 +578,19 @@ impl ProxySession for RunningLlmtape {
             self.cleanup_confirmed = stop_proxy(&mut child, self.builtin).is_ok();
             self._scratch.retain |= !self.cleanup_confirmed;
         }
+        // A workload failure may abort the proxy before normal settlement can
+        // report a replay mismatch. Preserve its private diagnostics so that
+        // the first failure is not lost behind the workload error.
+        if let Some(evidence) = self
+            .mismatch_evidence
+            .as_ref()
+            .filter(|path| path.is_file())
+            && self._scratch.retain_mismatch_evidence(evidence).is_err()
+        {
+            // Preserve the private directory if its diagnostic could not
+            // be moved out; otherwise Drop would destroy the evidence.
+            self._scratch.retain = true;
+        }
     }
 }
 
@@ -915,6 +928,42 @@ mod tests {
             };
             assert_eq!(session.finish().is_ok(), code == 0);
             assert_eq!(session.cleanup_confirmed(), code == 0);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn aborted_replay_preserves_private_mismatch_only_when_present() {
+        use crate::proxy::ProxySession;
+        let root = test_root();
+        for mismatch in [false, true] {
+            let scratch = super::Scratch::create(&root).unwrap();
+            let scratch_path = scratch.path.clone();
+            let evidence = scratch_path.join("mismatch.json");
+            if mismatch {
+                std::fs::write(&evidence, "{}").unwrap();
+            }
+            let mut session = super::RunningLlmtape {
+                child: None,
+                builtin: true,
+                url: String::new(),
+                progress: None,
+                mismatch_evidence: Some(evidence),
+                cassette: root.join("tape"),
+                mode: Mode::Replay,
+                cleanup_confirmed: true,
+                capture_request: None,
+                capture: None,
+                _scratch: scratch,
+            };
+            session.abort();
+            drop(session);
+            let retained = scratch_path.with_file_name(format!(
+                "{}.mismatch.json",
+                scratch_path.file_name().unwrap().to_string_lossy()
+            ));
+            assert!(!scratch_path.exists());
+            assert_eq!(retained.exists(), mismatch);
         }
         std::fs::remove_dir_all(root).unwrap();
     }
