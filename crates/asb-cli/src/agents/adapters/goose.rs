@@ -288,6 +288,10 @@ fn install_native(
             "goose-native-hook.rs",
             include_str!("../../../assets/scripts/goose-native-hook.rs"),
         ),
+        (
+            "goose-profile-symbols.py",
+            include_str!("../../../assets/scripts/goose-profile-symbols.py"),
+        ),
     ] {
         let path = support.join(name);
         if fs::read(&path).ok().as_deref() != Some(content.as_bytes()) {
@@ -303,13 +307,18 @@ fn install_native(
         .arg(&source)
         .arg(root.join("build"))
         .arg(&candidate)
+        .arg(
+            root.parent()
+                .ok_or_else(|| Error::Io("Goose tool directory has no parent".into()))?
+                .join("symbols"),
+        )
         .stdin(Stdio::null());
     if std::env::var_os("CARGO_HOME").is_none() {
         step.command_mut()
             .env("CARGO_HOME", root.join("cargo-cache"));
     }
     if !scope.run(step)?.status.success() {
-        return Err(Error::Io("Goose native build failed; install Python, Git, Rust and Goose's build dependencies, then retry `asb tool install goose`".into()).into());
+        return Err(Error::Io("Goose native build failed; install Python, Git, Rust, binutils (objcopy and readelf), and Goose's build dependencies, then retry `asb tool install goose`".into()).into());
     }
     owner.consume(scope.finish()?)?;
     progress(90, crate::install::ProgressStage::Validating);
