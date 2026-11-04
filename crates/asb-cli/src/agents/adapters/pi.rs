@@ -5,6 +5,19 @@ use super::{
 use crate::{Error, install::Recipe};
 use std::path::Path;
 const TOOL_PROGRESS_FILENAME: &str = "pi-progress.json";
+// Pi's Responses client uses its freshly generated session UUID only as a
+// provider-side prompt cache key. It changes across replay launches.
+const TAPE_WIRE_EXTENSION: &str = r#"
+export function normalizeRequest(request) {
+  const body = request?.body;
+  if (request?.url?.endsWith('/responses') && body && typeof body === 'object'
+      && typeof body.prompt_cache_key === 'string'
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.prompt_cache_key)) {
+    body.prompt_cache_key = '<asb-pi-session-cache>';
+  }
+  return body;
+}
+"#;
 
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "pi",
@@ -21,6 +34,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_estimated_disk_mib(768)
 .with_complete_tool_replay(prepare_tool_replay)
 .with_native_tool_transport()
+.with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_guest_service(start_native_service)
 .with_deferred_native_recording(finalize_native_recording)
 .with_collection(collect)
@@ -802,6 +816,32 @@ mod tests {
         assert!(super::finalize_native_recording(&emit(true), "bad").is_err());
     }
     use super::*;
+
+    #[test]
+    fn replay_normalizes_only_pi_response_session_cache_uuid() {
+        let root = std::env::temp_dir().join(format!("asb-pi-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("extension.mjs"), super::TAPE_WIRE_EXTENSION).unwrap();
+        std::fs::write(root.join("test.mjs"), r#"import { normalizeRequest } from './extension.mjs';
+const one = '00112233-4455-6677-8899-aabbccddeeff';
+const two = '11112233-4455-6677-8899-aabbccddeeff';
+const norm = (url, key, input = 'one') => normalizeRequest({url,body:{prompt_cache_key:key,input}});
+if (JSON.stringify(norm('/v1/responses',one)) !== JSON.stringify(norm('/v1/responses',two))) throw Error('session differs');
+if (JSON.stringify(norm('/v1/chat/completions',one)) === JSON.stringify(norm('/v1/chat/completions',two))) throw Error('wrong endpoint changed');
+if (norm('/v1/responses','user-key').prompt_cache_key !== 'user-key') throw Error('non-UUID changed');
+if (JSON.stringify(norm('/v1/responses',one,'one')) === JSON.stringify(norm('/v1/responses',two,'two'))) throw Error('input changed');
+"#).unwrap();
+        let output = std::process::Command::new("node")
+            .arg(root.join("test.mjs"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use crate::agents::AgentAdapter;
 
     fn frozen_collection_artifacts(
