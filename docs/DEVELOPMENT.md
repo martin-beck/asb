@@ -46,6 +46,14 @@ capture a baseline, tool-end snapshots, and a final snapshot. Its separate
 marker journal records start/end ordering and supplied process and thread IDs.
 This service is not wired into the guest driver or cassette replay; snapshots
 made during overlapping mutations are not yet qualified for replay.
+The extended probe also runs the Mini-SWE adapter against a fixture tool once
+and applies its snapshot through four concurrent replay coordinators. The
+Mini-SWE environment and command are fixtures, not a live agent or workload.
+For this fixture the baseline and incremental snapshots are exported with
+`btrfs send`, received on a separate disposable Btrfs filesystem, and the
+received snapshots feed the replay coordinators. The fixture uses a second
+loop device, loop29, in addition to the configured device. Production cassette
+integration is not qualified by this probe.
 
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without

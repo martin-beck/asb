@@ -110,6 +110,55 @@ class SnapshotService:
                 self.events.close()
 
 
+class SnapshotReplay:
+    """Apply recorded tool-end boundaries to one isolated replay workspace.
+
+    The caller owns snapshot verification, initial workspace restoration and
+    the actual application mechanism. This protocol is an offline prototype.
+    """
+    def __init__(self, boundaries, apply):
+        self.boundaries = list(boundaries)
+        if any(not isinstance(item, tuple) or len(item) != 2 or
+               not isinstance(item[0], str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', item[0]) or
+               not isinstance(item[1], int) or isinstance(item[1], bool) or item[1] < 1
+               for item in self.boundaries):
+            raise ValueError('snapshot replay boundaries are malformed')
+        self.apply = apply
+        self.position = 0
+        self.failed = False
+        self.closed = False
+        self.lock = threading.RLock()
+
+    def marker(self, action, alias, process=None, thread=None):
+        with self.lock:
+            if self.closed or self.failed:
+                raise RuntimeError('snapshot replay is not active')
+            if (action != 'end' or self.position >= len(self.boundaries) or
+                    self.boundaries[self.position][0] != alias):
+                self.failed = True
+                raise ValueError('snapshot replay boundary differs from the recording')
+            sequence = self.boundaries[self.position][1]
+            try:
+                self.apply(sequence)
+            except BaseException:
+                self.failed = True
+                raise
+            self.position += 1
+            return sequence
+
+    def invalidate(self):
+        with self.lock:
+            self.failed = True
+
+    def finish(self):
+        with self.lock:
+            if self.closed:
+                raise RuntimeError('snapshot replay is already closed')
+            self.closed = True
+            if self.failed or self.position != len(self.boundaries):
+                raise RuntimeError('snapshot replay has unconsumed or failed boundaries')
+
+
 class _Handler(socketserver.StreamRequestHandler):
     def handle(self):
         self.request.settimeout(5)
