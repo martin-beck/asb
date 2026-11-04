@@ -613,6 +613,23 @@ fn shell_quote(value: &std::ffi::OsStr) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn offline_build_and_symbol_fixtures_run_in_the_rust_gate() {
+        for name in [
+            "goose_native_prepare.py",
+            "goose_native_build.py",
+            "goose_profile_symbols.py",
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join(name);
+            let status = std::process::Command::new("python3")
+                .arg(path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "Goose fixture {name} failed");
+        }
+    }
     #[cfg(unix)]
     #[test]
     fn hooked_project_install_is_selected_for_guest_staging() {
