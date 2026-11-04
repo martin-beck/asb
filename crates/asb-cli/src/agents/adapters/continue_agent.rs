@@ -34,6 +34,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_estimated_disk_mib(1024)
 .with_deferred_native_recording(finalize_native_recording)
+.with_guest_service(start_recording_service)
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_complete_tool_replay(prepare_tool_replay)
 .with_replay_credential_vars(&["CONTINUE_API_KEY"])
@@ -359,6 +360,12 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
+    // The experimental snapshot guest records native dispatch directly;
+    // retain Continue's built-in tools rather than replacing their semantics.
+    if tape.mode == crate::tape::Mode::Record && std::env::var_os("ASB_FS_MARKER_SOCKET").is_some()
+    {
+        return Ok(());
+    }
     let launch = super::super::tool_replay_mcp::launch(context, tape)?;
     let command = std::iter::once(launch.program.as_os_str())
         .chain(launch.args.iter().map(std::ffi::OsString::as_os_str))
@@ -376,6 +383,123 @@ fn prepare_tool_replay(
         context.command.arg("--exclude").arg(tool);
     }
     Ok(())
+}
+
+fn start_recording_service(
+    command: &mut std::process::Command,
+    executable: &str,
+    run_dir: &std::path::Path,
+    mode: Option<crate::tape::Mode>,
+) -> Result<Option<super::super::auxiliary::AuxiliaryService>, Error> {
+    let Some(marker) = std::env::var_os("ASB_FS_MARKER_SOCKET") else {
+        return Ok(None);
+    };
+    start_recording_service_with_marker(command, executable, run_dir, mode, marker)
+}
+
+fn start_recording_service_with_marker(
+    command: &mut std::process::Command,
+    executable: &str,
+    run_dir: &std::path::Path,
+    mode: Option<crate::tape::Mode>,
+    marker: std::ffi::OsString,
+) -> Result<Option<super::super::auxiliary::AuxiliaryService>, Error> {
+    if mode != Some(crate::tape::Mode::Record) {
+        return Ok(None);
+    }
+    let cli = std::fs::canonicalize(executable).map_err(|_| {
+        Error::Run("Continue executable is unavailable for native recording".into())
+    })?;
+    let bundle = cli
+        .parent()
+        .ok_or_else(|| Error::Run("Continue executable has no bundle directory".into()))?
+        .join("index.js");
+    if !bundle.is_file() {
+        return Err(Error::Run(
+            "Continue native recording requires the installed pinned bundle".into(),
+        ));
+    }
+    let directory = run_dir.join("continue");
+    std::fs::create_dir_all(&directory).map_err(crate::io_error)?;
+    for (name, source) in [
+        (
+            "continue-native-service.mjs",
+            include_str!("../../../assets/scripts/continue-native-service.mjs"),
+        ),
+        (
+            "continue-native-broker.mjs",
+            include_str!("../../../assets/scripts/continue-native-broker.mjs"),
+        ),
+        (
+            "continue-native-custody.mjs",
+            include_str!("../../../assets/scripts/continue-native-custody.mjs"),
+        ),
+        (
+            "continue-native-sidecar.mjs",
+            include_str!("../../../assets/scripts/continue-native-sidecar.mjs"),
+        ),
+        (
+            "continue-native-session.mjs",
+            include_str!("../../../assets/scripts/continue-native-session.mjs"),
+        ),
+        (
+            "continue-native-bootstrap.mjs",
+            include_str!("../../../assets/scripts/continue-native-bootstrap.mjs"),
+        ),
+        (
+            "continue-dispatch-hook.mjs",
+            include_str!("../../../assets/scripts/continue-dispatch-hook.mjs"),
+        ),
+        (
+            "continue-dispatch-transform.mjs",
+            include_str!("../../../assets/scripts/continue-dispatch-transform.mjs"),
+        ),
+        (
+            "continue-native-dispatch.mjs",
+            include_str!("../../../assets/scripts/continue-native-dispatch.mjs"),
+        ),
+        (
+            "continue-snapshot-boundary.mjs",
+            include_str!("../../../assets/scripts/continue-snapshot-boundary.mjs"),
+        ),
+    ] {
+        std::fs::write(directory.join(name), source).map_err(crate::io_error)?;
+    }
+    let socket = directory.join("broker.sock");
+    let mut service = std::process::Command::new("node");
+    if let Some((_, Some(path))) = command.get_envs().find(|(name, _)| *name == "PATH") {
+        service.env("PATH", path);
+    }
+    service
+        .arg(directory.join("continue-native-service.mjs"))
+        .arg(&socket)
+        .arg(&bundle)
+        .arg(directory.join("native-tool-pending.jsonl"));
+    let service = super::super::auxiliary::AuxiliaryService::start(&mut service)?;
+    let bootstrap = directory.join("continue-native-bootstrap.mjs");
+    let bootstrap = bootstrap
+        .to_str()
+        .ok_or_else(|| Error::Run("Continue bootstrap path is not UTF-8".into()))?
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let existing = command
+        .get_envs()
+        .find(|(name, _)| *name == "NODE_OPTIONS")
+        .map(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+        .unwrap_or_else(|| std::env::var_os("NODE_OPTIONS"))
+        .unwrap_or_default();
+    let mut options = existing;
+    if !options.is_empty() {
+        options.push(" ");
+    }
+    options.push(format!("--import=\"{bootstrap}\""));
+    command
+        .env("NODE_OPTIONS", options)
+        .env("ASB_CONTINUE_BUNDLE", bundle)
+        .env("ASB_CONTINUE_MODE", "record")
+        .env("ASB_CONTINUE_SOCKET", socket)
+        .env("ASB_CONTINUE_MARKER", marker);
+    Ok(Some(service))
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
@@ -566,6 +690,61 @@ fn configure(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn guest_recording_service_produces_private_pending_artifact() {
+        use std::io::{BufRead, Write};
+        use std::os::unix::net::UnixListener;
+        let root =
+            std::env::temp_dir().join(format!("asb-continue-adapter-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bundle = root.join("index.js");
+        let cli = root.join("cn.mjs");
+        std::fs::write(root.join("package.json"), "{\"type\":\"module\"}").unwrap();
+        std::fs::write(&bundle, r#"function guard(){cE.getInstance().getCurrentSession();let a="";if(!a)throw new Error("No active session found");return a}
+async function dispatch(e,r){return await e.tool.run(e.preprocessResult?.args??e.arguments,r)}
+await dispatch({name:'Read',arguments:{path:'fixture'},tool:{run:async()=> 'ok'}},{});
+"#).unwrap();
+        std::fs::write(&cli, "import './index.js';\n").unwrap();
+        let marker = root.join("marker.sock");
+        let listener = UnixListener::bind(&marker).unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = std::io::BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.starts_with("tool-"));
+                reader.get_mut().write_all(b"1\n").unwrap();
+            }
+        });
+        let run = root.join("run");
+        let mut command = std::process::Command::new("node");
+        command.arg(&cli);
+        let mut service = super::start_recording_service_with_marker(
+            &mut command,
+            cli.to_str().unwrap(),
+            &run,
+            Some(crate::tape::Mode::Record),
+            marker.into_os_string(),
+        )
+        .unwrap()
+        .unwrap();
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        server.join().unwrap();
+        service.settle().unwrap();
+        let pending = std::fs::read(run.join("continue/native-tool-pending.jsonl")).unwrap();
+        let completed =
+            super::finalize_native_recording(&pending, &crate::cassette::digest(b"snapshot"))
+                .unwrap();
+        assert!(completed.ends_with(b"}\n"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn deferred_native_recording_is_collected_without_a_session_document() {
         use crate::agents::AgentAdapter;

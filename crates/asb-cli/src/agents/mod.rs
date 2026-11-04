@@ -5,6 +5,7 @@
 
 mod adapters;
 mod artifacts;
+pub(crate) mod auxiliary;
 #[allow(
     dead_code,
     reason = "capsule staging follows the validated manifest contract"
@@ -136,6 +137,15 @@ pub(crate) trait AgentAdapter: Sync {
         false
     }
     fn prepare(&self, context: &mut PreparationContext<'_>) -> Result<(), Error>;
+    fn start_guest_service(
+        &self,
+        _command: &mut Command,
+        _executable: &str,
+        _run_dir: &Path,
+        _mode: Option<crate::tape::Mode>,
+    ) -> Result<Option<auxiliary::AuxiliaryService>, Error> {
+        Ok(None)
+    }
     fn supports_native_tool_transport(&self) -> bool {
         false
     }
@@ -546,6 +556,14 @@ pub(super) struct StaticAdapter {
     mcp_servers: bool,
     mcp_relay: bool,
     native_tool_transport: bool,
+    guest_service: Option<
+        fn(
+            &mut Command,
+            &str,
+            &Path,
+            Option<crate::tape::Mode>,
+        ) -> Result<Option<auxiliary::AuxiliaryService>, Error>,
+    >,
     finalize_native_recording: Option<fn(&[u8], &str) -> Result<Vec<u8>, Error>>,
     max_steps: bool,
     native_workspace_capsule: Option<(WorkspaceCapsuleCaptureHook, WorkspaceCapsuleApplyHook)>,
@@ -597,6 +615,7 @@ impl StaticAdapter {
             mcp_servers: false,
             mcp_relay: false,
             native_tool_transport: false,
+            guest_service: None,
             finalize_native_recording: None,
             max_steps: false,
             native_workspace_capsule: None,
@@ -628,6 +647,18 @@ impl StaticAdapter {
 
     pub(super) const fn with_collection(mut self, collect: CollectionHook) -> Self {
         self.collect = Some(collect);
+        self
+    }
+    pub(super) const fn with_guest_service(
+        mut self,
+        hook: fn(
+            &mut Command,
+            &str,
+            &Path,
+            Option<crate::tape::Mode>,
+        ) -> Result<Option<auxiliary::AuxiliaryService>, Error>,
+    ) -> Self {
+        self.guest_service = Some(hook);
         self
     }
 
@@ -906,6 +937,16 @@ impl AgentAdapter for StaticAdapter {
     }
     fn supports_native_tool_transport(&self) -> bool {
         self.native_tool_transport
+    }
+    fn start_guest_service(
+        &self,
+        command: &mut Command,
+        executable: &str,
+        run_dir: &Path,
+        mode: Option<crate::tape::Mode>,
+    ) -> Result<Option<auxiliary::AuxiliaryService>, Error> {
+        self.guest_service
+            .map_or(Ok(None), |hook| hook(command, executable, run_dir, mode))
     }
     fn finalize_native_recording(
         &self,
