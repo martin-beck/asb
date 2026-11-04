@@ -17,10 +17,10 @@ const marker = createServer(client => {
   });
 });
 const moduleUrl = new URL('../assets/scripts/claude-native-hook.mjs', import.meta.url).href;
-function hook(event) {
+function hook(event, mode = 'record') {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', `import(${JSON.stringify(moduleUrl)}).then(m=>m.main()).catch(e=>{console.error(e.message);process.exitCode=1})`], {
-      env: {...process.env, ASB_CLAUDE_NATIVE_DIRECTORY: root, ASB_CLAUDE_NATIVE_SOCKET: socket, ASB_CLAUDE_NATIVE_MARKER: markerPath},
+      env: {...process.env, ASB_CLAUDE_NATIVE_DIRECTORY: root, ASB_CLAUDE_NATIVE_SOCKET: socket, ASB_CLAUDE_NATIVE_MARKER: markerPath, ASB_CLAUDE_NATIVE_MODE: mode},
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let out = '', err = '';
@@ -43,14 +43,32 @@ try {
   const failure = {...base, tool_use_id: 'failed-call', tool_name: 'Bash', tool_input: {command: 'fixture'}};
   assert.equal((await hook({...failure, hook_event_name: 'PreToolUse'})).code, 0);
   assert.equal((await hook({...failure, hook_event_name: 'PostToolUseFailure', error: 'fixture failure', is_interrupt: false})).code, 0);
+  const bash = {...base, tool_use_id: 'bash-call', tool_name: 'Bash', tool_input: {command: 'touch forbidden'}};
+  assert.equal((await hook({...bash, hook_event_name: 'PreToolUse'})).code, 0);
+  assert.equal((await hook({...bash, hook_event_name: 'PostToolUse', tool_response: {stdout: 'recorded', stderr: '', interrupted: false, isImage: false}})).code, 0);
   const events = await broker.finish();
-  assert.equal(events.length, 2);
+  assert.equal(events.length, 3);
   assert.deepEqual(events[1].outcome.value, {kind: 'failure', json: '{\"error\":\"fixture failure\",\"is_interrupt\":false}'});
   assert.deepEqual(events[0].request, {tool: 'Read', input: {file_path: '/fixture'}});
   assert.equal(events[0].outcome.value.json, '{"z":1,"a":2}');
   assert.match(markers[0], /^tool-begin:claude-code-0:\d+:\d+$/);
   assert.match(markers[1], /^tool-end:claude-code-0:\d+:\d+$/);
   assert.equal(readdirSync(root).filter(name => name.endsWith('.json')).length, 0);
+  const replayEffects = [];
+  const playback = new NativeToolBroker('replay', [{...events[2], ordinal: 0}], async event => { replayEffects.push(event.ordinal); });
+  await playback.listen(socket);
+  const unsupported = await hook({...base, hook_event_name: 'PreToolUse'}, 'replay');
+  assert.notEqual(unsupported.code, 0);
+  assert.match(unsupported.err, /Bash only/);
+  const before = await hook({...bash, hook_event_name: 'PreToolUse'}, 'replay');
+  assert.equal(before.code, 0, before.err);
+  assert.equal(JSON.parse(before.out).hookSpecificOutput.updatedInput.command, ':');
+  assert.deepEqual(replayEffects, []);
+  const replayAfter = await hook({...bash, tool_input: {command: ':'}, hook_event_name: 'PostToolUse', tool_response: {stdout: ''}}, 'replay');
+  assert.equal(replayAfter.code, 0, replayAfter.err);
+  assert.equal(JSON.parse(replayAfter.out).hookSpecificOutput.updatedToolOutput.stdout, 'recorded');
+  assert.deepEqual(replayEffects, [0]);
+  await playback.finish();
   const failed = await hook({...base, hook_event_name: 'PostToolUse', tool_response: {}});
   assert.notEqual(failed.code, 0);
   assert.match(readFileSync(join(root, 'hook-failed'), 'utf8'), /failed/);

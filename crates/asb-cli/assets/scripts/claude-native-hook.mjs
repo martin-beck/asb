@@ -58,6 +58,40 @@ export async function recordHook(event, { directory, socket, marker }) {
   }
 }
 
+// Experimental Bash-only replay probe. Production must handle all native
+// tools and failure shapes before this can be selected by the adapter.
+export async function replayHook(event, { directory, socket }) {
+  const state = statePath(directory, event);
+  if (!socket || event.tool_name !== 'Bash' || !event.tool_input ||
+      typeof event.tool_input !== 'object' || Array.isArray(event.tool_input))
+    throw new TypeError('Claude native replay probe supports Bash only');
+  if (event.hook_event_name === 'PreToolUse') {
+    const file = await open(state, 'wx', 0o600);
+    try {
+      const request = normalizeRequest({tool: event.tool_name, input: event.tool_input});
+      const {token} = await brokerRequest(socket, {op: 'reserve', request});
+      const substitute = normalizeRequest({...event.tool_input, command: ':'});
+      await file.writeFile(JSON.stringify({token, substitute}));
+      await file.close();
+      return {hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: substitute}};
+    } catch (error) {
+      await file.close().catch(() => {});
+      throw error;
+    }
+  }
+  if (event.hook_event_name !== 'PostToolUse') throw new Error('Claude native replay probe expected a successful tool');
+  const data = JSON.parse(await readFile(state, 'utf8'));
+  if (!Number.isSafeInteger(data.token) || data.token < 0 ||
+      JSON.stringify(data.substitute) !== JSON.stringify(normalizeRequest(event.tool_input)))
+    throw new Error('Claude native replay completion does not match its start');
+  const {value} = await brokerRequest(socket, {op: 'release', token: data.token});
+  if (value?.kind !== 'success' || typeof value.json !== 'string')
+    throw new Error('Claude native replay probe cannot restore this result');
+  const result = JSON.parse(value.json);
+  await unlink(state);
+  return {hookSpecificOutput: {hookEventName: 'PostToolUse', updatedToolOutput: result}};
+}
+
 export async function main() {
   const directory = process.env.ASB_CLAUDE_NATIVE_DIRECTORY;
   try {
@@ -69,10 +103,13 @@ export async function main() {
       chunks.push(chunk);
     }
     const event = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    await recordHook(event, {directory, socket: process.env.ASB_CLAUDE_NATIVE_SOCKET, marker: process.env.ASB_CLAUDE_NATIVE_MARKER});
+    const options = {directory, socket: process.env.ASB_CLAUDE_NATIVE_SOCKET, marker: process.env.ASB_CLAUDE_NATIVE_MARKER};
+    const mode = process.env.ASB_CLAUDE_NATIVE_MODE ?? 'record';
+    if (!['record', 'replay'].includes(mode)) throw new Error('Claude native hook mode is invalid');
+    const result = mode === 'replay' ? await replayHook(event, options) : await recordHook(event, options);
+    process.stdout.write(`${JSON.stringify(result ?? {})}\n`);
   } catch (error) {
     if (directory) await writeFile(join(directory, 'hook-failed'), 'Claude native hook failed\n', {flag: 'a', mode: 0o600}).catch(() => {});
     throw error;
   }
-  process.stdout.write('{}\n');
 }
