@@ -240,6 +240,7 @@ impl Producer {
             completion: Some(completion),
         }
     }
+    #[cfg(any(test, target_os = "linux"))]
     pub fn id(&self) -> Option<u32> {
         match self.active.as_ref() {
             #[cfg(target_os = "linux")]

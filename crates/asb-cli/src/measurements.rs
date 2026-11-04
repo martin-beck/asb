@@ -1254,6 +1254,7 @@ impl Session {
         producer::command(&mut launch)
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn collector_uses_sudo(&self, name: &str) -> bool {
         self.sudo_collectors.contains(name)
     }
