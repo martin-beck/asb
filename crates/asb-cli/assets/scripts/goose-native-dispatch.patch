@@ -1,3 +1,19 @@
+diff --git a/crates/goose-cli/Cargo.toml b/crates/goose-cli/Cargo.toml
+index c7f53d6..4bad238 100644
+--- a/crates/goose-cli/Cargo.toml
++++ b/crates/goose-cli/Cargo.toml
+@@ -94,0 +95 @@ libc = { version = "0.2.182", default-features = false, features = ["std"] }
++asb-native-probe = ["goose/asb-native-probe"]
+diff --git a/crates/goose-cli/src/main.rs b/crates/goose-cli/src/main.rs
+index 63ccf64..2cd839a 100644
+--- a/crates/goose-cli/src/main.rs
++++ b/crates/goose-cli/src/main.rs
+@@ -37,0 +38,5 @@ fn main() -> Result<()> {
++    #[cfg(feature = "asb-native-probe")]
++    if std::env::var_os("ASB_GOOSE_NATIVE_CAPABILITY").as_deref() == Some(std::ffi::OsStr::new("1")) {
++        println!("asb-goose-native-probe-v1");
++        return Ok(());
++    }
 diff --git a/crates/goose/Cargo.toml b/crates/goose/Cargo.toml
 index 59d699a..281b31c 100644
 --- a/crates/goose/Cargo.toml

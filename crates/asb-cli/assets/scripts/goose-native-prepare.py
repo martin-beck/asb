@@ -14,6 +14,8 @@ import tomllib
 
 SUPPORTED_VERSION = '1.54.0'
 SOURCE_HASHES = {
+    'crates/goose-cli/Cargo.toml': '8e0fc9794db8f908507b1bfc3931322e5057e846d23fef773276b487b863ed45',
+    'crates/goose-cli/src/main.rs': '301d1ff4503b12c3e6cc79a3a8c0a4e0e2b195c238f4f50e88cb00520055a284',
     'crates/goose/Cargo.toml': 'b1c97519c93e79faebb3892ad9985e5a75b16cdf3de9838a06127c78de1449a6',
     'crates/goose/src/agents/extension_manager/lease.rs': 'b2061f486a8baa9b927458a9090900c986fbbe8f03e3835021f00d75cca6fdee',
     'crates/goose/src/agents/extension_manager/mod.rs': '3ac2ca7454c9cca5a5f477f38e1f12fb70e4f34da8b3dfb6b16c0062417cb0a1',

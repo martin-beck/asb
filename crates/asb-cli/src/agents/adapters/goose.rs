@@ -279,6 +279,37 @@ fn prepare_tool_replay(
     Ok(())
 }
 
+/// Check the installed executable's compiled adapter interface before
+/// allowing it to own native recordings. Ordinary Goose builds remain valid
+/// for normal, non-native runs.
+#[allow(dead_code, reason = "native guest launch is being integrated")]
+fn native_hook_available(executable: &Path) -> bool {
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+    let mut command = Command::new(executable);
+    command
+        .arg("--version")
+        .env("ASB_GOOSE_NATIVE_CAPABILITY", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let Ok(result) = crate::runner::run_guest_process(
+        &mut command,
+        None,
+        None,
+        &mut std::io::sink(),
+        &mut std::io::sink(),
+        Duration::from_secs(5),
+        &mut |_| Ok(()),
+    ) else {
+        return false;
+    };
+    !result.timed_out
+        && !result.transcript_truncated
+        && result.output.status.success()
+        && result.output.stdout == b"asb-goose-native-probe-v1\n"
+}
+
 fn shell_quote(value: &std::ffi::OsStr) -> Result<String, Error> {
     let value = value
         .to_str()
@@ -288,6 +319,34 @@ fn shell_quote(value: &std::ffi::OsStr) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn native_hook_probe_distinguishes_upstream_and_hooked_builds() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!("goose-capability-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let executable = root.join("goose");
+        for (body, expected) in [
+            ("#!/bin/sh\nprintf 'goose 1.54.0\\n'\n", false),
+            (
+                "#!/bin/sh\ntest \"$ASB_GOOSE_NATIVE_CAPABILITY\" = 1 || exit 1\nprintf 'asb-goose-native-probe-v1\\n'\n",
+                true,
+            ),
+            (
+                "#!/bin/sh\nprintf 'asb-goose-native-probe-v1\\n'\nexit 1\n",
+                false,
+            ),
+        ] {
+            std::fs::write(&executable, body).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(super::native_hook_available(&executable), expected);
+        }
+        assert!(!super::native_hook_available(&root.join("missing")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn completed_goose_summary_supplies_final_answer() {
         use crate::agents::AgentAdapter;
