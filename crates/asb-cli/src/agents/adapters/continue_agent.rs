@@ -523,6 +523,27 @@ fn configure(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn native_sidecar_prototype_passes_common_transport_validation() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/continue_native_sidecar_emit.mjs");
+        let output = std::process::Command::new("node")
+            .arg(fixture)
+            .output()
+            .expect("Node is required for Continue adapter tests");
+        assert!(output.status.success());
+        let native = crate::cassette::NativeTrack {
+            complete: true,
+            events: 10,
+            bytes: output.stdout.len() as u64,
+            sha256: crate::cassette::digest(&output.stdout),
+        };
+        let transport = crate::cassette::NativeToolTransport::from_sidecar(&native, &output.stdout)
+            .expect("Continue codec must use the common native sidecar protocol");
+        assert_eq!(transport.launch_session(), "continue-launch-1");
+        assert_eq!(transport.sessions().len(), 1);
+    }
+
+    #[test]
     fn replay_normalizes_only_git_stash_object_in_tool_output() {
         let root = std::env::temp_dir().join(format!("asb-continue-stash-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();

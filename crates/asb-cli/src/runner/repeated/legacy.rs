@@ -54,10 +54,12 @@ impl Inspection {
         options: RunOptions<'_>,
         slots: &mut [Slot],
     ) -> Result<Self, Error> {
+        let runtime_anchor =
+            crate::project::configuration_anchor(config_path, options.invocation_dir)?;
         let base = options
             .cassette
             .map(PathBuf::from)
-            .unwrap_or_else(|| super::super::default_cassette(config_path, config));
+            .unwrap_or_else(|| super::super::default_cassette(&runtime_anchor, config));
         let mut seen = BTreeMap::new();
         let mut inputs = Vec::new();
         let mut files = Vec::new();

@@ -668,7 +668,7 @@ pub(crate) fn ensure_execution_requirements(
     invocation_dir: &Path,
     output: &mut dyn std::io::Write,
 ) -> Result<(), Error> {
-    let (root, project_config) = project::load(config_path)?;
+    let (root, project_config) = project::load_for_invocation(config_path, Some(invocation_dir))?;
     let tools_root = project::resolve(&root, &project_config.tools_dir);
     let workloads_root = project::environment_path("ASB_WORKLOAD_DIR", invocation_dir)
         .unwrap_or_else(|| project::resolve(&root, &project_config.workloads_dir));

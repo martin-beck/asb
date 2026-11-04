@@ -250,10 +250,11 @@ pub(crate) fn run_with_diagnostics(
     let text = read_config(config_path)?;
     let config: BenchmarkConfig = toml::from_str(&text)
         .map_err(|error| Error::Input(format!("cannot parse {path}: {error}")))?;
+    let runtime_anchor = project::configuration_anchor(config_path, options.invocation_dir)?;
     let cassette = options
         .cassette
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| default_cassette(config_path, &config));
+        .unwrap_or_else(|| default_cassette(&runtime_anchor, &config));
     let derived_capsule = automatic_native_capsule(
         &config.agent,
         options.mode,
@@ -300,7 +301,7 @@ pub(crate) fn run_with_diagnostics(
         ));
     }
     let disk_policy = crate::planning::resolve(&config)?;
-    let output_directory = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let output_directory = runtime_anchor.parent().unwrap_or_else(|| Path::new("."));
     if (options.track.is_some() || options.replay_seed.is_some())
         && options.mode != Some(tape::Mode::Replay)
     {
@@ -310,7 +311,7 @@ pub(crate) fn run_with_diagnostics(
         write_trial_start(output, &config)?;
     }
     let bundled_replay = if options.mode == Some(tape::Mode::Replay) {
-        let source = replay_cassette(config_path, &config, options.cassette)?;
+        let source = replay_cassette(&runtime_anchor, &config, options.cassette)?;
         crate::tape::require_replay_cassette(&source)?;
         crate::cassette::Source::is_bundle(&source)
             .map_err(|error| Error::Input(error.to_string()))?
@@ -486,8 +487,9 @@ fn run_loaded(
         }
     }
     let configured_log = public_direct_run(&options).then(|| config.log_file.clone());
+    let runtime_anchor = project::configuration_anchor(config_path, options.invocation_dir)?;
     if configured_log.is_some() {
-        (config, _) = isolated_direct_config(config_path, config)?;
+        (config, _) = isolated_direct_config(&runtime_anchor, config)?;
     }
     let mut cohort = measurements::ExecutionCohort {
         id: workloads::TaskIdentity::local("execution-cohort", None).attempt_id,
@@ -508,7 +510,12 @@ fn run_loaded(
     let concurrency = config.concurrency;
     let result = run_dispatched(config_path, config, options, output, warnings);
     if let Some(configured_log) = configured_log {
-        publish_configured_logs(config_path, &configured_log, &generated_log, concurrency)?;
+        publish_configured_logs(
+            &runtime_anchor,
+            &configured_log,
+            &generated_log,
+            concurrency,
+        )?;
     }
     result
 }
@@ -654,6 +661,7 @@ fn run_concurrent(
     warnings: &Mutex<BTreeSet<String>>,
 ) -> Result<(), Error> {
     let tape_request = options.mode.map(|mode| (mode, options.cassette));
+    let runtime_anchor = project::configuration_anchor(config_path, options.invocation_dir)?;
     let mut jobs = Vec::with_capacity(config.concurrency);
     let mut completed = Vec::with_capacity(config.concurrency);
     for index in 1..=config.concurrency {
@@ -674,7 +682,7 @@ fn run_concurrent(
         let cassette = tape_request.map(|(mode, requested)| {
             let base = requested
                 .map(PathBuf::from)
-                .unwrap_or_else(|| default_cassette(config_path, config));
+                .unwrap_or_else(|| default_cassette(&runtime_anchor, config));
             (mode, replica_cassette(mode, &base, index))
         });
         let measurement = options
