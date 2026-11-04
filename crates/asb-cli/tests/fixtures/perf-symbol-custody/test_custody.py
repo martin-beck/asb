@@ -29,6 +29,9 @@ class CustodyTest(unittest.TestCase):
         with mock.patch.object(module, 'identity', side_effect=[(1, 7), (1, 7)]), \
              mock.patch.object(Path, 'read_text', return_value=f'0::/{container}/{"c" * 64}\n'):
             self.assertIsNone(module.container_for(123, 7))
+        with mock.patch.object(module, 'identity', side_effect=[(1, 7), (1, 7)]), \
+             mock.patch.object(Path, 'read_text', return_value=f'0::/other/{container}\n'):
+            self.assertIsNone(module.container_for(123, 7))
 
     @unittest.skipUnless(shutil.which('cc'), 'requires a C compiler')
     def test_container_export_is_bounded_and_build_id_checked(self):

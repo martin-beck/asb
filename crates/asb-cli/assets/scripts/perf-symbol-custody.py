@@ -328,8 +328,11 @@ def container_for(pid, start):
         lines = pathlib.Path(f'/proc/{pid}/cgroup').read_text().splitlines()
         ids = set()
         for line in lines:
-            for component in line.split(':', 2)[-1].split('/'):
-                match = re.fullmatch(r'(?:docker-)?([0-9a-f]{64})(?:\.scope)?', component)
+            components = line.split(':', 2)[-1].split('/')
+            for index, component in enumerate(components):
+                match = re.fullmatch(r'docker-([0-9a-f]{64})\.scope', component)
+                if match is None and index and components[index - 1] == 'docker':
+                    match = re.fullmatch(r'([0-9a-f]{64})', component)
                 if match:
                     ids.add(match.group(1))
         current = identity(pid)
