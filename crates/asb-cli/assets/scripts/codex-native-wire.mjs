@@ -3,7 +3,12 @@
 // leaving provider IDs, tool arguments and user content request-significant.
 export function normalizeRequest({ url, body }) {
   if (typeof url !== 'string' || !/\/responses(?:\?|$)/.test(url) ||
-      !body || typeof body !== 'object' || !Array.isArray(body.input)) return body;
+      !body || typeof body !== 'object') return body;
+  if (typeof body.prompt_cache_key === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.prompt_cache_key)) {
+    body.prompt_cache_key = '<asb-codex-session-cache>';
+  }
+  if (!Array.isArray(body.input)) return body;
   const ids = new Map();
   for (const item of body.input) {
     if (!item || typeof item !== 'object' || typeof item.id !== 'string') continue;
