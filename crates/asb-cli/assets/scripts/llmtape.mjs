@@ -294,6 +294,14 @@ function normalizePytestElapsed(value) {
   return value.replace(/(^|\\n|\r?\n)((?:\d+ (?:failed|passed|skipped|deselected|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1$2<asb-elapsed>");
 }
 
+function normalizeUnittestElapsed(value) {
+  // Python unittest renders a distinct, complete summary. The elapsed value is
+  // scheduler-dependent, but the test count and result text remain meaningful
+  // replay inputs. This is applied only to structured tool-result output below,
+  // never to prompts, arguments, or arbitrary request strings.
+  return value.replace(/(^|\\n|\r?\n)(Ran \d+ tests? in )\d+(?:\.\d+)?s\b(?=(?:\\n|\r?\n){2}(?:OK|FAILED(?: \([^\r\n]*\))?)(?:\\n|\r?\n|$))/g, "$1$2<asb-elapsed>");
+}
+
 // Python renders a callable's process-local address in its fixed repr.  This
 // is terminal presentation noise, not a tool result change.  Keep the exact
 // existing callable-rendering rule in one helper so it applies both before
@@ -645,6 +653,7 @@ function normalizeCassetteBody(body, url = "") {
           value = value
             .replace(/^(Tool (?:result|time): )\d+(?:\.\d+)? seconds(?=\r?\n)/, "$1<asb-tool-time> seconds")
             .replace(/^(Wall time: )\d+(?:\.\d+)? seconds(?=\r?\nOutput:)/, "$1<asb-wall-time> seconds");
+          value = normalizeUnittestElapsed(value);
         }
         value = normalizeFunctionRenderingAddress(value);
         value = normalizeObjectRenderingAddress(value);
