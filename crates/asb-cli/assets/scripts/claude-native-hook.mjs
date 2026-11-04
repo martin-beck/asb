@@ -58,19 +58,21 @@ export async function recordHook(event, { directory, socket, marker }) {
   }
 }
 
-// Experimental Bash-only replay probe. Production must handle all native
+// Experimental Bash and Read replay probe. Production must handle all native
 // tools and failure shapes before this can be selected by the adapter.
 export async function replayHook(event, { directory, socket }) {
   const state = statePath(directory, event);
-  if (!socket || event.tool_name !== 'Bash' || !event.tool_input ||
+  if (!socket || !['Bash', 'Read'].includes(event.tool_name) || !event.tool_input ||
       typeof event.tool_input !== 'object' || Array.isArray(event.tool_input))
-    throw new TypeError('Claude native replay probe supports Bash only');
+    throw new TypeError('Claude native replay probe supports Bash and Read only');
   if (event.hook_event_name === 'PreToolUse') {
     const file = await open(state, 'wx', 0o600);
     try {
       const request = normalizeRequest({tool: event.tool_name, input: event.tool_input});
       const {token} = await brokerRequest(socket, {op: 'reserve', request});
-      const substitute = normalizeRequest({...event.tool_input, command: ':'});
+      // Claude tracks which paths its own Read tool opened before allowing
+      // an Edit. Keep the original Read in the isolated replay workspace.
+      const substitute = normalizeRequest(event.tool_name === 'Bash' ? {...event.tool_input, command: ':'} : event.tool_input);
       await file.writeFile(JSON.stringify({token, substitute}));
       await file.close();
       return {hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: substitute}};
