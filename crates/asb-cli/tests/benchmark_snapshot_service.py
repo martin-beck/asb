@@ -260,6 +260,16 @@ class SnapshotServiceTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'guest-error-stderr.log'):
                 supervisor.close()
 
+    def test_snapshot_settlement_points_to_stdout_only_failure(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);(root/'guest-error-stdout.log').write_text('failure')
+            process=unittest.mock.MagicMock();process.communicate.return_value=(b'',b'');process.returncode=1
+            supervisor=GuestSnapshot.__new__(GuestSnapshot)
+            supervisor.task=SimpleNamespace(artifacts=root);supervisor.process=process
+            supervisor.log=io.BytesIO();supervisor.replay=False
+            with self.assertRaisesRegex(RuntimeError,'guest-error-stdout.log'):
+                supervisor.close()
+
     def test_snapshot_archive_streams_flat_entries_and_rejects_invalid_entries(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root = Path(directory)

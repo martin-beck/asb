@@ -477,6 +477,29 @@ class GuestBootstrapTests(unittest.TestCase):
             self.assertEqual(len(forwarded),2)
             self.assertEqual(json.loads((root/'execution.json').read_text())['guest_error_log'],path.name)
 
+    def test_failed_guest_with_valid_metadata_preserves_bounded_output_tails(self):
+        for code in (0,1):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                root=Path(directory)
+                def execute(_argv, **options):
+                    options['on_output']('stdout',b'x'*(256*1024)+b'important stdout')
+                    options['on_output']('stderr',b'important stderr')
+                    return {'stdout':b'', 'stderr':b'', 'exit_code':code}
+                metadata={'schema_version':1,'exit_code':code,'tree_quiesced':True,
+                          'final_response':None,'token_usage':{},'steps':None}
+                task=SimpleNamespace(artifacts=root,agent_timeout=15,
+                    checked=lambda *_args,**_kwargs:json.dumps(metadata).encode(),
+                    workspace=SimpleNamespace(container=Container(),execute=execute))
+                with patch('asb_guest.prepare_agent',return_value=({},{})):
+                    execute_agent(task,{},None,None,None)
+                for stream in ('stdout','stderr'):
+                    path=root/f'guest-error-{stream}.log'
+                    self.assertEqual(path.exists(),code != 0)
+                    if code:
+                        self.assertEqual(path.stat().st_mode & 0o777,0o600)
+                        self.assertLessEqual(path.stat().st_size,256*1024)
+                        self.assertTrue(path.read_bytes().endswith(f'important {stream}'.encode()))
+
     def test_local_forwarding_precedes_install_and_is_closed_on_install_failure_or_success(self):
         for failure in (False, True):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
