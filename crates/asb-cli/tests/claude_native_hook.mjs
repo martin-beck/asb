@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import {mkdtempSync, readdirSync, readFileSync, rmSync} from 'node:fs';
+import {existsSync, mkdtempSync, readdirSync, readFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createServer} from 'node:net';
-import {spawn} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import {NativeToolBroker} from '../assets/scripts/native-tool-broker.mjs';
 
 const root = mkdtempSync(join(tmpdir(), 'asb-claude-hook-'));
@@ -40,15 +40,16 @@ try {
   const after = await hook({...base, hook_event_name: 'PostToolUse', tool_response: {z: 1, a: 2}});
   assert.equal(after.code, 0, after.err);
   assert.deepEqual(JSON.parse(after.out), {});
+  const failureText = "Exit code 13\nfixture '$(touch injected)' output";
   const failure = {...base, tool_use_id: 'failed-call', tool_name: 'Bash', tool_input: {command: 'fixture'}};
   assert.equal((await hook({...failure, hook_event_name: 'PreToolUse'})).code, 0);
-  assert.equal((await hook({...failure, hook_event_name: 'PostToolUseFailure', error: 'Exit code 13\nfixture output', is_interrupt: false})).code, 0);
+  assert.equal((await hook({...failure, hook_event_name: 'PostToolUseFailure', error: failureText, is_interrupt: false})).code, 0);
   const bash = {...base, tool_use_id: 'bash-call', tool_name: 'Bash', tool_input: {command: 'touch forbidden'}};
   assert.equal((await hook({...bash, hook_event_name: 'PreToolUse'})).code, 0);
   assert.equal((await hook({...bash, hook_event_name: 'PostToolUse', tool_response: {stdout: 'recorded', stderr: '', interrupted: false, isImage: false}})).code, 0);
   const events = await broker.finish();
   assert.equal(events.length, 3);
-  assert.deepEqual(events[1].outcome.value, {kind: 'failure', json: '{\"error\":\"Exit code 13\\nfixture output\",\"is_interrupt\":false}'});
+  assert.deepEqual(JSON.parse(events[1].outcome.value.json), {error: failureText, is_interrupt: false});
   assert.deepEqual(events[0].request, {tool: 'Read', input: {file_path: '/fixture'}});
   assert.equal(events[0].outcome.value.json, '{"z":1,"a":2}');
   assert.match(markers[0], /^tool-begin:claude-code-0:\d+:\d+$/);
@@ -86,7 +87,11 @@ try {
   assert.equal(failedBefore.code, 0, failedBefore.err);
   const failedInput = JSON.parse(failedBefore.out).hookSpecificOutput.updatedInput;
   assert.match(failedInput.command, /exit 13$/);
-  const failedAfter = await hook({...failure, tool_input: failedInput, hook_event_name: 'PostToolUseFailure', error: 'Exit code 13\nfixture output', is_interrupt: false}, 'replay');
+  const synthetic = spawnSync('/bin/sh', ['-c', failedInput.command], {cwd: root, encoding: 'utf8'});
+  assert.equal(synthetic.status, 13);
+  assert.equal(synthetic.stdout, failureText.split('\n').slice(1).join('\n'));
+  assert.equal(existsSync(join(root, 'injected')), false, 'recorded output is data, never shell code');
+  const failedAfter = await hook({...failure, tool_input: failedInput, hook_event_name: 'PostToolUseFailure', error: failureText, is_interrupt: false}, 'replay');
   assert.equal(failedAfter.code, 0, failedAfter.err);
   assert.deepEqual(JSON.parse(failedAfter.out), {});
   await failurePlayback.finish();

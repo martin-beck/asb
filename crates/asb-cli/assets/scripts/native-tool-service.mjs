@@ -1,7 +1,7 @@
 // Adapter-owned recording service, launched as a sibling of the agent by its
 // process owner. Only the owner sends S after agent descendants have stopped.
 import { createReadStream } from 'node:fs';
-import { open, readFile } from 'node:fs/promises';
+import { chmod, open, readFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { NativeToolBroker } from './native-tool-broker.mjs';
 import { sealPendingBroker, replayBroker } from './native-tool-custody.mjs';
@@ -24,6 +24,7 @@ const broker = mode === 'record' ? new NativeToolBroker('record') : replayBroker
   programSha256, workspaceEffectSha256: snapshotSha256, applyEffects: replayEffects(marker, agent), agent,
 });
 await broker.listen(socket);
+if (agent === 'claude-code') await chmod(socket, 0o666);
 process.stdout.write('READY\n');
 try {
   const chunks = [];
@@ -32,6 +33,10 @@ try {
     if (chunks.reduce((sum, item) => sum + item.length, 0) > 2) throw new Error('Native tool service settlement request is invalid');
   }
   if (Buffer.concat(chunks).toString() !== 'S\n') throw new Error('Native tool service stopped without process-tree settlement');
+  if (agent === 'claude-code') {
+    const state = process.env.ASB_NATIVE_HOOK_STATE;
+    if (!state || (await readdir(state)).length) throw new Error('Claude native hook state is missing or unfinished');
+  }
   if (mode === 'record') {
     const pending = await sealPendingBroker(broker, { programSha256, agent });
     const file = await open(target, 'wx', 0o600);

@@ -89,8 +89,44 @@ pub(super) fn broker(
     {
         std::fs::write(directory.join(name), source).map_err(crate::io_error)?;
     }
-    let socket = directory.join("broker.sock");
+    let socket = if settings.agent == "claude-code" {
+        let hook_dir = command
+            .get_envs()
+            .find_map(|(name, value)| {
+                (name == "ASB_CLAUDE_NATIVE_DIRECTORY")
+                    .then_some(value)
+                    .flatten()
+            })
+            .ok_or_else(|| Error::Run("Claude native hook directory is missing".into()))?;
+        let hook_dir = Path::new(hook_dir);
+        std::fs::create_dir_all(hook_dir).map_err(crate::io_error)?;
+        let parent = hook_dir
+            .parent()
+            .ok_or_else(|| Error::Run("Claude native hook runtime is missing".into()))?;
+        for name in [
+            "claude-native-hook.mjs",
+            "native-tool-broker.mjs",
+            "native-tool-session.mjs",
+            "native-snapshot-boundary.mjs",
+        ] {
+            std::fs::copy(directory.join(name), parent.join(name)).map_err(crate::io_error)?;
+        }
+        parent.join("broker.sock")
+    } else {
+        directory.join("broker.sock")
+    };
     let mut service = Command::new("node");
+    if settings.agent == "claude-code" {
+        let state = command
+            .get_envs()
+            .find_map(|(name, value)| {
+                (name == "ASB_CLAUDE_NATIVE_DIRECTORY")
+                    .then_some(value)
+                    .flatten()
+            })
+            .ok_or_else(|| Error::Run("Claude native hook directory is missing".into()))?;
+        service.env("ASB_NATIVE_HOOK_STATE", state);
+    }
     if let Some((_, Some(path))) = command.get_envs().find(|(name, _)| *name == "PATH") {
         service.env("PATH", path);
     }
