@@ -48,13 +48,10 @@ impl measurements::Session {
             .unwrap_or_else(|| directory.join("no-project-symbols"));
         let mut ready = readiness::Readiness::new(&directory, "symbols")
             .map_err(|error| format!("cannot prepare symbol custody: {error}"))?;
-        let mut launch = if self.collector_uses_sudo("perf") {
-            let mut launch = crate::launch::ProcessLaunch::new("sudo");
-            launch.arg("-n").arg("--").arg("python3");
-            launch
-        } else {
-            crate::launch::ProcessLaunch::new("python3")
-        };
+        // The helper is written to a user-owned result directory. Never run
+        // it as root, even if perf itself needs sudo: that would grant elevated
+        // execution to mutable user code and require a separate sudo rule.
+        let mut launch = crate::launch::ProcessLaunch::new("python3");
         launch
             .arg("-I")
             .arg(&script)

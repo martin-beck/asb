@@ -275,7 +275,9 @@ The report links `perf-symbol-quality.json` and `perf-symbol-custody.json`:
 these show unresolved frame counts and recorded images or debug files that
 could not be retained. Deleted images, stripped third-party tools and kernel
 address restrictions can still leave unknown frames. The cache can use up to
-2 GiB per run, plus temporary copying space.
+2 GiB per run, plus temporary copying space. Symbol capture runs as the
+benchmark user even if perf uses sudo; guest files inaccessible to that user
+cannot be retained and are reported as unavailable.
 Selecting `flamegraph` also selects `perf`. ASB installs the required `perf`
 tool in the project automatically when installing FlameGraph, using setup,
 or starting an existing flamegraph-only configuration. `asb tool install perf`
