@@ -175,6 +175,9 @@ pub(crate) struct RunOptions<'a> {
     pub requirements_prepared: bool,
     pub preparation_gate: Option<&'a batch::Gate>,
     pub launch_gate: Option<&'a batch::Gate>,
+    /// Holds official grading and post-processing until every admitted peer
+    /// has settled its agent execution and measurement collection.
+    pub settlement_barrier: Option<&'a batch::SettlementBarrier>,
     pub policy: Option<&'a crate::planning::ResolvedPlan>,
     pub execution_cohort: Option<&'a measurements::ExecutionCohort>,
     pub json: bool,
@@ -569,6 +572,7 @@ fn public_direct_run(options: &RunOptions<'_>) -> bool {
         && options.execution_cohort.is_none()
         && options.preparation_gate.is_none()
         && options.launch_gate.is_none()
+        && options.settlement_barrier.is_none()
         && options.batch.is_none()
         && options.on_completion.is_none()
 }
@@ -590,6 +594,7 @@ fn run_admitted_batch(
         || options.execution_cohort.is_some()
         || options.preparation_gate.is_some()
         || options.launch_gate.is_some()
+        || options.settlement_barrier.is_some()
     {
         return Err(Error::Input(
             "batch admission differs from original pending replica population".into(),
@@ -600,6 +605,7 @@ fn run_admitted_batch(
         execution_cohort: Some(admission.cohort()),
         preparation_gate: Some(admission.material()),
         launch_gate: Some(admission.launch()),
+        settlement_barrier: Some(admission.settlement()),
         verify_initial_material: true,
         ..options
     };
@@ -635,8 +641,18 @@ fn run_dispatched(
     let gate = (options.verify_initial_material && options.preparation_gate.is_none())
         .then(|| batch::Gate::new(config.concurrency, None, Duration::from_secs(1800)))
         .transpose()?;
+    let settlement = (config.concurrency > 1 && options.settlement_barrier.is_none())
+        .then(|| {
+            batch::SettlementBarrier::selected(
+                config.concurrency,
+                &(1..=config.concurrency).collect::<Vec<_>>(),
+                Duration::from_secs(1800),
+            )
+        })
+        .transpose()?;
     let options = RunOptions {
         preparation_gate: options.preparation_gate.or(gate.as_ref()),
+        settlement_barrier: options.settlement_barrier.or(settlement.as_ref()),
         ..options
     };
     if config.concurrency > 1 {
@@ -841,6 +857,9 @@ fn abort_replica_gates(options: RunOptions<'_>, reason: &str) {
     if let Some(gate) = options.launch_gate {
         gate.abort(reason);
     }
+    if let Some(barrier) = options.settlement_barrier {
+        barrier.abort(reason);
+    }
 }
 
 fn run_replica_catching(
@@ -905,26 +924,44 @@ fn run_mode(
     warnings: &Mutex<BTreeSet<String>>,
 ) -> Result<(), Error> {
     if options.mode == Some(tape::Mode::Record) && options.provider_capture_path.is_none() {
-        return Err(Error::Run(
+        let error = Error::Run(
             "record dispatch lost its owned provider capture path before attempt admission".into(),
-        ));
+        );
+        abort_replica_gates(options, &error.to_string());
+        return Err(error);
     }
     // Register before any fallible setup. Early return or unwinding aborts peers.
-    let mut arrival = options
+    let mut arrival = match options
         .preparation_gate
         .map(|gate| gate.register(options.replica))
-        .transpose()?;
-    let policy = crate::planning::resolve_snapshot(
-        &config,
-        options.measurement_dir.is_some(),
-        options.policy,
-    )?;
-    let admitted = AdmittedAttempt::admit(config_path, config, options)?;
-    attempt::ConfiguredAttempt::configure(config_path, admitted, policy, output, warnings)?.run(
-        &mut arrival,
-        output,
-        warnings,
-    )
+        .transpose()
+    {
+        Ok(arrival) => arrival,
+        Err(error) => {
+            abort_replica_gates(options, &error.to_string());
+            return Err(error);
+        }
+    };
+    let result =
+        (|| {
+            let policy = crate::planning::resolve_snapshot(
+                &config,
+                options.measurement_dir.is_some(),
+                options.policy,
+            )?;
+            let admitted = AdmittedAttempt::admit(config_path, config, options)?;
+            attempt::ConfiguredAttempt::configure(config_path, admitted, policy, output, warnings)?
+                .run(&mut arrival, output, warnings)
+        })();
+    if let Err(error) = &result
+        && let Some(barrier) = options.settlement_barrier
+    {
+        barrier.abort(&format!(
+            "replica {} failed before cohort grading: {error}",
+            options.replica.index
+        ));
+    }
+    result
 }
 
 fn finish_provider_attempt(

@@ -412,8 +412,13 @@ sessions through execution. Native command intent becomes an owned
 `PreparedNative` only after adapter, endpoint, Python, runtime and replay
 preparation, so the gate executes that exact command. `ExecutionEvidence` owns
 captured output, guest observations and the frozen execution clock.
-Proxy settlement consumes execution into `SettledAttempt`; evaluation consumes
-that into `EvaluatedAttempt`, retaining an independent `EvaluationOutcome`.
+Proxy settlement consumes execution into `SettledAttempt`. For a concurrent
+cohort, each admitted replica then waits at an execution-settlement barrier;
+adapter collection, official evaluation and post-processing start only after
+every admitted peer reaches that boundary. A failed, cancelled, or panicked
+peer aborts the barrier and releases waiters without authorizing early grading.
+Evaluation consumes a released `SettledAttempt` into `EvaluatedAttempt`,
+retaining an independent `EvaluationOutcome`.
 Explicit cleanup then yields `FinalizedAttempt`. Existing adapter cancellation
 on aborted transitions preserves unfinished resources rather than calling
 destructive normal-close from Drop. Provider bridge ownership remains outside
@@ -711,7 +716,9 @@ record, workspace, log, native runtime state (if present), measurements and
 external evaluator/proxy evidence in
 `.checkpoint/replicas/<configuration>/<replica>.json`. These receipts publish
 after grading, workload/proxy cleanup and measurement completion, before the
-runner waits for the whole group. Sibling output paths do not enter that
+runner waits for the whole group. Concurrent replicas first cross the shared
+execution-settlement barrier before any of those grading or post-processing
+steps; sibling output paths do not enter that
 replica's seal. Slot-to-workspace/log/measurement naming comes from the same
 runner helper used to create replicas; the observer does not guess an agent's
 paths. Per-configuration evidence publication is serialized without serializing
@@ -1851,7 +1858,8 @@ default 1). This is separate from each configuration's identical replicas.
 and defaults to max(jobs, largest selected concurrency), preserving sequential
 replica choices. A configuration must fit the budget; invalid admission is
 rejected before preserving/moving existing results. A bounded FIFO worker pool
-holds replica-weighted slots through preparation, execution, grading and cleanup.
+holds replica-weighted slots through preparation, execution, the cohort
+execution-settlement barrier, grading and cleanup.
 The count budget is not a host RAM reservation; task environment CPU/memory/PID
 limits remain adapter-owned, and operators must choose jobs for host capacity.
 Selected scheduling is saved in the plan and disclosed in JSON/HTML reports
