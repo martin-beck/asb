@@ -12,6 +12,9 @@ const X86_64_URL: &str = "https://github.com/aaif-goose/goose/releases/download/
 const X86_64_SHA256: &str = "ab396c95aebbd28b4d38c175234be8d4a3ea0c96e7ccb24c307e4618c9be57e1";
 const AARCH64_URL: &str = "https://github.com/aaif-goose/goose/releases/download/v1.54.0/goose-aarch64-unknown-linux-gnu.tar.gz";
 const AARCH64_SHA256: &str = "0f174b5118a53888cd4e65b7ca9a4b72dd0b887e89142c8ce41e2409205e40d5";
+const SOURCE_URL: &str =
+    "https://codeload.github.com/aaif-goose/goose/tar.gz/cd643d2126fffab4c6a6186905211ba868d6a657";
+const SOURCE_SHA256: &str = "34aac2c8c8efdd0e1423faecee5d905a0a32500e640c80d40c6a9666621f0ab1";
 
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "goose",
@@ -195,6 +198,9 @@ fn install(
     root: &Path,
     progress: &mut dyn FnMut(u8, crate::install::ProgressStage),
 ) -> InstallResult<PathBuf> {
+    if std::env::var_os("ASB_GOOSE_NATIVE_BUILD").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return install_native(context, root, progress);
+    }
     let (archive, checksum) = cached_archive(context, root, progress)?;
     crate::install::archive::install_archive_in(
         context,
@@ -204,6 +210,115 @@ fn install(
         progress,
         &archive_spec(),
     )
+}
+
+fn install_native(
+    context: &OperationContext,
+    root: &Path,
+    progress: &mut dyn FnMut(u8, crate::install::ProgressStage),
+) -> InstallResult<PathBuf> {
+    use crate::install::{
+        ProducerDirectory, Purpose, VerifiedSource, install_executable_source_in,
+        install_verified_source_bounded_in, verify_sha256_preserving,
+    };
+    use std::{fs, process::Stdio};
+
+    fs::create_dir_all(root.join("cache")).map_err(crate::io_error)?;
+    let archive = root.join("cache/goose-native-source.tar.gz");
+    if verify_sha256_preserving(&archive, SOURCE_SHA256, "Goose source").is_err() {
+        progress(10, crate::install::ProgressStage::Downloading);
+        install_verified_source_bounded_in(
+            context,
+            SOURCE_URL,
+            &archive,
+            VerifiedSource {
+                kind: "pinned Goose source",
+                checksum: SOURCE_SHA256,
+                executable: false,
+                limit: 512 * 1024 * 1024,
+            },
+            |_, _| Ok(()),
+        )?;
+    }
+    let source = root.join("source-v1.54.0");
+    let complete = source.join(".asb-source-extracted");
+    if source.exists() && !complete.is_file() {
+        let retained = root.join(format!(
+            "source-incomplete-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        fs::rename(&source, retained).map_err(crate::io_error)?;
+    }
+    let owner = ProducerDirectory::open(root)?;
+    let mut scope = owner.scope(context);
+    if !complete.is_file() {
+        progress(25, crate::install::ProgressStage::Extracting);
+        fs::create_dir_all(&source).map_err(crate::io_error)?;
+        let mut step = scope.prepare("tar", Purpose::Extract, "Goose source extraction")?;
+        step.command_mut()
+            .arg("-xzf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&source)
+            .arg("--strip-components=1")
+            .stdin(Stdio::null());
+        if !scope.run(step)?.status.success() {
+            return Err(
+                Error::Io("Goose source extraction failed; install tar and retry".into()).into(),
+            );
+        }
+        fs::write(&complete, b"1\n").map_err(crate::io_error)?;
+    }
+    let support = root.join("asb-native-build");
+    fs::create_dir_all(&support).map_err(crate::io_error)?;
+    for (name, content) in [
+        (
+            "goose-native-build.py",
+            include_str!("../../../assets/scripts/goose-native-build.py"),
+        ),
+        (
+            "goose-native-prepare.py",
+            include_str!("../../../assets/scripts/goose-native-prepare.py"),
+        ),
+        (
+            "goose-native-dispatch.patch",
+            include_str!("../../../assets/scripts/goose-native-dispatch.patch"),
+        ),
+        (
+            "goose-native-hook.rs",
+            include_str!("../../../assets/scripts/goose-native-hook.rs"),
+        ),
+    ] {
+        let path = support.join(name);
+        if fs::read(&path).ok().as_deref() != Some(content.as_bytes()) {
+            fs::write(path, content).map_err(crate::io_error)?;
+        }
+    }
+    let output = root.join("bin/goose");
+    let candidate = root.join("native-build-output/goose");
+    progress(40, crate::install::ProgressStage::Building);
+    let mut step = scope.prepare("python3", Purpose::Build, "Goose native compilation")?;
+    step.command_mut()
+        .arg(support.join("goose-native-build.py"))
+        .arg(&source)
+        .arg(root.join("build"))
+        .arg(&candidate)
+        .stdin(Stdio::null());
+    if std::env::var_os("CARGO_HOME").is_none() {
+        step.command_mut()
+            .env("CARGO_HOME", root.join("cargo-cache"));
+    }
+    if !scope.run(step)?.status.success() {
+        return Err(Error::Io("Goose native build failed; install Python, Git, Rust and Goose's build dependencies, then retry `asb tool install goose`".into()).into());
+    }
+    owner.consume(scope.finish()?)?;
+    progress(90, crate::install::ProgressStage::Validating);
+    let candidate = candidate.to_str().ok_or_else(|| {
+        Error::Io("Goose build output path is not valid UTF-8; use a UTF-8 project path".into())
+    })?;
+    install_executable_source_in(context, candidate, &output, "Goose native build")?;
+    progress(100, crate::install::ProgressStage::Validating);
+    Ok(output)
 }
 
 fn guest_assets(
