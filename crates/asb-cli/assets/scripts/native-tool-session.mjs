@@ -78,7 +78,9 @@ export class ReplaySession {
   reserve(request) {
     if (this.closed) throw new Error('Native tool replay session is closed');
     const key = canonical(request);
-    if (!this.byDispatch.slice(this.nextDispatch).some(event => canonical(event.request) === key)) {
+    const available = this.byDispatch.slice(this.nextDispatch).filter(event => canonical(event.request) === key).length;
+    const queued = this.pending.filter(item => item.key === key).length;
+    if (queued >= available) {
       throw new Error('Native tool replay has no matching remaining tool request');
     }
     let item;

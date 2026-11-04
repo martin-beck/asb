@@ -77,3 +77,16 @@ const failedReservation = new ReplaySession([
 const failedHandle = failedReservation.reserve({tool: 'write'});
 await assert.rejects(failedHandle.release(), /snapshot failed/);
 assert.throws(() => failedReservation.finish(), /incomplete/);
+
+// An out-of-order duplicate must not wait forever for a single later event.
+const duplicates = new ReplaySession([
+  {ordinal: 0, request: {tool: 'first'}, outcome: {ok: true, value: 0}},
+  {ordinal: 1, request: {tool: 'later'}, outcome: {ok: true, value: 1}},
+]);
+const later = duplicates.reserve({tool: 'later'});
+assert.throws(() => duplicates.reserve({tool: 'later'}), /no matching/);
+const firstReservation = duplicates.reserve({tool: 'first'});
+const lateResult = later.release();
+assert.equal(await firstReservation.release(), 0);
+assert.equal(await lateResult, 1);
+duplicates.finish();

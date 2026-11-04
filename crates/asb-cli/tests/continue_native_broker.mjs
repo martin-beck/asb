@@ -218,6 +218,18 @@ try {
   assert.deepEqual(delayedEffects, [1, 0]);
   await assert.rejects(brokerRequest(socket, {op: 'release', token: parent.token}), /no active/);
   await delayed.finish();
+  const duplicateBroker = new NativeToolBroker('replay', [
+    {ordinal: 0, request: {tool: 'first'}, outcome: {ok: true, value: 'first'}},
+    {ordinal: 1, request: {tool: 'later'}, outcome: {ok: true, value: 'later'}},
+  ]);
+  await duplicateBroker.listen(socket);
+  const lateCall = await brokerRequest(socket, {op: 'reserve', request: {tool: 'later'}});
+  await assert.rejects(brokerRequest(socket, {op: 'reserve', request: {tool: 'later'}}), /no matching/);
+  const firstCall = await brokerRequest(socket, {op: 'reserve', request: {tool: 'first'}});
+  const lateOutcome = brokerRequest(socket, {op: 'release', token: lateCall.token});
+  assert.equal((await brokerRequest(socket, {op: 'release', token: firstCall.token})).value, 'first');
+  assert.equal((await lateOutcome).value, 'later');
+  await duplicateBroker.finish();
   await new Promise(resolve => marker.close(resolve));
   await assert.rejects(snapshotBoundary(markerSocket,'record','begin',0), /unavailable/);
   console.log('Continue broker parent/child ordering checks passed');
