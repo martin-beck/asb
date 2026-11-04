@@ -319,6 +319,47 @@ def cache_pinned_file(root_fd, path, expected_buildid, cache_home, perf, uid, gi
         os.close(fd)
 
 
+def container_for(pid, start):
+    """Identify the local Docker cgroup without trusting a caller-supplied name."""
+    current = identity(pid)
+    if current is None or current[1] != start:
+        return None
+    try:
+        lines = pathlib.Path(f'/proc/{pid}/cgroup').read_text().splitlines()
+        ids = set()
+        for line in lines:
+            for component in line.split(':', 2)[-1].split('/'):
+                match = re.fullmatch(r'(?:docker-)?([0-9a-f]{64})(?:\.scope)?', component)
+                if match:
+                    ids.add(match.group(1))
+        current = identity(pid)
+        return next(iter(ids)) if len(ids) == 1 and current and current[1] == start else None
+    except OSError:
+        return None
+
+
+def cache_container_file(container, path, expected_buildid, cache_home, perf, uid, gid, max_bytes, timeout=20):
+    """Copy one bounded image via the owned container, then verify its build ID."""
+    if (not re.fullmatch(r'[0-9a-f]{64}', container) or not path.startswith('/')
+            or '..' in path.split('/') or len(path) > 4096 or max_bytes <= 0):
+        return False
+    limit = min(MAX_IMAGE_BYTES, max_bytes)
+    try:
+        with tempfile.TemporaryFile(dir=cache_home) as image:
+            result = subprocess.run(
+                ['docker', 'exec', '--user', '0', container, 'head', '-c', str(limit + 1), '--', path],
+                stdin=subprocess.DEVNULL, stdout=image, stderr=subprocess.DEVNULL,
+                timeout=timeout, check=False,
+            )
+            info = os.fstat(image.fileno())
+            if result.returncode != 0 or not 0 < info.st_size <= limit:
+                return False
+            return cache_fd(image.fileno(), (info.st_dev, info.st_ino), cache_home,
+                            perf, uid, gid, limit, expected_buildid)
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def publish_host_debug(buildid, symbol_root, cache_home, uid, gid, max_bytes):
     """Attach an independently verified project debug file to a cached ELF."""
     if not re.fullmatch(r'(?:[0-9a-f]{2}){4,64}', buildid):
@@ -381,7 +422,7 @@ def publish_host_debug(buildid, symbol_root, cache_home, uid, gid, max_bytes):
         return None
 
 
-def settle_recorded_images(root_fd, data, cache_home, perf, symbol_root, uid, gid, remaining, slots=MAX_IMAGES):
+def settle_recorded_images(root_fd, data, cache_home, perf, symbol_root, uid, gid, remaining, slots=MAX_IMAGES, container=None):
     """Recover recorded images still present in the pinned guest filesystem."""
     initial_remaining = remaining
     def drop_privileges():
@@ -407,13 +448,17 @@ def settle_recorded_images(root_fd, data, cache_home, perf, symbol_root, uid, gi
             return None
     wanted = set(initial['missing'])
     recovered = 0
+    export_deadline = time.monotonic() + 20
     for line in listing.splitlines():
         fields = line.split(None, 1)
         if len(fields) != 2 or fields[0] not in wanted or not fields[1].startswith('/'):
             continue
-        if remaining <= 0 or recovered >= slots:
+        if remaining <= 0 or recovered >= slots or time.monotonic() >= export_deadline:
             break
-        copied = cache_pinned_file(root_fd, fields[1], fields[0], cache_home, perf, uid, gid, remaining)
+        copied = (cache_pinned_file(root_fd, fields[1], fields[0], cache_home, perf, uid, gid, remaining)
+                  if root_fd is not None else
+                  cache_container_file(container, fields[1], fields[0], cache_home, perf, uid, gid, remaining,
+                                       max(0.01, export_deadline - time.monotonic())))
         if copied:
             used, buildid = copied
             remaining -= used
@@ -444,6 +489,7 @@ def main():
     recorder = (int(sys.argv[9]), int(sys.argv[10])) if len(sys.argv) > 11 else None
     data = sys.argv[11] if recorder else None
     root_fd = None
+    container = None
     seen = set()
     members = [(root, start)]
     size = 0
@@ -470,12 +516,15 @@ def main():
             try:
                 root_fd = os.open(f'/proc/{root}/root', os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
             except OSError as error:
-                print('Cannot access the benchmark process root for perf symbol capture: '
-                      f'{error}. Guest files must be readable by the benchmark user.', file=sys.stderr)
-                return 2
+                container = container_for(root, start)
+                if container is None:
+                    print('Cannot access the benchmark process root for perf symbol capture: '
+                          f'{error}. No verified local Docker container was found.', file=sys.stderr)
+                    return 2
             after = identity(root)
             if after is None or after[1] != start:
-                os.close(root_fd)
+                if root_fd is not None:
+                    os.close(root_fd)
                 return 2
         with open(request, 'rb', buffering=0) as reader, open(ack, 'wb', buffering=0) as writer:
             if reader.read(7) != b'enable\n':
@@ -527,17 +576,18 @@ def main():
                     skipped += 1
         time.sleep(0.5)
     recorded = None
-    if recorder and root_fd is not None:
+    if recorder and (root_fd is not None or container is not None):
         deadline = time.monotonic() + 35
         while time.monotonic() < deadline:
             current = identity(recorder[0])
             if current is None or current[1] != recorder[1]:
-                recorded = settle_recorded_images(root_fd, data, cache_home, perf, symbol_root, uid, gid, MAX_TOTAL_BYTES - size, MAX_IMAGES - len(seen))
+                recorded = settle_recorded_images(root_fd, data, cache_home, perf, symbol_root, uid, gid, MAX_TOTAL_BYTES - size, MAX_IMAGES - len(seen), container)
                 if recorded is not None:
                     size += recorded['recovered_bytes']
                 break
             time.sleep(0.05)
-        os.close(root_fd)
+        if root_fd is not None:
+            os.close(root_fd)
     print(json.dumps({'schema_version': 1, 'scope': 'sampled-live-mappings-and-recorded-build-ids',
                       'retained_images': len(seen) + (recorded['recovered_recorded_images'] if recorded else 0), 'retained_bytes': size,
                       'skipped_observations': skipped, 'interval_ms': 500,

@@ -18,12 +18,50 @@ spec.loader.exec_module(module)
 
 
 class CustodyTest(unittest.TestCase):
+    def test_container_identity_requires_one_cgroup_and_same_process_generation(self):
+        container = 'b' * 64
+        with mock.patch.object(module, 'identity', side_effect=[(1, 7), (1, 7)]), \
+             mock.patch.object(Path, 'read_text', return_value=f'0::/system.slice/docker-{container}.scope\n'):
+            self.assertEqual(module.container_for(123, 7), container)
+        with mock.patch.object(module, 'identity', side_effect=[(1, 7), (1, 8)]), \
+             mock.patch.object(Path, 'read_text', return_value=f'0::/docker/{container}\n'):
+            self.assertIsNone(module.container_for(123, 7))
+        with mock.patch.object(module, 'identity', side_effect=[(1, 7), (1, 7)]), \
+             mock.patch.object(Path, 'read_text', return_value=f'0::/{container}/{"c" * 64}\n'):
+            self.assertIsNone(module.container_for(123, 7))
+
+    @unittest.skipUnless(shutil.which('cc'), 'requires a C compiler')
+    def test_container_export_is_bounded_and_build_id_checked(self):
+        with tempfile.TemporaryDirectory(prefix='asb-symbol-container-') as directory:
+            root = Path(directory); source = root / 'test.c'; binary = root / 'test'
+            source.write_text('int main(void) { return 0; }\n')
+            subprocess.run(['cc', '-g', '-Wl,--build-id', '-o', str(binary), str(source)], check=True)
+            with binary.open('rb') as stream:
+                buildid = module.elf_buildid(stream.fileno())
+            perf = root / 'perf'
+            perf.write_text('#!/bin/sh\nexit 0\n'); perf.chmod(0o755)
+            original = subprocess.run
+            def export(args, **kwargs):
+                if args[0] == 'docker':
+                    kwargs['stdout'].write(binary.read_bytes())
+                    kwargs['stdout'].flush()
+                    return subprocess.CompletedProcess(args, 0)
+                return original(args, **kwargs)
+            with mock.patch.object(module.subprocess, 'run', side_effect=export):
+                args = ('a' * 64, '/usr/bin/test', buildid, str(root), str(perf), os.getuid(), os.getgid())
+                self.assertTrue(module.cache_container_file(*args, 1024 * 1024))
+                self.assertFalse(module.cache_container_file(*args, 8))
+                self.assertFalse(module.cache_container_file('x' * 64, *args[1:], 1024 * 1024))
+                self.assertFalse(module.cache_container_file(args[0], '/../../etc/passwd', *args[2:], 1024 * 1024))
+                self.assertFalse(module.cache_container_file(args[0], args[1], 'deadbeef', *args[3:], 1024 * 1024))
+
     def test_inaccessible_guest_root_reports_the_permission_problem(self):
         stderr = io.StringIO()
         argv = ['helper', '12', '34', '1000', '1000', '/cache', '/perf',
                 '/symbols', 'fifo:/request,/ack', '56', '78', '/perf.data']
         with mock.patch.object(module.sys, 'argv', argv), \
              mock.patch.object(module, 'identity', side_effect=[(1, 34), (1, 78)]), \
+             mock.patch.object(module, 'container_for', return_value=None), \
              mock.patch.object(module.os, 'open', side_effect=PermissionError('denied')), \
              contextlib.redirect_stderr(stderr):
             self.assertEqual(module.main(), 2)
