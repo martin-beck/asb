@@ -11,7 +11,9 @@ function statePath(directory, event) {
   if (!directory || typeof event?.session_id !== 'string' || !event.session_id ||
       typeof event?.tool_use_id !== 'string' || !event.tool_use_id)
     throw new TypeError('Claude native hook identity is missing');
-  const id = createHash('sha256').update(JSON.stringify([event.session_id, event.tool_use_id])).digest('hex');
+  if (event.agent_id !== undefined && (typeof event.agent_id !== 'string' || !event.agent_id))
+    throw new TypeError('Claude native hook agent identity is invalid');
+  const id = createHash('sha256').update(JSON.stringify([event.session_id, event.agent_id ?? null, event.tool_use_id])).digest('hex');
   return join(directory, `${id}.json`);
 }
 
@@ -58,13 +60,13 @@ export async function recordHook(event, { directory, socket, marker }) {
   }
 }
 
-// Experimental Bash and Read replay probe. Production must handle all native
+// Experimental Bash, Read and WebSearch replay probe. Production must handle all native
 // tools and failure shapes before this can be selected by the adapter.
 export async function replayHook(event, { directory, socket }) {
   const state = statePath(directory, event);
-  if (!socket || !['Bash', 'Read'].includes(event.tool_name) || !event.tool_input ||
+  if (!socket || !['Bash', 'Read', 'WebSearch'].includes(event.tool_name) || !event.tool_input ||
       typeof event.tool_input !== 'object' || Array.isArray(event.tool_input))
-    throw new TypeError('Claude native replay probe supports Bash and Read only');
+    throw new TypeError('Claude native replay probe supports Bash, Read and WebSearch only');
   if (event.hook_event_name === 'PreToolUse') {
     const file = await open(state, 'wx', 0o600);
     try {

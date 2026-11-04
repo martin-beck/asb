@@ -47,8 +47,20 @@ try {
   const bash = {...base, tool_use_id: 'bash-call', tool_name: 'Bash', tool_input: {command: 'touch forbidden'}};
   assert.equal((await hook({...bash, hook_event_name: 'PreToolUse'})).code, 0);
   assert.equal((await hook({...bash, hook_event_name: 'PostToolUse', tool_response: {stdout: 'recorded', stderr: '', interrupted: false, isImage: false}})).code, 0);
+  const search = {...base, tool_use_id: 'search-call', tool_name: 'WebSearch', tool_input: {query: 'fixture search'}};
+  assert.equal((await hook({...search, hook_event_name: 'PreToolUse'})).code, 0);
+  const searchResult = {query: 'fixture search', results: [], durationSeconds: 1, searchCount: 0};
+  assert.equal((await hook({...search, hook_event_name: 'PostToolUse', tool_response: searchResult})).code, 0);
+  // Child agents share a Claude session; tool IDs may coincide across them.
+  const childA = {...base, agent_id: 'agent-a', tool_use_id: 'same-call'};
+  const childB = {...base, agent_id: 'agent-b', tool_use_id: 'same-call'};
+  assert.equal((await hook({...childA, hook_event_name: 'PreToolUse'})).code, 0);
+  assert.equal((await hook({...childB, hook_event_name: 'PreToolUse'})).code, 0);
+  assert.equal((await hook({...childB, hook_event_name: 'PostToolUse', tool_response: {child: 'b'}})).code, 0);
+  assert.equal((await hook({...childA, hook_event_name: 'PostToolUse', tool_response: {child: 'a'}})).code, 0);
   const events = await broker.finish();
-  assert.equal(events.length, 3);
+  assert.equal(events.length, 6);
+  assert.deepEqual(events.slice(4).map(event => JSON.parse(event.outcome.value.json).child), ['b', 'a']);
   assert.deepEqual(JSON.parse(events[1].outcome.value.json), {error: failureText, is_interrupt: false});
   assert.deepEqual(events[0].request, {tool: 'Read', input: {file_path: '/fixture'}});
   assert.equal(events[0].outcome.value.json, '{"z":1,"a":2}');
@@ -60,7 +72,7 @@ try {
   await playback.listen(socket);
   const unsupported = await hook({...base, tool_name: 'WebFetch', hook_event_name: 'PreToolUse'}, 'replay');
   assert.notEqual(unsupported.code, 0);
-  assert.match(unsupported.err, /Bash and Read only/);
+  assert.match(unsupported.err, /Bash, Read and WebSearch only/);
   const before = await hook({...bash, hook_event_name: 'PreToolUse'}, 'replay');
   assert.equal(before.code, 0, before.err);
   assert.equal(JSON.parse(before.out).hookSpecificOutput.updatedInput.command, ':');
@@ -95,6 +107,15 @@ try {
   assert.equal(failedAfter.code, 0, failedAfter.err);
   assert.deepEqual(JSON.parse(failedAfter.out), {});
   await failurePlayback.finish();
+  const searchPlayback = new NativeToolBroker('replay', [{...events[3], ordinal: 0}], async () => {});
+  await searchPlayback.listen(socket);
+  const searchBefore = await hook({...search, hook_event_name: 'PreToolUse'}, 'replay');
+  assert.equal(searchBefore.code, 0, searchBefore.err);
+  assert.deepEqual(JSON.parse(searchBefore.out).hookSpecificOutput.updatedInput, search.tool_input);
+  const searchAfter = await hook({...search, hook_event_name: 'PostToolUse', tool_response: {...searchResult, durationSeconds: 9}}, 'replay');
+  assert.equal(searchAfter.code, 0, searchAfter.err);
+  assert.deepEqual(JSON.parse(searchAfter.out).hookSpecificOutput.updatedToolOutput, searchResult);
+  await searchPlayback.finish();
   const failed = await hook({...base, hook_event_name: 'PostToolUse', tool_response: {}});
   assert.notEqual(failed.code, 0);
   assert.match(readFileSync(join(root, 'hook-failed'), 'utf8'), /failed/);
