@@ -32,6 +32,7 @@ pub(super) fn guest_archive(
         source: root.join("cache").join(name),
         target: Path::new("cache").join(name),
         native_executable: false,
+        runtime_tools: &[],
         distribution: Some((url, checksum)),
     }]
 }

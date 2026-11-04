@@ -101,6 +101,8 @@ pub(crate) struct GuestAsset {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub native_executable: bool,
     #[serde(skip)]
+    pub runtime_tools: &'static [&'static str],
+    #[serde(skip)]
     pub distribution: Option<(&'static str, &'static str)>,
 }
 type GuestAssetsHook = fn(&Path) -> Result<Vec<GuestAsset>, crate::Error>;

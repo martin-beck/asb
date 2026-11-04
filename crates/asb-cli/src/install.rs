@@ -347,6 +347,14 @@ fn guest_bootstrap_in(
         public_package_cache: matches!(recipe, Recipe::Npm { .. }),
         npm_package_tree: None,
     };
+    let primary_assets = recipe.guest_assets(context, &tools_root.join(id), &mut progress)?;
+    if let Some(assets) = &primary_assets {
+        for &runtime in assets.iter().flat_map(|asset| asset.runtime_tools) {
+            if !plan.runtime_tools.contains(&runtime) {
+                plan.runtime_tools.push(runtime);
+            }
+        }
+    }
     for id in &plan.runtime_tools {
         let tool = tools::find(id)
             .ok_or_else(|| Error::Input("guest runtime is not registered".into()))?;
@@ -366,7 +374,7 @@ fn guest_bootstrap_in(
             plan.assets.push(asset);
         }
     }
-    if let Some(assets) = recipe.guest_assets(context, &tools_root.join(id), &mut progress)? {
+    if let Some(assets) = primary_assets {
         plan.assets.extend(assets.into_iter().map(|mut asset| {
             asset.target = Path::new(id).join(asset.target);
             asset

@@ -335,6 +335,7 @@ fn guest_assets(
             source: executable,
             target: PathBuf::from("bin/goose"),
             native_executable: true,
+            runtime_tools: &["node"],
             distribution: None,
         }]);
     }
@@ -343,6 +344,7 @@ fn guest_assets(
         source: archive,
         target: PathBuf::from("cache/goose.tar.gz"),
         native_executable: false,
+        runtime_tools: &[],
         distribution: None,
     }])
 }
@@ -623,6 +625,7 @@ mod tests {
         assert_eq!(assets[0].source, executable);
         assert_eq!(assets[0].target, Path::new("bin/goose"));
         assert!(assets[0].native_executable);
+        assert_eq!(assets[0].runtime_tools, &["node"]);
         assert_eq!(
             serde_json::to_value(&assets[0]).unwrap()["native_executable"],
             true
