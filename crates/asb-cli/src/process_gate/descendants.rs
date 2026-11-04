@@ -569,6 +569,68 @@ mod tests {
     }
 
     #[test]
+    fn recording_service_settles_after_agent_descendant_cleanup() {
+        use std::io::{BufRead, Write};
+        use std::os::unix::net::UnixStream;
+        use std::process::{Command, Stdio};
+        let _view = CurrentTaskView::enter();
+        let root = std::env::temp_dir().join(format!("asb-csvc-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bundle = root.join("bundle");
+        let socket = root.join("s.sock");
+        let output = root.join("record.jsonl");
+        std::fs::write(&bundle, b"fixture").unwrap();
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/scripts/continue-native-service.mjs");
+        let mut scope = DescendantScope::new().unwrap();
+        let mut service = Command::new("node")
+            .arg(script)
+            .arg(&socket)
+            .arg(&bundle)
+            .arg(&output)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufReader::new(service.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready, "READY\n");
+        let exchange = |message: &str| {
+            let mut connection = UnixStream::connect(&socket).unwrap();
+            writeln!(connection, "{message}").unwrap();
+            let mut response = String::new();
+            std::io::BufReader::new(connection)
+                .read_line(&mut response)
+                .unwrap();
+            response
+        };
+        assert!(exchange(r#"{"op":"start","request":{"tool":"Read"}}"#).contains("\"token\":0"));
+        assert!(
+            exchange(r#"{"op":"finish","token":0,"outcome":{"ok":true,"value":"ok"}}"#)
+                .contains("\"ok\":true")
+        );
+        let mut agent = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let agent_identity = pin(agent.id());
+        let result = scope.quiesce_except(&mut service);
+        let agent_reaped = was_reaped(&agent_identity);
+        service.stdin.take().unwrap().write_all(b"S\n").unwrap();
+        let status = service.wait().unwrap();
+        if !agent_reaped {
+            let _ = agent.kill();
+        }
+        let _ = agent.wait();
+        result.unwrap();
+        assert!(agent_reaped && status.success());
+        let payload = std::fs::read_to_string(&output).unwrap();
+        assert!(payload.contains("\"event\":\"launch\""));
+        assert!(!payload.contains("workspace_effect"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn separately_owned_service_survives_agent_descendant_cleanup() {
         let _view = CurrentTaskView::enter();
         let mut scope = DescendantScope::new().unwrap();
