@@ -767,6 +767,10 @@ def main():
                     if observation in guest_seen or path in guest_ambiguous:
                         continue
                     guest_seen.add(observation)
+                    if row.get('has_build_id') is True:
+                        # The settled perf listing recovers these images via
+                        # their build IDs; prioritize no-ID files while live.
+                        continue
                     copied = capture_guest_noid(container, guest_script, row, cache_home, MAX_TOTAL_BYTES - size)
                     if copied is None:
                         guest_failures += 1

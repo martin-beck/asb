@@ -1,6 +1,8 @@
 import importlib.util
 import io
 import os
+import shutil
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -21,6 +23,20 @@ def process(root, pid, parent, start, maps=''):
 
 
 class GuestMappingsTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('cc'), 'requires a C compiler')
+    def test_detects_build_id_and_absence_without_classifying_invalid_as_present(self):
+        with tempfile.TemporaryDirectory() as path:
+            root = Path(path); source = root / 'test.c'; source.write_text('int main(void) { return 0; }\n')
+            for name, flags, expected in [('withid', ['-Wl,--build-id'], True),
+                                          ('noid', ['-Wl,--build-id=none'], False)]:
+                binary = root / name
+                subprocess.run(['cc', *flags, '-o', str(binary), str(source)], check=True)
+                with binary.open('rb') as image:
+                    self.assertEqual(module.has_build_id(image.fileno()), expected)
+            invalid = root / 'invalid'; invalid.write_bytes(b'\x7fELF')
+            with invalid.open('rb') as image:
+                self.assertFalse(module.has_build_id(image.fileno()))
+
     def test_copy_requires_the_observed_inode_and_live_generation(self):
         with tempfile.TemporaryDirectory() as path:
             proc = Path(path)

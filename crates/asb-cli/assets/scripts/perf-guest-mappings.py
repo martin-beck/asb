@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import struct
 import sys
 
 MAX_PROCESSES = 16384
@@ -15,6 +16,49 @@ MAX_MAP_LINES = 65536
 MAX_MAPPINGS = 8192
 MAX_PATH_BYTES = 4096
 MAX_IMAGE_BYTES = 512 * 1024 * 1024
+
+
+def has_build_id(fd):
+    """Return true only for a bounded, well-formed GNU build-ID note."""
+    try:
+        header = os.pread(fd, 64, 0)
+        if len(header) < 52 or header[:4] != b'\x7fELF' or header[5] not in (1, 2):
+            return False
+        endian = '<' if header[5] == 1 else '>'
+        if header[4] == 2 and len(header) >= 64:
+            offset = struct.unpack_from(endian + 'Q', header, 32)[0]
+            width, count = struct.unpack_from(endian + 'HH', header, 54)
+            minimum, offset_field, size_field, number = 56, 8, 32, 'Q'
+        elif header[4] == 1:
+            offset = struct.unpack_from(endian + 'I', header, 28)[0]
+            width, count = struct.unpack_from(endian + 'HH', header, 42)
+            minimum, offset_field, size_field, number = 32, 4, 16, 'I'
+        else:
+            return False
+        size = os.fstat(fd).st_size
+        if width < minimum or width > 1024 or count > 512 or offset > size or count * width > size - offset:
+            return False
+        for index in range(count):
+            segment = os.pread(fd, width, offset + index * width)
+            if len(segment) != width or struct.unpack_from(endian + 'I', segment)[0] != 4:
+                continue
+            start = struct.unpack_from(endian + number, segment, offset_field)[0]
+            length = struct.unpack_from(endian + number, segment, size_field)[0]
+            if length > 1024 * 1024 or start > size or length > size - start:
+                continue
+            notes = os.pread(fd, length, start); cursor = 0
+            while cursor + 12 <= len(notes):
+                namesz, descsz, kind = struct.unpack_from(endian + 'III', notes, cursor)
+                cursor += 12; name_end = cursor + namesz
+                descriptor = (name_end + 3) & ~3; end = descriptor + descsz
+                if end > len(notes):
+                    break
+                if kind == 3 and notes[cursor:name_end] == b'GNU\0' and 4 <= descsz <= 64:
+                    return True
+                cursor = (end + 3) & ~3
+    except (OSError, ValueError, struct.error, OverflowError):
+        pass
+    return False
 
 
 def identity(proc, pid):
@@ -105,7 +149,8 @@ def scan(proc, roots, include_stamps=False):
                                         != (major, minor, inode) or not stat.S_ISREG(info.st_mode)
                                         or os.pread(fd, 4, 0) != b'\x7fELF'):
                                     continue
-                                row.update(size=info.st_size, mtime_ns=info.st_mtime_ns, ctime_ns=info.st_ctime_ns)
+                                row.update(size=info.st_size, mtime_ns=info.st_mtime_ns,
+                                           ctime_ns=info.st_ctime_ns, has_build_id=has_build_id(fd))
                             finally:
                                 os.close(fd)
                         except OSError:
