@@ -97,7 +97,7 @@ class GuestBootstrapTests(unittest.TestCase):
             request={'project_root':str(root),'tools_root':str(root),'binary':'fixture',
                      'request':{'config':{'agent':'fixture'}},'bootstrap':{},
                      'auxiliary_tools':{'btrfs':'a','mkfs.btrfs':'b','rsync':'c'}}
-            resources=SimpleNamespace(callback=lambda _:None)
+            resources=SimpleNamespace(push=lambda _:None)
             with patch('asb_guest.bundle',return_value=([],{})), \
                  patch('asb_guest.stage_runtime',return_value=(0,0)), \
                  patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \
@@ -118,7 +118,7 @@ class GuestBootstrapTests(unittest.TestCase):
             tools={'btrfs':'a','mkfs.btrfs':'b','rsync':'c','qemu-img':'d','qemu-storage-daemon':'e'}
             request={'project_root':str(root),'tools_root':str(root),'binary':'fixture',
                      'request':{'config':{'agent':'fixture'}},'bootstrap':{},'auxiliary_tools':tools}
-            resources=SimpleNamespace(callback=lambda _:None)
+            resources=SimpleNamespace(push=lambda _:None)
             with patch('asb_guest.bundle',return_value=([],{})), \
                  patch('asb_guest.stage_runtime',return_value=(0,0)), \
                  patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \

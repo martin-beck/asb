@@ -20,13 +20,23 @@ from asb_snapshot_service import MarkerServer,SnapshotService,SnapshotReplay,Sna
 import asb_snapshot_service
 from asb_snapshot_guest import unpack_streams
 import asb_snapshot_guest
-from asb_snapshot_control import GuestSnapshot
+from asb_snapshot_control import GuestSnapshot, settle_on_exit
 
 SCRATCH=ROOT/'target'/'snapshot-service-tests'
 SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_snapshot_cleanup_keeps_the_original_execution_failure(self):
+        def fail():
+            raise RuntimeError('snapshot replay did not settle')
+        owner=SimpleNamespace(close=fail)
+        with self.assertRaisesRegex(RuntimeError, 'agent launch failed; snapshot cleanup also failed: snapshot replay did not settle'):
+            settle_on_exit(owner, RuntimeError, RuntimeError('agent launch failed'), None)
+        with self.assertRaisesRegex(RuntimeError, 'snapshot replay did not settle'):
+            settle_on_exit(owner, None, None, None)
+        self.assertFalse(settle_on_exit(SimpleNamespace(close=lambda:None), RuntimeError, RuntimeError('original'), None))
+
     def test_guest_supervisor_uses_automatic_capacity_by_default(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);container=SimpleNamespace(id='fixture-container')
