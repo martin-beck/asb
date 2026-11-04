@@ -265,6 +265,57 @@ fn replay_sidecar(path: &Path, stem: &str, extension: &str) -> Result<PathBuf, S
     Ok(parent.join(format!("{stem}{suffix}.{extension}")))
 }
 
+// The adapter derives only the private evidence it needs from the selected
+// model track; the generic guest transport does not interpret its contents.
+fn stage_adapter_replay_evidence(
+    adapter: &dyn crate::agents::AgentAdapter,
+    track: Option<&Path>,
+    replay: bool,
+    artifact_output: &Path,
+    inputs: &mut Vec<PrivateInput>,
+) -> Result<(), String> {
+    if !replay {
+        return Ok(());
+    }
+    let Some(track) = track else {
+        return Ok(());
+    };
+    let Some(bytes) = adapter
+        .guest_replay_evidence(track)
+        .map_err(|error| format!("cannot prepare adapter replay evidence: {error}"))?
+    else {
+        return Ok(());
+    };
+    if bytes.len() as u64 > MAX_PRIVATE_REPLAY_INPUT {
+        return Err("adapter replay evidence exceeds its size limit".into());
+    }
+    let directory = artifact_output.join("adapter-private");
+    std::fs::create_dir_all(&directory)
+        .map_err(|_| "cannot allocate adapter replay evidence".to_owned())?;
+    let source = directory.join("adapter-model-evidence.json");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&source)
+        .map_err(|_| "cannot create fresh adapter replay evidence".to_owned())?;
+    file.write_all(&bytes)
+        .map_err(|_| "cannot write adapter replay evidence".to_owned())?;
+    file.sync_all()
+        .map_err(|_| "cannot settle adapter replay evidence".to_owned())?;
+    inputs.push(PrivateInput {
+        source,
+        target: "adapter-model-evidence.json".into(),
+        bytes: bytes.len() as u64,
+        sha256: crate::cassette::digest(&bytes),
+    });
+    Ok(())
+}
+
 fn replay_private_inputs(
     path: Option<&Path>,
     replay: bool,
@@ -1114,6 +1165,13 @@ impl Session {
         // protocol; the adapter alone selects the guest-relative target.
         let adapter = crate::agents::find(&context.config.agent)
             .ok_or_else(|| "selected agent has no installation adapter".to_owned())?;
+        stage_adapter_replay_evidence(
+            adapter,
+            context.tape_cassette,
+            context.tool_replay && native_tool_launch.is_some(),
+            &artifact_output,
+            &mut private_inputs,
+        )?;
         for asset in adapter.guest_private_assets() {
             let target = std::path::Path::new(asset.target);
             if target.is_absolute()
@@ -1594,6 +1652,62 @@ mod execution_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn real_claude_replay_evidence_opt_in() {
+        let Some(track) = std::env::var_os("ASB_TEST_CLAUDE_TRACK") else {
+            return;
+        };
+        let output = std::env::var_os("ASB_TEST_CLAUDE_EVIDENCE_ROOT")
+            .expect("explicit evidence output is required");
+        let root = std::path::PathBuf::from(output);
+        std::fs::create_dir(&root).expect("evidence output must be fresh");
+        let mut inputs = Vec::new();
+        super::stage_adapter_replay_evidence(
+            crate::agents::find("claude-code").unwrap(),
+            Some(std::path::Path::new(&track)),
+            true,
+            &root,
+            &mut inputs,
+        )
+        .unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert!(inputs[0].bytes > 2);
+    }
+
+    #[test]
+    fn stages_only_adapter_owned_replay_evidence() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-adapter-evidence-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let track = root.join("replay.jsonl");
+        let fixture = serde_json::json!({"request":{"body":{"messages":[{"role":"user","content":"\nWeb page content:\n---\nfixture"}],"tools":[]}}});
+        std::fs::write(&track, format!("{fixture}\n")).unwrap();
+        let claude = crate::agents::find("claude-code").unwrap();
+        let other = crate::agents::find("codex").unwrap();
+        let mut inputs = Vec::new();
+        super::stage_adapter_replay_evidence(claude, Some(&track), false, &root, &mut inputs)
+            .unwrap();
+        super::stage_adapter_replay_evidence(other, Some(&track), true, &root, &mut inputs)
+            .unwrap();
+        assert!(inputs.is_empty());
+        super::stage_adapter_replay_evidence(claude, Some(&track), true, &root, &mut inputs)
+            .unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].target, "adapter-model-evidence.json");
+        let bytes = std::fs::read(&inputs[0].source).unwrap();
+        assert_eq!(inputs[0].sha256, crate::cassette::digest(&bytes));
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 1);
+        assert!(
+            super::stage_adapter_replay_evidence(claude, Some(&track), true, &root, &mut inputs)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&inputs[0].source).unwrap(), bytes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn all_workload_controller_routes_inherit_the_invocation_directory() {
         let root = std::env::temp_dir().join(format!(

@@ -27,11 +27,20 @@ await broker.listen(socket);
 if (agent === 'claude-code') await chmod(socket, 0o666);
 let webService;
 const webPlan = process.env.ASB_CLAUDE_WEB_PLAN;
+const webEvidence = process.env.ASB_CLAUDE_WEB_EVIDENCE;
 const webReady = process.env.ASB_CLAUDE_WEB_READY;
-if (webPlan || webReady) {
-  if (agent !== 'claude-code' || mode !== 'replay' || !webPlan || !webReady || !process.env.ASB_CLAUDE_WEB_RUNTIME)
+if (webPlan || webEvidence || webReady) {
+  if (agent !== 'claude-code' || mode !== 'replay' || Boolean(webPlan) === Boolean(webEvidence) || !webReady || !process.env.ASB_CLAUDE_WEB_RUNTIME)
     throw new Error('Claude WebFetch replay service configuration is incomplete');
-  const plan = JSON.parse(await readFile(webPlan, 'utf8'));
+  let plan;
+  if (webPlan) plan = JSON.parse(await readFile(webPlan, 'utf8'));
+  else {
+    const {decodeSidecar} = await import('./native-tool-sidecar.mjs');
+    const {planWebFetchReplay} = await import('./claude-webfetch-tape.mjs');
+    const exchanges = decodeSidecar(await readFile(target), 'claude-code').exchanges;
+    const evidence = JSON.parse(await readFile(webEvidence, 'utf8'));
+    plan = planWebFetchReplay(exchanges, evidence);
+  }
   const {startWebFetchReplayService} = await import('./claude-webfetch-service.mjs');
   webService = await startWebFetchReplayService({runtime: process.env.ASB_CLAUDE_WEB_RUNTIME, plan});
   try {

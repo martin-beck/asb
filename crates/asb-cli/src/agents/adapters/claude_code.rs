@@ -35,6 +35,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_complete_tool_replay(prepare_tool_replay)
 .with_native_tool_transport()
+.with_guest_replay_evidence(extract_guest_replay_evidence)
 .with_guest_service(start_native_service)
 .with_deferred_native_recording(finalize_native_recording)
 .with_artifact_specs(&[
@@ -158,6 +159,108 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
         specification.args.retain(|arg| arg != "--bare");
     }
     specification
+}
+
+// Only one-message tool-free provider requests can be WebFetch summaries.
+// Keep their messages, not the complete prompt/response track, in the guest.
+fn extract_guest_replay_evidence(track: &Path) -> Result<Vec<u8>, Error> {
+    use std::io::{BufRead, BufReader};
+    const MAX_EVIDENCE: usize = 64 * 1024 * 1024;
+    let metadata = std::fs::symlink_metadata(track)
+        .map_err(|_| Error::Run("Claude replay model track is unavailable".into()))?;
+    if !metadata.file_type().is_file()
+        || metadata.len() > crate::cassette::Limits::default().max_track_bytes
+    {
+        return Err(Error::Run(
+            "Claude replay model track is invalid or too large".into(),
+        ));
+    }
+    let file = std::fs::File::open(track)
+        .map_err(|_| Error::Run("Claude replay model track is unavailable".into()))?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut output = vec![b'['];
+    let mut first = true;
+    let mut consumed = 0u64;
+    loop {
+        line.clear();
+        let size = reader
+            .read_until(b'\n', &mut line)
+            .map_err(|_| Error::Run("Claude replay model track is unreadable".into()))?;
+        if size == 0 {
+            break;
+        }
+        consumed = consumed
+            .checked_add(size as u64)
+            .ok_or_else(|| Error::Run("Claude replay model track is too large".into()))?;
+        if consumed > metadata.len() || line.last() != Some(&b'\n') {
+            return Err(Error::Run(
+                "Claude replay model track changed or is incomplete".into(),
+            ));
+        }
+        let entry: serde_json::Value = serde_json::from_slice(&line)
+            .map_err(|_| Error::Run("Claude replay model track is malformed".into()))?;
+        let Some(raw) = entry.get("request").and_then(|request| request.get("body")) else {
+            continue;
+        };
+        let parsed;
+        let body = if let Some(text) = raw.as_str() {
+            parsed = serde_json::from_str::<serde_json::Value>(text).ok();
+            parsed.as_ref()
+        } else {
+            Some(raw)
+        };
+        let Some(body) = body else { continue };
+        let Some(messages) = body.get("messages").and_then(|value| value.as_array()) else {
+            continue;
+        };
+        if messages.len() != 1
+            || body
+                .get("tools")
+                .is_some_and(|tools| tools.as_array().is_none_or(|values| !values.is_empty()))
+        {
+            continue;
+        }
+        let message = &messages[0];
+        if message.get("role").and_then(|value| value.as_str()) != Some("user") {
+            continue;
+        }
+        let Some(content) = message.get("content") else {
+            continue;
+        };
+        let text = content.as_str().or_else(|| {
+            let parts = content.as_array()?;
+            if parts.len() != 1
+                || parts[0].get("type").and_then(|value| value.as_str()) != Some("text")
+            {
+                return None;
+            }
+            parts[0].get("text")?.as_str()
+        });
+        if !text.is_some_and(|text| text.starts_with("\nWeb page content:\n---\n")) {
+            continue;
+        }
+        let item = serde_json::json!({"request": {"body": {"messages": messages, "tools": []}}});
+        let bytes = serde_json::to_vec(&item)
+            .map_err(|_| Error::Run("Claude replay evidence cannot be encoded".into()))?;
+        if output.len().saturating_add(bytes.len()).saturating_add(2) > MAX_EVIDENCE {
+            return Err(Error::Run(
+                "Claude replay evidence exceeds its size limit".into(),
+            ));
+        }
+        if !first {
+            output.push(b',');
+        }
+        first = false;
+        output.extend_from_slice(&bytes);
+    }
+    if consumed != metadata.len() {
+        return Err(Error::Run(
+            "Claude replay model track changed or is incomplete".into(),
+        ));
+    }
+    output.push(b']');
+    Ok(output)
 }
 
 fn finalize_native_recording(pending: &[u8], snapshot_sha256: &str) -> Result<Vec<u8>, Error> {
@@ -608,6 +711,41 @@ if (normalizeRequest(altered).system[0].text === a.system[0].text) throw Error('
         assert!(ADAPTER.supports_tool_replay());
         assert!(ADAPTER.supports_mcp_servers());
         assert!(ADAPTER.supports_mcp_relay());
+    }
+
+    #[test]
+    fn guest_replay_evidence_keeps_only_tool_free_single_message_requests() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-claude-evidence-{}-{}",
+            std::process::id(),
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("track.jsonl");
+        let summary = serde_json::json!({"messages":[{"role":"user","content":"\nWeb page content:\n---\nfixture page"}],"tools":[]});
+        let entries = [
+            serde_json::json!({"request":{"body":summary},"response":{"secret":"omitted"}}),
+            serde_json::json!({"request":{"body":serde_json::to_string(&summary).unwrap()}}),
+            serde_json::json!({"request":{"body":{"messages":[{"role":"user","content":"fixture"}],"tools":[{"name":"Bash"}]}}}),
+            serde_json::json!({"request":{"body":{"messages":[{},{}],"tools":[]}}}),
+            serde_json::json!({"request":{"body":{"messages":[{"role":"user","content":"unrelated single-message input"}],"tools":[]}}}),
+        ];
+        let mut contents = entries
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        contents.push('\n');
+        std::fs::write(&path, &contents).unwrap();
+        let evidence = extract_guest_replay_evidence(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&evidence).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 2);
+        assert!(!String::from_utf8(evidence).unwrap().contains("omitted"));
+        std::fs::write(&path, contents.trim_end()).unwrap();
+        assert!(extract_guest_replay_evidence(&path).is_err());
+        std::fs::write(&path, b"not-json\n").unwrap();
+        assert!(extract_guest_replay_evidence(&path).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -118,6 +118,7 @@ pub(super) fn broker(
     let mut service = Command::new("node");
     service
         .env_remove("ASB_CLAUDE_WEB_PLAN")
+        .env_remove("ASB_CLAUDE_WEB_EVIDENCE")
         .env_remove("ASB_CLAUDE_WEB_READY")
         .env_remove("ASB_CLAUDE_WEB_RUNTIME");
     if settings.agent == "claude-code" {

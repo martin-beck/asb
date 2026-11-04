@@ -36,18 +36,24 @@ async function run(name, bad) {
   const [code] = await once(child, 'exit');
   return {code, stderr};
 }
-async function runReplay(name, plan, consume = false) {
+async function runReplay(name, plan, consume = false, useEvidence = false) {
   const dir = join(root, name), state = join(dir, 'state'), socket = join(dir, 'broker.sock');
   await mkdir(dir); await mkdir(state);
   const program = join(dir, 'program'), sidecar = join(dir, 'sidecar'), planFile = join(dir, 'plan.json'), readyFile = join(dir, 'ready.json'), markerPath = join(dir, 'marker.sock');
   const source = Buffer.from('fixture program'); await writeFile(program, source);
   const sha = createHash('sha256').update(source).digest('hex'), snapshot = 'a'.repeat(64);
-  await writeFile(sidecar, encodeSidecar([{ordinal: 0, request: {tool: 'fixture'}, outcome: {ok: true, value: 'recorded'}}], sha, snapshot, 'claude-code'));
-  await writeFile(planFile, JSON.stringify(plan));
+  const exchanges = [{ordinal: 0, request: {tool: 'fixture'}, outcome: {ok: true, value: 'recorded'}}];
+  const fetchRequest = {tool: 'WebFetch', input: {url: 'https://example.test/page', prompt: 'fixture prompt'}};
+  const fetchResult = {kind: 'success', json: JSON.stringify({url: fetchRequest.input.url, code: 200, bytes: 7})};
+  if (useEvidence) exchanges.push({ordinal: 1, request: fetchRequest, outcome: {ok: true, value: fetchResult}});
+  await writeFile(sidecar, encodeSidecar(exchanges, sha, snapshot, 'claude-code'));
+  const summary = '\nWeb page content:\n---\nfixture\n---\n\nfixture prompt\n\nProvide a concise response based only on the content above.';
+  const evidence = [{request: {body: {messages: [{role: 'user', content: [{type: 'text', text: summary}]}], tools: []}}}];
+  await writeFile(planFile, JSON.stringify(useEvidence ? evidence : plan));
   const marker = createServer(socket => { socket.once('data', () => socket.end('1\n')); });
   await new Promise(resolve => marker.listen(markerPath, resolve));
   const child = spawn(process.execPath, [service.pathname, socket, program, sidecar, `sha256:${snapshot}`, markerPath], {
-    env: {...process.env, ASB_NATIVE_TOOL_AGENT: 'claude-code', ASB_NATIVE_HOOK_STATE: state, ASB_CLAUDE_WEB_PLAN: planFile, ASB_CLAUDE_WEB_READY: readyFile, ASB_CLAUDE_WEB_RUNTIME: dir},
+    env: {...process.env, ASB_NATIVE_TOOL_AGENT: 'claude-code', ASB_NATIVE_HOOK_STATE: state, ASB_CLAUDE_WEB_PLAN: useEvidence ? '' : planFile, ASB_CLAUDE_WEB_EVIDENCE: useEvidence ? planFile : '', ASB_CLAUDE_WEB_READY: readyFile, ASB_CLAUDE_WEB_RUNTIME: dir},
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   let stderr = '', ready = '';
@@ -70,6 +76,7 @@ async function runReplay(name, plan, consume = false) {
     assert.match(response, /fixture/);
   }
   assert.equal((await brokerRequest(socket, {op: 'invoke', request: {tool: 'fixture'}})).value, 'recorded');
+  if (useEvidence) assert.deepEqual((await brokerRequest(socket, {op: 'invoke', request: fetchRequest})).value, fetchResult);
   child.stdin.end('S\n');
   const [code] = await once(child, 'exit');
   await new Promise(resolve => marker.close(resolve));
@@ -80,6 +87,7 @@ async function runReplay(name, plan, consume = false) {
 try {
   assert.equal((await runReplay('replay-clean', [])).code, 0);
   assert.equal((await runReplay('replay-consumed', [{ordinal: 0, url: 'https://example.test/page', status: 200, page: 'fixture'}], true)).code, 0);
+  assert.equal((await runReplay('replay-evidence', [], true, true)).code, 0);
   const unfinished = await runReplay('replay-unfinished', [{ordinal: 0, url: 'https://example.test/page', status: 200, page: 'fixture'}]);
   assert.notEqual(unfinished.code, 0);
   assert.match(unfinished.stderr, /unconsumed/);
