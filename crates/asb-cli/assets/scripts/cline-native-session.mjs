@@ -33,7 +33,9 @@ export async function runClineNativeSession({coreModule, transport, mode, worksp
     // must independently check the shared state even when the parent succeeds.
     native.assertSettled();
     if (!result || typeof result.finishReason !== 'string') throw new Error('Cline returned no terminal result');
-    return result;
+    const usage = typeof core.getAccumulatedUsage === 'function'
+      ? await core.getAccumulatedUsage(session.sessionId) : undefined;
+    return usage?.aggregateUsage ? {...result, aggregateUsage: usage.aggregateUsage} : result;
   } finally {
     await core.dispose();
   }
