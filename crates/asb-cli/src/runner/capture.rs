@@ -137,6 +137,16 @@ impl OwnedChild {
             )),
         }
     }
+    #[cfg(target_os = "linux")]
+    pub fn start_measured_principal(&mut self) -> io::Result<u32> {
+        match self {
+            Self::Gated(gate) => gate.start_measured_principal(),
+            Self::Direct(_) => Err(io::Error::other(
+                "agent-only measurement requires gate custody",
+            )),
+        }
+    }
+
     pub fn spawn_direct(command: &mut Command) -> io::Result<Self> {
         DirectChild::spawn(command).map(Self::Direct)
     }

@@ -124,7 +124,7 @@ pub(crate) fn start<'a>(
     after_exit: impl FnMut(std::process::ExitStatus, u64, bool) -> Result<(), Error>,
 ) -> Result<HeldProcess, Error> {
     start_with_spawn(
-        command,
+        (command, None),
         None,
         stdout,
         stderr,
@@ -135,7 +135,7 @@ pub(crate) fn start<'a>(
 }
 
 pub(crate) fn start_with_spawn<'a>(
-    command: &mut Command,
+    launch: (&mut Command, Option<crate::launch::CommandRoute>),
     stdin_prompt: Option<&[u8]>,
     stdout: &'a mut dyn Write,
     stderr: &'a mut dyn Write,
@@ -143,11 +143,43 @@ pub(crate) fn start_with_spawn<'a>(
     mut on_spawn: impl FnMut(u32) -> Result<(), Error>,
     mut after_exit: impl FnMut(std::process::ExitStatus, u64, bool) -> Result<(), Error>,
 ) -> Result<HeldProcess, Error> {
+    let (command, route) = launch;
     let scope = crate::process_gate::DescendantScope::new()
         .map_err(|_| Error::Run("cannot own workload service descendants".into()))?;
-    let started = Instant::now();
+    let gated = route.is_some();
+    if let Some(route) = route {
+        route.validate_gate(command).map_err(crate::io_error)?;
+    }
     let mut child = OwnedChild::spawn_direct(command)
         .map_err(|error| Error::Run(format!("cannot start workload client: {error}")))?;
+    if gated {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if child.try_wait().map_err(crate::io_error)?.is_some() {
+                return Err(Error::Run(
+                    "retained agent exited before its measurement gate".into(),
+                ));
+            }
+            let status = std::fs::read_to_string(format!("/proc/{}/status", child.id()))
+                .map_err(crate::io_error)?;
+            if status.lines().any(|line| {
+                line.starts_with("State:") && line.split_whitespace().nth(1) == Some("T")
+            }) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::Run(
+                    "retained agent did not reach its measurement gate".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let identity = super::principal_identity(child.id())?;
+        on_spawn(child.id())?;
+        let pid = child.id();
+        super::wait_for_agent_exec(&mut child, pid, identity)?;
+    }
+    let started = Instant::now();
     if let Some(prompt) = stdin_prompt {
         let Some(mut stdin) = child.take_stdin() else {
             return Err(Error::Run(
@@ -156,7 +188,9 @@ pub(crate) fn start_with_spawn<'a>(
         };
         stdin.write_all(prompt).map_err(crate::io_error)?;
     }
-    on_spawn(child.id())?;
+    if !gated {
+        on_spawn(child.id())?;
+    }
     let out = child
         .take_stdout()
         .ok_or_else(|| Error::Run("workload client stdout is not piped".into()))?;

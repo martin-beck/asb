@@ -72,9 +72,12 @@ printf '%s\\n' '{"type":"result","result":"known service fixture prepared"}'
                     task.agent_session.send_keys(["export ASB_SDK_SERVICE_CONTEXT=original-parent-context","Enter"],
                         block=True,max_timeout_sec=10)
                     parents.append(observe_parent())
+                exported = artifacts / "exported"
+                exported.mkdir()
                 with patch.object(task,"prepare_agent_session",side_effect=prepare_session), \
                         patch("asb_guest.prepare_agent", return_value=(guest, {"PATH":"/usr/local/bin:/usr/bin:/bin"})):
-                    result = execute_agent(task, {"binary":os.environ["ASB_TEST_BENCHMARK_ASB"]}, None, None, None, on_ended=ended.append)
+                    result = execute_agent(task, {"binary":os.environ["ASB_TEST_BENCHMARK_ASB"],
+                        "artifact_output":str(exported)}, None, None, None, on_ended=ended.append)
                 (artifacts / "driver.stdout").write_bytes(result["stdout"])
                 (artifacts / "driver.stderr").write_bytes(result["stderr"])
                 self.assertEqual(result["exit_code"], 0, result["stderr"].decode(errors="replace"))

@@ -16,6 +16,7 @@ const READY: u8 = 1;
 const INTERRUPT: u8 = 2;
 const ACK: u8 = 3;
 const EXITED: u8 = 4;
+const PRINCIPAL: u8 = 5;
 
 #[cfg(test)]
 std::thread_local! { static INTERRUPT_NEXT_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
@@ -76,6 +77,8 @@ pub(super) struct Parent {
     pending: Vec<u8>,
     frames: usize,
     pub ready: bool,
+    expect_principal: bool,
+    pub principal: Option<u32>,
     requested: bool,
     pub acknowledged: bool,
     pub exited: Option<PrincipalExit>,
@@ -96,6 +99,8 @@ impl Parent {
                 pending: Vec::new(),
                 frames: 0,
                 ready: false,
+                expect_principal: false,
+                principal: None,
                 requested: false,
                 acknowledged: false,
                 exited: None,
@@ -103,6 +108,9 @@ impl Parent {
             },
             child,
         ))
+    }
+    pub fn expect_principal(&mut self) {
+        self.expect_principal = true;
     }
     pub fn interrupt(&mut self, deadline: Instant) -> io::Result<()> {
         if !self.ready || self.requested || self.exited.is_some() {
@@ -113,7 +121,7 @@ impl Parent {
         write_frame(&mut self.socket, &frame(INTERRUPT, 0, 0), deadline)
     }
     pub fn poll(&mut self, gate: u32) -> io::Result<()> {
-        let mut buffer = [0; FRAME * 3 + 1];
+        let mut buffer = [0; FRAME * 4 + 1];
         let mut closed = false;
         loop {
             #[cfg(test)]
@@ -130,7 +138,7 @@ impl Parent {
                     break;
                 }
                 Ok(count) => {
-                    if self.pending.len() + count > FRAME * 3 {
+                    if self.pending.len() + count > FRAME * 4 {
                         return Err(invalid());
                     }
                     self.pending.extend_from_slice(&buffer[..count]);
@@ -149,6 +157,17 @@ impl Parent {
             match kind {
                 READY if !self.ready && self.frames == 0 && detail == 0 && value == gate => {
                     self.ready = true
+                }
+                PRINCIPAL
+                    if self.ready
+                        && self.expect_principal
+                        && self.principal.is_none()
+                        && self.exited.is_none()
+                        && detail == 0
+                        && value > 1
+                        && value != gate =>
+                {
+                    self.principal = Some(value);
                 }
                 ACK if self.ready
                     && self.requested
@@ -181,7 +200,10 @@ impl Parent {
         }
         if !self.failed {
             self.failed = self.poll(gate).is_err()
-                || finished && (self.pending.len() != self.frames * FRAME || self.exited.is_none());
+                || finished
+                    && (self.pending.len() != self.frames * FRAME
+                        || self.exited.is_none()
+                        || (self.expect_principal && self.principal.is_none()));
             if self.failed {
                 self.exited = None;
             }
@@ -280,6 +302,12 @@ impl ChildControl {
     pub fn ready(&mut self) -> io::Result<()> {
         self.send(frame(READY, 0, std::process::id()))
     }
+    pub fn principal(&mut self, pid: u32) -> io::Result<()> {
+        if pid <= 1 {
+            return Err(invalid());
+        }
+        self.send(frame(PRINCIPAL, 0, pid))
+    }
     pub fn acknowledge(&mut self) -> io::Result<()> {
         self.send(frame(ACK, 0, 0))
     }
@@ -335,6 +363,39 @@ impl ChildControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn measured_principal_frame_is_opt_in_unique_and_precedes_exit() {
+        let (mut parent, mut peer) = Parent::pair().unwrap();
+        peer.write_all(&frame(READY, 0, 42)).unwrap();
+        peer.write_all(&frame(PRINCIPAL, 0, 43)).unwrap();
+        assert!(
+            parent.poll(42).is_err(),
+            "unsolicited principal must be rejected"
+        );
+
+        let (mut parent, mut peer) = Parent::pair().unwrap();
+        parent.expect_principal();
+        peer.write_all(&frame(READY, 0, 42)).unwrap();
+        peer.write_all(&frame(PRINCIPAL, 0, 43)).unwrap();
+        parent.poll(42).unwrap();
+        assert_eq!(parent.principal, Some(43));
+        peer.write_all(&frame(PRINCIPAL, 0, 44)).unwrap();
+        assert!(
+            parent.poll(42).is_err(),
+            "duplicate principal must be rejected"
+        );
+
+        let (mut parent, mut peer) = Parent::pair().unwrap();
+        parent.expect_principal();
+        peer.write_all(&frame(READY, 0, 42)).unwrap();
+        peer.write_all(&frame(EXITED, 0, 0)).unwrap();
+        parent.observe(42, true);
+        assert_eq!(
+            parent.observation(),
+            crate::process_termination::Observation::malformed()
+        );
+    }
+
     #[test]
     fn interrupted_final_control_read_retries_before_classifying_exit() {
         let (mut parent, mut peer) = Parent::pair().unwrap();

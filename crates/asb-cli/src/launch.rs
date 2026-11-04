@@ -75,10 +75,23 @@ impl ProcessLaunch {
     /// Materialize once, before configuration. Never reconstruct this command
     /// from getters: std owns env_clear, I/O, credentials and pre-exec state.
     pub(crate) fn native(&self, gate: Option<&Path>) -> (Command, CommandRoute) {
+        self.gated(gate, "__asb-gate")
+    }
+
+    /// A direct, stopped principal for a retained workload supervisor. It
+    /// execs in place and leaves retained descendants under that supervisor.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn measured(&self, gate: &Path) -> (Command, CommandRoute) {
+        let (mut command, route) = self.gated(Some(gate), "__asb-measure-launch");
+        command.env_remove("ASB_NATIVE_TRACE_READY_FD");
+        (command, route)
+    }
+
+    fn gated(&self, gate: Option<&Path>, entry: &str) -> (Command, CommandRoute) {
         let (command, prefix) = if let Some(gate) = gate {
             let mut command = Command::new(gate);
             command.env_remove("ASB_GATE_INSTALL_LOCK_FDS");
-            command.arg("__asb-gate").arg(FORMAT);
+            command.arg(entry).arg(FORMAT);
             match &self.arg0 {
                 Some(arg0) => {
                     command.arg("1").arg(arg0);
