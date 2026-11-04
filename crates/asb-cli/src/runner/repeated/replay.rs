@@ -49,7 +49,9 @@ impl Inspection {
         if options.mode != Some(crate::tape::Mode::Replay) {
             return Ok(None);
         }
-        let path = super::super::replay_cassette(config_path, config, options.cassette)?;
+        let runtime_anchor =
+            crate::project::configuration_anchor(config_path, options.invocation_dir)?;
+        let path = super::super::replay_cassette(&runtime_anchor, config, options.cassette)?;
         if !Source::is_bundle(&path).map_err(input_error)?
             && options.track.is_none()
             && options.replay_seed.is_none()
