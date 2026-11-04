@@ -1254,6 +1254,10 @@ impl Session {
         producer::command(&mut launch)
     }
 
+    pub(crate) fn collector_uses_sudo(&self, name: &str) -> bool {
+        self.sudo_collectors.contains(name)
+    }
+
     /// A collector adapter may retry its own target-specific probe through an
     /// already configured passwordless sudo route. Generic orchestration never
     /// decides which collector needs elevation.

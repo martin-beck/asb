@@ -279,16 +279,20 @@ impl measurements::Session {
         // pre-created and owned by the benchmark user.  Run post-processing
         // without sudo so perf's ownership check accepts that file and the
         // flamegraph never needs elevated privileges.
-        let script = Command::new(measurements::resolve_executable(
+        let mut script = Command::new(measurements::resolve_executable(
             self.tool_dir.as_deref(),
             "perf",
-        ))
-        .args(["script", "-i"])
-        .arg(data)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("cannot start perf script for flamegraph: {e}"))?;
+        ));
+        if let Some(cache) = self.artifact(super::super::SharedArtifact::PerfSymbolCache) {
+            script.env("HOME", cache).env("DEBUGINFOD_URLS", "");
+        }
+        let script = script
+            .args(["script", "-i"])
+            .arg(data)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("cannot start perf script for flamegraph: {e}"))?;
         let script = children.add("perf script", script);
         let script_stdout = children
             .child(script)

@@ -1,12 +1,14 @@
 use super::super::CollectorAdapter;
 use super::super::PreflightContext;
-use super::super::{ProcessContext, ProcessData, SharedArtifact};
+use super::super::{ArtifactDisplay, ProcessContext, ProcessData, SharedArtifact};
 use crate::measurements;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 mod readiness;
+#[cfg(target_os = "linux")]
+mod symbols;
 
 #[cfg(all(test, target_os = "linux"))]
 #[path = "../../../tests/unit/perf_stop_contract.rs"]
@@ -75,7 +77,8 @@ impl CollectorAdapter for PerfCollector {
         )]
     }
     fn estimated_disk_mib(&self) -> u64 {
-        512
+        // Include the bounded symbol cache and one in-flight image copy.
+        3072
     }
     fn description(&self) -> &'static str {
         "process-tree performance counter samples"
@@ -88,6 +91,16 @@ impl CollectorAdapter for PerfCollector {
     }
     fn tool_id(&self) -> Option<&'static str> {
         Some("perf")
+    }
+    fn prioritizes_artifact(&self, name: &str) -> bool {
+        name == "perf-symbol-quality.json"
+    }
+    fn display_artifact(&self, name: &str) -> Option<ArtifactDisplay> {
+        (name == "perf-symbol-quality.json").then_some(ArtifactDisplay::Status {
+            class: "perf-symbol-quality",
+            label: "Perf symbol quality",
+            suffix: "See the decoded and unknown frame counts in the quality artifact.",
+        })
     }
     fn requires_pid(&self) -> bool {
         true
@@ -107,8 +120,11 @@ impl CollectorAdapter for PerfCollector {
     fn producer_policy(&self, name: &str) -> measurements::ProducerPolicy {
         measurements::ProducerPolicy {
             stream_bytes: 256 * 1024 * 1024,
-            graceful: matches!(name, "perf" | "perf-stat")
-                .then_some(std::time::Duration::from_secs(5)),
+            graceful: match name {
+                "perf-symbol-custody" => Some(std::time::Duration::from_secs(60)),
+                "perf" | "perf-stat" => Some(std::time::Duration::from_secs(5)),
+                _ => None,
+            },
         }
     }
     fn accepts_termination(
@@ -116,7 +132,7 @@ impl CollectorAdapter for PerfCollector {
         name: &str,
         completion: &measurements::ProducerCompletion,
     ) -> bool {
-        matches!(name, "perf" | "perf-stat")
+        matches!(name, "perf" | "perf-stat" | "perf-symbol-custody")
             && accepted_exit(
                 completion.exit,
                 completion.interruption_requested
@@ -162,6 +178,10 @@ fn process(
     let mut result = ProcessData::from_output(context);
     if !accepted_exit(context.status, context.controlled_interruption) {
         result.status = "failed".into();
+        return Ok(result);
+    }
+    if context.name == "perf-symbol-custody" {
+        result.status = "completed".into();
         return Ok(result);
     }
     if context.name == "perf-stat" {
@@ -247,6 +267,9 @@ fn validate_record(
     launch.arg("script").arg("-i").arg(&artifact);
     let (mut command, route) = measurements::producer_command(&mut launch)?;
     configure_offline_decoder_environment(&mut command, &session.dir);
+    if let Some(cache) = session.artifact(SharedArtifact::PerfSymbolCache) {
+        command.env("HOME", cache);
+    }
     let mut captures = [
         crate::evidence::Capture::create(&session.dir.join("perf-validation.stdout"))?,
         crate::evidence::Capture::create(&session.dir.join("perf-validation.stderr"))?,
@@ -289,9 +312,64 @@ fn validate_record(
     // installed decoder successfully consumed it. Never invent a sample count.
     for capture in &mut captures {
         capture.freeze()?;
+    }
+    let quality = symbol_quality(captures[0].reader()?)?;
+    measurements::write_json(
+        &session.dir.join("perf-symbol-quality.json"),
+        &serde_json::json!({
+            "schema_version": 1,
+            "status": if quality.1 > 0 { "partial" } else { "not-verified" },
+            "decoded_frames": quality.0,
+            "unknown_frames": quality.1,
+        "reason": "Unknown frames can reflect missing agent or library symbols, JIT code, or restricted kernel addresses (kernel.kptr_restrict). Zero unknown frames alone does not prove complete debug information."
+        }),
+    )?;
+    for capture in &captures {
         capture.consume()?;
     }
     Ok(())
+}
+
+/// Count decoded stack frames without retaining their symbols or paths.
+fn symbol_quality(mut input: impl std::io::Read) -> Result<(u64, u64), String> {
+    let mut buffer = [0u8; 8192];
+    let needle = b"[unknown]";
+    let (mut frame, mut unknown, mut match_at) = (false, false, 0usize);
+    let (mut start, mut total, mut missing) = (true, 0u64, 0u64);
+    loop {
+        let count = input
+            .read(&mut buffer)
+            .map_err(|error| format!("cannot inspect decoded perf symbols: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        for &byte in &buffer[..count] {
+            if start {
+                frame = byte == b'\t';
+                start = false;
+            }
+            if byte == b'\n' {
+                if frame {
+                    total += 1;
+                    missing += u64::from(unknown);
+                }
+                (frame, unknown, match_at, start) = (false, false, 0, true);
+            } else if byte == needle[match_at] {
+                match_at += 1;
+                if match_at == needle.len() {
+                    unknown = true;
+                    match_at = 0;
+                }
+            } else {
+                match_at = usize::from(byte == needle[0]);
+            }
+        }
+    }
+    if !start && frame {
+        total += 1;
+        missing += u64::from(unknown);
+    }
+    Ok((total, missing))
 }
 
 /// Keep offline decoding independent from perf configuration without clearing
@@ -541,6 +619,14 @@ impl measurements::Session {
                 error.to_string(),
             )?,
         }
+        #[cfg(target_os = "linux")]
+        if let Err(error) = self.start_perf_symbols(pid) {
+            write_unavailable(
+                &self.dir.join("perf-symbol-custody.json"),
+                "perf-symbol-custody",
+                error,
+            )?;
+        }
         Ok(())
     }
 }
@@ -787,6 +873,41 @@ pub(crate) fn perf_permission_error() -> String {
 #[cfg(test)]
 mod tests {
     use super::{record_args, stat_args};
+
+    #[test]
+    fn decoded_symbol_quality_counts_unknown_frames_across_chunks() {
+        struct OneByte<'a>(&'a [u8]);
+        impl std::io::Read for OneByte<'_> {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.is_empty() {
+                    return Ok(0);
+                }
+                output[0] = self.0[0];
+                self.0 = &self.0[1..];
+                Ok(1)
+            }
+        }
+        let text =
+            b"agent 123 sample\n\t123 function+1 (agent)\n\t456 [unknown] (agent)\n\t789 [unknown]";
+        assert_eq!(super::symbol_quality(OneByte(text)).unwrap(), (3, 2));
+        assert_eq!(super::symbol_quality(&b""[..]).unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn symbol_quality_is_visible_in_reports() {
+        use crate::collectors::CollectorAdapter;
+        assert!(super::ADAPTER.prioritizes_artifact("perf-symbol-quality.json"));
+        assert!(
+            super::ADAPTER
+                .display_artifact("perf-symbol-quality.json")
+                .is_some()
+        );
+        assert!(
+            super::ADAPTER
+                .display_artifact("not-symbol-quality.json")
+                .is_none()
+        );
+    }
 
     #[test]
     fn permission_error_suggests_kernel_policy_not_sudoers() {
