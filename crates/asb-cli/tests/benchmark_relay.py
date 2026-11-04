@@ -1,5 +1,6 @@
 """Provider-free real-executable tests of the private guest TCP relay."""
 import json
+import errno
 import os
 from pathlib import Path
 import select
@@ -299,6 +300,7 @@ class ForwardingTests(unittest.TestCase):
                 roundtrip(port)
         relay.check()
         relay.close()
+        self.assertEqual(relay.diagnostic()['connect_failures'], 0)
         self.assertIsNotNone(relay.process.poll())
         self.assertFalse(relay.reader.is_alive())
         self.assertTrue(all(not worker.is_alive() for worker in relay.workers))
@@ -402,6 +404,23 @@ class ForwardingTests(unittest.TestCase):
             self.assertEqual(diagnostic["stderr_tail"], "fixture relay diagnostic")
             self.assertLessEqual(artifact.stat().st_size, 12 * 1024)
 
+    def test_failed_loopback_connect_records_bounded_errno_without_endpoint(self):
+        # Keep the destination bound but not listening so no other process can
+        # claim it and the connection failure is deterministic.
+        reserved = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        reserved.bind(('127.0.0.1', 0))
+        self.addCleanup(reserved.close)
+        relay = self.start([reserved.getsockname()])
+        with socket.create_connection(('127.0.0.1', relay.ports[0]), timeout=5) as client:
+            client.settimeout(5)
+            self.assertEqual(client.recv(1), b'')
+        relay.close()
+        diagnostic = relay.diagnostic()
+        self.assertEqual(diagnostic['connect_failures'], 1)
+        self.assertEqual(diagnostic['last_connect_target'], 0)
+        self.assertEqual(diagnostic['last_connect_errno'], errno.ECONNREFUSED)
+        self.assertNotIn(str(reserved.getsockname()[1]), json.dumps(diagnostic))
+
     def test_cancellation_closes_host_connections_and_owned_relay(self):
         cancelled = threading.Event()
         relay = HostRelay([self.server.server_address],
@@ -435,6 +454,7 @@ class ForwardingTests(unittest.TestCase):
             with socket.create_connection((host, port), timeout=5) as client:
                 client.sendall(b"IPv6 remains loopback")
                 self.assertEqual(client.recv(1024), b"IPv6 remains loopback")
+        self.assertEqual(relay.diagnostic()['connect_failures'], 0)
 
     def test_non_default_ipv4_loopback_address_is_preserved(self):
         try:
