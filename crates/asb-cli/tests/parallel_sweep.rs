@@ -87,11 +87,10 @@ const expected=first?['first-1','first-2']:['second'];
     await new Promise(resolve=>setTimeout(resolve,10));
   }
   if(first && fs.existsSync(home+'/fail-first')) process.exit(7);
-  if(first && replica==='2') {
-    while(!fs.existsSync(home+'/sweep-results/.checkpoint/replicas/000000/001.json')) {
-      if(Date.now()>deadline) throw new Error('replica 1 evidence was not sealed before replica 2 finished');
-      await new Promise(resolve=>setTimeout(resolve,10));
-    }
+  // Grading and final receipts wait until every admitted replica has finished
+  // execution. Waiting for another replica's receipt here deadlocks the cohort.
+  if(first && replica==='2' && fs.existsSync(home+'/sweep-results/.checkpoint/replicas/000000/001.json')) {
+    throw new Error('replica receipt was published before the cohort finished');
   }
   if(!first && fs.existsSync(home+'/retarget-input')) {
     fs.unlinkSync(process.env.ASB_TEST_INPUT);
