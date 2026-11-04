@@ -112,6 +112,68 @@ fn guest_uses_registered_adapter_prepares_before_gate_and_preserves_output_and_f
 }
 
 #[test]
+fn native_auxiliary_service_starts_only_after_guest_gate_resumes() {
+    let project = Project::new();
+    let bundle = project
+        .0
+        .join(".asb-tools/pi/node_modules/@mariozechner/pi-agent-core/dist/agent-loop.js");
+    std::fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+    std::fs::write(bundle, "export {};").unwrap();
+    let executable = project.0.join(".asb-tools/pi/bin/pi");
+    fixture_writer::write_file(&project.0, &executable,
+        "#!/bin/sh\ntest -S \"$ASB_NATIVE_SOCKET\" || exit 81\nprintf ready > native-service-observed\nexit 0\n").unwrap();
+    std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut request = project.request();
+    request["tool_tape_cassette"] = project
+        .0
+        .join("recording.jsonl")
+        .to_string_lossy()
+        .to_string()
+        .into();
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_asb"))
+            .arg("__asb-agent")
+            .isolated_env()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("HOME", &project.0)
+            .env("ASB_FS_MARKER_SOCKET", project.0.join("marker.sock"))
+            .env("ASB_GUEST_AGENT_REQUEST", request.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
+    let mut ready = String::new();
+    stdout.read_line(&mut ready).unwrap();
+    assert_eq!(ready.trim(), format!("__ASB_GATE__:{}", process.0.id()));
+    assert!(
+        !project
+            .0
+            .join("private/attempt/pi/native-tool-service.mjs")
+            .exists()
+    );
+    assert!(!project.0.join("workspace/native-service-observed").exists());
+    resume_fixture(&mut process);
+    let mut remaining = String::new();
+    stdout.read_to_string(&mut remaining).unwrap();
+    let status = process.0.wait().unwrap();
+    assert!(
+        project
+            .0
+            .join("private/attempt/pi/native-tool-service.mjs")
+            .is_file()
+    );
+    assert!(
+        project
+            .0
+            .join("workspace/native-service-observed")
+            .is_file(),
+        "status={status}, output={remaining}"
+    );
+}
+
+#[test]
 fn guest_stages_a_declared_mcp_server_through_the_recording_relay_before_launch() {
     let project = Project::new();
     let program = project.0.join(".asb-tools/codex/bin/codex");

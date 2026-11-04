@@ -526,7 +526,7 @@ fn grant_unprivileged_traverse(_: &Path) -> Result<(), Error> {
 
 struct PreparedGuest {
     command: Command,
-    auxiliary: Option<super::auxiliary::AuxiliaryService>,
+    service_executable: String,
     stdin_prompt: Option<Vec<u8>>,
     artifact_owner: super::ArtifactOwner,
     instrumentation: Option<crate::workloads::staging::Guard>,
@@ -737,20 +737,6 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
                 cassette,
             }),
     })?;
-    let auxiliary = adapter.start_guest_service(
-        &mut command,
-        process_program,
-        &request.run_dir,
-        request.tool_tape_cassette.as_ref().map(|_| {
-            if request.tool_replay {
-                crate::tape::Mode::Replay
-            } else {
-                crate::tape::Mode::Record
-            }
-        }),
-        native_tool.map(|native| native.path),
-        request.snapshot_archive_sha256.as_deref(),
-    )?;
     configure_execution_identity(
         &mut command,
         adapter.execution_identity(),
@@ -759,7 +745,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
     )?;
     Ok(PreparedGuest {
         command,
-        auxiliary,
+        service_executable: process_program.to_owned(),
         stdin_prompt,
         artifact_owner,
         instrumentation,
@@ -816,17 +802,12 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     };
     let PreparedGuest {
         mut command,
-        mut auxiliary,
+        service_executable,
         stdin_prompt,
         mut artifact_owner,
         instrumentation,
         execution_identity,
     } = prepare(&request)?;
-    if retained && auxiliary.is_some() {
-        return Err(Error::Run(
-            "adapter auxiliary recording requires agent cleanup before evaluation".into(),
-        ));
-    }
     // Keep the same launch identity even if a tool renames/deletes its cwd.
     // Looking up current_dir again after execution can erase a valid outcome.
     let workspace = command
@@ -866,6 +847,35 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     return Err(Error::Run(
         "guest agent gate currently requires Unix signals".into(),
     ));
+    // Start adapter-owned services only after host collectors have attached
+    // to this stopped driver. Their process creation and descendants then
+    // inherit the same trace filter before the actual agent is started.
+    let adapter = super::find(&request.config.agent).ok_or_else(|| {
+        Error::Input("guest execution requires a registered agent adapter".into())
+    })?;
+    let native_tool_path = request.runtime_dir.join("native-tool-sidecar.jsonl");
+    let mut auxiliary = adapter.start_guest_service(
+        &mut command,
+        &service_executable,
+        &request.run_dir,
+        request.tool_tape_cassette.as_ref().map(|_| {
+            if request.tool_replay {
+                crate::tape::Mode::Replay
+            } else {
+                crate::tape::Mode::Record
+            }
+        }),
+        request
+            .native_tool_launch
+            .as_ref()
+            .map(|_| native_tool_path.as_path()),
+        request.snapshot_archive_sha256.as_deref(),
+    )?;
+    if retained && auxiliary.is_some() {
+        return Err(Error::Run(
+            "adapter auxiliary recording requires agent cleanup before evaluation".into(),
+        ));
+    }
     #[cfg(target_os = "linux")]
     let held = if retained {
         Some(crate::runner::workload_process::start_with_spawn(
