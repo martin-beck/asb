@@ -51,7 +51,7 @@ export function createWebFetchProxy({plan, key, cert}) {
       return;
     }
     const body = Buffer.from(item.page, 'utf8');
-    res.writeHead(200, {'Content-Type': 'text/html; charset=utf-8', 'Content-Length': body.length, 'Connection': 'close'}).end(body);
+    res.writeHead(200, {'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': body.length, 'Connection': 'close'}).end(body);
   }
   const inner = http.createServer();
   inner.on('request', (req, res) => respond(req, res, req.socket.asbAuthority));

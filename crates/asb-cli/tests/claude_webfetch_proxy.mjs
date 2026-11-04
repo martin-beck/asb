@@ -37,7 +37,7 @@ try {
       const check = await get(url, 'api.anthropic.com', '/api/web/domain_info?domain=example.test');
       assert.match(check, /"can_fetch":true/);
       const page = await get(url, 'example.test', '/page?q=1');
-      assert.match(page, /HTTP\/1\.1 200/); assert.match(page, /fixture café/);
+      assert.match(page, /HTTP\/1\.1 200/); assert.match(page, /content-type: text\/plain; charset=utf-8/i); assert.match(page, /fixture café/);
       const redirect = await get(url, 'example.test', '/redirect');
       assert.match(redirect, /HTTP\/1\.1 302/); assert.match(redirect, /location: https:\/\/asb-replay\.invalid\//i);
       await proxy.finish();
