@@ -31,6 +31,7 @@ pub(super) fn guest_archive(
     vec![super::GuestAsset {
         source: root.join("cache").join(name),
         target: Path::new("cache").join(name),
+        native_executable: false,
         distribution: Some((url, checksum)),
     }]
 }

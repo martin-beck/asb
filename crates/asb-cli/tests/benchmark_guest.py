@@ -68,6 +68,24 @@ class ArchiveContainer:
 
 
 class GuestBootstrapTests(unittest.TestCase):
+    def test_preinstalled_native_agent_does_not_run_guest_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'.asb').mkdir();(root/'.asb/project.toml').write_text('')
+            calls=[]
+            def execute(*args,**kwargs):
+                calls.append(args)
+                return {'stdout':b'','stderr':b'','exit_code':0,'timed_out':False,'cancelled':False}
+            task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),image_identity={},execute=execute),
+                                 artifacts=root,checked=lambda _:b'')
+            request={'project_root':str(root),'tools_root':str(root),'binary':'fixture',
+                     'request':{'config':{'agent':'fixture'}},'bootstrap':{},'auxiliary_tools':{}}
+            with patch('asb_guest.bundle',return_value=([],{})), patch('asb_guest.stage_runtime',return_value=(0,0)), \
+                 patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \
+                 patch('asb_guest.stage_bootstrap',return_value=([],['fixture'])), \
+                 patch('asb_guest.stage_auxiliary_tools',return_value={}):
+                prepare_agent(task,request,None)
+            self.assertEqual(calls,[])
+
     def test_guest_preparation_forwards_staged_auxiliary_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);(root/'.asb').mkdir();(root/'.asb/project.toml').write_text('')
@@ -80,7 +98,7 @@ class GuestBootstrapTests(unittest.TestCase):
             with patch('asb_guest.bundle',return_value=([],{})), \
                  patch('asb_guest.stage_runtime',return_value=(0,0)), \
                  patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \
-                 patch('asb_guest.stage_bootstrap',return_value=[]), \
+                 patch('asb_guest.stage_bootstrap',return_value=([],[])), \
                  patch('asb_guest.stage_auxiliary_tools',return_value={'btrfs':'/opt/asb-private/tools/btrfs/btrfs'}) as stage:
                 guest, environment=prepare_agent(task,request,None)
             stage.assert_called_once_with(task,{'btrfs':'/some/tool'},(0,0))
@@ -101,7 +119,7 @@ class GuestBootstrapTests(unittest.TestCase):
             with patch('asb_guest.bundle',return_value=([],{})), \
                  patch('asb_guest.stage_runtime',return_value=(0,0)), \
                  patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \
-                 patch('asb_guest.stage_bootstrap',return_value=[]), \
+                 patch('asb_guest.stage_bootstrap',return_value=([],[])), \
                  patch('asb_guest.stage_auxiliary_tools',return_value={'btrfs':'a','mkfs.btrfs':'b','rsync':'c'}), \
                  patch('asb_docker.docker_command',return_value=['docker']), \
                  patch('asb_snapshot_control.GuestSnapshot'):
@@ -122,7 +140,7 @@ class GuestBootstrapTests(unittest.TestCase):
             with patch('asb_guest.bundle',return_value=([],{})), \
                  patch('asb_guest.stage_runtime',return_value=(0,0)), \
                  patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \
-                 patch('asb_guest.stage_bootstrap',return_value=[]), \
+                 patch('asb_guest.stage_bootstrap',return_value=([],[])), \
                  patch('asb_guest.stage_auxiliary_tools',return_value=tools), \
                  patch('asb_docker.docker_command',return_value=['docker']), \
                  patch('asb_snapshot_control.GuestSnapshot') as supervisor:
@@ -141,7 +159,7 @@ class GuestBootstrapTests(unittest.TestCase):
                      'private_inputs':[{'target':'workspace-snapshots.tar','sha256':'a'*64}],
                      'auxiliary_tools':{'btrfs':'a','mkfs.btrfs':'b','rsync':'c'}}
             with patch('asb_guest.bundle',return_value=([],{})), patch('asb_guest.stage_runtime',return_value=(0,0)), \
-                 patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), patch('asb_guest.stage_bootstrap',return_value=[]), \
+                 patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), patch('asb_guest.stage_bootstrap',return_value=([],[])), \
                  patch('asb_guest.stage_auxiliary_tools',return_value={'btrfs':'a','mkfs.btrfs':'b','rsync':'c'}), \
                  patch('asb_docker.docker_command',return_value=['docker']), patch('asb_snapshot_control.GuestSnapshot'):
                 guest,environment=prepare_agent(task,request,None,resources=SimpleNamespace(push=lambda _:None))
@@ -588,11 +606,36 @@ class GuestBootstrapTests(unittest.TestCase):
             task = SimpleNamespace(workspace=SimpleNamespace(container=container),artifacts=root,
                                    checked=lambda argv:calls.append(argv))
             plan = {"runtime_tools":["example-runtime"],"assets":[{"source":str(source),"target":"example/cache/package.tar.gz"}]}
-            self.assertEqual(stage_bootstrap(task,plan,tools),["example-runtime"])
+            self.assertEqual(stage_bootstrap(task,plan,tools),(["example-runtime"],[]))
             self.assertEqual(container.files,[("/opt/asb-project/.asb-tools","example/cache/package.tar.gz",source.read_bytes())])
             receipt = json.loads((root/"bootstrap.json").read_text())
             self.assertNotIn(str(root),json.dumps(receipt))
             self.assertEqual(receipt["assets"][0]["bytes"],len(source.read_bytes()))
+
+    def test_native_executable_is_staged_with_loader_and_skips_guest_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); tools = root/'tools'; source=tools/'example/bin/example'
+            source.parent.mkdir(parents=True); source.write_bytes(b'native fixture')
+            container=Container(); calls=[]
+            task=SimpleNamespace(workspace=SimpleNamespace(container=container),artifacts=root,
+                                 checked=lambda argv:calls.append(argv))
+            files=[('tools/example/example',b'loader wrapper',0o755),('tools/example/bin/example',b'native fixture',0o755)]
+            receipt={'files':[{'name':name,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()} for name,data,_ in files]}
+            asset={'source':str(source),'target':'example/bin/example','native_executable':True}
+            with patch('asb_guest.bundle_tool',return_value=(files,receipt)):
+                runtimes,native=stage_bootstrap(task,{'runtime_tools':[],'assets':[asset]},tools)
+            self.assertEqual((runtimes,native),([],['example']))
+            launcher=next(data for destination,name,data in container.files if name=='example/bin/example')
+            self.assertIn(b'/example/native-runtime/tools/example/example',launcher)
+            evidence=json.loads((root/'bootstrap.json').read_text())
+            self.assertEqual(evidence['native_executables'][0]['files'],receipt['files'])
+            self.assertNotIn(str(root),json.dumps(evidence))
+
+            untouched=Container()
+            task.workspace.container=untouched
+            with patch('asb_guest.bundle_tool',return_value=(files,receipt)), self.assertRaises(ExecutionError):
+                stage_bootstrap(task,{'runtime_tools':[],'assets':[asset,{'source':str(source),'target':'../escape'}]},tools)
+            self.assertEqual(untouched.files,[])
 
     def test_bootstrap_rejects_escape_symlinks_duplicate_targets_and_invalid_dependencies(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -606,7 +649,9 @@ class GuestBootstrapTests(unittest.TestCase):
             external = root/"private"
             external.write_bytes(b"must-not-be-staged")
             assets = [{"source":str(source),"target":"../escape"},{"source":str(source),"target":"/escape"},
-                      {"source":str(external),"target":"package"},{"source":str(link),"target":"package"}]
+                      {"source":str(external),"target":"package"},{"source":str(link),"target":"package"},
+                      {"source":str(source),"target":"package","native_executable":True},
+                      {"source":str(source),"target":"package","native_executable":"yes"}]
             for asset in assets:
                 container = Container()
                 task = SimpleNamespace(workspace=SimpleNamespace(container=container),artifacts=root,checked=lambda _:None)

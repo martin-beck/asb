@@ -326,10 +326,23 @@ fn guest_assets(
     root: &Path,
     progress: &mut dyn FnMut(u8, crate::install::ProgressStage),
 ) -> InstallResult<Vec<crate::tools::GuestAsset>> {
+    let executable = root.join("bin/goose");
+    if root.join("native-build-output/goose").is_file()
+        && executable.is_file()
+        && native_hook_available(&executable)
+    {
+        return Ok(vec![crate::tools::GuestAsset {
+            source: executable,
+            target: PathBuf::from("bin/goose"),
+            native_executable: true,
+            distribution: None,
+        }]);
+    }
     let (archive, _) = cached_archive(context, root, progress)?;
     Ok(vec![crate::tools::GuestAsset {
         source: archive,
         target: PathBuf::from("cache/goose.tar.gz"),
+        native_executable: false,
         distribution: None,
     }])
 }
@@ -504,9 +517,10 @@ fn configured_native_service(
             format!("{}/.asb/goose-session-map", endpoint.trim_end_matches('/')),
         );
     }
+    let program = native_program(&executable);
     let settings = super::super::native_guest::Settings {
         agent: "goose",
-        bundle: &executable,
+        bundle: &program,
         run_dir,
         mode,
         marker: marker.clone(),
@@ -527,6 +541,26 @@ fn configured_native_service(
             },
         );
     Ok(super::super::auxiliary::AuxiliaryPlan::new(service))
+}
+
+fn native_program(executable: &Path) -> PathBuf {
+    let Some(root) = executable.parent().and_then(Path::parent) else {
+        return executable.to_path_buf();
+    };
+    let runtime = root.join("native-runtime");
+    let expected = format!(
+        "#!/bin/sh\nexec {}/tools/goose/goose \"$@\"\n",
+        runtime.display()
+    );
+    let payload = runtime.join("tools/goose/bin/goose");
+    if std::fs::metadata(executable).is_ok_and(|metadata| metadata.len() == expected.len() as u64)
+        && std::fs::read(executable).ok().as_deref() == Some(expected.as_bytes())
+        && payload.is_file()
+    {
+        payload
+    } else {
+        executable.to_path_buf()
+    }
 }
 
 /// Check the installed executable's compiled adapter interface before
@@ -568,6 +602,59 @@ fn shell_quote(value: &std::ffi::OsStr) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn hooked_project_install_is_selected_for_guest_staging() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!("goose-guest-assets-{}", std::process::id()));
+        let tool = root.join("goose");
+        std::fs::create_dir_all(tool.join("bin")).unwrap();
+        std::fs::create_dir_all(tool.join("native-build-output")).unwrap();
+        let executable = tool.join("bin/goose");
+        std::fs::write(&executable, "#!/bin/sh\nexit 73\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(tool.join("native-build-output/goose"), b"fixture").unwrap();
+        let context =
+            OperationContext::new(&root, &crate::project::ProjectConfig::default()).unwrap();
+        let assets = super::guest_assets(&context, &tool, &mut |_, _| {}).unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].source, executable);
+        assert_eq!(assets[0].target, Path::new("bin/goose"));
+        assert!(assets[0].native_executable);
+        assert_eq!(
+            serde_json::to_value(&assets[0]).unwrap()["native_executable"],
+            true
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_program_identifies_the_staged_binary_not_the_launcher() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!("goose-program-{}", std::process::id()));
+        let executable = base.join("bin/goose");
+        let runtime = base.join("native-runtime");
+        let payload = runtime.join("tools/goose/bin/goose");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        std::fs::write(&payload, b"native binary").unwrap();
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nexec {}/tools/goose/goose \"$@\"\n",
+                runtime.display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(super::native_program(&executable), payload);
+        std::fs::write(&executable, b"different wrapper").unwrap();
+        assert_eq!(super::native_program(&executable), executable);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn native_guest_service_records_goose_dispatch_without_replacing_tools() {
