@@ -6,6 +6,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::ExitStatusExt;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::time::{Duration, Instant};
 
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 static CANCELLATION_FD: AtomicI32 = AtomicI32::new(-1);
@@ -130,6 +131,44 @@ impl Owner {
             };
         }
         Ok(descriptor.revents != 0)
+    }
+
+    /// Once the externally measured principal is resumed, it waits on the
+    /// trace readiness descriptor until lifecycle tracing is attached.
+    pub(super) fn wait_for_principal_resume(
+        &self,
+        child: &mut std::process::Child,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            if self.cancelled()? {
+                return Err(io::Error::other(
+                    "native gate owner exited during principal admission",
+                ));
+            }
+            if child.try_wait()?.is_some() {
+                return Err(io::Error::other(
+                    "measured principal exited before trace admission",
+                ));
+            }
+            let status = std::fs::read_to_string(format!("/proc/{}/status", child.id()))?;
+            let state = status
+                .lines()
+                .find(|line| line.starts_with("State:"))
+                .and_then(|line| line.split_whitespace().nth(1));
+            match state {
+                Some("T") => (),
+                Some(_) => return Ok(()),
+                None => return Err(io::Error::other("measured principal state is unavailable")),
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "measured principal was not resumed",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     pub(super) fn wait(

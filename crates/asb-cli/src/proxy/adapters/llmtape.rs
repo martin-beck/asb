@@ -239,6 +239,7 @@ impl ProxyAdapter for LlmtapeAdapter {
             None
         };
         if let Some(observer) = observer.as_ref() {
+            inherit_observer_in_child(&mut command, observer);
             command.env(
                 "ASB_TAPE_PERFETTO_OBSERVER_FD",
                 observer.as_raw_fd().to_string(),
@@ -581,11 +582,14 @@ impl ProxySession for RunningLlmtape {
         // A workload failure may abort the proxy before normal settlement can
         // report a replay mismatch. Preserve its private diagnostics so that
         // the first failure is not lost behind the workload error.
-        if self
+        if let Some(evidence) = self
             .mismatch_evidence
             .as_ref()
-            .is_some_and(|path| path.is_file())
+            .filter(|path| path.is_file())
+            && self._scratch.retain_mismatch_evidence(evidence).is_err()
         {
+            // Preserve the private directory if its diagnostic could not
+            // be moved out; otherwise Drop would destroy the evidence.
             self._scratch.retain = true;
         }
     }
@@ -845,6 +849,24 @@ impl Scratch {
     }
 }
 
+// File::try_clone creates a close-on-exec descriptor. Clear that flag only
+// in the child after fork, avoiding a window where another concurrent launch
+// could inherit this private observer capability.
+fn inherit_observer_in_child(command: &mut Command, observer: &std::fs::File) {
+    use std::os::unix::process::CommandExt;
+    let fd = observer.as_raw_fd();
+    #[allow(unsafe_code)]
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
@@ -877,6 +899,82 @@ mod tests {
     use crate::tape::{Mode, Session};
     use std::io::{Read, Write};
     use std::net::TcpStream;
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    #[test]
+    fn builtin_observer_survives_exec_without_changing_parent_descriptor() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::net::UnixStream;
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let file =
+            unsafe { std::fs::File::from_raw_fd(std::os::fd::IntoRawFd::into_raw_fd(writer)) };
+        let file = file.try_clone().unwrap();
+        let fd = file.as_raw_fd();
+        let script = format!("require('node:fs').writeSync({fd}, 'observed')");
+        let status = std::process::Command::new("node")
+            .args(["-e", &script])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "the cloned descriptor must start close-on-exec"
+        );
+        let mut child = std::process::Command::new("node");
+        child.args(["-e", &script]);
+        super::inherit_observer_in_child(&mut child, &file);
+        assert!(child.status().unwrap().success());
+        let mut message = [0; 8];
+        reader.read_exact(&mut message).unwrap();
+        assert_eq!(&message, b"observed");
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builtin_proxy_emits_request_observations_after_exec() {
+        use std::os::unix::net::UnixStream;
+        let root = test_root();
+        let cassette = cassette(&root);
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let report = root.join("request-report.json");
+        let session = Session::start_for_agent_at(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            crate::tape::AgentContext {
+                workspace: &root,
+                agent: None,
+                recorder: None,
+                invocation_dir: &root,
+                perfetto_observer: Some(std::fs::File::from(std::os::fd::OwnedFd::from(writer))),
+                perfetto_trace_id: Some("test-trace".into()),
+                perfetto_report: Some(report.clone()),
+            },
+        )
+        .unwrap();
+        assert!(request(&session, r#"{"model":"m","messages":[{"content":"work in <asb-workspace>"}],"tools":[{"type":"function"}]}"#).contains("200 OK"));
+        session.stop().unwrap();
+        let mut events = String::new();
+        reader.read_to_string(&mut events).unwrap();
+        assert!(events.contains("begin llm_request 1\n"));
+        assert!(events.contains("end llm_request 1\n"));
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+        assert_eq!(value["begun"], 1);
+        assert_eq!(value["ended"], 1);
+        assert_eq!(value["complete"], true);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn registry_recording_settings_preserve_invocation_context() {
@@ -955,7 +1053,12 @@ mod tests {
             };
             session.abort();
             drop(session);
-            assert_eq!(scratch_path.exists(), mismatch);
+            let retained = scratch_path.with_file_name(format!(
+                "{}.mismatch.json",
+                scratch_path.file_name().unwrap().to_string_lossy()
+            ));
+            assert!(!scratch_path.exists());
+            assert_eq!(retained.exists(), mismatch);
         }
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1710,6 +1813,7 @@ mod tests {
         let replayed = r#"{"model":"m","messages":[{"content":"write to srv-data-projects-asb-e2e-v0142-project-sweep-replay-v0142-results-003-v0141-workbuddy-swe-bench-workspace/memory"}]}"#;
         assert!(request(&session, replayed).contains("200 OK"));
         session.stop().unwrap();
+
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1917,6 +2021,7 @@ mod tests {
             assert!(request(&session, &changed).contains("409 Conflict"));
             assert!(session.stop().unwrap_err().to_string().contains("rejected"));
         }
+
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2230,6 +2335,115 @@ mod tests {
         let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
         assert!(request(&session, &changed_count).contains("409 Conflict"));
         assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_structured_unittest_elapsed_time() {
+        let root = test_root();
+        let cassette = root.join("unittest-summary.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Ran 6 tests in 0.001s\\n\\nOK\\nresult: retained"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let replayed = recorded.replace("0.001s", "0.002s");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        for changed in [
+            replayed.replace("Ran 6 tests", "Ran 7 tests"),
+            replayed.replace("OK", "FAILED"),
+            replayed.replace("retained", "changed"),
+        ] {
+            let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+            assert!(request_to(&session, "/v1/responses", &changed).contains("409 Conflict"));
+            assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        }
+
+        let not_summary = root.join("unittest-not-summary.jsonl");
+        let recorded_text = recorded.replace("OK", "arbitrary output");
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded_text},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&not_summary, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &not_summary, None, false, &root).unwrap();
+        let changed = recorded
+            .replace("OK", "arbitrary output")
+            .replace("0.001s", "0.002s");
+        assert!(request_to(&session, "/v1/responses", &changed).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        let singular = root.join("unittest-singular-summary.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Ran 1 test in 1.001s\\n\\nOK"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&singular, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &singular, None, false, &root).unwrap();
+        assert!(
+            request_to(
+                &session,
+                "/v1/responses",
+                &recorded.replace("1.001s", "1.002s"),
+            )
+            .contains("200 OK")
+        );
+        session.stop().unwrap();
+        let failed = root.join("unittest-failed-summary.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Ran 2 tests in 0.015s\n\nFAILED (failures=1)\n"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&failed, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &failed, None, false, &root).unwrap();
+        assert!(
+            request_to(
+                &session,
+                "/v1/responses",
+                &recorded.replace("0.015s", "0.016s")
+            )
+            .contains("200 OK")
+        );
+        session.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_normalizes_only_structured_unified_diff_header_mtimes() {
+        let root = test_root();
+        let cassette = root.join("unified-diff-mtime.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"--- /testbed/a.py\t2026-11-04 14:48:00.257132838 +0000\n+++ source/a.py\t2019-05-15 09:30:00.000000000 +0000\n@@ -1 +1 @@\n-old\n+new\n--- /testbed/b.py\t2026-11-04 14:48:01 +0000\n+++ source/b.py\t2019-05-15 09:30:01 +0000\n@@ -2 +2 @@\n-before\n+after"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = recorded
+            .replace("14:48:00.257132838", "14:58:31.449839575")
+            .replace("09:30:00.000000000", "10:30:00.000000000")
+            .replace("14:48:01", "14:58:32")
+            .replace("09:30:01", "10:30:01");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        for changed in [
+            replayed.replace("/testbed/a.py", "/testbed/changed.py"),
+            replayed.replace("@@ -1 +1 @@", "@@ -2 +2 @@"),
+            replayed.replace("+new", "+changed"),
+            replayed.replace("2019-05-15", "literal 2019-05-15"),
+        ] {
+            let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+            assert!(request_to(&session, "/v1/responses", &changed).contains("409 Conflict"));
+            assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

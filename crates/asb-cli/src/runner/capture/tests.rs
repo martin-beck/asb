@@ -23,6 +23,7 @@ fn guest_execution_reports_its_own_timeout() {
         &mut command,
         None,
         None,
+        None,
         &mut Vec::new(),
         &mut Vec::new(),
         Duration::from_millis(50),

@@ -1,4 +1,5 @@
 use super::*;
+use std::path::PathBuf;
 use std::process::Stdio;
 
 struct FailingWriter(bool);
@@ -36,6 +37,8 @@ fn isolated_workload_process_capture_timeout_and_failure_cleanup() {
             "flush-failure",
             "callback-failure",
             "truncated",
+            "measured",
+            "measured-callback-failure",
         ] {
             let output = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", &name, "--nocapture"])
@@ -63,6 +66,64 @@ fn isolated_workload_process_capture_timeout_and_failure_cleanup() {
     let mut output = Vec::new();
     let mut errors = Vec::new();
     match case.as_str() {
+        "measured" | "measured-callback-failure" => {
+            use std::os::unix::fs::PermissionsExt;
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/retained-principal-fixtures")
+                .join(std::process::id().to_string());
+            std::fs::create_dir_all(&root).unwrap();
+            let gate = root.join("gate");
+            std::fs::write(&gate, "#!/bin/sh\nshift 3\nkill -STOP $$\nexec \"$@\"\n").unwrap();
+            std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let mut launch = crate::launch::ProcessLaunch::new("/usr/bin/printf");
+            launch.arg("retained-agent");
+            let (mut command, route) = launch.measured(&gate);
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
+            let mut observed_pid = None;
+            let result = start_with_spawn(
+                (&mut command, Some(route)),
+                None,
+                &mut output,
+                &mut errors,
+                Duration::from_millis(500),
+                |pid| {
+                    observed_pid = Some(pid);
+                    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+                    assert!(status.lines().any(|line| line.starts_with("State:")
+                        && line.split_whitespace().nth(1) == Some("T")));
+                    if case == "measured-callback-failure" {
+                        return Err(Error::Run("collector admission failed".into()));
+                    }
+                    std::thread::sleep(Duration::from_millis(700));
+                    assert!(
+                        Command::new("kill")
+                            .args(["-CONT", &pid.to_string()])
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                    Ok(())
+                },
+                |_, _, _| Ok(()),
+            );
+            if case == "measured-callback-failure" {
+                assert!(
+                    result
+                        .err()
+                        .unwrap()
+                        .to_string()
+                        .contains("collector admission failed")
+                );
+                assert!(!PathBuf::from(format!("/proc/{}", observed_pid.unwrap())).exists());
+                assert!(output.is_empty());
+            } else {
+                let held = result.unwrap();
+                assert!(!held.timed_out);
+                assert!(held.output.status.success());
+                assert_eq!(output, b"retained-agent");
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
         "normal" | "nonzero" => {
             if case == "nonzero" {
                 command = Command::new("sh");

@@ -328,7 +328,7 @@ fn render_agent_reports(stage: &Path, prepared: &PreparedReport) -> Result<(), E
                 )?,
             }
         }
-        write_agent_html_report(stage, &plan, &values)?;
+        write_agent_html_report(stage, &plan, &values, &prepared.collector_graphs)?;
     }
     Ok(())
 }
@@ -378,16 +378,22 @@ fn write_agent_html_report(
     stage: &Path,
     plan: &AgentReportPlan,
     values: &BTreeMap<String, BTreeMap<String, Vec<f64>>>,
+    collector_graphs: &[crate::collectors::ReportGraph],
 ) -> Result<(), Error> {
     let agents = values
         .values()
         .flat_map(|metric| metric.keys().cloned())
         .collect::<BTreeSet<_>>();
-    let graphs = plan
+    let mut graphs = plan
         .graphs
         .iter()
         .flat_map(|(_, graphs)| graphs.iter().map(|(_, file)| file.clone()))
         .collect::<Vec<_>>();
+    // Collector-owned graphs are already published with the comparison's
+    // immutable graph set.  Include them in every derived agent report too:
+    // they are diagnostic cross-run views, not scalar agent aggregates, and
+    // hiding them behind the main report made the report family inconsistent.
+    graphs.extend(collector_graphs.iter().map(|graph| graph.filename.clone()));
     let mut html = String::from(HTML_HEAD);
     html = html.replacen(
         "</style></head>",
@@ -400,6 +406,9 @@ fn write_agent_html_report(
     html.push_str("<main class=\"shell\">");
     html.push_str(&format!("<header class=\"hero\"><p class=\"eyebrow\">ASB AGENT REPORT</p><h1>{}</h1><p>{}</p></header>", escape(plan.kind.title()), escape(plan.kind.description())));
     html.push_str("<section class=\"explain\"><strong>Agent-only aggregation</strong><p>These derived views use the same validated sweep records and SVG/HTML interaction pipeline as the benchmark report. They group every finite observation by agent; provider, model, workload, and task detail stay in the original report and comparison.json.</p></section>");
+    if !collector_graphs.is_empty() {
+        html.push_str("<section class=\"explain\"><strong>Collector diagnostics</strong><p>Specialized collector graphs are included below with their original cross-run scope. They are diagnostic evidence, not per-agent scalar aggregates or benchmark scores.</p></section>");
+    }
     html.push_str("<section class=\"filters\"><div class=\"section-title\"><h2>Filter agents</h2><div><button type=\"button\" data-action=\"all\">Select all</button><button type=\"button\" data-action=\"none\">Clear all</button></div></div><div class=\"filter-grid\"><fieldset><legend>Agent</legend>");
     for agent in &agents {
         html.push_str(&format!("<label><input type=\"checkbox\" data-group=\"agent\" value=\"{}\" checked><span>{}</span></label>", escape(agent), escape(agent)));
@@ -509,4 +518,49 @@ fn write_histogram_svg(
     svg.push_str("<text x=\"574\" y=\"452\" text-anchor=\"middle\" font-size=\"12\">metric value bin</text></svg>\n");
     fs::write(path, svg)
         .map_err(|error| Error::Run(format!("cannot write {}: {error}", path.display())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_agent_report_embeds_collector_diagnostics() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-agent-report-collector-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let graphs = [
+            crate::collectors::ReportGraph {
+                filename: "agentsysperf-bottleneck-findings.svg".into(),
+                svg: "<svg xmlns=\"http://www.w3.org/2000/svg\"><title>AgentSysPerf bottleneck diagnostic</title></svg>"
+                    .into(),
+            },
+            crate::collectors::ReportGraph {
+                filename: "agentsysperf-scaling-fixture.svg".into(),
+                svg: "<svg xmlns=\"http://www.w3.org/2000/svg\"><title>AgentSysPerf scaling diagnostic</title></svg>"
+                    .into(),
+            },
+        ];
+        for graph in &graphs {
+            fs::write(root.join(&graph.filename), &graph.svg).unwrap();
+        }
+        let values = BTreeMap::new();
+        for kind in AgentReportKind::ALL {
+            let plan = AgentReportPlan {
+                kind,
+                report_file: kind.report_file().into(),
+                graphs: Vec::new(),
+            };
+            write_agent_html_report(&root, &plan, &values, &graphs).unwrap();
+            let html = fs::read_to_string(root.join(kind.report_file())).unwrap();
+            assert!(html.contains("Collector diagnostics"));
+            assert!(html.contains("agentsysperf-bottleneck-findings.svg"));
+            assert!(html.contains("AgentSysPerf bottleneck diagnostic"));
+            assert!(html.contains("agentsysperf-scaling-fixture.svg"));
+            assert!(html.contains("AgentSysPerf scaling diagnostic"));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -31,6 +31,22 @@ impl<'a> Admission<'a> {
         Self::prepare(validated, true)
     }
 
+    /// Request a second, actual-principal gate for agent-only collectors.
+    pub(crate) fn with_measured_principal(
+        validated: crate::launch::ValidatedGate<'a>,
+    ) -> io::Result<Self> {
+        let mut admission = Self::prepare(validated, true)?;
+        admission.command.env(super::MEASURE_PRINCIPAL, "1");
+        admission
+            .control
+            .as_mut()
+            .expect("controlled gate")
+            .0
+            .expect_principal();
+        admission.observation_only = true;
+        Ok(admission)
+    }
+
     pub(crate) fn with_principal_observation(
         validated: crate::launch::ValidatedGate<'a>,
     ) -> io::Result<Self> {
@@ -41,6 +57,7 @@ impl<'a> Admission<'a> {
 
     fn prepare(validated: crate::launch::ValidatedGate<'a>, controlled: bool) -> io::Result<Self> {
         let command = validated.into_command();
+        command.env_remove(super::MEASURE_PRINCIPAL);
         let keeper = OwnedReaper::new("asb-gate-custody").map_err(io::Error::other)?;
         let (receiver, writer) = Receiver::pair()?;
         let fd = writer.as_raw_fd();
@@ -151,6 +168,57 @@ impl ManagedGate {
             return Err(io::Error::last_os_error());
         }
         Ok(true)
+    }
+
+    /// Resume the guardian, then wait for its exact direct principal to stop
+    /// before exec. The caller may attach collectors and externally resume it.
+    pub(crate) fn start_measured_principal(&mut self) -> io::Result<u32> {
+        self.resume()?;
+        let deadline = Instant::now() + STARTUP;
+        loop {
+            let gate = self.id();
+            let control = self
+                .control
+                .as_mut()
+                .ok_or_else(|| io::Error::other("measured principal control is missing"))?;
+            control.poll(gate)?;
+            if let Some(pid) = control.principal {
+                let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
+                let mut stopped = false;
+                let mut parent = None;
+                for line in status.lines() {
+                    if line.starts_with("State:") {
+                        stopped = line.split_whitespace().nth(1) == Some("T");
+                    }
+                    if let Some(value) = line.strip_prefix("PPid:") {
+                        parent = value.trim().parse::<u32>().ok();
+                    }
+                }
+                if stopped && parent == Some(gate) {
+                    return Ok(pid);
+                }
+                if parent != Some(gate) {
+                    return Err(io::Error::other("measured principal changed parent"));
+                }
+            }
+            if self
+                .child
+                .as_mut()
+                .expect("owned gate")
+                .try_wait()?
+                .is_some()
+            {
+                return Err(io::Error::other(
+                    "guardian exited before principal readiness",
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other(
+                    "measured principal readiness deadline exceeded",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     /// Establish current-ABI custody without admitting the application. This

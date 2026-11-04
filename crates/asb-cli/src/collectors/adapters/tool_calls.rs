@@ -138,6 +138,13 @@ mod tests {
             0,
             &ReportRow {
                 label: "agent",
+                agent: "agent",
+                provider: "fixture-provider",
+                model: "fixture-model",
+                workload: "fixture-workload",
+                trial: "fixture-trial",
+                configured_concurrency: 1,
+                execution_cohort: None,
                 metrics: &metrics,
                 components: None,
                 documents: &documents,

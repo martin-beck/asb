@@ -44,6 +44,7 @@ pub(super) struct Admission {
     claimed: std::sync::atomic::AtomicBool,
     material: Gate,
     launch: Gate,
+    settlement: SettlementBarrier,
     cohort: crate::measurements::ExecutionCohort,
 }
 
@@ -123,10 +124,13 @@ impl Admission {
         }
         let material = Gate::selected(total, &cohort.admitted_slots, expected, material_timeout)?;
         let launch = Gate::deferred_selected(total, &cohort.admitted_slots, launch_timeout)?;
+        let settlement =
+            SettlementBarrier::selected(total, &cohort.admitted_slots, launch_timeout)?;
         Ok(Self {
             claimed: std::sync::atomic::AtomicBool::new(false),
             material,
             launch,
+            settlement,
             cohort,
         })
     }
@@ -141,6 +145,9 @@ impl Admission {
     }
     pub(super) fn launch(&self) -> &Gate {
         &self.launch
+    }
+    pub(super) fn settlement(&self) -> &SettlementBarrier {
+        &self.settlement
     }
     pub(super) fn cohort(&self) -> &crate::measurements::ExecutionCohort {
         &self.cohort
@@ -179,6 +186,136 @@ impl Admission {
                 .copied()
                 .eq((1..=total)
                     .filter(|slot| !reused.is_some_and(|slots| slots.contains_key(slot))))
+    }
+}
+
+/// A second cohort boundary: no participant may enter official workload
+/// grading until every admitted peer has finished its agent execution and
+/// measurement collection.  Unlike preparation admission, this carries no
+/// material identity; it only owns the original selected participant set.
+///
+/// The deadline begins with the first settled execution, so a slow benchmark
+/// run does not consume the post-execution rendezvous budget.  Any failed,
+/// cancelled, or panicked replica aborts the barrier and wakes its peers rather
+/// than allowing an early evaluator to run or leaving a waiter stranded.
+pub(crate) struct SettlementBarrier {
+    state: Mutex<SettlementState>,
+    changed: Condvar,
+    timeout: Duration,
+}
+
+struct SettlementState {
+    deadline: Option<Instant>,
+    participants: Vec<bool>,
+    arrived: Vec<bool>,
+    released: bool,
+    aborted: Option<String>,
+}
+
+impl SettlementBarrier {
+    pub(crate) fn selected(
+        total: usize,
+        admitted: &[usize],
+        timeout: Duration,
+    ) -> Result<Self, Error> {
+        if !(1..=64).contains(&total)
+            || admitted.is_empty()
+            || admitted.len() > total
+            || timeout.is_zero()
+        {
+            return Err(Error::Input("invalid execution-settlement cohort".into()));
+        }
+        let mut participants = vec![false; total];
+        for slot in admitted {
+            if !(1..=total).contains(slot) || participants[*slot - 1] {
+                return Err(Error::Input(
+                    "invalid or duplicate execution-settlement participant".into(),
+                ));
+            }
+            participants[*slot - 1] = true;
+        }
+        Ok(Self {
+            state: Mutex::new(SettlementState {
+                deadline: None,
+                participants,
+                arrived: vec![false; total],
+                released: false,
+                aborted: None,
+            }),
+            changed: Condvar::new(),
+            timeout,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(total: usize, timeout: Duration) -> Result<Self, Error> {
+        Self::selected(total, &(1..=total).collect::<Vec<_>>(), timeout)
+    }
+
+    pub(crate) fn arrive(&self, replica: Identity) -> Result<(), Error> {
+        let mut state = self.state.lock().map_err(|_| unavailable())?;
+        if !replica.valid()
+            || replica.total != state.arrived.len()
+            || !state.participants[replica.index - 1]
+            || state.arrived[replica.index - 1]
+        {
+            state
+                .aborted
+                .get_or_insert_with(|| "invalid or duplicate execution-settlement arrival".into());
+            self.changed.notify_all();
+            return Err(Error::Run(
+                "invalid or duplicate execution-settlement arrival".into(),
+            ));
+        }
+        if state.deadline.is_none() {
+            state.deadline = Some(
+                Instant::now()
+                    .checked_add(self.timeout)
+                    .ok_or_else(unavailable)?,
+            );
+        }
+        state.arrived[replica.index - 1] = true;
+        if state
+            .arrived
+            .iter()
+            .zip(&state.participants)
+            .all(|(arrived, selected)| !selected || *arrived)
+        {
+            state.released = true;
+            self.changed.notify_all();
+        }
+        loop {
+            if let Some(reason) = &state.aborted {
+                return Err(Error::Run(reason.clone()));
+            }
+            if state.released {
+                return Ok(());
+            }
+            let deadline = state.deadline.ok_or_else(unavailable)?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                state.aborted =
+                    Some("execution-settlement cohort timed out before grading could begin".into());
+                self.changed.notify_all();
+                continue;
+            }
+            let (next, _) = self
+                .changed
+                .wait_timeout(state, remaining.min(Duration::from_secs(1)))
+                .map_err(|_| unavailable())?;
+            state = next;
+        }
+    }
+
+    pub(crate) fn abort(&self, reason: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.released && state.aborted.is_none() {
+            state.aborted = Some(reason.into());
+        }
+        self.changed.notify_all();
     }
 }
 
@@ -515,6 +652,56 @@ mod tests {
                 launch_gate
                     .register(Identity { index: 1, total: 2 })
                     .is_err()
+            );
+        });
+    }
+
+    #[test]
+    fn settlement_barrier_holds_grading_until_every_execution_has_arrived() {
+        let barrier = SettlementBarrier::for_test(2, Duration::from_secs(3)).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (released_tx, released_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                entered_tx.send(()).unwrap();
+                barrier
+                    .arrive(Identity { index: 1, total: 2 })
+                    .expect("first settled execution is released after its peer settles");
+                released_tx.send(()).unwrap();
+            });
+            entered_rx.recv().unwrap();
+            // This models the evaluator entry point. It must remain blocked
+            // while replica 2 is still executing/collecting measurements.
+            assert!(released_rx.recv_timeout(Duration::from_millis(50)).is_err());
+            barrier
+                .arrive(Identity { index: 2, total: 2 })
+                .expect("second settled execution releases the cohort");
+            released_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        });
+    }
+
+    #[test]
+    fn settlement_barrier_failure_releases_waiters_without_grading() {
+        let barrier = SettlementBarrier::for_test(2, Duration::from_secs(3)).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                entered_tx.send(()).unwrap();
+                result_tx
+                    .send(barrier.arrive(Identity { index: 1, total: 2 }))
+                    .unwrap();
+            });
+            entered_rx.recv().unwrap();
+            barrier.abort("replica 2 failed while settling execution evidence");
+            let error = result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .expect_err("failed peers must not authorize early grading");
+            assert!(
+                error
+                    .to_string()
+                    .contains("replica 2 failed while settling execution evidence")
             );
         });
     }

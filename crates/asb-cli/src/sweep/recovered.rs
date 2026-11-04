@@ -149,11 +149,12 @@ pub(super) fn import(
     sweep_path: &Path,
     manifest: &super::SweepFile,
     parent: &Path,
+    output_parent: &Path,
     stem: &str,
     json_output: bool,
     output: &mut dyn Write,
 ) -> Result<(), Error> {
-    let results = parent.join(format!("{stem}-results"));
+    let results = output_parent.join(format!("{stem}-results"));
     if !std::fs::symlink_metadata(&results).is_ok_and(|metadata| metadata.is_dir()) {
         return Err(invalid("original sweep results must be a real directory"));
     }

@@ -220,13 +220,23 @@ def guest(scenario="normal"):
         child = subprocess.Popen([str(ASB),"__asb-agent"],cwd=root,env=env,
             stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         try:
-            ready = child.stdout.readline()
-            assert ready.strip() == f"__ASB_GATE__:{child.pid}".encode(), ready
+            ready = child.stdout.readline().strip()
+            prefix = b"__ASB_GATE__:"
+            assert ready.startswith(prefix) and ready[len(prefix):].isdigit(), ready
+            gated_pid = int(ready[len(prefix):])
+            assert gated_pid > 1, "invalid guest gate pid"
+            # The guest supervisor may gate either itself or its agent child.
+            # Confirm that the announced process belongs to this fixture.
+            ancestor = gated_pid
+            while ancestor != child.pid:
+                assert ancestor > 1, "guest gate is outside the supervisor tree"
+                status = Path(f"/proc/{ancestor}/status").read_text()
+                ancestor = int(next(line.split()[1] for line in status.splitlines() if line.startswith("PPid:")))
             deadline = time.monotonic()+5
-            while "\nState:\tT" not in Path(f"/proc/{child.pid}/status").read_text():
-                assert time.monotonic() < deadline, "guest never stopped"
+            while "\nState:\tT" not in Path(f"/proc/{gated_pid}/status").read_text():
+                assert time.monotonic() < deadline, "guest gate never stopped"
                 time.sleep(.005)
-            child.send_signal(signal.SIGCONT)
+            os.kill(gated_pid, signal.SIGCONT)
             _, stderr = child.communicate(timeout=10)
             (root / f"invocation-{index}.stderr").write_bytes(stderr)
             if scenario == "publication" and index == 0:

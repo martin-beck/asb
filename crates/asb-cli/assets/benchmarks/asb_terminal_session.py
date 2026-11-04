@@ -74,7 +74,7 @@ class SessionTransport:
         self.root = "/tmp/asb-session-"+self.nonce
         self.channel = "asb-return-"+self.nonce
         self.bridge,self.worker,self.worker_error = None,None,None
-        self.namespace_pid,self.parent_pid,self.closed,self.close_error = None,None,False,None
+        self.namespace_pid,self.launch_pid,self.parent_pid,self.closed,self.close_error = None,None,None,False,None
         self.parent_released = False
         self.deadline = owner.preparation_deadline if owner.preparation_deadline is not None else time.monotonic()+90
 
@@ -166,13 +166,25 @@ class SessionTransport:
     def target(self,namespace_pid):
         from asb_material_exec import run
         from asb_material import MaterialError
-        if self._frame("started",2) != [namespace_pid]:
-            raise ExecutionError("SDK session gate does not match its launched child")
+        self.launch_pid, = self._frame("started",2)
+        if self.launch_pid != namespace_pid:
+            # The SDK owns the guest driver; the stopped measurement target
+            # can be its principal or a child of its private guardian.
+            ancestry = ('p=$1; root=$2; n=0; while test "$n" -lt 128; do '
+                'test "$p" = "$root" && exit 0; '
+                'case "$p" in ""|*[!0-9]*|0|1) exit 1;; esac; '
+                'next=; while IFS=: read -r key value; do '
+                'if test "$key" = PPid; then set -- $value; next=$1; break; fi; '
+                'done < "/proc/$p/status" || exit 1; p=$next; n=$((n+1)); done; exit 1')
+            checked = self._run(["/bin/sh","-c",ancestry,"asb-session-descendant",
+                str(namespace_pid),str(self.launch_pid)])
+            if checked.exit_code != 0:
+                raise ExecutionError("SDK session gate is not a descendant of its launched child")
         self.worker.join(timeout=max(0,min(5,self.deadline-time.monotonic())))
         if self.worker.is_alive() or self.worker_error:
             raise ExecutionError("SDK session launch worker did not settle before client admission")
         self.parent_pid, = self._frame("parent",2)
-        if self.parent_pid <= 1 or self.parent_pid == namespace_pid:
+        if self.parent_pid <= 1 or self.parent_pid in (namespace_pid,self.launch_pid):
             raise ExecutionError("SDK session client replaced its parent shell")
         self.namespace_pid = namespace_pid
         probe = self._run(["/opt/asb-runtime/asb","__asb-target",str(namespace_pid)])
@@ -201,7 +213,7 @@ class SessionTransport:
     def exit_status(self):
         if self.bridge.exit_status() != 0:raise ExecutionError("SDK session output bridge failed")
         pid,status = self._frame("exit",3,time.monotonic()+5)
-        if pid != self.namespace_pid or not 0 <= status <= 255:
+        if pid != self.launch_pid or not 0 <= status <= 255:
             raise ExecutionError("SDK session child status contradicts its stopped gate")
         self._parent_return()
         return status
@@ -213,7 +225,7 @@ class SessionTransport:
         self.parent_released = True
         result = self._run(["timeout","5s","/bin/sh","-c",'printf "%s\\n" "$1" > "$2"',
             "asb-session-release",self.nonce,self.root+"/release"])
-        if result.exit_code != 0 or self._frame("released",2,time.monotonic()+5) != [self.namespace_pid]:
+        if result.exit_code != 0 or self._frame("released",2,time.monotonic()+5) != [self.launch_pid]:
             raise ExecutionError("SDK session could not release its owned workload parent")
         self._parent_return()
 

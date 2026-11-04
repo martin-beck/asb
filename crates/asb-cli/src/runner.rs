@@ -177,6 +177,9 @@ pub(crate) struct RunOptions<'a> {
     pub requirements_prepared: bool,
     pub preparation_gate: Option<&'a batch::Gate>,
     pub launch_gate: Option<&'a batch::Gate>,
+    /// Holds official grading and post-processing until every admitted peer
+    /// has settled its agent execution and measurement collection.
+    pub settlement_barrier: Option<&'a batch::SettlementBarrier>,
     pub policy: Option<&'a crate::planning::ResolvedPlan>,
     pub execution_cohort: Option<&'a measurements::ExecutionCohort>,
     pub json: bool,
@@ -571,6 +574,7 @@ fn public_direct_run(options: &RunOptions<'_>) -> bool {
         && options.execution_cohort.is_none()
         && options.preparation_gate.is_none()
         && options.launch_gate.is_none()
+        && options.settlement_barrier.is_none()
         && options.batch.is_none()
         && options.on_completion.is_none()
 }
@@ -592,6 +596,7 @@ fn run_admitted_batch(
         || options.execution_cohort.is_some()
         || options.preparation_gate.is_some()
         || options.launch_gate.is_some()
+        || options.settlement_barrier.is_some()
     {
         return Err(Error::Input(
             "batch admission differs from original pending replica population".into(),
@@ -602,6 +607,7 @@ fn run_admitted_batch(
         execution_cohort: Some(admission.cohort()),
         preparation_gate: Some(admission.material()),
         launch_gate: Some(admission.launch()),
+        settlement_barrier: Some(admission.settlement()),
         verify_initial_material: true,
         ..options
     };
@@ -637,8 +643,18 @@ fn run_dispatched(
     let gate = (options.verify_initial_material && options.preparation_gate.is_none())
         .then(|| batch::Gate::new(config.concurrency, None, Duration::from_secs(1800)))
         .transpose()?;
+    let settlement = (config.concurrency > 1 && options.settlement_barrier.is_none())
+        .then(|| {
+            batch::SettlementBarrier::selected(
+                config.concurrency,
+                &(1..=config.concurrency).collect::<Vec<_>>(),
+                Duration::from_secs(1800),
+            )
+        })
+        .transpose()?;
     let options = RunOptions {
         preparation_gate: options.preparation_gate.or(gate.as_ref()),
+        settlement_barrier: options.settlement_barrier.or(settlement.as_ref()),
         ..options
     };
     if config.concurrency > 1 {
@@ -843,6 +859,9 @@ fn abort_replica_gates(options: RunOptions<'_>, reason: &str) {
     if let Some(gate) = options.launch_gate {
         gate.abort(reason);
     }
+    if let Some(barrier) = options.settlement_barrier {
+        barrier.abort(reason);
+    }
 }
 
 fn run_replica_catching(
@@ -907,26 +926,44 @@ fn run_mode(
     warnings: &Mutex<BTreeSet<String>>,
 ) -> Result<(), Error> {
     if options.mode == Some(tape::Mode::Record) && options.provider_capture_path.is_none() {
-        return Err(Error::Run(
+        let error = Error::Run(
             "record dispatch lost its owned provider capture path before attempt admission".into(),
-        ));
+        );
+        abort_replica_gates(options, &error.to_string());
+        return Err(error);
     }
     // Register before any fallible setup. Early return or unwinding aborts peers.
-    let mut arrival = options
+    let mut arrival = match options
         .preparation_gate
         .map(|gate| gate.register(options.replica))
-        .transpose()?;
-    let policy = crate::planning::resolve_snapshot(
-        &config,
-        options.measurement_dir.is_some(),
-        options.policy,
-    )?;
-    let admitted = AdmittedAttempt::admit(config_path, config, options)?;
-    attempt::ConfiguredAttempt::configure(config_path, admitted, policy, output, warnings)?.run(
-        &mut arrival,
-        output,
-        warnings,
-    )
+        .transpose()
+    {
+        Ok(arrival) => arrival,
+        Err(error) => {
+            abort_replica_gates(options, &error.to_string());
+            return Err(error);
+        }
+    };
+    let result =
+        (|| {
+            let policy = crate::planning::resolve_snapshot(
+                &config,
+                options.measurement_dir.is_some(),
+                options.policy,
+            )?;
+            let admitted = AdmittedAttempt::admit(config_path, config, options)?;
+            attempt::ConfiguredAttempt::configure(config_path, admitted, policy, output, warnings)?
+                .run(&mut arrival, output, warnings)
+        })();
+    if let Err(error) = &result
+        && let Some(barrier) = options.settlement_barrier
+    {
+        barrier.abort(&format!(
+            "replica {} failed before cohort grading: {error}",
+            options.replica.index
+        ));
+    }
+    result
 }
 
 fn finish_provider_attempt(
@@ -1584,6 +1621,7 @@ use capture::{OwnedChild, PresentationPolicy, capture_with_output_streams};
 
 pub(crate) struct GuestProcessOutput {
     pub output: Output,
+    pub observation: crate::process_termination::Observation,
     pub transcript_truncated: bool,
     pub timed_out: bool,
 }
@@ -1604,8 +1642,54 @@ fn wait_with_output(
     )
 }
 
+#[cfg(target_os = "linux")]
+fn principal_identity(
+    pid: u32,
+) -> Result<(measurements::ProcessIdentity, std::path::PathBuf), Error> {
+    let identity = measurements::ProcessIdentity::read(pid)
+        .ok_or_else(|| Error::Run("stopped agent identity disappeared".into()))?;
+    let executable = std::fs::read_link(format!("/proc/{pid}/exe")).map_err(crate::io_error)?;
+    Ok((identity, executable))
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_agent_exec(
+    child: &mut OwnedChild,
+    principal: u32,
+    identity: (measurements::ProcessIdentity, std::path::PathBuf),
+) -> Result<(), Error> {
+    let (identity, launcher) = identity;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if !identity.matches() {
+            break;
+        }
+        match std::fs::read_link(format!("/proc/{principal}/exe")) {
+            Ok(current) if current != launcher => break,
+            Ok(_) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(Error::Run(format!(
+                    "cannot observe agent execution: {error}"
+                )));
+            }
+        }
+        if child.try_wait().map_err(crate::io_error)?.is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::Run(
+                "agent did not execute after collector attachment".into(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+
 pub(crate) fn run_guest_process(
     command: &mut Command,
+    route: Option<crate::launch::CommandRoute>,
     #[allow(unused_mut, unused_variables)] mut auxiliary: Option<&mut std::process::Child>,
     stdin_prompt: Option<&[u8]>,
     stdout: &mut dyn Write,
@@ -1616,8 +1700,42 @@ pub(crate) fn run_guest_process(
     #[cfg(target_os = "linux")]
     let mut descendants = crate::process_gate::DescendantScope::new()
         .map_err(|error| Error::Run(format!("cannot retain guest agent descendants: {error}")))?;
-    let mut child = OwnedChild::spawn_direct(command)
-        .map_err(|error| Error::Run(format!("cannot start guest agent: {error}")))?;
+    let gated = route.is_some();
+    #[cfg(target_os = "linux")]
+    let mut child = if let Some(route) = route {
+        let validated = route.validate_gate(command).map_err(crate::io_error)?;
+        let admission = crate::process_gate::Admission::with_measured_principal(validated)
+            .map_err(crate::io_error)?;
+        OwnedChild::Gated(admission.spawn().map_err(crate::io_error)?)
+    } else {
+        OwnedChild::spawn_direct(command).map_err(crate::io_error)?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut child = {
+        if route.is_some() {
+            return Err(Error::Run("agent-only gating requires Linux".into()));
+        }
+        OwnedChild::spawn_direct(command).map_err(crate::io_error)?
+    };
+    #[cfg(target_os = "linux")]
+    let principal = if gated {
+        child.start_measured_principal().map_err(crate::io_error)?
+    } else {
+        child.id()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let principal = child.id();
+    #[cfg(target_os = "linux")]
+    let identity = if gated {
+        Some(principal_identity(principal)?)
+    } else {
+        None
+    };
+    on_spawn(principal)?;
+    #[cfg(target_os = "linux")]
+    if let Some(identity) = identity {
+        wait_for_agent_exec(&mut child, principal, identity)?;
+    }
     if let Some(prompt) = stdin_prompt {
         let Some(mut stdin) = child.take_stdin() else {
             return Err(Error::Run(
@@ -1626,7 +1744,6 @@ pub(crate) fn run_guest_process(
         };
         stdin.write_all(prompt).map_err(crate::io_error)?;
     }
-    on_spawn(child.id())?;
     let captured = capture_with_output_streams(
         child,
         true,
@@ -1652,6 +1769,7 @@ pub(crate) fn run_guest_process(
     }
     Ok(GuestProcessOutput {
         output: captured.output,
+        observation: captured.observation,
         transcript_truncated: captured.transcript_truncated,
         timed_out: captured.timed_out,
     })
@@ -2544,6 +2662,7 @@ mod tests {
         let mut stderr = Vec::new();
         let result = super::run_guest_process(
             &mut command,
+            None,
             None,
             None,
             &mut stdout,

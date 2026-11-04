@@ -355,6 +355,26 @@ mod tests {
 
     #[test]
     fn every_family_member_exposes_its_installed_catalog_to_trial_selection() {
+        // The integration fixture owns its catalog root. A runner's optional
+        // workload override must not redirect this test to a host catalog.
+        // Use a child rather than mutating the process environment shared by
+        // other concurrent tests.
+        if std::env::var_os("ASB_WORKLOAD_DIR").is_some() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "workloads::adapters::livecodebench::catalog::tests::every_family_member_exposes_its_installed_catalog_to_trial_selection",
+                ])
+                .env_remove("ASB_WORKLOAD_DIR")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated fixture failed: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
         let root = std::env::temp_dir().join(format!(
             "asb-livecodebench-trial-integration-{}",
             crate::workloads::TaskIdentity::local("lcb", None).attempt_id
@@ -417,7 +437,7 @@ mod tests {
                 configs: vec![reference],
                 resources: None,
             };
-            let plan = crate::sweep::plan::build(&root, &manifest).unwrap();
+            let plan = crate::sweep::plan::build_at(&root, &manifest, &root).unwrap();
             let selection = &plan.entries[0].selection;
             assert_eq!(selection.task_id, "fixture-1");
             assert_eq!(selection.population_size, Some(2));

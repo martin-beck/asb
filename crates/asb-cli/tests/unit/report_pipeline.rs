@@ -121,9 +121,15 @@ fn external_compare_cannot_read_a_sweep_owned_by_an_active_writer() {
     assert!(error.contains("another sweep owns"));
     assert!(!fixture.0.join("results/sweep-comparison").exists());
     // The sweep's own finalization retains the same owner without re-locking.
-    run_in_sweep(manifest.to_str().unwrap(), &mut Vec::new(), &owner).unwrap();
+    run_in_sweep(
+        manifest.to_str().unwrap(),
+        &fixture.0,
+        &mut Vec::new(),
+        &owner,
+    )
+    .unwrap();
     let mut quiet = Vec::new();
-    run_links_in_sweep(manifest.to_str().unwrap(), &mut quiet, &owner).unwrap();
+    run_links_in_sweep(manifest.to_str().unwrap(), &fixture.0, &mut quiet, &owner).unwrap();
     let quiet = String::from_utf8(quiet).unwrap();
     assert!(quiet.contains("Result report: "));
     assert!(!quiet.contains("Compared "));

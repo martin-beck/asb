@@ -135,7 +135,101 @@ fn verify_at(value: &serde_json::Value, proc: &Path) -> Result<LocalTarget, Stri
 }
 
 pub(crate) fn verify(value: &serde_json::Value) -> Result<LocalTarget, String> {
-    verify_at(value, Path::new("/proc"))
+    verify_descendant_at(value, Path::new("/proc"))
+}
+
+/// Resolve the guest's stopped agent beneath the owned Docker exec driver.
+/// The daemon PID is a search root only; every candidate must separately pass
+/// the existing namespace, generation, stopped-state and cgroup checks.
+fn verify_descendant_at(value: &serde_json::Value, proc: &Path) -> Result<LocalTarget, String> {
+    if let Ok(direct) = verify_at(value, proc) {
+        return Ok(direct);
+    }
+    let target: Target = serde_json::from_value(value.clone())
+        .map_err(|_| "isolated measurement target has invalid identity fields")?;
+    if target.pid_scope != "docker-daemon-host" || target.daemon_pid <= 1 {
+        return Err("isolated target driver identity is invalid".into());
+    }
+    let driver = proc.join(target.daemon_pid.to_string());
+    let driver_start = start_time(&read(&driver.join("stat"))?)?;
+    let cgroup = read(&driver.join("cgroup"))?;
+    let container_scope = format!("docker-{}.scope", target.container_id);
+    if !cgroup
+        .lines()
+        .filter_map(|line| line.strip_prefix("0::"))
+        .any(|path| {
+            path.split('/')
+                .any(|part| part == target.container_id || part == container_scope)
+        })
+    {
+        return Err("isolated driver does not belong to its owned container".into());
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut children = std::collections::BTreeMap::<u32, Vec<u32>>::new();
+    let entries =
+        std::fs::read_dir(proc).map_err(|_| "cannot enumerate isolated target candidates")?;
+    for (index, entry) in entries.flatten().enumerate() {
+        if index >= 65536 || std::time::Instant::now() >= deadline {
+            return Err("isolated target candidate scan exceeded its bound".into());
+        }
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = read(&entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(parent) = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        children.entry(parent).or_default().push(pid);
+    }
+    let mut candidates = vec![target.daemon_pid];
+    let mut seen = std::collections::BTreeSet::from([target.daemon_pid]);
+    let mut index = 0;
+    while index < candidates.len() {
+        if let Some(items) = children.get(&candidates[index]) {
+            for &pid in items {
+                if seen.insert(pid) {
+                    candidates.push(pid);
+                }
+            }
+        }
+        if candidates.len() > 4096 {
+            return Err("isolated target process tree exceeds its bound".into());
+        }
+        index += 1;
+    }
+    let mut selected = None;
+    for pid in candidates.into_iter().skip(1) {
+        if std::time::Instant::now() >= deadline {
+            return Err("isolated target candidate scan exceeded its deadline".into());
+        }
+        let mut candidate = value.clone();
+        candidate["daemon_pid"] = serde_json::json!(pid);
+        if let Ok(found) = verify_at(&candidate, proc) {
+            if selected.is_some() {
+                return Err("isolated stopped target identity is ambiguous".into());
+            }
+            selected = Some(found);
+        }
+    }
+    if start_time(&read(&driver.join("stat"))?)? != driver_start
+        || read(&driver.join("cgroup"))? != cgroup
+    {
+        return Err("isolated driver changed during target resolution".into());
+    }
+    let selected = selected.ok_or("cannot identify the stopped agent under its owned driver")?;
+    let mut final_candidate = value.clone();
+    final_candidate["daemon_pid"] = serde_json::json!(selected.pid);
+    verify_at(&final_candidate, proc)
 }
 
 /// Candidate daemon PIDs are hints, never authority or a substitute bridge PID.
@@ -245,6 +339,52 @@ pub(crate) fn entry(args: &[std::ffi::OsString]) -> std::process::ExitCode {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn resolves_only_the_verified_stopped_child_of_owned_driver() {
+        let root = std::env::temp_dir()
+            .join(super::super::TaskIdentity::local("target-child", None).attempt_id);
+        std::fs::create_dir_all(root.join("sys/kernel/random")).unwrap();
+        let boot = "01234567-89ab-cdef-0123-456789abcdef";
+        std::fs::write(root.join("sys/kernel/random/boot_id"), boot).unwrap();
+        for (pid, parent, generation, state, namespace) in [
+            (9000, 1, 17, "S", 10),
+            (9001, 9000, 23, "T", 42),
+            (9002, 1, 23, "T", 42),
+        ] {
+            let path = root.join(pid.to_string());
+            std::fs::create_dir_all(&path).unwrap();
+            let mut fields = vec!["0".to_owned(); 20];
+            fields[0] = state.into();
+            fields[1] = parent.to_string();
+            fields[19] = generation.to_string();
+            std::fs::write(
+                path.join("stat"),
+                format!("{pid} (fixture) {}", fields.join(" ")),
+            )
+            .unwrap();
+            std::fs::write(
+                path.join("status"),
+                format!("State: {state}\nNSpid: {pid} {namespace}\n"),
+            )
+            .unwrap();
+            std::fs::write(
+                path.join("cgroup"),
+                format!("0::/system.slice/docker-{}.scope\n", "a".repeat(64)),
+            )
+            .unwrap();
+        }
+        let value = json!({"container_id":"a".repeat(64),"exec_id":"b".repeat(64),"daemon_pid":9000,
+            "namespace_pid":42,"pid_scope":"docker-daemon-host",
+            "process_identity":{"boot_id":boot,"namespace_pid":42,"start_time_ticks":23}});
+        assert_eq!(verify_descendant_at(&value, &root).unwrap().pid, 9001);
+        let mut changed = value.clone();
+        changed["process_identity"]["start_time_ticks"] = json!(24);
+        assert!(verify_descendant_at(&changed, &root).is_err());
+        std::fs::write(root.join("9000/cgroup"), "0::/unrelated\n").unwrap();
+        assert!(verify_descendant_at(&value, &root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn local_target_needs_boot_namespace_start_time_stopped_gate_and_owned_cgroup() {
         let root =

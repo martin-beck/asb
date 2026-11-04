@@ -25,11 +25,14 @@ class Container(BaseContainer):
         self.attrs = {"Config":{"User":"worker","Labels":{"asb.owner":"asb","asb.attempt":"asb-"+"a"*32}}}
         self.image = SimpleNamespace(id="sha256:"+"f"*64,attrs={"Os":"linux","Architecture":"amd64"})
         self.frames,self.archives,self.nonce = {},[],None
+        self.ancestry_valid = False
         self.candidates = {"Titles":["PID"],"Processes":[["222"],["9001"]]}
     def exec_run(self,argv,user=None):
         result = SimpleNamespace(exit_code=0,output=b"")
         if argv[0] == "id":result.output = b"1001\n" if argv[1] == "-u" else b"1002\n"
         elif "asb-session" in argv:self.nonce = argv[-1].split("asb-session-")[-1]
+        elif "asb-session-descendant" in argv:
+            result.exit_code = 0 if self.ancestry_valid else 1
         elif "asb-session-receipt" in argv:
             name = argv[-1].rsplit("/",1)[1]
             fields = {"started":"42","parent":"9","exit":"42 7","returned":"9 0","released":"42"}
@@ -315,6 +318,20 @@ class SDKSessionTests(unittest.TestCase):
                 if name in ["started","parent"]:self.assertFalse(container.resumed)
                 self.assertIn("kill",container.events)
                 launcher.close();workspace.close()
+
+    def test_descendant_principal_uses_launcher_receipts_for_release(self):
+        workspace,container,launcher,_ = self.fixture()
+        transport = launcher(workspace.client.api,container,["agent"],{},"/task")
+        container.frames["started"] = (container.nonce+" 43\n").encode()
+        container.frames["released"] = (container.nonce+" 43\n").encode()
+        with patch("asb_material_exec.run",side_effect=self.resolve):
+            with self.assertRaisesRegex(ExecutionError,"not a descendant"):
+                transport.target(42)
+            container.ancestry_valid = True
+            target = transport.target(42)
+        self.assertEqual(target["namespace_pid"],42)
+        transport.release_workload_parent()
+        launcher.close();workspace.close()
 
     def test_partial_failed_sdk_launch_remains_owned_and_does_not_resume(self):
         workspace,container,launcher,_ = self.fixture()

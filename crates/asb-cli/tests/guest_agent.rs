@@ -111,8 +111,9 @@ fn guest_uses_registered_adapter_prepares_before_gate_and_preserves_output_and_f
     qualify_guest_directory(false, false);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn native_auxiliary_service_starts_only_after_guest_gate_resumes() {
+fn native_auxiliary_service_is_ready_before_gated_agent_runs() {
     let project = Project::new();
     let bundle = project
         .0
@@ -163,7 +164,8 @@ fn native_auxiliary_service_starts_only_after_guest_gate_resumes() {
     let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
     let mut ready = String::new();
     stdout.read_line(&mut ready).unwrap();
-    assert_eq!(ready.trim(), format!("__ASB_GATE__:{}", process.0.id()));
+    let principal = fixture_gate_pid(&ready);
+    assert_ne!(principal, process.0.id());
     assert!(
         project
             .0
@@ -171,13 +173,13 @@ fn native_auxiliary_service_starts_only_after_guest_gate_resumes() {
             .is_file()
     );
     assert!(
-        !project
+        project
             .0
             .join("private/attempt/pi/broker.sock.started")
             .exists()
     );
     assert!(!project.0.join("workspace/native-service-observed").exists());
-    resume_fixture(&mut process);
+    resume_fixture_pid(&mut process, principal);
     let mut remaining = String::new();
     stdout.read_to_string(&mut remaining).unwrap();
     let status = process.0.wait().unwrap();
@@ -272,7 +274,7 @@ fn guest_stages_a_declared_mcp_server_through_the_recording_relay_before_launch(
     let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
     let mut ready = String::new();
     stdout.read_line(&mut ready).unwrap();
-    if ready.trim() != format!("__ASB_GATE__:{}", process.0.id()) {
+    if !ready.trim().starts_with("__ASB_GATE__:") {
         let mut error = String::new();
         process
             .0
@@ -283,6 +285,8 @@ fn guest_stages_a_declared_mcp_server_through_the_recording_relay_before_launch(
             .unwrap();
         panic!("guest did not reach its launch gate: {error}");
     }
+    let principal = fixture_gate_pid(&ready);
+    assert_ne!(principal, process.0.id());
     let config: toml::Value = toml::from_str(
         &std::fs::read_to_string(
             project
@@ -306,7 +310,7 @@ fn guest_stages_a_declared_mcp_server_through_the_recording_relay_before_launch(
     );
     assert!(!project.0.join("private/attempt/mcp-relay/fixture").exists());
 
-    resume_fixture(&mut process);
+    resume_fixture_pid(&mut process, principal);
     let mut output = String::new();
     stdout.read_to_string(&mut output).unwrap();
     assert!(process.0.wait().unwrap().success());
@@ -356,7 +360,7 @@ fn actual_guest_metadata_preserves_code_versus_signal_without_changing_carrier()
                 .spawn()
                 .unwrap(),
         );
-        resume_fixture(&mut process);
+        resume_guest_fixture(&mut process);
         let deadline = Instant::now() + Duration::from_secs(5);
         while process.0.try_wait().unwrap().is_none() {
             assert!(
@@ -442,13 +446,14 @@ fn qualify_guest_directory(inherit_directory: bool, rename: bool) {
     let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
     let mut first = String::new();
     stdout.read_line(&mut first).unwrap();
-    assert_eq!(first.trim(), format!("__ASB_GATE__:{}", process.0.id()));
+    let principal = fixture_gate_pid(&first);
+    assert_ne!(principal, process.0.id());
     // Guest adapter state is intentionally isolated beneath the owned
     // agent-state root, never directly under the workload-private root.
     assert!(project.0.join("private/agent-state/pi/config").is_dir());
     assert!(!project.0.join("workspace/performed.txt").exists());
     let deadline = Instant::now() + Duration::from_secs(3);
-    while !std::fs::read_to_string(format!("/proc/{}/status", process.0.id()))
+    while !std::fs::read_to_string(format!("/proc/{principal}/status"))
         .unwrap()
         .lines()
         .any(|line| line.starts_with("State:") && line.contains('T'))
@@ -461,7 +466,7 @@ fn qualify_guest_directory(inherit_directory: bool, rename: bool) {
     }
     assert!(
         Command::new("kill")
-            .args(["-CONT", &process.0.id().to_string()])
+            .args(["-CONT", &principal.to_string()])
             .status()
             .unwrap()
             .success()
@@ -556,9 +561,10 @@ exit 93
     let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
     let mut ready = String::new();
     stdout.read_line(&mut ready).unwrap();
-    assert_eq!(ready.trim(), format!("__ASB_GATE__:{}", process.0.id()));
+    let principal = fixture_gate_pid(&ready);
+    assert_ne!(principal, process.0.id());
     let deadline = Instant::now() + Duration::from_secs(3);
-    while !std::fs::read_to_string(format!("/proc/{}/status", process.0.id()))
+    while !std::fs::read_to_string(format!("/proc/{principal}/status"))
         .unwrap()
         .lines()
         .any(|line| line.starts_with("State:") && line.contains('T'))
@@ -568,7 +574,7 @@ exit 93
     }
     assert!(
         Command::new("kill")
-            .args(["-CONT", &process.0.id().to_string()])
+            .args(["-CONT", &principal.to_string()])
             .status()
             .unwrap()
             .success()
@@ -675,6 +681,60 @@ sys.exit({code})
 }
 
 #[cfg(target_os = "linux")]
+fn fixture_gate_pid(frame: &str) -> u32 {
+    frame
+        .trim()
+        .strip_prefix("__ASB_GATE__:")
+        .expect("agent gate frame")
+        .parse()
+        .expect("agent gate PID")
+}
+
+#[cfg(target_os = "linux")]
+fn resume_fixture_pid(process: &mut Process, principal: u32) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let status = std::fs::read_to_string(format!("/proc/{principal}/status")).unwrap();
+        if status
+            .lines()
+            .any(|line| line.starts_with("State:") && line.split_whitespace().nth(1) == Some("T"))
+        {
+            break;
+        }
+        assert!(process.0.try_wait().unwrap().is_none());
+        assert!(
+            Instant::now() < deadline,
+            "agent fixture never stopped at gate"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        Command::new("kill")
+            .args(["-CONT", &principal.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn resume_guest_fixture(process: &mut Process) {
+    let mut bytes = Vec::new();
+    let stdout = process.0.stdout.as_mut().unwrap();
+    loop {
+        let mut byte = [0];
+        stdout.read_exact(&mut byte).unwrap();
+        bytes.push(byte[0]);
+        assert!(bytes.len() <= 64);
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    let principal = fixture_gate_pid(std::str::from_utf8(&bytes).unwrap());
+    resume_fixture_pid(process, principal);
+}
+
+#[cfg(target_os = "linux")]
 fn resume_fixture(process: &mut Process) {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -734,8 +794,9 @@ fn guest_quiesces_double_forked_helpers_before_returning_any_client_result() {
         let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
         let mut ready = String::new();
         stdout.read_line(&mut ready).unwrap();
-        assert_eq!(ready.trim(), format!("__ASB_GATE__:{}", process.0.id()));
-        resume_fixture(&mut process);
+        let principal = fixture_gate_pid(&ready);
+        assert_ne!(principal, process.0.id());
+        resume_fixture_pid(&mut process, principal);
         let mut output = String::new();
         stdout.read_to_string(&mut output).unwrap();
         assert_eq!(process.0.wait().unwrap().code(), Some(code));
@@ -841,10 +902,11 @@ fn guest_output_failure_still_quiesces_owned_helpers_without_publishing_a_result
     let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
     let mut ready = String::new();
     stdout.read_line(&mut ready).unwrap();
-    assert_eq!(ready.trim(), format!("__ASB_GATE__:{}", process.0.id()));
+    let principal = fixture_gate_pid(&ready);
+    assert_ne!(principal, process.0.id());
     // Simulate a failed output consumer while the prepared client starts.
     drop(stdout);
-    resume_fixture(&mut process);
+    resume_fixture_pid(&mut process, principal);
     assert!(!process.0.wait().unwrap().success());
     assert!(!project.0.join("private/attempt/agent-result.json").exists());
     assert_helper_quiesced(&project);
@@ -881,8 +943,9 @@ exit 93
     let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
     let mut ready = String::new();
     stdout.read_line(&mut ready).unwrap();
-    assert_eq!(ready.trim(), format!("__ASB_GATE__:{}", process.0.id()));
-    resume_fixture(&mut process);
+    let principal = fixture_gate_pid(&ready);
+    assert_ne!(principal, process.0.id());
+    resume_fixture_pid(&mut process, principal);
     let mut text = String::new();
     stdout.read_to_string(&mut text).unwrap();
     assert!(process.0.wait().unwrap().success());
@@ -931,8 +994,9 @@ printf 'debug tool output that is not the answer\n'
     let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
     let mut ready = String::new();
     stdout.read_line(&mut ready).unwrap();
-    assert_eq!(ready.trim(), format!("__ASB_GATE__:{}", process.0.id()));
-    resume_fixture(&mut process);
+    let principal = fixture_gate_pid(&ready);
+    assert_ne!(principal, process.0.id());
+    resume_fixture_pid(&mut process, principal);
     let mut text = String::new();
     stdout.read_to_string(&mut text).unwrap();
     assert!(process.0.wait().unwrap().success());
@@ -980,8 +1044,9 @@ printf '%s\n' '{"response":"guest answer","status":"success","note":"Response wa
     let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
     let mut ready = String::new();
     stdout.read_line(&mut ready).unwrap();
-    assert_eq!(ready.trim(), format!("__ASB_GATE__:{}", process.0.id()));
-    resume_fixture(&mut process);
+    let principal = fixture_gate_pid(&ready);
+    assert_ne!(principal, process.0.id());
+    resume_fixture_pid(&mut process, principal);
     let mut text = String::new();
     stdout.read_to_string(&mut text).unwrap();
     assert!(process.0.wait().unwrap().success());
@@ -1004,4 +1069,141 @@ printf '%s\n' '{"response":"guest answer","status":"success","note":"Response wa
     let frozen = read_deferred_collection(&path).to_string();
     assert!(frozen.contains("guest answer"));
     assert!(!frozen.contains("private prompt"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn guest_measurement_frame_identifies_stopped_actual_agent_not_driver() {
+    let project = Project::new();
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_asb"))
+            .arg("__asb-agent")
+            .isolated_env()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", &project.0)
+            .env("ASB_GUEST_AGENT_REQUEST", project.request().to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
+    let mut ready = String::new();
+    stdout.read_line(&mut ready).unwrap();
+    let principal: u32 = ready
+        .trim()
+        .strip_prefix("__ASB_GATE__:")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_ne!(principal, process.0.id());
+    let status = std::fs::read_to_string(format!("/proc/{principal}/status")).unwrap();
+    assert!(
+        status
+            .lines()
+            .any(|line| line.starts_with("State:") && line.split_whitespace().nth(1) == Some("T"))
+    );
+    assert!(!project.0.join("workspace/performed.txt").exists());
+    assert!(
+        Command::new("kill")
+            .args(["-CONT", &principal.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut output = String::new();
+    stdout.read_to_string(&mut output).unwrap();
+    let mut stderr = String::new();
+    process
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(process.0.wait().unwrap().code(), Some(7), "{stderr}");
+    assert!(project.0.join("workspace/performed.txt").is_file());
+    assert!(output.contains("fixture completed"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn retained_guest_reports_actual_principal_and_keeps_its_service_alive() {
+    use std::os::unix::fs::MetadataExt;
+    let project = Project::new();
+    let executable = project.0.join(".asb-tools/pi/bin/pi");
+    fixture_writer::write_file(
+        &project.0,
+        &executable,
+        "#!/bin/sh\nsleep 20 >/dev/null 2>&1 &\nprintf '%s' $! > retained-service.pid\nprintf fixture > \"$HOME/retained-home-check\"\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let namespace = std::fs::metadata("/proc/self/ns/pid").unwrap().ino();
+    let token = "e".repeat(32);
+    let mut request = project.request();
+    request["process_lifetime"] = "through-evaluation".into();
+    request["workload_owner"] = serde_json::json!({
+        "controller_namespace": namespace + 1, "guest_namespace": namespace, "token": token
+    });
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_asb"))
+            .arg("__asb-agent")
+            .isolated_env()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", &project.0)
+            .env("ASB_GUEST_AGENT_REQUEST", request.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let principal: u32 = line
+        .trim()
+        .strip_prefix("__ASB_GATE__:")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_ne!(principal, process.0.id());
+    assert!(
+        Command::new("kill")
+            .args(["-CONT", &principal.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut ended = false;
+    loop {
+        line.clear();
+        assert_ne!(
+            stdout.read_line(&mut line).unwrap(),
+            0,
+            "driver exited before readiness"
+        );
+        if line.starts_with("__ASB_AGENT_ENDED__:") {
+            assert!(line.starts_with(&format!("__ASB_AGENT_ENDED__:{principal}:{token}:0:")));
+            ended = true;
+        }
+        if line.starts_with("__ASB_WORKLOAD_READY__:") {
+            assert!(ended);
+            assert_eq!(
+                line.trim(),
+                format!("__ASB_WORKLOAD_READY__:{principal}:{token}:0")
+            );
+            break;
+        }
+    }
+    let service =
+        std::fs::read_to_string(project.0.join("workspace/retained-service.pid")).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(project.0.join("retained-home-check")).unwrap(),
+        "fixture"
+    );
+    assert!(std::path::Path::new(&format!("/proc/{service}")).exists());
+    let _ = Command::new("kill")
+        .args(["-TERM", service.trim()])
+        .status();
 }

@@ -49,6 +49,8 @@ struct BenchmarkData {
     directory: PathBuf,
     agent: String,
     workload: String,
+    /// Configured replica population, distinct from actual cohort evidence.
+    configured_concurrency: usize,
     task: Option<crate::workloads::TaskIdentity>,
     selection: Option<crate::workloads::TaskSelection>,
     evaluation_completed: bool,
@@ -113,8 +115,12 @@ pub fn run(path: &str, output: &mut dyn Write) -> Result<(), Error> {
 /// and Perfetto views are.  The quiet execution paths deliberately omit the
 /// chart summary, backups, and installer chatter, so relay only those stable
 /// public links.
-pub(crate) fn run_links(path: &str, output: &mut dyn Write) -> Result<(), Error> {
-    let (_, links) = generate_with_links(path, &mut std::io::sink())?;
+pub(crate) fn run_links_at(
+    path: &str,
+    invocation: &Path,
+    output: &mut dyn Write,
+) -> Result<(), Error> {
+    let (_, links) = generate_at_with_links(path, invocation, &mut std::io::sink())?;
     write_public_links(links, output)
 }
 
@@ -122,18 +128,20 @@ pub(crate) fn run_links(path: &str, output: &mut dyn Write) -> Result<(), Error>
 /// it alive across comparison without recursively acquiring the same lock.
 pub(crate) fn run_in_sweep(
     path: &str,
+    output_parent: &Path,
     output: &mut dyn Write,
     _owner: &crate::sweep::lock::OutputLock,
 ) -> Result<(), Error> {
-    generate_owned_with_links(path, output).map(|_| ())
+    generate_owned_with_links(path, Some(output_parent), output).map(|_| ())
 }
 
 pub(crate) fn run_links_in_sweep(
     path: &str,
+    output_parent: &Path,
     output: &mut dyn Write,
     _owner: &crate::sweep::lock::OutputLock,
 ) -> Result<(), Error> {
-    let (_, links) = generate_owned_with_links(path, &mut std::io::sink())?;
+    let (_, links) = generate_owned_with_links(path, Some(output_parent), &mut std::io::sink())?;
     write_public_links(links, output)
 }
 
@@ -145,8 +153,40 @@ fn write_public_links(links: Vec<(String, String)>, output: &mut dyn Write) -> R
 }
 
 /// Generate an offline report for either a benchmark or a sweep manifest.
+#[cfg(test)]
 pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Error> {
     generate_with_links(path, output).map(|(path, _)| path)
+}
+
+pub(crate) fn generate_at(
+    path: &str,
+    invocation: &Path,
+    output: &mut dyn Write,
+) -> Result<PathBuf, Error> {
+    generate_at_with_links(path, invocation, output).map(|(report, _)| report)
+}
+
+fn generate_at_with_links(
+    path: &str,
+    invocation: &Path,
+    output: &mut dyn Write,
+) -> Result<(PathBuf, Vec<(String, String)>), Error> {
+    let source = Path::new(path);
+    if source.file_name().is_some_and(|name| name == "plan.json") {
+        return generate_with_links(path, output);
+    }
+    let anchor = crate::project::configuration_anchor(source, Some(invocation))?;
+    if anchor == source {
+        return generate_with_links(path, output);
+    }
+    let parent = anchor.parent().unwrap_or_else(|| Path::new("."));
+    let stem = anchor
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("sweep");
+    let _owner = crate::sweep::lock::OutputLock::acquire_for_source(parent, stem, source)?;
+    generate_owned_with_links(path, Some(parent), output)
 }
 
 fn generate_with_links(
@@ -154,14 +194,15 @@ fn generate_with_links(
     output: &mut dyn Write,
 ) -> Result<(PathBuf, Vec<(String, String)>), Error> {
     let _owner = crate::sweep::lock::OutputLock::for_comparison(Path::new(path))?;
-    generate_owned_with_links(path, output)
+    generate_owned_with_links(path, None, output)
 }
 
 fn generate_owned_with_links(
     path: &str,
+    output_parent: Option<&Path>,
     output: &mut dyn Write,
 ) -> Result<(PathBuf, Vec<(String, String)>), Error> {
-    let loaded = source::load(path)?;
+    let loaded = source::load_at(path, output_parent)?;
     let validated = ValidatedReport::validate(loaded)?;
     let prepared = PreparedReport::prepare(validated)?;
     let mut files = prepared.graph_names();

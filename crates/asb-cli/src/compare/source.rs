@@ -114,7 +114,7 @@ pub(super) struct LoadedReport {
 }
 
 impl Request {
-    fn read(path: &str) -> Result<Self, Error> {
+    fn read(path: &str, output_parent: Option<&Path>) -> Result<Self, Error> {
         let sweep_path = Path::new(path);
         let input_text = read_text(sweep_path, "TOML")?;
         let input: toml::Value = toml::from_str(&input_text)
@@ -142,7 +142,8 @@ impl Request {
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("sweep");
-        let sweep_results = parent.join(format!("{stem}-results"));
+        let output_parent = output_parent.unwrap_or(parent);
+        let sweep_results = output_parent.join(format!("{stem}-results"));
         let mut configurations = BTreeMap::new();
         let mut configuration_bytes = 0usize;
         for reference in &sweep.configs {
@@ -202,7 +203,9 @@ impl Request {
                 }
             }
         };
-        let comparison_dir = parent.join("results").join(format!("{stem}-comparison"));
+        let comparison_dir = output_parent
+            .join("results")
+            .join(format!("{stem}-comparison"));
         Ok(Request {
             campaign: None,
             path: path.to_owned(),
@@ -217,14 +220,19 @@ impl Request {
     }
 }
 
+#[cfg(test)]
 pub(super) fn load(path: &str) -> Result<LoadedReport, Error> {
+    load_at(path, None)
+}
+
+pub(super) fn load_at(path: &str, output_parent: Option<&Path>) -> Result<LoadedReport, Error> {
     if Path::new(path)
         .file_name()
         .is_some_and(|name| name == "plan.json")
     {
         return campaign::load(path);
     }
-    let request = Request::read(path)?;
+    let request = Request::read(path, output_parent)?;
     if request
         .plan
         .as_ref()
@@ -397,6 +405,14 @@ fn load_configuration(
                 config.display()
             ))
         })?;
+    let config = if single {
+        sweep_results
+            .parent()
+            .unwrap_or(parent)
+            .join(config.file_name().unwrap_or_default())
+    } else {
+        config
+    };
     let standalone = single.then(|| configuration.clone());
     if let Some(configuration) = &standalone {
         result_dir = crate::runner::resolve_log_path(&config, &configuration.log_file)
@@ -586,6 +602,7 @@ fn load_attempt(
             directory: result_dir.clone(),
             agent: agent.clone(),
             workload: workload.clone(),
+            configured_concurrency: concurrency,
             task: None,
             selection: selection.clone(),
             evaluation_completed: false,
@@ -866,6 +883,7 @@ fn load_attempt(
         directory: result_dir.clone(),
         agent: agent.clone(),
         workload: workload.clone(),
+        configured_concurrency: concurrency,
         task,
         selection: selection.clone(),
         evaluation_completed,
@@ -1257,6 +1275,7 @@ mod pricing_tests {
                 directory: root.into(),
                 agent: "fixture".into(),
                 workload: "fixture".into(),
+                configured_concurrency: 1,
                 task: None,
                 selection: None,
                 evaluation_completed: false,

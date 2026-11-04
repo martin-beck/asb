@@ -32,6 +32,7 @@ pub(super) struct PreparedSweep<'a> {
     campaigns: Option<campaigns::Prepared>,
     source: String,
     parent: PathBuf,
+    output_parent: PathBuf,
     stem: String,
     plan: plan::SweepPlan,
     weights: Vec<usize>,
@@ -57,6 +58,9 @@ impl<'a> PreparedSweep<'a> {
     ) -> Result<Self, Error> {
         let sweep_path = Path::new(source);
         let parent = sweep_path.parent().unwrap_or_else(|| Path::new("."));
+        let output_anchor =
+            crate::project::configuration_anchor(sweep_path, options.invocation_dir)?;
+        let output_parent = output_anchor.parent().unwrap_or_else(|| Path::new("."));
         let stem = sweep_path
             .file_stem()
             .and_then(|v| v.to_str())
@@ -91,8 +95,10 @@ impl<'a> PreparedSweep<'a> {
         plan.scheduling = Some(scheduling);
         let reservations = plan.resource_costs(sweep.resources)?;
         plan.resources = sweep.resources;
-        let results = parent.join(format!("{stem}-results"));
-        let backup = parent.join(format!("{stem}-history")).join(&plan.run_id);
+        let results = output_parent.join(format!("{stem}-results"));
+        let backup = output_parent
+            .join(format!("{stem}-history"))
+            .join(&plan.run_id);
         let campaigns = if options.resume {
             None
         } else {
@@ -105,7 +111,7 @@ impl<'a> PreparedSweep<'a> {
             )?
         };
         if options.resume {
-            let results = parent.join(format!("{stem}-results"));
+            let results = output_parent.join(format!("{stem}-results"));
             if !std::fs::symlink_metadata(&results).is_ok_and(|metadata| metadata.is_dir()) {
                 return Err(Error::Input("cannot resume: the existing sweep results must be a real directory; run without --resume to start a fresh sweep".into()));
             }
@@ -137,7 +143,7 @@ impl<'a> PreparedSweep<'a> {
         // capacity is still checked before dependency preparation or output
         // publication can start.
         crate::disk_space::confirm_capacity(
-            parent,
+            output_parent,
             crate::disk_space::sweep(
                 plan.entries
                     .iter()
@@ -158,7 +164,10 @@ impl<'a> PreparedSweep<'a> {
         let mut prepared_execution = BTreeSet::new();
         let mut prepared_workloads = BTreeSet::new();
         for entry in plan.entries.iter().filter(|_| !options.resume) {
-            let (root, project) = crate::project::load(&parent.join(&entry.reference))?;
+            let (root, project) = crate::project::load_for_invocation(
+                &parent.join(&entry.reference),
+                options.invocation_dir,
+            )?;
             let preparation_key =
                 crate::install::execution_requirements(&entry.configuration, options.mode);
             if prepared_execution.insert((root.clone(), preparation_key)) {
@@ -197,7 +206,10 @@ impl<'a> PreparedSweep<'a> {
         } else {
             capture_pricing_snapshots(&plan)?
         };
-        let old_results = parent.join(format!("{stem}-results")).canonicalize().ok();
+        let old_results = output_parent
+            .join(format!("{stem}-results"))
+            .canonicalize()
+            .ok();
         let relocated_input = if mode == Some(crate::tape::Mode::Replay) {
             cassette_root
                 .and_then(|root| root.canonicalize().ok())
@@ -210,8 +222,10 @@ impl<'a> PreparedSweep<'a> {
             None
         };
 
-        let results = parent.join(format!("{stem}-results"));
-        let backup = parent.join(format!("{stem}-history")).join(&plan.run_id);
+        let results = output_parent.join(format!("{stem}-results"));
+        let backup = output_parent
+            .join(format!("{stem}-history"))
+            .join(&plan.run_id);
         let replay_inputs = relocated_input
             .as_ref()
             .map(|relative| backup.join(format!("{stem}-results")).join(relative))
@@ -254,6 +268,7 @@ impl<'a> PreparedSweep<'a> {
             campaigns,
             source: source.into(),
             parent: parent.into(),
+            output_parent: output_parent.into(),
             stem: stem.into(),
             plan,
             weights,
@@ -294,7 +309,7 @@ impl<'a> PreparedSweep<'a> {
                 (mode, reused, None)
             }
             PreparedMode::Fresh => {
-                plan::fresh_results(&self.parent, &self.stem, &self.plan)?;
+                plan::fresh_results(&self.output_parent, &self.stem, &self.plan)?;
                 // The values were fetched during preflight, before this
                 // activation moved any historical results. Retain exactly
                 // those values for offline comparison.
@@ -695,12 +710,13 @@ impl SettledSweep<'_> {
         }
         #[cfg(all(test, unix))]
         tests::before_comparison(Path::new(&source));
+        let output_parent = results.parent().unwrap_or_else(|| Path::new("."));
         let comparison_error = if options.json || output.failed() {
-            compare::run_in_sweep(&source, &mut std::io::sink(), &_output_lock).err()
+            compare::run_in_sweep(&source, output_parent, &mut std::io::sink(), &_output_lock).err()
         } else if options.quiet_output {
-            compare::run_links_in_sweep(&source, output, &_output_lock).err()
+            compare::run_links_in_sweep(&source, output_parent, output, &_output_lock).err()
         } else {
-            compare::run_in_sweep(&source, output, &_output_lock).err()
+            compare::run_in_sweep(&source, output_parent, output, &_output_lock).err()
         };
         let primary = if failures.is_empty() {
             comparison_error.map_or(Ok(()), Err)

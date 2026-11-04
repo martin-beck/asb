@@ -1,9 +1,14 @@
 use super::super::CollectorAdapter;
 use super::super::PreflightContext;
-use super::super::{ProcessContext, ProcessData, SharedArtifact};
+use super::super::{ArtifactDisplay, ProcessContext, ProcessData, SharedArtifact};
 use crate::measurements;
 use std::process::{Command, Stdio};
 use std::time::Duration;
+
+#[cfg(target_os = "linux")]
+mod readiness;
+#[cfg(target_os = "linux")]
+mod symbols;
 
 #[cfg(all(test, target_os = "linux"))]
 #[path = "../../../tests/unit/perf_stop_contract.rs"]
@@ -25,7 +30,9 @@ fn record_args(pid: u32) -> Vec<String> {
         "cpu-clock".into(),
         "-g".into(),
         "-F".into(),
-        "19".into(),
+        // Frequency is per thread: a 19 Hz period misses most short-lived
+        // workers even when their aggregate CPU time is substantial.
+        "199".into(),
         "--inherit".into(),
         "-p".into(),
         pid.to_string(),
@@ -34,7 +41,12 @@ fn record_args(pid: u32) -> Vec<String> {
 
 /// Build the process-scoped interval counter arguments with the same
 /// inheritance contract as call-stack recording.
-fn stat_args(pid: u32, interval_ms: u64) -> Vec<String> {
+fn stat_args(pid: u32, interval_ms: u64, hardware_events: &[String]) -> Vec<String> {
+    let mut events = "task-clock,context-switches,cpu-migrations,page-faults".to_owned();
+    if !hardware_events.is_empty() {
+        events.push(',');
+        events.push_str(&hardware_events.join(","));
+    }
     vec![
         "stat".into(),
         "--no-scale".into(),
@@ -45,7 +57,7 @@ fn stat_args(pid: u32, interval_ms: u64) -> Vec<String> {
         // These software counters remain available when a workload's cgroup
         // or hybrid-PMU policy rejects hardware cycles/instructions.  Hardware
         // counters are deliberately not estimated or silently substituted.
-        "task-clock,context-switches,cpu-migrations,page-faults".into(),
+        events,
         "--inherit".into(),
         "-p".into(),
         pid.to_string(),
@@ -65,7 +77,8 @@ impl CollectorAdapter for PerfCollector {
         )]
     }
     fn estimated_disk_mib(&self) -> u64 {
-        512
+        // Include the bounded symbol cache and one in-flight image copy.
+        3072
     }
     fn description(&self) -> &'static str {
         "process-tree performance counter samples"
@@ -78,6 +91,27 @@ impl CollectorAdapter for PerfCollector {
     }
     fn tool_id(&self) -> Option<&'static str> {
         Some("perf")
+    }
+    fn prioritizes_artifact(&self, name: &str) -> bool {
+        matches!(
+            name,
+            "perf-symbol-quality.json" | "perf-symbol-custody.json"
+        )
+    }
+    fn display_artifact(&self, name: &str) -> Option<ArtifactDisplay> {
+        match name {
+            "perf-symbol-quality.json" => Some(ArtifactDisplay::Status {
+                class: "perf-symbol-quality",
+                label: "Perf symbol quality",
+                suffix: "See the decoded and unknown frame counts in the quality artifact.",
+            }),
+            "perf-symbol-custody.json" => Some(ArtifactDisplay::Status {
+                class: "perf-symbol-custody",
+                label: "Perf symbol custody",
+                suffix: "See the helper output for recorded images and unavailable debug files.",
+            }),
+            _ => None,
+        }
     }
     fn requires_pid(&self) -> bool {
         true
@@ -97,8 +131,11 @@ impl CollectorAdapter for PerfCollector {
     fn producer_policy(&self, name: &str) -> measurements::ProducerPolicy {
         measurements::ProducerPolicy {
             stream_bytes: 256 * 1024 * 1024,
-            graceful: matches!(name, "perf" | "perf-stat")
-                .then_some(std::time::Duration::from_secs(5)),
+            graceful: match name {
+                "perf-symbol-custody" => Some(std::time::Duration::from_secs(60)),
+                "perf" | "perf-stat" => Some(std::time::Duration::from_secs(5)),
+                _ => None,
+            },
         }
     }
     fn accepts_termination(
@@ -106,7 +143,7 @@ impl CollectorAdapter for PerfCollector {
         name: &str,
         completion: &measurements::ProducerCompletion,
     ) -> bool {
-        matches!(name, "perf" | "perf-stat")
+        matches!(name, "perf" | "perf-stat" | "perf-symbol-custody")
             && accepted_exit(
                 completion.exit,
                 completion.interruption_requested
@@ -152,6 +189,10 @@ fn process(
     let mut result = ProcessData::from_output(context);
     if !accepted_exit(context.status, context.controlled_interruption) {
         result.status = "failed".into();
+        return Ok(result);
+    }
+    if context.name == "perf-symbol-custody" {
+        result.status = "completed".into();
         return Ok(result);
     }
     if context.name == "perf-stat" {
@@ -237,6 +278,12 @@ fn validate_record(
     launch.arg("script").arg("-i").arg(&artifact);
     let (mut command, route) = measurements::producer_command(&mut launch)?;
     configure_offline_decoder_environment(&mut command, &session.dir);
+    if let Some(cache) = session.artifact(SharedArtifact::PerfSymbolCache) {
+        command.env("HOME", cache);
+        if cache.join("symfs-ready").is_file() {
+            command.arg("--symfs").arg(cache.join("symfs"));
+        }
+    }
     let mut captures = [
         crate::evidence::Capture::create(&session.dir.join("perf-validation.stdout"))?,
         crate::evidence::Capture::create(&session.dir.join("perf-validation.stderr"))?,
@@ -279,9 +326,64 @@ fn validate_record(
     // installed decoder successfully consumed it. Never invent a sample count.
     for capture in &mut captures {
         capture.freeze()?;
+    }
+    let quality = symbol_quality(captures[0].reader()?)?;
+    measurements::write_json(
+        &session.dir.join("perf-symbol-quality.json"),
+        &serde_json::json!({
+            "schema_version": 1,
+            "status": if quality.1 > 0 { "partial" } else { "not-verified" },
+            "decoded_frames": quality.0,
+            "unknown_frames": quality.1,
+        "reason": "Unknown frames can reflect missing agent or library symbols, JIT code, or restricted kernel addresses (kernel.kptr_restrict). Zero unknown frames alone does not prove complete debug information."
+        }),
+    )?;
+    for capture in &captures {
         capture.consume()?;
     }
     Ok(())
+}
+
+/// Count decoded stack frames without retaining their symbols or paths.
+fn symbol_quality(mut input: impl std::io::Read) -> Result<(u64, u64), String> {
+    let mut buffer = [0u8; 8192];
+    let needle = b"[unknown]";
+    let (mut frame, mut unknown, mut match_at) = (false, false, 0usize);
+    let (mut start, mut total, mut missing) = (true, 0u64, 0u64);
+    loop {
+        let count = input
+            .read(&mut buffer)
+            .map_err(|error| format!("cannot inspect decoded perf symbols: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        for &byte in &buffer[..count] {
+            if start {
+                frame = byte == b'\t';
+                start = false;
+            }
+            if byte == b'\n' {
+                if frame {
+                    total += 1;
+                    missing += u64::from(unknown);
+                }
+                (frame, unknown, match_at, start) = (false, false, 0, true);
+            } else if byte == needle[match_at] {
+                match_at += 1;
+                if match_at == needle.len() {
+                    unknown = true;
+                    match_at = 0;
+                }
+            } else {
+                match_at = usize::from(byte == needle[0]);
+            }
+        }
+    }
+    if !start && frame {
+        total += 1;
+        missing += u64::from(unknown);
+    }
+    Ok((total, missing))
 }
 
 /// Keep offline decoding independent from perf configuration without clearing
@@ -422,6 +524,15 @@ impl measurements::Session {
         if !self.state::<PerfState>().borrow().enabled {
             return Ok(());
         }
+        #[cfg(target_os = "linux")]
+        let mut record_ready = readiness::Readiness::new(
+            &self
+                .dir
+                .canonicalize()
+                .map_err(|error| format!("cannot resolve perf capture directory: {error}"))?,
+            "record",
+        )
+        .map_err(|error| format!("cannot prepare perf activation: {error}"))?;
         let data = self.dir.join("perf.data");
         // A passwordless-sudo fallback may be needed for rootless isolated
         // process trees. Pre-creating the destination keeps its ownership
@@ -446,6 +557,8 @@ impl measurements::Session {
             .args(&record_args)
             .args(["-o"])
             .arg(&data);
+        #[cfg(target_os = "linux")]
+        command.args(["-D", "-1", "--control", &record_ready.argument()]);
         let mut collector = match Collector::spawn("perf", &ADAPTER, command, route, captures) {
             Ok(collector) => collector,
             Err(error) if !env_true("ASB_MEASURE_PERF") => {
@@ -458,7 +571,13 @@ impl measurements::Session {
                 ));
             }
         };
-        if let Some(reason) = startup_failure(&mut collector)? {
+        #[cfg(target_os = "linux")]
+        let record_failure = record_ready
+            .enable(Duration::from_secs(10), || collector.startup_exit())
+            .err();
+        #[cfg(not(target_os = "linux"))]
+        let record_failure = startup_failure(&mut collector)?;
+        if let Some(reason) = record_failure {
             write_unavailable(
                 &self.dir.join("perf.json"),
                 "perf",
@@ -474,13 +593,31 @@ impl measurements::Session {
             crate::evidence::Capture::create(&stat_stdout_path)?,
             crate::evidence::Capture::create(&stat_stderr_path)?,
         ];
-        let stat_args = stat_args(pid, measurement_interval_ms());
+        let hardware_events = super::agentsysperf::telemetry_events(self);
+        let stat_args = stat_args(pid, measurement_interval_ms(), &hardware_events);
         let (mut command, route) = self.collector_command("perf")?;
         command.args(&stat_args);
+        #[cfg(target_os = "linux")]
+        let mut stat_ready = readiness::Readiness::new(
+            &self
+                .dir
+                .canonicalize()
+                .map_err(|error| format!("cannot resolve perf capture directory: {error}"))?,
+            "stat",
+        )
+        .map_err(|error| format!("cannot prepare perf-stat activation: {error}"))?;
+        #[cfg(target_os = "linux")]
+        command.args(["-D", "-1", "--control", &stat_ready.argument()]);
         let stat = Collector::spawn("perf-stat", &ADAPTER, command, route, captures);
         match stat {
             Ok(mut collector) => {
-                if let Some(reason) = startup_failure(&mut collector)? {
+                #[cfg(target_os = "linux")]
+                let stat_failure = stat_ready
+                    .enable(Duration::from_secs(10), || collector.startup_exit())
+                    .err();
+                #[cfg(not(target_os = "linux"))]
+                let stat_failure = startup_failure(&mut collector)?;
+                if let Some(reason) = stat_failure {
                     write_unavailable(
                         &self.dir.join("perf-stat.json"),
                         "perf-stat",
@@ -496,10 +633,19 @@ impl measurements::Session {
                 error.to_string(),
             )?,
         }
+        #[cfg(target_os = "linux")]
+        if let Err(error) = self.start_perf_symbols(pid) {
+            write_unavailable(
+                &self.dir.join("perf-symbol-custody.json"),
+                "perf-symbol-custody",
+                error,
+            )?;
+        }
         Ok(())
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn startup_failure(collector: &mut Collector) -> Result<Option<String>, String> {
     // perf reports inaccessible PMUs immediately. Give its owned capture
     // worker one scheduling interval to observe that deterministic exit.
@@ -703,15 +849,33 @@ pub(crate) fn parse_perf_stat_metrics(output: &str) -> BTreeMap<String, f64> {
 }
 
 fn perf_metric_name(event: &str) -> Option<&'static str> {
+    // On Intel hybrid CPUs `perf stat` expands an architected event into
+    // separate `cpu_core/<event>/` and `cpu_atom/<event>/` rows. They remain
+    // separate raw-quality observations, while ASB's validated scalar/series
+    // aggregates deliberately sum their common architectural metric.
+    let event = event
+        .strip_prefix("cpu_core/")
+        .or_else(|| event.strip_prefix("cpu_atom/"))
+        .and_then(|event| event.strip_suffix('/'))
+        .unwrap_or(event);
     match event {
         "task-clock" => Some("task_clock_ms"),
         "context-switches" => Some("context_switches"),
         "cpu-migrations" => Some("cpu_migrations"),
         "page-faults" => Some("page_faults"),
-        "cycles" | "cpu_core/cycles/" | "cpu_atom/cycles/" => Some("observed_cycles_count"),
-        "instructions" | "cpu_core/instructions/" | "cpu_atom/instructions/" => {
-            Some("observed_instructions_count")
-        }
+        "cycles" => Some("observed_cycles_count"),
+        "instructions" => Some("observed_instructions_count"),
+        "cache-misses" => Some("cache_misses_count"),
+        "branch-misses" => Some("branch_misses_count"),
+        // `perf` adds slots to a hybrid Topdown event group. Retain it as an
+        // observed counter so its presence cannot invalidate the complete
+        // process-scoped capture, even when no current analyzer consumes it.
+        "slots" => Some("topdown_slots_count"),
+        "topdown-fe-bound" => Some("topdown_fe_bound_count"),
+        "topdown-be-bound" => Some("topdown_be_bound_count"),
+        "l1d_cache_refill" => Some("observed_l1d_cache_refill_count"),
+        "stall_backend" => Some("observed_stall_backend_count"),
+        "stall_frontend" => Some("observed_stall_frontend_count"),
         _ => None,
     }
 }
@@ -723,6 +887,47 @@ pub(crate) fn perf_permission_error() -> String {
 #[cfg(test)]
 mod tests {
     use super::{record_args, stat_args};
+
+    #[test]
+    fn decoded_symbol_quality_counts_unknown_frames_across_chunks() {
+        struct OneByte<'a>(&'a [u8]);
+        impl std::io::Read for OneByte<'_> {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.is_empty() {
+                    return Ok(0);
+                }
+                output[0] = self.0[0];
+                self.0 = &self.0[1..];
+                Ok(1)
+            }
+        }
+        let text =
+            b"agent 123 sample\n\t123 function+1 (agent)\n\t456 [unknown] (agent)\n\t789 [unknown]";
+        assert_eq!(super::symbol_quality(OneByte(text)).unwrap(), (3, 2));
+        assert_eq!(super::symbol_quality(&b""[..]).unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn symbol_quality_is_visible_in_reports() {
+        use crate::collectors::CollectorAdapter;
+        assert!(super::ADAPTER.prioritizes_artifact("perf-symbol-quality.json"));
+        assert!(
+            super::ADAPTER
+                .display_artifact("perf-symbol-quality.json")
+                .is_some()
+        );
+        assert!(super::ADAPTER.prioritizes_artifact("perf-symbol-custody.json"));
+        assert!(
+            super::ADAPTER
+                .display_artifact("perf-symbol-custody.json")
+                .is_some()
+        );
+        assert!(
+            super::ADAPTER
+                .display_artifact("not-symbol-quality.json")
+                .is_none()
+        );
+    }
 
     #[test]
     fn permission_error_suggests_kernel_policy_not_sudoers() {
@@ -861,6 +1066,16 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_pmu_aliases_normalize_all_selected_architectural_events() {
+        let parsed = super::parse_perf_stat(std::io::Cursor::new(
+            "0.1,2,,cpu_core/cache-misses/,1,\n0.1,3,,cpu_atom/cache-misses/,1,\n0.1,4,,cpu_core/branch-misses/,1,\n0.1,5,,cpu_atom/branch-misses/,1,\n0.1,6,,cpu_core/topdown-fe-bound/,1,\n0.1,7,,cpu_atom/topdown-fe-bound/,1,\n"
+        )).unwrap();
+        assert_eq!(parsed.metrics["perf.cache_misses_count"], 5.0);
+        assert_eq!(parsed.metrics["perf.branch_misses_count"], 9.0);
+        assert_eq!(parsed.metrics["perf.topdown_fe_bound_count"], 13.0);
+    }
+
+    #[test]
     fn raw_hybrid_counts_keep_pmu_quality_without_reversing_rounded_scaling() {
         let parsed = super::parse_perf_stat(std::io::Cursor::new(
             "0.1,400,,cpu_core/cycles/,100000000,99.00,,\n0.1,2,,cpu_atom/cycles/,1000,0.00,,\n0.2,<not counted>,,cpu_atom/cycles/,0,0.00,,\n0.3,9,,instructions,100,,\n"
@@ -877,7 +1092,7 @@ mod tests {
             Some(400.0)
         );
         assert_eq!(parsed.quality["instructions"].unknown_quality_rows, 1);
-        let args = stat_args(1234, 100);
+        let args = stat_args(1234, 100, &[]);
         assert!(args.iter().any(|arg| arg == "--no-scale"));
         assert!(!args.iter().any(|arg| arg == "--all-cpus"));
     }
@@ -949,7 +1164,7 @@ mod tests {
                 "cpu-clock",
                 "-g",
                 "-F",
-                "19",
+                "199",
                 "--inherit",
                 "-p",
                 "42"
@@ -980,7 +1195,7 @@ mod tests {
     #[test]
     fn perf_stat_uses_the_same_process_tree_scope() {
         assert_eq!(
-            stat_args(42, 1000),
+            stat_args(42, 1000, &[]),
             vec![
                 "stat",
                 "--no-scale",
@@ -994,5 +1209,15 @@ mod tests {
                 "42"
             ]
         );
+    }
+
+    #[test]
+    fn optional_platform_events_remain_on_the_process_tree_command() {
+        let events = vec!["cycles".into(), "l1d_cache_refill".into()];
+        let args = stat_args(42, 1000, &events);
+        assert!(args.iter().any(|arg| arg
+            == "task-clock,context-switches,cpu-migrations,page-faults,cycles,l1d_cache_refill"));
+        assert!(args.windows(2).any(|pair| pair == ["-p", "42"]));
+        assert!(!args.iter().any(|arg| arg == "-a"));
     }
 }

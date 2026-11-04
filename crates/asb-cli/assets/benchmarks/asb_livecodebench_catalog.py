@@ -249,6 +249,13 @@ def evaluate(args):
         raise ValueError("LiveCodeBench task metadata checksum changed")
     row = json.loads(payload)
     response = Path(args.response).read_text(encoding="utf-8")
+    # The upstream code-generation metric can treat an empty candidate list as
+    # vacuously passing for some tasks.  An absent response is never a valid
+    # submission, and accepting it would make the pre-agent baseline look
+    # solved and invalidate the benchmark population.
+    if not response.strip():
+        atomic_write(Path(args.result), {"schema_version": 1, "passed": False})
+        return
     source = Path(args.source)
     if not (source / "lcb_runner").is_dir():
         raise ValueError("pinned LiveCodeBench evaluator source is unavailable")

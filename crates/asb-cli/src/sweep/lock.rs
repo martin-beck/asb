@@ -8,6 +8,25 @@ pub(crate) struct OutputLock {
 }
 
 impl OutputLock {
+    /// Hold ownership for the selected output and for any result tree that
+    /// contains the input manifest, including through a symlink.
+    pub(crate) fn acquire_for_source(
+        parent: &Path,
+        stem: &str,
+        source: &Path,
+    ) -> Result<Self, Error> {
+        let parent = canonical_directory(parent)?;
+        let source_parent = canonical_directory(source.parent().unwrap_or_else(|| Path::new(".")))?;
+        let mut candidates = enclosing_owners(&source_parent);
+        if let Ok(target) = std::fs::canonicalize(source) {
+            candidates.extend(enclosing_owners(&target));
+        }
+        candidates.extend(enclosing_owners(&parent));
+        candidates.push((parent, stem.to_owned()));
+        Self::acquire_owners(candidates)
+    }
+
+    #[cfg(test)]
     pub(crate) fn acquire(parent: &Path, stem: &str) -> Result<Self, Error> {
         // A sweep can itself be inside a prior sweep's result tree. Take the
         // enclosing owners from outermost to innermost before taking its own
@@ -178,6 +197,25 @@ mod tests {
         drop(inherited_descriptor);
         drop(successor);
         assert!(path.is_file(), "do not unlink and split future lock owners");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn external_manifest_keeps_its_enclosing_result_owner_and_selected_output_owner() {
+        let root = std::env::temp_dir()
+            .join(crate::workloads::TaskIdentity::local("external-sweep-lock", None).attempt_id);
+        let source = root.join("outer-results/000-benchmark/suite.toml");
+        let selected = root.join("selected");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::write(&source, "configs=[]").unwrap();
+        let outer = OutputLock::acquire(&root, "outer").unwrap();
+        assert!(OutputLock::acquire_for_source(&selected, "suite", &source).is_err());
+        drop(outer);
+        let owner = OutputLock::acquire_for_source(&selected, "suite", &source).unwrap();
+        assert!(OutputLock::acquire(&root, "outer").is_err());
+        assert!(OutputLock::acquire(&selected, "suite").is_err());
+        drop(owner);
         std::fs::remove_dir_all(root).unwrap();
     }
 

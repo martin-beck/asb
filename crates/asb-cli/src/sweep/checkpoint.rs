@@ -264,6 +264,21 @@ impl Snapshotter {
         })?;
         #[cfg(not(unix))]
         let bytes = self.legacy_exchange(&request, timeout)?;
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+            && let Some(object) = value.as_object()
+            && object.len() == 2
+            && object.get("schema_version") == Some(&serde_json::json!(1))
+            && let Some(code) = object.get("error_code").and_then(serde_json::Value::as_str)
+        {
+            let reason = match code {
+                "resource_bound" => "fingerprint resource bound exceeded",
+                "input_changed" => "fingerprint input changed during verification",
+                "unsupported_input" => "fingerprint input type or symlink is unsupported",
+                "permission_denied" => "fingerprint input permission denied",
+                _ => "fingerprint verification failed",
+            };
+            return Err(Error::Run(reason.into()));
+        }
         let fingerprint: Fingerprint = serde_json::from_slice(&bytes)
             .map_err(|_| Error::Run("checkpoint helper returned an invalid digest".into()))?;
         if !fingerprint.valid() {
@@ -471,7 +486,7 @@ impl Inputs {
     }
 
     fn recovery_inputs(
-        parent: &Path,
+        _parent: &Path,
         results: &Path,
         plan: &super::plan::SweepPlan,
     ) -> Result<Self, Error> {
@@ -487,11 +502,10 @@ impl Inputs {
         if reading::bounded_relative(&directory, Path::new("key"), 32)?.len() != 32 {
             return Err(resume_error("original checkpoint key is invalid"));
         }
-        let first = plan
-            .entries
-            .first()
-            .ok_or_else(|| resume_error("no original configuration"))?;
-        let (root, _) = crate::project::load(&parent.join(&first.reference))?;
+        if plan.entries.is_empty() {
+            return Err(resume_error("no original configuration"));
+        }
+        let (root, _) = crate::project::load(results)?;
         let candidate = crate::python_runtime::project_python(&root);
         let python = if candidate.is_file() {
             candidate
@@ -583,7 +597,10 @@ impl Inputs {
         let mut projects = BTreeSet::new();
         let mut python = PathBuf::from("python3");
         for entry in &plan.entries {
-            let (root, _) = crate::project::load(&parent.join(&entry.reference))?;
+            let (root, _) = crate::project::load_for_invocation(
+                &parent.join(&entry.reference),
+                Some(invocation_dir),
+            )?;
             projects.insert(root.canonicalize().map_err(crate::io_error)?);
         }
         for (index, root) in projects.iter().enumerate() {
@@ -781,6 +798,21 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fingerprint_reports_unsupported_input_without_leaking_its_path() {
+        let directory = Directory::new();
+        let link = directory.0.join("secret-input-name");
+        std::os::unix::fs::symlink("secret-input-name", &link).unwrap();
+        let snapshotter = Snapshotter::open(&directory.0.join("state"), "python3".into()).unwrap();
+        let error = snapshotter
+            .fingerprint(&[Root::path("fixture", link)], &json!(null), false, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("fingerprint input type or symlink is unsupported"));
+        assert!(!error.contains("secret-input-name"));
     }
 
     #[test]

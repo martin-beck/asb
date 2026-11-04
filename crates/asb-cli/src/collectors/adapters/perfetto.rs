@@ -543,6 +543,13 @@ mod report_tests {
         let components = serde_json::json!({"components":{"agent.execute":{"wall_ms":12}}});
         let graph = execution_composition_graph(&[ReportRow {
             label: "no-perfetto",
+            agent: "fixture-agent",
+            provider: "fixture-provider",
+            model: "fixture-model",
+            workload: "fixture-workload",
+            trial: "fixture-trial",
+            configured_concurrency: 1,
+            execution_cohort: None,
             metrics: &metrics,
             components: Some(&components),
             documents: &BTreeMap::new(),
@@ -1377,18 +1384,17 @@ fn verify_trace_coverage(processor: &Path, trace: &Path, trace_id: &str) -> Resu
     Err("Incomplete Perfetto capture: data loss=true. Scheduler metrics are suppressed. Inspect native trace stats for buffer overruns/overwrites and check whether the 1 GiB file or one-hour duration limit was reached; reduce tracing load before a fresh qualification.".into())
 }
 
-/// Reject a trace with scheduler events outside the direct gated agent and
-/// descendants inherited through tracefs `event-fork`.
+/// Verify raw ftrace events rather than treating every scheduler slice as an
+/// independent captured event: a switch necessarily names both the agent and
+/// its neighboring task. Every switch must touch a uniquely identified agent
+/// thread, and every other event must belong to the tree or be a wakeup of it.
 fn verify_agent_scheduler_scope(
     processor: &Path,
     trace: &Path,
     pid: u32,
     trace_id: &str,
 ) -> Result<(), String> {
-    let scope = perfetto_scope_sql(pid, trace_id);
-    let query = format!(
-        "{scope} SELECT COUNT(*) FROM sched s LEFT JOIN thread th ON s.utid=th.utid CROSS JOIN bounds WHERE s.ts >= bounds.start_ts AND s.ts < bounds.end_ts AND (th.upid IS NULL OR th.upid NOT IN tree) HAVING {VALID_SCOPE}"
-    );
+    let query = scheduler_scope_query(pid, trace_id);
     let output = processor_query(processor, trace, &query).map_err(|_| {
         "Cannot verify Perfetto agent scope: trace processor could not start.".to_owned()
     })?;
@@ -1408,6 +1414,19 @@ fn verify_agent_scheduler_scope(
     Err(format!(
         "Perfetto captured {outside:.0} scheduler event(s) outside the verified agent process tree; scheduler metrics are suppressed rather than attributing host or ASB work to the agent. Check Tracebox TID filtering and retry."
     ))
+}
+
+fn scheduler_scope_query(pid: u32, trace_id: &str) -> String {
+    let scope = perfetto_scope_sql(pid, trace_id);
+    let marker_owner = trace_id
+        .split('-')
+        .next()
+        .and_then(|part| part.parse::<u32>().ok())
+        .unwrap_or(0);
+    let marker_id = trace_id.replace('\'', "''");
+    format!(
+        "{scope}, scoped_threads AS (SELECT tid,start_ts,end_ts FROM thread WHERE upid IN tree), observed AS (SELECT e.*, th.upid, EXTRACT_ARG(e.arg_set_id,'prev_pid') AS prev_tid, EXTRACT_ARG(e.arg_set_id,'next_pid') AS next_tid, EXTRACT_ARG(e.arg_set_id,'pid') AS target_tid FROM ftrace_event e LEFT JOIN thread th ON e.utid=th.utid CROSS JOIN bounds WHERE e.ts >= bounds.start_ts AND e.ts < bounds.end_ts ), attached AS (SELECT e.*, EXISTS(SELECT 1 FROM scoped_threads t WHERE t.tid IN (e.prev_tid,e.next_tid,e.target_tid) AND (t.start_ts IS NULL OR t.start_ts<=e.ts) AND (t.end_ts IS NULL OR t.end_ts>=e.ts) AND (SELECT COUNT(*) FROM thread generation WHERE generation.tid=t.tid AND (generation.start_ts IS NULL OR generation.start_ts<=e.ts) AND (generation.end_ts IS NULL OR generation.end_ts>=e.ts))=1) AS endpoint_in_tree FROM observed e) SELECT COUNT(*) FROM attached WHERE CASE WHEN name='print' THEN NOT (COALESCE(upid IN (SELECT owner.upid FROM process owner WHERE owner.pid={marker_owner} AND (owner.start_ts IS NULL OR owner.start_ts<=attached.ts) AND (owner.end_ts IS NULL OR owner.end_ts>=attached.ts) AND (SELECT COUNT(*) FROM process generation WHERE generation.pid=owner.pid AND (generation.start_ts IS NULL OR generation.start_ts<=attached.ts) AND (generation.end_ts IS NULL OR generation.end_ts>=attached.ts))=1),0) AND (EXTRACT_ARG(arg_set_id,'buf') IN (CHAR(10),'E','E'||CHAR(10)) OR (SUBSTR(EXTRACT_ARG(arg_set_id,'buf'),1,2) IN ('S|','F|','I|','B|') AND INSTR(EXTRACT_ARG(arg_set_id,'buf'),'.{marker_id}')>0))) WHEN name='sched_switch' THEN NOT endpoint_in_tree WHEN name IN ('sched_waking','sched_wakeup_new') THEN NOT (COALESCE(upid IN tree,0) OR endpoint_in_tree) ELSE NOT COALESCE(upid IN tree,0) END HAVING {VALID_SCOPE} AND (SELECT COUNT(*) FROM attached WHERE name='sched_switch')>0"
+    )
 }
 
 fn marker_access_error(path: &Path, error: &std::io::Error) -> String {
@@ -1731,6 +1750,40 @@ mod marker_tests {
             assert_eq!(result.is_ok(), expected, "{name}: {result:?}");
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scope_sql_accepts_switch_neighbors_but_rejects_leaks_and_ambiguous_ids() {
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/perfetto/scope_sql.py");
+        let query = scheduler_scope_query(42, "500-1");
+        for (case, expected) in [
+            ("scoped", "0"),
+            ("unrelated", "1"),
+            ("foreign_syscall", "1"),
+            ("foreign_print", "1"),
+            ("foreign_marker", "1"),
+            ("reused_later", "0"),
+            ("ambiguous", "2"),
+            ("empty", "missing"),
+        ] {
+            let output = Command::new("python3")
+                .arg(&script)
+                .arg(&query)
+                .arg(case)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{case}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                expected,
+                "{case}"
+            );
+        }
     }
 
     #[test]

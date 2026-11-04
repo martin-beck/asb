@@ -454,6 +454,7 @@ mod tests {
             directory: "same-configuration".into(),
             agent: "fixture".into(),
             workload: "bug-fix".into(),
+            configured_concurrency: 1,
             task: (!missing).then_some(task),
             selection: None,
             evaluation_completed: !missing,

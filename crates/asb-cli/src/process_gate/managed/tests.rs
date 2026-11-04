@@ -989,3 +989,268 @@ fn traced_principal_completion_quiesces_live_adopted_descendant() {
     scope.wait_finished();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn measured_principal_stops_before_exec_and_remains_outside_guardian_helpers() {
+    let root = root();
+    let marker = root.join("principal-pid");
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    let (mut command, route) = command(
+        &binary,
+        "/bin/sh",
+        &["-c".into(), "printf %s $$ > principal-pid".into()],
+    );
+    command.current_dir(&root);
+    let mut gate = Admission::with_measured_principal(route.validate_gate(&mut command).unwrap())
+        .unwrap()
+        .spawn()
+        .unwrap();
+    let principal = gate.start_measured_principal().unwrap();
+    assert_ne!(principal, gate.id());
+    assert!(!marker.exists());
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-CONT", &principal.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = gate.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read_to_string(marker).unwrap(),
+        principal.to_string()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cancelling_stopped_measured_principal_never_executes_agent() {
+    let root = root();
+    let marker = root.join("should-not-run");
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    let (mut command, route) = command(
+        &binary,
+        "/bin/sh",
+        &["-c".into(), "printf bad > should-not-run".into()],
+    );
+    command.current_dir(&root);
+    let mut gate = Admission::with_measured_principal(route.validate_gate(&mut command).unwrap())
+        .unwrap()
+        .spawn()
+        .unwrap();
+    let principal = gate.start_measured_principal().unwrap();
+    let _ = gate.stop().unwrap();
+    assert!(!marker.exists());
+    assert!(!Path::new(&format!("/proc/{principal}")).exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "requires working Linux perf process sampling"]
+fn measured_principal_perf_inherits_children_but_excludes_guardian_and_sibling() {
+    let root = root();
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    let perf =
+        std::env::var_os("ASB_TEST_PERF").expect("set ASB_TEST_PERF to an installed perf binary");
+    let code = "import multiprocessing as m,time\ndef f():\n e=time.monotonic()+4\n while time.monotonic()<e: pass\nif __name__=='__main__':\n ps=[m.Process(target=f) for _ in range(4)]\n [p.start() for p in ps]\n open('children','w').write('\\n'.join(str(p.pid) for p in ps))\n [p.join() for p in ps]\n";
+    let (mut command, route) = command(&binary, "/usr/bin/python3", &["-c".into(), code.into()]);
+    command.current_dir(&root);
+    let mut gate = Admission::with_measured_principal(route.validate_gate(&mut command).unwrap())
+        .unwrap()
+        .spawn()
+        .unwrap();
+    let principal = gate.start_measured_principal().unwrap();
+    let mut foreign = Command::new("/usr/bin/python3")
+        .args([
+            "-c",
+            "import time; e=time.monotonic()+5\nwhile time.monotonic()<e: pass",
+        ])
+        .spawn()
+        .unwrap();
+    let foreign_pid = foreign.id();
+    let data = root.join("perf.data");
+    let mut recorder = Command::new(&perf)
+        .args([
+            "record",
+            "-e",
+            "cpu-clock",
+            "-F",
+            "19",
+            "--inherit",
+            "-p",
+            &principal.to_string(),
+            "-o",
+        ])
+        .arg(&data)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        recorder.try_wait().unwrap().is_none(),
+        "perf failed to attach"
+    );
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-CONT", &principal.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = gate.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = Command::new("/bin/kill")
+        .args(["-INT", &recorder.id().to_string()])
+        .status();
+    let _ = recorder.wait();
+    let _ = foreign.wait();
+    let decoded = Command::new(&perf)
+        .args(["script", "--symfs"])
+        .arg(&root)
+        .args(["-F", "pid,tid", "-i"])
+        .arg(&data)
+        .output()
+        .unwrap();
+    assert!(decoded.status.success(), "perf script failed");
+    let mut allowed: std::collections::BTreeSet<u32> =
+        std::fs::read_to_string(root.join("children"))
+            .unwrap()
+            .lines()
+            .map(|line| line.parse().unwrap())
+            .collect();
+    allowed.insert(principal);
+    let mut observed = std::collections::BTreeSet::new();
+    for line in String::from_utf8(decoded.stdout).unwrap().lines() {
+        if let Some(pid) = line
+            .trim()
+            .split('/')
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+        {
+            observed.insert(pid);
+        }
+    }
+    assert!(!observed.is_empty(), "no perf samples");
+    assert!(!observed.contains(&foreign_pid));
+    assert!(!observed.contains(&gate.id()));
+    assert!(
+        observed.is_subset(&allowed),
+        "unrelated samples: {observed:?}, allowed: {allowed:?}"
+    );
+    assert_eq!(
+        observed
+            .intersection(&allowed)
+            .filter(|pid| **pid != principal)
+            .count(),
+        4,
+        "all long-running children must be sampled"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn measured_principal_preserves_native_lifecycle_trace() {
+    let root = root();
+    std::fs::create_dir_all(root.join("native-trace")).unwrap();
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    let marker = root.join("principal-pid");
+    let (mut command, route) = command(
+        &binary,
+        "/bin/sh",
+        &["-c".into(), "printf %s $$ > principal-pid".into()],
+    );
+    command.current_dir(&root);
+    let _channel = crate::agents::native_trace::prepare_gate_channel(&mut command, &root).unwrap();
+    let mut gate = Admission::with_measured_principal(route.validate_gate(&mut command).unwrap())
+        .unwrap()
+        .spawn()
+        .unwrap();
+    let principal = gate.start_measured_principal().unwrap();
+    assert!(!marker.exists());
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-CONT", &principal.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = gate.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "traced measured agent did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        std::fs::read_to_string(marker).unwrap(),
+        principal.to_string()
+    );
+    let trace = crate::agents::native_trace::Transcript::decode(
+        &std::fs::read(root.join("native-trace/native-trace.jsonl")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        trace
+            .events()
+            .iter()
+            .any(|event| event.operation == crate::agents::native_trace::Operation::ProcessStart)
+    );
+    assert!(
+        trace
+            .events()
+            .iter()
+            .any(|event| event.operation == crate::agents::native_trace::Operation::ProcessExec)
+    );
+    assert!(
+        trace
+            .events()
+            .iter()
+            .any(|event| event.operation == crate::agents::native_trace::Operation::ProcessExit)
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

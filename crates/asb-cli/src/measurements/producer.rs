@@ -126,7 +126,6 @@ impl Producer {
             let request = Arc::clone(&stopped);
             // Allocate the worker before it can resume this stopped guardian.
             // Failed spawn drops only the unadmitted gate into existing custody.
-            #[cfg(test)]
             let id = gate.id();
             #[cfg(test)]
             let fault = FAULT.with(|fault| fault.borrow_mut().take());
@@ -146,7 +145,6 @@ impl Producer {
                 .map_err(|error| format!("cannot start collector capture worker: {error}"))?;
             Ok(Self {
                 active: Some(Active::Process(Process {
-                    #[cfg(test)]
                     id,
                     stop: stopped,
                     handle: Some(handle),
@@ -242,7 +240,7 @@ impl Producer {
             completion: Some(completion),
         }
     }
-    #[cfg(test)]
+    #[cfg(any(test, target_os = "linux"))]
     pub fn id(&self) -> Option<u32> {
         match self.active.as_ref() {
             #[cfg(target_os = "linux")]
@@ -259,7 +257,6 @@ impl Drop for Producer {
 
 #[cfg(target_os = "linux")]
 struct Process {
-    #[cfg(test)]
     id: u32,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<Completion>>,

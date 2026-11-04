@@ -2305,6 +2305,56 @@ fn explicit_project_directory_owns_run_with_config_in_another_project() {
 
 #[cfg(unix)]
 #[test]
+fn external_run_report_uses_selected_project_results() {
+    let project = replay_project(1);
+    let outside = Project::new();
+    outside.init();
+    let config = outside.0.join("foreign-benchmark.toml");
+    std::fs::copy(project.0.join("benchmark.toml"), &config).unwrap();
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "run",
+            config.to_str().unwrap(),
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    expect_success(&result);
+    assert!(
+        project
+            .0
+            .join("results/foreign-benchmark-comparison/report.html")
+            .is_file()
+    );
+    let comparison: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            project
+                .0
+                .join("results/foreign-benchmark-comparison/comparison.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(comparison["benchmarks"][0]["agent"], "pi");
+    assert_eq!(
+        comparison["benchmarks"][0]["benchmark_outcome"]["evaluation"]["resolution"],
+        true
+    );
+    assert!(
+        !outside
+            .0
+            .join("results/foreign-benchmark-comparison")
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn explicit_project_directory_owns_repeated_run_with_external_config() {
     let project = replay_project(1);
     let outside = Project::new();
@@ -2590,6 +2640,175 @@ fn explicit_project_sweep_uses_relative_workload_override_and_cassette_root() {
             .is_file()
     );
     assert!(!outside.0.join("suite-results").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_project_sweep_with_external_manifest_keeps_results_in_selected_project() {
+    let project = replay_project(1);
+    let outside = Project::new();
+    outside.init();
+    std::fs::copy(
+        project.0.join("benchmark.toml"),
+        outside.0.join("benchmark.toml"),
+    )
+    .unwrap();
+    outside.write("suite.toml", "configs=['benchmark.toml']\n");
+    let tape = std::fs::read_to_string(project.0.join("tape.jsonl")).unwrap();
+    project.write(
+        "tapes/000-benchmark/cassettes/benchmark-pi-bug-fix-test-model.jsonl",
+        &tape,
+    );
+    let manifest = outside.0.join("suite.toml");
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "sweep",
+            manifest.to_str().unwrap(),
+            "--llm-replay",
+            "--cassette-root",
+            "tapes",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    assert!(
+        !outside.0.join("suite-results").exists(),
+        "sweep output must not be written in the external configuration project"
+    );
+    expect_success(&result);
+    let resumed = project.command_in_with_env(
+        &outside.0,
+        &[
+            "sweep",
+            manifest.to_str().unwrap(),
+            "--llm-replay",
+            "--cassette-root",
+            "tapes",
+            "--resume",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    expect_success(&resumed);
+    assert!(
+        project
+            .0
+            .join("suite-results/000-benchmark/run.log")
+            .is_file()
+    );
+    assert!(
+        project
+            .0
+            .join("results/suite-comparison/report.html")
+            .is_file()
+    );
+    let comparison = project.command_in_with_env(
+        &outside.0,
+        &[
+            "compare",
+            manifest.to_str().unwrap(),
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[],
+    );
+    expect_success(&comparison);
+    assert!(
+        project
+            .0
+            .join("results/suite-comparison/report.html")
+            .is_file()
+    );
+    assert!(!outside.0.join("results/suite-comparison").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_project_repeated_sweep_with_external_manifest_keeps_results_in_selected_project() {
+    let project = replay_project(1);
+    let outside = Project::new();
+    outside.init();
+    std::fs::copy(
+        project.0.join("benchmark.toml"),
+        outside.0.join("benchmark.toml"),
+    )
+    .unwrap();
+    outside.write("suite.toml", "configs=['benchmark.toml']\n");
+    let tape = std::fs::read_to_string(project.0.join("tape.jsonl")).unwrap();
+    project.write(
+        "tapes/000-benchmark/cassettes/benchmark-pi-bug-fix-test-model.jsonl",
+        &tape,
+    );
+    let manifest = outside.0.join("suite.toml");
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "sweep",
+            manifest.to_str().unwrap(),
+            "--repeat",
+            "2",
+            "--llm-replay",
+            "--cassette-root",
+            "tapes",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    assert!(
+        !outside.0.join("suite-results").exists(),
+        "sweep output must not be written in the external configuration project"
+    );
+    expect_success(&result);
+    let resumed = project.command_in_with_env(
+        &outside.0,
+        &[
+            "sweep",
+            manifest.to_str().unwrap(),
+            "--repeat",
+            "2",
+            "--llm-replay",
+            "--cassette-root",
+            "tapes",
+            "--resume",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    expect_success(&resumed);
+    assert!(project.0.join("suite-results/000-benchmark").is_dir());
+    assert!(
+        project
+            .0
+            .join("results/suite-comparison/report.html")
+            .is_file()
+    );
+    let comparison = project.command_in_with_env(
+        &outside.0,
+        &[
+            "compare",
+            manifest.to_str().unwrap(),
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[],
+    );
+    expect_success(&comparison);
+    assert!(
+        project
+            .0
+            .join("results/suite-comparison/report.html")
+            .is_file()
+    );
+    assert!(!outside.0.join("results/suite-comparison").exists());
 }
 
 #[cfg(unix)]
@@ -3912,7 +4131,7 @@ fn flamegraph_only_configuration_installs_and_starts_perf_for_concurrent_replay(
     use std::os::unix::fs::PermissionsExt;
     let project = replay_project(2);
     let calls = project.0.join("perf-calls");
-    project.write("host-bin/perf", &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nrecord) while [ $# -gt 0 ]; do if [ \"$1\" = -o ]; then shift; [ \"$1\" = - ] || printf sample > \"$1\"; break; fi; shift; done ;;\nscript) printf 'sample stack\\n' ;;\nesac\nexit 0\n", calls.display()));
+    project.write("host-bin/perf", &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nmode=$1\nwhile [ $# -gt 0 ]; do\n case \"$1\" in\n -o) shift; [ \"$1\" = - ] || printf sample > \"$1\" ;;\n --control) shift; pair=${{1#fifo:}}; control=${{pair%%,*}}; ack=${{pair#*,}}; IFS= read -r request < \"$control\"; [ \"$request\" = enable ] || exit 1; printf 'ack\\n' > \"$ack\" ;;\n esac\n shift\ndone\n[ \"$mode\" != script ] || printf 'sample stack\\n'\nexit 0\n", calls.display()));
     project.write(
         ".asb-tools/flamegraph/bin/stackcollapse-perf.pl",
         "#!/bin/sh\ncat\n",

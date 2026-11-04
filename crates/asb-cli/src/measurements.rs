@@ -162,7 +162,7 @@ pub fn available_collectors() -> Vec<String> {
 pub fn default_collectors() -> Vec<String> {
     available_collectors()
         .into_iter()
-        .filter(|collector| collector != "bpftrace")
+        .filter(|collector| collector != "bpftrace" && collector != "agentsysperf:l1-resource")
         .collect()
 }
 
@@ -722,6 +722,18 @@ impl Session {
             .wall_ms = now.duration_since(started).as_millis();
     }
 
+    /// A collector may derive a post-execution record from an observed
+    /// lifecycle component, but cannot turn a missing boundary into a
+    /// zero-duration measurement.
+    pub(crate) fn component_timing(&self, name: &str) -> Option<&ComponentTiming> {
+        self.component_timings.get(name)
+    }
+
+    /// Project-local tool root selected by the resolved execution plan.
+    pub(crate) fn tool_directory(&self) -> Option<&Path> {
+        self.tool_dir.as_deref()
+    }
+
     fn write_component_measurements(&self) -> Result<(), String> {
         // RunMeasurement.elapsed_ms is execution-only (guest-observed for
         // isolated workloads). The total must cover preparation, execution,
@@ -1261,6 +1273,11 @@ impl Session {
             let binary = tool_binary_name(name);
             for local in [
                 tool_dir.join(name).join("bin").join(binary),
+                // Python support tools are deliberately isolated in a
+                // project-local virtual environment.  Resolve their console
+                // scripts just like native tool `bin` entries rather than
+                // falling through to an unrelated host PATH executable.
+                tool_dir.join(name).join("venv").join("bin").join(binary),
                 tool_dir.join("bin").join(binary),
             ] {
                 if local.is_file() {
@@ -1436,6 +1453,7 @@ pub(crate) fn resolve_executable(tool_dir: Option<&Path>, name: &str) -> PathBuf
         let binary = tool_binary_name(name);
         for local in [
             tool_dir.join(name).join("bin").join(binary),
+            tool_dir.join(name).join("venv").join("bin").join(binary),
             tool_dir.join("bin").join(binary),
         ] {
             if local.is_file() {
@@ -2295,5 +2313,21 @@ mod tests {
                 .iter()
                 .any(|collector| collector == "bpftrace")
         );
+        assert!(
+            !default_collectors()
+                .iter()
+                .any(|collector| collector == "agentsysperf:l1-resource"),
+            "the optional AgentSysPerf runtime is intentionally large and must be explicitly selected"
+        );
+    }
+
+    #[test]
+    fn resolves_project_local_python_console_scripts() {
+        let root = std::env::temp_dir().join(format!("asb-python-tool-{}", unix_ms()));
+        let executable = root.join("agentsysperf/venv/bin/agentsysperf");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, "fixture").unwrap();
+        assert_eq!(resolve_executable(Some(&root), "agentsysperf"), executable);
+        let _ = fs::remove_dir_all(root);
     }
 }
