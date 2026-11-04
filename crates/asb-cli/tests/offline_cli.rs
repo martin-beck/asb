@@ -2336,6 +2336,36 @@ fn explicit_project_directory_owns_repeated_run_with_external_config() {
 
 #[cfg(unix)]
 #[test]
+fn external_config_uses_selected_project_default_replay_cassette() {
+    let project = replay_project(1);
+    let outside = Project::new();
+    outside.init();
+    let config = outside.0.join("foreign-benchmark.toml");
+    std::fs::copy(project.0.join("benchmark.toml"), &config).unwrap();
+    project.write(
+        "cassettes/foreign-benchmark-pi-bug-fix-test-model.jsonl",
+        &std::fs::read_to_string(project.0.join("tape.jsonl")).unwrap(),
+    );
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "run",
+            config.to_str().unwrap(),
+            "--llm-replay",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    expect_success(&result);
+    let summary: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(summary["success_rate"], 1.0, "{summary}");
+    assert!(!outside.0.join("run.log").exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn explicit_project_directory_resolves_relative_workload_override() {
     let project = replay_project(1);
     let outside = Project::new();

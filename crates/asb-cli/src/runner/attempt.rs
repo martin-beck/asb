@@ -46,6 +46,7 @@ impl<'a> ConfiguredAttempt<'a> {
             ));
         }
         let publication_config = std::path::absolute(config_path).map_err(io_error)?;
+        let runtime_anchor = project::configuration_anchor(config_path, options.invocation_dir)?;
         let measurement_path = options
             .measurement_dir
             .map(PathBuf::from)
@@ -65,7 +66,7 @@ impl<'a> ConfiguredAttempt<'a> {
                 options
                     .cassette
                     .map(PathBuf::from)
-                    .unwrap_or_else(|| default_cassette(config_path, &config)),
+                    .unwrap_or_else(|| default_cassette(&runtime_anchor, &config)),
             )
         });
         let tool_mode = options.effective_tool_mode();
@@ -75,7 +76,7 @@ impl<'a> ConfiguredAttempt<'a> {
                 options
                     .cassette
                     .map(PathBuf::from)
-                    .unwrap_or_else(|| default_cassette(config_path, &config)),
+                    .unwrap_or_else(|| default_cassette(&runtime_anchor, &config)),
             )
         });
         let mcp_tape_cassette = options.mcp_mode.map(|mode| {
@@ -84,7 +85,7 @@ impl<'a> ConfiguredAttempt<'a> {
                 options
                     .cassette
                     .map(PathBuf::from)
-                    .unwrap_or_else(|| default_cassette(config_path, &config)),
+                    .unwrap_or_else(|| default_cassette(&runtime_anchor, &config)),
             )
         });
         let network = project::network_project_at(

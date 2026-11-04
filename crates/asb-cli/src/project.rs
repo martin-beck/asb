@@ -1047,6 +1047,11 @@ mod tests {
         let (root, config) = load_for_invocation(&input, Some(&selected)).unwrap();
         assert_eq!(root, selected);
         assert_eq!(config.tools_dir, "selected-tools");
+        assert_eq!(
+            configuration_anchor(&input, Some(&selected)).unwrap(),
+            selected.join("benchmark.toml")
+        );
+        assert_eq!(configuration_anchor(&input, Some(&foreign)).unwrap(), input);
         let (root, config) = load_for_invocation(&input, None).unwrap();
         assert_eq!(root, foreign);
         assert_eq!(config.tools_dir, "foreign-tools");

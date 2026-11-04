@@ -248,10 +248,11 @@ pub(crate) fn run_with_diagnostics(
     let text = read_config(config_path)?;
     let config: BenchmarkConfig = toml::from_str(&text)
         .map_err(|error| Error::Input(format!("cannot parse {path}: {error}")))?;
+    let runtime_anchor = project::configuration_anchor(config_path, options.invocation_dir)?;
     let cassette = options
         .cassette
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| default_cassette(config_path, &config));
+        .unwrap_or_else(|| default_cassette(&runtime_anchor, &config));
     let derived_capsule = automatic_native_capsule(
         &config.agent,
         options.mode,
@@ -308,7 +309,7 @@ pub(crate) fn run_with_diagnostics(
         write_trial_start(output, &config)?;
     }
     let bundled_replay = if options.mode == Some(tape::Mode::Replay) {
-        let source = replay_cassette(config_path, &config, options.cassette)?;
+        let source = replay_cassette(&runtime_anchor, &config, options.cassette)?;
         crate::tape::require_replay_cassette(&source)?;
         crate::cassette::Source::is_bundle(&source)
             .map_err(|error| Error::Input(error.to_string()))?
@@ -658,6 +659,7 @@ fn run_concurrent(
     warnings: &Mutex<BTreeSet<String>>,
 ) -> Result<(), Error> {
     let tape_request = options.mode.map(|mode| (mode, options.cassette));
+    let runtime_anchor = project::configuration_anchor(config_path, options.invocation_dir)?;
     let mut jobs = Vec::with_capacity(config.concurrency);
     let mut completed = Vec::with_capacity(config.concurrency);
     for index in 1..=config.concurrency {
@@ -678,7 +680,7 @@ fn run_concurrent(
         let cassette = tape_request.map(|(mode, requested)| {
             let base = requested
                 .map(PathBuf::from)
-                .unwrap_or_else(|| default_cassette(config_path, config));
+                .unwrap_or_else(|| default_cassette(&runtime_anchor, config));
             (mode, replica_cassette(mode, &base, index))
         });
         let measurement = options
