@@ -5,7 +5,7 @@
 //! default could observe unrelated host work.  This adapter instead exports
 //! already verified ASB process-tree observations for later offline analysis.
 
-use super::super::CollectorAdapter;
+use super::super::{CollectorAdapter, ReportGraph, ReportRow};
 use crate::measurements::{self, ComponentTiming, Session};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -64,6 +64,10 @@ impl CollectorAdapter for AgentSysPerfCollector {
 
     fn dependencies(&self) -> &'static [&'static str] {
         DEPENDENCIES
+    }
+
+    fn report_graphs(&self, rows: &[ReportRow<'_>]) -> Vec<ReportGraph> {
+        bottleneck_graph(rows).into_iter().collect()
     }
 
     fn configure(&self, session: &mut Session, selected: &[String]) -> Result<(), String> {
@@ -241,6 +245,93 @@ fn read_bounded(path: &std::path::Path) -> Option<Vec<u8>> {
         .read_to_end(&mut bytes)
         .ok()?;
     (bytes.len() <= MAX_ANALYSIS_BYTES).then_some(bytes)
+}
+
+/// Publish only the analyzer's explicit, bounded diagnostic confidence.  A
+/// finding is not a benchmark score: absent, malformed, or unavailable
+/// analysis never becomes a zero and never contributes a ranking metric.
+fn bottleneck_graph(rows: &[ReportRow<'_>]) -> Option<ReportGraph> {
+    const MAX_FINDINGS: usize = 64;
+    let mut findings = Vec::new();
+    for row in rows {
+        let Some(analysis) = row.documents.get("agentsysperf-analysis") else {
+            continue;
+        };
+        if analysis.get("status").and_then(Value::as_str) != Some("observed") {
+            continue;
+        }
+        let Some(entries) = analysis.get("findings").and_then(Value::as_array) else {
+            continue;
+        };
+        for finding in entries {
+            let Some(analyzer) = finding.get("analyzer").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(verdict) = finding.get("verdict").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(confidence) = finding.get("confidence").and_then(Value::as_f64) else {
+                continue;
+            };
+            if !(0.0..=1.0).contains(&confidence) || !confidence.is_finite() {
+                continue;
+            }
+            findings.push((
+                bounded_label(&format!("{} · {analyzer}: {verdict}", row.label)),
+                confidence,
+            ));
+            if findings.len() == MAX_FINDINGS {
+                break;
+            }
+        }
+        if findings.len() == MAX_FINDINGS {
+            break;
+        }
+    }
+    (!findings.is_empty()).then(|| {
+        let height = 100.0 + findings.len() as f64 * 24.0;
+        let left = 330.0;
+        let right = 940.0;
+        let mut svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 980 {height:.0}\" role=\"img\" aria-label=\"AgentSysPerf bottleneck finding confidence\"><rect width=\"980\" height=\"{height:.0}\" fill=\"#fff\"/><text x=\"24\" y=\"32\" font-family=\"sans-serif\" font-size=\"18\" font-weight=\"700\">AgentSysPerf bottleneck findings</text><text x=\"24\" y=\"54\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#61707f\">Diagnostic confidence only; findings do not affect ASB grades or rankings.</text>"
+        );
+        for tick in 0..=4 {
+            let value = tick as f64 / 4.0;
+            let x = left + (right - left) * value;
+            svg.push_str(&format!("<line x1=\"{x:.1}\" y1=\"72\" x2=\"{x:.1}\" y2=\"{:.1}\" stroke=\"#dce4ec\"/><text x=\"{x:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"10\" fill=\"#61707f\">{value:.2}</text>", height - 22.0, height - 7.0));
+        }
+        for (index, (label, confidence)) in findings.iter().enumerate() {
+            let y = 76.0 + index as f64 * 24.0;
+            let width = (right - left) * confidence;
+            svg.push_str(&format!("<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" font-family=\"sans-serif\" font-size=\"11\">{}</text><rect class=\"bar\" data-label=\"{}\" data-value=\"{confidence:.3}\" x=\"{left}\" y=\"{:.1}\" width=\"{width:.1}\" height=\"16\" rx=\"3\" fill=\"#4472c4\"><title>{}: confidence {confidence:.3}</title></rect>", left - 10.0, y + 12.0, escape(label), escape(label), y, escape(label)));
+        }
+        svg.push_str("</svg>\n");
+        ReportGraph {
+            filename: "agentsysperf-bottleneck-findings.svg".into(),
+            svg,
+        }
+    })
+}
+
+fn bounded_label(value: &str) -> String {
+    const MAX_LABEL_BYTES: usize = 180;
+    if value.len() <= MAX_LABEL_BYTES {
+        return value.into();
+    }
+    let mut end = MAX_LABEL_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &value[..end])
+}
+
+fn escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// Hardware counters that the shared process-tree `perf stat` collector may
@@ -563,5 +654,35 @@ mod tests {
         );
         assert!(analysis_findings(b"preamble {\"not\":\"an array\"}").is_err());
         assert!(analysis_findings(b"[{}] trailing").is_err());
+    }
+
+    #[test]
+    fn bottleneck_graph_uses_only_complete_observed_findings() {
+        let metrics = std::collections::BTreeMap::new();
+        let documents = std::collections::BTreeMap::from([(
+            "agentsysperf-analysis".into(),
+            json!({"status":"observed","findings":[
+                {"analyzer":"breakdown","verdict":"orchestration_heavy","confidence":0.75},
+                {"analyzer":"bad","verdict":"ignored","confidence":2.0}
+            ]}),
+        )]);
+        let graph = bottleneck_graph(&[
+            ReportRow {
+                label: "fixture-agent",
+                metrics: &metrics,
+                components: None,
+                documents: &documents,
+            },
+            ReportRow {
+                label: "unmeasured-agent",
+                metrics: &metrics,
+                components: None,
+                documents: &std::collections::BTreeMap::new(),
+            },
+        ])
+        .expect("one validated finding");
+        assert_eq!(graph.filename, "agentsysperf-bottleneck-findings.svg");
+        assert!(graph.svg.contains("orchestration_heavy"));
+        assert!(!graph.svg.contains("ignored"));
     }
 }
