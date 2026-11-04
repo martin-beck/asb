@@ -54,3 +54,14 @@ proxy; the proxy does not read the fixture's retained identity files. Setting
 `ASB_TEST_SKIP_MAP_URL=1` makes this a negative control that should fail.
 It is not an ASB CLI or SWE-bench qualification and does not cover all Goose
 tools, arbitrary filesystem access, or all subagent behaviors.
+
+To check the separate container-to-host control transport, run
+`relay_control_probe.py` with a new output directory and set
+`ASB_RELAY_BINARY` to a built ASB executable, `ASB_TEST_NODE` to Node,
+`ASB_TEST_CASSETTE` to the previous fixture's `llm.jsonl`, and
+`ASB_TEST_IMAGE` to an already installed Linux task image containing Python.
+Set `ASB_TEST_LIB_DIR` to the ASB executable's host library directory and
+`ASB_TEST_LOADER` to the loader filename in that directory. The fixture starts
+a container with networking disabled, uses ASB's own relay, and checks that
+the control message does not consume a provider exchange. It requires Docker
+access and retains only the output directory; it removes its container.
