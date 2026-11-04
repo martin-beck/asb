@@ -34,8 +34,18 @@ impl AuxiliaryService {
         let stderr = child.stderr.take().expect("piped service stderr");
         let (diagnostics_send, diagnostics) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
+            let mut stderr = stderr;
             let mut bytes = Vec::new();
-            let _ = stderr.take(8192).read_to_end(&mut bytes);
+            let mut buffer = [0u8; 4096];
+            loop {
+                match stderr.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => {
+                        let retained = count.min(8192usize.saturating_sub(bytes.len()));
+                        bytes.extend_from_slice(&buffer[..retained]);
+                    }
+                }
+            }
             let _ = diagnostics_send.send(bytes);
         });
         let (send, receive) = std::sync::mpsc::sync_channel(1);
@@ -188,6 +198,16 @@ mod tests {
         command.args(["-c", "printf 'READY\\n'; read line"]);
         let mut service = AuxiliaryService::start(&mut command).unwrap();
         assert!(service.early_exit().is_none());
+        service.settle().unwrap();
+    }
+    #[test]
+    fn service_stderr_is_drained_after_the_diagnostic_limit() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "set -e; printf 'READY\\n'; head -c 65536 /dev/zero >&2; read line",
+        ]);
+        let mut service = AuxiliaryService::start(&mut command).unwrap();
         service.settle().unwrap();
     }
     #[test]
