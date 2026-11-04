@@ -293,6 +293,7 @@ fn run_child(case: &str) {
             1,
             RunOptions {
                 json: true,
+                invocation_dir: Some(&root),
                 mode: Some(tape::Mode::Record),
                 cassette: Some(cassette.to_str().unwrap()),
                 ..Default::default()
@@ -322,6 +323,7 @@ fn run_child(case: &str) {
         2,
         RunOptions {
             json: true,
+            invocation_dir: Some(&root),
             mode: Some(if replay {
                 tape::Mode::Replay
             } else {
