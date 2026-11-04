@@ -4,14 +4,13 @@ import { spawn } from 'node:child_process';
 import { readFile, writeFile, mkdir, rm, copyFile, mkdtemp } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
-import { pathToFileURL, fileURLToPath } from 'node:url';
-import { ContinueBroker } from '../assets/scripts/continue-native-broker.mjs';
+import { fileURLToPath } from 'node:url';
+import { startContinue } from '../assets/scripts/continue-native-supervisor.mjs';
 import { encodeSidecar, decodeSidecar } from '../assets/scripts/continue-native-sidecar.mjs';
-import { replayEffects } from '../assets/scripts/continue-snapshot-boundary.mjs';
 const base=resolve(process.env.ASB_TEST_PROBE_ROOT || 'target/continue-installed-probes'), cli=process.env.ASB_TEST_CONTINUE_CLI;
 if(!cli)throw new Error('ASB_TEST_CONTINUE_CLI required');
 await mkdir(base,{recursive:true});const root=await mkdtemp(resolve(base,'run-'));
-const bundle=resolve(cli,'../index.js');const hook=new URL('../assets/scripts/continue-dispatch-hook.mjs',import.meta.url).href,dispatch=new URL('../assets/scripts/continue-native-dispatch.mjs',import.meta.url).href,boundary=new URL('../assets/scripts/continue-snapshot-boundary.mjs',import.meta.url).href;const bootPath=resolve(root,'bootstrap.mjs');await writeFile(bootPath,`import {installDispatchHook} from ${JSON.stringify(hook)};import {createNativeDispatcher} from ${JSON.stringify(dispatch)};import {recordBoundaries} from ${JSON.stringify(boundary)};installDispatchHook(process.env.ASB_TEST_BUNDLE,createNativeDispatcher(process.env.ASB_TEST_MODE,process.env.ASB_TEST_SOCKET,{isDelegation:call=>call.name==='Subagent',...recordBoundaries(process.env.ASB_TEST_MARKER)}),{headlessSubagent:true});`);const bootstrap=pathToFileURL(bootPath).href;
+const bundle=resolve(cli,'../index.js');
 const markerPath=resolve(root,'marker.sock'),markers=[];
 const marker=createSocketServer(client=>{let data='';client.on('data',chunk=>{data+=chunk;if(data.includes('\n')){markers.push(data.trim());client.end('1\n');}});});
 await new Promise((resolve,reject)=>{marker.once('error',reject);marker.listen(markerPath,resolve);});
@@ -42,22 +41,22 @@ async function startProxy(mode,index,workspace) {
 async function stop(child){if(child.pid==null||child.exitCode!==null||child.signalCode!==null)return;const exited=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGTERM');const timer=setTimeout(()=>child.kill('SIGKILL'),5000);try{await exited;}finally{clearTimeout(timer);}}
 async function run(mode,index,events=[]) {
  const dir=resolve(root,`${mode}-${index}`);await mkdir(resolve(dir,'home'),{recursive:true});const socket=resolve(dir,'broker.sock');await rm(socket,{force:true});
- const broker=new ContinueBroker(mode,events,replayEffects(markerPath));await broker.listen(socket);
- let proxy;
+ let proxy,supervisor;
  try {
   proxy=await startProxy(mode,index,dir);
   const config=resolve(dir,'config.yaml'), base=`http://127.0.0.1:${proxy.port}/v1`;
   await writeFile(config,`name: ASB fixture\nversion: 1.0.0\nmodels:\n  - name: fixture\n    provider: openai\n    model: fixture-parent\n    roles: [chat]\n    apiBase: ${base}\n    apiKey: fixture\n  - name: worker\n    provider: openai\n    model: fixture-child\n    roles: [subagent]\n    apiBase: ${base}\n    apiKey: fixture\n    chatOptions:\n      baseSystemMessage: You are a fixture helper.\n`);
-  const env={PATH:process.env.PATH||'',NODE_OPTIONS:`--import=${bootstrap}`,ASB_TEST_BUNDLE:bundle,ASB_TEST_MODE:mode,ASB_TEST_SOCKET:socket,ASB_TEST_MARKER:markerPath,CONTINUE_GLOBAL_DIR:resolve(dir,'home')};
-  const child=spawn(process.execPath,[cli,'-p','Delegate the fixture task to the worker subagent and finish.','--config',config,'--model','fixture','--format','json','--auto','--beta-subagent-tool'],{cwd:dir,env,stdio:['ignore','pipe','pipe']});
+  const env={PATH:process.env.PATH||'',CONTINUE_GLOBAL_DIR:resolve(dir,'home')};
+  supervisor=await startContinue({node:process.execPath,cli,args:['-p','Delegate the fixture task to the worker subagent and finish.','--config',config,'--model','fixture','--format','json','--auto','--beta-subagent-tool'],cwd:dir,env,bundle,socket,marker:markerPath,mode,events,stdio:['ignore','pipe','pipe']});
+  const {child,broker}=supervisor;
   let out='',err='';child.stdout.on('data',c=>out+=c);child.stderr.on('data',c=>err+=c);
   const timer=setTimeout(()=>child.kill('SIGKILL'),60000);
-  let code;try {code=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',resolve)});} finally {clearTimeout(timer);}
+  let code;try {({code}=await supervisor.exited);} finally {clearTimeout(timer);}
   if(code!==0)throw new Error(`${mode} ${index} client exited ${code}: ${err.slice(-1200)}`);
   const result=await broker.finish();
   if(mode==='replay'){const progress=JSON.parse(await readFile(`${proxy.selected}.progress.json`,'utf8'));if(progress.consumed!==4||progress.total!==4||progress.rejected!==0)throw new Error(`replay ${index} incomplete: ${JSON.stringify(progress)}`);}
   return {result,outputBytes:Buffer.byteLength(out)};
- } catch(error){await broker.abort().catch(()=>{});throw error;}
+ } catch(error){if(supervisor)await supervisor.broker.abort().catch(()=>{});throw error;}
  finally {if(proxy)await stop(proxy.child);}
 }
 
