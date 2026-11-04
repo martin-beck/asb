@@ -34,15 +34,29 @@ impl AuxiliaryService {
         let stderr = child.stderr.take().expect("piped service stderr");
         let (diagnostics_send, diagnostics) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
+            let mut stderr = stderr;
             let mut bytes = Vec::new();
-            let _ = stderr.take(8192).read_to_end(&mut bytes);
+            let mut buffer = [0u8; 4096];
+            loop {
+                match stderr.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => {
+                        let retained = count.min(8192usize.saturating_sub(bytes.len()));
+                        bytes.extend_from_slice(&buffer[..retained]);
+                    }
+                }
+            }
             let _ = diagnostics_send.send(bytes);
         });
         let (send, receive) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
+            let mut stdout = BufReader::new(stdout);
             let mut line = String::new();
-            let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
+            let result = (&mut stdout).take(8193).read_line(&mut line).map(|_| line);
             let _ = send.send(result);
+            // Keep the pipe open after readiness. A service that writes a
+            // diagnostic later must not receive SIGPIPE from its supervisor.
+            let _ = std::io::copy(&mut stdout, &mut std::io::sink());
         });
         match receive.recv_timeout(Duration::from_secs(15)) {
             Ok(Ok(line)) if line == "READY\n" => Ok(Self { child, diagnostics }),
@@ -74,6 +88,45 @@ impl AuxiliaryService {
     }
     pub(crate) fn child(&mut self) -> &mut Child {
         &mut self.child
+    }
+    /// Classify an early service exit without publishing its private output.
+    pub(crate) fn early_exit(&mut self) -> Option<String> {
+        let status = self.child.try_wait().ok().flatten()?;
+        let diagnostic = self
+            .diagnostics
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_default();
+        let text = String::from_utf8_lossy(&diagnostic);
+        let reason = if text.contains("EPIPE") {
+            "broken pipe"
+        } else if text.contains("ECONNRESET") {
+            "connection reset"
+        } else if text.contains("ERR_UNHANDLED_REJECTION")
+            || text.contains("UnhandledPromiseRejection")
+        {
+            "unhandled promise rejection"
+        } else if text.contains("out of memory") || text.contains("heap out of memory") {
+            "out of memory"
+        } else if text.contains("TypeError") {
+            "type error"
+        } else if text.contains("SyntaxError") {
+            "syntax error"
+        } else {
+            "unclassified error"
+        };
+        #[cfg(unix)]
+        let termination = {
+            use std::os::unix::process::ExitStatusExt;
+            status.code().map_or_else(
+                || format!("signal {}", status.signal().unwrap_or_default()),
+                |code| format!("exit {code}"),
+            )
+        };
+        #[cfg(not(unix))]
+        let termination = format!("exit {}", status.code().unwrap_or_default());
+        Some(format!(
+            "adapter auxiliary service exited early ({termination}; {reason})"
+        ))
     }
     pub(crate) fn settle(&mut self) -> Result<(), Error> {
         self.child
@@ -128,6 +181,55 @@ impl Drop for AuxiliaryService {
 #[cfg(all(test, unix))]
 mod tests {
     use super::AuxiliaryService;
+    #[test]
+    fn early_service_exit_reports_classification_without_private_output() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'READY\\n'; printf 'Error: EPIPE private-value\\n' >&2; exit 42",
+        ]);
+        let mut service = AuxiliaryService::start(&mut command).unwrap();
+        service.child().wait().unwrap();
+        let detail = service.early_exit().unwrap();
+        assert!(detail.contains("exit 42"));
+        assert!(detail.contains("broken pipe"));
+        assert!(!detail.contains("private-value"));
+    }
+
+    #[test]
+    fn live_service_is_not_misreported_as_early_exit() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "printf 'READY\\n'; read line"]);
+        let mut service = AuxiliaryService::start(&mut command).unwrap();
+        assert!(service.early_exit().is_none());
+        service.settle().unwrap();
+    }
+    #[test]
+    fn service_stderr_is_drained_after_the_diagnostic_limit() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "set -e; printf 'READY\\n'; head -c 65536 /dev/zero >&2; read line",
+        ]);
+        let mut service = AuxiliaryService::start(&mut command).unwrap();
+        service.settle().unwrap();
+    }
+    #[test]
+    fn service_stdout_remains_open_after_readiness() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "set -e; printf 'READY\\n'; head -c 65536 /dev/zero; read line",
+        ]);
+        let mut service = AuxiliaryService::start(&mut command).unwrap();
+        service.settle().unwrap();
+    }
+    #[test]
+    fn oversized_readiness_is_rejected() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "head -c 16384 /dev/zero; sleep 1"]);
+        assert!(AuxiliaryService::start(&mut command).is_err());
+    }
     #[test]
     fn service_failure_reports_only_the_classified_problem() {
         let mut command = std::process::Command::new("/bin/sh");

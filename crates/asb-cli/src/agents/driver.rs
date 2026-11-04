@@ -947,7 +947,16 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
                 }
                 Ok(())
             },
-        )?;
+        );
+        let captured = match captured {
+            Ok(value) => value,
+            Err(error) => {
+                if let Some(detail) = auxiliary.as_mut().and_then(|service| service.early_exit()) {
+                    return Err(Error::Run(format!("{error}; {detail}")));
+                }
+                return Err(error);
+            }
+        };
         (
             captured.output,
             captured.transcript_truncated,

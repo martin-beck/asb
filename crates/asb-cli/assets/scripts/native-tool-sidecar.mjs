@@ -30,7 +30,7 @@ export function encodePendingSidecar(exchanges, programSha256, agent = 'continue
   // Reuse replay's ordering and shape validation before writing any bytes.
   new ReplaySession(exchanges);
   if (exchanges.some(exchange => !keys(exchange,['ordinal','request','outcome']) ||
-      (exchange.outcome.ok ? !keys(exchange.outcome,['ok','value']) : !keys(exchange.outcome,['ok','name','message'])))) {
+      (exchange.outcome.ok ? !keys(exchange.outcome,['ok','value']) : !(keys(exchange.outcome,['ok','name','message']) || keys(exchange.outcome,['ok','thrown']))))) {
     throw new Error('Native tool sidecar exchange contains unsupported fields');
   }
   const session = `${agent}-launch-1`, alias = `${agent}-tools-1`;
@@ -77,7 +77,7 @@ export function decodeSidecar(bytes, agent = 'continue') {
         !keys(output,['event','alias','response_sha256','output_b64']) || output.event !== 'output' || output.alias !== session.alias) throw new Error('Native tool sidecar event order is invalid');
     const request = payload(write.request_b64,write.request_sha256), outcome = payload(output.output_b64,output.response_sha256);
     if (!keys(request,['ordinal','request'])) throw new Error('Native tool sidecar request is invalid');
-    if (!(outcome?.ok ? keys(outcome,['ok','value']) : keys(outcome,['ok','name','message']))) throw new Error('Native tool sidecar outcome is invalid');
+    if (!(outcome?.ok ? keys(outcome,['ok','value']) : (keys(outcome,['ok','name','message']) || keys(outcome,['ok','thrown'])))) throw new Error('Native tool sidecar outcome is invalid');
     exchanges.push({ordinal:request.ordinal,request:request.request,outcome});
   }
   new ReplaySession(exchanges);
