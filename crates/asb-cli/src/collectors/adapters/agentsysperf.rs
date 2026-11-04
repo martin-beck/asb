@@ -10,6 +10,7 @@ use crate::measurements::{self, ComponentTiming, Session};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::fs;
+use std::process::Command;
 
 pub(super) struct AgentSysPerfCollector;
 pub(super) static ADAPTER: AgentSysPerfCollector = AgentSysPerfCollector;
@@ -19,6 +20,17 @@ const DEPENDENCIES: &[&str] = &["agent-memory", "agent-workers", "cpu-accounting
 #[derive(Default)]
 struct State {
     enabled: bool,
+    platform: Option<PlatformManifest>,
+}
+
+/// Capability evidence for optional processor telemetry.  Event names are
+/// accepted only after the local `perf list` advertises them; ASB never copies
+/// an Intel encoding onto an AMD or Arm machine.
+#[derive(Clone, Serialize)]
+struct PlatformManifest {
+    family: &'static str,
+    architecture: &'static str,
+    perf_events: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -50,8 +62,11 @@ impl CollectorAdapter for AgentSysPerfCollector {
     }
 
     fn configure(&self, session: &mut Session, selected: &[String]) -> Result<(), String> {
-        session.state::<State>().borrow_mut().enabled =
-            crate::collectors::selected_or_environment(self.id(), selected);
+        let enabled = crate::collectors::selected_or_environment(self.id(), selected);
+        let state = session.state::<State>();
+        let mut state = state.borrow_mut();
+        state.enabled = enabled;
+        state.platform = enabled.then(discover_platform);
         Ok(())
     }
 
@@ -87,10 +102,77 @@ impl CollectorAdapter for AgentSysPerfCollector {
                 "scope": "selected-agent-process-tree",
                 "analysis_input": "agentsysperf-records/measurement_records.json",
                 "records": records.len(),
+                "platform": session.state::<State>().borrow().platform,
                 "limitations": "This is an ASB-owned process-tree export for offline AgentSysPerf analysis. It does not run AgentSysPerf's benchmark harness or accept system-wide perf attribution. Missing observations are omitted rather than represented as zero."
             }),
         )
     }
+}
+
+/// Hardware counters that the shared process-tree `perf stat` collector may
+/// add to its already-scoped command.  Returning an empty list is a normal
+/// unavailable-capability result, never a reason to fall back to `perf -a`.
+pub(super) fn telemetry_events(session: &mut Session) -> Vec<String> {
+    session
+        .state::<State>()
+        .borrow()
+        .platform
+        .as_ref()
+        .map(|manifest| manifest.perf_events.clone())
+        .unwrap_or_default()
+}
+
+fn discover_platform() -> PlatformManifest {
+    let architecture = match std::env::consts::ARCH {
+        "aarch64" => "armv8",
+        "x86_64" => "x86_64",
+        other => other,
+    };
+    let cpuinfo = fs::read_to_string("/proc/cpuinfo")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let family = if architecture == "armv8" {
+        "armv8"
+    } else if cpuinfo.contains("authenticamd") || cpuinfo.contains("amd") {
+        "amd"
+    } else if cpuinfo.contains("genuineintel") || cpuinfo.contains("intel") {
+        "intel"
+    } else {
+        "unknown"
+    };
+    let listing = Command::new("perf")
+        .args(["list", "--no-desc"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    let mut wanted = vec!["cycles", "instructions", "cache-misses", "branch-misses"];
+    match family {
+        "intel" => wanted.extend(["topdown-fe-bound", "topdown-be-bound"]),
+        // AMD gets the portable hardware counters above unless a future,
+        // separately qualified AMD PMU catalog is available.
+        "armv8" => wanted.extend(["l1d_cache_refill", "stall_backend", "stall_frontend"]),
+        _ => {}
+    }
+    let perf_events = wanted
+        .into_iter()
+        .filter(|event| perf_list_advertises(&listing, event))
+        .map(str::to_owned)
+        .collect();
+    PlatformManifest {
+        family,
+        architecture,
+        perf_events,
+    }
+}
+
+fn perf_list_advertises(listing: &str, event: &str) -> bool {
+    listing.lines().any(|line| {
+        line.split_whitespace()
+            .next()
+            .is_some_and(|first| first == event)
+    })
 }
 
 fn write_unavailable(session: &Session, reason: &str) -> Result<(), String> {
@@ -163,6 +245,9 @@ fn l3_record(perf: &Map<String, Value>) -> Option<Map<String, Value>> {
         ("perf.observed_instructions_count", "instructions"),
         ("perf.cache_misses_count", "cache_misses"),
         ("perf.branch_misses_count", "branch_misses"),
+        ("perf.observed_l1d_cache_refill_count", "l1d_cache_refill"),
+        ("perf.observed_stall_backend_count", "stall_backend"),
+        ("perf.observed_stall_frontend_count", "stall_frontend"),
     ] {
         if let Some(value) = metric(perf, from) {
             l3.insert(to.into(), json!(value));
@@ -286,5 +371,12 @@ mod tests {
         .unwrap();
         assert!(read_observed_metrics(&path, "selected-agent-process-tree").is_err());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn platform_selection_uses_only_advertised_vendor_events() {
+        let arm = "  cycles\n  instructions\n  cache-misses\n  branch-misses\n  l1d_cache_refill OR armv8_pmuv3_0/l1d_cache_refill/\n  stall_backend\n  stall_frontend\n";
+        assert!(perf_list_advertises(arm, "l1d_cache_refill"));
+        assert!(!perf_list_advertises(arm, "topdown-fe-bound"));
     }
 }
