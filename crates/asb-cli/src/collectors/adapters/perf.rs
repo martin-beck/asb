@@ -34,7 +34,12 @@ fn record_args(pid: u32) -> Vec<String> {
 
 /// Build the process-scoped interval counter arguments with the same
 /// inheritance contract as call-stack recording.
-fn stat_args(pid: u32, interval_ms: u64) -> Vec<String> {
+fn stat_args(pid: u32, interval_ms: u64, hardware_events: &[String]) -> Vec<String> {
+    let mut events = "task-clock,context-switches,cpu-migrations,page-faults".to_owned();
+    if !hardware_events.is_empty() {
+        events.push(',');
+        events.push_str(&hardware_events.join(","));
+    }
     vec![
         "stat".into(),
         "--no-scale".into(),
@@ -45,7 +50,7 @@ fn stat_args(pid: u32, interval_ms: u64) -> Vec<String> {
         // These software counters remain available when a workload's cgroup
         // or hybrid-PMU policy rejects hardware cycles/instructions.  Hardware
         // counters are deliberately not estimated or silently substituted.
-        "task-clock,context-switches,cpu-migrations,page-faults".into(),
+        events,
         "--inherit".into(),
         "-p".into(),
         pid.to_string(),
@@ -474,7 +479,8 @@ impl measurements::Session {
             crate::evidence::Capture::create(&stat_stdout_path)?,
             crate::evidence::Capture::create(&stat_stderr_path)?,
         ];
-        let stat_args = stat_args(pid, measurement_interval_ms());
+        let hardware_events = super::agentsysperf::telemetry_events(self);
+        let stat_args = stat_args(pid, measurement_interval_ms(), &hardware_events);
         let (mut command, route) = self.collector_command("perf")?;
         command.args(&stat_args);
         let stat = Collector::spawn("perf-stat", &ADAPTER, command, route, captures);
@@ -712,6 +718,11 @@ fn perf_metric_name(event: &str) -> Option<&'static str> {
         "instructions" | "cpu_core/instructions/" | "cpu_atom/instructions/" => {
             Some("observed_instructions_count")
         }
+        "cache-misses" => Some("cache_misses_count"),
+        "branch-misses" => Some("branch_misses_count"),
+        "l1d_cache_refill" => Some("observed_l1d_cache_refill_count"),
+        "stall_backend" => Some("observed_stall_backend_count"),
+        "stall_frontend" => Some("observed_stall_frontend_count"),
         _ => None,
     }
 }
@@ -877,7 +888,7 @@ mod tests {
             Some(400.0)
         );
         assert_eq!(parsed.quality["instructions"].unknown_quality_rows, 1);
-        let args = stat_args(1234, 100);
+        let args = stat_args(1234, 100, &[]);
         assert!(args.iter().any(|arg| arg == "--no-scale"));
         assert!(!args.iter().any(|arg| arg == "--all-cpus"));
     }
@@ -980,7 +991,7 @@ mod tests {
     #[test]
     fn perf_stat_uses_the_same_process_tree_scope() {
         assert_eq!(
-            stat_args(42, 1000),
+            stat_args(42, 1000, &[]),
             vec![
                 "stat",
                 "--no-scale",
@@ -994,5 +1005,15 @@ mod tests {
                 "42"
             ]
         );
+    }
+
+    #[test]
+    fn optional_platform_events_remain_on_the_process_tree_command() {
+        let events = vec!["cycles".into(), "l1d_cache_refill".into()];
+        let args = stat_args(42, 1000, &events);
+        assert!(args.iter().any(|arg| arg
+            == "task-clock,context-switches,cpu-migrations,page-faults,cycles,l1d_cache_refill"));
+        assert!(args.windows(2).any(|pair| pair == ["-p", "42"]));
+        assert!(!args.iter().any(|arg| arg == "-a"));
     }
 }
