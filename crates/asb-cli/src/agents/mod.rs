@@ -522,6 +522,15 @@ pub(super) fn final_result_counter(stdout: &str, field: &str) -> Option<u64> {
 
 type CommandBuilder = for<'a> fn(&CommandContext<'a>) -> CommandSpec;
 type PreparationHook = for<'a> fn(&mut PreparationContext<'a>) -> Result<(), Error>;
+type GuestServiceHook = fn(
+    &mut Command,
+    &str,
+    &Path,
+    Option<crate::tape::Mode>,
+    Option<&Path>,
+    Option<&str>,
+) -> Result<Option<auxiliary::AuxiliaryService>, Error>;
+type DeferredNativeHook = fn(&[u8], &str) -> Result<Vec<u8>, Error>;
 type ToolReplayHook = for<'a> fn(&mut PreparationContext<'a>, TapeContext<'a>) -> Result<(), Error>;
 type CollectionHook = for<'a> fn(&CollectionContext<'a>) -> AgentArtifacts;
 /// An adapter-selected extension which may attach its own bounded replay
@@ -558,17 +567,8 @@ pub(super) struct StaticAdapter {
     mcp_servers: bool,
     mcp_relay: bool,
     native_tool_transport: bool,
-    guest_service: Option<
-        fn(
-            &mut Command,
-            &str,
-            &Path,
-            Option<crate::tape::Mode>,
-            Option<&Path>,
-            Option<&str>,
-        ) -> Result<Option<auxiliary::AuxiliaryService>, Error>,
-    >,
-    finalize_native_recording: Option<fn(&[u8], &str) -> Result<Vec<u8>, Error>>,
+    guest_service: Option<GuestServiceHook>,
+    finalize_native_recording: Option<DeferredNativeHook>,
     max_steps: bool,
     native_workspace_capsule: Option<(WorkspaceCapsuleCaptureHook, WorkspaceCapsuleApplyHook)>,
     collect: Option<CollectionHook>,
@@ -653,24 +653,14 @@ impl StaticAdapter {
         self.collect = Some(collect);
         self
     }
-    pub(super) const fn with_guest_service(
-        mut self,
-        hook: fn(
-            &mut Command,
-            &str,
-            &Path,
-            Option<crate::tape::Mode>,
-            Option<&Path>,
-            Option<&str>,
-        ) -> Result<Option<auxiliary::AuxiliaryService>, Error>,
-    ) -> Self {
+    pub(super) const fn with_guest_service(mut self, hook: GuestServiceHook) -> Self {
         self.guest_service = Some(hook);
         self
     }
 
     pub(super) const fn with_deferred_native_recording(
         mut self,
-        finalize: fn(&[u8], &str) -> Result<Vec<u8>, Error>,
+        finalize: DeferredNativeHook,
     ) -> Self {
         self.finalize_native_recording = Some(finalize);
         self
