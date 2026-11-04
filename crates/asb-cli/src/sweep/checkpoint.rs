@@ -471,7 +471,7 @@ impl Inputs {
     }
 
     fn recovery_inputs(
-        parent: &Path,
+        _parent: &Path,
         results: &Path,
         plan: &super::plan::SweepPlan,
     ) -> Result<Self, Error> {
@@ -487,11 +487,10 @@ impl Inputs {
         if reading::bounded_relative(&directory, Path::new("key"), 32)?.len() != 32 {
             return Err(resume_error("original checkpoint key is invalid"));
         }
-        let first = plan
-            .entries
-            .first()
-            .ok_or_else(|| resume_error("no original configuration"))?;
-        let (root, _) = crate::project::load(&parent.join(&first.reference))?;
+        if plan.entries.is_empty() {
+            return Err(resume_error("no original configuration"));
+        }
+        let (root, _) = crate::project::load(results)?;
         let candidate = crate::python_runtime::project_python(&root);
         let python = if candidate.is_file() {
             candidate
@@ -583,7 +582,10 @@ impl Inputs {
         let mut projects = BTreeSet::new();
         let mut python = PathBuf::from("python3");
         for entry in &plan.entries {
-            let (root, _) = crate::project::load(&parent.join(&entry.reference))?;
+            let (root, _) = crate::project::load_for_invocation(
+                &parent.join(&entry.reference),
+                Some(invocation_dir),
+            )?;
             projects.insert(root.canonicalize().map_err(crate::io_error)?);
         }
         for (index, root) in projects.iter().enumerate() {

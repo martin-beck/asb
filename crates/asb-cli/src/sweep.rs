@@ -157,13 +157,15 @@ pub(crate) fn run_with_options(
     };
     let Options { json, mode, .. } = options;
     let parent = sweep_path.parent().unwrap_or_else(|| Path::new("."));
+    let output_anchor = crate::project::configuration_anchor(sweep_path, options.invocation_dir)?;
+    let output_parent = output_anchor.parent().unwrap_or_else(|| Path::new("."));
     let stem = sweep_path
         .file_stem()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
         .unwrap_or("sweep");
     // Keep ownership through comparison, including moving older output trees.
-    let _output_lock = lock::OutputLock::acquire(parent, stem)?;
+    let _output_lock = lock::OutputLock::acquire_for_source(output_parent, stem, sweep_path)?;
     if options.recover_continuation {
         if !options.resume
             || mode.is_some()
@@ -182,7 +184,7 @@ pub(crate) fn run_with_options(
         {
             return Err(Error::Input("--recover-continuation requires --resume and accepts no execution/selection options".into()));
         }
-        let results = parent.join(format!("{stem}-results"));
+        let results = output_parent.join(format!("{stem}-results"));
         let saved = plan::SweepPlan::load(&results, parent, &sweep)?
             .ok_or_else(|| Error::Input("no retained sweep to recover".into()))?;
         if saved.execution.is_none() {
@@ -219,7 +221,7 @@ pub(crate) fn run_with_options(
         {
             return Err(Error::Input("--recover-recording requires --resume --record and accepts no execution/selection options".into()));
         }
-        let results = parent.join(format!("{stem}-results"));
+        let results = output_parent.join(format!("{stem}-results"));
         let saved = plan::SweepPlan::load(&results, parent, &sweep)?
             .ok_or_else(|| Error::Input("no retained sweep to recover".into()))?;
         if saved.execution_mode != plan::SavedExecutionMode::Record || saved.execution.is_none() {
@@ -260,12 +262,20 @@ pub(crate) fn run_with_options(
                     .into(),
             ));
         }
-        if plan::SweepPlan::source_snapshot(&parent.join(format!("{stem}-results")), parent)?
+        if plan::SweepPlan::source_snapshot(&output_parent.join(format!("{stem}-results")), parent)?
             .is_some_and(|saved| saved.execution.is_some())
         {
             return Err(Error::Input("campaign grade import requires saved-slot validation; existing results were not changed".into()));
         }
-        return recovered::import(sweep_path, &sweep, parent, stem, json, output);
+        return recovered::import(
+            sweep_path,
+            &sweep,
+            parent,
+            output_parent,
+            stem,
+            json,
+            output,
+        );
     }
     let prepared = phases::PreparedSweep::prepare(path, options, _output_lock, sweep, output)?;
     let activated = prepared.activate()?;
