@@ -718,7 +718,7 @@ fn start_native_service(
     mode: Option<crate::tape::Mode>,
     native_tool: Option<&Path>,
     snapshot_sha256: Option<&str>,
-) -> Result<Option<super::super::auxiliary::AuxiliaryService>, Error> {
+) -> Result<Option<super::super::auxiliary::AuxiliaryPlan>, Error> {
     let Some((mode, marker, snapshot)) =
         super::super::native_guest::selection(mode, snapshot_sha256)?
     else {

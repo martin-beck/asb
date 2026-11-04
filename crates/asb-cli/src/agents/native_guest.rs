@@ -51,7 +51,7 @@ pub(super) fn selection(
 pub(super) fn start(
     command: &mut Command,
     settings: Settings<'_>,
-) -> Result<super::auxiliary::AuxiliaryService, Error> {
+) -> Result<super::auxiliary::AuxiliaryPlan, Error> {
     let directory = settings.run_dir.join(settings.agent);
     std::fs::create_dir_all(&directory).map_err(crate::io_error)?;
     for (name, source) in [
@@ -112,7 +112,6 @@ pub(super) fn start(
     } else {
         service.arg(directory.join("native-tool-pending.jsonl"));
     }
-    let owner = super::auxiliary::AuxiliaryService::start(&mut service)?;
     let bootstrap = directory.join(format!("{}-native-bootstrap.mjs", settings.agent));
     let bootstrap = bootstrap
         .to_str()
@@ -147,7 +146,7 @@ pub(super) fn start(
         )
         .env(format!("{prefix}_SOCKET"), socket)
         .env(format!("{prefix}_MARKER"), settings.marker);
-    Ok(owner)
+    Ok(super::auxiliary::AuxiliaryPlan::new(service))
 }
 
 pub(super) fn finalize(

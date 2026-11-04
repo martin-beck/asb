@@ -371,7 +371,7 @@ fn start_recording_service(
     mode: Option<crate::tape::Mode>,
     native_tool: Option<&std::path::Path>,
     snapshot_sha256: Option<&str>,
-) -> Result<Option<super::super::auxiliary::AuxiliaryService>, Error> {
+) -> Result<Option<super::super::auxiliary::AuxiliaryPlan>, Error> {
     let Some((mode, marker, snapshot)) =
         super::super::native_guest::selection(mode, snapshot_sha256)?
     else {
@@ -396,7 +396,7 @@ fn start_recording_service_with_marker(
     marker: std::ffi::OsString,
     native_tool: Option<&std::path::Path>,
     snapshot_archive: &std::ffi::OsStr,
-) -> Result<Option<super::super::auxiliary::AuxiliaryService>, Error> {
+) -> Result<Option<super::super::auxiliary::AuxiliaryPlan>, Error> {
     let Some(mode) = mode else { return Ok(None) };
     let cli = std::fs::canonicalize(executable).map_err(|_| {
         Error::Run("Continue executable is unavailable for native recording".into())
@@ -690,6 +690,8 @@ await dispatch({name:'Read',arguments:{path:'fixture'},tool:{run:async()=>{write
             root.join("unused-snapshot").as_os_str(),
         )
         .unwrap()
+        .unwrap()
+        .start()
         .unwrap();
         let output = command.output().unwrap();
         assert!(
@@ -720,6 +722,8 @@ await dispatch({name:'Read',arguments:{path:'fixture'},tool:{run:async()=>{write
             archive.as_os_str(),
         )
         .unwrap()
+        .unwrap()
+        .start()
         .unwrap();
         let replay = replay_command.output().unwrap();
         assert!(

@@ -138,7 +138,7 @@ pub(crate) trait AgentAdapter: Sync {
         false
     }
     fn prepare(&self, context: &mut PreparationContext<'_>) -> Result<(), Error>;
-    fn start_guest_service(
+    fn prepare_guest_service(
         &self,
         _command: &mut Command,
         _executable: &str,
@@ -146,7 +146,7 @@ pub(crate) trait AgentAdapter: Sync {
         _mode: Option<crate::tape::Mode>,
         _native_tool: Option<&Path>,
         _snapshot_sha256: Option<&str>,
-    ) -> Result<Option<auxiliary::AuxiliaryService>, Error> {
+    ) -> Result<Option<auxiliary::AuxiliaryPlan>, Error> {
         Ok(None)
     }
     fn supports_native_tool_transport(&self) -> bool {
@@ -530,7 +530,7 @@ type GuestServiceHook = fn(
     Option<crate::tape::Mode>,
     Option<&Path>,
     Option<&str>,
-) -> Result<Option<auxiliary::AuxiliaryService>, Error>;
+) -> Result<Option<auxiliary::AuxiliaryPlan>, Error>;
 type DeferredNativeHook = fn(&[u8], &str) -> Result<Vec<u8>, Error>;
 type ToolReplayHook = for<'a> fn(&mut PreparationContext<'a>, TapeContext<'a>) -> Result<(), Error>;
 type CollectionHook = for<'a> fn(&CollectionContext<'a>) -> AgentArtifacts;
@@ -935,7 +935,7 @@ impl AgentAdapter for StaticAdapter {
     fn supports_native_tool_transport(&self) -> bool {
         self.native_tool_transport
     }
-    fn start_guest_service(
+    fn prepare_guest_service(
         &self,
         command: &mut Command,
         executable: &str,
@@ -943,7 +943,7 @@ impl AgentAdapter for StaticAdapter {
         mode: Option<crate::tape::Mode>,
         native_tool: Option<&Path>,
         snapshot_sha256: Option<&str>,
-    ) -> Result<Option<auxiliary::AuxiliaryService>, Error> {
+    ) -> Result<Option<auxiliary::AuxiliaryPlan>, Error> {
         self.guest_service.map_or(Ok(None), |hook| {
             hook(
                 command,

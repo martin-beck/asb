@@ -148,11 +148,12 @@ fn native_auxiliary_service_starts_only_after_guest_gate_resumes() {
     stdout.read_line(&mut ready).unwrap();
     assert_eq!(ready.trim(), format!("__ASB_GATE__:{}", process.0.id()));
     assert!(
-        !project
+        project
             .0
             .join("private/attempt/pi/native-tool-service.mjs")
-            .exists()
+            .is_file()
     );
+    assert!(!project.0.join("private/attempt/pi/broker.sock").exists());
     assert!(!project.0.join("workspace/native-service-observed").exists());
     resume_fixture(&mut process);
     let mut remaining = String::new();
@@ -171,6 +172,37 @@ fn native_auxiliary_service_starts_only_after_guest_gate_resumes() {
             .is_file(),
         "status={status}, output={remaining}"
     );
+}
+
+#[test]
+fn invalid_native_auxiliary_configuration_fails_before_guest_gate() {
+    let project = Project::new();
+    let mut request = project.request();
+    request["tool_tape_cassette"] = project
+        .0
+        .join("recording.jsonl")
+        .to_string_lossy()
+        .to_string()
+        .into();
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_asb"))
+            .arg("__asb-agent")
+            .isolated_env()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("HOME", &project.0)
+            .env("ASB_FS_MARKER_SOCKET", project.0.join("marker.sock"))
+            .env("ASB_GUEST_AGENT_REQUEST", request.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
+    let mut first = String::new();
+    stdout.read_line(&mut first).unwrap();
+    assert!(first.is_empty(), "invalid service reached the launch gate");
+    assert!(!process.0.wait().unwrap().success());
+    assert!(!project.0.join("workspace/performed.txt").exists());
 }
 
 #[test]
