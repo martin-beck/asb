@@ -421,7 +421,7 @@ impl<'a> ProviderAttempt<'a> {
                 ReadyAttempt::prepare(configured, bridge.as_deref(), arrival, output, warnings)?;
             let executed = ready.execute(bridge.as_deref(), arrival, output)?;
             executed
-                .finalize(&mut bridge, output, warnings)
+                .finalize(&mut bridge, output, warnings)?
                 .publish(output, warnings)
         })();
         finish_provider_attempt(result, arrival, &mut bridge)
@@ -1090,13 +1090,20 @@ impl<'a> CompletedAttempt<'a> {
         bridge: &mut Option<Box<dyn providers::ProviderSession>>,
         output: &mut dyn Write,
         warnings: &Mutex<BTreeSet<String>>,
-    ) -> FinalResult<'a> {
+    ) -> Result<FinalResult<'a>, Error> {
         let Self {
             context,
             metadata,
             mut settled,
             interface,
         } = self;
+        // `settle` has ended agent execution, proxy activity, and the
+        // execution-bound collector work. Do not begin adapter collection,
+        // official grading, or later post-processing while another admitted
+        // peer is still executing or measuring.
+        if let Some(barrier) = context.options.settlement_barrier {
+            barrier.arrive(context.options.replica)?;
+        }
         let config = &context.config;
         let workspace = &metadata.workspace;
         let mut artifact_owner = settled.evidence.artifact_owner.take();
@@ -1254,7 +1261,7 @@ impl<'a> CompletedAttempt<'a> {
             issues.run_error(error.clone());
         }
 
-        FinalResult {
+        Ok(FinalResult {
             context,
             facts: ResultFacts {
                 metadata,
@@ -1265,7 +1272,7 @@ impl<'a> CompletedAttempt<'a> {
                 provider_cleanup_error,
                 artifact_evidence,
             },
-        }
+        })
     }
 }
 
