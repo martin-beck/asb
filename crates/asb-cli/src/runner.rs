@@ -1685,6 +1685,7 @@ fn command_for(
     command_for_with_interface(config, provider_base_url, prompt, interface, None)
 }
 
+#[cfg(test)]
 fn command_for_with_interface(
     config: &BenchmarkConfig,
     provider_base_url: Option<&str>,
