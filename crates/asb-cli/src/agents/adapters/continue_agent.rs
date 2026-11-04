@@ -751,9 +751,24 @@ mod tests {
     fn guest_service_records_and_replays_native_tool_without_live_execution() {
         use std::io::{BufRead, Write};
         use std::os::unix::net::UnixListener;
-        let root =
+        let actual_root =
             std::env::temp_dir().join(format!("asb-continue-adapter-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&actual_root).unwrap();
+        // CI may supply a long TMPDIR. Keep Unix socket paths short while
+        // retaining every fixture byte in that same selected directory.
+        #[cfg(target_os = "linux")]
+        let directory = std::fs::File::open(&actual_root).unwrap();
+        #[cfg(target_os = "linux")]
+        let root = {
+            use std::os::fd::AsRawFd;
+            std::path::PathBuf::from(format!(
+                "/proc/{}/fd/{}",
+                std::process::id(),
+                directory.as_raw_fd()
+            ))
+        };
+        #[cfg(not(target_os = "linux"))]
+        let root = actual_root.clone();
         let bundle = root.join("index.js");
         let cli = root.join("cn.mjs");
         std::fs::write(root.join("package.json"), "{\"type\":\"module\"}").unwrap();
@@ -829,7 +844,7 @@ await dispatch({name:'Read',arguments:{path:'fixture'},tool:{run:async()=>{write
         replay_service.settle().unwrap();
         server.join().unwrap();
         assert!(!effect.exists(), "native tool was executed during replay");
-        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(actual_root).unwrap();
     }
     #[test]
     fn deferred_native_recording_is_collected_without_a_session_document() {
