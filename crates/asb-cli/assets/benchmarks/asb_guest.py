@@ -524,11 +524,12 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
         if preparation_budget is not None:
             preparation_budget.remaining()
             preparation_budget.active = False
-    stderr_tail = bytearray()
+    output_tails = {'stdout': bytearray(), 'stderr': bytearray()}
     def agent_output(stream, chunk):
-        if stream == 'stderr':
-            stderr_tail.extend(chunk)
-            del stderr_tail[:-256 * 1024]
+        if stream in output_tails:
+            tail = output_tails[stream]
+            tail.extend(chunk)
+            del tail[:-256 * 1024]
         if on_output is not None:
             on_output(stream, chunk)
     result = task.workspace.execute(["/opt/asb-runtime/asb", "__asb-agent"], environment=environment,
@@ -559,12 +560,12 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
         # Unknown usage is never invented from text or an expected minimum.
         # Preserve the end of the private guest stderr: the bounded transport
         # prefix may omit the actual failure after a verbose agent run.
-        if stderr_tail:
+        if output_tails['stderr']:
             try:
                 path = task.artifacts / 'guest-error-stderr.log'
                 descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(descriptor, 'wb') as log:
-                    log.write(stderr_tail)
+                    log.write(output_tails['stderr'])
                 observation['guest_error_log'] = path.name
             except OSError:
                 pass
@@ -593,6 +594,23 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
     result["metadata"].update(exact)
     result.update(exact)
     observation.update(exact)
+    # A failed agent can still produce valid metadata. Preserve the diagnostic
+    # tails before the snapshot supervisor settles, since settlement may fail
+    # and otherwise hide the original cause from the caller.
+    if result['metadata'].get('exit_code') not in (None, 0) or result.get('exit_code') not in (None, 0):
+        for stream, tail in output_tails.items():
+            if not tail:
+                continue
+            path = task.artifacts / f'guest-error-{stream}.log'
+            if stream == 'stderr' and observation.get('guest_error_log'):
+                continue
+            try:
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, 'wb') as log:
+                    log.write(tail)
+                observation[f'guest_error_{stream}_log'] = path.name
+            except OSError:
+                pass
     journal = task.artifacts / "execution.json"
     journal.write_text(json.dumps(observation))
     journal.chmod(0o600)
