@@ -289,12 +289,20 @@ class RuntimeTests(unittest.TestCase):
                 "ASB_GUEST_AGENT_REQUEST":json.dumps(request)}),stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             try:
                 self.assertTrue(select.select([process.stdout],[],[],5)[0],"guest did not become ready")
-                self.assertEqual(process.stdout.readline().strip(),f"__ASB_GATE__:{process.pid}".encode())
+                ready = process.stdout.readline().strip()
+                prefix = b"__ASB_GATE__:"
+                self.assertTrue(ready.startswith(prefix) and ready[len(prefix):].isdigit(), ready)
+                gated_pid = int(ready[len(prefix):])
+                ancestor = gated_pid
+                while ancestor != process.pid:
+                    self.assertGreater(ancestor, 1, "gate must belong to the fixture process tree")
+                    status = Path(f"/proc/{ancestor}/status").read_text()
+                    ancestor = int(next(line.split()[1] for line in status.splitlines() if line.startswith("PPid:")))
                 deadline = time.monotonic()+5
-                while not any(line.startswith("State:") and "T" in line for line in Path(f"/proc/{process.pid}/status").read_text().splitlines()):
+                while not any(line.startswith("State:") and "T" in line for line in Path(f"/proc/{gated_pid}/status").read_text().splitlines()):
                     self.assertLess(time.monotonic(),deadline)
                     time.sleep(0.005)
-                os.kill(process.pid,signal.SIGCONT)
+                os.kill(gated_pid,signal.SIGCONT)
                 _,stderr = process.communicate(timeout=5)
                 self.assertEqual(process.returncode,0,stderr.decode())
                 metadata = json.loads((project/"private/attempt/agent-result.json").read_text())
