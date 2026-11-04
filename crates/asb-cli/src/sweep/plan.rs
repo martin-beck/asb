@@ -128,7 +128,7 @@ fn build_with_catalog(
         let config: BenchmarkConfig = value.try_into().map_err(|error| {
             Error::Input(format!("invalid benchmark {}: {error}", path.display()))
         })?;
-        let (root, settings) = project::load(&path)?;
+        let (root, settings) = project::load_for_invocation(&path, Some(base))?;
         let directory = project::environment_path("ASB_WORKLOAD_DIR", base)
             .unwrap_or_else(|| project::resolve(&root, &settings.workloads_dir));
         let key = (

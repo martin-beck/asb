@@ -203,6 +203,7 @@ fn invalid_or_unbound_original_results_cannot_be_imported() {
             &fixture.0.join("sweep.toml"),
             &manifest,
             &fixture.0,
+            &fixture.0,
             "sweep",
             false,
             output,
@@ -246,6 +247,7 @@ fn no_grade_import_reports_unknown_metrics_in_both_output_formats() {
         import(
             &fixture.0.join("sweep.toml"),
             &manifest,
+            &fixture.0,
             &fixture.0,
             "sweep",
             json_output,

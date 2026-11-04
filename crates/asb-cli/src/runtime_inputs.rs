@@ -97,7 +97,8 @@ pub(crate) fn for_plan(
     ];
     let mut selected = std::collections::BTreeSet::new();
     for entry in &plan.entries {
-        let (root, project) = project::load(&parent.join(&entry.reference))?;
+        let (root, project) =
+            project::load_for_invocation(&parent.join(&entry.reference), Some(invocation_dir))?;
         let identity = (
             root.clone(),
             entry.configuration.agent.clone(),

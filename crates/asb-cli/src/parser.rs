@@ -388,7 +388,7 @@ pub(crate) fn run_with_interactive(
             )
         }
         Some(CommandLine::Compare(options)) => {
-            super::compare::generate(&resolve(&options.path), stdout).and_then(|report| {
+            super::compare::generate_at(&resolve(&options.path), &base, stdout).and_then(|report| {
                 if options.report {
                     super::compare::open_report(&report)
                 } else {

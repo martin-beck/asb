@@ -2594,6 +2594,175 @@ fn explicit_project_sweep_uses_relative_workload_override_and_cassette_root() {
 
 #[cfg(unix)]
 #[test]
+fn explicit_project_sweep_with_external_manifest_keeps_results_in_selected_project() {
+    let project = replay_project(1);
+    let outside = Project::new();
+    outside.init();
+    std::fs::copy(
+        project.0.join("benchmark.toml"),
+        outside.0.join("benchmark.toml"),
+    )
+    .unwrap();
+    outside.write("suite.toml", "configs=['benchmark.toml']\n");
+    let tape = std::fs::read_to_string(project.0.join("tape.jsonl")).unwrap();
+    project.write(
+        "tapes/000-benchmark/cassettes/benchmark-pi-bug-fix-test-model.jsonl",
+        &tape,
+    );
+    let manifest = outside.0.join("suite.toml");
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "sweep",
+            manifest.to_str().unwrap(),
+            "--llm-replay",
+            "--cassette-root",
+            "tapes",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    assert!(
+        !outside.0.join("suite-results").exists(),
+        "sweep output must not be written in the external configuration project"
+    );
+    expect_success(&result);
+    let resumed = project.command_in_with_env(
+        &outside.0,
+        &[
+            "sweep",
+            manifest.to_str().unwrap(),
+            "--llm-replay",
+            "--cassette-root",
+            "tapes",
+            "--resume",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    expect_success(&resumed);
+    assert!(
+        project
+            .0
+            .join("suite-results/000-benchmark/run.log")
+            .is_file()
+    );
+    assert!(
+        project
+            .0
+            .join("results/suite-comparison/report.html")
+            .is_file()
+    );
+    let comparison = project.command_in_with_env(
+        &outside.0,
+        &[
+            "compare",
+            manifest.to_str().unwrap(),
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[],
+    );
+    expect_success(&comparison);
+    assert!(
+        project
+            .0
+            .join("results/suite-comparison/report.html")
+            .is_file()
+    );
+    assert!(!outside.0.join("results/suite-comparison").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_project_repeated_sweep_with_external_manifest_keeps_results_in_selected_project() {
+    let project = replay_project(1);
+    let outside = Project::new();
+    outside.init();
+    std::fs::copy(
+        project.0.join("benchmark.toml"),
+        outside.0.join("benchmark.toml"),
+    )
+    .unwrap();
+    outside.write("suite.toml", "configs=['benchmark.toml']\n");
+    let tape = std::fs::read_to_string(project.0.join("tape.jsonl")).unwrap();
+    project.write(
+        "tapes/000-benchmark/cassettes/benchmark-pi-bug-fix-test-model.jsonl",
+        &tape,
+    );
+    let manifest = outside.0.join("suite.toml");
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "sweep",
+            manifest.to_str().unwrap(),
+            "--repeat",
+            "2",
+            "--llm-replay",
+            "--cassette-root",
+            "tapes",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    assert!(
+        !outside.0.join("suite-results").exists(),
+        "sweep output must not be written in the external configuration project"
+    );
+    expect_success(&result);
+    let resumed = project.command_in_with_env(
+        &outside.0,
+        &[
+            "sweep",
+            manifest.to_str().unwrap(),
+            "--repeat",
+            "2",
+            "--llm-replay",
+            "--cassette-root",
+            "tapes",
+            "--resume",
+            "--json",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    expect_success(&resumed);
+    assert!(project.0.join("suite-results/000-benchmark").is_dir());
+    assert!(
+        project
+            .0
+            .join("results/suite-comparison/report.html")
+            .is_file()
+    );
+    let comparison = project.command_in_with_env(
+        &outside.0,
+        &[
+            "compare",
+            manifest.to_str().unwrap(),
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[],
+    );
+    expect_success(&comparison);
+    assert!(
+        project
+            .0
+            .join("results/suite-comparison/report.html")
+            .is_file()
+    );
+    assert!(!outside.0.join("results/suite-comparison").exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn explicit_project_repeated_sweep_keeps_invocation_context_in_batches() {
     let project = replay_project(1);
     let outside = Project::new();

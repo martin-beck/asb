@@ -122,18 +122,20 @@ pub(crate) fn run_links(path: &str, output: &mut dyn Write) -> Result<(), Error>
 /// it alive across comparison without recursively acquiring the same lock.
 pub(crate) fn run_in_sweep(
     path: &str,
+    output_parent: &Path,
     output: &mut dyn Write,
     _owner: &crate::sweep::lock::OutputLock,
 ) -> Result<(), Error> {
-    generate_owned_with_links(path, output).map(|_| ())
+    generate_owned_with_links(path, Some(output_parent), output).map(|_| ())
 }
 
 pub(crate) fn run_links_in_sweep(
     path: &str,
+    output_parent: &Path,
     output: &mut dyn Write,
     _owner: &crate::sweep::lock::OutputLock,
 ) -> Result<(), Error> {
-    let (_, links) = generate_owned_with_links(path, &mut std::io::sink())?;
+    let (_, links) = generate_owned_with_links(path, Some(output_parent), &mut std::io::sink())?;
     write_public_links(links, output)
 }
 
@@ -149,19 +151,43 @@ pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Er
     generate_with_links(path, output).map(|(path, _)| path)
 }
 
+pub(crate) fn generate_at(
+    path: &str,
+    invocation: &Path,
+    output: &mut dyn Write,
+) -> Result<PathBuf, Error> {
+    let source = Path::new(path);
+    if source.file_name().is_some_and(|name| name == "plan.json") {
+        return generate(path, output);
+    }
+    let anchor = crate::project::configuration_anchor(source, Some(invocation))?;
+    if anchor == source {
+        return generate(path, output);
+    }
+    let parent = anchor.parent().unwrap_or_else(|| Path::new("."));
+    let stem = anchor
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("sweep");
+    let _owner = crate::sweep::lock::OutputLock::acquire_for_source(parent, stem, source)?;
+    generate_owned_with_links(path, Some(parent), output).map(|(report, _)| report)
+}
+
 fn generate_with_links(
     path: &str,
     output: &mut dyn Write,
 ) -> Result<(PathBuf, Vec<(String, String)>), Error> {
     let _owner = crate::sweep::lock::OutputLock::for_comparison(Path::new(path))?;
-    generate_owned_with_links(path, output)
+    generate_owned_with_links(path, None, output)
 }
 
 fn generate_owned_with_links(
     path: &str,
+    output_parent: Option<&Path>,
     output: &mut dyn Write,
 ) -> Result<(PathBuf, Vec<(String, String)>), Error> {
-    let loaded = source::load(path)?;
+    let loaded = source::load_at(path, output_parent)?;
     let validated = ValidatedReport::validate(loaded)?;
     let prepared = PreparedReport::prepare(validated)?;
     let mut files = prepared.graph_names();
