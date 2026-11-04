@@ -917,6 +917,8 @@ if _replay_path:
     _recorded_exchanges = sum(1 for event in _native_events if event.get("event") == "write")
     if _native_cursor != _recorded_exchanges:
         raise SystemExit("ASB OpenJiuwen native replay left recorded native tool exchanges unconsumed")
+    if _replay_completion_cursor != len(_replay_completion_order):
+        raise SystemExit("ASB OpenJiuwen native replay left recorded tool completions unconsumed")
     _recorded_final_messages = sum(
         1
         for event in _native_events

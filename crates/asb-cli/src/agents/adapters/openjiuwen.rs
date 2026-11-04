@@ -1043,9 +1043,9 @@ class _Tool(Tool):
         # were dispatched. Their task-local ancestry must remain root-level,
         # and replay must use dispatch ordinal rather than sidecar append
         # order.
-        if inputs.get("concurrent") == "first":
+        if inputs.get("concurrent") in ("first", "final-first"):
             await asyncio.sleep(0.01)
-        elif inputs.get("concurrent") == "second":
+        elif inputs.get("concurrent") in ("second", "final-second"):
             await asyncio.sleep(0)
         with open(os.environ["ASB_TEST_NATIVE_EXECUTED"], "a", encoding="utf-8") as marker:
             marker.write(self.label + "\n")
@@ -1174,6 +1174,14 @@ async def main():
             None, None, None, context, output, ToolMessage("concurrent-" + label, "live")
         )
     await asyncio.gather(concurrent_context("first"), concurrent_context("second"))
+    first = asyncio.create_task(concurrent_root("final-first"))
+    await asyncio.sleep(0)
+    if os.environ.get("ASB_TEST_CANCEL_LAST_COMPLETION"):
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        await concurrent_root("final-second")
+        return
+    await asyncio.gather(first, concurrent_root("final-second"))
     print(json.dumps(result, sort_keys=True))
 asyncio.run(main())
 "#,
@@ -1213,7 +1221,7 @@ asyncio.run(main())
         );
         assert_eq!(
             std::fs::read_to_string(&marker).unwrap().lines().count(),
-            29
+            31
         );
         assert_eq!(
             std::fs::read_to_string(&sidecar)
@@ -1221,7 +1229,7 @@ asyncio.run(main())
                 .lines()
                 .filter(|line| line.contains(r#""event":"write""#))
                 .count(),
-            28,
+            30,
             "nested helper calls must not become independent replay exchanges"
         );
         std::fs::remove_file(&marker).unwrap();
@@ -1270,6 +1278,24 @@ asyncio.run(main())
             .unwrap();
         assert!(!cancelled.status.success());
         assert!(String::from_utf8_lossy(&cancelled.stderr).contains("unconsumed"));
+        assert!(!marker.exists(), "cancelled replay executed a direct tool");
+        let cancelled_last = super::process(entry.to_str().unwrap())
+            .unwrap()
+            .direct()
+            .arg("--asb-native-tool-replay")
+            .arg(&sidecar)
+            .env("PYTHONPATH", &root)
+            .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_TEST_WORKSPACE", &replay_workspace)
+            .env("ASB_TEST_RENDER_PREFIX", "replay:")
+            .env("ASB_TEST_CANCEL_LAST_COMPLETION", "1")
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
+            .output()
+            .unwrap();
+        assert!(!cancelled_last.status.success());
+        assert!(
+            String::from_utf8_lossy(&cancelled_last.stderr).contains("tool completions unconsumed")
+        );
         assert!(!marker.exists(), "cancelled replay executed a direct tool");
         let missing_nesting = root.join("native-missing-nesting.jsonl");
         let remove_nesting = std::process::Command::new(python.trim())
