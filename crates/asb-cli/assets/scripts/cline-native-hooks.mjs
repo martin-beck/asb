@@ -55,11 +55,19 @@ export function createClineNativeHooks(mode, transport) {
         const entry = active.get(id);
         if (!entry) throw new Error('Cline native tool completion has no invocation');
         if (mode === 'record') {
-          const result = JSON.parse(canonical(context.result));
+          // Keep Cline's insertion order: the runtime serializes tool output
+          // into a provider-visible string. The shared broker canonicalizes
+          // objects, so carrying the result as a string avoids changing that
+          // string during replay while retaining structural validation.
+          canonical(context.result);
+          const result = {json: JSON.stringify(context.result)};
           await transport.end(entry.token);
           await transport.finish(entry.token, result);
         } else {
-          const expected = await entry.outcome;
+          const envelope = await entry.outcome;
+          if (!envelope || typeof envelope.json !== 'string' || Object.keys(envelope).length !== 1)
+            throw new Error('Cline native tool result envelope is invalid');
+          const expected = JSON.parse(envelope.json);
           if (entry.delegates) {
             if (canonical(expected) !== canonical(context.result)) throw new Error('Cline delegated tool result differs from recording');
           } else {

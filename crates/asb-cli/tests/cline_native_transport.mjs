@@ -23,7 +23,7 @@ const context = (agent, id, name, input, result) => ({
   snapshot: {agentId: agent}, toolCall: {toolCallId: id}, tool: {name}, input, result,
 });
 const parent = context('root', 'same', 'spawn_agent', {task: 'fixture'}, {output: 'done'});
-const child = context('child', 'same', 'fetch_web_content', {url: 'https://example.test'}, {output: 'recorded'});
+const child = context('child', 'same', 'fetch_web_content', {url: 'https://example.test'}, {output: [{z: 1, a: 2}]});
 try {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(marker, resolve); });
   const recording = new NativeToolBroker('record');
@@ -45,7 +45,8 @@ try {
   const replay = createClineNativeHooks('replay', createClineNativeTransport(socket, marker));
   assert.equal(await replay.hooks.beforeTool(parent), undefined, 'delegate must execute');
   assert.equal((await replay.hooks.beforeTool(child)).skip, true, 'web request must not execute');
-  assert.deepEqual((await replay.hooks.afterTool({...child, result: {isError: true}})).result, {output: 'recorded'});
+  const replayed = (await replay.hooks.afterTool({...child, result: {isError: true}})).result;
+  assert.equal(JSON.stringify(replayed), JSON.stringify(child.result), 'provider-visible key order must match recording');
   await replay.hooks.afterTool(parent);
   replay.assertSettled();
   await playback.finish();

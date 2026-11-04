@@ -1346,6 +1346,7 @@ mod tests {
                 "openjiuwen",
                 "goose",
                 "hermes",
+                "cline",
                 "continue"
             ]
         );
