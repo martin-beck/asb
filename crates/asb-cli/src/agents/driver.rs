@@ -746,6 +746,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
                 crate::tape::Mode::Record
             }
         }),
+        native_tool.map(|native| native.path),
     )?;
     configure_execution_identity(
         &mut command,

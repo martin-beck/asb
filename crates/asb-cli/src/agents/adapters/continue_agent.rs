@@ -35,6 +35,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_estimated_disk_mib(1024)
 .with_deferred_native_recording(finalize_native_recording)
 .with_guest_service(start_recording_service)
+.with_native_tool_transport()
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_complete_tool_replay(prepare_tool_replay)
 .with_replay_credential_vars(&["CONTINUE_API_KEY"])
@@ -362,7 +363,10 @@ fn prepare_tool_replay(
 ) -> Result<(), Error> {
     // The experimental snapshot guest records native dispatch directly;
     // retain Continue's built-in tools rather than replacing their semantics.
-    if tape.mode == crate::tape::Mode::Record && std::env::var_os("ASB_FS_MARKER_SOCKET").is_some()
+    if (tape.mode == crate::tape::Mode::Record
+        && std::env::var_os("ASB_FS_MARKER_SOCKET").is_some())
+        || (tape.mode == crate::tape::Mode::Replay
+            && std::env::var_os("ASB_FS_REPLAY_SOCKET").is_some())
     {
         return Ok(());
     }
@@ -390,11 +394,25 @@ fn start_recording_service(
     executable: &str,
     run_dir: &std::path::Path,
     mode: Option<crate::tape::Mode>,
+    native_tool: Option<&std::path::Path>,
 ) -> Result<Option<super::super::auxiliary::AuxiliaryService>, Error> {
-    let Some(marker) = std::env::var_os("ASB_FS_MARKER_SOCKET") else {
+    let variable = match mode {
+        Some(crate::tape::Mode::Record) => "ASB_FS_MARKER_SOCKET",
+        Some(crate::tape::Mode::Replay) => "ASB_FS_REPLAY_SOCKET",
+        None => return Ok(None),
+    };
+    let Some(marker) = std::env::var_os(variable) else {
         return Ok(None);
     };
-    start_recording_service_with_marker(command, executable, run_dir, mode, marker)
+    start_recording_service_with_marker(
+        command,
+        executable,
+        run_dir,
+        mode,
+        marker,
+        native_tool,
+        std::path::Path::new("/asb-snapshot-storage/workspace-snapshots.tar"),
+    )
 }
 
 fn start_recording_service_with_marker(
@@ -403,8 +421,10 @@ fn start_recording_service_with_marker(
     run_dir: &std::path::Path,
     mode: Option<crate::tape::Mode>,
     marker: std::ffi::OsString,
+    native_tool: Option<&std::path::Path>,
+    snapshot_archive: &std::path::Path,
 ) -> Result<Option<super::super::auxiliary::AuxiliaryService>, Error> {
-    if mode != Some(crate::tape::Mode::Record) {
+    if mode.is_none() {
         return Ok(None);
     }
     let cli = std::fs::canonicalize(executable).map_err(|_| {
@@ -473,8 +493,19 @@ fn start_recording_service_with_marker(
     service
         .arg(directory.join("continue-native-service.mjs"))
         .arg(&socket)
-        .arg(&bundle)
-        .arg(directory.join("native-tool-pending.jsonl"));
+        .arg(&bundle);
+    if mode == Some(crate::tape::Mode::Replay) {
+        service
+            .arg(native_tool.ok_or_else(|| {
+                Error::Run(
+                    "Continue snapshot replay requires a recorded native tool sidecar".into(),
+                )
+            })?)
+            .arg(snapshot_archive)
+            .arg(&marker);
+    } else {
+        service.arg(directory.join("native-tool-pending.jsonl"));
+    }
     let service = super::super::auxiliary::AuxiliaryService::start(&mut service)?;
     let bootstrap = directory.join("continue-native-bootstrap.mjs");
     let bootstrap = bootstrap
@@ -496,7 +527,14 @@ fn start_recording_service_with_marker(
     command
         .env("NODE_OPTIONS", options)
         .env("ASB_CONTINUE_BUNDLE", bundle)
-        .env("ASB_CONTINUE_MODE", "record")
+        .env(
+            "ASB_CONTINUE_MODE",
+            if mode == Some(crate::tape::Mode::Replay) {
+                "replay"
+            } else {
+                "record"
+            },
+        )
         .env("ASB_CONTINUE_SOCKET", socket)
         .env("ASB_CONTINUE_MARKER", marker);
     Ok(Some(service))
@@ -692,7 +730,7 @@ fn configure(
 mod tests {
     #[cfg(unix)]
     #[test]
-    fn guest_recording_service_produces_private_pending_artifact() {
+    fn guest_service_records_and_replays_native_tool_without_live_execution() {
         use std::io::{BufRead, Write};
         use std::os::unix::net::UnixListener;
         let root =
@@ -701,15 +739,16 @@ mod tests {
         let bundle = root.join("index.js");
         let cli = root.join("cn.mjs");
         std::fs::write(root.join("package.json"), "{\"type\":\"module\"}").unwrap();
-        std::fs::write(&bundle, r#"function guard(){cE.getInstance().getCurrentSession();let a="";if(!a)throw new Error("No active session found");return a}
+        std::fs::write(&bundle, r#"import {writeFileSync} from 'node:fs';
+function guard(){cE.getInstance().getCurrentSession();let a="";if(!a)throw new Error("No active session found");return a}
 async function dispatch(e,r){return await e.tool.run(e.preprocessResult?.args??e.arguments,r)}
-await dispatch({name:'Read',arguments:{path:'fixture'},tool:{run:async()=> 'ok'}},{});
+await dispatch({name:'Read',arguments:{path:'fixture'},tool:{run:async()=>{writeFileSync(process.env.FIXTURE_EFFECT,'called');return 'ok'}}},{});
 "#).unwrap();
         std::fs::write(&cli, "import './index.js';\n").unwrap();
         let marker = root.join("marker.sock");
         let listener = UnixListener::bind(&marker).unwrap();
         let server = std::thread::spawn(move || {
-            for _ in 0..2 {
+            for _ in 0..3 {
                 let (stream, _) = listener.accept().unwrap();
                 let mut reader = std::io::BufReader::new(stream);
                 let mut line = String::new();
@@ -719,14 +758,17 @@ await dispatch({name:'Read',arguments:{path:'fixture'},tool:{run:async()=> 'ok'}
             }
         });
         let run = root.join("run");
+        let effect = root.join("effect");
         let mut command = std::process::Command::new("node");
-        command.arg(&cli);
+        command.arg(&cli).env("FIXTURE_EFFECT", &effect);
         let mut service = super::start_recording_service_with_marker(
             &mut command,
             cli.to_str().unwrap(),
             &run,
             Some(crate::tape::Mode::Record),
-            marker.into_os_string(),
+            marker.clone().into_os_string(),
+            None,
+            &root.join("unused-snapshot"),
         )
         .unwrap()
         .unwrap();
@@ -736,13 +778,39 @@ await dispatch({name:'Read',arguments:{path:'fixture'},tool:{run:async()=> 'ok'}
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        server.join().unwrap();
         service.settle().unwrap();
+        assert!(effect.exists());
+        std::fs::remove_file(&effect).unwrap();
         let pending = std::fs::read(run.join("continue/native-tool-pending.jsonl")).unwrap();
+        let archive = root.join("snapshot.tar");
+        std::fs::write(&archive, b"snapshot").unwrap();
         let completed =
             super::finalize_native_recording(&pending, &crate::cassette::digest(b"snapshot"))
                 .unwrap();
-        assert!(completed.ends_with(b"}\n"));
+        let sidecar = root.join("native.jsonl");
+        std::fs::write(&sidecar, completed).unwrap();
+        let mut replay_command = std::process::Command::new("node");
+        replay_command.arg(&cli).env("FIXTURE_EFFECT", &effect);
+        let mut replay_service = super::start_recording_service_with_marker(
+            &mut replay_command,
+            cli.to_str().unwrap(),
+            &root.join("replay"),
+            Some(crate::tape::Mode::Replay),
+            marker.into_os_string(),
+            Some(&sidecar),
+            &archive,
+        )
+        .unwrap()
+        .unwrap();
+        let replay = replay_command.output().unwrap();
+        assert!(
+            replay.status.success(),
+            "{}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        replay_service.settle().unwrap();
+        server.join().unwrap();
+        assert!(!effect.exists(), "native tool was executed during replay");
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
