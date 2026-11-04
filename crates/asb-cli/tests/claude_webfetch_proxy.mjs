@@ -52,6 +52,15 @@ try {
     {ordinal: 0, url: 'https://example.test/one', status: 200, page: 'a'},
     {ordinal: 0, url: 'https://example.test/two', status: 200, page: 'b'},
   ]}), /duplicate ordinals/);
+  const apiFetch = createWebFetchProxy({key, cert, plan: [{ordinal: 0, url: 'https://api.anthropic.com/recorded', status: 200, page: 'recorded api content'}]});
+  const apiUrl = await apiFetch.listen();
+  assert.match(await get(apiUrl, 'api.anthropic.com', '/recorded'), /recorded api content/);
+  await apiFetch.finish();
+  const unknownApi = createWebFetchProxy({key, cert, plan: []});
+  const unknownApiUrl = await unknownApi.listen();
+  const unknownApiResponse = await get(unknownApiUrl, 'api.anthropic.com', '/unrecorded');
+  assert.match(unknownApiResponse, /HTTP\/1\.1 502/);
+  await assert.rejects(unknownApi.finish(), /no recorded response/);
   const plain = createWebFetchProxy({key, cert, plan: [{ordinal: 0, url: 'http://example.test/plain', status: 200, page: 'plain fixture'}]});
   const plainUrl = new URL(await plain.listen());
   const plainBody = await new Promise((resolve, reject) => {

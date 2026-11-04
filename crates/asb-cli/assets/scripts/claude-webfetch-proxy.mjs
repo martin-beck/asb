@@ -31,14 +31,15 @@ export function createWebFetchProxy({plan, key, cert}) {
     let target;
     try { target = new URL(authority ? `https://${authority}${req.url}` : req.url); }
     catch { fail('Claude WebFetch proxy request is malformed'); res.writeHead(400, {'Connection': 'close'}).end(); return; }
-    if (authority && target.hostname === 'api.anthropic.com') {
+    const pending = queue.get(target.href);
+    if (!queue.has(target.href) && authority && target.hostname === 'api.anthropic.com' &&
+        ['/api/web/domain_info', '/mcp-registry/v0/servers', '/api/event_logging/v2/batch'].includes(target.pathname)) {
       // Claude performs a domain-info request before fetch and may also issue
       // optional registry/diagnostic calls. None needs a live connection.
       const body = target.pathname === '/api/web/domain_info' ? '{"can_fetch":true}' : '{}';
       res.writeHead(200, {'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), 'Connection': 'close'}).end(body);
       return;
     }
-    const pending = queue.get(target.href);
     if (req.method !== 'GET' || !pending?.length) {
       fail('Claude WebFetch proxy request has no recorded response');
       res.writeHead(502, {'Connection': 'close'}).end(); return;
