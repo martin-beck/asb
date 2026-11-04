@@ -323,6 +323,13 @@ pub(crate) trait CollectorAdapter: Sync {
     fn tool_id(&self) -> Option<&'static str> {
         None
     }
+    /// Project-local runtimes required in addition to tools owned by collector
+    /// dependencies.  A collector's `tool_id` may describe an optional
+    /// post-processor rather than an executable that must be installed before
+    /// measurement starts, so it is intentionally not implied here.
+    fn required_tools(&self) -> &'static [&'static str] {
+        &[]
+    }
     fn dependencies(&self) -> &'static [&'static str] {
         &[]
     }
@@ -588,6 +595,11 @@ pub(crate) fn dependency_tools(selected: &[String]) -> Vec<&'static str> {
     let mut tools = Vec::new();
     for id in &expanded {
         if let Some(adapter) = find(id) {
+            for tool in adapter.required_tools() {
+                if !tools.contains(tool) {
+                    tools.push(*tool);
+                }
+            }
             for dependency in adapter.dependencies() {
                 if let Some(tool) = find(dependency).and_then(|item| item.tool_id())
                     && !tools.contains(&tool)
@@ -642,6 +654,16 @@ pub(crate) fn selected_or_environment(id: &str, selected: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_agentsysperf_installs_its_own_runtime_and_perf_dependency() {
+        let selected = vec!["agentsysperf:l1-resource".to_owned()];
+        assert_eq!(
+            dependency_tools(&selected),
+            vec!["agentsysperf", "perf"],
+            "a selected collector must expose both its own runtime and its collector tool dependencies"
+        );
+    }
 
     #[test]
     fn host_setting_descriptors_belong_to_collectors_and_remain_unique() {
@@ -745,6 +767,12 @@ mod tests {
                 true,
             ),
             ("cpu-accounting", None, None, true),
+            (
+                "agentsysperf:l1-resource",
+                None,
+                Some("agentsysperf"),
+                false,
+            ),
             ("system", None, None, false),
             ("mpstat", Some("ASB_MEASURE_MPSTAT"), Some("mpstat"), true),
             ("iostat", Some("ASB_MEASURE_IOSTAT"), Some("iostat"), true),
@@ -775,7 +803,13 @@ mod tests {
                 pid && id != "perfetto",
                 "{id}"
             );
-            let dependencies: &[&str] = if id == "flamegraph" { &["perf"] } else { &[] };
+            let dependencies: &[&str] = match id {
+                "flamegraph" => &["perf"],
+                "agentsysperf:l1-resource" => {
+                    &["agent-memory", "agent-workers", "cpu-accounting", "perf"]
+                }
+                _ => &[],
+            };
             assert_eq!(adapter.dependencies(), dependencies, "{id}");
             for process in ["perf", "perf-stat", "perfetto", "bpftrace-sched", "other"] {
                 let graceful = matches!(id, "perfetto" | "bpftrace")

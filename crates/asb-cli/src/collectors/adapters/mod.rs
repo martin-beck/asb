@@ -5,6 +5,7 @@ use super::CollectorAdapter;
 mod agent_memory;
 mod agent_processes;
 mod agent_workers;
+mod agentsysperf;
 pub(crate) mod bpftrace;
 mod cpu_accounting;
 pub(crate) mod flamegraph;
@@ -21,6 +22,7 @@ pub(super) static REGISTRY: &[&dyn CollectorAdapter] = &[
     &agent_memory::ADAPTER,
     &agent_workers::ADAPTER,
     &cpu_accounting::ADAPTER,
+    &agentsysperf::ADAPTER,
     &system::ADAPTER,
     &mpstat::ADAPTER,
     &iostat::ADAPTER,
