@@ -10,6 +10,24 @@ const patterns = [
   /^• (\d{8}_\d+):/gm,
 ];
 
+function bindSession(live, recorded) {
+  if (!/^\d{8}_\d+$/.test(live) || !/^\d{8}_\d+$/.test(recorded)) throw new Error('Invalid Goose session ID');
+  const alias = sessions.get(live) || sessions.get(recorded) || `<asb-goose-session-${nextSession++}>`;
+  if ((sessions.has(live) && sessions.get(live) !== alias) || (sessions.has(recorded) && sessions.get(recorded) !== alias)) throw new Error('Goose session alias conflict');
+  sessions.set(live, alias);
+  sessions.set(recorded, alias);
+}
+
+// Sent by the Goose hook to this replica's proxy, never to the LLM provider.
+export function controlRequest({ method, url, body, mode }) {
+  if (url !== '/.asb/goose-session-map') return undefined;
+  if (mode !== 'replay' || method !== 'POST' || body.length > 1024) return false;
+  const value = JSON.parse(body.toString('utf8'));
+  if (!value || Object.keys(value).sort().join(',') !== 'live,recorded' || typeof value.live !== 'string' || typeof value.recorded !== 'string') return false;
+  bindSession(value.live, value.recorded);
+  return true;
+}
+
 function visit(value, fn) {
   if (typeof value === 'string') return fn(value);
   if (Array.isArray(value)) return value.map(item => visit(item, fn));
@@ -23,9 +41,7 @@ export function normalizeRequest({ body }) {
     try {
       const scopes = JSON.parse(readFileSync(process.env.ASB_GOOSE_ID_MAP_FILE, 'utf8'));
       for (const pairs of Object.values(scopes)) for (const [live, recorded] of Object.entries(pairs)) {
-        const alias = sessions.get(live) || sessions.get(recorded) || `<asb-goose-session-${nextSession++}>`;
-        if ((sessions.has(live) && sessions.get(live) !== alias) || (sessions.has(recorded) && sessions.get(recorded) !== alias)) throw new Error('Goose session alias conflict');
-        sessions.set(live, alias);sessions.set(recorded, alias);
+        bindSession(live, recorded);
       }
     } catch (error) { if (error?.code !== 'ENOENT') throw error; }
   }

@@ -85,6 +85,30 @@ fn publish_identities(
     result
 }
 
+async fn publish_proxy_identity(live: &str, recorded: &str) -> io::Result<()> {
+    let Ok(url) = std::env::var("ASB_GOOSE_ID_MAP_URL") else {
+        return Ok(());
+    };
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(io::Error::other)?;
+    let response = client
+        .post(url)
+        .json(&serde_json::json!({"live": live, "recorded": recorded}))
+        .send()
+        .await
+        .map_err(io::Error::other)?;
+    if response.status() != reqwest::StatusCode::NO_CONTENT {
+        return Err(io::Error::other(
+            "replay proxy rejected the session mapping",
+        ));
+    }
+    Ok(())
+}
+
 fn canonicalize_delegation(value: &mut Value, live: &str, recorded: &str) {
     let Some(result) = value.get_mut("Ok") else {
         return;
@@ -235,22 +259,31 @@ where
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             if let (Some(live), Some(recorded_id)) = (live, recorded_id) {
-                let mut all = identities().lock().unwrap();
-                let ids = all.entry(scope.to_string()).or_default();
-                if ids
-                    .get(&live)
-                    .is_some_and(|existing| existing != &recorded_id)
-                    || ids
-                        .iter()
-                        .any(|(other, value)| other != &live && value == &recorded_id)
                 {
-                    return Err(internal(
-                        "delegated session mapping conflicts with recording".into(),
-                    ));
+                    let mut all = identities().lock().unwrap();
+                    let ids = all.entry(scope.to_string()).or_default();
+                    if ids
+                        .get(&live)
+                        .is_some_and(|existing| existing != &recorded_id)
+                        || ids
+                            .iter()
+                            .any(|(other, value)| other != &live && value == &recorded_id)
+                    {
+                        return Err(internal(
+                            "delegated session mapping conflicts with recording".into(),
+                        ));
+                    }
+                    ids.insert(live.clone(), recorded_id.clone());
+                    publish_identities(&all)
+                        .map_err(|_| internal("cannot publish delegated session mapping".into()))?;
                 }
-                ids.insert(live.clone(), recorded_id.clone());
-                publish_identities(&all)
-                    .map_err(|_| internal("cannot publish delegated session mapping".into()))?;
+                publish_proxy_identity(&live, &recorded_id)
+                    .await
+                    .map_err(|_| {
+                        internal(
+                            "cannot synchronize delegated session mapping with replay proxy".into(),
+                        )
+                    })?;
                 canonicalize_delegation(&mut actual_value, &live, &recorded_id);
                 canonicalize_delegation(&mut sealed_value, &recorded_id, &recorded_id);
             }

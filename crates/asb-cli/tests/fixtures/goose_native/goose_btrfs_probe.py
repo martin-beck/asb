@@ -110,7 +110,7 @@ try:
             args += ['--upstream',upstream,'--out',str(cassette)] if mode=='record' else ['--cassette',str(cassette)]
             tape_env=env | {'ASB_TAPE_READY_FILE':str(ready),'ASB_TAPE_WORKSPACE':str(run_workspace),
                             'ASB_TAPE_AGENT_WIRE_EXTENSION':str(asb/'assets/scripts/goose-native-wire.mjs')}
-            if id_map is not None:tape_env['ASB_GOOSE_ID_MAP_FILE']=str(id_map)
+            tape_env.pop('ASB_GOOSE_ID_MAP_FILE', None)
             p=subprocess.Popen(args,cwd=root,env=tape_env,stdin=subprocess.DEVNULL,stdout=logfile,stderr=subprocess.STDOUT)
             children.append(p)
             deadline=time.monotonic()+15
@@ -165,6 +165,8 @@ try:
                     dest=home/'.local/share/goose/sessions/sessions.db';dest.parent.mkdir(parents=True)
                     with sqlite3.connect(f'file:{source}?mode=ro',uri=True) as src, sqlite3.connect(dest) as dst:src.backup(dst)
                 run_env=env | {'HOME':str(home),'OPENAI_HOST':f'http://127.0.0.1:{proxy_port}', 'ASB_GOOSE_PROBE_SOCKET':str(replay_socket),'ASB_GOOSE_PROBE_MODE':'replay','ASB_GOOSE_ID_MAP_FILE':str(id_map)}
+                if os.environ.get('ASB_TEST_SKIP_MAP_URL') != '1':
+                    run_env['ASB_GOOSE_ID_MAP_URL']=f'http://127.0.0.1:{proxy_port}/.asb/goose-session-map'
                 replicas.append((index,replay_workspace,replay_target,replay_broker,replay_service,proxy,run_env))
             def run_replica(entry):
                 index,run_workspace,_,_,_,_,run_env=entry

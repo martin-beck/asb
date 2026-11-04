@@ -5,6 +5,21 @@ import { join } from 'node:path';
 
 const modulePath = new URL('../assets/scripts/goose-native-wire.mjs', import.meta.url);
 
+test('accepts replica-local identity control without consuming provider traffic', async () => {
+  const { normalizeRequest, controlRequest } = await import(`${modulePath}?case=control`);
+  const control = (body, mode='replay', method='POST', url='/.asb/goose-session-map') => controlRequest({ body: Buffer.from(body), mode, method, url });
+  assert.equal(control('{}', 'record'), false);
+  assert.equal(control('{}', 'replay', 'GET'), false);
+  assert.equal(control('{}'), false);
+  assert.throws(() => control('{invalid'));
+  assert.equal(control(' '.repeat(1025)), false);
+  assert.equal(control('{}', 'replay', 'POST', '/v1/chat/completions'), undefined);
+  assert.equal(control('{"live":"20261104_4","recorded":"20261104_2"}'), true);
+  assert.throws(() => control('{"live":"bad","recorded":"20261104_2"}'));
+  const result = normalizeRequest({body:{messages:[{role:'user',content:'Subagent ID: 20261104_4'}, {role:'user',content:'Subagent ID: 20261104_2'}]}});
+  assert.equal(result.messages[0].content, result.messages[1].content);
+});
+
 test('aliases observed Goose sessions without collapsing distinct children', async () => {
   const { normalizeRequest } = await import(`${modulePath}?case=ids`);
   const body = { messages: [

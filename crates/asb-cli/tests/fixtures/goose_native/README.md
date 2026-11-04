@@ -49,5 +49,8 @@ sudo env ASB_GOOSE_BINARY=/absolute/path/to/patched/goose \
 
 This fixture records a Goose background child and replays four independent
 replicas with the mock provider stopped, using real Btrfs snapshot streams.
+Each Goose replica sends its recorded-to-live session mapping to its own LLM
+proxy; the proxy does not read the fixture's retained identity files. Setting
+`ASB_TEST_SKIP_MAP_URL=1` makes this a negative control that should fail.
 It is not an ASB CLI or SWE-bench qualification and does not cover all Goose
 tools, arbitrary filesystem access, or all subagent behaviors.
