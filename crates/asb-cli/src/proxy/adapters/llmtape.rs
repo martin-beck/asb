@@ -2416,6 +2416,38 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_structured_unified_diff_header_mtimes() {
+        let root = test_root();
+        let cassette = root.join("unified-diff-mtime.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"--- /testbed/a.py\t2026-11-04 14:48:00.257132838 +0000\n+++ source/a.py\t2019-05-15 09:30:00.000000000 +0000\n@@ -1 +1 @@\n-old\n+new\n--- /testbed/b.py\t2026-11-04 14:48:01 +0000\n+++ source/b.py\t2019-05-15 09:30:01 +0000\n@@ -2 +2 @@\n-before\n+after"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let replayed = recorded
+            .replace("14:48:00.257132838", "14:58:31.449839575")
+            .replace("09:30:00.000000000", "10:30:00.000000000")
+            .replace("14:48:01", "14:58:32")
+            .replace("09:30:01", "10:30:01");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        for changed in [
+            replayed.replace("/testbed/a.py", "/testbed/changed.py"),
+            replayed.replace("@@ -1 +1 @@", "@@ -2 +2 @@"),
+            replayed.replace("+new", "+changed"),
+            replayed.replace("2019-05-15", "literal 2019-05-15"),
+        ] {
+            let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+            assert!(request_to(&session, "/v1/responses", &changed).contains("409 Conflict"));
+            assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_codex_shell_envelope_wall_time() {
         let root = test_root();
         let cassette = root.join("codex-shell-wall-time.jsonl");
