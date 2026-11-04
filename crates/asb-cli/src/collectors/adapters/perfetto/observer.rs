@@ -154,7 +154,10 @@ fn deliver(state: &State, event: &Event) {
         state.rejected.fetch_add(1, Ordering::Relaxed);
         return;
     };
-    if writeln!(marker_file, "{}", marker(event, pid, &trace_id)).is_ok() {
+    // trace_marker creates one event per write syscall. Format the complete
+    // record before writing so formatting cannot emit a second empty marker.
+    let line = format!("{}\n", marker(event, pid, &trace_id));
+    if marker_file.write_all(line.as_bytes()).is_ok() {
         state.accepted.fetch_add(1, Ordering::Relaxed);
     } else {
         state.write_errors.fetch_add(1, Ordering::Relaxed);
