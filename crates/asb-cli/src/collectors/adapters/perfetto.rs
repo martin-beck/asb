@@ -1478,8 +1478,11 @@ pub(crate) fn perfetto_scope_sql(pid: u32, trace_id: &str) -> String {
     // A numeric PID may have several UPIDs in a long trace. Select only the
     // unique generation alive at the agent-start marker. Without a marker,
     // a unique PID generation is required; ambiguity must not become zero data.
+    // A gated agent can first be scheduled after its start marker. When its
+    // start time is absent, accept an observed in-lifetime event only if it
+    // is the sole PID generation in the trace.
     format!(
-        "WITH RECURSIVE tree(upid) AS (SELECT upid FROM root UNION ALL SELECT p.upid FROM process p JOIN tree t ON p.parent_upid=t.upid), marker_bounds AS (SELECT MIN(ts) FILTER (WHERE name='asb.agent.started.{trace_id}') AS marker_start, MAX(ts) FILTER (WHERE name='asb.agent.exited.{trace_id}') AS marker_end FROM slice), root_candidates AS (SELECT p.upid,p.start_ts,p.end_ts,COALESCE(p.start_ts,(SELECT MIN(s.ts) FROM sched s JOIN thread th ON s.utid=th.utid WHERE th.upid=p.upid)) AS first_seen FROM process p WHERE p.pid={pid}), eligible_roots AS (SELECT r.upid FROM root_candidates r CROSS JOIN marker_bounds m WHERE (m.marker_start IS NOT NULL AND r.first_seen <= m.marker_start AND (r.end_ts IS NULL OR r.end_ts >= m.marker_start)) OR (m.marker_start IS NULL AND (SELECT COUNT(*) FROM root_candidates)=1)), root AS (SELECT upid FROM eligible_roots WHERE (SELECT COUNT(*) FROM eligible_roots)=1), process_bounds AS (SELECT MIN(start_ts) AS process_start, MAX(end_ts) AS process_end FROM process WHERE upid IN tree), scheduler_bounds AS (SELECT MIN(s.ts) AS scheduler_start, MAX(s.ts+s.dur) AS scheduler_end FROM sched s JOIN thread th ON s.utid=th.utid WHERE th.upid IN tree), bounds AS (SELECT COALESCE(marker_start,process_start,scheduler_start) AS start_ts, COALESCE(marker_end,process_end,scheduler_end) AS end_ts FROM process_bounds CROSS JOIN scheduler_bounds CROSS JOIN marker_bounds)",
+        "WITH RECURSIVE tree(upid) AS (SELECT upid FROM root UNION ALL SELECT p.upid FROM process p JOIN tree t ON p.parent_upid=t.upid), marker_bounds AS (SELECT MIN(ts) FILTER (WHERE name='asb.agent.started.{trace_id}') AS marker_start, MAX(ts) FILTER (WHERE name='asb.agent.exited.{trace_id}') AS marker_end FROM slice), root_candidates AS (SELECT p.upid,p.start_ts,p.end_ts,COALESCE(p.start_ts,(SELECT MIN(s.ts) FROM sched s JOIN thread th ON s.utid=th.utid WHERE th.upid=p.upid)) AS first_seen FROM process p WHERE p.pid={pid}), eligible_roots AS (SELECT r.upid FROM root_candidates r CROSS JOIN marker_bounds m WHERE (m.marker_start IS NOT NULL AND r.first_seen <= m.marker_start AND (r.end_ts IS NULL OR r.end_ts >= m.marker_start)) OR (m.marker_start IS NOT NULL AND m.marker_end>m.marker_start AND r.start_ts IS NULL AND r.first_seen>=m.marker_start AND r.first_seen<m.marker_end AND (r.end_ts IS NULL OR r.end_ts>=r.first_seen) AND (SELECT COUNT(*) FROM root_candidates)=1) OR (m.marker_start IS NULL AND (SELECT COUNT(*) FROM root_candidates)=1)), root AS (SELECT upid FROM eligible_roots WHERE (SELECT COUNT(*) FROM eligible_roots)=1), process_bounds AS (SELECT MIN(start_ts) AS process_start, MAX(end_ts) AS process_end FROM process WHERE upid IN tree), scheduler_bounds AS (SELECT MIN(s.ts) AS scheduler_start, MAX(s.ts+s.dur) AS scheduler_end FROM sched s JOIN thread th ON s.utid=th.utid WHERE th.upid IN tree), bounds AS (SELECT COALESCE(marker_start,process_start,scheduler_start) AS start_ts, COALESCE(marker_end,process_end,scheduler_end) AS end_ts FROM process_bounds CROSS JOIN scheduler_bounds CROSS JOIN marker_bounds)",
     )
 }
 
@@ -1956,6 +1959,13 @@ if case=='unique-legacy': c.execute('DELETE FROM process WHERE upid!=2')
 if case=='ambiguous': c.execute('UPDATE process SET end_ts=NULL WHERE upid=1')
 if case=='unknown-start': c.execute('UPDATE process SET start_ts=NULL WHERE upid IN (2,3)')
 if case=='invalid-bounds': c.execute("UPDATE slice SET ts=80 WHERE name='asb.agent.exited.fixture'")
+if case in ('delayed-first','delayed-after-end','delayed-ambiguous','known-late-start'):
+ c.execute('DELETE FROM process WHERE upid IN (1,3,5)')
+ c.execute('DELETE FROM sched WHERE utid=2 AND ts=90')
+ c.execute('UPDATE process SET start_ts=NULL WHERE upid=2')
+if case=='delayed-after-end': c.execute('UPDATE sched SET ts=220 WHERE utid=2')
+if case=='delayed-ambiguous': c.execute('INSERT INTO process VALUES(6,42,NULL,NULL,NULL)')
+if case=='known-late-start': c.execute('UPDATE process SET start_ts=110 WHERE upid=2')
 print(json.dumps(c.execute(sys.argv[1]).fetchall()))
 "#;
         let output = Command::new("python3")
@@ -2004,6 +2014,23 @@ print(json.dumps(c.execute(sys.argv[1]).fetchall()))
             scope_fixture_query(&format!("{scope} SELECT upid FROM root"), "unique-legacy"),
             serde_json::json!([[2]])
         );
+    }
+
+    #[test]
+    fn delayed_first_sample_requires_one_unknown_start_generation_within_agent_lifetime() {
+        let scope = perfetto_scope_sql(42, "fixture");
+        let query = format!("{scope} SELECT upid FROM root");
+        assert_eq!(
+            scope_fixture_query(&query, "delayed-first"),
+            serde_json::json!([[2]])
+        );
+        for scenario in ["delayed-after-end", "delayed-ambiguous", "known-late-start"] {
+            assert_eq!(
+                scope_fixture_query(&query, scenario),
+                serde_json::json!([]),
+                "{scenario}"
+            );
+        }
     }
 
     #[test]
