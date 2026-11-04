@@ -883,6 +883,8 @@ impl<'a> ReadyAttempt<'a> {
                 .native_tool_inputs
                 .and_then(|inputs| inputs.get(options.replica.index.checked_sub(1)?))
                 .and_then(|input| input.native_tool_launch().zip(input.native_tool.as_deref()));
+            #[cfg(test)]
+            let native_tool: Option<(&crate::cassette::NativeToolLaunch, &Path)> = None;
             let isolated = prepared.workload.execute(
                 &mut workloads::ExecutionContext {
                     launch,
@@ -978,6 +980,8 @@ impl<'a> ReadyAttempt<'a> {
                         mcp_tape_cassette: mcp_tape_cassette
                             .as_ref()
                             .map(|(_, cassette)| cassette.as_path()),
+                        native_tool: native_tool
+                            .map(|(launch, path)| agents::NativeToolContext { launch, path }),
                     },
                 }
                 .prepare(prepared.measurements.as_mut())?;
