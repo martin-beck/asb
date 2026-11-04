@@ -14,13 +14,13 @@ export async function startContinue({ node, cli, args, cwd, env, bundle, socket,
   await broker.listen(socket);
   const bootstrap = fileURLToPath(new URL('./continue-native-bootstrap.mjs', import.meta.url));
   const options = [env.NODE_OPTIONS, `--import=${JSON.stringify(bootstrap)}`].filter(Boolean).join(' ');
+  const childEnv = { ...env, NODE_OPTIONS: options, ASB_CONTINUE_BUNDLE: bundle,
+    ASB_CONTINUE_MODE: mode, ASB_CONTINUE_SOCKET: socket };
+  if (marker) childEnv.ASB_CONTINUE_MARKER = marker;
+  else delete childEnv.ASB_CONTINUE_MARKER;
   let child;
   try {
-    child = spawn(node, [cli, ...args], { cwd, stdio, env: {
-      ...env, NODE_OPTIONS: options, ASB_CONTINUE_BUNDLE: bundle,
-      ASB_CONTINUE_MODE: mode, ASB_CONTINUE_SOCKET: socket,
-      ...(marker ? { ASB_CONTINUE_MARKER: marker } : {}),
-    } });
+    child = spawn(node, [cli, ...args], { cwd, stdio, env: childEnv });
   } catch (error) { await broker.abort(); throw error; }
   // Register immediately so an early spawn failure or exit is never missed.
   const exited = new Promise((resolve, reject) => {
