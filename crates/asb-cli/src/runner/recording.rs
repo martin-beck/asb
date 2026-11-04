@@ -582,31 +582,12 @@ impl Recorder {
             };
             // The adapter interprets its own pending stream only after the
             // recorder has measured the actual settled snapshot archive.
-            let mut deferred = result
-                .sealed_artifacts
-                .iter()
-                .filter(|item| item.kind == "native-tool-deferred");
-            let pending = deferred.next();
-            if deferred.next().is_some()
-                || (pending.is_some() && result.native_tool_sidecar.is_some())
-            {
-                return Err(Error::Run(
-                    "multiple native tool recordings claim one track".into(),
-                ));
-            }
-            let completed_native = pending
-                .map(|item| {
-                    let digest = snapshot_artifact.as_ref().ok_or_else(|| {
-                        Error::Run(
-                            "deferred native recording requires a settled workspace snapshot"
-                                .into(),
-                        )
-                    })?;
-                    crate::agents::find(result.agent)
-                        .ok_or_else(|| Error::Run("native recording agent is unavailable".into()))?
-                        .finalize_native_recording(&item.bytes, &digest.sha256)
-                })
-                .transpose()?;
+            let completed_native = finalize_deferred_native(
+                result.agent,
+                &result.sealed_artifacts,
+                result.native_tool_sidecar.as_deref(),
+                snapshot_artifact.as_ref(),
+            )?;
             let mut native_tool = completed_native
                 .as_deref()
                 .or(result.native_tool_sidecar.as_deref())
@@ -834,6 +815,33 @@ fn seal_native_tool_sidecar(bytes: &[u8]) -> Result<(NativeTrack, std::io::Curso
     NativeToolTransport::from_sidecar(&native, bytes)
         .map_err(|_| Error::Run("adapter native tool sidecar is invalid or incomplete".into()))?;
     Ok((native, std::io::Cursor::new(bytes)))
+}
+
+fn finalize_deferred_native(
+    agent: &str,
+    artifacts: &[crate::agents::SealedArtifact],
+    native: Option<&[u8]>,
+    snapshot: Option<&Artifact>,
+) -> Result<Option<Vec<u8>>, Error> {
+    let mut deferred = artifacts
+        .iter()
+        .filter(|item| item.kind == "native-tool-deferred");
+    let pending = deferred.next();
+    if deferred.next().is_some() || (pending.is_some() && native.is_some()) {
+        return Err(Error::Run(
+            "multiple native tool recordings claim one track".into(),
+        ));
+    }
+    pending
+        .map(|item| {
+            let snapshot = snapshot.ok_or_else(|| {
+                Error::Run("deferred native recording requires a settled workspace snapshot".into())
+            })?;
+            crate::agents::find(agent)
+                .ok_or_else(|| Error::Run("native recording agent is unavailable".into()))?
+                .finalize_native_recording(&item.bytes, &snapshot.sha256)
+        })
+        .transpose()
 }
 
 fn validate_sealed_artifact_budget(
@@ -1413,6 +1421,65 @@ mod tests {
             bytes: vec![0; MAX_SEALED_ARTIFACT_BYTES + 1],
         };
         assert!(validate_sealed_artifact_budget(&[over]).is_err());
+    }
+
+    #[test]
+    fn deferred_native_uses_settled_snapshot_and_rejects_conflicting_inputs() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/continue_native_sidecar_emit.mjs");
+        let output = std::process::Command::new("node")
+            .arg(fixture)
+            .arg("--pending")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let pending = crate::agents::SealedArtifact {
+            kind: "native-tool-deferred".into(),
+            bytes: output.stdout,
+        };
+        let snapshot = Artifact {
+            kind: "workspace-snapshots".into(),
+            bytes: 7,
+            sha256: crate::cassette::digest(b"archive"),
+        };
+        let complete = finalize_deferred_native(
+            "continue",
+            std::slice::from_ref(&pending),
+            None,
+            Some(&snapshot),
+        )
+        .unwrap()
+        .unwrap();
+        let (native, _) = seal_native_tool_sidecar(&complete).unwrap();
+        let transport = NativeToolTransport::from_sidecar(&native, &complete).unwrap();
+        assert_eq!(transport.workspace_effect_sha256(), snapshot.sha256);
+        assert!(
+            finalize_deferred_native("continue", std::slice::from_ref(&pending), None, None)
+                .is_err()
+        );
+        assert!(
+            finalize_deferred_native(
+                "continue",
+                std::slice::from_ref(&pending),
+                Some(b"other"),
+                Some(&snapshot)
+            )
+            .is_err()
+        );
+        assert!(
+            finalize_deferred_native(
+                "continue",
+                &[pending.clone(), pending],
+                None,
+                Some(&snapshot)
+            )
+            .is_err()
+        );
+        assert!(
+            finalize_deferred_native("other-agent", &[], None, None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
