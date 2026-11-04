@@ -2305,6 +2305,56 @@ fn explicit_project_directory_owns_run_with_config_in_another_project() {
 
 #[cfg(unix)]
 #[test]
+fn external_run_report_uses_selected_project_results() {
+    let project = replay_project(1);
+    let outside = Project::new();
+    outside.init();
+    let config = outside.0.join("foreign-benchmark.toml");
+    std::fs::copy(project.0.join("benchmark.toml"), &config).unwrap();
+    let result = project.command_in_with_env(
+        &outside.0,
+        &[
+            "run",
+            config.to_str().unwrap(),
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+            "--project-dir",
+            project.0.to_str().unwrap(),
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    expect_success(&result);
+    assert!(
+        project
+            .0
+            .join("results/foreign-benchmark-comparison/report.html")
+            .is_file()
+    );
+    let comparison: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            project
+                .0
+                .join("results/foreign-benchmark-comparison/comparison.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(comparison["benchmarks"][0]["agent"], "pi");
+    assert_eq!(
+        comparison["benchmarks"][0]["benchmark_outcome"]["evaluation"]["resolution"],
+        true
+    );
+    assert!(
+        !outside
+            .0
+            .join("results/foreign-benchmark-comparison")
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn explicit_project_directory_owns_repeated_run_with_external_config() {
     let project = replay_project(1);
     let outside = Project::new();

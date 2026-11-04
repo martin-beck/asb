@@ -113,8 +113,12 @@ pub fn run(path: &str, output: &mut dyn Write) -> Result<(), Error> {
 /// and Perfetto views are.  The quiet execution paths deliberately omit the
 /// chart summary, backups, and installer chatter, so relay only those stable
 /// public links.
-pub(crate) fn run_links(path: &str, output: &mut dyn Write) -> Result<(), Error> {
-    let (_, links) = generate_with_links(path, &mut std::io::sink())?;
+pub(crate) fn run_links_at(
+    path: &str,
+    invocation: &Path,
+    output: &mut dyn Write,
+) -> Result<(), Error> {
+    let (_, links) = generate_at_with_links(path, invocation, &mut std::io::sink())?;
     write_public_links(links, output)
 }
 
@@ -147,6 +151,7 @@ fn write_public_links(links: Vec<(String, String)>, output: &mut dyn Write) -> R
 }
 
 /// Generate an offline report for either a benchmark or a sweep manifest.
+#[cfg(test)]
 pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Error> {
     generate_with_links(path, output).map(|(path, _)| path)
 }
@@ -156,13 +161,21 @@ pub(crate) fn generate_at(
     invocation: &Path,
     output: &mut dyn Write,
 ) -> Result<PathBuf, Error> {
+    generate_at_with_links(path, invocation, output).map(|(report, _)| report)
+}
+
+fn generate_at_with_links(
+    path: &str,
+    invocation: &Path,
+    output: &mut dyn Write,
+) -> Result<(PathBuf, Vec<(String, String)>), Error> {
     let source = Path::new(path);
     if source.file_name().is_some_and(|name| name == "plan.json") {
-        return generate(path, output);
+        return generate_with_links(path, output);
     }
     let anchor = crate::project::configuration_anchor(source, Some(invocation))?;
     if anchor == source {
-        return generate(path, output);
+        return generate_with_links(path, output);
     }
     let parent = anchor.parent().unwrap_or_else(|| Path::new("."));
     let stem = anchor
@@ -171,7 +184,7 @@ pub(crate) fn generate_at(
         .filter(|s| !s.is_empty())
         .unwrap_or("sweep");
     let _owner = crate::sweep::lock::OutputLock::acquire_for_source(parent, stem, source)?;
-    generate_owned_with_links(path, Some(parent), output).map(|(report, _)| report)
+    generate_owned_with_links(path, Some(parent), output)
 }
 
 fn generate_with_links(

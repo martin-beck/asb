@@ -405,6 +405,14 @@ fn load_configuration(
                 config.display()
             ))
         })?;
+    let config = if single {
+        sweep_results
+            .parent()
+            .unwrap_or(parent)
+            .join(config.file_name().unwrap_or_default())
+    } else {
+        config
+    };
     let standalone = single.then(|| configuration.clone());
     if let Some(configuration) = &standalone {
         result_dir = crate::runner::resolve_log_path(&config, &configuration.log_file)

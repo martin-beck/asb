@@ -307,9 +307,9 @@ pub(crate) fn run_with_interactive(
                 if json {
                     Ok(())
                 } else if options.verbose {
-                    super::compare::generate(&report_path, stdout).map(|_| ())
+                    super::compare::generate_at(&report_path, &base, stdout).map(|_| ())
                 } else {
-                    super::compare::run_links(&report_path, stdout)
+                    super::compare::run_links_at(&report_path, &base, stdout)
                 }
             })
         }
