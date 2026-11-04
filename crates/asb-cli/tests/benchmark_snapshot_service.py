@@ -4,6 +4,7 @@ import json
 import io
 from pathlib import Path
 import socket
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,27 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    @unittest.expectedFailure
+    def test_replay_preserves_direct_write_after_last_tool(self):
+        # Direct agent/subagent writes have no tool marker.  A successful
+        # boundary replay must not be mistaken for full workspace replay.
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);record=root/'record';record.mkdir()
+            store=root/'store';replay=root/'replay';replay.mkdir()
+            service=SnapshotService(record,store,['fixture'],snapshot=lambda path:shutil.copytree(record,path))
+            service.marker('begin','tool');(record/'tool.txt').write_text('tool effect')
+            service.marker('end','tool')
+            (record/'direct.txt').write_text('direct agent effect')
+            service.finish()
+            boundaries=asb_snapshot_service.load_replay_boundaries(store)
+            def apply(sequence):
+                for item in replay.iterdir():item.unlink()
+                for item in (store/f'snapshot-{sequence:08d}').iterdir():
+                    shutil.copy2(item,replay/item.name)
+            restored=SnapshotReplay(boundaries,apply)
+            restored.marker('end','tool');restored.finish()
+            self.assertEqual((replay/'direct.txt').read_text(), 'direct agent effect')
+
     def test_snapshot_cleanup_keeps_the_original_execution_failure(self):
         def fail():
             raise RuntimeError('snapshot replay did not settle')
