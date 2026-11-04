@@ -2337,6 +2337,52 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_structured_unittest_elapsed_time() {
+        let root = test_root();
+        let cassette = root.join("unittest-summary.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Ran 6 tests in 0.001s\\n\\nOK\\nresult: retained"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let replayed = recorded.replace("0.001s", "0.002s");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        for changed in [
+            replayed.replace("Ran 6 tests", "Ran 7 tests"),
+            replayed.replace("OK", "FAILED"),
+            replayed.replace("retained", "changed"),
+        ] {
+            let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+            assert!(request_to(&session, "/v1/responses", &changed).contains("409 Conflict"));
+            assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        }
+
+        let singular = root.join("unittest-singular-summary.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Ran 1 test in 1.001s\\n\\nOK"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&singular, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &singular, None, false, &root).unwrap();
+        assert!(
+            request_to(
+                &session,
+                "/v1/responses",
+                &recorded.replace("1.001s", "1.002s"),
+            )
+            .contains("200 OK")
+        );
+        session.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_codex_shell_envelope_wall_time() {
         let root = test_root();
         let cassette = root.join("codex-shell-wall-time.jsonl");
