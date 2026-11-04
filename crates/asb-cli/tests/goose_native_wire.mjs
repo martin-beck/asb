@@ -5,6 +5,20 @@ import { join } from 'node:path';
 
 const modulePath = new URL('../assets/scripts/goose-native-wire.mjs', import.meta.url);
 
+test('normalizes Goose turn time while retaining task dates and other context', async () => {
+  const { normalizeRequest } = await import(`${modulePath}?case=turn-time`);
+  const message = minute => ({role:'user',content:`Fix the event at 2026-11-04 09:02:00 +00:00\n<turn-context>\n<current-time>2026-11-04 09:${minute}:00 +00:00</current-time>\n<working-directory>/task</working-directory>\n</turn-context>`});
+  const first = normalizeRequest({body:{messages:[message('00')]}});
+  const second = normalizeRequest({body:{messages:[message('01')]}});
+  assert.deepEqual(first, second);
+  assert.match(first.messages[0].content, /Fix the event at 2026-11-04 09:02:00/);
+  const different = message('01');
+  different.content = different.content.replace('/task', '/another');
+  assert.notDeepEqual(first, normalizeRequest({body:{messages:[different]}}));
+  const userOnly = {role:'user',content:'<current-time>2026-11-04 09:01:00 +00:00</current-time>'};
+  assert.deepEqual(normalizeRequest({body:{messages:[userOnly]}}).messages[0], userOnly);
+});
+
 test('accepts replica-local identity control without consuming provider traffic', async () => {
   const { normalizeRequest, controlRequest } = await import(`${modulePath}?case=control`);
   const control = (body, mode='replay', method='POST', url='/.asb/goose-session-map') => controlRequest({ body: Buffer.from(body), mode, method, url });

@@ -1,4 +1,7 @@
-use super::{CommandContext, CommandSpec, PreparationContext, StaticAdapter};
+use super::{
+    AgentArtifacts, CollectionContext, CommandContext, CommandSpec, PreparationContext,
+    StaticAdapter,
+};
 use crate::{
     Error,
     install::{InstallResult, OperationContext, Recipe},
@@ -26,14 +29,28 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_estimated_disk_mib(1024)
 .with_tool_replay(prepare_tool_replay)
+.with_native_tool_transport()
+.with_guest_service(start_native_service)
+.with_deferred_native_recording(finalize_native_recording)
+.with_tape_wire_extension(include_str!(
+    "../../../assets/scripts/goose-native-wire.mjs"
+))
+.with_collection(collect_native)
 .with_step_count(step_count)
 .with_output_usage(output_usage)
 .with_final_response(final_response)
-.with_artifact_specs(&[super::super::ArtifactSpec {
-    namespace: "tool-replay",
-    filename: "local-tools.jsonl",
-    format: super::super::ArtifactFormat::JsonLines,
-}])
+.with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "tool-replay",
+        filename: "local-tools.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "goose",
+        filename: "native-tool-pending.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+])
 .with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"])
 .with_max_steps();
 
@@ -219,6 +236,7 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
     }
 }
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
+    context.command.env_remove("ASB_GOOSE_NATIVE_CAPABILITY");
     let connection = context.connection;
     let key = connection.credential.as_deref().unwrap_or("asb-local");
     // Session naming is an asynchronous, auxiliary provider request.  It has
@@ -256,6 +274,13 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
+    if (tape.mode == crate::tape::Mode::Record
+        && std::env::var_os("ASB_FS_MARKER_SOCKET").is_some())
+        || (tape.mode == crate::tape::Mode::Replay
+            && std::env::var_os("ASB_FS_REPLAY_SOCKET").is_some())
+    {
+        return Ok(());
+    }
     // Goose may submit independent MCP observations from one assistant turn
     // in a different order on replay.  The sealed transcript still requires
     // an exact request/result match, and workspace effects remain barriers;
@@ -279,35 +304,144 @@ fn prepare_tool_replay(
     Ok(())
 }
 
+fn collect_native(context: &CollectionContext<'_>) -> AgentArtifacts {
+    let mut artifacts = AgentArtifacts::default();
+    if let Some(bytes) = context
+        .frozen
+        .bytes("native-tool-pending.jsonl")
+        .filter(|bytes| !bytes.is_empty())
+    {
+        artifacts
+            .sealed_artifacts
+            .push(super::super::SealedArtifact {
+                kind: "native-tool-deferred".into(),
+                bytes: bytes.to_vec(),
+            });
+    }
+    artifacts
+}
+
+fn finalize_native_recording(pending: &[u8], snapshot_sha256: &str) -> Result<Vec<u8>, Error> {
+    super::super::native_guest::finalize("goose", pending, snapshot_sha256)
+}
+
+fn start_native_service(
+    command: &mut std::process::Command,
+    executable: &str,
+    run_dir: &Path,
+    mode: Option<crate::tape::Mode>,
+    native_tool: Option<&Path>,
+    snapshot_sha256: Option<&str>,
+) -> Result<Option<super::super::auxiliary::AuxiliaryPlan>, Error> {
+    let Some((mode, marker, snapshot)) =
+        super::super::native_guest::selection(mode, snapshot_sha256)?
+    else {
+        return Ok(None);
+    };
+    configured_native_service(
+        command,
+        executable,
+        run_dir,
+        mode,
+        marker,
+        native_tool,
+        &snapshot,
+    )
+    .map(Some)
+}
+
+fn configured_native_service(
+    command: &mut std::process::Command,
+    executable: &str,
+    run_dir: &Path,
+    mode: crate::tape::Mode,
+    marker: std::ffi::OsString,
+    native_tool: Option<&Path>,
+    snapshot: &std::ffi::OsStr,
+) -> Result<super::super::auxiliary::AuxiliaryPlan, Error> {
+    let executable = std::fs::canonicalize(executable)
+        .map_err(|_| Error::Run("Goose executable is unavailable for native recording".into()))?;
+    if !native_hook_available(&executable) {
+        return Err(Error::Run("Goose native record/replay requires an ASB-hooked Goose build; the ordinary Goose installation does not provide it".into()));
+    }
+    if mode == crate::tape::Mode::Replay {
+        let endpoint = command
+            .get_envs()
+            .find_map(|(key, value)| {
+                (key == "OPENAI_HOST" || key == "ANTHROPIC_HOST")
+                    .then_some(value)
+                    .flatten()
+                    .and_then(std::ffi::OsStr::to_str)
+            })
+            .ok_or_else(|| {
+                Error::Run("Goose native replay needs the local LLM replay proxy".into())
+            })?;
+        if !["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
+            .iter()
+            .any(|prefix| endpoint.starts_with(prefix))
+        {
+            return Err(Error::Run(
+                "Goose native replay needs a local LLM replay proxy".into(),
+            ));
+        }
+        command.env(
+            "ASB_GOOSE_ID_MAP_URL",
+            format!("{}/.asb/goose-session-map", endpoint.trim_end_matches('/')),
+        );
+    }
+    let settings = super::super::native_guest::Settings {
+        agent: "goose",
+        bundle: &executable,
+        run_dir,
+        mode,
+        marker: marker.clone(),
+        native_tool,
+        snapshot,
+        assets: &[],
+    };
+    let (service, _, socket) = super::super::native_guest::broker(command, &settings)?;
+    command
+        .env("ASB_GOOSE_PROBE_SOCKET", socket)
+        .env("ASB_GOOSE_PROBE_MARKER", marker)
+        .env(
+            "ASB_GOOSE_PROBE_MODE",
+            if mode == crate::tape::Mode::Replay {
+                "replay"
+            } else {
+                "record"
+            },
+        );
+    Ok(super::super::auxiliary::AuxiliaryPlan::new(service))
+}
+
 /// Check the installed executable's compiled adapter interface before
 /// allowing it to own native recordings. Ordinary Goose builds remain valid
 /// for normal, non-native runs.
-#[allow(dead_code, reason = "native guest launch is being integrated")]
 fn native_hook_available(executable: &Path) -> bool {
     use std::process::{Command, Stdio};
-    use std::time::Duration;
-    let mut command = Command::new(executable);
-    command
+    use std::time::{Duration, Instant};
+    let Ok(mut child) = Command::new(executable)
         .arg("--version")
         .env("ASB_GOOSE_NATIVE_CAPABILITY", "1")
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let Ok(result) = crate::runner::run_guest_process(
-        &mut command,
-        None,
-        None,
-        &mut std::io::sink(),
-        &mut std::io::sink(),
-        Duration::from_secs(5),
-        &mut |_| Ok(()),
-    ) else {
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
         return false;
     };
-    !result.timed_out
-        && !result.transcript_truncated
-        && result.output.status.success()
-        && result.output.stdout == b"asb-goose-native-probe-v1\n"
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.code() == Some(73),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 fn shell_quote(value: &std::ffi::OsStr) -> Result<String, Error> {
@@ -321,6 +455,98 @@ fn shell_quote(value: &std::ffi::OsStr) -> Result<String, Error> {
 mod tests {
     #[cfg(unix)]
     #[test]
+    fn native_guest_service_records_goose_dispatch_without_replacing_tools() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::{fs::PermissionsExt, net::UnixStream};
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        std::fs::create_dir_all(&base).unwrap();
+        let root = base.join(format!("goose-guest-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("goose-executable");
+        std::fs::write(&executable, "#!/bin/sh\nexit 73\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut command = Command::new(&executable);
+        let plan = super::configured_native_service(
+            &mut command,
+            executable.to_str().unwrap(),
+            &root,
+            crate::tape::Mode::Record,
+            "/fixture/marker".into(),
+            None,
+            std::ffi::OsStr::new(""),
+        )
+        .unwrap();
+        let mut service = plan.start().unwrap();
+        let socket = root.join("goose/broker.sock");
+        let request = |message: serde_json::Value| {
+            let mut stream = UnixStream::connect(&socket).unwrap();
+            writeln!(stream, "{message}").unwrap();
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).unwrap();
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()
+        };
+        let started = request(
+            serde_json::json!({"op":"start","request":{"extension":"developer","tool":"write","args":{"path":"file"}}}),
+        );
+        assert_eq!(started["ok"], true);
+        let finished = request(
+            serde_json::json!({"op":"finish","token":started["token"],"outcome":{"ok":true,"value":{"Ok":{"content":[]}}}}),
+        );
+        assert_eq!(finished["ok"], true);
+        service.settle().unwrap();
+        let pending = std::fs::read(root.join("goose/native-tool-pending.jsonl")).unwrap();
+        assert!(
+            !super::finalize_native_recording(&pending, &"a".repeat(64))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "ASB_GOOSE_PROBE_SOCKET" && value.is_some())
+        );
+        assert!(command.get_args().next().is_none());
+        drop(service);
+        let mut replay = Command::new(&executable);
+        replay.env("OPENAI_HOST", "http://127.0.0.1:1234");
+        let _plan = super::configured_native_service(
+            &mut replay,
+            executable.to_str().unwrap(),
+            &root.join("replay"),
+            crate::tape::Mode::Replay,
+            "/fixture/replay-marker".into(),
+            Some(Path::new("/fixture/sidecar")),
+            std::ffi::OsStr::new("sha256:fixture"),
+        )
+        .unwrap();
+        assert!(
+            replay
+                .get_envs()
+                .any(|(key, value)| key == "ASB_GOOSE_ID_MAP_URL"
+                    && value
+                        == Some(std::ffi::OsStr::new(
+                            "http://127.0.0.1:1234/.asb/goose-session-map"
+                        )))
+        );
+        let mut remote = Command::new(&executable);
+        remote.env("OPENAI_HOST", "https://provider.example");
+        assert!(
+            super::configured_native_service(
+                &mut remote,
+                executable.to_str().unwrap(),
+                &root.join("remote"),
+                crate::tape::Mode::Replay,
+                "/fixture/replay-marker".into(),
+                Some(Path::new("/fixture/sidecar")),
+                std::ffi::OsStr::new("sha256:fixture"),
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn native_hook_probe_distinguishes_upstream_and_hooked_builds() {
         use std::os::unix::fs::PermissionsExt;
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -331,7 +557,7 @@ mod tests {
         for (body, expected) in [
             ("#!/bin/sh\nprintf 'goose 1.54.0\\n'\n", false),
             (
-                "#!/bin/sh\ntest \"$ASB_GOOSE_NATIVE_CAPABILITY\" = 1 || exit 1\nprintf 'asb-goose-native-probe-v1\\n'\n",
+                "#!/bin/sh\ntest \"$ASB_GOOSE_NATIVE_CAPABILITY\" = 1 || exit 1\nexit 73\n",
                 true,
             ),
             (

@@ -57,6 +57,9 @@ export function normalizeRequest({ body }) {
   const messages = body.messages.map(message => {
     const output = { ...message };
     if (Object.hasOwn(output, 'content')) output.content = visit(output.content, text => {
+      if (output.role === 'user') {
+        text = text.replace(/(<turn-context>\n<current-time>)\d{4}-\d{2}-\d{2} \d{2}:\d{2}:00 [+-]\d{2}:\d{2}(<\/current-time>\n<working-directory>)(?=[\s\S]*\n<\/turn-context>\s*$)/, '$1<asb-goose-turn-time>$2');
+      }
       if (!patterns.some(pattern => { pattern.lastIndex = 0; return pattern.test(text); })) return text;
       let normalized = text;
       for (const pattern of patterns) {
