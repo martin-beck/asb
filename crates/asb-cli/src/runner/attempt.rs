@@ -1723,9 +1723,11 @@ impl Publication<'_, '_> {
                     if compact_workspace && completion_sealed {
                         let completion_directory =
                             completion::directory(&context.publication_config, &config.log_file);
-                        if let Err(error) =
-                            super::compaction::remove_workspace(&workspace, &completion_directory)
-                        {
+                        if let Err(error) = super::compaction::remove_workspace(
+                            &workspace,
+                            &completion_directory,
+                            options.replica,
+                        ) {
                             continuation_warnings.push(diagnostics::Warning::new(
                                 diagnostics::Stage::Outcome,
                                 config_path,

@@ -37,13 +37,25 @@ pub(super) fn eligible(
 /// the workspace a literal child of the same result directory prevents this
 /// cleanup path from ever accepting a caller-selected project checkout or a
 /// shared installation directory.  Symlinks and non-directories fail closed.
-pub(super) fn remove_workspace(workspace: &Path, completion_directory: &Path) -> Result<(), Error> {
+pub(super) fn remove_workspace(
+    workspace: &Path,
+    completion_directory: &Path,
+    replica: super::replica::Identity,
+) -> Result<(), Error> {
     let Some(result_directory) = completion_directory.parent() else {
         return Err(Error::Input(
             "cannot compact a completion directory without a result directory".into(),
         ));
     };
-    if workspace.file_name().is_none_or(|name| name != "workspace")
+    let expected_name = if replica.total == 1 {
+        "workspace".to_owned()
+    } else {
+        format!("workspace-concurrency-{}", replica.index)
+    };
+    if !replica.valid()
+        || workspace
+            .file_name()
+            .is_none_or(|name| name != expected_name.as_str())
         || workspace.parent() != Some(result_directory)
     {
         return Err(Error::Input(
@@ -138,10 +150,30 @@ mod tests {
         std::fs::write(workspace.join("unchanged-fixture.txt"), "fixture").unwrap();
         std::fs::write(measurements.join("runtime.json"), "retained").unwrap();
 
-        remove_workspace(&workspace, &completion).unwrap();
+        remove_workspace(&workspace, &completion, Default::default()).unwrap();
 
         assert!(!workspace.exists());
         assert!(measurements.join("runtime.json").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compacts_only_the_matching_concurrent_replica() {
+        let root = root("concurrent");
+        let completion = root.join(".asb-completions");
+        let first = root.join("workspace-concurrency-1");
+        let second = root.join("workspace-concurrency-2");
+        std::fs::create_dir_all(&completion).unwrap();
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let replica = super::super::replica::Identity { index: 1, total: 2 };
+        assert!(remove_workspace(&second, &completion, replica).is_err());
+        assert!(second.exists());
+        remove_workspace(&first, &completion, replica).unwrap();
+        assert!(!first.exists());
+        assert!(second.exists());
+        let invalid = super::super::replica::Identity { index: 0, total: 2 };
+        assert!(remove_workspace(&second, &completion, invalid).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -153,7 +185,7 @@ mod tests {
         let outside = root.join("caller-checkout/workspace");
         std::fs::create_dir_all(&completion).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
-        assert!(remove_workspace(&outside, &completion).is_err());
+        assert!(remove_workspace(&outside, &completion, Default::default()).is_err());
         assert!(outside.exists());
 
         #[cfg(unix)]
@@ -161,7 +193,7 @@ mod tests {
             let workspace = result.join("workspace");
             std::os::unix::fs::symlink(Path::new("../caller-checkout/workspace"), &workspace)
                 .unwrap();
-            assert!(remove_workspace(&workspace, &completion).is_err());
+            assert!(remove_workspace(&workspace, &completion, Default::default()).is_err());
             assert!(outside.exists());
         }
         std::fs::remove_dir_all(root).unwrap();
