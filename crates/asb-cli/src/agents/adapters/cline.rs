@@ -1,5 +1,9 @@
-use super::{CommandContext, CommandSpec, PreparationContext, StaticAdapter};
+use super::{
+    AgentArtifacts, CollectionContext, CommandContext, CommandSpec, PreparationContext,
+    StaticAdapter,
+};
 use crate::{Error, install::Recipe};
+use std::path::Path;
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "cline",
     "cline",
@@ -14,11 +18,22 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_estimated_disk_mib(1024)
 .with_complete_tool_replay(prepare_tool_replay)
-.with_artifact_specs(&[super::super::ArtifactSpec {
-    namespace: "tool-replay",
-    filename: "local-tools.jsonl",
-    format: super::super::ArtifactFormat::JsonLines,
-}])
+.with_native_tool_transport()
+.with_guest_service(start_native_service)
+.with_deferred_native_recording(finalize_native_recording)
+.with_collection(collect_native)
+.with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "tool-replay",
+        filename: "local-tools.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "cline",
+        filename: "native-tool-pending.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+])
 .with_replay_credential_vars(&["CLINE_API_KEY"])
 .with_state_environment_vars(&[
     "CLINE_DIR",
@@ -79,6 +94,19 @@ fn output_usage(stdout: &str, _stderr: &str, _: bool) -> crate::measurements::To
     Default::default()
 }
 fn command(context: &CommandContext<'_>) -> CommandSpec {
+    if context.native_tool_mode.is_some() && snapshot_marker_present() {
+        return CommandSpec {
+            program: "node".into(),
+            args: vec![
+                "--input-type=module".into(), "-e".into(),
+                "import(process.env.ASB_CLINE_NATIVE_ENTRY).then(m=>m.main()).catch(()=>{console.error('Cline native replay failed; inspect retained ASB evidence');process.exitCode=1})".into(),
+                "--".into(), client(context.interface).into(), context.config.model.clone(),
+                context.prompt.into(), context.max_steps.map(|n| n.to_string()).unwrap_or_default(),
+                context.executable.into(),
+            ],
+            prompt_delivery: super::PromptDelivery::Embedded,
+        };
+    }
     CommandSpec {
         program: "cline".into(),
         args: vec![
@@ -93,6 +121,105 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
         ],
         prompt_delivery: super::PromptDelivery::Embedded,
     }
+}
+
+fn snapshot_marker_present() -> bool {
+    std::env::var_os("ASB_FS_MARKER_SOCKET").is_some()
+        || std::env::var_os("ASB_FS_REPLAY_SOCKET").is_some()
+}
+
+fn collect_native(context: &CollectionContext<'_>) -> AgentArtifacts {
+    let mut artifacts = AgentArtifacts::default();
+    if let Some(bytes) = context
+        .frozen
+        .bytes("native-tool-pending.jsonl")
+        .filter(|bytes| !bytes.is_empty())
+    {
+        artifacts
+            .sealed_artifacts
+            .push(super::super::SealedArtifact {
+                kind: "native-tool-deferred".into(),
+                bytes: bytes.to_vec(),
+            });
+    }
+    artifacts
+}
+
+fn finalize_native_recording(pending: &[u8], snapshot_sha256: &str) -> Result<Vec<u8>, Error> {
+    super::super::native_guest::finalize("cline", pending, snapshot_sha256)
+}
+
+fn start_native_service(
+    command: &mut std::process::Command,
+    _executable: &str,
+    run_dir: &Path,
+    mode: Option<crate::tape::Mode>,
+    native_tool: Option<&Path>,
+    snapshot_sha256: Option<&str>,
+) -> Result<Option<super::super::auxiliary::AuxiliaryPlan>, Error> {
+    let Some((mode, marker, snapshot)) =
+        super::super::native_guest::selection(mode, snapshot_sha256)?
+    else {
+        return Ok(None);
+    };
+    let installed = command.get_args().last().ok_or_else(|| {
+        Error::Run("Cline native launcher is missing its installed executable".into())
+    })?;
+    let executable = std::fs::canonicalize(installed)
+        .map_err(|_| Error::Run("Cline executable is unavailable for native recording".into()))?;
+    let bundle = executable
+        .ancestors()
+        .map(|root| root.join("node_modules/@cline/core/dist/index.js"))
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            Error::Run("Cline native replay requires its installed core module".into())
+        })?;
+    let assets = [
+        (
+            "cline-native-entry.mjs",
+            include_str!("../../../assets/scripts/cline-native-entry.mjs"),
+        ),
+        (
+            "cline-native-session.mjs",
+            include_str!("../../../assets/scripts/cline-native-session.mjs"),
+        ),
+        (
+            "cline-native-hooks.mjs",
+            include_str!("../../../assets/scripts/cline-native-hooks.mjs"),
+        ),
+        (
+            "cline-native-transport.mjs",
+            include_str!("../../../assets/scripts/cline-native-transport.mjs"),
+        ),
+    ];
+    let settings = super::super::native_guest::Settings {
+        agent: "cline",
+        bundle: &bundle,
+        run_dir,
+        mode,
+        marker: marker.clone(),
+        native_tool,
+        snapshot: &snapshot,
+        assets: &assets,
+    };
+    let (service, directory, socket) = super::super::native_guest::broker(command, &settings)?;
+    command
+        .env(
+            "ASB_CLINE_NATIVE_ENTRY",
+            directory.join("cline-native-entry.mjs"),
+        )
+        .env("ASB_CLINE_CORE_MODULE", bundle)
+        .env("ASB_CLINE_NATIVE_SOCKET", socket)
+        .env("ASB_CLINE_MARKER", marker)
+        .env(
+            "ASB_CLINE_NATIVE_MODE",
+            if mode == crate::tape::Mode::Replay {
+                "replay"
+            } else {
+                "record"
+            },
+        );
+    Ok(Some(super::super::auxiliary::AuxiliaryPlan::new(service)))
 }
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     let directory = context.runtime_dir.join("cline/config");
@@ -151,6 +278,9 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
+    if snapshot_marker_present() {
+        return Ok(());
+    }
     let launch = super::super::tool_replay_mcp::launch(context, tape)?;
     let directory = context.runtime_dir.join("cline/config/data/settings");
     std::fs::create_dir_all(&directory).map_err(|error| {
