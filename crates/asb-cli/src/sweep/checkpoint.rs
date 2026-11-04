@@ -264,6 +264,21 @@ impl Snapshotter {
         })?;
         #[cfg(not(unix))]
         let bytes = self.legacy_exchange(&request, timeout)?;
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+            && let Some(object) = value.as_object()
+            && object.len() == 2
+            && object.get("schema_version") == Some(&serde_json::json!(1))
+            && let Some(code) = object.get("error_code").and_then(serde_json::Value::as_str)
+        {
+            let reason = match code {
+                "resource_bound" => "fingerprint resource bound exceeded",
+                "input_changed" => "fingerprint input changed during verification",
+                "unsupported_input" => "fingerprint input type or symlink is unsupported",
+                "permission_denied" => "fingerprint input permission denied",
+                _ => "fingerprint verification failed",
+            };
+            return Err(Error::Run(reason.into()));
+        }
         let fingerprint: Fingerprint = serde_json::from_slice(&bytes)
             .map_err(|_| Error::Run("checkpoint helper returned an invalid digest".into()))?;
         if !fingerprint.valid() {
@@ -783,6 +798,21 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fingerprint_reports_unsupported_input_without_leaking_its_path() {
+        let directory = Directory::new();
+        let link = directory.0.join("secret-input-name");
+        std::os::unix::fs::symlink("secret-input-name", &link).unwrap();
+        let snapshotter = Snapshotter::open(&directory.0.join("state"), "python3".into()).unwrap();
+        let error = snapshotter
+            .fingerprint(&[Root::path("fixture", link)], &json!(null), false, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("fingerprint input type or symlink is unsupported"));
+        assert!(!error.contains("secret-input-name"));
     }
 
     #[test]

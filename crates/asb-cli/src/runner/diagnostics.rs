@@ -42,6 +42,22 @@ fn safe_reason(error: &Error) -> &'static str {
     let text = error.to_string();
     for (needle, reason) in [
         (
+            "fingerprint resource bound exceeded",
+            "fingerprint input size, count, depth or time limit exceeded",
+        ),
+        (
+            "fingerprint input changed during verification",
+            "an input changed while its fingerprint was being computed",
+        ),
+        (
+            "fingerprint input type or symlink is unsupported",
+            "an input contains an unsupported file type or symlink cycle",
+        ),
+        (
+            "fingerprint input permission denied",
+            "permission denied while fingerprinting an input",
+        ),
+        (
             "output capture is incomplete",
             "agent output capture is incomplete; preserve results for inspection",
         ),

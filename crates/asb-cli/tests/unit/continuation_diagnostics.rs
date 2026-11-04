@@ -4,6 +4,22 @@ use serde_json::Value;
 #[test]
 fn filesystem_and_verification_classes_are_specific_without_exposing_values() {
     for (text, expected) in [
+        (
+            "fingerprint resource bound exceeded",
+            "fingerprint input size, count, depth or time limit exceeded",
+        ),
+        (
+            "fingerprint input changed during verification",
+            "an input changed while its fingerprint was being computed",
+        ),
+        (
+            "fingerprint input type or symlink is unsupported",
+            "an input contains an unsupported file type or symlink cycle",
+        ),
+        (
+            "fingerprint input permission denied",
+            "permission denied while fingerprinting an input",
+        ),
         ("Permission denied (os error 13)", "permission denied"),
         ("No space left on device", "storage is full"),
         ("Read-only file system", "storage is read-only"),
