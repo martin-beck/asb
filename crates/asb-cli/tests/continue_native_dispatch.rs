@@ -16,6 +16,7 @@ fn native_dispatch_prototype_handles_loader_ordering_and_child_transport() {
         "claude_webfetch_proxy.mjs",
         "claude_webfetch_certificate.mjs",
         "claude_webfetch_service.mjs",
+        "claude_native_launcher.mjs",
         "continue_native_sidecar.mjs",
         "continue_native_supervisor.mjs",
         "continue_native_service.mjs",

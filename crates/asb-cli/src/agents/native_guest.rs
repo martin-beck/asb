@@ -116,6 +116,10 @@ pub(super) fn broker(
         directory.join("broker.sock")
     };
     let mut service = Command::new("node");
+    service
+        .env_remove("ASB_CLAUDE_WEB_PLAN")
+        .env_remove("ASB_CLAUDE_WEB_READY")
+        .env_remove("ASB_CLAUDE_WEB_RUNTIME");
     if settings.agent == "claude-code" {
         let state = command
             .get_envs()

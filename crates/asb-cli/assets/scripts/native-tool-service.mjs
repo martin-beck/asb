@@ -1,7 +1,7 @@
 // Adapter-owned recording service, launched as a sibling of the agent by its
 // process owner. Only the owner sends S after agent descendants have stopped.
 import { createReadStream } from 'node:fs';
-import { chmod, open, readFile, readdir } from 'node:fs/promises';
+import { chmod, open, readFile, readdir, unlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { NativeToolBroker } from './native-tool-broker.mjs';
 import { sealPendingBroker, replayBroker } from './native-tool-custody.mjs';
@@ -25,6 +25,22 @@ const broker = mode === 'record' ? new NativeToolBroker('record') : replayBroker
 });
 await broker.listen(socket);
 if (agent === 'claude-code') await chmod(socket, 0o666);
+let webService;
+const webPlan = process.env.ASB_CLAUDE_WEB_PLAN;
+const webReady = process.env.ASB_CLAUDE_WEB_READY;
+if (webPlan || webReady) {
+  if (agent !== 'claude-code' || mode !== 'replay' || !webPlan || !webReady || !process.env.ASB_CLAUDE_WEB_RUNTIME)
+    throw new Error('Claude WebFetch replay service configuration is incomplete');
+  const plan = JSON.parse(await readFile(webPlan, 'utf8'));
+  const {startWebFetchReplayService} = await import('./claude-webfetch-service.mjs');
+  webService = await startWebFetchReplayService({runtime: process.env.ASB_CLAUDE_WEB_RUNTIME, plan});
+  try {
+    const file = await open(webReady, 'wx', 0o644);
+    try { await file.writeFile(JSON.stringify({address: webService.address, certPath: webService.certPath})); await file.sync(); }
+    finally { await file.close(); }
+    await chmod(webReady, 0o644);
+  } catch (error) { await webService.abort().catch(() => {}); throw error; }
+}
 process.stdout.write('READY\n');
 try {
   const chunks = [];
@@ -42,7 +58,11 @@ try {
     const file = await open(target, 'wx', 0o600);
     try { await file.writeFile(pending); await file.sync(); } finally { await file.close(); }
   } else await broker.finish();
+  if (webService) await webService.finish();
 } catch (error) {
   await broker.abort().catch(() => {});
+  if (webService) await webService.abort().catch(() => {});
   throw error;
+} finally {
+  if (webReady) await unlink(webReady).catch(() => {});
 }
