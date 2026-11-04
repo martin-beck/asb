@@ -48,10 +48,10 @@ pub(super) fn selection(
     Ok(Some((mode, marker, snapshot)))
 }
 
-pub(super) fn start(
-    command: &mut Command,
-    settings: Settings<'_>,
-) -> Result<super::auxiliary::AuxiliaryPlan, Error> {
+pub(super) fn broker(
+    command: &Command,
+    settings: &Settings<'_>,
+) -> Result<(Command, std::path::PathBuf, std::path::PathBuf), Error> {
     let directory = settings.run_dir.join(settings.agent);
     std::fs::create_dir_all(&directory).map_err(crate::io_error)?;
     for (name, source) in [
@@ -112,6 +112,14 @@ pub(super) fn start(
     } else {
         service.arg(directory.join("native-tool-pending.jsonl"));
     }
+    Ok((service, directory, socket))
+}
+
+pub(super) fn start(
+    command: &mut Command,
+    settings: Settings<'_>,
+) -> Result<super::auxiliary::AuxiliaryPlan, Error> {
+    let (service, directory, socket) = broker(command, &settings)?;
     let bootstrap = directory.join(format!("{}-native-bootstrap.mjs", settings.agent));
     let bootstrap = bootstrap
         .to_str()
@@ -185,4 +193,58 @@ pub(super) fn finalize(
         )));
     }
     Ok(completed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broker_prepares_native_client_without_node_bootstrap() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        std::fs::create_dir_all(&base).unwrap();
+        let directory = base.join(format!("native-broker-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let mut client = Command::new("goose");
+        client.env("PATH", "/fixture/bin");
+        let settings = Settings {
+            agent: "goose",
+            bundle: Path::new("/fixture/goose"),
+            run_dir: &directory,
+            mode: crate::tape::Mode::Replay,
+            marker: "/fixture/marker".into(),
+            native_tool: Some(Path::new("/fixture/sidecar")),
+            snapshot: std::ffi::OsStr::new("sha256:fixture"),
+            assets: &[],
+        };
+        let (service, service_dir, socket) = broker(&client, &settings).unwrap();
+        let args = service
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args[0],
+            service_dir
+                .join("native-tool-service.mjs")
+                .to_string_lossy()
+        );
+        assert_eq!(args[1], socket.to_string_lossy());
+        assert_eq!(
+            &args[2..],
+            [
+                "/fixture/goose",
+                "/fixture/sidecar",
+                "sha256:fixture",
+                "/fixture/marker"
+            ]
+        );
+        assert!(client.get_envs().all(|(name, _)| name != "NODE_OPTIONS"));
+        assert!(service_dir.join("native-tool-broker.mjs").is_file());
+        let missing = Settings {
+            native_tool: None,
+            ..settings
+        };
+        assert!(broker(&client, &missing).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
