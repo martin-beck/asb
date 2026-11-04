@@ -309,6 +309,8 @@ mod adapter_layout_tests {
                     "mod.rs",
                     "driver.rs",
                     "artifacts.rs",
+                    "auxiliary.rs", // Shared lifecycle for adapter-owned guest services.
+                    "native_guest.rs", // Shared guest native replay transport.
                     "capsule.rs",
                     "determinism.rs",
                     "mcp_framing.rs",
