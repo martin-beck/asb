@@ -1117,7 +1117,7 @@ from openjiuwen.core.context_engine.context.context import Context
 async def main():
     agent, _tracker = factory.create_agent(None)
     assert agent._deep_config.enable_read_image_multimodal is False
-    assert agent._deep_config.parallel_tool_calls is False
+    assert agent._deep_config.parallel_tool_calls is None
     result = []
     context = Context()
     for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool, WebFetchWebpageTool, WebFetchWebpageTool, WebFreeSearchTool, WebPaidSearchTool):
@@ -1145,9 +1145,13 @@ async def main():
         assert isinstance(mixed[2][1].tool_call_id, str)
         assert mixed[3][1].content == "unrelated-after"
         result.append(mixed[2][1].tool_call_id)
+    completion_order = []
     async def concurrent_root(label):
-        return await ReadFileTool().invoke({{"concurrent": label}})
+        result = await ReadFileTool().invoke({{"concurrent": label}})
+        completion_order.append(label)
+        return result
     await asyncio.gather(concurrent_root("first"), concurrent_root("second"))
+    assert completion_order == ["second", "first"], completion_order
     async def concurrent_context(label):
         tool = ReadFileTool()
         output = await tool.invoke({{"context": label}})
