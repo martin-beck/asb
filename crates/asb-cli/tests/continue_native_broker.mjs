@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { connect } from 'node:net';
+import { once } from 'node:events';
 import { ContinueBroker, brokerRequest } from '../assets/scripts/continue-native-broker.mjs';
 import { createNativeDispatcher } from '../assets/scripts/continue-native-dispatch.mjs';
 import { sealBroker, replayBroker } from '../assets/scripts/continue-native-custody.mjs';
@@ -79,6 +81,32 @@ try {
   assert.equal(invalid.pending.size, 0, 'invalid exchanges must not remain pending');
   await assert.rejects(invalid.finish(), /unfinished/);
   await invalid.abort();
+  for (const failingBoundary of ['begin', 'end']) {
+    const incomplete = new ContinueBroker('record');
+    await incomplete.listen(socket);
+    const boundaryError = new Error(`${failingBoundary} failed`);
+    let calls = 0;
+    const boundaryDispatch = createNativeDispatcher('record', socket, {
+      [failingBoundary]: async () => { throw boundaryError; },
+    });
+    await assert.rejects(boundaryDispatch({ name: 'Write', arguments: {} }, {}, async () => { calls++; return 'ok'; }), error => error === boundaryError);
+    assert.equal(calls, failingBoundary === 'begin' ? 0 : 1);
+    assert.equal(incomplete.pending.size, 0);
+    await assert.rejects(incomplete.finish(), /unfinished/);
+    await incomplete.abort();
+  }
+  const sealing = new ContinueBroker('record');
+  await sealing.listen(socket);
+  const late = connect(socket);
+  await once(late, 'connect');
+  // Let the server accept the connection, but withhold the request until
+  // sealing begins. It must never enter the already snapshotted session.
+  while (!sealing.connections.size) await new Promise(resolve => setImmediate(resolve));
+  const sealResult = sealing.finish(events => JSON.stringify(events));
+  late.write(JSON.stringify({ op: 'start', request: { tool: 'Write' } }) + '\n');
+  const [reply] = await once(late, 'data');
+  assert.match(reply.toString(), /sealing/);
+  assert.equal(await sealResult, '[]');
   const custody = new ContinueBroker('record');
   await custody.listen(socket);
   const dispatch = createNativeDispatcher('record', socket);

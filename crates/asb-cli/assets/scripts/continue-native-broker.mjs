@@ -30,6 +30,7 @@ export class ContinueBroker {
     this.session = mode === 'record' ? new RecordingSession() : new ReplaySession(events, applyEffects);
     this.pending = new Map();
     this.connections = new Set();
+    this.sealing = false;
     this.nextToken = 0;
     this.server = createServer(socket => {
       this.connections.add(socket);
@@ -40,6 +41,7 @@ export class ContinueBroker {
   async handle(socket) {
     try {
       const message = await frame(socket);
+      if (this.sealing) throw new Error('Continue broker is sealing its recording');
       if (this.mode === 'replay' && message.op === 'invoke') {
         try { reply(socket, { ok: true, value: await this.session.invoke(message.request) }); }
         catch (error) { reply(socket, { ok: false, name: error.name, message: error.message }); }
@@ -73,11 +75,20 @@ export class ContinueBroker {
     } catch (error) { if (!socket.destroyed) reply(socket, { ok: false, name: error.name, message: error.message }); }
   }
   listen(path) { return new Promise((resolve, reject) => { this.server.once('error', reject); this.server.listen(path, resolve); }); }
-  async finish() {
-    if (this.pending.size) throw new Error('Continue broker has unfinished calls');
-    const events = this.session.finish();
+  async finish(encode) {
+    if (this.sealing) throw new Error('Continue broker is already sealing');
+    this.sealing = true;
+    let events, encoded;
+    try {
+      if (this.pending.size) throw new Error('Continue broker has unfinished calls');
+      if (encode) encoded = encode(this.session.preview());
+      events = this.session.finish();
+    } catch (error) {
+      this.sealing = false;
+      throw error;
+    }
     await new Promise((resolve, reject) => this.server.close(error => error ? reject(error) : resolve()));
-    return events;
+    return encode ? encoded : events;
   }
   async abort() {
     const error = new Error('Continue broker was cancelled');

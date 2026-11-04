@@ -17,7 +17,16 @@ export function createNativeDispatcher(mode, socket, {
     const request = { tool: call.name, args: call.preprocessResult?.args ?? call.arguments };
     if (mode === 'replay') return (await brokerRequest(socket, { op: 'invoke', request })).value;
     const { token } = await brokerRequest(socket, { op: 'start', request });
-    await begin(request, token);
+    // A failed boundary leaves workspace effects unaccounted for. Invalidate
+    // the exchange and release its pending token before propagating failure.
+    const boundary = async action => {
+      try { await action(request, token); }
+      catch (error) {
+        await brokerRequest(socket, { op: 'invalidate', token });
+        throw error;
+      }
+    };
+    await boundary(begin);
     let value;
     try { value = await invoke(); }
     catch (error) {
@@ -28,11 +37,11 @@ export function createNativeDispatcher(mode, socket, {
         await brokerRequest(socket, { op: 'invalidate', token });
         throw error;
       }
-      await end(request, token);
+      await boundary(end);
       await brokerRequest(socket, { op: 'finish', token, outcome: { ok: false, name: error.name, message: error.message } });
       throw error;
     }
-    await end(request, token);
+    await boundary(end);
     await brokerRequest(socket, { op: 'finish', token, outcome: { ok: true, value } });
     return value;
   };
