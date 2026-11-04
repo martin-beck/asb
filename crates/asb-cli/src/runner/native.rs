@@ -390,6 +390,8 @@ mod tests {
         );
         assert!(validate_native_replay("openjiuwen", Some(tape::Mode::Record), None).is_ok());
         assert!(validate_native_replay("openjiuwen", None, None).is_ok());
+        assert!(validate_native_replay("codex", Some(tape::Mode::Replay), None).is_err());
+        assert!(validate_native_replay("codex", None, None).is_ok());
         assert!(validate_native_replay("pi", Some(tape::Mode::Replay), None).is_ok());
     }
 

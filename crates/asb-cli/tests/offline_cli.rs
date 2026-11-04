@@ -1132,7 +1132,7 @@ fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'applicati
         &[
             "run",
             "benchmark.toml",
-            "--record",
+            "--llm-record",
             "--cassette",
             "tape.jsonl",
         ],
@@ -1142,7 +1142,7 @@ fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'applicati
         &[
             "run",
             "benchmark.toml",
-            "--replay",
+            "--llm-replay",
             "--cassette",
             "tape.jsonl",
         ],
@@ -1262,7 +1262,7 @@ fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'applicati
         &[
             "run",
             "benchmark.toml",
-            "--record",
+            "--llm-record",
             "--cassette",
             "tape.jsonl",
         ],
@@ -1273,7 +1273,7 @@ fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'applicati
         &[
             "run",
             "benchmark.toml",
-            "--replay",
+            "--llm-replay",
             "--cassette",
             "tape.jsonl",
         ],
