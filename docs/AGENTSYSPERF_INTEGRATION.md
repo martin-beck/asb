@@ -76,6 +76,15 @@ capture custody, and report publication.  This avoids handing AgentSysPerf a
 host-wide observation capability or letting it start a second benchmark
 harness around an ASB run.
 
+When an `agentsysperf:l1-resource` export has complete prerequisite evidence,
+ASB invokes the project-local `agentsysperf analyze` command against those
+records after the benchmark ends.  This invocation has no provider, agent, or
+workload arguments; it is an offline post-processing step.  Its stdout and
+stderr are retained only under the run's private measurement directory, each
+limited to 1 MiB by the child process, and it is stopped after 10 seconds.
+An unavailable, malformed, oversized, or failed analysis is recorded as an
+`unavailable` analysis artifact and never changes the benchmark grade.
+
 The initial selectable collector family is:
 
 | Selection | Source | Result | Scope |
