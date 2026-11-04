@@ -110,7 +110,7 @@ fn admission_rejects_missing_foreign_locked_and_symlinked_instances_without_trac
         Service::acquire(&executable, &fixture.0)
             .err()
             .unwrap()
-            .contains("all of this project's Perfetto instances are leased")
+            .contains("all of this project's Perfetto instances are in use")
     );
     drop(leases);
     for instance in &instances {
@@ -143,24 +143,33 @@ fn admission_rejects_missing_foreign_locked_and_symlinked_instances_without_trac
     assert_eq!(fs::read_to_string(target).unwrap(), "preserved");
 }
 #[test]
-fn cached_registry_service_is_reused_only_with_identical_executable() {
+fn active_registry_service_is_never_reused_by_another_capture() {
     let fixture = Fixture::new();
-    fixture.configuration(super::super::project::instance_names(&fixture.0).unwrap());
+    let instance = super::super::project::instance_names(&fixture.0)
+        .unwrap()
+        .remove(0);
+    fixture.configuration(vec![instance.clone()]);
     let children = Arc::new(Mutex::new(Vec::new()));
-    let lease = File::create(fixture.0.join("cached.lease")).unwrap();
+    let lease_path = fixture
+        .0
+        .join(".asb/perfetto")
+        .join(format!("{instance}.lease"));
+    let lease = File::create(&lease_path).unwrap();
     let service = Arc::new(fixture.service(children, lease));
     let registry = SERVICES.get_or_init(|| Mutex::new(BTreeMap::new()));
     registry
         .lock()
         .unwrap()
-        .insert(fixture.0.clone(), Arc::downgrade(&service));
-    let reused = Service::acquire(&service.executable, &fixture.0).unwrap();
-    assert!(Arc::ptr_eq(&reused, &service));
+        .insert(lease_path.clone(), Arc::downgrade(&service));
+    let error = Service::acquire(&service.executable, &fixture.0)
+        .err()
+        .unwrap();
+    assert!(error.contains("instances are in use"));
     let error = Service::acquire(&fixture.0.join("changed-executable"), &fixture.0)
         .err()
         .unwrap();
-    assert!(error.contains("selected different executables"));
-    registry.lock().unwrap().remove(&fixture.0);
+    assert!(error.contains("instances are in use"));
+    registry.lock().unwrap().remove(&lease_path);
 }
 #[test]
 fn daemon_logs_are_bounded_drained_private_and_not_overwritten() {
