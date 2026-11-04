@@ -1350,6 +1350,7 @@ mod tests {
             ]
         );
         assert!(find("pi").unwrap().supports_native_tool_transport());
+        assert!(find("goose").unwrap().supports_native_tool_transport());
         let adapter = find("codex").unwrap();
         assert!(select_process(adapter, "not-executed", None).is_ok());
     }
