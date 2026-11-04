@@ -3,6 +3,19 @@ use super::{
     StaticAdapter,
 };
 use crate::{Error, install::Recipe};
+// The SDK derives this cache hint from its freshly generated conversation UUID.
+// Preserve all semantic request fields and non-UUID cache keys for matching.
+const TAPE_WIRE_EXTENSION: &str = r#"
+export function normalizeRequest(request) {
+  const body = request?.body;
+  if (request?.url?.endsWith('/chat/completions') && body && typeof body === 'object'
+      && typeof body.prompt_cache_key === 'string'
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.prompt_cache_key)) {
+    body.prompt_cache_key = '<asb-openhands-conversation-cache>';
+  }
+  return body;
+}
+"#;
 /// Dormant project-local SDK seam for future native tool cassette transport.
 ///
 /// The normal OpenHands command remains the installed CLI.  It exposes no
@@ -27,6 +40,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_replay_credential_vars(&["LLM_API_KEY"])
 .with_complete_tool_replay(prepare_native_tool_replay)
 .with_native_tool_transport()
@@ -323,6 +337,31 @@ fn conversation_usage(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn replay_normalizes_only_openhands_conversation_cache_uuid() {
+        let root = std::env::temp_dir().join(format!("asb-openhands-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("extension.mjs"), super::TAPE_WIRE_EXTENSION).unwrap();
+        std::fs::write(root.join("test.mjs"), r#"import { normalizeRequest } from './extension.mjs';
+const one = '00112233-4455-6677-8899-aabbccddeeff';
+const two = '11112233-4455-6677-8899-aabbccddeeff';
+const norm = (url, key, input = 'one') => normalizeRequest({url,body:{prompt_cache_key:key,input}});
+if (JSON.stringify(norm('/v1/chat/completions',one)) !== JSON.stringify(norm('/v1/chat/completions',two))) throw Error('session differs');
+if (JSON.stringify(norm('/v1/responses',one)) === JSON.stringify(norm('/v1/responses',two))) throw Error('wrong endpoint changed');
+if (norm('/v1/chat/completions','user-key').prompt_cache_key !== 'user-key') throw Error('non-UUID changed');
+if (JSON.stringify(norm('/v1/chat/completions',one,'one')) === JSON.stringify(norm('/v1/chat/completions',two,'two'))) throw Error('input changed');
+"#).unwrap();
+        let output = std::process::Command::new("node")
+            .arg(root.join("test.mjs"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn finish_action_message_is_final_answer() {
         use crate::agents::AgentAdapter;
