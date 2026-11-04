@@ -1273,6 +1273,11 @@ impl Session {
             let binary = tool_binary_name(name);
             for local in [
                 tool_dir.join(name).join("bin").join(binary),
+                // Python support tools are deliberately isolated in a
+                // project-local virtual environment.  Resolve their console
+                // scripts just like native tool `bin` entries rather than
+                // falling through to an unrelated host PATH executable.
+                tool_dir.join(name).join("venv").join("bin").join(binary),
                 tool_dir.join("bin").join(binary),
             ] {
                 if local.is_file() {
@@ -1448,6 +1453,7 @@ pub(crate) fn resolve_executable(tool_dir: Option<&Path>, name: &str) -> PathBuf
         let binary = tool_binary_name(name);
         for local in [
             tool_dir.join(name).join("bin").join(binary),
+            tool_dir.join(name).join("venv").join("bin").join(binary),
             tool_dir.join("bin").join(binary),
         ] {
             if local.is_file() {
@@ -2313,5 +2319,15 @@ mod tests {
                 .any(|collector| collector == "agentsysperf:l1-resource"),
             "the optional AgentSysPerf runtime is intentionally large and must be explicitly selected"
         );
+    }
+
+    #[test]
+    fn resolves_project_local_python_console_scripts() {
+        let root = std::env::temp_dir().join(format!("asb-python-tool-{}", unix_ms()));
+        let executable = root.join("agentsysperf/venv/bin/agentsysperf");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, "fixture").unwrap();
+        assert_eq!(resolve_executable(Some(&root), "agentsysperf"), executable);
+        let _ = fs::remove_dir_all(root);
     }
 }
