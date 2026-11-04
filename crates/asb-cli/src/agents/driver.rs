@@ -97,6 +97,8 @@ pub(crate) struct GuestRequest {
     /// while retaining the independently mounted task workspace.
     #[serde(default)]
     pub snapshot_private_mount: bool,
+    #[serde(default)]
+    pub snapshot_archive_sha256: Option<String>,
     /// Exact provider-tape path forwarded by the owning runner.  It is never
     /// inferred from the provider endpoint because record and replay are both
     /// routed through loopback services.
@@ -524,6 +526,7 @@ fn grant_unprivileged_traverse(_: &Path) -> Result<(), Error> {
 
 struct PreparedGuest {
     command: Command,
+    auxiliary: Option<super::auxiliary::AuxiliaryService>,
     stdin_prompt: Option<Vec<u8>>,
     artifact_owner: super::ArtifactOwner,
     instrumentation: Option<crate::workloads::staging::Guard>,
@@ -734,6 +737,20 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
                 cassette,
             }),
     })?;
+    let auxiliary = adapter.start_guest_service(
+        &mut command,
+        process_program,
+        &request.run_dir,
+        request.tool_tape_cassette.as_ref().map(|_| {
+            if request.tool_replay {
+                crate::tape::Mode::Replay
+            } else {
+                crate::tape::Mode::Record
+            }
+        }),
+        native_tool.map(|native| native.path),
+        request.snapshot_archive_sha256.as_deref(),
+    )?;
     configure_execution_identity(
         &mut command,
         adapter.execution_identity(),
@@ -742,6 +759,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
     )?;
     Ok(PreparedGuest {
         command,
+        auxiliary,
         stdin_prompt,
         artifact_owner,
         instrumentation,
@@ -798,11 +816,17 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     };
     let PreparedGuest {
         mut command,
+        mut auxiliary,
         stdin_prompt,
         mut artifact_owner,
         instrumentation,
         execution_identity,
     } = prepare(&request)?;
+    if retained && auxiliary.is_some() {
+        return Err(Error::Run(
+            "adapter auxiliary recording requires agent cleanup before evaluation".into(),
+        ));
+    }
     // Keep the same launch identity even if a tool renames/deletes its cwd.
     // Looking up current_dir again after execution can erase a valid outcome.
     let workspace = command
@@ -898,6 +922,9 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             .map_err(crate::io_error)?;
         let captured = crate::runner::run_guest_process(
             &mut command,
+            auxiliary
+                .as_mut()
+                .map(super::auxiliary::AuxiliaryService::child),
             stdin_prompt.as_deref(),
             #[cfg(unix)]
             &mut transport_out,
@@ -921,6 +948,9 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             captured.timed_out,
         )
     };
+    if let Some(service) = auxiliary.as_mut() {
+        service.settle()?;
+    }
     let namespace_collectors = capture
         .as_mut()
         .map(|session| session.export_execution_namespace_state())

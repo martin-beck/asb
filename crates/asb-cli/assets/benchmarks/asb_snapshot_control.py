@@ -9,6 +9,17 @@ from asb_execution import ExecutionError
 from asb_staging import upload
 
 
+def settle_on_exit(supervisor, exc_type, exc, traceback):
+    """Preserve the execution failure when snapshot cleanup also fails."""
+    try:
+        supervisor.close()
+    except BaseException as cleanup:
+        if exc is None:
+            raise
+        raise ExecutionError(f'{exc}; snapshot cleanup also failed: {cleanup}') from exc
+    return False
+
+
 class GuestSnapshot:
     def __init__(self, task, tools, owner, docker_command, deadline, replay=False):
         self.task=task;self.docker_command=list(docker_command);self.process=None

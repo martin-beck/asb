@@ -261,8 +261,11 @@ impl Inspection {
             return Err(Error::Input("--repeat cannot combine with a nondefault planning.repetition; choose automated batches or manually identified configurations".into()));
         }
         let admission = crate::planning::BatchAdmissionPolicy::current();
-        let (project_root, settings) = crate::project::load(config_path)?;
+        let (project_root, settings) =
+            crate::project::load_for_invocation(config_path, options.invocation_dir)?;
         let project_root = project_root.canonicalize().map_err(io_error)?;
+        let runtime_anchor =
+            crate::project::configuration_anchor(config_path, options.invocation_dir)?;
         let campaign = crate::workloads::TaskIdentity::local("execution-campaign", None).attempt_id;
         let measured = options.measurement_dir.is_some()
             || config
@@ -272,7 +275,7 @@ impl Inspection {
         let mut slots = planned_slots(&config, repeat, measured)?;
         let replay_source = (options.mode == Some(crate::tape::Mode::Replay))
             .then(|| {
-                super::replay_cassette(config_path, &config, options.cassette)
+                super::replay_cassette(&runtime_anchor, &config, options.cassette)
                     .and_then(|path| std::path::absolute(path).map_err(io_error))
             })
             .transpose()?;
@@ -299,7 +302,7 @@ impl Inspection {
                     if campaign_parent.is_some() {
                         root.join("recording.asb.zip")
                     } else {
-                        super::default_bundle_cassette(config_path, &config)
+                        super::default_bundle_cassette(&runtime_anchor, &config)
                     }
                 });
                 super::recording::inspect_destination(&destination)

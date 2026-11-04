@@ -4,6 +4,7 @@ import json
 import io
 from pathlib import Path
 import socket
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,13 +21,45 @@ from asb_snapshot_service import MarkerServer,SnapshotService,SnapshotReplay,Sna
 import asb_snapshot_service
 from asb_snapshot_guest import unpack_streams
 import asb_snapshot_guest
-from asb_snapshot_control import GuestSnapshot
+from asb_snapshot_control import GuestSnapshot, settle_on_exit
 
 SCRATCH=ROOT/'target'/'snapshot-service-tests'
 SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_agent_direct_write_after_last_tool_is_executed_again(self):
+        # Replay runs the agent again; direct writes are not reproduced by
+        # tool snapshots and must be modelled as agent activity in the test.
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);record=root/'record';record.mkdir()
+            store=root/'store';replay=root/'replay';replay.mkdir()
+            service=SnapshotService(record,store,['fixture'],snapshot=lambda path:shutil.copytree(record,path))
+            service.marker('begin','tool');(record/'tool.txt').write_text('tool effect')
+            service.marker('end','tool')
+            (record/'direct.txt').write_text('direct agent effect')
+            service.finish()
+            boundaries=asb_snapshot_service.load_replay_boundaries(store)
+            def apply(sequence):
+                for item in replay.iterdir():item.unlink()
+                for item in (store/f'snapshot-{sequence:08d}').iterdir():
+                    shutil.copy2(item,replay/item.name)
+            restored=SnapshotReplay(boundaries,apply)
+            restored.marker('end','tool')
+            (replay/'direct.txt').write_text('direct agent effect')
+            restored.finish()
+            self.assertEqual((replay/'direct.txt').read_text(), 'direct agent effect')
+
+    def test_snapshot_cleanup_keeps_the_original_execution_failure(self):
+        def fail():
+            raise RuntimeError('snapshot replay did not settle')
+        owner=SimpleNamespace(close=fail)
+        with self.assertRaisesRegex(RuntimeError, 'agent launch failed; snapshot cleanup also failed: snapshot replay did not settle'):
+            settle_on_exit(owner, RuntimeError, RuntimeError('agent launch failed'), None)
+        with self.assertRaisesRegex(RuntimeError, 'snapshot replay did not settle'):
+            settle_on_exit(owner, None, None, None)
+        self.assertFalse(settle_on_exit(SimpleNamespace(close=lambda:None), RuntimeError, RuntimeError('original'), None))
+
     def test_guest_supervisor_uses_automatic_capacity_by_default(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);container=SimpleNamespace(id='fixture-container')

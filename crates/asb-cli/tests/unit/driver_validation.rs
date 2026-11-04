@@ -60,6 +60,7 @@ impl Fixture {
             mcp_tape_cassette: None,
             native_tool_launch: None,
             snapshot_private_mount: false,
+            snapshot_archive_sha256: None,
             capsule: Default::default(),
             inherit_working_directory: false,
             process_lifetime: Default::default(),
