@@ -4131,7 +4131,7 @@ fn flamegraph_only_configuration_installs_and_starts_perf_for_concurrent_replay(
     use std::os::unix::fs::PermissionsExt;
     let project = replay_project(2);
     let calls = project.0.join("perf-calls");
-    project.write("host-bin/perf", &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nrecord) while [ $# -gt 0 ]; do if [ \"$1\" = -o ]; then shift; [ \"$1\" = - ] || printf sample > \"$1\"; break; fi; shift; done ;;\nscript) printf 'sample stack\\n' ;;\nesac\nexit 0\n", calls.display()));
+    project.write("host-bin/perf", &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nmode=$1\nwhile [ $# -gt 0 ]; do\n case \"$1\" in\n -o) shift; [ \"$1\" = - ] || printf sample > \"$1\" ;;\n --control) shift; pair=${{1#fifo:}}; control=${{pair%%,*}}; ack=${{pair#*,}}; IFS= read -r request < \"$control\"; [ \"$request\" = enable ] || exit 1; printf 'ack\\n' > \"$ack\" ;;\n esac\n shift\ndone\n[ \"$mode\" != script ] || printf 'sample stack\\n'\nexit 0\n", calls.display()));
     project.write(
         ".asb-tools/flamegraph/bin/stackcollapse-perf.pl",
         "#!/bin/sh\ncat\n",
