@@ -595,8 +595,8 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
     result.update(exact)
     observation.update(exact)
     # A failed agent can still produce valid metadata. Preserve the diagnostic
-    # tails before the snapshot supervisor settles, since settlement may fail
-    # and otherwise hide the original cause from the caller.
+    # tails before later workload settlement, which may fail and otherwise
+    # hide the original cause from the caller.
     if result['metadata'].get('exit_code') not in (None, 0) or result.get('exit_code') not in (None, 0):
         for stream, tail in output_tails.items():
             if not tail:
