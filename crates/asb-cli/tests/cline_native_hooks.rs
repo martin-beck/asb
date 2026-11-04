@@ -10,6 +10,7 @@ fn native_hooks_preserve_delegation_and_replay_tool_results() {
         "cline_native_hooks.mjs",
         "cline_native_transport.mjs",
         "cline_native_session.mjs",
+        "cline_native_entry.mjs",
     ] {
         let output = std::process::Command::new("node")
             .arg(root.join("tests").join(fixture))
