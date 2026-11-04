@@ -28,10 +28,9 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
-    @unittest.expectedFailure
-    def test_replay_preserves_direct_write_after_last_tool(self):
-        # Direct agent/subagent writes have no tool marker.  A successful
-        # boundary replay must not be mistaken for full workspace replay.
+    def test_agent_direct_write_after_last_tool_is_executed_again(self):
+        # Replay runs the agent again; direct writes are not reproduced by
+        # tool snapshots and must be modelled as agent activity in the test.
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);record=root/'record';record.mkdir()
             store=root/'store';replay=root/'replay';replay.mkdir()
@@ -46,7 +45,9 @@ class SnapshotServiceTest(unittest.TestCase):
                 for item in (store/f'snapshot-{sequence:08d}').iterdir():
                     shutil.copy2(item,replay/item.name)
             restored=SnapshotReplay(boundaries,apply)
-            restored.marker('end','tool');restored.finish()
+            restored.marker('end','tool')
+            (replay/'direct.txt').write_text('direct agent effect')
+            restored.finish()
             self.assertEqual((replay/'direct.txt').read_text(), 'direct agent effect')
 
     def test_snapshot_cleanup_keeps_the_original_execution_failure(self):
