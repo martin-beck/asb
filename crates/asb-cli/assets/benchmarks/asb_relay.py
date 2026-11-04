@@ -99,6 +99,7 @@ class HostRelay:
         self.stop, self.ready = threading.Event(), threading.Event()
         self.lock, self.write_lock = threading.Lock(), threading.Lock()
         self.channels, self.workers, self.ports, self.error = {}, [], None, None
+        self.connect_failures, self.last_connect_target, self.last_connect_errno = 0, None, None
         self.diagnostic_path, self.stderr_tail = diagnostic_path, bytearray()
         self.stderr_lock, self.stderr_done = threading.Lock(), threading.Event()
         self.cancelled_by_owner = False
@@ -135,10 +136,16 @@ class HostRelay:
         with self.stderr_lock:
             stderr = bytes(self.stderr_tail).decode("utf-8", "replace").strip()
         status = self.process.poll()
+        with self.lock:
+            connect_failures = self.connect_failures
+            last_connect_target = self.last_connect_target
+            last_connect_errno = self.last_connect_errno
         return {"schema_version": 1, "component": "private-endpoint-relay",
                 "reason": self.error, "cancelled_by_owner": self.cancelled_by_owner,
                 "exit_code": status if isinstance(status, int) else None,
-                "stderr_tail": stderr or None}
+                "stderr_tail": stderr or None, "connect_failures": connect_failures,
+                "last_connect_target": last_connect_target,
+                "last_connect_errno": last_connect_errno}
 
     def save_diagnostic(self):
         if self.diagnostic_path is None:
@@ -234,13 +241,19 @@ class HostRelay:
         # localhost is never sent to DNS: preserve support for IPv6-only servers.
         addresses = ["127.0.0.1", "::1"] if host == "localhost" else [host]
         connection = None
+        last_errno = None
         for address in addresses:
             try:
                 connection = socket.create_connection((address, port), timeout=2)
                 break
-            except OSError:
+            except OSError as error:
+                last_errno = error.errno if isinstance(error.errno, int) else None
                 continue
         if connection is None:
+            with self.lock:
+                self.connect_failures = min(self.connect_failures + 1, 1_000_000_000)
+                self.last_connect_target = target
+                self.last_connect_errno = last_errno
             self.send(CLOSE, channel)
             return
         connection.settimeout(2)
