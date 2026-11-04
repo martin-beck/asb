@@ -7,11 +7,30 @@ import threading
 import re
 import shutil
 import tarfile
+import os
+import time
 
 from asb_snapshot_service import (MarkerServer, SnapshotService, SnapshotReplay,
                                   SnapshotApplier, export_snapshot_streams,
                                   receive_snapshot_streams)
 from asb_snapshot_workspace import SnapshotWorkspace
+
+
+def unmount_when_idle(target, timeout=25):
+    """Wait for short-lived readers; never force or lazily detach the mount."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            subprocess.run(['umount', target], check=True, timeout=60,
+                           capture_output=True, text=True, env=dict(os.environ, LC_ALL='C'))
+            return
+        except subprocess.CalledProcessError as error:
+            remaining = deadline - time.monotonic()
+            if 'target is busy' not in (error.stderr or '') or remaining <= 0:
+                if error.stderr:
+                    print(error.stderr, end='', file=sys.stderr)
+                raise
+            time.sleep(min(0.2, remaining))
 
 
 def unpack_streams(archive, destination):
@@ -98,7 +117,7 @@ def main(argv=None):
             try:service.finish()
             except RuntimeError:pass
         if bound:
-            subprocess.run(['umount',args.target],check=True,timeout=60)
+            unmount_when_idle(args.target)
         try:
             if bound and args.apply_final:
                 subprocess.run([args.rsync,'-aHAX','--inplace','--checksum','--delete',

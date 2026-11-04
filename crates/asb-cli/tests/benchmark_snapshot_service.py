@@ -27,6 +27,29 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_unmount_waits_for_transient_busy_without_forcing(self):
+        busy=subprocess.CalledProcessError(32, ['umount','/task'], stderr='umount: /task: target is busy.\n')
+        with patch.object(asb_snapshot_guest.subprocess, 'run', side_effect=[busy, None]) as run, \
+             patch.object(asb_snapshot_guest.time, 'sleep') as sleep:
+            asb_snapshot_guest.unmount_when_idle('/task')
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args.args[0], ['umount','/task'])
+        sleep.assert_called_once()
+
+    def test_unmount_does_not_retry_other_errors_or_unbounded_busy(self):
+        denied=subprocess.CalledProcessError(1, ['umount','/task'], stderr='permission denied\n')
+        busy=subprocess.CalledProcessError(32, ['umount','/task'], stderr='target is busy\n')
+        for error, times in ((denied, [0, 1]), (busy, [0, 26])):
+            with self.subTest(stderr=error.stderr), \
+                 patch.object(asb_snapshot_guest.subprocess, 'run', side_effect=error) as run, \
+                 patch.object(asb_snapshot_guest.time, 'monotonic', side_effect=times), \
+                 patch.object(asb_snapshot_guest.time, 'sleep') as sleep, \
+                 patch.object(asb_snapshot_guest.sys, 'stderr', io.StringIO()):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    asb_snapshot_guest.unmount_when_idle('/task')
+                self.assertEqual(run.call_count, 1)
+                sleep.assert_not_called()
+
     def test_snapshot_cleanup_keeps_the_original_execution_failure(self):
         def fail():
             raise RuntimeError('snapshot replay did not settle')
