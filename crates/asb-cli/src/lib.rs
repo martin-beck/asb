@@ -372,7 +372,8 @@ mod adapter_layout_tests {
                 // Category-wide bounded output codec, not a target adapter.
                 root_modules: &["mod.rs", "output.rs"],
                 root_directories: &[],
-                shared_family_adapters: &[],
+                // This public selection ID is owned by the AgentSysPerf module.
+                shared_family_adapters: &[("agentsysperf:l1-resource", "agentsysperf.rs")],
             },
         ];
         for CategoryLayout {
