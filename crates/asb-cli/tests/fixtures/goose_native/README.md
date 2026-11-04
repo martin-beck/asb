@@ -37,7 +37,8 @@ snapshot recording and restoration only; it does not execute Goose or qualify
 full filesystem replay.
 
 For the combined Goose and Btrfs fixture, first build the patched Goose CLI
-with `--features rustls-tls,scheduler,goose/asb-native-probe`. Then run:
+with `cargo build --locked -p goose-cli --bin goose --features goose/asb-native-probe`.
+This retains Goose's default features. Then run:
 
 ```sh
 sudo env ASB_GOOSE_BINARY=/absolute/path/to/patched/goose \
