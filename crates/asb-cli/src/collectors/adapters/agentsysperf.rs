@@ -10,7 +10,12 @@ use crate::measurements::{self, ComponentTiming, Session};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::fs;
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+const MAX_ANALYSIS_BYTES: usize = 1024 * 1024;
+const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(super) struct AgentSysPerfCollector;
 pub(super) static ADAPTER: AgentSysPerfCollector = AgentSysPerfCollector;
@@ -93,6 +98,8 @@ impl CollectorAdapter for AgentSysPerfCollector {
         fs::create_dir_all(&directory)
             .map_err(|error| format!("cannot create AgentSysPerf record directory: {error}"))?;
         measurements::write_json(&directory.join("measurement_records.json"), &records)?;
+        let analysis = analyze(session, &directory);
+        measurements::write_json(&session.dir.join("agentsysperf-analysis.json"), &analysis)?;
         measurements::write_json(
             &session.dir.join("agentsysperf.json"),
             &json!({
@@ -103,10 +110,137 @@ impl CollectorAdapter for AgentSysPerfCollector {
                 "analysis_input": "agentsysperf-records/measurement_records.json",
                 "records": records.len(),
                 "platform": session.state::<State>().borrow().platform,
+                "analysis": analysis["status"],
                 "limitations": "This is an ASB-owned process-tree export for offline AgentSysPerf analysis. It does not run AgentSysPerf's benchmark harness or accept system-wide perf attribution. Missing observations are omitted rather than represented as zero."
             }),
         )
     }
+}
+
+fn analyze(session: &Session, records: &std::path::Path) -> Value {
+    #[cfg(unix)]
+    {
+        analyze_unix(session, records)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (session, records);
+        json!({"schema_version": 1, "status": "unavailable", "reason": "bounded AgentSysPerf analysis currently requires Unix"})
+    }
+}
+
+#[cfg(unix)]
+fn analyze_unix(session: &Session, records: &std::path::Path) -> Value {
+    use std::os::unix::process::CommandExt;
+
+    let executable = measurements::resolve_executable(session.tool_directory(), "agentsysperf");
+    let Some(executable) = crate::tools::host_executable(&executable) else {
+        return json!({"schema_version": 1, "status": "unavailable", "reason": "project-local AgentSysPerf executable is unavailable"});
+    };
+    let stdout_path = session.dir.join("agentsysperf-analysis.stdout.json");
+    let stderr_path = session.dir.join("agentsysperf-analysis.stderr.log");
+    let stdout = match fs::File::create(&stdout_path) {
+        Ok(file) => file,
+        Err(error) => {
+            return json!({"schema_version": 1, "status": "unavailable", "reason": format!("cannot create AgentSysPerf analysis evidence: {error}")});
+        }
+    };
+    let stderr = match fs::File::create(&stderr_path) {
+        Ok(file) => file,
+        Err(error) => {
+            return json!({"schema_version": 1, "status": "unavailable", "reason": format!("cannot create AgentSysPerf analysis evidence: {error}")});
+        }
+    };
+    let limit = libc::rlimit {
+        rlim_cur: MAX_ANALYSIS_BYTES as libc::rlim_t,
+        rlim_max: MAX_ANALYSIS_BYTES as libc::rlim_t,
+    };
+    let mut command = Command::new(executable);
+    command
+        .args(["analyze"])
+        .arg(records)
+        .args(["--format", "json"])
+        .current_dir(&session.dir)
+        .env("AGENTSYSPERF_HOME", session.dir.join("agentsysperf-home"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    // SAFETY: `setrlimit` is async-signal-safe and the copied limit contains
+    // no borrowed state. The child may write no more than this bound to either
+    // evidence file, even if a damaged external analyzer is noisy.
+    #[allow(unsafe_code)]
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return json!({"schema_version": 1, "status": "unavailable", "reason": format!("cannot start AgentSysPerf analysis: {error}")});
+        }
+    };
+    let deadline = Instant::now() + ANALYSIS_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return json!({"schema_version": 1, "status": "unavailable", "reason": "AgentSysPerf analysis exceeded its 10-second timeout"});
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return json!({"schema_version": 1, "status": "unavailable", "reason": format!("cannot observe AgentSysPerf analysis: {error}")});
+            }
+        }
+    };
+    let stdout = read_bounded(&stdout_path);
+    let stderr = read_bounded(&stderr_path);
+    if stdout.is_none() || stderr.is_none() {
+        return json!({"schema_version": 1, "status": "unavailable", "reason": "AgentSysPerf analysis exceeded the bounded evidence size"});
+    }
+    if !status.success() {
+        return json!({"schema_version": 1, "status": "unavailable", "reason": "AgentSysPerf analysis failed", "exit": status.code()});
+    }
+    match analysis_findings(&stdout.expect("checked above")) {
+        Ok(findings) if findings.is_array() => {
+            json!({"schema_version": 1, "status": "observed", "findings": findings})
+        }
+        _ => {
+            json!({"schema_version": 1, "status": "unavailable", "reason": "AgentSysPerf analysis did not return a JSON finding list"})
+        }
+    }
+}
+
+/// AgentSysPerf currently prints a one-line progress preamble before its JSON
+/// report.  Keep that human text in the private bounded stdout artifact, then
+/// accept only a complete JSON array beginning at the first array delimiter.
+/// This is intentionally not a line scraper: trailing bytes or any non-array
+/// JSON remain unavailable rather than becoming a partial diagnosis.
+fn analysis_findings(stdout: &[u8]) -> Result<Value, serde_json::Error> {
+    let start = stdout
+        .iter()
+        .position(|byte| *byte == b'[')
+        .unwrap_or(stdout.len());
+    serde_json::from_slice(&stdout[start..])
+}
+
+fn read_bounded(path: &std::path::Path) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take((MAX_ANALYSIS_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() <= MAX_ANALYSIS_BYTES).then_some(bytes)
 }
 
 /// Hardware counters that the shared process-tree `perf stat` collector may
@@ -378,5 +512,56 @@ mod tests {
         let arm = "  cycles\n  instructions\n  cache-misses\n  branch-misses\n  l1d_cache_refill OR armv8_pmuv3_0/l1d_cache_refill/\n  stall_backend\n  stall_frontend\n";
         assert!(perf_list_advertises(arm, "l1d_cache_refill"));
         assert!(!perf_list_advertises(arm, "topdown-fe-bound"));
+    }
+
+    #[test]
+    fn bounded_reader_rejects_oversized_analysis_evidence() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-agentsysperf-bounded-reader-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("oversized.json");
+        fs::write(&path, vec![b'x'; MAX_ANALYSIS_BYTES + 1]).unwrap();
+        assert!(read_bounded(&path).is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn analysis_uses_project_local_tool_and_session_local_home() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("asb-agentsysperf-analysis-{}", std::process::id()));
+        let tools = root.join("tools");
+        let bin = tools.join("agentsysperf/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let executable = bin.join("agentsysperf");
+        fs::write(
+            &executable,
+            "#!/bin/sh\ntest \"$AGENTSYSPERF_HOME\" = \"$PWD/agentsysperf-home\" || exit 7\nprintf 'Analyzing 1 record...\\n\\n[{\"analyzer\":\"fixture\"}]'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let session = Session::start_with_collectors(&root, &[], Some(&tools)).unwrap();
+        let output = analyze(&session, &root.join("records"));
+        assert_eq!(output["status"], "observed");
+        assert_eq!(output["findings"][0]["analyzer"], "fixture");
+        assert!(root.join("agentsysperf-analysis.stdout.json").is_file());
+        assert!(root.join("agentsysperf-analysis.stderr.log").is_file());
+        drop(session);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn analysis_parser_accepts_only_a_complete_json_array_after_preamble() {
+        assert_eq!(
+            analysis_findings(b"Analyzing 1 record...\n\n[{\"analyzer\":\"fixture\"}]").unwrap()[0]
+                ["analyzer"],
+            "fixture"
+        );
+        assert!(analysis_findings(b"preamble {\"not\":\"an array\"}").is_err());
+        assert!(analysis_findings(b"[{}] trailing").is_err());
     }
 }

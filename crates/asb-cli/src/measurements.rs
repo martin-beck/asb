@@ -729,6 +729,11 @@ impl Session {
         self.component_timings.get(name)
     }
 
+    /// Project-local tool root selected by the resolved execution plan.
+    pub(crate) fn tool_directory(&self) -> Option<&Path> {
+        self.tool_dir.as_deref()
+    }
+
     fn write_component_measurements(&self) -> Result<(), String> {
         // RunMeasurement.elapsed_ms is execution-only (guest-observed for
         // isolated workloads). The total must cover preparation, execution,
