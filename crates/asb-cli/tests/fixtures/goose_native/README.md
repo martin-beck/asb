@@ -62,6 +62,11 @@ below. The fixture uses the host loader for the test binaries and bind-mounts
 the disposable fixture directory; it does not test ASB's installer or perform an
 official workload evaluation.
 
+`runtime_bundle_probe.py` separately stages `ASB_GOOSE_BINARY` with ASB's
+runtime bundler and runs its version command in the image named by
+`ASB_TEST_IMAGE`. Pass a new disposable directory as its only argument. This
+checks loader and size compatibility, not replay or installation.
+
 To check the separate container-to-host control transport, run
 `relay_control_probe.py` with a new output directory and set
 `ASB_RELAY_BINARY` to a built ASB executable, `ASB_TEST_NODE` to Node,
