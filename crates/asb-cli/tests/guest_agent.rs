@@ -13,6 +13,15 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use support::IsolatedEnvironment;
 
+fn read_deferred_collection(path: &std::path::Path) -> serde_json::Value {
+    let compressed = std::fs::read(path).unwrap();
+    assert!(
+        compressed.starts_with(&[0x1f, 0x8b]),
+        "deferred collection must be gzip encoded"
+    );
+    serde_json::from_reader(flate2::read::GzDecoder::new(compressed.as_slice())).unwrap()
+}
+
 struct Process(Child);
 impl Drop for Process {
     fn drop(&mut self) {
@@ -465,8 +474,7 @@ exit 93
         .0
         .join("private/attempt/exports")
         .join(receipt["filename"].as_str().expect("receipt filename"));
-    let frozen: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(artifact).unwrap()).unwrap();
+    let frozen = read_deferred_collection(&artifact);
     assert_eq!(frozen["documents"]["usage.json"]["api_calls"], 4);
     assert_eq!(frozen["documents"]["usage.json"]["input_tokens"], 31);
     assert_eq!(frozen["documents"]["usage.json"]["output_tokens"], 11);
@@ -769,7 +777,7 @@ exit 93
         .0
         .join("private/attempt/exports")
         .join(receipt["filename"].as_str().unwrap());
-    let frozen: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let frozen = read_deferred_collection(&path);
     let bytes: Vec<u8> = serde_json::from_value(frozen["bytes"]["final.txt"].clone()).unwrap();
     assert_eq!(bytes, b"guest completed answer");
 }
@@ -869,7 +877,7 @@ printf '%s\n' '{"response":"guest answer","status":"success","note":"Response wa
         .0
         .join("private/attempt/exports")
         .join(receipt["filename"].as_str().unwrap());
-    let frozen = std::fs::read_to_string(path).unwrap();
+    let frozen = read_deferred_collection(&path).to_string();
     assert!(frozen.contains("guest answer"));
     assert!(!frozen.contains("private prompt"));
 }
