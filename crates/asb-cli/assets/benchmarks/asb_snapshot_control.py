@@ -53,8 +53,10 @@ class GuestSnapshot:
         try:
             stdout,_=process.communicate(b'STOP\n',timeout=600)
             if process.returncode or b'SAVED\n' not in stdout:
-                if (self.task.artifacts/'guest-error-stderr.log').is_file():
-                    raise ExecutionError('snapshot workspace did not settle after guest failure; inspect guest-error-stderr.log and snapshot-supervisor.log')
+                logs = [name for name in ('guest-error-stdout.log','guest-error-stderr.log')
+                        if (self.task.artifacts/name).is_file()]
+                if logs:
+                    raise ExecutionError('snapshot workspace did not settle after guest failure; inspect '+', '.join(logs)+' and snapshot-supervisor.log')
                 raise ExecutionError('snapshot workspace did not settle; inspect snapshot-supervisor.log')
             if self.replay:
                 return
