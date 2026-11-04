@@ -299,7 +299,7 @@ pub(crate) fn run_with_diagnostics(
         ));
     }
     let disk_policy = crate::planning::resolve(&config)?;
-    let output_directory = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let output_directory = runtime_anchor.parent().unwrap_or_else(|| Path::new("."));
     if (options.track.is_some() || options.replay_seed.is_some())
         && options.mode != Some(tape::Mode::Replay)
     {
