@@ -280,6 +280,9 @@ fn validate_record(
     configure_offline_decoder_environment(&mut command, &session.dir);
     if let Some(cache) = session.artifact(SharedArtifact::PerfSymbolCache) {
         command.env("HOME", cache);
+        if cache.join("symfs-ready").is_file() {
+            command.arg("--symfs").arg(cache.join("symfs"));
+        }
     }
     let mut captures = [
         crate::evidence::Capture::create(&session.dir.join("perf-validation.stdout"))?,

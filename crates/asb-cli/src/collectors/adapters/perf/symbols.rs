@@ -38,6 +38,19 @@ impl measurements::Session {
         ))
         .map_err(|error| format!("cannot write perf symbol helper: {error}"))?;
         drop(file);
+        let guest_script = directory.join("perf-guest-mappings.py");
+        let mut guest_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&guest_script)
+            .map_err(|error| format!("cannot create guest mapping helper: {error}"))?;
+        guest_file
+            .write_all(include_bytes!(
+                "../../../../assets/scripts/perf-guest-mappings.py"
+            ))
+            .map_err(|error| format!("cannot write guest mapping helper: {error}"))?;
+        drop(guest_file);
         let executable = measurements::resolve_executable(self.tool_dir.as_deref(), "perf");
         let executable = crate::tools::host_executable(&executable)
             .ok_or("perf executable is unavailable for symbol custody")?;
@@ -65,7 +78,8 @@ impl measurements::Session {
             .arg(ready.argument())
             .arg(recorder.pid.to_string())
             .arg(recorder.start_time_ticks.to_string())
-            .arg(directory.join("perf.data"));
+            .arg(directory.join("perf.data"))
+            .arg(guest_script);
         let (command, route) = measurements::producer_command(&mut launch)?;
         let captures = [
             crate::evidence::Capture::create(&directory.join("perf-symbol-custody.stdout"))?,
@@ -84,6 +98,17 @@ impl measurements::Session {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn offline_guest_mapping_fixtures_run_in_the_rust_gate() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/perf-guest-mappings/test_mappings.py");
+        let status = std::process::Command::new("python3")
+            .arg(fixture)
+            .status()
+            .unwrap();
+        assert!(status.success(), "guest mapping fixtures failed");
+    }
+
     #[test]
     fn offline_symbol_custody_fixtures_run_in_the_rust_gate() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

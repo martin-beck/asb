@@ -8,6 +8,7 @@ import os
 import json
 import pathlib
 import re
+import selectors
 import signal
 import stat
 import struct
@@ -21,8 +22,187 @@ MAX_MAP_LINES = 65536
 MAX_IMAGES = 2048
 MAX_IMAGE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+MAX_GUEST_ROWS_BYTES = 40 * 1024 * 1024
 
 
+def namespace_pid(pid, start):
+    current = identity(pid)
+    if current is None or current[1] != start:
+        return None
+    try:
+        status = pathlib.Path(f'/proc/{pid}/status').read_text()
+        values = next(line for line in status.splitlines() if line.startswith('NSpid:')).split()[1:]
+        numbers = [int(value) for value in values]
+        current = identity(pid)
+        if len(numbers) < 2 or numbers[0] != pid or numbers[-1] <= 1 or not current or current[1] != start:
+            return None
+        return numbers[-1]
+    except (OSError, ValueError, StopIteration):
+        return None
+
+
+def guest_command(container, script, arguments, output, limit, timeout):
+    """Run a bounded guest helper, discarding partial output on failure."""
+    if not re.fullmatch(r'[0-9a-f]{64}', container) or limit <= 0:
+        return False
+    process = None
+    try:
+        with open(script, 'rb') as source:
+            process = subprocess.Popen(
+                ['docker', 'exec', '-i', '--user', '0', '--workdir', '/', container,
+                 'python3', '-I', '-', *arguments],
+                stdin=source, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            deadline = time.monotonic() + timeout
+            count = 0
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    if not selector.select(remaining):
+                        return False
+                    block = os.read(process.stdout.fileno(), min(1024 * 1024, limit + 1 - count))
+                    if not block:
+                        break
+                    count += len(block)
+                    if count > limit:
+                        return False
+                    output.write(block)
+            return process.wait(timeout=max(0.01, deadline - time.monotonic())) == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            if process.stdout:
+                process.stdout.close()
+
+
+def guest_scan(container, script, roots, cache_home):
+    if len(roots) > 1024:
+        return None
+    try:
+        with tempfile.TemporaryFile(dir=cache_home) as output:
+            if not guest_command(container, script, ['scan-roots', json.dumps(roots)],
+                                 output, MAX_GUEST_ROWS_BYTES, 5):
+                return None
+            output.seek(0)
+            result = json.load(output)
+        if (not isinstance(result, dict) or result.get('schema_version') != 1
+                or not isinstance(result.get('members'), list)
+                or not isinstance(result.get('mappings'), list)
+                or type(result.get('inaccessible')) is not int or result['inaccessible'] < 0
+                or len(result['members']) > 1024 or len(result['mappings']) > 8192):
+            return None
+        return result
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def capture_guest_noid(container, script, row, cache_home, max_bytes):
+    """Stage a live mapping and return it only if it has no build ID."""
+    try:
+        pid, start = row['pid'], row['start']
+        path, major, minor, inode = row['path'], row['major'], row['minor'], row['inode']
+        stamp = (row['size'], row['mtime_ns'], row['ctime_ns'])
+        if (any(type(value) is not int or value < 0 for value in (pid, start, major, minor, inode))
+                or any(type(value) is not int for value in stamp) or stamp[0] <= 0
+                or pid <= 1 or start <= 0 or inode <= 0 or not isinstance(path, str)
+                or not path.startswith('/') or any(part in ('', '.', '..') for part in path[1:].split('/'))
+                or len(os.fsencode(path)) > 4096 or max_bytes <= 0):
+            return None
+        descriptor, name = tempfile.mkstemp(prefix='.asb-guest-image-', dir=cache_home)
+        try:
+            with os.fdopen(descriptor, 'w+b') as output:
+                arguments = ['copy', str(pid), str(start), path, str(major), str(minor), str(inode),
+                             *(str(value) for value in stamp)]
+                limit = min(MAX_IMAGE_BYTES, max_bytes)
+                if not guest_command(container, script, arguments, output, limit, 8):
+                    return None
+                output.flush()
+                info = os.fstat(output.fileno())
+                if not 0 < info.st_size <= limit or os.pread(output.fileno(), 4, 0) != b'\x7fELF':
+                    return None
+                buildid = elf_buildid(output.fileno())
+                if buildid is not None:
+                    return (0, False)
+                root = pathlib.Path(cache_home) / 'symfs'
+                destination = root.joinpath(*path[1:].split('/'))
+                destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                if destination.exists() or destination.is_symlink():
+                    return None
+                os.fsync(output.fileno())
+                os.link(name, destination)
+                return (info.st_size, True)
+        finally:
+            os.unlink(name)
+    except (KeyError, TypeError, OSError, ValueError):
+        return None
+
+
+def prepare_symfs(listing, cache_home, ambiguous):
+    """Mirror known build IDs and retain available no-build-ID images."""
+    if ambiguous:
+        return False
+    root = pathlib.Path(cache_home) / 'symfs'
+    buildroot = pathlib.Path(cache_home) / '.debug' / '.build-id'
+    if not root.is_dir():
+        return False
+    paths = {}
+    missing_noid = 0
+    try:
+        for line in listing.splitlines():
+            fields = line.split(None, 1)
+            if not fields:
+                continue
+            if len(fields) == 1:
+                name = fields[0]
+                if name.startswith('/tmp/perf-vdso'):
+                    continue
+                buildid = None
+            else:
+                buildid, name = fields
+                if name.startswith('[') and name.endswith(']'):
+                    continue
+                if not re.fullmatch(r'(?:[0-9a-f]{2}){4,64}', buildid):
+                    return False
+            if (not name.startswith('/') or any(part in ('', '.', '..') for part in name[1:].split('/'))
+                    or len(os.fsencode(name)) > 4096):
+                return False
+            if name in paths and paths[name] != buildid:
+                return False
+            paths[name] = buildid
+            target = root.joinpath(*name[1:].split('/'))
+            if buildid is None:
+                if not target.is_file() or target.is_symlink():
+                    missing_noid += 1
+                continue
+            image = (buildroot / buildid[:2] / buildid[2:] / 'elf').resolve(strict=True)
+            with image.open('rb') as source:
+                if elf_buildid(source.fileno()) != buildid:
+                    return False
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if target.exists() or target.is_symlink():
+                if target.is_symlink() or not os.path.samefile(image, target):
+                    return False
+            else:
+                os.link(image, target)
+            debug = (buildroot / buildid[:2] / buildid[2:] / 'debug')
+            if debug.is_file():
+                target_debug = root / 'usr/lib/debug/.build-id' / buildid[:2] / (buildid[2:] + '.debug')
+                target_debug.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                if not target_debug.exists():
+                    os.link(debug.resolve(strict=True), target_debug)
+        marker = pathlib.Path(cache_home) / 'symfs-ready'
+        with marker.open('x') as output:
+            json.dump({'schema_version': 1, 'missing_no_build_id_images': missing_noid}, output)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
 def identity(pid):
     try:
         value = pathlib.Path(f'/proc/{pid}/stat').read_text()
@@ -426,7 +606,7 @@ def publish_host_debug(buildid, symbol_root, cache_home, uid, gid, max_bytes):
         return None
 
 
-def settle_recorded_images(root_fd, data, cache_home, perf, symbol_root, uid, gid, remaining, slots=MAX_IMAGES, container=None):
+def settle_recorded_images(root_fd, data, cache_home, perf, symbol_root, uid, gid, remaining, slots=MAX_IMAGES, container=None, ambiguous=()):
     """Recover recorded images still present in the pinned guest filesystem."""
     initial_remaining = remaining
     def drop_privileges():
@@ -473,9 +653,19 @@ def settle_recorded_images(root_fd, data, cache_home, perf, symbol_root, uid, gi
                 if retained is not None:
                     remaining -= retained
     final = verify_buildids(listing, cache_home)
+    symfs_ready = prepare_symfs(listing, cache_home, ambiguous)
+    missing_noid = None
+    if symfs_ready:
+        try:
+            with open(pathlib.Path(cache_home) / 'symfs-ready', encoding='utf-8') as marker:
+                missing_noid = json.load(marker)['missing_no_build_id_images']
+        except (OSError, ValueError, KeyError):
+            symfs_ready = False
+            (pathlib.Path(cache_home) / 'symfs-ready').unlink(missing_ok=True)
     return {'recovered_recorded_images': recovered, 'recovered_bytes': initial_remaining - remaining,
             'missing_recorded_images': len(final['missing']),
-            'missing_debug_images': len(final['missing_debug']), 'unverified_entries': final['unverified']}
+            'missing_debug_images': len(final['missing_debug']), 'unverified_entries': final['unverified'],
+            'symfs_ready': symfs_ready, 'symfs_missing_no_build_id_images': missing_noid}
 
 
 def main():
@@ -492,12 +682,20 @@ def main():
     control = sys.argv[8] if len(sys.argv) > 8 else None
     recorder = (int(sys.argv[9]), int(sys.argv[10])) if len(sys.argv) > 11 else None
     data = sys.argv[11] if recorder else None
+    guest_script = sys.argv[12] if len(sys.argv) > 12 else None
     root_fd = None
     container = None
     seen = set()
     members = [(root, start)]
     size = 0
     skipped = 0
+    guest_roots = []
+    guest_seen = set()
+    guest_paths = {}
+    guest_ambiguous = set()
+    guest_captured_paths = set()
+    guest_noid = 0
+    guest_failures = 0
     stopping = False
 
     def stop(_signum, _frame):
@@ -525,6 +723,9 @@ def main():
                     print('Cannot access the benchmark process root for perf symbol capture: '
                           f'{error}. No verified local Docker container was found.', file=sys.stderr)
                     return 2
+                guest_pid = namespace_pid(root, start)
+                if guest_script and guest_pid:
+                    guest_roots = [(guest_pid, start)]
             after = identity(root)
             if after is None or after[1] != start:
                 if root_fd is not None:
@@ -540,6 +741,60 @@ def main():
             while recorder and not stopping:
                 time.sleep(0.1)
             break
+        if container and guest_script and guest_roots:
+            observed = guest_scan(container, guest_script, guest_roots, cache_home)
+            if observed is None:
+                guest_failures += 1
+            else:
+                guest_roots = observed['members']
+                guest_failures += observed.get('inaccessible', 0)
+                for row in observed['mappings']:
+                    if not isinstance(row, dict):
+                        guest_failures += 1
+                        continue
+                    path = row.get('path')
+                    key = (row.get('major'), row.get('minor'), row.get('inode'),
+                           row.get('size'), row.get('mtime_ns'), row.get('ctime_ns'))
+                    if not isinstance(path, str) or not all(type(value) is int for value in key):
+                        guest_failures += 1
+                        continue
+                    if path not in guest_paths and len(guest_paths) >= MAX_IMAGES:
+                        guest_failures += 1
+                        continue
+                    previous = guest_paths.setdefault(path, key)
+                    if previous != key:
+                        guest_ambiguous.add(path)
+                        if path in guest_captured_paths:
+                            guest_captured_paths.remove(path)
+                            guest_noid -= 1
+                        if path.startswith('/') and all(part not in ('', '.', '..') for part in path[1:].split('/')):
+                            try:
+                                (pathlib.Path(cache_home) / 'symfs').joinpath(*path[1:].split('/')).unlink(missing_ok=True)
+                            except OSError:
+                                guest_failures += 1
+                        continue
+                    observation = (path, key)
+                    if observation not in guest_seen and len(guest_seen) >= MAX_IMAGES:
+                        guest_failures += 1
+                        continue
+                    if observation in guest_seen or path in guest_ambiguous:
+                        continue
+                    guest_seen.add(observation)
+                    if row.get('has_build_id') is True:
+                        # The settled perf listing recovers these images via
+                        # their build IDs; prioritize no-ID files while live.
+                        continue
+                    copied = capture_guest_noid(container, guest_script, row, cache_home, MAX_TOTAL_BYTES - size)
+                    if copied is None:
+                        guest_failures += 1
+                    else:
+                        size += copied[0]
+                        guest_noid += int(copied[1])
+                        if copied[1]:
+                            guest_captured_paths.add(path)
+                    # Bound collector work per scan; short-lived mappings can
+                    # be missed and are explicitly not claimed as complete.
+                    break
         for pid, generation in members:
             for path, key in mappings(pid):
                 if key in seen or len(seen) >= MAX_IMAGES or size >= MAX_TOTAL_BYTES:
@@ -585,7 +840,7 @@ def main():
         while time.monotonic() < deadline:
             current = identity(recorder[0])
             if current is None or current[1] != recorder[1]:
-                recorded = settle_recorded_images(root_fd, data, cache_home, perf, symbol_root, uid, gid, MAX_TOTAL_BYTES - size, MAX_IMAGES - len(seen), container)
+                recorded = settle_recorded_images(root_fd, data, cache_home, perf, symbol_root, uid, gid, MAX_TOTAL_BYTES - size, MAX_IMAGES - len(seen), container, guest_ambiguous)
                 if recorded is not None:
                     size += recorded['recovered_bytes']
                 break
@@ -596,6 +851,9 @@ def main():
                       'retained_images': len(seen) + (recorded['recovered_recorded_images'] if recorded else 0), 'retained_bytes': size,
                       'skipped_observations': skipped, 'interval_ms': 500,
                       'recorded_images': recorded,
+                      'guest_no_build_id_images': guest_noid,
+                      'guest_ambiguous_paths': len(guest_ambiguous),
+                      'guest_capture_failures': guest_failures,
                       'limitation': 'deleted or otherwise inaccessible images cannot be recovered'}, sort_keys=True), flush=True)
     return 2 if recorder and recorded is None else 0
 
