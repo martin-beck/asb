@@ -202,9 +202,25 @@ def main():
         return 0
     except Exception as error:
         # Paths, context, key, contents and exception text may contain secrets.
-        # Only the exception class can cross this private process boundary.
-        print(json.dumps({"schema_version":1, "error_class":type(error).__name__}))
-        return 2
+        # Only fixed, non-identifying categories cross the process boundary.
+        reason = str(error) if isinstance(error, FingerprintError) else ''
+        if reason in {'fingerprint resource bound exceeded', 'fingerprint byte bound exceeded',
+                      'input path depth exceeded', 'request size exceeded'}:
+            code = 'resource_bound'
+        elif reason in {'input changed during fingerprinting', 'input was replaced before reading',
+                        'input changed while reading', 'direct input changed between reads',
+                        'direct file was replaced before reading', 'direct file changed while reading',
+                        'input changed before snapshot completion', 'direct input changed before snapshot completion'}:
+            code = 'input_changed'
+        elif reason in {'input symlink cycle', 'input is not a regular file, directory or symlink',
+                        'direct input is not a regular file'}:
+            code = 'unsupported_input'
+        elif isinstance(error, PermissionError):
+            code = 'permission_denied'
+        else:
+            code = 'verification_failed'
+        print(json.dumps({'schema_version': 1, 'error_code': code}))
+        return 0
 
 
 if __name__ == "__main__":

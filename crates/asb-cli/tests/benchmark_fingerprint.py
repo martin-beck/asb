@@ -208,11 +208,21 @@ class FingerprintTests(unittest.TestCase):
     def test_process_errors_never_print_secret_values_or_input_paths(self):
         request={"key":KEY.hex(),"roots":[{"name":"SECRET_PATH","path":"\x00SECRET_VALUE"}],"context":"SECRET_CONTEXT"}
         result=subprocess.run([sys.executable,"-I","-S",str(SOURCE)],input=json.dumps(request).encode(),capture_output=True,timeout=5)
-        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(result.returncode,0)
         self.assertEqual(result.stderr,b"")
         self.assertNotIn(b"SECRET",result.stdout)
         self.assertNotIn(KEY.hex().encode(),result.stdout)
-        self.assertEqual(json.loads(result.stdout)["error_class"],"ValueError")
+        self.assertEqual(json.loads(result.stdout)["error_code"],"verification_failed")
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'requires FIFO support')
+    def test_process_classifies_unsupported_input_without_exposing_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'SECRET_FIFO';os.mkfifo(path)
+            request={'key':KEY.hex(),'roots':[{'name':'fixture','path':str(path)}]}
+            result=subprocess.run([sys.executable,'-I','-S',str(SOURCE)],input=json.dumps(request).encode(),capture_output=True,timeout=5)
+            self.assertEqual(result.returncode,0)
+            self.assertEqual(json.loads(result.stdout),{'schema_version':1,'error_code':'unsupported_input'})
+            self.assertNotIn(b'SECRET_FIFO',result.stdout)
 
 
 if __name__=="__main__":
