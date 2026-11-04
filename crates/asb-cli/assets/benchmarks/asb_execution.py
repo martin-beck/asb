@@ -224,7 +224,7 @@ class ManagedDockerWorkspace:
                 raise ExecutionError('snapshot workspace requires an owned project storage directory')
             creation.update(volumes={str(self.snapshot_storage): {'bind':'/asb-snapshot-storage','mode':'rw'}},
                             cap_add=['SYS_ADMIN'], devices=['/dev/loop-control:/dev/loop-control:rwm'],
-                            device_cgroup_rules=['b 7:* rwm'], security_opt=['apparmor=unconfined'])
+                            device_cgroup_rules=['b 7:* rwm','c 10:229 rwm'], security_opt=['apparmor=unconfined'])
         if self.journal is not None:
             self.journal.direct_container(creation)
         self.container = self.client.containers.create(**creation)

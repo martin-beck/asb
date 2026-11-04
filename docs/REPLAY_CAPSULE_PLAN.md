@@ -146,3 +146,14 @@ An out-of-order marker waits for its recorded predecessor until the execution
 ends or the service is invalidated. Shutdown wakes pending markers and closes
 idle client connections before joining server threads. This does not establish
 that overlapping filesystem mutations can be replayed correctly.
+
+Snapshot workspace images are sparse and default to the storage space available
+on the project filesystem at preparation time. This removes the previous fixed
+4 GiB logical image size; actual writes can still fail if the filesystem fills
+or cannot represent the image. An explicit size remains available for offline
+fixtures. On a filesystem that allocates a small sparse probe eagerly, an
+available `qemu-img` and `qemu-storage-daemon` pair can provide a thin qcow2
+image through FUSE. Both tools must currently be installed project-locally or
+available on the host, and the guest needs FUSE and loop support. Automatic
+tool installation and a VM fallback are not yet implemented. This sizing change
+does not establish complete native replay.
