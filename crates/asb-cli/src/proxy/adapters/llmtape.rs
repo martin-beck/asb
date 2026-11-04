@@ -1813,6 +1813,7 @@ mod tests {
         let replayed = r#"{"model":"m","messages":[{"content":"write to srv-data-projects-asb-e2e-v0142-project-sweep-replay-v0142-results-003-v0141-workbuddy-swe-bench-workspace/memory"}]}"#;
         assert!(request(&session, replayed).contains("200 OK"));
         session.stop().unwrap();
+
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2020,6 +2021,7 @@ mod tests {
             assert!(request(&session, &changed).contains("409 Conflict"));
             assert!(session.stop().unwrap_err().to_string().contains("rejected"));
         }
+
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2362,6 +2364,20 @@ mod tests {
             assert!(session.stop().unwrap_err().to_string().contains("rejected"));
         }
 
+        let not_summary = root.join("unittest-not-summary.jsonl");
+        let recorded_text = recorded.replace("OK", "arbitrary output");
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded_text},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&not_summary, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &not_summary, None, false, &root).unwrap();
+        let changed = recorded
+            .replace("OK", "arbitrary output")
+            .replace("0.001s", "0.002s");
+        assert!(request_to(&session, "/v1/responses", &changed).contains("409 Conflict"));
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
         let singular = root.join("unittest-singular-summary.jsonl");
         let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Ran 1 test in 1.001s\\n\\nOK"}]}"#;
         let line = serde_json::json!({
@@ -2375,6 +2391,23 @@ mod tests {
                 &session,
                 "/v1/responses",
                 &recorded.replace("1.001s", "1.002s"),
+            )
+            .contains("200 OK")
+        );
+        session.stop().unwrap();
+        let failed = root.join("unittest-failed-summary.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"Ran 2 tests in 0.015s\n\nFAILED (failures=1)\n"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&failed, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &failed, None, false, &root).unwrap();
+        assert!(
+            request_to(
+                &session,
+                "/v1/responses",
+                &recorded.replace("0.015s", "0.016s")
             )
             .contains("200 OK")
         );

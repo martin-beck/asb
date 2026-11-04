@@ -299,7 +299,7 @@ function normalizeUnittestElapsed(value) {
   // scheduler-dependent, but the test count and result text remain meaningful
   // replay inputs. This is applied only to structured tool-result output below,
   // never to prompts, arguments, or arbitrary request strings.
-  return value.replace(/(^|\\n|\r?\n)(Ran \d+ tests? in )\d+(?:\.\d+)?s\b/g, "$1$2<asb-elapsed>");
+  return value.replace(/(^|\\n|\r?\n)(Ran \d+ tests? in )\d+(?:\.\d+)?s\b(?=(?:\\n|\r?\n){2}(?:OK|FAILED(?: \([^\r\n]*\))?)(?:\\n|\r?\n|$))/g, "$1$2<asb-elapsed>");
 }
 
 // Python renders a callable's process-local address in its fixed repr.  This
