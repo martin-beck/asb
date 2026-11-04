@@ -451,7 +451,26 @@ fn activate_unprivileged_project_access(
     if identity == crate::agents::ExecutionIdentity::Unprivileged {
         grant_unprivileged_access(project, false)?;
         grant_unprivileged_traverse(runtime)?;
+        if let Some(launcher) = std::env::var_os("ASB_RUNTIME_EXECUTABLE") {
+            grant_unprivileged_bundled_gate_access(Path::new(&launcher))?;
+        }
     }
+    Ok(())
+}
+
+/// The stopped gate uses the same bundled launcher as the guest driver, but
+/// runs under the agent identity. Permit traversal without making its runtime
+/// writable or exposing unrelated private attempt state.
+fn grant_unprivileged_bundled_gate_access(launcher: &Path) -> Result<(), Error> {
+    if !launcher.is_absolute() || !launcher.is_file() {
+        return Err(Error::Run("invalid bundled ASB runtime launcher".into()));
+    }
+    let root = launcher
+        .parent()
+        .ok_or_else(|| Error::Run("bundled ASB runtime has no directory".into()))?;
+    grant_unprivileged_traverse(root)?;
+    grant_unprivileged_traverse(&root.join("bin"))?;
+    grant_unprivileged_traverse(&root.join("lib"))?;
     Ok(())
 }
 

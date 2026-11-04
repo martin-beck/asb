@@ -2,6 +2,34 @@
 use super::*;
 use crate::endpoint::{Authentication, Interface};
 
+#[cfg(unix)]
+#[test]
+fn bundled_gate_grants_only_directory_traversal() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("asb-bundled-gate-{}", std::process::id()));
+    fs::create_dir_all(root.join("bin")).unwrap();
+    fs::create_dir_all(root.join("lib")).unwrap();
+    let launcher = root.join("asb");
+    fs::write(&launcher, b"launcher").unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+    for path in [&root, &root.join("bin"), &root.join("lib")] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    super::grant_unprivileged_bundled_gate_access(&launcher).unwrap();
+    for path in [&root, &root.join("bin"), &root.join("lib")] {
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o711
+        );
+    }
+    assert_eq!(
+        fs::metadata(&launcher).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert!(super::grant_unprivileged_bundled_gate_access(&root.join("missing")).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
 // Run explicitly inside a disposable container with the two mounts described
 // by the snapshot qualification fixture; ordinary CI lacks mount privileges.
 #[cfg(target_os = "linux")]
