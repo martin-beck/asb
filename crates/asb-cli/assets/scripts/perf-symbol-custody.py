@@ -350,7 +350,8 @@ def cache_container_file(container, path, expected_buildid, cache_home, perf, ui
     try:
         with tempfile.TemporaryFile(dir=cache_home) as image:
             result = subprocess.run(
-                ['docker', 'exec', '--user', '0', container, 'head', '-c', str(limit + 1), '--', path],
+                ['docker', 'exec', '--user', '0', '--workdir', '/', container,
+                 'head', '-c', str(limit + 1), '--', path],
                 stdin=subprocess.DEVNULL, stdout=image, stderr=subprocess.DEVNULL,
                 timeout=timeout, check=False,
             )

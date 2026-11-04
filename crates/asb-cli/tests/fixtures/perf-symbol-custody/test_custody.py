@@ -46,6 +46,7 @@ class CustodyTest(unittest.TestCase):
             original = subprocess.run
             def export(args, **kwargs):
                 if args[0] == 'docker':
+                    self.assertEqual(args[1:6], ['exec', '--user', '0', '--workdir', '/'])
                     kwargs['stdout'].write(binary.read_bytes())
                     kwargs['stdout'].flush()
                     return subprocess.CompletedProcess(args, 0)
