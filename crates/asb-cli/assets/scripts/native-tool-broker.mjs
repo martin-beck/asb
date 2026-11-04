@@ -101,9 +101,13 @@ export class NativeToolBroker {
 }
 
 export async function brokerRequest(path, message) {
+  // Serialize before opening a socket so cyclic or unsupported values reject
+  // the caller's promise instead of throwing from an asynchronous callback.
+  const payload = JSON.stringify(message);
+  if (typeof payload !== 'string') throw new TypeError('Native tool broker message is not representable as JSON');
   const socket = connect(path);
   const response = frame(socket);
-  socket.once('connect', () => socket.write(`${JSON.stringify(message)}\n`));
+  socket.once('connect', () => socket.write(`${payload}\n`));
   const result = await response;
   if (!result.ok) { const error = new Error(result.message); error.name = result.name || 'Error'; throw error; }
   return result;

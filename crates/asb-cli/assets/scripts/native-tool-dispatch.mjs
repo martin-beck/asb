@@ -44,7 +44,17 @@ export function createNativeDispatcher(mode, socket, {
       throw error;
     }
     await boundary(end);
-    await brokerRequest(socket, { op: 'finish', token, outcome: { ok: true, value: encodeResult(value) } });
+    let outcome;
+    try {
+      outcome = JSON.parse(JSON.stringify({ ok: true, value: encodeResult(value) }));
+      if (!Object.hasOwn(outcome, 'value')) throw new TypeError('Native tool result is not representable as JSON');
+    } catch (error) {
+      // Do not leave an open exchange when a result cannot be represented.
+      // The recording is invalid, but the caller still sees its original error.
+      await brokerRequest(socket, { op: 'invalidate', token }).catch(() => {});
+      throw error;
+    }
+    await brokerRequest(socket, { op: 'finish', token, outcome });
     return value;
   };
 }

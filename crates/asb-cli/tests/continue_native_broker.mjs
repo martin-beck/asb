@@ -82,6 +82,25 @@ try {
   assert.equal(invalid.pending.size, 0, 'invalid exchanges must not remain pending');
   await assert.rejects(invalid.finish(), /unfinished/);
   await invalid.abort();
+  for (const makeValue of [() => undefined, () => 1n, () => { const value = {}; value.self = value; return value; }]) {
+    const invalidResult = new NativeToolBroker('record');
+    await invalidResult.listen(socket);
+    const dispatch = createNativeDispatcher('record', socket);
+    await assert.rejects(dispatch({ name: 'Read', arguments: {} }, {}, async () => makeValue()), TypeError);
+    assert.equal(invalidResult.pending.size, 0, 'unserializable results must release their token');
+    await assert.rejects(invalidResult.finish(), /unfinished/);
+    await invalidResult.abort();
+  }
+  const invalidEncoder = new NativeToolBroker('record');
+  await invalidEncoder.listen(socket);
+  const encoderError = new Error('fixture encoder failure');
+  const encoderDispatch = createNativeDispatcher('record', socket, { encodeResult: () => { throw encoderError; } });
+  await assert.rejects(encoderDispatch({ name: 'Read', arguments: {} }, {}, async () => 'value'), error => error === encoderError);
+  assert.equal(invalidEncoder.pending.size, 0);
+  await assert.rejects(invalidEncoder.finish(), /unfinished/);
+  await invalidEncoder.abort();
+  const cyclic = {}; cyclic.self = cyclic;
+  await assert.rejects(brokerRequest(socket, cyclic), TypeError);
   for (const failingBoundary of ['begin', 'end']) {
     const incomplete = new NativeToolBroker('record');
     await incomplete.listen(socket);
