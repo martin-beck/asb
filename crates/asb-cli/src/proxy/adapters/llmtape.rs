@@ -239,6 +239,7 @@ impl ProxyAdapter for LlmtapeAdapter {
             None
         };
         if let Some(observer) = observer.as_ref() {
+            inherit_observer_in_child(&mut command, observer);
             command.env(
                 "ASB_TAPE_PERFETTO_OBSERVER_FD",
                 observer.as_raw_fd().to_string(),
@@ -848,6 +849,24 @@ impl Scratch {
     }
 }
 
+// File::try_clone creates a close-on-exec descriptor. Clear that flag only
+// in the child after fork, avoiding a window where another concurrent launch
+// could inherit this private observer capability.
+fn inherit_observer_in_child(command: &mut Command, observer: &std::fs::File) {
+    use std::os::unix::process::CommandExt;
+    let fd = observer.as_raw_fd();
+    #[allow(unsafe_code)]
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
@@ -880,6 +899,82 @@ mod tests {
     use crate::tape::{Mode, Session};
     use std::io::{Read, Write};
     use std::net::TcpStream;
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    #[test]
+    fn builtin_observer_survives_exec_without_changing_parent_descriptor() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::net::UnixStream;
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let file =
+            unsafe { std::fs::File::from_raw_fd(std::os::fd::IntoRawFd::into_raw_fd(writer)) };
+        let file = file.try_clone().unwrap();
+        let fd = file.as_raw_fd();
+        let script = format!("require('node:fs').writeSync({fd}, 'observed')");
+        let status = std::process::Command::new("node")
+            .args(["-e", &script])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "the cloned descriptor must start close-on-exec"
+        );
+        let mut child = std::process::Command::new("node");
+        child.args(["-e", &script]);
+        super::inherit_observer_in_child(&mut child, &file);
+        assert!(child.status().unwrap().success());
+        let mut message = [0; 8];
+        reader.read_exact(&mut message).unwrap();
+        assert_eq!(&message, b"observed");
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builtin_proxy_emits_request_observations_after_exec() {
+        use std::os::unix::net::UnixStream;
+        let root = test_root();
+        let cassette = cassette(&root);
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let report = root.join("request-report.json");
+        let session = Session::start_for_agent_at(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            crate::tape::AgentContext {
+                workspace: &root,
+                agent: None,
+                recorder: None,
+                invocation_dir: &root,
+                perfetto_observer: Some(std::fs::File::from(std::os::fd::OwnedFd::from(writer))),
+                perfetto_trace_id: Some("test-trace".into()),
+                perfetto_report: Some(report.clone()),
+            },
+        )
+        .unwrap();
+        assert!(request(&session, r#"{"model":"m","messages":[{"content":"work in <asb-workspace>"}],"tools":[{"type":"function"}]}"#).contains("200 OK"));
+        session.stop().unwrap();
+        let mut events = String::new();
+        reader.read_to_string(&mut events).unwrap();
+        assert!(events.contains("begin llm_request 1\n"));
+        assert!(events.contains("end llm_request 1\n"));
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+        assert_eq!(value["begun"], 1);
+        assert_eq!(value["ended"], 1);
+        assert_eq!(value["complete"], true);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn registry_recording_settings_preserve_invocation_context() {
