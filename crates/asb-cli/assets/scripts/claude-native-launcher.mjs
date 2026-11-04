@@ -41,7 +41,8 @@ export async function launchClaude({program, args, environment = process.env, st
 }
 
 export async function main(args = process.argv.slice(1)) {
-  const [program, ...rest] = args;
+  const [marker, program, ...rest] = args;
+  if (marker !== '--asb-claude-executable') throw new Error('Claude replay client identity is missing');
   const result = await launchClaude({program, args: rest});
   if (result.signal) {
     const numbers = {SIGHUP: 1, SIGINT: 2, SIGTERM: 15};

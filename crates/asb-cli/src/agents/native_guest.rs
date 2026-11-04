@@ -105,6 +105,7 @@ pub(super) fn broker(
             .ok_or_else(|| Error::Run("Claude native hook runtime is missing".into()))?;
         for name in [
             "claude-native-hook.mjs",
+            "claude-native-launcher.mjs",
             "native-tool-broker.mjs",
             "native-tool-session.mjs",
             "native-snapshot-boundary.mjs",

@@ -131,8 +131,12 @@ fn output_usage(
     // the top-level typed result usage is an agent-owned usage record.
     Default::default()
 }
-fn native_record(mode: Option<crate::tape::Mode>) -> bool {
-    mode == Some(crate::tape::Mode::Record) && std::env::var_os("ASB_FS_MARKER_SOCKET").is_some()
+fn native_snapshot(mode: Option<crate::tape::Mode>) -> bool {
+    match mode {
+        Some(crate::tape::Mode::Record) => std::env::var_os("ASB_FS_MARKER_SOCKET").is_some(),
+        Some(crate::tape::Mode::Replay) => std::env::var_os("ASB_FS_REPLAY_SOCKET").is_some(),
+        None => false,
+    }
 }
 
 fn command(context: &CommandContext<'_>) -> CommandSpec {
@@ -155,8 +159,16 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
         ],
         prompt_delivery: super::PromptDelivery::Embedded,
     };
-    if native_record(context.native_tool_mode) {
+    if native_snapshot(context.native_tool_mode) {
         specification.args.retain(|arg| arg != "--bare");
+        if context.native_tool_mode == Some(crate::tape::Mode::Replay) {
+            let mut args = vec!["--input-type=module".into(), "-e".into(),
+                "import(process.env.ASB_CLAUDE_NATIVE_LAUNCHER).then(m=>m.main()).catch(()=>{console.error('Claude replay launch failed; inspect retained ASB evidence');process.exitCode=1})".into(),
+                "--".into(), "--asb-claude-executable".into(), context.executable.into()];
+            args.extend(specification.args);
+            specification.args = args;
+            specification.program = "node".into();
+        }
     }
     specification
 }
@@ -297,17 +309,48 @@ fn start_native_service(
     else {
         return Ok(None);
     };
-    if mode != crate::tape::Mode::Record {
-        return Err(Error::Run(
-            "Claude native snapshot replay is not implemented".into(),
-        ));
-    }
-    let bundle = std::fs::canonicalize(executable)
+    let selected = if mode == crate::tape::Mode::Replay {
+        let args = command.get_args().collect::<Vec<_>>();
+        let index = args
+            .iter()
+            .position(|arg| *arg == "--asb-claude-executable")
+            .ok_or_else(|| {
+                Error::Run("Claude native replay launcher is missing its executable".into())
+            })?;
+        args.get(index + 1)
+            .ok_or_else(|| Error::Run("Claude native replay executable is missing".into()))?
+            .to_os_string()
+    } else {
+        executable.into()
+    };
+    let bundle = std::fs::canonicalize(selected)
         .map_err(|_| Error::Run("Claude native executable is unavailable".into()))?;
-    let assets = [(
-        "claude-native-hook.mjs",
-        include_str!("../../../assets/scripts/claude-native-hook.mjs"),
-    )];
+    let assets = [
+        (
+            "claude-native-hook.mjs",
+            include_str!("../../../assets/scripts/claude-native-hook.mjs"),
+        ),
+        (
+            "claude-native-launcher.mjs",
+            include_str!("../../../assets/scripts/claude-native-launcher.mjs"),
+        ),
+        (
+            "claude-webfetch-tape.mjs",
+            include_str!("../../../assets/scripts/claude-webfetch-tape.mjs"),
+        ),
+        (
+            "claude-webfetch-certificate.mjs",
+            include_str!("../../../assets/scripts/claude-webfetch-certificate.mjs"),
+        ),
+        (
+            "claude-webfetch-proxy.mjs",
+            include_str!("../../../assets/scripts/claude-webfetch-proxy.mjs"),
+        ),
+        (
+            "claude-webfetch-service.mjs",
+            include_str!("../../../assets/scripts/claude-webfetch-service.mjs"),
+        ),
+    ];
     let settings = super::super::native_guest::Settings {
         agent: "claude-code",
         bundle: &bundle,
@@ -318,7 +361,7 @@ fn start_native_service(
         snapshot: &snapshot,
         assets: &assets,
     };
-    let (service, _directory, socket) = super::super::native_guest::broker(command, &settings)?;
+    let (mut service, _directory, socket) = super::super::native_guest::broker(command, &settings)?;
     let hook_state = command
         .get_envs()
         .find_map(|(name, value)| {
@@ -327,15 +370,39 @@ fn start_native_service(
                 .flatten()
         })
         .ok_or_else(|| Error::Run("Claude native hook directory is missing".into()))?;
-    let entry = Path::new(hook_state)
+    let runtime = Path::new(hook_state)
         .parent()
         .ok_or_else(|| Error::Run("Claude native hook runtime is missing".into()))?
-        .join("claude-native-hook.mjs");
+        .to_path_buf();
+    if mode == crate::tape::Mode::Replay {
+        let ready = runtime.join("webfetch-ready.json");
+        service
+            .env(
+                "ASB_CLAUDE_WEB_EVIDENCE",
+                "/opt/asb-private/adapter-model-evidence.json",
+            )
+            .env("ASB_CLAUDE_WEB_RUNTIME", &runtime)
+            .env("ASB_CLAUDE_WEB_READY", &ready);
+        command.env("ASB_CLAUDE_WEB_READY", ready).env(
+            "ASB_CLAUDE_NATIVE_LAUNCHER",
+            runtime.join("claude-native-launcher.mjs"),
+        );
+    }
     command
-        .env("ASB_CLAUDE_NATIVE_ENTRY", entry)
+        .env(
+            "ASB_CLAUDE_NATIVE_ENTRY",
+            runtime.join("claude-native-hook.mjs"),
+        )
         .env("ASB_CLAUDE_NATIVE_SOCKET", socket)
         .env("ASB_CLAUDE_NATIVE_MARKER", marker)
-        .env("ASB_CLAUDE_NATIVE_MODE", "record");
+        .env(
+            "ASB_CLAUDE_NATIVE_MODE",
+            if mode == crate::tape::Mode::Replay {
+                "replay"
+            } else {
+                "record"
+            },
+        );
     Ok(Some(super::super::auxiliary::AuxiliaryPlan::new(service)))
 }
 
@@ -351,7 +418,7 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
             config_root.display()
         ))
     })?;
-    if native_record(context.tape.map(|tape| tape.mode)) {
+    if native_snapshot(context.tape.map(|tape| tape.mode)) {
         let native_dir = context.runtime_dir.join("claude-native");
         let state = native_dir.join("hook-state");
         std::fs::create_dir_all(&state).map_err(crate::io_error)?;
@@ -427,7 +494,7 @@ fn configure_mcp_servers(
         context.mcp_servers,
         context.mcp_tape,
     )?;
-    let native = native_record(context.tape.map(|tape| tape.mode));
+    let native = native_snapshot(context.tape.map(|tape| tape.mode));
     if launches.is_empty() && (context.tape.is_none() || native) {
         return Ok(());
     }
@@ -495,7 +562,7 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
-    if native_record(Some(tape.mode)) {
+    if native_snapshot(Some(tape.mode)) {
         return Ok(());
     }
     let launch = super::super::tool_replay_mcp::launch(context, tape)?;
@@ -745,6 +812,97 @@ if (normalizeRequest(altered).system[0].text === a.system[0].text) throw Error('
         assert!(extract_guest_replay_evidence(&path).is_err());
         std::fs::write(&path, b"not-json\n").unwrap();
         assert!(extract_guest_replay_evidence(&path).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn snapshot_replay_stages_launcher_and_native_hooks() {
+        const CHILD: &str = "ASB_TEST_CLAUDE_NATIVE_REPLAY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "agents::adapters::claude_code::tests::snapshot_replay_stages_launcher_and_native_hooks"])
+                .env(CHILD, "1").env("ASB_FS_REPLAY_SOCKET", "/fixture/replay.sock")
+                .env_remove("ASB_FS_MARKER_SOCKET").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "asb-claude-replay-{}-{}",
+            std::process::id(),
+            crate::tools::runtime::unique_id()
+        ));
+        let workspace = root.join("workspace");
+        let runtime = root.join("runtime");
+        let run = root.join("run");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config: crate::benchmark::BenchmarkConfig = toml::from_str("agent='claude-code'\nworkload='fixture'\nprovider='fixture'\nmodel='fixture'\nworkspace='/work'\n").unwrap();
+        let spec = command(&CommandContext {
+            executable: "/bin/true",
+            config: &config,
+            endpoint: None,
+            interface: None,
+            prompt: "fixture",
+            max_steps: None,
+            native_tool_mode: Some(crate::tape::Mode::Replay),
+            native_tool: None,
+        });
+        assert_eq!(spec.program, "node");
+        assert!(!spec.args.iter().any(|arg| arg == "--bare"));
+        let mut cmd = std::process::Command::new(&spec.program);
+        cmd.args(&spec.args);
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::AnthropicMessages,
+            base_url: "http://127.0.0.1:4321/v1".into(),
+            credential: None,
+            authentication: crate::endpoint::Authentication::None,
+        };
+        let cassette = root.join("recording.zip");
+        let tape = super::super::TapeContext {
+            mode: crate::tape::Mode::Replay,
+            cassette: &cassette,
+        };
+        let mut context = PreparationContext {
+            command: &mut cmd,
+            model: "fixture",
+            connection: &connection,
+            workspace: &workspace,
+            runtime_dir: &runtime,
+            run_dir: &run,
+            mcp_servers: &[],
+            mcp_tape: None,
+            tape: Some(tape),
+        };
+        prepare_tool_replay(&mut context, tape).unwrap();
+        prepare_adapter(&mut context).unwrap();
+        assert!(!runtime.join("claude-code/asb-local-tools.json").exists());
+        let sidecar = root.join("sidecar");
+        let digest = "a".repeat(64);
+        assert!(
+            start_native_service(
+                &mut cmd,
+                "node",
+                &run,
+                Some(crate::tape::Mode::Replay),
+                Some(&sidecar),
+                Some(&digest)
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            runtime
+                .join("claude-native/claude-native-launcher.mjs")
+                .is_file()
+        );
+        assert!(
+            cmd.get_envs()
+                .any(|(name, value)| name == "ASB_CLAUDE_WEB_READY" && value.is_some())
+        );
+        assert!(
+            cmd.get_envs()
+                .any(|(name, value)| name == "ASB_CLAUDE_NATIVE_MODE"
+                    && value == Some(std::ffi::OsStr::new("replay")))
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
