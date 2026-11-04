@@ -150,11 +150,17 @@ mod tests {
 
     #[test]
     fn delegation_normalization_preserves_agent_output() {
-        let mut value = json!({"_meta":{"subagent_session_id":"20261104_4"},"content":[{"text":"# Background Task Result: 20261104_4\n\n**Duration:** 17s (2 turns)\n\n## Output\n\nKeep 20261104_4 and **Duration:** 17s"},{"text":"Unrelated 20261104_4"}]});
+        let mut value = json!({"Ok":{"_meta":{"subagent_session_id":"20261104_4", "duration_secs":17},"content":[{"text":"# Background Task Result: 20261104_4\n\n**Duration:** 17s (2 turns)\n\n## Output\n\nKeep 20261104_4 and **Duration:** 17s"},{"text":"Unrelated 20261104_4", "details":{"subagent_session_id":"20261104_4", "duration_secs":17}}]}});
         canonicalize_delegation(&mut value, "20261104_4", "20261104_2");
-        assert_eq!(value["_meta"]["subagent_session_id"], "20261104_2");
-        assert_eq!(value["content"][0]["text"], "# Background Task Result: 20261104_2\n\n**Duration:** <duration>s (2 turns)\n\n## Output\n\nKeep 20261104_4 and **Duration:** 17s");
-        assert_eq!(value["content"][1]["text"], "Unrelated 20261104_4");
+        assert_eq!(value["Ok"]["_meta"]["subagent_session_id"], "20261104_2");
+        assert_eq!(value["Ok"]["_meta"]["duration_secs"], 0);
+        assert_eq!(value["Ok"]["content"][0]["text"], "# Background Task Result: 20261104_2\n\n**Duration:** <duration>s (2 turns)\n\n## Output\n\nKeep 20261104_4 and **Duration:** 17s");
+        assert_eq!(value["Ok"]["content"][1]["text"], "Unrelated 20261104_4");
+        assert_eq!(
+            value["Ok"]["content"][1]["details"]["subagent_session_id"],
+            "20261104_4"
+        );
+        assert_eq!(value["Ok"]["content"][1]["details"]["duration_secs"], 17);
     }
 
     #[test]

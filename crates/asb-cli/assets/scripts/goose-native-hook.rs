@@ -86,57 +86,55 @@ fn publish_identities(
 }
 
 fn canonicalize_delegation(value: &mut Value, live: &str, recorded: &str) {
-    match value {
-        Value::String(text) => {
-            let task_prefix = format!("Task {live} started in background:");
-            let result_prefix = format!("# Background Task Result: {live}\n");
-            if text.starts_with(&task_prefix) {
-                *text = text.replacen(
-                    &task_prefix,
-                    &format!("Task {recorded} started in background:"),
-                    1,
+    let Some(result) = value.get_mut("Ok") else {
+        return;
+    };
+    if let Some(meta) = result.get_mut("_meta").and_then(Value::as_object_mut) {
+        if meta.get("subagent_session_id").and_then(Value::as_str) == Some(live) {
+            meta.insert("subagent_session_id".into(), Value::String(recorded.into()));
+            if meta.get("duration_secs").is_some_and(Value::is_number) {
+                meta.insert("duration_secs".into(), Value::from(0));
+            }
+        }
+    }
+    let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for item in content {
+        let Some(Value::String(text)) = item.get_mut("text") else {
+            continue;
+        };
+        let task_prefix = format!("Task {live} started in background:");
+        let result_prefix = format!("# Background Task Result: {live}\n");
+        if text.starts_with(&task_prefix) {
+            *text = text.replacen(
+                &task_prefix,
+                &format!("Task {recorded} started in background:"),
+                1,
+            );
+            let suffix = format!("use load(source: \"{live}\").");
+            if text.ends_with(&suffix) {
+                text.truncate(text.len() - suffix.len());
+                text.push_str(&format!("use load(source: \"{recorded}\")."));
+            }
+        } else if text.starts_with(&result_prefix) {
+            *text = text.replacen(
+                &result_prefix,
+                &format!("# Background Task Result: {recorded}\n"),
+                1,
+            );
+            if let Some((header, output)) = text.split_once("\n\n## Output\n\n") {
+                static DURATION: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+                let duration = DURATION.get_or_init(|| {
+                    regex::Regex::new(r"(?m)^(\*\*Duration:\*\* )\d+s").expect("static regex")
+                });
+                *text = format!(
+                    "{}\n\n## Output\n\n{}",
+                    duration.replace(header, "${1}<duration>s"),
+                    output
                 );
-                let suffix = format!("use load(source: \"{live}\").");
-                if text.ends_with(&suffix) {
-                    text.truncate(text.len() - suffix.len());
-                    text.push_str(&format!("use load(source: \"{recorded}\")."));
-                }
-            } else if text.starts_with(&result_prefix) {
-                *text = text.replacen(
-                    &result_prefix,
-                    &format!("# Background Task Result: {recorded}\n"),
-                    1,
-                );
-                if let Some((header, output)) = text.split_once("\n\n## Output\n\n") {
-                    static DURATION: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-                    let duration = DURATION.get_or_init(|| {
-                        regex::Regex::new(r"(?m)^(\*\*Duration:\*\* )\d+s").expect("static regex")
-                    });
-                    *text = format!(
-                        "{}\n\n## Output\n\n{}",
-                        duration.replace(header, "${1}<duration>s"),
-                        output
-                    );
-                }
             }
         }
-        Value::Array(values) => {
-            for item in values {
-                canonicalize_delegation(item, live, recorded);
-            }
-        }
-        Value::Object(values) => {
-            for (key, item) in values {
-                if key == "subagent_session_id" && item.as_str() == Some(live) {
-                    *item = Value::String(recorded.into());
-                } else if key == "duration_secs" && item.is_number() {
-                    *item = Value::from(0);
-                } else {
-                    canonicalize_delegation(item, live, recorded);
-                }
-            }
-        }
-        _ => {}
     }
 }
 
