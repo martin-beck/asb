@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import {extractWebFetchPage} from '../assets/scripts/claude-webfetch-tape.mjs';
+const prefix = '\nWeb page content:\n---\n';
+const suffix = '\n---\n\nfixture prompt\n\nProvide a concise response based only on the content above.\nFurther instructions';
+const page = '<html>fixture café\n---\nordinary separator</html>\n';
+const message = prefix + page + suffix;
+assert.equal(extractWebFetchPage(message, 'fixture prompt', Buffer.byteLength(page)), page);
+assert.throws(() => extractWebFetchPage(message, 'other prompt', Buffer.byteLength(page)), /missing or ambiguous/);
+assert.throws(() => extractWebFetchPage(message, 'fixture prompt', Buffer.byteLength(page) - 1), /byte count/);
+assert.throws(() => extractWebFetchPage(message.slice(1), 'fixture prompt', Buffer.byteLength(page)), /unsupported/);
+assert.throws(() => extractWebFetchPage(prefix + page + suffix + suffix, 'fixture prompt', Buffer.byteLength(page)), /ambiguous/);
+assert.throws(() => extractWebFetchPage(message, '', 0), /invalid/);
+console.log('Claude WebFetch recorded page extraction passed');

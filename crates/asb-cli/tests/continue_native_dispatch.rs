@@ -12,6 +12,7 @@ fn native_dispatch_prototype_handles_loader_ordering_and_child_transport() {
         "continue_native_broker.mjs",
         "claude_native_hook.mjs",
         "claude_native_service.mjs",
+        "claude_webfetch_tape.mjs",
         "continue_native_sidecar.mjs",
         "continue_native_supervisor.mjs",
         "continue_native_service.mjs",

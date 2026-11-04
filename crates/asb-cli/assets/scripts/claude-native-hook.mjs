@@ -60,13 +60,15 @@ export async function recordHook(event, { directory, socket, marker }) {
   }
 }
 
-// Experimental Bash, Read and WebSearch replay probe. Production must handle all native
+// Experimental native replay probe; WebFetch requires a local replay proxy. Production must handle all native
 // tools and failure shapes before this can be selected by the adapter.
-export async function replayHook(event, { directory, socket }) {
+export async function replayHook(event, { directory, socket, webProxy }) {
   const state = statePath(directory, event);
-  if (!socket || !['Bash', 'Read', 'WebSearch'].includes(event.tool_name) || !event.tool_input ||
+  if (!socket || !['Bash', 'Read', 'WebSearch', 'WebFetch'].includes(event.tool_name) || !event.tool_input ||
       typeof event.tool_input !== 'object' || Array.isArray(event.tool_input))
-    throw new TypeError('Claude native replay probe supports Bash, Read and WebSearch only');
+    throw new TypeError('Claude native replay probe does not support this native tool');
+  if (event.tool_name === 'WebFetch' && !webProxy)
+    throw new Error('Claude WebFetch replay requires a local recorded-content proxy');
   if (event.hook_event_name === 'PreToolUse') {
     const file = await open(state, 'wx', 0o600);
     try {
@@ -129,7 +131,7 @@ export async function main() {
       chunks.push(chunk);
     }
     const event = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    const options = {directory, socket: process.env.ASB_CLAUDE_NATIVE_SOCKET, marker: process.env.ASB_CLAUDE_NATIVE_MARKER};
+    const options = {directory, socket: process.env.ASB_CLAUDE_NATIVE_SOCKET, marker: process.env.ASB_CLAUDE_NATIVE_MARKER, webProxy: process.env.ASB_CLAUDE_NATIVE_WEB_PROXY};
     const mode = process.env.ASB_CLAUDE_NATIVE_MODE ?? 'record';
     if (!['record', 'replay'].includes(mode)) throw new Error('Claude native hook mode is invalid');
     const result = mode === 'replay' ? await replayHook(event, options) : await recordHook(event, options);

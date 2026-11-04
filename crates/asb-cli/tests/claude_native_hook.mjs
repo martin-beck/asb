@@ -17,10 +17,10 @@ const marker = createServer(client => {
   });
 });
 const moduleUrl = new URL('../assets/scripts/claude-native-hook.mjs', import.meta.url).href;
-function hook(event, mode = 'record') {
+function hook(event, mode = 'record', webProxy = '') {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', `import(${JSON.stringify(moduleUrl)}).then(m=>m.main()).catch(e=>{console.error(e.message);process.exitCode=1})`], {
-      env: {...process.env, ASB_CLAUDE_NATIVE_DIRECTORY: root, ASB_CLAUDE_NATIVE_SOCKET: socket, ASB_CLAUDE_NATIVE_MARKER: markerPath, ASB_CLAUDE_NATIVE_MODE: mode},
+      env: {...process.env, ASB_CLAUDE_NATIVE_DIRECTORY: root, ASB_CLAUDE_NATIVE_SOCKET: socket, ASB_CLAUDE_NATIVE_MARKER: markerPath, ASB_CLAUDE_NATIVE_MODE: mode, ASB_CLAUDE_NATIVE_WEB_PROXY: webProxy},
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let out = '', err = '';
@@ -58,9 +58,13 @@ try {
   assert.equal((await hook({...childB, hook_event_name: 'PreToolUse'})).code, 0);
   assert.equal((await hook({...childB, hook_event_name: 'PostToolUse', tool_response: {child: 'b'}})).code, 0);
   assert.equal((await hook({...childA, hook_event_name: 'PostToolUse', tool_response: {child: 'a'}})).code, 0);
+  const fetch = {...base, tool_use_id: 'fetch-call', tool_name: 'WebFetch', tool_input: {url: 'https://example.com/fixture', prompt: 'fixture prompt'}};
+  const fetchResult = {bytes: 7, code: 200, codeText: 'OK', result: 'summary', durationMs: 1, url: fetch.tool_input.url};
+  assert.equal((await hook({...fetch, hook_event_name: 'PreToolUse'})).code, 0);
+  assert.equal((await hook({...fetch, hook_event_name: 'PostToolUse', tool_response: fetchResult})).code, 0);
   const events = await broker.finish();
-  assert.equal(events.length, 6);
-  assert.deepEqual(events.slice(4).map(event => JSON.parse(event.outcome.value.json).child), ['b', 'a']);
+  assert.equal(events.length, 7);
+  assert.deepEqual(events.slice(4, 6).map(event => JSON.parse(event.outcome.value.json).child), ['b', 'a']);
   assert.deepEqual(JSON.parse(events[1].outcome.value.json), {error: failureText, is_interrupt: false});
   assert.deepEqual(events[0].request, {tool: 'Read', input: {file_path: '/fixture'}});
   assert.equal(events[0].outcome.value.json, '{"z":1,"a":2}');
@@ -72,7 +76,7 @@ try {
   await playback.listen(socket);
   const unsupported = await hook({...base, tool_name: 'WebFetch', hook_event_name: 'PreToolUse'}, 'replay');
   assert.notEqual(unsupported.code, 0);
-  assert.match(unsupported.err, /Bash, Read and WebSearch only/);
+  assert.match(unsupported.err, /requires a local recorded-content proxy/);
   const before = await hook({...bash, hook_event_name: 'PreToolUse'}, 'replay');
   assert.equal(before.code, 0, before.err);
   assert.equal(JSON.parse(before.out).hookSpecificOutput.updatedInput.command, ':');
@@ -116,6 +120,15 @@ try {
   assert.equal(searchAfter.code, 0, searchAfter.err);
   assert.deepEqual(JSON.parse(searchAfter.out).hookSpecificOutput.updatedToolOutput, searchResult);
   await searchPlayback.finish();
+  const fetchPlayback = new NativeToolBroker('replay', [{...events[6], ordinal: 0}], async () => {});
+  await fetchPlayback.listen(socket);
+  const fetchBefore = await hook({...fetch, hook_event_name: 'PreToolUse'}, 'replay', 'fixture-proxy');
+  assert.equal(fetchBefore.code, 0, fetchBefore.err);
+  assert.deepEqual(JSON.parse(fetchBefore.out).hookSpecificOutput.updatedInput, fetch.tool_input);
+  const fetchAfter = await hook({...fetch, hook_event_name: 'PostToolUse', tool_response: {...fetchResult, durationMs: 9}}, 'replay', 'fixture-proxy');
+  assert.equal(fetchAfter.code, 0, fetchAfter.err);
+  assert.deepEqual(JSON.parse(fetchAfter.out).hookSpecificOutput.updatedToolOutput, fetchResult);
+  await fetchPlayback.finish();
   const failed = await hook({...base, hook_event_name: 'PostToolUse', tool_response: {}});
   assert.notEqual(failed.code, 0);
   assert.match(readFileSync(join(root, 'hook-failed'), 'utf8'), /failed/);
