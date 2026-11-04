@@ -5,6 +5,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { ContinueBroker } from './continue-native-broker.mjs';
 import { replayEffects } from './continue-snapshot-boundary.mjs';
+import { sealPendingBroker } from './continue-native-custody.mjs';
+import { open } from 'node:fs/promises';
 
 export async function startContinue({ node, cli, args, cwd, env, bundle, socket, marker, mode, events = [], stdio = 'inherit' }) {
   if (!node || !cli || !bundle || !socket || !cwd || !Array.isArray(args) || !env || !['record', 'replay'].includes(mode)) {
@@ -28,4 +30,14 @@ export async function startContinue({ node, cli, args, cwd, env, bundle, socket,
     child.once('close', (code, signal) => resolve({ code, signal }));
   });
   return { child, exited, broker };
+}
+
+// The ASB process owner must supply its actual descendant-quiescence result;
+// principal exit alone cannot certify that delegated agents are finished.
+export async function publishPending(supervisor, { programSha256, destination, treeQuiesced }) {
+  if (treeQuiesced !== true || !destination) throw new Error('Continue native recording requires confirmed process-tree quiescence and an artifact destination');
+  await supervisor.exited;
+  const pending = await sealPendingBroker(supervisor.broker, { programSha256 });
+  const file = await open(destination, 'wx', 0o600);
+  try { await file.writeFile(pending); await file.sync(); } finally { await file.close(); }
 }

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, existsSync, unlinkSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, unlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startContinue } from '../assets/scripts/continue-native-supervisor.mjs';
+import { startContinue, publishPending } from '../assets/scripts/continue-native-supervisor.mjs';
+import { createHash } from 'node:crypto';
 
 const root = mkdtempSync(join(tmpdir(), 'asb-continue-supervisor-'));
 try {
@@ -19,8 +20,13 @@ if(result!=='result')process.exit(2);
     bundle, socket, stdio: 'ignore' };
   const record = await startContinue({ ...config, mode: 'record' });
   assert.deepEqual(await record.exited, { code: 0, signal: null });
-  const events = await record.broker.finish();
+  const events = record.broker.session.preview();
   assert.equal(events.length, 1);
+  const artifact = join(root, 'pending.jsonl');
+  const programSha256 = createHash('sha256').update(readFileSync(bundle)).digest('hex');
+  await assert.rejects(publishPending(record, { programSha256, destination:artifact, treeQuiesced:false }), /quiescence/);
+  await publishPending(record, { programSha256, destination:artifact, treeQuiesced:true });
+  assert.doesNotMatch(readFileSync(artifact,'utf8'), /workspace_effect/);
   assert.equal(existsSync(effect), true);
   unlinkSync(effect);
   const replay = await startContinue({ ...config, mode: 'replay', events });

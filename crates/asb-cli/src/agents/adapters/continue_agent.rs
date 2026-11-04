@@ -46,6 +46,11 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     },
     super::super::ArtifactSpec {
         namespace: "continue",
+        filename: "native-tool-pending.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "continue",
         filename: "session.json",
         format: super::super::ArtifactFormat::JsonSingleton {
             directories: &["config", "sessions"],
@@ -374,20 +379,29 @@ fn prepare_tool_replay(
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
-    let Some(value) = validated_session(context.frozen) else {
-        return AgentArtifacts::default();
-    };
-    AgentArtifacts {
-        token_usage: Some(session_usage(
+    let mut artifacts = AgentArtifacts::default();
+    if let Some(bytes) = context
+        .frozen
+        .bytes("native-tool-pending.jsonl")
+        .filter(|bytes| !bytes.is_empty())
+    {
+        artifacts
+            .sealed_artifacts
+            .push(super::super::SealedArtifact {
+                kind: "native-tool-deferred".into(),
+                bytes: bytes.to_vec(),
+            });
+    }
+    if let Some(value) = validated_session(context.frozen) {
+        artifacts.token_usage = Some(session_usage(
             value,
             context.interface == Some(crate::endpoint::Interface::AnthropicMessages)
                 && !context.anthropic_input_includes_cache,
-        )),
-        steps: session_steps(value),
-        tool_call_count: session_tool_call_count(value),
-        final_response: None,
-        ..Default::default()
+        ));
+        artifacts.steps = session_steps(value);
+        artifacts.tool_call_count = session_tool_call_count(value);
     }
+    artifacts
 }
 
 fn session_history_compacted(value: &serde_json::Value) -> bool {
@@ -552,6 +566,37 @@ fn configure(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn deferred_native_recording_is_collected_without_a_session_document() {
+        use crate::agents::AgentAdapter;
+        let root = std::env::temp_dir().join(format!(
+            "asb-continue-native-artifact-{}",
+            std::process::id()
+        ));
+        let run = root.join("run");
+        let mut owner =
+            crate::agents::ArtifactOwner::prepare(&run, super::ADAPTER.artifact_specs()).unwrap();
+        std::fs::write(
+            run.join("continue/native-tool-pending.jsonl"),
+            b"{\"event\":\"launch\"}\n",
+        )
+        .unwrap();
+        let frozen = owner.freeze();
+        assert!(!frozen.error);
+        let artifacts = super::collect(&crate::agents::CollectionContext {
+            frozen: &frozen,
+            provider_capture: None,
+            run_dir: &run,
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert_eq!(artifacts.sealed_artifacts.len(), 1);
+        assert_eq!(artifacts.sealed_artifacts[0].kind, "native-tool-deferred");
+        assert!(artifacts.token_usage.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn deferred_native_recording_binds_only_a_valid_settled_snapshot_digest() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
