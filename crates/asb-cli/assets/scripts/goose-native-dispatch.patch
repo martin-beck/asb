@@ -1,0 +1,63 @@
+diff --git a/crates/goose/Cargo.toml b/crates/goose/Cargo.toml
+index 59d699a..281b31c 100644
+--- a/crates/goose/Cargo.toml
++++ b/crates/goose/Cargo.toml
+@@ -12,0 +13 @@ default = []
++asb-native-probe = []
+diff --git a/crates/goose/src/agents/extension_manager/lease.rs b/crates/goose/src/agents/extension_manager/lease.rs
+index ecb7d46..616c23c 100644
+--- a/crates/goose/src/agents/extension_manager/lease.rs
++++ b/crates/goose/src/agents/extension_manager/lease.rs
+@@ -691,12 +691,26 @@ impl ExtensionLease {
+-            let mut result = client
+-                .call_tool(
+-                    &call_context,
+-                    &server_name,
+-                    arguments,
+-                    cancellation_token.clone(),
+-                )
+-                .await
+-                .map_err(|e| match e {
+-                    ServiceError::McpError(error_data) => error_data,
+-                    _ => ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None),
+-                })?;
++            #[cfg(all(any(test, feature = "asb-native-probe"), target_os = "linux"))]
++            let probe_call = serde_json::json!({"tool":server_name, "args":arguments});
++            let invoke = async {
++                client
++                    .call_tool(
++                        &call_context,
++                        &server_name,
++                        arguments,
++                        cancellation_token.clone(),
++                    )
++                    .await
++                    .map_err(|e| match e {
++                        ServiceError::McpError(error_data) => error_data,
++                        _ => ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None),
++                    })
++            };
++            #[cfg(all(any(test, feature = "asb-native-probe"), target_os = "linux"))]
++            let mut result = super::asb_native_probe::intercept(
++                &session_id,
++                probe_call,
++                &cancellation_token,
++                invoke,
++            )
++            .await?;
++            #[cfg(not(all(any(test, feature = "asb-native-probe"), target_os = "linux")))]
++            let mut result = invoke.await?;
+diff --git a/crates/goose/src/agents/extension_manager/mod.rs b/crates/goose/src/agents/extension_manager/mod.rs
+index c9d032c..d54d097 100644
+--- a/crates/goose/src/agents/extension_manager/mod.rs
++++ b/crates/goose/src/agents/extension_manager/mod.rs
+@@ -15,0 +16,3 @@ use tracing::warn;
++#[cfg(all(any(test, feature = "asb-native-probe"), target_os = "linux"))]
++mod asb_native_probe;
++
+diff --git a/crates/goose/src/agents/extension_manager/asb_native_probe.rs b/crates/goose/src/agents/extension_manager/asb_native_probe.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/goose/src/agents/extension_manager/asb_native_probe.rs
+@@ -0,0 +1 @@
++include!(env!("ASB_GOOSE_HOOK_SOURCE"));
