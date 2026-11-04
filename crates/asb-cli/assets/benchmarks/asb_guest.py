@@ -295,8 +295,23 @@ def stage_auxiliary_tools(task, tools, owner):
         raise ExecutionError('guest auxiliary tools must be a name-to-path mapping')
     paths = {}
     architecture = getattr(task.workspace,'image_identity',{}).get('architecture')
+    optional = {'qemu-img', 'qemu-storage-daemon'}
+    optional_bundles = {}
+    if optional.issubset(tools):
+        try:
+            optional_bundles = {name: bundle_tool(tools[name],name,architecture,root='/opt/asb-private')
+                                for name in optional}
+        except (ExecutionError, OSError):
+            # A sparse workspace does not use QEMU. An unavailable or
+            # incompatible optional fallback must not prevent its preparation.
+            optional_bundles = {}
     for name, source in tools.items():
-        files, _ = bundle_tool(source,name,architecture,root='/opt/asb-private')
+        if name in optional:
+            if name not in optional_bundles:
+                continue
+            files, _ = optional_bundles[name]
+        else:
+            files, _ = bundle_tool(source,name,architecture,root='/opt/asb-private')
         directories = set()
         for relative,_,_ in files:
             parent = Path(relative).parent
@@ -453,7 +468,7 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
     if getattr(task,'snapshot',False):
         if task.tool_mode not in ('record', 'replay'):
             raise ExecutionError('experimental snapshot requires tool recording or replay')
-        if resources is None or set(auxiliary) != {'btrfs','mkfs.btrfs','rsync'}:
+        if resources is None or not {'btrfs','mkfs.btrfs','rsync'}.issubset(auxiliary):
             raise ExecutionError('experimental snapshot preparation needs staged filesystem tools')
         from asb_docker import docker_command
         from asb_snapshot_control import GuestSnapshot
@@ -463,6 +478,7 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
         supervisor=GuestSnapshot(task,auxiliary,owner,docker_command(),deadline,replay=replay)
         resources.callback(supervisor.close)
         environment['ASB_FS_REPLAY_SOCKET' if replay else 'ASB_FS_MARKER_SOCKET']='/opt/asb-private/snapshot.sock'
+        guest['snapshot_private_mount'] = True
     return guest,environment
 
 
@@ -566,11 +582,12 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
         if preparation_budget is not None:
             preparation_budget.remaining()
             preparation_budget.active = False
-    stderr_tail = bytearray()
+    output_tails = {'stdout': bytearray(), 'stderr': bytearray()}
     def agent_output(stream, chunk):
-        if stream == 'stderr':
-            stderr_tail.extend(chunk)
-            del stderr_tail[:-256 * 1024]
+        if stream in output_tails:
+            tail = output_tails[stream]
+            tail.extend(chunk)
+            del tail[:-256 * 1024]
         if on_output is not None:
             on_output(stream, chunk)
     result = task.workspace.execute(["/opt/asb-runtime/asb", "__asb-agent"], environment=environment,
@@ -601,12 +618,12 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
         # Unknown usage is never invented from text or an expected minimum.
         # Preserve the end of the private guest stderr: the bounded transport
         # prefix may omit the actual failure after a verbose agent run.
-        if stderr_tail:
+        if output_tails['stderr']:
             try:
                 path = task.artifacts / 'guest-error-stderr.log'
                 descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(descriptor, 'wb') as log:
-                    log.write(stderr_tail)
+                    log.write(output_tails['stderr'])
                 observation['guest_error_log'] = path.name
             except OSError:
                 pass
@@ -635,6 +652,23 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
     result["metadata"].update(exact)
     result.update(exact)
     observation.update(exact)
+    # A failed agent can still produce valid metadata. Preserve the diagnostic
+    # tails before the snapshot supervisor settles, since settlement may fail
+    # and otherwise hide the original cause from the caller.
+    if result['metadata'].get('exit_code') not in (None, 0) or result.get('exit_code') not in (None, 0):
+        for stream, tail in output_tails.items():
+            if not tail:
+                continue
+            path = task.artifacts / f'guest-error-{stream}.log'
+            if stream == 'stderr' and observation.get('guest_error_log'):
+                continue
+            try:
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, 'wb') as log:
+                    log.write(tail)
+                observation[f'guest_error_{stream}_log'] = path.name
+            except OSError:
+                pass
     journal = task.artifacts / "execution.json"
     journal.write_text(json.dumps(observation))
     journal.chmod(0o600)

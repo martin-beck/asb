@@ -40,13 +40,19 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     for name in ('target','root','socket','output','btrfs','mkfs','rsync'):
         parser.add_argument('--'+name,required=True)
-    parser.add_argument('--size',type=int,required=True)
+    parser.add_argument('--size',type=int)
+    parser.add_argument('--qemu-img')
+    parser.add_argument('--qemu-storage')
     parser.add_argument('--apply-final',action='store_true')
     parser.add_argument('--replay-archive')
     args=parser.parse_args(argv)
+    if bool(args.qemu_img) != bool(args.qemu_storage):
+        parser.error('qemu-img and qemu-storage must be supplied together')
     root=Path(args.root);root.mkdir(parents=True,exist_ok=False)
     workspace=SnapshotWorkspace(root/'workspace.img',root/'filesystem',args.size,
-                                [args.mkfs],[args.btrfs],[args.rsync])
+                                [args.mkfs],[args.btrfs],[args.rsync],
+                                [args.qemu_img] if args.qemu_img else None,
+                                [args.qemu_storage] if args.qemu_storage else None)
     bound=False;server=None;worker=None;service=None
     try:
         mounted=workspace.prepare(args.target)
@@ -68,15 +74,24 @@ def main(argv=None):
         if sys.stdin.readline()!='STOP\n':
             service.invalidate()
             raise RuntimeError('snapshot supervisor control ended unexpectedly')
-        server.shutdown();server.server_close();worker.join();server=None
-        Path(args.socket).unlink(missing_ok=True)
-        service.finish();service=None
+        server.shutdown()
+        try:
+            # Closing the service wakes replay markers whose predecessor never
+            # arrived. Joining server threads first would otherwise deadlock.
+            service.finish()
+        finally:
+            server.interrupt_clients()
+            server.server_close();worker.join();server=None
+            Path(args.socket).unlink(missing_ok=True)
+        service=None
         if not args.replay_archive:
             export_snapshot_streams(store,args.output,[args.btrfs])
         print('SAVED',flush=True)
     finally:
         if server is not None:
-            server.shutdown();server.server_close();worker.join()
+            if service is not None:
+                service.invalidate()
+            server.shutdown();server.interrupt_clients();server.server_close();worker.join()
             Path(args.socket).unlink(missing_ok=True)
         if service is not None:
             service.invalidate()

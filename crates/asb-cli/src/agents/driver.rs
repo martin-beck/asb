@@ -93,6 +93,10 @@ pub(crate) struct GuestRequest {
     pub run_dir: PathBuf,
     #[serde(default)]
     pub replay: bool,
+    /// Hide the snapshot supervisor's private storage mount from the agent
+    /// while retaining the independently mounted task workspace.
+    #[serde(default)]
+    pub snapshot_private_mount: bool,
     /// Exact provider-tape path forwarded by the owning runner.  It is never
     /// inferred from the provider endpoint because record and replay are both
     /// routed through loopback services.
@@ -449,6 +453,52 @@ fn activate_unprivileged_project_access(
     Ok(())
 }
 
+/// Snapshot bookkeeping is an ASB implementation detail, not part of the
+/// task filesystem. Keep it out of the agent's view without changing the
+/// supervisor's mount namespace or detaching the task's workspace bind.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn hide_snapshot_storage() -> Result<(), Error> {
+    use std::ffi::CString;
+    let root = CString::new("/").expect("static mount path");
+    let storage = CString::new("/asb-snapshot-storage").expect("static mount path");
+    // SAFETY: paths are NUL-terminated constants; these calls affect only the
+    // current process after unshare, which gives it a private mount namespace.
+    unsafe {
+        if libc::unshare(libc::CLONE_NEWNS) != 0 {
+            return Err(Error::Run(format!(
+                "cannot isolate snapshot bookkeeping mount: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if libc::mount(
+            std::ptr::null(),
+            root.as_ptr(),
+            std::ptr::null(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            std::ptr::null(),
+        ) != 0
+        {
+            return Err(Error::Run(format!(
+                "cannot make snapshot mount namespace private: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if libc::umount2(storage.as_ptr(), libc::MNT_DETACH) != 0 {
+            return Err(Error::Run(format!(
+                "cannot hide snapshot bookkeeping mount: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn hide_snapshot_storage() -> Result<(), Error> {
+    Err(Error::Run("snapshot mount isolation requires Linux".into()))
+}
+
 /// Permit traversal into the already writable `agent-state` child without
 /// exposing the sealed runtime prefix for listing, reading, or writing.
 #[cfg(target_os = "linux")]
@@ -701,6 +751,11 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
 
 fn run(request: GuestRequest) -> Result<u8, Error> {
     request.capsule.validate()?;
+    // Establish this before preparation or collectors can start threads;
+    // Linux cannot unshare the filesystem context after it is shared.
+    if request.snapshot_private_mount {
+        hide_snapshot_storage()?;
+    }
     let retained =
         request.process_lifetime == crate::workloads::session::ProcessLifetime::ThroughEvaluation;
     if retained {

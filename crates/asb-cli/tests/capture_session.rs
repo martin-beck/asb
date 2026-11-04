@@ -10,6 +10,7 @@ fn recorder_accounting_and_publication_fault_matrix() {
         .arg(root.join("tests/capture_session.mjs"))
         .arg(root.join("tests/capture_http.mjs"))
         .arg(root.join("tests/tape_normalization.mjs"))
+        .arg(root.join("tests/tape_stream_paths.mjs"))
         .current_dir(root)
         .isolated_env()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())

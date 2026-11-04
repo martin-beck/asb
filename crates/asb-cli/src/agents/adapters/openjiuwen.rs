@@ -163,8 +163,6 @@ fn process(executable: &str) -> Result<crate::launch::ProcessLaunch, Error> {
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     let mut args = vec![
         "-v".into(),
-        "-w".into(),
-        context.config.workspace.clone(),
         "--model".into(),
         context.config.model.clone(),
         "--provider".into(),
@@ -323,6 +321,16 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         "OPENJIUWEN_API_KEY",
         connection.credential.as_deref().unwrap_or("asb-local"),
     );
+    // OpenJiuwen's workspace is its internal rail state; filesystem tools use
+    // the process cwd independently. Keep that state in the attempt runtime.
+    context.command.env(
+        "OPENJIUWEN_WORKSPACE",
+        context.runtime_dir.join("openjiuwen/workspace"),
+    );
+    context.command.env(
+        "ASB_OPENJIUWEN_LOG_DIR",
+        context.runtime_dir.join("openjiuwen/logs"),
+    );
     context.command.env(
         "ASB_OPENJIUWEN_NATIVE_TOOL_RECORD",
         context.run_dir.join("openjiuwen/native-tool-sidecar.jsonl"),
@@ -400,6 +408,18 @@ mod tests {
                     .then_some(value.and_then(OsStr::to_str))
             });
             assert_eq!(actual.flatten(), expected);
+            let state = command.get_envs().find_map(|(key, value)| {
+                (key == OsStr::new("OPENJIUWEN_WORKSPACE"))
+                    .then_some(value)
+                    .flatten()
+            });
+            assert_eq!(state, Some(root.join("openjiuwen/workspace").as_os_str()));
+            let logs = command.get_envs().find_map(|(key, value)| {
+                (key == OsStr::new("ASB_OPENJIUWEN_LOG_DIR"))
+                    .then_some(value)
+                    .flatten()
+            });
+            assert_eq!(logs, Some(root.join("openjiuwen/logs").as_os_str()));
         }
     }
 
@@ -592,10 +612,14 @@ for (const request of invalid) {
         });
         assert_eq!(spec.args.first().map(String::as_str), Some("-v"));
         assert_eq!(spec.args.last().map(String::as_str), Some("repair"));
+        // `-w` selects OpenJiuwen's internal state directory, not the
+        // process cwd used by its file and shell tools. Adapter preparation
+        // selects an attempt-local state directory instead of the task tree.
         assert!(
-            spec.args
-                .windows(2)
-                .any(|pair| pair[0] == "-w" && pair[1] == "workspace")
+            !spec
+                .args
+                .iter()
+                .any(|arg| arg == "-w" || arg == "--workspace")
         );
         assert!(
             spec.args
@@ -838,6 +862,7 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         ));
         let package = root.join("openjiuwen");
         for relative in [
+            "core/common/logging",
             "core/foundation/llm/schema",
             "core/foundation/tool",
             "core/context_engine/context",
@@ -852,6 +877,8 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         for relative in [
             "__init__.py",
             "core/__init__.py",
+            "core/common/__init__.py",
+            "core/common/logging/__init__.py",
             "core/foundation/__init__.py",
             "core/foundation/llm/__init__.py",
             "core/foundation/llm/schema/__init__.py",
@@ -877,13 +904,28 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
         )
         .unwrap();
         std::fs::write(
+            package.join("core/common/logging/log_config.py"),
+            r#"
+import os
+from pathlib import Path
+def get_log_config_snapshot(): return {"level": "INFO", "log_path": "original"}
+def configure_log_config(config):
+    assert config["level"] == "INFO"
+    assert config["log_path"] == os.environ["ASB_OPENJIUWEN_LOG_DIR"]
+    Path(os.environ["ASB_TEST_LOG_CONFIGURED"]).write_text("ready")
+"#,
+        )
+        .unwrap();
+        std::fs::write(
             package.join("harness/cli/agent/factory.py"),
             r#"
 class Config:
-    enable_read_image_multimodal = None
-    parallel_tool_calls = None
+    enable_read_image_multimodal = True
+    parallel_tool_calls = True
 class Agent:
     _deep_config = Config()
+def _build_memory_rail(_cfg): return "memory-enabled"
+def _build_subagents(_model): return ["subagent-enabled"]
 def create_agent(_cfg):
     return Agent(), object()
 "#,
@@ -892,6 +934,10 @@ def create_agent(_cfg):
         std::fs::write(
             package.join("core/foundation/llm/schema/message_chunk.py"),
             r#"
+import os
+from pathlib import Path
+if os.environ.get("ASB_OPENJIUWEN_LOG_DIR"):
+    assert Path(os.environ["ASB_TEST_LOG_CONFIGURED"]).read_text() == "ready"
 class AssistantMessageChunk:
     usage_metadata = None
     def __add__(self, other): return other
@@ -1047,8 +1093,10 @@ from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 from openjiuwen.core.context_engine.context.context import Context
 async def main():
     agent, _tracker = factory.create_agent(None)
-    assert agent._deep_config.enable_read_image_multimodal is False
-    assert agent._deep_config.parallel_tool_calls is False
+    assert agent._deep_config.enable_read_image_multimodal is True
+    assert agent._deep_config.parallel_tool_calls is True
+    assert factory._build_memory_rail(None) == "memory-enabled"
+    assert factory._build_subagents(None) == ["subagent-enabled"]
     result = []
     context = Context()
     for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool):
@@ -1100,8 +1148,36 @@ asyncio.run(main())
         )
         .unwrap();
         std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let socket = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!(".openjiuwen-snapshot-{}.sock", std::process::id()));
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_messages = messages.clone();
+        let server_stop = stop.clone();
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            while !server_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut line = String::new();
+                        std::io::BufReader::new(stream.try_clone().unwrap())
+                            .read_line(&mut line)
+                            .unwrap();
+                        server_messages.lock().unwrap().push(line);
+                        stream.write_all(b"1\n").unwrap();
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("snapshot test listener failed: {error}"),
+                }
+            }
+        });
         let sidecar = root.join("native.jsonl");
         let marker = root.join("executed");
+        let log_marker = root.join("log-configured");
         let record_workspace = root.join("record-workspace");
         let replay_workspace = root.join("replay-workspace");
         let record = super::process(entry.to_str().unwrap())
@@ -1109,9 +1185,12 @@ asyncio.run(main())
             .direct()
             .env("PYTHONPATH", &root)
             .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_OPENJIUWEN_LOG_DIR", root.join("private-logs"))
+            .env("ASB_TEST_LOG_CONFIGURED", &log_marker)
             .env("ASB_TEST_WORKSPACE", &record_workspace)
             .env("ASB_TEST_RENDER_PREFIX", "record:")
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_RECORD", &sidecar)
+            .env("ASB_FS_MARKER_SOCKET", &socket)
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &record_workspace)
             .output()
             .unwrap();
@@ -1147,11 +1226,33 @@ asyncio.run(main())
             .arg(&sidecar)
             .env("PYTHONPATH", &root)
             .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_OPENJIUWEN_LOG_DIR", root.join("private-logs"))
+            .env("ASB_TEST_LOG_CONFIGURED", &log_marker)
             .env("ASB_TEST_WORKSPACE", &replay_workspace)
             .env("ASB_TEST_RENDER_PREFIX", "replay:")
+            .env("ASB_FS_REPLAY_SOCKET", &socket)
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
             .output()
             .unwrap();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        server.join().unwrap();
+        std::fs::remove_file(&socket).unwrap();
+        let messages = messages.lock().unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|line| line.starts_with("tool-begin:"))
+                .count(),
+            20
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|line| line.starts_with("tool-end:"))
+                .count(),
+            40
+        );
+        drop(messages);
         assert!(
             replay.status.success(),
             "{}",

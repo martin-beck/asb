@@ -16,6 +16,12 @@ SUBMISSION_GIT_DIR = "/opt/asb-swebench-baseline.git"
 SUBMISSION_WORKTREE = "/testbed"
 
 
+def reflog_digest(entries):
+    # Git merges refs by timestamp. Ref-local positions are explicit in %gD,
+    # so canonicalize the cross-ref order without discarding any entry.
+    return hashlib.sha256(b"".join(sorted(entries.splitlines(keepends=True)))).hexdigest()
+
+
 class SweBenchTask:
     def __init__(self, client, catalog_path, task_id, artifacts, tool_mode="none", snapshot=False):
         if tool_mode not in ("none", "record", "replay"):
@@ -108,17 +114,22 @@ class SweBenchTask:
         """Retain the base and its ancestors, excluding later image history."""
         original = worktree + '/.git'
         old_git = clean_git + '.unfiltered'
+        committer = {'GIT_COMMITTER_NAME':'ASB workload preparation',
+                     'GIT_COMMITTER_EMAIL':'asb-workload@localhost'}
         self.checked(['mkdir', clean_git])
         self.checked(['git', 'init', '--bare', clean_git])
         self.checked(['git', '--git-dir='+clean_git, 'fetch', '--no-tags',
                       '--no-recurse-submodules', '--no-write-fetch-head', worktree, base], timeout=600)
         self.checked(['git', '--git-dir='+clean_git, 'cat-file', '-e', base+'^{commit}'])
         self.checked(['git', '--git-dir='+clean_git, 'config', 'core.bare', 'false'])
-        self.checked(['git', '--git-dir='+clean_git, 'update-ref', 'refs/heads/asb-base', base])
-        self.checked(['git', '--git-dir='+clean_git, 'symbolic-ref', 'HEAD', 'refs/heads/asb-base'])
+        self.checked(['git', '--git-dir='+clean_git, 'update-ref', 'refs/heads/asb-base', base],
+                     environment=committer)
+        self.checked(['git', '--git-dir='+clean_git, 'symbolic-ref', 'HEAD', 'refs/heads/asb-base'],
+                     environment=committer)
         self.checked(['mv', original, old_git])
         self.checked(['mv', clean_git, original])
-        self.checked(['git', '-C', worktree, 'reset', '--mixed', base], timeout=300)
+        self.checked(['git', '-C', worktree, 'reset', '--mixed', base],
+                     environment=committer, timeout=300)
         # The disposable image's unrelated refs and unreachable objects must
         # not remain available to the benchmark agent through this copy.
         self.checked(['rm', '-rf', old_git], timeout=300)
@@ -166,8 +177,8 @@ class SweBenchTask:
                 # Ref/index, commit, action and actor remain bound. Only raw
                 # timestamp/timezone fields are omitted; SDK reset actors are
                 # explicitly stable rather than inherited from container names.
-                "reflog_sha256":hashlib.sha256(checked(prefix + ["reflog", "show", "--all",
-                    "--format=%gD%x00%H%x00%gs%x00%gn%x00%ge%x00"], 4*1024**2)).hexdigest(),
+                "reflog_sha256":reflog_digest(checked(prefix + ["reflog", "show", "--all",
+                    "--format=%gD%x00%H%x00%gs%x00%gn%x00%ge%x00"], 4*1024**2)),
                 "local_config_sha256":hashlib.sha256(checked(prefix + ["config", "--null", "--local", "--list"], 4*1024**2)).hexdigest()}
         before = git_state()
         if git_state() != before:

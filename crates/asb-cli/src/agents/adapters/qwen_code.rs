@@ -13,7 +13,7 @@ export function normalizeRequest(request) {
   if (!body || !Array.isArray(body.messages)) return body;
   const normalize = (content) => {
     if (typeof content !== 'string' || !content.includes('<persisted-output>')) return content;
-    return content.replace(/(Full output saved to: )\/opt\/asb-private\/agent-state\/home\/\.qwen\/tmp\/[0-9a-f]+\/tool-results\/(?:call_[A-Za-z0-9_-]+|call-<asb-uuid>|asb-replay-\d+-<asb-timestamp>-\d+)\.txt/g, '$1<asb-qwen-persisted-output>');
+    return content.replace(/(Full output saved to: )\/opt\/asb-private\/agent-state\/home\/\.qwen\/tmp\/[0-9a-f]+\/tool-results\/(?:call_[A-Za-z0-9_-]+|call-(?:<asb-uuid>|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})|asb-replay-\d+-<asb-timestamp>-\d+)\.txt/g, '$1<asb-qwen-persisted-output>');
   };
   const visit = (value) => {
     if (typeof value === 'string') return normalize(value);

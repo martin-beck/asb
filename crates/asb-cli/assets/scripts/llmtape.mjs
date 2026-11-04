@@ -10,7 +10,7 @@ import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { quiesceNetworkRequests, networkFetch } from "./network-fetch.mjs";
 import { CaptureSession, completedSseResponse, responseDelivery } from "./capture-session.mjs";
-import { normalizeWorkspacePaths } from "./tape-normalization.mjs";
+import { normalizeOpenAiSseWorkspacePaths, normalizeWorkspacePaths, replaceExactWorkspace } from "./tape-normalization.mjs";
 
 const MAX_BODY = 16 * 1024 * 1024;
 const MAX_DELAY_MS = 60 * 60 * 1000;
@@ -131,11 +131,12 @@ async function replayResponse(response, interaction) {
   // before replay so agents never execute commands in the record directory.
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const body = workspace
-    ? normalizeSseWorkspaceFragments(
-        normalizeCassetteBody(interaction.response.body || ""),
+    ? replaceExactWorkspace(normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(
+        interaction.response.body || "",
         "<asb-workspace>",
         workspace,
-      ).replaceAll("<asb-workspace>", workspace)
+        true,
+      ), "<asb-workspace>", workspace, true), "<asb-workspace>", workspace)
     : interaction.response.body || "";
   // Request matching intentionally redacts provider-generated tool-call IDs,
   // but Claude requires IDs to be unique across turns. Give each replayed
@@ -341,6 +342,30 @@ function normalizePytestTestMapsAddress(value) {
   );
 }
 
+// Preserve provider response content exactly, apart from workspace paths that
+// must point into the replay replica. Request canonicalization is only for
+// matching and must never rewrite dates, UUIDs or other model-generated data.
+function normalizeRecordedResponse(body) {
+  const workspace = process.env.ASB_TAPE_WORKSPACE;
+  const marker = "<asb-workspace>";
+  // JSON may escape slashes, so rewrite decoded string values before
+  // serializing rather than relying on bytewise path matching.
+  try {
+    JSON.parse(body); // Validate, but leave numbers and untouched tokens byte-for-byte intact.
+    return body.replace(/"(?:\\.|[^"\\])*"/g, (token) => {
+      const decoded = JSON.parse(token);
+      const rewritten = replaceExactWorkspace(decoded, workspace, marker);
+      return rewritten === decoded ? token : JSON.stringify(rewritten);
+    });
+  } catch {
+    // SSE and non-JSON response bodies are handled as text below.
+  }
+  const fragmented = normalizeSseWorkspaceFragments(body, workspace, marker, true);
+  return replaceExactWorkspace(
+    normalizeOpenAiSseWorkspacePaths(fragmented, workspace, marker, true), workspace, marker,
+  );
+}
+
 function normalizeCassetteBody(body, url = "") {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
@@ -380,7 +405,7 @@ function normalizeCassetteBody(body, url = "") {
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const callIdentifiers = new Map();
   const normalized = normalizeFunctionRenderingAddress(normalizePytestElapsed(
-    normalizeWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace)
+    normalizeWorkspacePaths(normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace), workspace)
       .replaceAll(workspace || "\u0000", "<asb-workspace>"))
     // Preserve distinct call IDs before the generic UUID normalizer below.
     // OpenCode uses `call-<uuid>` while some OpenAI-compatible clients use
@@ -392,15 +417,9 @@ function normalizeCassetteBody(body, url = "") {
       }
       return `"${callIdentifiers.get(identifier)}"`;
     })
-    // Agent SDKs generate fresh message/session IDs for every invocation;
-    // those identifiers are not provider semantics and must not prevent a
-    // cassette recorded in one process from replaying in another.
-    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<asb-uuid>")
-    .replace(/\b1[0-9]{12,}\b/g, "<asb-timestamp>")
-    // Shell directory listings include filesystem mtimes. They are not
-    // provider input and naturally differ between record and replay.
-    .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{2}:\d{2}\b/g, "<asb-file-mtime>")
-    .replace(/\b20\d{2}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?\b/g, "<asb-file-mtime>")
+    // Generated replay protocol IDs contain a local clock; literal timestamps
+    // in prompts, tool arguments and tool results remain replay-significant.
+    .replace(/(asb-replay-\d+-)1[0-9]{12,}(?=-\d+)/g, "$1<asb-timestamp>")
     // WorkBuddy derives a memory-project slug from the absolute workspace;
     // canonicalize that generated slug when record and replay roots differ.
     .replace(/srv-data-projects-[A-Za-z0-9_.-]+-(?:sweep-(?:record|replay)-[A-Za-z0-9_.-]+|workspaces(?:-replay)?-[A-Za-z0-9_.-]+)/g, "<asb-project-workspace>")
@@ -669,7 +688,7 @@ function normalizeCassetteBody(body, url = "") {
 // event boundaries and cannot be normalized by a regex over the raw SSE text.
 // Reassemble each contiguous content block, normalize it, and emit the result
 // in the first fragment while retaining the event boundaries for the client.
-function normalizeSseWorkspaceFragments(body, workspace, replacement = "<asb-workspace>") {
+function normalizeSseWorkspaceFragments(body, workspace, replacement = "<asb-workspace>", exactOnly = false) {
   if (!body.includes("partial_json")) return body;
   const lines = body.split(/(?<=\n)/);
   const groups = [];
@@ -693,7 +712,7 @@ function normalizeSseWorkspaceFragments(body, workspace, replacement = "<asb-wor
     }
   }
   for (const group of groups) {
-    const value = normalizeWorkspaceText(group.parts.join(""), workspace, replacement);
+    const value = normalizeWorkspaceText(group.parts.join(""), workspace, replacement, exactOnly);
     let cursor = 0;
     for (let offset = 0; offset < group.indices.length; offset += 1) {
       const lineIndex = group.indices[offset];
@@ -711,10 +730,9 @@ function normalizeSseWorkspaceFragments(body, workspace, replacement = "<asb-wor
   return lines.join("");
 }
 
-function normalizeWorkspaceText(value, workspace, replacement = "<asb-workspace>") {
-  return (workspace ? value.replaceAll(workspace, replacement) : value)
-    .replace(/\/?(?:[A-Za-z0-9_.-]+\/)+workspace-concurrency-\d+(?:\.asb-agent-runtime)?/g, replacement)
-    .replace(/\/?(?:[A-Za-z0-9_.-]+\/)+workspace(?=\/|["\\])/g, replacement);
+function normalizeWorkspaceText(value, workspace, replacement = "<asb-workspace>", exactOnly = false) {
+  const exact = replaceExactWorkspace(value, workspace, replacement);
+  return exactOnly ? exact : normalizeWorkspacePaths(exact, replacement);
 }
 
 function requestKey(request) {
@@ -732,9 +750,6 @@ const interactions = mode === "replay"
         if (interaction.request) {
           interaction.request.url = requestPath(interaction.request.url);
           interaction.request.body = normalizeCassetteBody(interaction.request.body, interaction.request.url);
-        }
-        if (interaction.response?.body) {
-          interaction.response.body = normalizeCassetteBody(interaction.response.body);
         }
         return interaction;
       })
@@ -1087,7 +1102,7 @@ async function handle(request, response, recording) {
   const recordedResponse = {
     status: upstreamResponse.status,
     headers: responseHeaders(upstreamResponse.headers),
-    body: normalizeCassetteBody(responseBody),
+    body: normalizeRecordedResponse(responseBody),
   };
   const delayMs = Math.min(Math.max(0, Math.round(performance.now() - startedAt)), MAX_DELAY_MS);
   const interaction = {
