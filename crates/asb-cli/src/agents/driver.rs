@@ -471,6 +471,7 @@ fn grant_unprivileged_traverse(_: &Path) -> Result<(), Error> {
 
 struct PreparedGuest {
     command: Command,
+    agent_route: Option<crate::launch::CommandRoute>,
     stdin_prompt: Option<Vec<u8>>,
     artifact_owner: super::ArtifactOwner,
     instrumentation: Option<crate::workloads::staging::Guard>,
@@ -625,16 +626,35 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
     } else {
         &specification.program
     };
-    let mut command = super::select_process(adapter, process_program, native_tool)?.direct();
-    command.args(specification.args);
+    let mut launch = super::select_process(adapter, process_program, native_tool)?;
+    for argument in specification.args {
+        launch.arg(argument);
+    }
     let stdin_prompt = match specification.prompt_delivery {
         super::PromptDelivery::Argument => {
-            command.arg(&request.prompt);
+            launch.arg(&request.prompt);
             None
         }
         super::PromptDelivery::Embedded => None,
         super::PromptDelivery::Stdin => Some(request.prompt.as_bytes().to_vec()),
     };
+    let use_agent_gate = cfg!(target_os = "linux");
+    let gate = if use_agent_gate {
+        Some(crate::process_gate::executable().map_err(crate::io_error)?)
+    } else {
+        None
+    };
+    #[cfg(target_os = "linux")]
+    let (mut command, route) = if request.process_lifetime
+        == crate::workloads::session::ProcessLifetime::ThroughEvaluation
+    {
+        launch.measured(gate.as_deref().expect("Linux agent gate"))
+    } else {
+        launch.native(gate.as_deref())
+    };
+    #[cfg(not(target_os = "linux"))]
+    let (mut command, route) = launch.native(gate.as_deref());
+    let agent_route = use_agent_gate.then_some(route);
     command
         .current_dir(&workspace)
         .stdin(if stdin_prompt.is_some() {
@@ -689,6 +709,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
     )?;
     Ok(PreparedGuest {
         command,
+        agent_route,
         stdin_prompt,
         artifact_owner,
         instrumentation,
@@ -740,6 +761,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     };
     let PreparedGuest {
         mut command,
+        mut agent_route,
         stdin_prompt,
         mut artifact_owner,
         instrumentation,
@@ -761,8 +783,14 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             &request.namespace_collectors,
         )
         .map_err(Error::Run)?;
-        session.agent_launch_prepared(&crate::launch::TargetLaunch::direct(&command));
-        session.attach_pid(std::process::id()).map_err(Error::Run)?;
+        let target = agent_route.as_ref().map_or_else(
+            || crate::launch::TargetLaunch::direct(&command),
+            |route| route.target(&command),
+        );
+        session.agent_launch_prepared(&target);
+        if agent_route.is_none() {
+            session.attach_pid(std::process::id()).map_err(Error::Run)?;
+        }
         Some(session)
     };
     if let (Some(guard), Some(owner)) = (&instrumentation, &request.owned_instrumentation) {
@@ -773,29 +801,36 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         &request.project_root,
         &request.runtime_dir,
     )?;
-    // Preparation and command construction are complete before the outer
-    // collector attaches. Credentials remain only in process memory/env.
-    println!("__ASB_GATE__:{}", std::process::id());
-    std::io::stdout().flush().map_err(crate::io_error)?;
-    #[cfg(unix)]
-    crate::process_gate::pause_current()
-        .map_err(|error| Error::Run(format!("cannot stop prepared guest agent: {error}")))?;
-    #[cfg(not(unix))]
-    return Err(Error::Run(
-        "guest agent gate currently requires Unix signals".into(),
-    ));
+    // Other platforms retain the existing driver gate.
+    if agent_route.is_none() {
+        println!("__ASB_GATE__:{}", std::process::id());
+        std::io::stdout().flush().map_err(crate::io_error)?;
+        #[cfg(unix)]
+        crate::process_gate::pause_current()
+            .map_err(|error| Error::Run(format!("cannot stop prepared guest agent: {error}")))?;
+        #[cfg(not(unix))]
+        return Err(Error::Run(
+            "guest agent gate currently requires Unix signals".into(),
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    let retained_pid = std::cell::Cell::new(None);
     #[cfg(target_os = "linux")]
     let held = if retained {
         Some(crate::runner::workload_process::start_with_spawn(
-            &mut command,
+            (&mut command, agent_route.take()),
             stdin_prompt.as_deref(),
             &mut std::io::stdout(),
             &mut std::io::stderr(),
             std::time::Duration::from_secs_f64(request.timeout_seconds),
             |pid| {
+                retained_pid.set(Some(pid));
                 if let Some(session) = capture.as_mut() {
+                    session.attach_pid(pid).map_err(Error::Run)?;
                     session.agent_process_spawned(pid).map_err(Error::Run)?;
                 }
+                println!("__ASB_GATE__:{pid}");
+                std::io::stdout().flush().map_err(crate::io_error)?;
                 Ok(())
             },
             |status, elapsed, timed_out| {
@@ -805,7 +840,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
                     .expect("retained owner validated");
                 println!(
                     "\n__ASB_AGENT_ENDED__:{}:{}:{}:{}:{}",
-                    std::process::id(),
+                    retained_pid.get().expect("retained principal started"),
                     owner.token,
                     status.code().unwrap_or(1),
                     elapsed,
@@ -817,11 +852,16 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     } else {
         None
     };
-    let (output, transcript_truncated, execution_timed_out) = if retained {
+    let (output, transcript_truncated, execution_timed_out, observation) = if retained {
         #[cfg(target_os = "linux")]
         {
             let held = held.as_ref().expect("retained process");
-            (held.output.clone(), held.truncated, held.timed_out)
+            (
+                held.output.clone(),
+                held.truncated,
+                held.timed_out,
+                crate::process_termination::Observation::observed(held.output.status),
+            )
         }
         #[cfg(not(target_os = "linux"))]
         return Err(Error::Input(
@@ -838,8 +878,10 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         #[cfg(unix)]
         let mut transport_err = crate::runner::GuestTransport::new(&std::io::stderr(), deadline)
             .map_err(crate::io_error)?;
+        let gated_agent = agent_route.is_some();
         let captured = crate::runner::run_guest_process(
             &mut command,
+            agent_route.take(),
             stdin_prompt.as_deref(),
             #[cfg(unix)]
             &mut transport_out,
@@ -852,7 +894,14 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             std::time::Duration::from_secs_f64(request.timeout_seconds),
             &mut |pid| {
                 if let Some(session) = capture.as_mut() {
+                    if gated_agent {
+                        session.attach_pid(pid).map_err(Error::Run)?;
+                    }
                     session.agent_process_spawned(pid).map_err(Error::Run)?;
+                }
+                if gated_agent {
+                    println!("__ASB_GATE__:{pid}");
+                    std::io::stdout().flush().map_err(crate::io_error)?;
                 }
                 Ok(())
             },
@@ -861,6 +910,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             captured.output,
             captured.transcript_truncated,
             captured.timed_out,
+            captured.observation,
         )
     };
     let namespace_collectors = capture
@@ -897,7 +947,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     // Until the first durable publication transfers the frozen evidence, Drop
     // retains raw artifacts. This interim record never asserts settlement.
     let mut result = GuestResult {
-        observation: crate::process_termination::Observation::observed(output.status),
+        observation,
         artifact_error: Some(
             "agent scratch settlement pending; source or custody may remain".into(),
         ),
@@ -910,7 +960,10 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         timed_out: execution_timed_out,
         workload_owner: request.workload_owner,
         schema_version: 1,
-        exit_code: output.status.code(),
+        exit_code: match observation.process_termination {
+            Some(crate::process_termination::ProcessTermination::Code(code)) => Some(code),
+            _ => None,
+        },
         final_response: adapter.final_response_with_artifacts(
             &stdout,
             &frozen,
@@ -959,7 +1012,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             .expect("retained namespace owner");
         println!(
             "\n__ASB_WORKLOAD_READY__:{}:{}:{}",
-            std::process::id(),
+            retained_pid.get().expect("retained principal started"),
             owner.token,
             output.status.code().unwrap_or(1)
         );

@@ -19,6 +19,8 @@ use sha2::{Digest, Sha256};
 
 #[cfg(target_os = "linux")]
 const TRACE_READY_FD: &str = "ASB_NATIVE_TRACE_READY_FD";
+#[cfg(target_os = "linux")]
+const MEASURE_PRINCIPAL: &str = "ASB_GATE_MEASURE_PRINCIPAL";
 
 #[cfg(target_os = "linux")]
 const INSTALL_LOCK_FDS: &str = "ASB_GATE_INSTALL_LOCK_FDS";
@@ -233,6 +235,16 @@ pub(crate) fn run_gate(args: &[OsString]) -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     };
     #[cfg(target_os = "linux")]
+    let measured_principal = match std::env::var(MEASURE_PRINCIPAL) {
+        Ok(value) if value == "1" => true,
+        Err(std::env::VarError::NotPresent) => false,
+        _ => return std::process::ExitCode::from(2),
+    };
+    #[cfg(target_os = "linux")]
+    unsafe {
+        std::env::remove_var(MEASURE_PRINCIPAL)
+    };
+    #[cfg(target_os = "linux")]
     let mut receipt = match receipt::Sender::from_environment() {
         Ok(receipt) => receipt,
         Err(error) => {
@@ -306,12 +318,26 @@ pub(crate) fn run_gate(args: &[OsString]) -> std::process::ExitCode {
         let root_executable = trace
             .as_ref()
             .and_then(|_| root_executable_identity(program));
-        let mut command = target_command(program, target_args, arg0, trace.is_some())?;
+        let mut command = if measured_principal {
+            measured_target_command(program, target_args, arg0)?
+        } else {
+            target_command(program, target_args, arg0, trace.is_some())?
+        };
         let trace_ready = trace
             .is_some()
             .then(|| prepare_trace_readiness(&mut command))
             .transpose()?;
         let mut child = command.spawn()?;
+        if measured_principal {
+            wait_stopped(&mut child)?;
+            control
+                .as_mut()
+                .ok_or_else(|| io::Error::other("agent-only measurement control is missing"))?
+                .principal(child.id())?;
+            if trace.is_some() {
+                owner.wait_for_principal_resume(&mut child)?;
+            }
+        }
         let status = if let Some(trace) = trace.as_mut() {
             owner.wait_traced(
                 &mut child,
@@ -447,6 +473,68 @@ fn target_command(
     #[cfg(not(target_os = "linux"))]
     let _ = trace_lifecycle;
     Ok(launch.direct())
+}
+
+#[cfg(target_os = "linux")]
+fn measured_target_command(
+    program: &std::ffi::OsStr,
+    args: &[OsString],
+    arg0: Option<&OsString>,
+) -> io::Result<Command> {
+    let mut command = Command::new(executable()?);
+    command.env_remove(TRACE_READY_FD);
+    command
+        .arg("__asb-measure-launch")
+        .arg(crate::launch::FORMAT);
+    match arg0 {
+        Some(value) => {
+            command.arg("1").arg(value);
+        }
+        None => {
+            command.arg("0");
+        }
+    }
+    command.arg(program).args(args);
+    Ok(command)
+}
+
+/// A stopped principal retains its PID when it execs the agent. Its guardian
+/// and auxiliary services remain outside the principal's descendant tree.
+#[cfg(unix)]
+pub(crate) fn measure_launch(args: &[OsString]) -> std::process::ExitCode {
+    use std::os::unix::process::CommandExt;
+    let (args, arg0) = if args
+        .first()
+        .is_some_and(|value| value == crate::launch::FORMAT)
+    {
+        match args.get(1).and_then(|value| value.to_str()) {
+            Some("0") => (&args[2..], None),
+            Some("1") if args.len() >= 4 => (&args[3..], Some(&args[2])),
+            _ => return std::process::ExitCode::from(2),
+        }
+    } else {
+        return std::process::ExitCode::from(2);
+    };
+    let Some((program, target_args)) = args.split_first() else {
+        return std::process::ExitCode::from(2);
+    };
+    if pause_current().is_err() {
+        return std::process::ExitCode::from(2);
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::var_os(TRACE_READY_FD).is_some() && !wait_for_trace_attachment() {
+        return std::process::ExitCode::from(2);
+    }
+    let mut launch = crate::launch::ProcessLaunch::new(program);
+    for arg in target_args {
+        launch.arg(arg);
+    }
+    if let Some(arg0) = arg0 {
+        launch.arg0(arg0);
+    }
+    let error = launch.direct().exec();
+    eprintln!("asb measurement launcher could not execute client: {error}");
+    std::process::ExitCode::from(127)
 }
 
 /// Stop before replacing this small ASB launcher with the actual client.

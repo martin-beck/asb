@@ -22,6 +22,7 @@ fn guest_execution_reports_its_own_timeout() {
     let result = super::super::run_guest_process(
         &mut command,
         None,
+        None,
         &mut Vec::new(),
         &mut Vec::new(),
         Duration::from_millis(50),

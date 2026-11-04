@@ -152,6 +152,15 @@ pub fn entry(args: Vec<OsString>) -> ExitCode {
     }
     if args
         .first()
+        .is_some_and(|arg| arg == "__asb-measure-launch")
+    {
+        #[cfg(unix)]
+        return process_gate::measure_launch(&args[1..]);
+        #[cfg(not(unix))]
+        return ExitCode::from(2);
+    }
+    if args
+        .first()
         .is_some_and(|arg| arg == "__asb-native-trace-launch")
     {
         #[cfg(unix)]

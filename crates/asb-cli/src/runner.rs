@@ -1582,6 +1582,7 @@ use capture::{OwnedChild, PresentationPolicy, capture_with_output_streams};
 
 pub(crate) struct GuestProcessOutput {
     pub output: Output,
+    pub observation: crate::process_termination::Observation,
     pub transcript_truncated: bool,
     pub timed_out: bool,
 }
@@ -1602,8 +1603,54 @@ fn wait_with_output(
     )
 }
 
+#[cfg(target_os = "linux")]
+fn principal_identity(
+    pid: u32,
+) -> Result<(measurements::ProcessIdentity, std::path::PathBuf), Error> {
+    let identity = measurements::ProcessIdentity::read(pid)
+        .ok_or_else(|| Error::Run("stopped agent identity disappeared".into()))?;
+    let executable = std::fs::read_link(format!("/proc/{pid}/exe")).map_err(crate::io_error)?;
+    Ok((identity, executable))
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_agent_exec(
+    child: &mut OwnedChild,
+    principal: u32,
+    identity: (measurements::ProcessIdentity, std::path::PathBuf),
+) -> Result<(), Error> {
+    let (identity, launcher) = identity;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if !identity.matches() {
+            break;
+        }
+        match std::fs::read_link(format!("/proc/{principal}/exe")) {
+            Ok(current) if current != launcher => break,
+            Ok(_) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(Error::Run(format!(
+                    "cannot observe agent execution: {error}"
+                )));
+            }
+        }
+        if child.try_wait().map_err(crate::io_error)?.is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::Run(
+                "agent did not execute after collector attachment".into(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+
 pub(crate) fn run_guest_process(
     command: &mut Command,
+    route: Option<crate::launch::CommandRoute>,
     stdin_prompt: Option<&[u8]>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -1613,8 +1660,42 @@ pub(crate) fn run_guest_process(
     #[cfg(target_os = "linux")]
     let mut descendants = crate::process_gate::DescendantScope::new()
         .map_err(|error| Error::Run(format!("cannot retain guest agent descendants: {error}")))?;
-    let mut child = OwnedChild::spawn_direct(command)
-        .map_err(|error| Error::Run(format!("cannot start guest agent: {error}")))?;
+    let gated = route.is_some();
+    #[cfg(target_os = "linux")]
+    let mut child = if let Some(route) = route {
+        let validated = route.validate_gate(command).map_err(crate::io_error)?;
+        let admission = crate::process_gate::Admission::with_measured_principal(validated)
+            .map_err(crate::io_error)?;
+        OwnedChild::Gated(admission.spawn().map_err(crate::io_error)?)
+    } else {
+        OwnedChild::spawn_direct(command).map_err(crate::io_error)?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut child = {
+        if route.is_some() {
+            return Err(Error::Run("agent-only gating requires Linux".into()));
+        }
+        OwnedChild::spawn_direct(command).map_err(crate::io_error)?
+    };
+    #[cfg(target_os = "linux")]
+    let principal = if gated {
+        child.start_measured_principal().map_err(crate::io_error)?
+    } else {
+        child.id()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let principal = child.id();
+    #[cfg(target_os = "linux")]
+    let identity = if gated {
+        Some(principal_identity(principal)?)
+    } else {
+        None
+    };
+    on_spawn(principal)?;
+    #[cfg(target_os = "linux")]
+    if let Some(identity) = identity {
+        wait_for_agent_exec(&mut child, principal, identity)?;
+    }
     if let Some(prompt) = stdin_prompt {
         let Some(mut stdin) = child.take_stdin() else {
             return Err(Error::Run(
@@ -1623,7 +1704,6 @@ pub(crate) fn run_guest_process(
         };
         stdin.write_all(prompt).map_err(crate::io_error)?;
     }
-    on_spawn(child.id())?;
     let captured = capture_with_output_streams(
         child,
         true,
@@ -1646,6 +1726,7 @@ pub(crate) fn run_guest_process(
     }
     Ok(GuestProcessOutput {
         output: captured.output,
+        observation: captured.observation,
         transcript_truncated: captured.transcript_truncated,
         timed_out: captured.timed_out,
     })
@@ -2538,6 +2619,7 @@ mod tests {
         let mut stderr = Vec::new();
         let result = super::run_guest_process(
             &mut command,
+            None,
             None,
             &mut stdout,
             &mut stderr,
