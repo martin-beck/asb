@@ -128,6 +128,22 @@ impl PreparedReport {
             .iter()
             .map(|row| crate::collectors::ReportRow {
                 label: &row.label,
+                agent: &row.agent,
+                provider: &row.provider,
+                model: &row.model,
+                workload: &row.workload,
+                trial: row
+                    .task
+                    .as_ref()
+                    .map(|task| task.task_id.as_str())
+                    .or_else(|| {
+                        row.selection
+                            .as_ref()
+                            .map(|selection| selection.task_id.as_str())
+                    })
+                    .unwrap_or("default"),
+                configured_concurrency: row.configured_concurrency,
+                execution_cohort: row.execution_cohort.as_ref(),
                 metrics: &row.metrics,
                 components: row.components.as_ref(),
                 documents: &row.collector_documents,

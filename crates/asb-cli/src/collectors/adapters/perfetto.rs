@@ -543,6 +543,13 @@ mod report_tests {
         let components = serde_json::json!({"components":{"agent.execute":{"wall_ms":12}}});
         let graph = execution_composition_graph(&[ReportRow {
             label: "no-perfetto",
+            agent: "fixture-agent",
+            provider: "fixture-provider",
+            model: "fixture-model",
+            workload: "fixture-workload",
+            trial: "fixture-trial",
+            configured_concurrency: 1,
+            execution_cohort: None,
             metrics: &metrics,
             components: Some(&components),
             documents: &BTreeMap::new(),

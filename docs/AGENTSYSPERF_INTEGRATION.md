@@ -100,6 +100,25 @@ launch an agent, a provider, or a workload.  A one-run analysis cannot claim a
 concurrency knee.  The scaling collector requires a sweep with at least three
 distinct observed concurrency points and compatible selected task populations.
 
+### Scaling evidence contract
+
+Select `agentsysperf:scaling` in `asb setup --measure`, or select **sweep
+scaling** in the TUI's **AgentSysPerf modes** pane.  ASB installs the same
+pinned project-local AgentSysPerf runtime as resource analysis and automatically
+selects its process-tree prerequisites.  The selection is persisted in each
+run's `agentsysperf.json`; it is not inferred later from a report name.
+
+At comparison time ASB emits an AgentSysPerf scaling SVG only when it finds at
+least three distinct configured-concurrency points for the same agent,
+provider, model, workload and trial.  Every point must be one full, sealed ASB
+execution cohort with observed AgentSysPerf records and resolved successful
+work.  Partial cohorts, failed/unresolved slots, mixed trials, and repeated
+cohorts at the same point are omitted.  The report shows p95 end-to-end latency
+and a conservative aggregate service rate (completed work divided by the sum
+of observed elapsed times).  It does **not** invent wall-clock throughput from
+cohort membership, because admission provenance alone does not prove that
+members overlapped.
+
 ## Platform telemetry
 
 The catalog is capability-driven, not vendor-name-driven.  ASB detects the

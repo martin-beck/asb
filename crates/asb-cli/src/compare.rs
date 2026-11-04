@@ -49,6 +49,8 @@ struct BenchmarkData {
     directory: PathBuf,
     agent: String,
     workload: String,
+    /// Configured replica population, distinct from actual cohort evidence.
+    configured_concurrency: usize,
     task: Option<crate::workloads::TaskIdentity>,
     selection: Option<crate::workloads::TaskSelection>,
     evaluation_completed: bool,

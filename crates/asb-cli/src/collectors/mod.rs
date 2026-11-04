@@ -141,6 +141,13 @@ pub(crate) struct GraphSection {
 /// not interpret collector metric names or artifact formats.
 pub(crate) struct ReportRow<'a> {
     pub label: &'a str,
+    pub agent: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub workload: &'a str,
+    pub trial: &'a str,
+    pub configured_concurrency: usize,
+    pub execution_cohort: Option<&'a crate::measurements::ExecutionCohort>,
     pub metrics: &'a BTreeMap<String, f64>,
     pub components: Option<&'a serde_json::Value>,
     pub documents: &'a BTreeMap<String, serde_json::Value>,
@@ -594,8 +601,8 @@ pub(crate) fn expand_dependencies(selected: &[String]) -> Vec<String> {
 pub(crate) fn dependency_tools(selected: &[String]) -> Vec<&'static str> {
     let expanded = expand_dependencies(selected);
     let mut tools = Vec::new();
-    for id in &expanded {
-        if let Some(adapter) = find(id) {
+    for selection in &expanded {
+        if let Some(adapter) = adapter_for_selection(selection) {
             for tool in adapter.required_tools() {
                 if !tools.contains(tool) {
                     tools.push(*tool);
@@ -663,6 +670,12 @@ mod tests {
             dependency_tools(&selected),
             vec!["agentsysperf", "perf"],
             "a selected collector must expose both its own runtime and its collector tool dependencies"
+        );
+        let scaling = vec!["agentsysperf:scaling".to_owned()];
+        assert_eq!(
+            dependency_tools(&scaling),
+            vec!["agentsysperf", "perf"],
+            "the optional scaling mode must retain the same project-local runtime and scoped prerequisites"
         );
     }
 
