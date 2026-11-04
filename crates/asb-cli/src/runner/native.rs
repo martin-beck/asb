@@ -13,6 +13,7 @@ pub(super) struct NativeRoute<'a> {
     pub tool_tape_cassette: Option<&'a Path>,
     pub mcp_tape_mode: Option<tape::Mode>,
     pub mcp_tape_cassette: Option<&'a Path>,
+    pub native_tool: Option<agents::NativeToolContext<'a>>,
 }
 
 /// Immutable intent, not shared mutable runtime state.
@@ -44,6 +45,33 @@ pub(super) struct PreparedNative {
     _tool_observer: Option<std::fs::File>,
 }
 
+fn validate_native_replay(
+    agent: &str,
+    mode: Option<tape::Mode>,
+    native_tool: Option<agents::NativeToolContext<'_>>,
+) -> Result<(), Error> {
+    if let Some(native) = native_tool {
+        native
+            .launch
+            .validate_staged(native.path)
+            .map_err(|error| Error::Input(error.to_string()))?;
+    } else if mode == Some(tape::Mode::Replay)
+        && agents::find(agent).is_some_and(|adapter| {
+            adapter.supports_native_tool_transport() && !adapter.supports_tool_replay()
+        })
+    {
+        return Err(Error::Input("native tool replay requires the selected recorded tool sidecar; record a complete tool tape before replay".into()));
+    }
+    Ok(())
+}
+
+fn selected_native_replay(
+    mode: Option<tape::Mode>,
+    native: Option<agents::NativeToolContext<'_>>,
+) -> Option<agents::NativeToolContext<'_>> {
+    native.filter(|_| mode == Some(tape::Mode::Replay))
+}
+
 impl NativePlan<'_> {
     pub fn prepare(
         self,
@@ -70,6 +98,7 @@ impl NativePlan<'_> {
             tool_tape_cassette,
             mcp_tape_mode,
             mcp_tape_cassette,
+            native_tool,
         } = route;
         let workspace = &invocation.workspace;
         invocation
@@ -95,7 +124,9 @@ impl NativePlan<'_> {
         // especially important for OpenJiuwen's persistent workspace).
         let mut command_config = config.clone();
         command_config.workspace = workspace.to_string_lossy().into_owned();
-        let specification = command_for_with_interface(
+        let native_tool = selected_native_replay(tool_tape_mode, native_tool);
+        validate_native_replay(&config.agent, tool_tape_mode, native_tool)?;
+        let specification = command_for_with_native_tool(
             &command_config,
             connection
                 .as_ref()
@@ -104,6 +135,8 @@ impl NativePlan<'_> {
             prompt,
             connection.as_ref().map(|connection| connection.interface),
             max_steps,
+            tool_tape_mode,
+            native_tool,
         )?;
         let mut program = specification.program;
         match agents::execution_lookup_at(
@@ -125,7 +158,7 @@ impl NativePlan<'_> {
         }
         let launch = agents::find(&config.agent).map_or_else(
             || Ok(crate::launch::ProcessLaunch::new(&program)),
-            |adapter| crate::agents::select_process(adapter, &program, None),
+            |adapter| crate::agents::select_process(adapter, &program, native_tool),
         )?;
         #[cfg(unix)]
         let gate =
@@ -347,6 +380,102 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn native_only_replay_rejects_missing_sidecar_before_launch() {
+        let error =
+            validate_native_replay("openjiuwen", Some(tape::Mode::Replay), None).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires the selected recorded tool sidecar")
+        );
+        assert!(validate_native_replay("openjiuwen", Some(tape::Mode::Record), None).is_ok());
+        assert!(validate_native_replay("openjiuwen", None, None).is_ok());
+        assert!(validate_native_replay("pi", Some(tape::Mode::Replay), None).is_ok());
+    }
+
+    #[test]
+    fn selected_native_sidecar_reaches_the_adapter_command() {
+        let config: BenchmarkConfig = toml::from_str(
+            "agent='openjiuwen'\nprovider='cli2key'\nmodel='fixture'\nworkload='bug-fix'\n",
+        )
+        .unwrap();
+        let digest = "a".repeat(64);
+        let launch: crate::cassette::NativeToolLaunch = serde_json::from_value(serde_json::json!({
+            "native":{"complete":true,"events":1,"bytes":1,"sha256":digest},
+            "launch_session":"fixture", "workspace_effect_sha256":"b".repeat(64), "sessions":[]
+        }))
+        .unwrap();
+        let sidecar = Path::new("/private/selected-sidecar.jsonl");
+        let native = Some(agents::NativeToolContext {
+            launch: &launch,
+            path: sidecar,
+        });
+        assert!(selected_native_replay(None, native).is_none());
+        assert!(selected_native_replay(Some(tape::Mode::Record), native).is_none());
+        assert!(selected_native_replay(Some(tape::Mode::Replay), native).is_some());
+        let spec = command_for_with_native_tool(
+            &config,
+            Some("http://127.0.0.1/v1"),
+            "fixture prompt",
+            Some(crate::endpoint::Interface::AnthropicMessages),
+            None,
+            Some(tape::Mode::Replay),
+            Some(agents::NativeToolContext {
+                launch: &launch,
+                path: sidecar,
+            }),
+        )
+        .unwrap();
+        assert!(spec.args.windows(2).any(|args| args
+            == [
+                "--asb-native-tool-replay",
+                "/private/selected-sidecar.jsonl"
+            ]));
+        assert!(
+            validate_native_replay(
+                "openjiuwen",
+                Some(tape::Mode::Replay),
+                Some(agents::NativeToolContext {
+                    launch: &launch,
+                    path: sidecar
+                })
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn selected_native_sidecar_must_match_its_sealed_descriptor() {
+        let root = std::env::temp_dir()
+            .join(workloads::TaskIdentity::local("native-sidecar", None).attempt_id);
+        std::fs::create_dir_all(&root).unwrap();
+        let digest = crate::cassette::digest(b"a");
+        let bytes = format!(
+            "{{\"event\":\"launch\",\"session\":\"s\",\"program_sha256\":\"{digest}\"}}\n{{\"event\":\"session_alias\",\"alias\":\"a\",\"session\":\"s\"}}\n{{\"event\":\"poll\",\"alias\":\"a\"}}\n{{\"event\":\"write\",\"alias\":\"a\",\"request_sha256\":\"{digest}\",\"request_b64\":\"YQ==\"}}\n{{\"event\":\"output\",\"alias\":\"a\",\"response_sha256\":\"{digest}\",\"output_b64\":\"YQ==\"}}\n{{\"event\":\"exit\",\"alias\":\"a\",\"success\":true}}\n{{\"event\":\"workspace_effect\",\"sha256\":\"{digest}\"}}\n"
+        );
+        let path = root.join("native.jsonl");
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let track = crate::cassette::NativeTrack {
+            complete: true,
+            events: 7,
+            bytes: bytes.len() as u64,
+            sha256: crate::cassette::digest(bytes.as_bytes()),
+        };
+        let launch =
+            crate::cassette::NativeToolTransport::launch_descriptor(track, bytes.as_bytes())
+                .unwrap();
+        let native = Some(agents::NativeToolContext {
+            launch: &launch,
+            path: &path,
+        });
+        assert!(validate_native_replay("openjiuwen", Some(tape::Mode::Replay), native).is_ok());
+        std::fs::write(&path, b"changed").unwrap();
+        assert!(validate_native_replay("openjiuwen", Some(tape::Mode::Replay), native).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn codex_native_preference_retains_fresh_session_configuration() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/native-plan-fixtures")
@@ -401,6 +530,7 @@ mod tests {
                     tool_tape_cassette: None,
                     mcp_tape_mode: None,
                     mcp_tape_cassette: None,
+                    native_tool: None,
                 },
             }
             .prepare(None)
@@ -527,6 +657,7 @@ mod tests {
                 tool_tape_cassette: None,
                 mcp_tape_mode: None,
                 mcp_tape_cassette: None,
+                native_tool: None,
             },
         }
         .prepare(None)
