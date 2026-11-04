@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { encodeSidecar, decodeSidecar } from '../assets/scripts/continue-native-sidecar.mjs';
+import { encodeSidecar, decodeSidecar } from '../assets/scripts/native-tool-sidecar.mjs';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const exchanges = [
   {ordinal:1,request:{tool:'Fetch',args:{url:'fixture'}},outcome:{ok:true,value:'answer'}},

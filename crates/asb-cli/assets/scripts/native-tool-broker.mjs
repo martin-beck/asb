@@ -1,7 +1,7 @@
 // Adapter-owned IPC coordinator prototype. The owner controls socket lifetime,
 // persistence and snapshot application; clients only exchange tool events.
 import { createServer, connect } from 'node:net';
-import { RecordingSession, ReplaySession, normalizeRequest } from './continue-native-session.mjs';
+import { RecordingSession, ReplaySession, normalizeRequest } from './native-tool-session.mjs';
 
 const MAX_MESSAGE = 16 * 1024 * 1024;
 function frame(socket) {
@@ -10,22 +10,22 @@ function frame(socket) {
     socket.setEncoding('utf8');
     socket.on('data', chunk => {
       bytes += Buffer.byteLength(chunk);
-      if (bytes > MAX_MESSAGE) { reject(new Error('Continue broker message exceeds limit')); socket.destroy(); return; }
+      if (bytes > MAX_MESSAGE) { reject(new Error('Native tool broker message exceeds limit')); socket.destroy(); return; }
       data += chunk;
       const end = data.indexOf('\n');
       if (end >= 0) {
-        try { resolve(JSON.parse(data.slice(0, end))); } catch { reject(new Error('Continue broker message is malformed')); }
+        try { resolve(JSON.parse(data.slice(0, end))); } catch { reject(new Error('Native tool broker message is malformed')); }
       }
     });
     socket.once('error', reject);
-    socket.once('end', () => reject(new Error('Continue broker connection ended early')));
+    socket.once('end', () => reject(new Error('Native tool broker connection ended early')));
   });
 }
 function reply(socket, value) { socket.end(`${JSON.stringify(value)}\n`); }
 
-export class ContinueBroker {
+export class NativeToolBroker {
   constructor(mode, events = [], applyEffects) {
-    if (!['record', 'replay'].includes(mode)) throw new Error('Continue broker mode is invalid');
+    if (!['record', 'replay'].includes(mode)) throw new Error('Native tool broker mode is invalid');
     this.mode = mode;
     this.session = mode === 'record' ? new RecordingSession() : new ReplaySession(events, applyEffects);
     this.pending = new Map();
@@ -41,7 +41,7 @@ export class ContinueBroker {
   async handle(socket) {
     try {
       const message = await frame(socket);
-      if (this.sealing) throw new Error('Continue broker is sealing its recording');
+      if (this.sealing) throw new Error('Native tool broker is sealing its recording');
       if (this.mode === 'replay' && message.op === 'invoke') {
         try { reply(socket, { ok: true, value: await this.session.invoke(message.request) }); }
         catch (error) { reply(socket, { ok: false, name: error.name, message: error.message }); }
@@ -57,30 +57,30 @@ export class ContinueBroker {
         reply(socket, { ok: true, token });
       } else if (this.mode === 'record' && message.op === 'invalidate') {
         const item = this.pending.get(message.token);
-        if (!item) throw new Error('Continue broker invalidation has no active call');
+        if (!item) throw new Error('Native tool broker invalidation has no active call');
         this.pending.delete(message.token);
         this.session.abort();
-        item.reject(new Error('Continue tool exchange could not be recorded'));
+        item.reject(new Error('Native tool tool exchange could not be recorded'));
         try { await item.result; } catch { /* the recording is invalid */ }
         reply(socket, { ok: true });
       } else if (this.mode === 'record' && message.op === 'finish') {
         const item = this.pending.get(message.token);
-        if (!item || !message.outcome || typeof message.outcome.ok !== 'boolean') throw new Error('Continue broker finish has no active call');
+        if (!item || !message.outcome || typeof message.outcome.ok !== 'boolean') throw new Error('Native tool broker finish has no active call');
         this.pending.delete(message.token);
         if (message.outcome.ok) item.resolve(message.outcome.value);
         else { const error = new Error(message.outcome.message); error.name = message.outcome.name; item.reject(error); }
         try { await item.result; } catch { /* recorded tool failure */ }
         reply(socket, { ok: true });
-      } else throw new Error('Continue broker operation is invalid');
+      } else throw new Error('Native tool broker operation is invalid');
     } catch (error) { if (!socket.destroyed) reply(socket, { ok: false, name: error.name, message: error.message }); }
   }
   listen(path) { return new Promise((resolve, reject) => { this.server.once('error', reject); this.server.listen(path, resolve); }); }
   async finish(encode) {
-    if (this.sealing) throw new Error('Continue broker is already sealing');
+    if (this.sealing) throw new Error('Native tool broker is already sealing');
     this.sealing = true;
     let events, encoded;
     try {
-      if (this.pending.size) throw new Error('Continue broker has unfinished calls');
+      if (this.pending.size) throw new Error('Native tool broker has unfinished calls');
       if (encode) encoded = encode(this.session.preview());
       events = this.session.finish();
     } catch (error) {
@@ -91,7 +91,7 @@ export class ContinueBroker {
     return encode ? encoded : events;
   }
   async abort() {
-    const error = new Error('Continue broker was cancelled');
+    const error = new Error('Native tool broker was cancelled');
     this.session.abort(error);
     for (const item of this.pending.values()) item.reject(error);
     this.pending.clear();

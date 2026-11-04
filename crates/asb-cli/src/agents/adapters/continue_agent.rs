@@ -461,24 +461,24 @@ fn start_recording_service_with_marker(
     std::fs::create_dir_all(&directory).map_err(crate::io_error)?;
     for (name, source) in [
         (
-            "continue-native-service.mjs",
-            include_str!("../../../assets/scripts/continue-native-service.mjs"),
+            "native-tool-service.mjs",
+            include_str!("../../../assets/scripts/native-tool-service.mjs"),
         ),
         (
-            "continue-native-broker.mjs",
-            include_str!("../../../assets/scripts/continue-native-broker.mjs"),
+            "native-tool-broker.mjs",
+            include_str!("../../../assets/scripts/native-tool-broker.mjs"),
         ),
         (
-            "continue-native-custody.mjs",
-            include_str!("../../../assets/scripts/continue-native-custody.mjs"),
+            "native-tool-custody.mjs",
+            include_str!("../../../assets/scripts/native-tool-custody.mjs"),
         ),
         (
-            "continue-native-sidecar.mjs",
-            include_str!("../../../assets/scripts/continue-native-sidecar.mjs"),
+            "native-tool-sidecar.mjs",
+            include_str!("../../../assets/scripts/native-tool-sidecar.mjs"),
         ),
         (
-            "continue-native-session.mjs",
-            include_str!("../../../assets/scripts/continue-native-session.mjs"),
+            "native-tool-session.mjs",
+            include_str!("../../../assets/scripts/native-tool-session.mjs"),
         ),
         (
             "continue-native-bootstrap.mjs",
@@ -497,8 +497,12 @@ fn start_recording_service_with_marker(
             include_str!("../../../assets/scripts/continue-native-dispatch.mjs"),
         ),
         (
-            "continue-snapshot-boundary.mjs",
-            include_str!("../../../assets/scripts/continue-snapshot-boundary.mjs"),
+            "native-tool-dispatch.mjs",
+            include_str!("../../../assets/scripts/native-tool-dispatch.mjs"),
+        ),
+        (
+            "native-snapshot-boundary.mjs",
+            include_str!("../../../assets/scripts/native-snapshot-boundary.mjs"),
         ),
     ] {
         std::fs::write(directory.join(name), source).map_err(crate::io_error)?;
@@ -509,7 +513,7 @@ fn start_recording_service_with_marker(
         service.env("PATH", path);
     }
     service
-        .arg(directory.join("continue-native-service.mjs"))
+        .arg(directory.join("native-tool-service.mjs"))
         .arg(&socket)
         .arg(&bundle);
     if mode == Some(crate::tape::Mode::Replay) {

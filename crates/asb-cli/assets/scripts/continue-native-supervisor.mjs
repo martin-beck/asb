@@ -3,16 +3,16 @@
 // before publishing a complete recording.
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { ContinueBroker } from './continue-native-broker.mjs';
-import { replayEffects } from './continue-snapshot-boundary.mjs';
-import { sealPendingBroker } from './continue-native-custody.mjs';
+import { NativeToolBroker } from './native-tool-broker.mjs';
+import { replayEffects } from './native-snapshot-boundary.mjs';
+import { sealPendingBroker } from './native-tool-custody.mjs';
 import { open } from 'node:fs/promises';
 
 export async function startContinue({ node, cli, args, cwd, env, bundle, socket, marker, mode, events = [], stdio = 'inherit' }) {
   if (!node || !cli || !bundle || !socket || !cwd || !Array.isArray(args) || !env || !['record', 'replay'].includes(mode)) {
     throw new TypeError('Continue supervisor configuration is incomplete');
   }
-  const broker = new ContinueBroker(mode, events, replayEffects(marker));
+  const broker = new NativeToolBroker(mode, events, replayEffects(marker));
   await broker.listen(socket);
   const bootstrap = fileURLToPath(new URL('./continue-native-bootstrap.mjs', import.meta.url));
   const options = [env.NODE_OPTIONS, `--import=${JSON.stringify(bootstrap)}`].filter(Boolean).join(' ');

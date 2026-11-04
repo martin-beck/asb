@@ -5,15 +5,15 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { connect, createServer } from 'node:net';
 import { once } from 'node:events';
-import { ContinueBroker, brokerRequest } from '../assets/scripts/continue-native-broker.mjs';
+import { NativeToolBroker, brokerRequest } from '../assets/scripts/native-tool-broker.mjs';
 import { createNativeDispatcher } from '../assets/scripts/continue-native-dispatch.mjs';
-import { sealBroker, sealPendingBroker, replayBroker } from '../assets/scripts/continue-native-custody.mjs';
+import { sealBroker, sealPendingBroker, replayBroker } from '../assets/scripts/native-tool-custody.mjs';
 import { createHash } from 'node:crypto';
-import { recordBoundaries, replayEffects, snapshotBoundary } from '../assets/scripts/continue-snapshot-boundary.mjs';
+import { recordBoundaries, replayEffects, snapshotBoundary } from '../assets/scripts/native-snapshot-boundary.mjs';
 
 const root = mkdtempSync(join(tmpdir(), 'asb-continue-broker-'));
 const socket = join(root, 'broker.sock');
-const moduleUrl = new URL('../assets/scripts/continue-native-broker.mjs', import.meta.url).href;
+const moduleUrl = new URL('../assets/scripts/native-tool-broker.mjs', import.meta.url).href;
 function child(mode) {
   const code = `import {brokerRequest} from ${JSON.stringify(moduleUrl)};\nconst p=process.argv[1];\nif(process.argv[2]==='record'){const s=await brokerRequest(p,{op:'start',request:{tool:'Fetch',args:{url:'fixture'}}});await brokerRequest(p,{op:'finish',token:s.token,outcome:{ok:true,value:'fetch-result'}})}else{const r=await brokerRequest(p,{op:'invoke',request:{tool:'Fetch',args:{url:'fixture'}}});if(r.value!=='fetch-result')process.exit(3)}`;
   const process = spawn(processExec, ['--input-type=module', '-e', code, socket, mode], { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -23,7 +23,7 @@ function child(mode) {
 }
 const processExec = process.execPath;
 try {
-  const record = new ContinueBroker('record');
+  const record = new NativeToolBroker('record');
   await record.listen(socket);
   const first = await brokerRequest(socket, { op: 'start', request: { tool: 'Read', args: { path: 'fixture' } } });
   await child('record');
@@ -31,7 +31,7 @@ try {
   const events = await record.finish();
   assert.deepEqual(events.map(event => event.ordinal), [1, 0]);
   const effects = [];
-  const replay = new ContinueBroker('replay', events, async event => { effects.push(event.ordinal); });
+  const replay = new NativeToolBroker('replay', events, async event => { effects.push(event.ordinal); });
   await replay.listen(socket);
   const second = child('replay');
   // Let the child request the later dispatch first; the broker must wait for
@@ -42,18 +42,18 @@ try {
   assert.equal((await firstReplay).value, 'read-result');
   await replay.finish();
   assert.deepEqual(effects, [1, 0]);
-  const cancelled = new ContinueBroker('replay', events);
+  const cancelled = new NativeToolBroker('replay', events);
   await cancelled.listen(socket);
   const waiting = assert.rejects(brokerRequest(socket, { op: 'invoke', request: { tool: 'Fetch', args: { url: 'fixture' } } }));
   await new Promise(resolve => setTimeout(resolve, 30));
   await cancelled.abort();
   await waiting;
-  const unfinished = new ContinueBroker('record');
+  const unfinished = new NativeToolBroker('record');
   await unfinished.listen(socket);
   await brokerRequest(socket, { op: 'start', request: { tool: 'Read' } });
   await assert.rejects(unfinished.finish(), /unfinished/);
   await unfinished.abort();
-  const roundTrip = new ContinueBroker('record');
+  const roundTrip = new NativeToolBroker('record');
   await roundTrip.listen(socket);
   const boundaries = [];
   const recordDispatch = createNativeDispatcher('record', socket, {
@@ -67,14 +67,14 @@ try {
   const nativeEvents = await roundTrip.finish();
   assert.equal(nativeEvents.length, 1);
   assert.deepEqual(boundaries, ['begin', 'tool', 'end']);
-  const offline = new ContinueBroker('replay', nativeEvents);
+  const offline = new NativeToolBroker('replay', nativeEvents);
   await offline.listen(socket);
   const replayDispatch = createNativeDispatcher('replay', socket, { isDelegation: call => call.name === 'Subagent' });
   assert.equal(await replayDispatch({ name: 'Fetch', arguments: { url: 'local' } }, {}, async () => { executions++; return 'live'; }), 'recorded');
   assert.equal(await replayDispatch({ name: 'Subagent', arguments: {} }, {}, async () => { executions++; return 'delegated'; }), 'delegated');
   await offline.finish();
   assert.equal(executions, 3, 'the replayed native call must never execute');
-  const invalid = new ContinueBroker('record');
+  const invalid = new NativeToolBroker('record');
   await invalid.listen(socket);
   const invalidDispatch = createNativeDispatcher('record', socket);
   const thrown = { reason: 'non-Error value' };
@@ -83,7 +83,7 @@ try {
   await assert.rejects(invalid.finish(), /unfinished/);
   await invalid.abort();
   for (const failingBoundary of ['begin', 'end']) {
-    const incomplete = new ContinueBroker('record');
+    const incomplete = new NativeToolBroker('record');
     await incomplete.listen(socket);
     const boundaryError = new Error(`${failingBoundary} failed`);
     let calls = 0;
@@ -96,7 +96,7 @@ try {
     await assert.rejects(incomplete.finish(), /unfinished/);
     await incomplete.abort();
   }
-  const sealing = new ContinueBroker('record');
+  const sealing = new NativeToolBroker('record');
   await sealing.listen(socket);
   const late = connect(socket);
   await once(late, 'connect');
@@ -108,7 +108,7 @@ try {
   const [reply] = await once(late, 'data');
   assert.match(reply.toString(), /sealing/);
   assert.equal(await sealResult, '[]');
-  const custody = new ContinueBroker('record');
+  const custody = new NativeToolBroker('record');
   await custody.listen(socket);
   const dispatch = createNativeDispatcher('record', socket);
   assert.equal(await dispatch({name:'Fetch',arguments:{url:'fixture'}},{},async()=> 'captured'), 'captured');
@@ -124,7 +124,7 @@ try {
   assert.equal(await restoredDispatch({name:'Fetch',arguments:{url:'fixture'}},{},async()=>{throw new Error('must not execute')}), 'captured');
   await restored.finish();
   assert.equal(applied,1);
-  const pendingBroker = new ContinueBroker('record');
+  const pendingBroker = new NativeToolBroker('record');
   await pendingBroker.listen(socket);
   await createNativeDispatcher('record',socket)({name:'Read',arguments:{}},{},async()=> 'ok');
   await assert.rejects(sealPendingBroker(pendingBroker,{programSha256:'invalid'}),/program digest/);
@@ -149,7 +149,7 @@ try {
   });
   await new Promise(resolve => marker.listen(markerSocket, resolve));
   writeFileSync(workspaceFile, 'before');
-  const filesystemRecord = new ContinueBroker('record');
+  const filesystemRecord = new NativeToolBroker('record');
   await filesystemRecord.listen(socket);
   const writeRecord = createNativeDispatcher('record', socket, recordBoundaries(markerSocket));
   await writeRecord({name:'Write',arguments:{path:'workspace.txt'}},{},async()=>{writeFileSync(workspaceFile,'after'); return 'ok';});
@@ -157,7 +157,7 @@ try {
   assert.equal(readFileSync(workspaceFile,'utf8'),'after');
   writeFileSync(workspaceFile, 'before');
   replaying = true;
-  const filesystemReplay = new ContinueBroker('replay', filesystemEvents, replayEffects(markerSocket));
+  const filesystemReplay = new NativeToolBroker('replay', filesystemEvents, replayEffects(markerSocket));
   await filesystemReplay.listen(socket);
   const writeReplay = createNativeDispatcher('replay', socket);
   assert.equal(await writeReplay({name:'Write',arguments:{path:'workspace.txt'}},{},async()=>{throw new Error('live write must not run')}),'ok');

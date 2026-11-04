@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startContinue } from '../assets/scripts/continue-native-supervisor.mjs';
-import { encodeSidecar, decodeSidecar } from '../assets/scripts/continue-native-sidecar.mjs';
+import { encodeSidecar, decodeSidecar } from '../assets/scripts/native-tool-sidecar.mjs';
 const base=resolve(process.env.ASB_TEST_PROBE_ROOT || 'target/continue-installed-probes'), cli=process.env.ASB_TEST_CONTINUE_CLI;
 if(!cli)throw new Error('ASB_TEST_CONTINUE_CLI required');
 await mkdir(base,{recursive:true});const root=await mkdtemp(resolve(base,'run-'));
