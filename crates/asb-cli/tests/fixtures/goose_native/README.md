@@ -21,3 +21,17 @@ cargo test --offline --locked -p goose --features scheduler --lib asb_native_pro
 ```
 
 The fixture is opt-in; normal ASB CI does not download or build Goose.
+
+To separately exercise the real Btrfs snapshot supervisor, with one recording
+and four concurrent replay workspaces, run the following on a disposable Linux
+host or VM with `btrfs`, `mkfs.btrfs`, `rsync`, loop devices, and mount
+capability. Set the directory to a new path on a filesystem with ample space:
+
+```sh
+sudo env ASB_BTRFS_FIXTURE_DIR=/path/to/new/disposable-btrfs-fixture \
+  python3 "$ASB_ROOT/crates/asb-cli/tests/fixtures/goose_native/btrfs_smoke.py"
+```
+
+The fixture retains its images and diagnostics for inspection. It tests
+snapshot recording and restoration only; it does not execute Goose or qualify
+full filesystem replay.
