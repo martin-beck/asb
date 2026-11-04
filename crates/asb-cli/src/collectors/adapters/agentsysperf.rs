@@ -5,10 +5,11 @@
 //! default could observe unrelated host work.  This adapter instead exports
 //! already verified ASB process-tree observations for later offline analysis.
 
-use super::super::{CollectorAdapter, ReportGraph, ReportRow};
+use super::super::{CollectorAdapter, ReportGraph, ReportRow, SelectionExtension, SelectionOption};
 use crate::measurements::{self, ComponentTiming, Session};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -25,6 +26,7 @@ const DEPENDENCIES: &[&str] = &["agent-memory", "agent-workers", "cpu-accounting
 #[derive(Default)]
 struct State {
     enabled: bool,
+    scaling_requested: bool,
     platform: Option<PlatformManifest>,
     host_start: Option<HostSample>,
 }
@@ -68,6 +70,37 @@ impl CollectorAdapter for AgentSysPerfCollector {
         "agentsysperf:l1-resource"
     }
 
+    fn accepts_selection(&self, selection: &str) -> bool {
+        matches!(
+            selection,
+            "agentsysperf:l1-resource" | "agentsysperf:scaling"
+        )
+    }
+
+    fn selection_extension(&self) -> Option<SelectionExtension> {
+        Some(SelectionExtension {
+            tab: "AgentSysPerf modes",
+            description: "Choose process-tree analysis and optional offline sweep scaling diagnostics.",
+            all_selection: Some("agentsysperf:l1-resource".into()),
+            all_description: "agent-process-tree resource analysis",
+            required: true,
+            options: vec![
+                SelectionOption {
+                    selection: "agentsysperf:l1-resource".into(),
+                    label: "resource analysis",
+                    description: "agent-scoped records, Analyzer findings, and bottleneck report",
+                    default: true,
+                },
+                SelectionOption {
+                    selection: "agentsysperf:scaling".into(),
+                    label: "sweep scaling",
+                    description: "offline latency/service-rate curves for sealed compatible sweep cohorts",
+                    default: false,
+                },
+            ],
+        })
+    }
+
     fn tool_id(&self) -> Option<&'static str> {
         Some("agentsysperf")
     }
@@ -81,7 +114,9 @@ impl CollectorAdapter for AgentSysPerfCollector {
     }
 
     fn report_graphs(&self, rows: &[ReportRow<'_>]) -> Vec<ReportGraph> {
-        bottleneck_graph(rows).into_iter().collect()
+        let mut graphs = bottleneck_graph(rows).into_iter().collect::<Vec<_>>();
+        graphs.extend(scaling_graphs(rows));
+        graphs
     }
 
     fn configure(&self, session: &mut Session, selected: &[String]) -> Result<(), String> {
@@ -89,6 +124,7 @@ impl CollectorAdapter for AgentSysPerfCollector {
         let state = session.state::<State>();
         let mut state = state.borrow_mut();
         state.enabled = enabled;
+        state.scaling_requested = selected.iter().any(|value| value == "agentsysperf:scaling");
         state.platform = enabled.then(discover_platform);
         Ok(())
     }
@@ -138,6 +174,7 @@ impl CollectorAdapter for AgentSysPerfCollector {
                 "scope": "selected-agent-process-tree",
                 "analysis_input": "agentsysperf-records/measurement_records.json",
                 "records": records.len(),
+                "scaling_requested": session.state::<State>().borrow().scaling_requested,
                 "platform": session.state::<State>().borrow().platform,
                 "analysis": analysis["status"],
                 "limitations": "This is an ASB-owned process-tree export for offline AgentSysPerf analysis. It does not run AgentSysPerf's benchmark harness or accept system-wide perf attribution. Missing observations are omitted rather than represented as zero."
@@ -431,6 +468,200 @@ fn bottleneck_graph(rows: &[ReportRow<'_>]) -> Option<ReportGraph> {
             svg,
         }
     })
+}
+
+/// A conservative, offline scaling view for completed ASB dispatch cohorts.
+///
+/// AgentSysPerf's upstream sweep runner owns a different Harbor lifecycle, so
+/// ASB must not invoke it around an ASB sweep.  This collector instead derives
+/// a curve from already-sealed ASB rows.  It deliberately uses *summed* elapsed
+/// time for service rate: an execution cohort records admission provenance, not
+/// proof that starts overlapped, so dividing by the fastest member would invent
+/// throughput.  Incomplete cohorts, mixed trials, and repeated cohorts at one
+/// point are omitted rather than averaged into a plausible-looking knee.
+fn scaling_graphs(rows: &[ReportRow<'_>]) -> Vec<ReportGraph> {
+    #[derive(Clone)]
+    struct Observation {
+        elapsed_ms: f64,
+        label: String,
+    }
+    type Cohorts = BTreeMap<String, Vec<Observation>>;
+    type Points = BTreeMap<usize, Cohorts>;
+    let mut groups = BTreeMap::<String, Points>::new();
+    for row in rows {
+        let Some(document) = row.documents.get("agentsysperf") else {
+            continue;
+        };
+        if document.get("status").and_then(Value::as_str) != Some("observed")
+            || document.get("scaling_requested").and_then(Value::as_bool) != Some(true)
+        {
+            continue;
+        }
+        let Some(cohort) = row.execution_cohort else {
+            continue;
+        };
+        if row.configured_concurrency < 1
+            || cohort.selected_replicas != row.configured_concurrency
+            || cohort.admitted_slots.len() != row.configured_concurrency
+        {
+            continue;
+        }
+        let Some(elapsed_ms) = row.metrics.get("elapsed_ms").copied() else {
+            continue;
+        };
+        if !elapsed_ms.is_finite() || elapsed_ms <= 0.0 {
+            continue;
+        }
+        // A scaling curve reflects completed benchmark work, never a mixture
+        // of failed/unresolved slots with successful ones.
+        if row.metrics.get("success_rate") != Some(&1.0) {
+            continue;
+        }
+        let key = format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            row.agent, row.provider, row.model, row.workload, row.trial
+        );
+        groups
+            .entry(key)
+            .or_default()
+            .entry(row.configured_concurrency)
+            .or_default()
+            .entry(cohort.id.clone())
+            .or_default()
+            .push(Observation {
+                elapsed_ms,
+                label: row.label.into(),
+            });
+    }
+
+    const MAX_GRAPHS: usize = 8;
+    let mut graphs = Vec::new();
+    for (key, points) in groups {
+        if graphs.len() == MAX_GRAPHS {
+            break;
+        }
+        let mut curve = Vec::new();
+        for (concurrency, cohorts) in points {
+            // A repeated sweep point needs an explicit aggregation policy. Do
+            // not silently combine it with a different cohort.
+            if cohorts.len() != 1 {
+                continue;
+            }
+            let observations = cohorts.into_values().next().unwrap_or_default();
+            if observations.len() != concurrency {
+                continue;
+            }
+            let mut elapsed = observations
+                .iter()
+                .map(|observation| observation.elapsed_ms)
+                .collect::<Vec<_>>();
+            elapsed.sort_by(f64::total_cmp);
+            let p95_index = ((elapsed.len() * 95).saturating_add(99) / 100)
+                .saturating_sub(1)
+                .min(elapsed.len().saturating_sub(1));
+            let summed_ms = elapsed.iter().sum::<f64>();
+            if summed_ms <= 0.0 {
+                continue;
+            }
+            curve.push((
+                concurrency,
+                elapsed[p95_index],
+                observations.len() as f64 * 1000.0 / summed_ms,
+                observations[0].label.clone(),
+            ));
+        }
+        if curve.len() < 3 {
+            continue;
+        }
+        curve.sort_by_key(|point| point.0);
+        let parts = key.split('\u{1f}').collect::<Vec<_>>();
+        let title = format!(
+            "AgentSysPerf scaling — {} / {} / {} / {} / {}",
+            parts[0], parts[1], parts[2], parts[3], parts[4]
+        );
+        let filename = format!("agentsysperf-scaling-{}.svg", stable_label_id(&key));
+        graphs.push(ReportGraph {
+            filename,
+            svg: scaling_svg(&title, &curve),
+        });
+    }
+    graphs
+}
+
+fn stable_label_id(value: &str) -> String {
+    // Stable, non-cryptographic presentation identity; this is not used for
+    // evidence integrity or a security boundary.
+    let hash = value.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("{hash:016x}")
+}
+
+fn scaling_svg(title: &str, curve: &[(usize, f64, f64, String)]) -> String {
+    let width = 980.0;
+    let left = 90.0;
+    let right = 940.0;
+    let upper_top = 76.0;
+    let upper_bottom = 230.0;
+    let lower_top = 300.0;
+    let lower_bottom = 454.0;
+    let max_concurrency = curve.last().map(|point| point.0).unwrap_or(1).max(1) as f64;
+    let max_latency = curve
+        .iter()
+        .map(|point| point.1)
+        .fold(0.0f64, f64::max)
+        .max(1.0);
+    let max_rate = curve
+        .iter()
+        .map(|point| point.2)
+        .fold(0.0f64, f64::max)
+        .max(1.0);
+    let x = |concurrency: usize| left + (right - left) * concurrency as f64 / max_concurrency;
+    let y_latency =
+        |latency: f64| upper_bottom - (upper_bottom - upper_top) * latency / max_latency;
+    let y_rate = |rate: f64| lower_bottom - (lower_bottom - lower_top) * rate / max_rate;
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {width:.0} 500\" role=\"img\" aria-label=\"{}\"><rect width=\"{width:.0}\" height=\"500\" fill=\"#fff\"/><text x=\"24\" y=\"30\" font-family=\"sans-serif\" font-size=\"17\" font-weight=\"700\">{}</text><text x=\"24\" y=\"50\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#61707f\">Only complete, sealed cohorts. Rate is completions divided by summed end-to-end elapsed time; it is not inferred wall-clock throughput.</text>",
+        escape(title),
+        escape(title)
+    );
+    for (top, bottom, label, maximum) in [
+        (
+            upper_top,
+            upper_bottom,
+            "p95 end-to-end latency (ms)",
+            max_latency,
+        ),
+        (
+            lower_top,
+            lower_bottom,
+            "aggregate service rate (completed/s)",
+            max_rate,
+        ),
+    ] {
+        for tick in 0..=4 {
+            let fraction = tick as f64 / 4.0;
+            let y = bottom - (bottom - top) * fraction;
+            svg.push_str(&format!("<line x1=\"{left:.1}\" y1=\"{y:.1}\" x2=\"{right:.1}\" y2=\"{y:.1}\" stroke=\"#dce4ec\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" font-family=\"sans-serif\" font-size=\"10\" fill=\"#61707f\">{:.1}</text>", left - 8.0, y + 3.0, maximum * fraction));
+        }
+        svg.push_str(&format!("<text x=\"{left:.1}\" y=\"{:.1}\" font-family=\"sans-serif\" font-size=\"12\" font-weight=\"700\">{label}</text>", top - 8.0));
+    }
+    for (index, (concurrency, latency, rate, label)) in curve.iter().enumerate() {
+        let px = x(*concurrency);
+        if index > 0 {
+            let previous = &curve[index - 1];
+            svg.push_str(&format!("<path d=\"M {:.1} {:.1} L {:.1} {:.1}\" fill=\"none\" stroke=\"#4472c4\" stroke-width=\"2\"/><path d=\"M {:.1} {:.1} L {:.1} {:.1}\" fill=\"none\" stroke=\"#e07a28\" stroke-width=\"2\"/>", x(previous.0), y_latency(previous.1), px, y_latency(*latency), x(previous.0), y_rate(previous.2), px, y_rate(*rate)));
+        }
+        for (y, color, value, unit) in [
+            (y_latency(*latency), "#4472c4", *latency, "ms"),
+            (y_rate(*rate), "#e07a28", *rate, "completed/s"),
+        ] {
+            svg.push_str(&format!("<circle cx=\"{px:.1}\" cy=\"{y:.1}\" r=\"4\" fill=\"{color}\"><title>{}: concurrency {}, {:.3} {unit}</title></circle>", escape(label), concurrency, value));
+        }
+        svg.push_str(&format!("<text x=\"{px:.1}\" y=\"482\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"10\" fill=\"#61707f\">{concurrency}</text>"));
+    }
+    svg.push_str(&format!("<text x=\"{:.1}\" y=\"496\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"11\">configured concurrency</text><text x=\"{left:.1}\" y=\"270\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#4472c4\">● latency</text><text x=\"{:.1}\" y=\"270\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#e07a28\">● service rate</text></svg>\n", width / 2.0, left + 120.0));
+    svg
 }
 
 fn bounded_label(value: &str) -> String {
@@ -789,12 +1020,26 @@ mod tests {
         let graph = bottleneck_graph(&[
             ReportRow {
                 label: "fixture-agent",
+                agent: "fixture-agent",
+                provider: "fixture-provider",
+                model: "fixture-model",
+                workload: "fixture-workload",
+                trial: "fixture-trial",
+                configured_concurrency: 1,
+                execution_cohort: None,
                 metrics: &metrics,
                 components: None,
                 documents: &documents,
             },
             ReportRow {
                 label: "unmeasured-agent",
+                agent: "unmeasured-agent",
+                provider: "fixture-provider",
+                model: "fixture-model",
+                workload: "fixture-workload",
+                trial: "fixture-trial",
+                configured_concurrency: 1,
+                execution_cohort: None,
                 metrics: &metrics,
                 components: None,
                 documents: &std::collections::BTreeMap::new(),
@@ -804,5 +1049,55 @@ mod tests {
         assert_eq!(graph.filename, "agentsysperf-bottleneck-findings.svg");
         assert!(graph.svg.contains("orchestration_heavy"));
         assert!(!graph.svg.contains("ignored"));
+    }
+
+    #[test]
+    fn scaling_graph_requires_three_complete_compatible_cohorts() {
+        let mut metrics = Vec::new();
+        let mut documents = Vec::new();
+        let mut cohorts = Vec::new();
+        let mut labels = Vec::new();
+        for concurrency in 1..=3 {
+            for replica in 1..=concurrency {
+                metrics.push(std::collections::BTreeMap::from([
+                    ("elapsed_ms".into(), (concurrency * 100 + replica) as f64),
+                    ("success_rate".into(), 1.0),
+                ]));
+                documents.push(std::collections::BTreeMap::from([(
+                    "agentsysperf".into(),
+                    json!({"status":"observed","scaling_requested":true}),
+                )]));
+                cohorts.push(crate::measurements::ExecutionCohort {
+                    id: format!("cohort-{concurrency}"),
+                    selected_replicas: concurrency,
+                    admitted_slots: (1..=concurrency).collect(),
+                    dispatch: None,
+                });
+                labels.push(format!("run-{concurrency}-{replica}"));
+            }
+        }
+        let rows = (0..metrics.len())
+            .map(|index| ReportRow {
+                label: &labels[index],
+                agent: "fixture-agent",
+                provider: "fixture-provider",
+                model: "fixture-model",
+                workload: "fixture-workload",
+                trial: "fixture-trial",
+                configured_concurrency: cohorts[index].selected_replicas,
+                execution_cohort: Some(&cohorts[index]),
+                metrics: &metrics[index],
+                components: None,
+                documents: &documents[index],
+            })
+            .collect::<Vec<_>>();
+        let graphs = scaling_graphs(&rows);
+        assert_eq!(graphs.len(), 1);
+        assert!(graphs[0].filename.starts_with("agentsysperf-scaling-"));
+        assert!(graphs[0].svg.contains("configured concurrency"));
+        assert!(graphs[0].svg.contains("summed end-to-end elapsed time"));
+
+        // A partial cohort cannot become a fabricated scaling point.
+        assert!(scaling_graphs(&rows[..rows.len() - 1]).is_empty());
     }
 }
