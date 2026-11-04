@@ -176,19 +176,20 @@ fn goose_routes_record_and_replay_through_tape_without_live_credentials() {
     let agent = agent_dir.join("goose");
     std::fs::write(&agent, r##"#!/usr/bin/env node
 const host = process.env.OPENAI_HOST;
-if (process.env.ASB_TAPE_MODE) {
+const proxied = host !== process.env.ASB_TEST_UPSTREAM;
+const replaying = process.env.ASB_TAPE_MODE === 'replay' || (proxied && !process.env.ASB_TAPE_MODE);
+if (proxied) {
   const index = process.argv.indexOf('--max-turns');
   if (index < 0 || process.argv[index + 1] !== (process.env.ASB_TEST_EXPECTED_TURNS || '7')) {
     console.error('recorded step limit was not applied'); process.exit(11);
   }
 }
-if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(host || '') ||
-    (process.env.ASB_TAPE_MODE ? host === process.env.ASB_TEST_UPSTREAM : host !== process.env.ASB_TEST_UPSTREAM)) {
+if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(host || '')) {
   console.error('Goose endpoint is not the expected loopback service'); process.exit(7);
 }
-const expectedKey = process.env.ASB_TAPE_MODE === 'replay' ? 'asb-replay' : 'fixture-key';
+const expectedKey = replaying ? 'asb-replay' : 'fixture-key';
 if (process.env.OPENAI_API_KEY !== expectedKey) { console.error('incorrect key'); process.exit(8); }
-if (process.env.ASB_TAPE_MODE === 'replay' &&
+if (replaying &&
     (process.env.OPENROUTER_API_KEY !== 'asb-replay' || process.env.ANTHROPIC_API_KEY !== 'asb-replay')) {
   console.error('replay exposed a live credential'); process.exit(9);
 }
@@ -207,9 +208,12 @@ async function invokeExtension(extension) {
   });
 }
 async function main() {
-if (process.env.ASB_TAPE_MODE) {
-  const extensionIndex = process.argv.indexOf('--with-extension');
-  if (extensionIndex < 0 || !process.argv.includes('--no-profile')) {
+const extensionIndex = process.argv.indexOf('--with-extension');
+if (process.env.ASB_TAPE_MODE === 'record' && extensionIndex < 0) {
+  console.error('Goose did not receive the private ASB extension'); process.exit(10);
+}
+if (extensionIndex >= 0) {
+  if (!process.argv.includes('--no-profile')) {
     console.error('Goose did not receive the private ASB extension'); process.exit(10);
   }
   const extension = process.argv[extensionIndex + 1];
@@ -272,13 +276,33 @@ main().catch(e => { console.error(e); process.exitCode = 1; });
             .count(),
         1
     );
-    let replay = run(
+    let full_replay = run(
         &root,
         &provider.endpoint,
         &[
             "run",
             "benchmark.toml",
             "--replay",
+            "--cassette",
+            "tape.jsonl",
+        ],
+    );
+    assert!(!full_replay.status.success());
+    assert!(
+        String::from_utf8_lossy(&full_replay.stdout).contains("native tool replay requires")
+            || String::from_utf8_lossy(&full_replay.stderr).contains("native tool replay requires"),
+        "full replay: stdout={} stderr={}",
+        String::from_utf8_lossy(&full_replay.stdout),
+        String::from_utf8_lossy(&full_replay.stderr)
+    );
+    assert_eq!(*provider.requests.lock().unwrap(), before_replay);
+    let replay = run(
+        &root,
+        &provider.endpoint,
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
             "--cassette",
             "tape.jsonl",
         ],
@@ -300,7 +324,7 @@ main().catch(e => { console.error(e); process.exitCode = 1; });
         &[
             "run",
             "benchmark.toml",
-            "--replay",
+            "--llm-replay",
             "--cassette",
             "tape.jsonl",
             "--max-steps",
@@ -319,7 +343,7 @@ main().catch(e => { console.error(e); process.exitCode = 1; });
         &[
             "run",
             "benchmark.toml",
-            "--replay",
+            "--llm-replay",
             "--cassette",
             "tape.jsonl",
             "--verbose",
@@ -348,7 +372,7 @@ main().catch(e => { console.error(e); process.exitCode = 1; });
         &[
             "run",
             "benchmark.toml",
-            "--replay",
+            "--llm-replay",
             "--cassette",
             "missing.jsonl",
         ],
