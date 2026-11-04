@@ -148,6 +148,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn delegation_normalization_preserves_agent_output() {
+        let mut value = json!({"_meta":{"subagent_session_id":"20261104_4"},"content":[{"text":"# Background Task Result: 20261104_4\n\n**Duration:** 17s (2 turns)\n\n## Output\n\nKeep 20261104_4 and **Duration:** 17s"},{"text":"Unrelated 20261104_4"}]});
+        canonicalize_delegation(&mut value, "20261104_4", "20261104_2");
+        assert_eq!(value["_meta"]["subagent_session_id"], "20261104_2");
+        assert_eq!(value["content"][0]["text"], "# Background Task Result: 20261104_2\n\n**Duration:** <duration>s (2 turns)\n\n## Output\n\nKeep 20261104_4 and **Duration:** 17s");
+        assert_eq!(value["content"][1]["text"], "Unrelated 20261104_4");
+    }
+
+    #[test]
+    fn background_handles_are_translated_only_for_their_session() {
+        let scope = "asb-handle-test";
+        configure(
+            scope,
+            ProbeConfig {
+                socket: "unused".into(),
+                mode: "replay".into(),
+                marker: None,
+            },
+        );
+        identities()
+            .lock()
+            .unwrap()
+            .entry(scope.into())
+            .or_default()
+            .insert("20261104_4".into(), "20261104_2".into());
+        let call = json!({"extension":"summon","tool":"load","args":{"source":"20261104_2"}});
+        let mut args = Some(call["args"].as_object().unwrap().clone());
+        rewrite_arguments(scope, &call, &mut args);
+        assert_eq!(args.unwrap()["source"], "20261104_4");
+        let mut untouched = Some(call["args"].as_object().unwrap().clone());
+        rewrite_arguments("another-session", &call, &mut untouched);
+        assert_eq!(untouched.unwrap()["source"], "20261104_2");
+        unconfigure(scope);
+    }
+
     #[tokio::test]
     async fn failed_snapshot_begin_invalidates_without_executing_tool() {
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
@@ -573,9 +609,21 @@ mod tests {
             .unwrap();
         stop(record).await;
         if let Some(service) = snapshot_service.as_mut() {
-            service.stdin.as_mut().unwrap().write_all(b"SEAL\n").await.unwrap();
+            service
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"SEAL\n")
+                .await
+                .unwrap();
             let mut sealed = String::new();
-            tokio::time::timeout(std::time::Duration::from_secs(10), BufReader::new(service.stdout.as_mut().unwrap()).read_line(&mut sealed)).await.unwrap().unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                BufReader::new(service.stdout.as_mut().unwrap()).read_line(&mut sealed),
+            )
+            .await
+            .unwrap()
+            .unwrap();
             assert_eq!(sealed, "SEALED\n");
         }
         if snapshot_modules.is_none() {

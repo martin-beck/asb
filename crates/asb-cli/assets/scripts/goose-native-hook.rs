@@ -45,13 +45,131 @@ pub fn configuration(scope: &str) -> Option<ProbeConfig> {
 
 pub fn unconfigure(scope: &str) {
     registry().lock().unwrap().remove(scope);
+    identities().lock().unwrap().remove(scope);
+}
+
+fn identities() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+> {
+    static IDS: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+        >,
+    > = std::sync::OnceLock::new();
+    IDS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn publish_identities(
+    all: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+) -> io::Result<()> {
+    let Some(path) = std::env::var_os("ASB_GOOSE_ID_MAP_FILE") else {
+        return Ok(());
+    };
+    let path = std::path::PathBuf::from(path);
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    let result = (|| {
+        serde_json::to_writer(&mut file, all).map_err(io::Error::other)?;
+        file.flush()?;
+        std::fs::rename(&temporary, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
+}
+
+fn canonicalize_delegation(value: &mut Value, live: &str, recorded: &str) {
+    match value {
+        Value::String(text) => {
+            let task_prefix = format!("Task {live} started in background:");
+            let result_prefix = format!("# Background Task Result: {live}\n");
+            if text.starts_with(&task_prefix) {
+                *text = text.replacen(
+                    &task_prefix,
+                    &format!("Task {recorded} started in background:"),
+                    1,
+                );
+                let suffix = format!("use load(source: \"{live}\").");
+                if text.ends_with(&suffix) {
+                    text.truncate(text.len() - suffix.len());
+                    text.push_str(&format!("use load(source: \"{recorded}\")."));
+                }
+            } else if text.starts_with(&result_prefix) {
+                *text = text.replacen(
+                    &result_prefix,
+                    &format!("# Background Task Result: {recorded}\n"),
+                    1,
+                );
+                if let Some((header, output)) = text.split_once("\n\n## Output\n\n") {
+                    static DURATION: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+                    let duration = DURATION.get_or_init(|| {
+                        regex::Regex::new(r"(?m)^(\*\*Duration:\*\* )\d+s").expect("static regex")
+                    });
+                    *text = format!(
+                        "{}\n\n## Output\n\n{}",
+                        duration.replace(header, "${1}<duration>s"),
+                        output
+                    );
+                }
+            }
+        }
+        Value::Array(values) => {
+            for item in values {
+                canonicalize_delegation(item, live, recorded);
+            }
+        }
+        Value::Object(values) => {
+            for (key, item) in values {
+                if key == "subagent_session_id" && item.as_str() == Some(live) {
+                    *item = Value::String(recorded.into());
+                } else if key == "duration_secs" && item.is_number() {
+                    *item = Value::from(0);
+                } else {
+                    canonicalize_delegation(item, live, recorded);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Resolve a recorded background-task handle to the live Goose child before
+/// executing its `load` call. The broker still receives the original request.
+pub fn rewrite_arguments(scope: &str, call: &Value, args: &mut Option<rmcp::model::JsonObject>) {
+    if configuration(scope).is_none_or(|probe| probe.mode != "replay")
+        || call.get("extension").and_then(Value::as_str) != Some("summon")
+        || call.get("tool").and_then(Value::as_str) != Some("load")
+    {
+        return;
+    }
+    let Some(source) = args
+        .as_ref()
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    let live = identities().lock().unwrap().get(scope).and_then(|ids| {
+        ids.iter()
+            .find_map(|(live, recorded)| (recorded == source).then(|| live.clone()))
+    });
+    if let (Some(live), Some(args)) = (live, args.as_mut()) {
+        args.insert("source".into(), Value::String(live));
+    }
 }
 
 /// Adapter-owned dispatch: the upstream hook supplies the resolved call and
 /// original future without changing tool schemas or Goose's result processing.
 pub async fn intercept<Fut>(
     scope: &str,
-    call: Value,
+    mut call: Value,
     cancel: &CancellationToken,
     invoke: Fut,
 ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData>
@@ -71,11 +189,27 @@ where
         call.get("extension").and_then(Value::as_str),
         Some("summon" | "orchestrator")
     );
+    if probe.mode == "replay"
+        && call.get("extension").and_then(Value::as_str) == Some("summon")
+        && call.get("tool").and_then(Value::as_str) == Some("load")
+    {
+        if let Some(source) = call.pointer("/args/source").and_then(Value::as_str) {
+            let mapped = identities()
+                .lock()
+                .unwrap()
+                .get(scope)
+                .and_then(|ids| ids.get(source))
+                .cloned();
+            if let Some(recorded) = mapped {
+                call["args"]["source"] = Value::String(recorded);
+            }
+        }
+    }
     if delegated && probe.mode == "replay" {
         let recorded = dispatch(
             &probe.socket,
             &probe.mode,
-            call,
+            call.clone(),
             cancel,
             probe.marker.as_deref(),
             || async {
@@ -89,10 +223,40 @@ where
         let sealed =
             serde_json::from_value::<Result<rmcp::model::CallToolResult, rmcp::ErrorData>>(value)
                 .map_err(|error| internal(error.to_string()))?;
-        let sealed_value =
+        let mut sealed_value =
             serde_json::to_value(&sealed).map_err(|error| internal(error.to_string()))?;
-        let actual_value =
+        let mut actual_value =
             serde_json::to_value(&actual).map_err(|error| internal(error.to_string()))?;
+        if call.get("extension").and_then(Value::as_str) == Some("summon") {
+            let live = actual_value
+                .pointer("/Ok/_meta/subagent_session_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let recorded_id = sealed_value
+                .pointer("/Ok/_meta/subagent_session_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if let (Some(live), Some(recorded_id)) = (live, recorded_id) {
+                let mut all = identities().lock().unwrap();
+                let ids = all.entry(scope.to_string()).or_default();
+                if ids
+                    .get(&live)
+                    .is_some_and(|existing| existing != &recorded_id)
+                    || ids
+                        .iter()
+                        .any(|(other, value)| other != &live && value == &recorded_id)
+                {
+                    return Err(internal(
+                        "delegated session mapping conflicts with recording".into(),
+                    ));
+                }
+                ids.insert(live.clone(), recorded_id.clone());
+                publish_identities(&all)
+                    .map_err(|_| internal("cannot publish delegated session mapping".into()))?;
+                canonicalize_delegation(&mut actual_value, &live, &recorded_id);
+                canonicalize_delegation(&mut sealed_value, &recorded_id, &recorded_id);
+            }
+        }
         if sealed_value != actual_value {
             return Err(internal(
                 "delegated tool result differs from recording".into(),

@@ -5,13 +5,13 @@ index 59d699a..281b31c 100644
 @@ -12,0 +13 @@ default = []
 +asb-native-probe = []
 diff --git a/crates/goose/src/agents/extension_manager/lease.rs b/crates/goose/src/agents/extension_manager/lease.rs
-index ecb7d46..cb6d3ef 100644
+index ecb7d46..469ac44 100644
 --- a/crates/goose/src/agents/extension_manager/lease.rs
 +++ b/crates/goose/src/agents/extension_manager/lease.rs
 @@ -687,0 +688,2 @@ impl ExtensionLease {
 +        #[cfg(all(any(test, feature = "asb-native-probe"), target_os = "linux"))]
 +        let probe_extension = resolved.extension.key.clone();
-@@ -691,12 +693,26 @@ impl ExtensionLease {
+@@ -691,12 +693,30 @@ impl ExtensionLease {
 -            let mut result = client
 -                .call_tool(
 -                    &call_context,
@@ -25,7 +25,11 @@ index ecb7d46..cb6d3ef 100644
 -                    _ => ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None),
 -                })?;
 +            #[cfg(all(any(test, feature = "asb-native-probe"), target_os = "linux"))]
++            let mut arguments = arguments;
++            #[cfg(all(any(test, feature = "asb-native-probe"), target_os = "linux"))]
 +            let probe_call = serde_json::json!({"extension":probe_extension, "tool":server_name, "args":arguments});
++            #[cfg(all(any(test, feature = "asb-native-probe"), target_os = "linux"))]
++            super::asb_native_probe::rewrite_arguments(&session_id, &probe_call, &mut arguments);
 +            let invoke = async {
 +                client
 +                    .call_tool(
