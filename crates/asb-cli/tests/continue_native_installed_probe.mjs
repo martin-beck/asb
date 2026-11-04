@@ -11,6 +11,8 @@ if(!cli)throw new Error('ASB_TEST_CONTINUE_CLI required');
 await mkdir(base,{recursive:true});const root=await mkdtemp(resolve(base,'run-'));
 const bundle=resolve(cli,'../index.js');const hook=new URL('../assets/scripts/continue-dispatch-hook.mjs',import.meta.url).href,dispatch=new URL('../assets/scripts/continue-native-dispatch.mjs',import.meta.url).href;const bootPath=resolve(root,'bootstrap.mjs');await writeFile(bootPath,`import {installDispatchHook} from ${JSON.stringify(hook)};import {createNativeDispatcher} from ${JSON.stringify(dispatch)};installDispatchHook(process.env.ASB_TEST_BUNDLE,createNativeDispatcher(process.env.ASB_TEST_MODE,process.env.ASB_TEST_SOCKET,{isDelegation:call=>call.name==='Subagent'}),{headlessSubagent:true});`);const bootstrap=pathToFileURL(bootPath).href;
 const tapeScript=fileURLToPath(new URL('../assets/scripts/llmtape.mjs',import.meta.url));
+const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
+const programSha256=sha(await readFile(bundle));
 let posts=0,gets=0,modelCalls={};
 const server=createServer((req,res)=>{
  if(req.method==='GET'){gets++;res.writeHead(200,{'content-type':'text/plain'});res.end('fixture fetch result');return;}
@@ -21,8 +23,6 @@ const server=createServer((req,res)=>{
  });
 });
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const mockPort=server.address().port;
-const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
-const programSha256=sha(await readFile(bundle));
 // The local fixture uses a Fetch with no workspace mutation. This marker is
 // fixture-only and must never be treated as production snapshot evidence.
 const workspaceEffectSha256=sha('local-mock-fetch-no-workspace-effects');
@@ -32,10 +32,9 @@ async function startProxy(mode,index,workspace) {
  const selected=mode==='record'?cassette:resolve(root,`fixture-llm-replay-${index}.jsonl`);if(mode==='replay'){await copyFile(cassette,selected);await rm(`${selected}.progress.json`,{force:true});}
  const args=mode==='record'?['record','--port','0','--upstream',`http://127.0.0.1:${mockPort}/v1`,'--out',selected]:['replay','--port','0','--cassette',selected];
  const child=spawn(process.execPath,[tapeScript,...args],{env:{PATH:process.env.PATH||'',ASB_TAPE_READY_FILE:ready,ASB_TAPE_WORKSPACE:workspace,...(mode==='replay'?{ASB_TAPE_MISMATCH_EVIDENCE:resolve(root,`mismatch-${index}.json`)}:{})},stdio:['ignore','ignore','pipe']});let errors='',spawnError;child.stderr.on('data',c=>errors+=c);child.once('error',error=>{spawnError=error});
- for(let i=0;i<200;i++){if(spawnError)throw spawnError;if(child.exitCode!==null||child.signalCode!==null)throw new Error(`proxy failed: ${errors.slice(-1000)}`);try{const data=JSON.parse(await readFile(ready,'utf8'));return {child,port:data.port,selected};}catch(error){if(error.code!=='ENOENT')throw error;}await new Promise(r=>setTimeout(r,25));}
- child.kill();throw new Error('proxy readiness timed out');
+ try {for(let i=0;i<200;i++){if(spawnError)throw spawnError;if(child.exitCode!==null||child.signalCode!==null)throw new Error(`proxy failed: ${errors.slice(-1000)}`);try{const data=JSON.parse(await readFile(ready,'utf8'));return {child,port:data.port,selected};}catch(error){if(error.code!=='ENOENT')throw error;}await new Promise(r=>setTimeout(r,25));}throw new Error('proxy readiness timed out');}catch(error){await stop(child);throw error;}
 }
-async function stop(child){if(child.pid==null||child.exitCode!==null||child.signalCode!==null)return;child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));}
+async function stop(child){if(child.pid==null||child.exitCode!==null||child.signalCode!==null)return;const exited=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGTERM');const timer=setTimeout(()=>child.kill('SIGKILL'),5000);try{await exited;}finally{clearTimeout(timer);}}
 async function run(mode,index,events=[]) {
  const dir=resolve(root,`${mode}-${index}`);await mkdir(resolve(dir,'home'),{recursive:true});const socket=resolve(dir,'broker.sock');await rm(socket,{force:true});
  const broker=new ContinueBroker(mode,events,async()=>{});await broker.listen(socket);
