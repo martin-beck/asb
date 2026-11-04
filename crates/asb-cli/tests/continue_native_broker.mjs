@@ -202,6 +202,22 @@ try {
   assert.match(markers[0], /^tool-begin:continue-0:\d+:\d+$/);
   assert.match(markers[1], /^tool-end:continue-0:\d+:\d+$/);
   assert.equal(markers[2], 'tool-end:continue-0');
+  const delayedEffects = [];
+  const delayed = new NativeToolBroker('replay', [
+    {ordinal: 1, request: {tool: 'child'}, outcome: {ok: true, value: 'child'}},
+    {ordinal: 0, request: {tool: 'parent'}, outcome: {ok: true, value: 'parent'}},
+  ], async event => { delayedEffects.push(event.ordinal); });
+  await delayed.listen(socket);
+  const parent = await brokerRequest(socket, {op: 'reserve', request: {tool: 'parent'}});
+  const childCall = await brokerRequest(socket, {op: 'reserve', request: {tool: 'child'}});
+  await assert.rejects(delayed.finish(), /unfinished/);
+  assert.deepEqual(delayedEffects, []);
+  assert.equal((await brokerRequest(socket, {op: 'release', token: childCall.token})).value, 'child');
+  assert.deepEqual(delayedEffects, [1]);
+  assert.equal((await brokerRequest(socket, {op: 'release', token: parent.token})).value, 'parent');
+  assert.deepEqual(delayedEffects, [1, 0]);
+  await assert.rejects(brokerRequest(socket, {op: 'release', token: parent.token}), /no active/);
+  await delayed.finish();
   await new Promise(resolve => marker.close(resolve));
   await assert.rejects(snapshotBoundary(markerSocket,'record','begin',0), /unavailable/);
   console.log('Continue broker parent/child ordering checks passed');

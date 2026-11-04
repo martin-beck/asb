@@ -73,16 +73,30 @@ export class ReplaySession {
     this.draining = false;
     this.closed = false;
   }
-  invoke(request) {
-    if (this.closed) return Promise.reject(new Error('Native tool replay session is closed'));
+  // Reserve dispatch order now, but apply recorded effects only when the
+  // adapter signals that its corresponding native completion hook has fired.
+  reserve(request) {
+    if (this.closed) throw new Error('Native tool replay session is closed');
     const key = canonical(request);
     if (!this.byDispatch.slice(this.nextDispatch).some(event => canonical(event.request) === key)) {
-      return Promise.reject(new Error('Native tool replay has no matching remaining tool request'));
+      throw new Error('Native tool replay has no matching remaining tool request');
     }
-    return new Promise((resolve, reject) => {
-      this.pending.push({ key, resolve, reject });
-      this.drain().catch(error => this.abort(error));
+    let item;
+    const outcome = new Promise((resolve, reject) => {
+      item = { key, resolve, reject, released: false };
+      this.pending.push(item);
     });
+    this.drain().catch(error => this.abort(error));
+    return { outcome, release: () => {
+      if (this.closed || item.released) throw new Error('Native tool replay reservation is unavailable');
+      item.released = true;
+      this.drain().catch(error => this.abort(error));
+      return outcome;
+    }};
+  }
+  invoke(request) {
+    try { return this.reserve(request).release(); }
+    catch (error) { return Promise.reject(error); }
   }
   async drain() {
     if (this.draining || this.closed) return;
@@ -98,7 +112,7 @@ export class ReplaySession {
         }
         const event = this.events[this.nextCompletion];
         const item = event && this.assigned.get(event.ordinal);
-        if (!item) break;
+        if (!item || !item.released) break;
         await this.applyEffects(clone(event));
         this.assigned.delete(event.ordinal);
         this.nextCompletion++;

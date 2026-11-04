@@ -45,6 +45,19 @@ export class NativeToolBroker {
       if (this.mode === 'replay' && message.op === 'invoke') {
         try { reply(socket, { ok: true, value: await this.session.invoke(message.request) }); }
         catch (error) { reply(socket, error instanceof Error ? { ok: false, name: error.name, message: error.message } : { ok: false, thrown: encodeThrown(error) }); }
+      } else if (this.mode === 'replay' && message.op === 'reserve') {
+        const reservation = this.session.reserve(message.request);
+        // A failure may occur before the later completion hook connects.
+        reservation.outcome.catch(() => {});
+        const token = this.nextToken++;
+        this.pending.set(token, reservation);
+        reply(socket, { ok: true, token });
+      } else if (this.mode === 'replay' && message.op === 'release') {
+        const reservation = this.pending.get(message.token);
+        if (!reservation) throw new Error('Native tool broker release has no active call');
+        this.pending.delete(message.token);
+        try { reply(socket, { ok: true, value: await reservation.release() }); }
+        catch (error) { reply(socket, error instanceof Error ? { ok: false, name: error.name, message: error.message } : { ok: false, thrown: encodeThrown(error) }); }
       } else if (this.mode === 'record' && message.op === 'start') {
         const request = normalizeRequest(message.request);
         const token = this.nextToken++;
@@ -94,7 +107,7 @@ export class NativeToolBroker {
   async abort() {
     const error = new Error('Native tool broker was cancelled');
     this.session.abort(error);
-    for (const item of this.pending.values()) item.reject(error);
+    for (const item of this.pending.values()) if (item.reject) item.reject(error);
     this.pending.clear();
     for (const socket of this.connections) socket.destroy();
     await new Promise(resolve => this.server.close(() => resolve()));
