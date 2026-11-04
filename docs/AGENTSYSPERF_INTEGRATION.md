@@ -89,14 +89,12 @@ The initial selectable collector family is:
 
 | Selection | Source | Result | Scope |
 |---|---|---|---|
-| `agentsysperf:l1-resource` | AgentSysPerf L1 vocabulary + ASB sampler | CPU/RSS/thread observations for ASB lifecycle spans | agent tree |
-| `agentsysperf:l3-perf` | AgentSysPerf L3 vocabulary + ASB-owned `perf` | generic counters, IPC, cache/branch rates | agent tree/cgroup |
-| `agentsysperf:analysis` | AgentSysPerf analyzers | bounded evidence-backed bottleneck findings | offline post-run |
-| `agentsysperf:scaling` | AgentSysPerf scaling analyzer | sweep-only throughput/latency knee findings | offline post-sweep |
-| `agentsysperf:intel`, `:amd`, `:armv8` | platform capability catalogs | vendor-specific optional telemetry | explicitly declared |
+| `agentsysperf:l1-resource` | AgentSysPerf L1 vocabulary + ASB sampler/analyzer | CPU/RSS/thread observations, bounded Analyzer findings and bottleneck SVG | agent tree |
+| `agentsysperf:scaling` | AgentSysPerf-compatible sealed-cohort analyzer | sweep-only latency/service-rate SVG; no new execution | offline post-sweep |
+| platform manifest | ASB-owned `perf` capability discovery | generic counters plus guarded Intel, AMD, or Armv8 events | agent tree/cgroup |
 
-`analysis` and `scaling` consume validated normalized records; they never
-launch an agent, a provider, or a workload.  A one-run analysis cannot claim a
+Analysis and scaling consume validated normalized records; they never launch an
+agent, a provider, or a workload.  A one-run analysis cannot claim a
 concurrency knee.  The scaling collector requires a sweep with at least three
 distinct observed concurrency points and compatible selected task populations.
 
