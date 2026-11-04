@@ -5,6 +5,9 @@ use crate::measurements;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+mod readiness;
+
 #[cfg(all(test, target_os = "linux"))]
 #[path = "../../../tests/unit/perf_stop_contract.rs"]
 mod stop_contract_tests;
@@ -25,7 +28,9 @@ fn record_args(pid: u32) -> Vec<String> {
         "cpu-clock".into(),
         "-g".into(),
         "-F".into(),
-        "19".into(),
+        // Frequency is per thread: a 19 Hz period misses most short-lived
+        // workers even when their aggregate CPU time is substantial.
+        "199".into(),
         "--inherit".into(),
         "-p".into(),
         pid.to_string(),
@@ -427,6 +432,15 @@ impl measurements::Session {
         if !self.state::<PerfState>().borrow().enabled {
             return Ok(());
         }
+        #[cfg(target_os = "linux")]
+        let mut record_ready = readiness::Readiness::new(
+            &self
+                .dir
+                .canonicalize()
+                .map_err(|error| format!("cannot resolve perf capture directory: {error}"))?,
+            "record",
+        )
+        .map_err(|error| format!("cannot prepare perf activation: {error}"))?;
         let data = self.dir.join("perf.data");
         // A passwordless-sudo fallback may be needed for rootless isolated
         // process trees. Pre-creating the destination keeps its ownership
@@ -451,6 +465,8 @@ impl measurements::Session {
             .args(&record_args)
             .args(["-o"])
             .arg(&data);
+        #[cfg(target_os = "linux")]
+        command.args(["-D", "-1", "--control", &record_ready.argument()]);
         let mut collector = match Collector::spawn("perf", &ADAPTER, command, route, captures) {
             Ok(collector) => collector,
             Err(error) if !env_true("ASB_MEASURE_PERF") => {
@@ -463,7 +479,13 @@ impl measurements::Session {
                 ));
             }
         };
-        if let Some(reason) = startup_failure(&mut collector)? {
+        #[cfg(target_os = "linux")]
+        let record_failure = record_ready
+            .enable(Duration::from_secs(10), || collector.startup_exit())
+            .err();
+        #[cfg(not(target_os = "linux"))]
+        let record_failure = startup_failure(&mut collector)?;
+        if let Some(reason) = record_failure {
             write_unavailable(
                 &self.dir.join("perf.json"),
                 "perf",
@@ -483,10 +505,27 @@ impl measurements::Session {
         let stat_args = stat_args(pid, measurement_interval_ms(), &hardware_events);
         let (mut command, route) = self.collector_command("perf")?;
         command.args(&stat_args);
+        #[cfg(target_os = "linux")]
+        let mut stat_ready = readiness::Readiness::new(
+            &self
+                .dir
+                .canonicalize()
+                .map_err(|error| format!("cannot resolve perf capture directory: {error}"))?,
+            "stat",
+        )
+        .map_err(|error| format!("cannot prepare perf-stat activation: {error}"))?;
+        #[cfg(target_os = "linux")]
+        command.args(["-D", "-1", "--control", &stat_ready.argument()]);
         let stat = Collector::spawn("perf-stat", &ADAPTER, command, route, captures);
         match stat {
             Ok(mut collector) => {
-                if let Some(reason) = startup_failure(&mut collector)? {
+                #[cfg(target_os = "linux")]
+                let stat_failure = stat_ready
+                    .enable(Duration::from_secs(10), || collector.startup_exit())
+                    .err();
+                #[cfg(not(target_os = "linux"))]
+                let stat_failure = startup_failure(&mut collector)?;
+                if let Some(reason) = stat_failure {
                     write_unavailable(
                         &self.dir.join("perf-stat.json"),
                         "perf-stat",
@@ -506,6 +545,7 @@ impl measurements::Session {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn startup_failure(collector: &mut Collector) -> Result<Option<String>, String> {
     // perf reports inaccessible PMUs immediately. Give its owned capture
     // worker one scheduling interval to observe that deterministic exit.
@@ -960,7 +1000,7 @@ mod tests {
                 "cpu-clock",
                 "-g",
                 "-F",
-                "19",
+                "199",
                 "--inherit",
                 "-p",
                 "42"
