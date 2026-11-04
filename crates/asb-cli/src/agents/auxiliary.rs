@@ -50,9 +50,13 @@ impl AuxiliaryService {
         });
         let (send, receive) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
+            let mut stdout = BufReader::new(stdout);
             let mut line = String::new();
-            let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
+            let result = (&mut stdout).take(8193).read_line(&mut line).map(|_| line);
             let _ = send.send(result);
+            // Keep the pipe open after readiness. A service that writes a
+            // diagnostic later must not receive SIGPIPE from its supervisor.
+            let _ = std::io::copy(&mut stdout, &mut std::io::sink());
         });
         match receive.recv_timeout(Duration::from_secs(15)) {
             Ok(Ok(line)) if line == "READY\n" => Ok(Self { child, diagnostics }),
@@ -209,6 +213,22 @@ mod tests {
         ]);
         let mut service = AuxiliaryService::start(&mut command).unwrap();
         service.settle().unwrap();
+    }
+    #[test]
+    fn service_stdout_remains_open_after_readiness() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "set -e; printf 'READY\\n'; head -c 65536 /dev/zero; read line",
+        ]);
+        let mut service = AuxiliaryService::start(&mut command).unwrap();
+        service.settle().unwrap();
+    }
+    #[test]
+    fn oversized_readiness_is_rejected() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "head -c 16384 /dev/zero; sleep 1"]);
+        assert!(AuxiliaryService::start(&mut command).is_err());
     }
     #[test]
     fn service_failure_reports_only_the_classified_problem() {
