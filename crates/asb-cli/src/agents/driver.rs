@@ -972,11 +972,13 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             .map_err(crate::io_error)?;
         let gated_agent = agent_route.is_some();
         let captured = crate::runner::run_guest_process(
-            &mut command,
-            agent_route.take(),
-            auxiliary
-                .as_mut()
-                .map(super::auxiliary::AuxiliaryService::child),
+            (
+                &mut command,
+                agent_route.take(),
+                auxiliary
+                    .as_mut()
+                    .map(super::auxiliary::AuxiliaryService::child),
+            ),
             stdin_prompt.as_deref(),
             #[cfg(unix)]
             &mut transport_out,

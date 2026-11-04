@@ -1688,15 +1688,19 @@ fn wait_for_agent_exec(
 }
 
 pub(crate) fn run_guest_process(
-    command: &mut Command,
-    route: Option<crate::launch::CommandRoute>,
-    #[allow(unused_mut, unused_variables)] mut auxiliary: Option<&mut std::process::Child>,
+    launch: (
+        &mut Command,
+        Option<crate::launch::CommandRoute>,
+        Option<&mut std::process::Child>,
+    ),
     stdin_prompt: Option<&[u8]>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     runtime: Duration,
     on_spawn: &mut dyn FnMut(u32) -> Result<(), Error>,
 ) -> Result<GuestProcessOutput, Error> {
+    #[allow(unused_mut, unused_variables)]
+    let (command, route, mut auxiliary) = launch;
     #[cfg(target_os = "linux")]
     let mut descendants = crate::process_gate::DescendantScope::new()
         .map_err(|error| Error::Run(format!("cannot retain guest agent descendants: {error}")))?;
@@ -2661,9 +2665,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let result = super::run_guest_process(
-            &mut command,
-            None,
-            None,
+            (&mut command, None, None),
             None,
             &mut stdout,
             &mut stderr,
