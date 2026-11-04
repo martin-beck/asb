@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { createServer as createSocketServer } from 'node:net';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, mkdir, rm, copyFile, mkdtemp } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -6,10 +7,14 @@ import { resolve } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { ContinueBroker } from '../assets/scripts/continue-native-broker.mjs';
 import { encodeSidecar, decodeSidecar } from '../assets/scripts/continue-native-sidecar.mjs';
+import { replayEffects } from '../assets/scripts/continue-snapshot-boundary.mjs';
 const base=resolve(process.env.ASB_TEST_PROBE_ROOT || 'target/continue-installed-probes'), cli=process.env.ASB_TEST_CONTINUE_CLI;
 if(!cli)throw new Error('ASB_TEST_CONTINUE_CLI required');
 await mkdir(base,{recursive:true});const root=await mkdtemp(resolve(base,'run-'));
-const bundle=resolve(cli,'../index.js');const hook=new URL('../assets/scripts/continue-dispatch-hook.mjs',import.meta.url).href,dispatch=new URL('../assets/scripts/continue-native-dispatch.mjs',import.meta.url).href;const bootPath=resolve(root,'bootstrap.mjs');await writeFile(bootPath,`import {installDispatchHook} from ${JSON.stringify(hook)};import {createNativeDispatcher} from ${JSON.stringify(dispatch)};installDispatchHook(process.env.ASB_TEST_BUNDLE,createNativeDispatcher(process.env.ASB_TEST_MODE,process.env.ASB_TEST_SOCKET,{isDelegation:call=>call.name==='Subagent'}),{headlessSubagent:true});`);const bootstrap=pathToFileURL(bootPath).href;
+const bundle=resolve(cli,'../index.js');const hook=new URL('../assets/scripts/continue-dispatch-hook.mjs',import.meta.url).href,dispatch=new URL('../assets/scripts/continue-native-dispatch.mjs',import.meta.url).href,boundary=new URL('../assets/scripts/continue-snapshot-boundary.mjs',import.meta.url).href;const bootPath=resolve(root,'bootstrap.mjs');await writeFile(bootPath,`import {installDispatchHook} from ${JSON.stringify(hook)};import {createNativeDispatcher} from ${JSON.stringify(dispatch)};import {recordBoundaries} from ${JSON.stringify(boundary)};installDispatchHook(process.env.ASB_TEST_BUNDLE,createNativeDispatcher(process.env.ASB_TEST_MODE,process.env.ASB_TEST_SOCKET,{isDelegation:call=>call.name==='Subagent',...recordBoundaries(process.env.ASB_TEST_MARKER)}),{headlessSubagent:true});`);const bootstrap=pathToFileURL(bootPath).href;
+const markerPath=resolve(root,'marker.sock'),markers=[];
+const marker=createSocketServer(client=>{let data='';client.on('data',chunk=>{data+=chunk;if(data.includes('\n')){markers.push(data.trim());client.end('1\n');}});});
+await new Promise((resolve,reject)=>{marker.once('error',reject);marker.listen(markerPath,resolve);});
 const tapeScript=fileURLToPath(new URL('../assets/scripts/llmtape.mjs',import.meta.url));
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 const programSha256=sha(await readFile(bundle));
@@ -37,13 +42,13 @@ async function startProxy(mode,index,workspace) {
 async function stop(child){if(child.pid==null||child.exitCode!==null||child.signalCode!==null)return;const exited=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGTERM');const timer=setTimeout(()=>child.kill('SIGKILL'),5000);try{await exited;}finally{clearTimeout(timer);}}
 async function run(mode,index,events=[]) {
  const dir=resolve(root,`${mode}-${index}`);await mkdir(resolve(dir,'home'),{recursive:true});const socket=resolve(dir,'broker.sock');await rm(socket,{force:true});
- const broker=new ContinueBroker(mode,events,async()=>{});await broker.listen(socket);
+ const broker=new ContinueBroker(mode,events,replayEffects(markerPath));await broker.listen(socket);
  let proxy;
  try {
   proxy=await startProxy(mode,index,dir);
   const config=resolve(dir,'config.yaml'), base=`http://127.0.0.1:${proxy.port}/v1`;
   await writeFile(config,`name: ASB fixture\nversion: 1.0.0\nmodels:\n  - name: fixture\n    provider: openai\n    model: fixture-parent\n    roles: [chat]\n    apiBase: ${base}\n    apiKey: fixture\n  - name: worker\n    provider: openai\n    model: fixture-child\n    roles: [subagent]\n    apiBase: ${base}\n    apiKey: fixture\n    chatOptions:\n      baseSystemMessage: You are a fixture helper.\n`);
-  const env={PATH:process.env.PATH||'',NODE_OPTIONS:`--import=${bootstrap}`,ASB_TEST_BUNDLE:bundle,ASB_TEST_MODE:mode,ASB_TEST_SOCKET:socket,CONTINUE_GLOBAL_DIR:resolve(dir,'home')};
+  const env={PATH:process.env.PATH||'',NODE_OPTIONS:`--import=${bootstrap}`,ASB_TEST_BUNDLE:bundle,ASB_TEST_MODE:mode,ASB_TEST_SOCKET:socket,ASB_TEST_MARKER:markerPath,CONTINUE_GLOBAL_DIR:resolve(dir,'home')};
   const child=spawn(process.execPath,[cli,'-p','Delegate the fixture task to the worker subagent and finish.','--config',config,'--model','fixture','--format','json','--auto','--beta-subagent-tool'],{cwd:dir,env,stdio:['ignore','pipe','pipe']});
   let out='',err='';child.stdout.on('data',c=>out+=c);child.stderr.on('data',c=>err+=c);
   const timer=setTimeout(()=>child.kill('SIGKILL'),60000);
@@ -62,5 +67,6 @@ try {
  const sealed=decodeSidecar(sidecar);await new Promise(resolve=>server.close(resolve));
  const settled=await Promise.allSettled([0,1,2,3].map(i=>run('replay',i,sealed.exchanges)));const failures=settled.filter(x=>x.status==='rejected');if(failures.length)throw new Error(`replay failures: ${failures.map(x=>x.reason.message).join('; ')}`);const replay=settled.map(x=>x.value);
  if(gets!==1||posts!==4)throw new Error('replay contacted the stopped mock backend');
- const summary={recordEvents:record.result.length,recordMockPosts:posts,recordMockGets:gets,replayReplicas:replay.length,replayMockPosts:0,replayMockGets:0,replayOutputBytes:replay.map(x=>x.outputBytes),artifactDirectory:root,scope:'local-mock Fetch with fixture-only workspace marker; not ASB or SWE-bench'};await writeFile(resolve(root,'summary.json'),JSON.stringify(summary,null,2)+'\n');console.log(JSON.stringify(summary));
-} finally {if(server.listening)await new Promise(resolve=>server.close(resolve));}
+ if(markers.filter(x=>/^tool-begin:continue-0:\d+:\d+$/.test(x)).length!==1||markers.filter(x=>/^tool-end:continue-0:\d+:\d+$/.test(x)).length!==1||markers.filter(x=>x==='tool-end:continue-0').length!==4)throw new Error(`unexpected snapshot markers: ${JSON.stringify(markers)}`);
+ const summary={recordEvents:record.result.length,recordMockPosts:posts,recordMockGets:gets,replayReplicas:replay.length,replayMockPosts:0,replayMockGets:0,snapshotMarkers:markers,replayOutputBytes:replay.map(x=>x.outputBytes),artifactDirectory:root,scope:'local-mock Fetch with simulated snapshot service; not ASB, Btrfs, or SWE-bench'};await writeFile(resolve(root,'summary.json'),JSON.stringify(summary,null,2)+'\n');console.log(JSON.stringify(summary));
+} finally {if(server.listening)await new Promise(resolve=>server.close(resolve));if(marker.listening)await new Promise(resolve=>marker.close(resolve));}
