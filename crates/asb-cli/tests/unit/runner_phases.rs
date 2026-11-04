@@ -7,6 +7,13 @@ use std::rc::Rc;
 #[path = "runner_recording_capacity.rs"]
 mod recording_capacity;
 
+#[test]
+fn offline_sdk_session_protocol_fixtures_run_in_the_rust_gate() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/benchmark_sdk_session.py");
+    let status = Command::new("python3").arg(path).status().unwrap();
+    assert!(status.success(), "SDK session fixtures failed");
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
