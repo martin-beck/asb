@@ -744,6 +744,10 @@ fn start_native_service(
             "pi-native-transform.mjs",
             include_str!("../../../assets/scripts/pi-native-transform.mjs"),
         ),
+        (
+            "pi-fetch-diagnostic.mjs",
+            include_str!("../../../assets/scripts/pi-fetch-diagnostic.mjs"),
+        ),
     ];
     super::super::native_guest::start(
         command,
@@ -816,6 +820,42 @@ mod tests {
         assert!(super::finalize_native_recording(&emit(true), "bad").is_err());
     }
     use super::*;
+
+    #[test]
+    fn fetch_diagnostic_preserves_results_and_sanitizes_failures() {
+        let root = std::env::temp_dir().join(format!("asb-pi-fetch-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("diagnostic.mjs"),
+            include_str!("../../../assets/scripts/pi-fetch-diagnostic.mjs"),
+        )
+        .unwrap();
+        std::fs::write(root.join("test.mjs"), r#"import {installFetchDiagnostic} from './diagnostic.mjs';
+import {createServer} from 'node:net';
+const logs=[]; let failure=false; const originalError=new Error('secret request data',{cause:{code:'ECONNREFUSED'}});
+const target={fetch:async function(value){if(failure) throw originalError; return {value, receiver:this===target};}};
+installFetchDiagnostic(target,text=>logs.push(text));
+const response=await target.fetch('ok'); if(response.value!=='ok'||!response.receiver) throw Error('success changed');
+failure=true; for(let i=0;i<10;i++){try{await target.fetch('secret url')}catch(error){if(error!==originalError)throw Error('error changed')}}
+if(logs.length!==8||logs.some(s=>s!=='ASB Pi fetch transport failure: ECONNREFUSED\n'))throw Error('unsanitized or unbounded');
+const throwing={fetch:async()=>{throw new Error('secret')}};installFetchDiagnostic(throwing,()=>{throw Error('report failed')});
+try{await throwing.fetch()}catch(error){if(error.message!=='secret')throw Error('report masked error')}
+const server=createServer();await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const port=server.address().port;await new Promise(resolve=>server.close(resolve));
+const actualLogs=[];const actual={fetch:globalThis.fetch};installFetchDiagnostic(actual,text=>actualLogs.push(text));
+try{await actual.fetch(`http://127.0.0.1:${port}/secret`);throw Error('unexpected fetch success')}catch(error){if(error.message==='unexpected fetch success')throw error}
+if(actualLogs.length!==1||!actualLogs[0].includes('ECONNREFUSED')||actualLogs[0].includes(String(port)))throw Error('real network failure not sanitized');
+"#).unwrap();
+        let output = std::process::Command::new("node")
+            .arg(root.join("test.mjs"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn replay_normalizes_only_pi_response_session_cache_uuid() {
