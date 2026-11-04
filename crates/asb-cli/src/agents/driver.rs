@@ -526,7 +526,7 @@ fn grant_unprivileged_traverse(_: &Path) -> Result<(), Error> {
 
 struct PreparedGuest {
     command: Command,
-    auxiliary: Option<super::auxiliary::AuxiliaryService>,
+    auxiliary_plan: Option<super::auxiliary::AuxiliaryPlan>,
     stdin_prompt: Option<Vec<u8>>,
     artifact_owner: super::ArtifactOwner,
     instrumentation: Option<crate::workloads::staging::Guard>,
@@ -737,7 +737,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
                 cassette,
             }),
     })?;
-    let auxiliary = adapter.start_guest_service(
+    let auxiliary_plan = adapter.prepare_guest_service(
         &mut command,
         process_program,
         &request.run_dir,
@@ -759,7 +759,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
     )?;
     Ok(PreparedGuest {
         command,
-        auxiliary,
+        auxiliary_plan,
         stdin_prompt,
         artifact_owner,
         instrumentation,
@@ -816,13 +816,13 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     };
     let PreparedGuest {
         mut command,
-        mut auxiliary,
+        auxiliary_plan,
         stdin_prompt,
         mut artifact_owner,
         instrumentation,
         execution_identity,
     } = prepare(&request)?;
-    if retained && auxiliary.is_some() {
+    if retained && auxiliary_plan.is_some() {
         return Err(Error::Run(
             "adapter auxiliary recording requires agent cleanup before evaluation".into(),
         ));
@@ -866,6 +866,12 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     return Err(Error::Run(
         "guest agent gate currently requires Unix signals".into(),
     ));
+    // Start adapter-owned services only after host collectors have attached
+    // to this stopped driver. Their process creation and descendants then
+    // inherit the same trace filter before the actual agent is started.
+    let mut auxiliary = auxiliary_plan
+        .map(super::auxiliary::AuxiliaryPlan::start)
+        .transpose()?;
     #[cfg(target_os = "linux")]
     let held = if retained {
         Some(crate::runner::workload_process::start_with_spawn(

@@ -9,6 +9,19 @@ pub(crate) struct AuxiliaryService {
     diagnostics: std::sync::mpsc::Receiver<Vec<u8>>,
 }
 
+/// Validated adapter service command, held until collectors are attached.
+pub(crate) struct AuxiliaryPlan(Command);
+
+impl AuxiliaryPlan {
+    pub(crate) fn new(command: Command) -> Self {
+        Self(command)
+    }
+
+    pub(crate) fn start(mut self) -> Result<AuxiliaryService, Error> {
+        AuxiliaryService::start(&mut self.0)
+    }
+}
+
 impl AuxiliaryService {
     pub(crate) fn start(command: &mut Command) -> Result<Self, Error> {
         let mut child = command
