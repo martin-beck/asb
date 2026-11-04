@@ -55,6 +55,13 @@ proxy; the proxy does not read the fixture's retained identity files. Setting
 It is not an ASB CLI or SWE-bench qualification and does not cover all Goose
 tools, arbitrary filesystem access, or all subagent behaviors.
 
+Set `ASB_TEST_CONTAINER_IMAGE` to a locally available Linux task image to run
+Goose inside network-isolated containers using ASB's relay. Also set
+`ASB_RELAY_BINARY`, `ASB_TEST_LIB_DIR`, and `ASB_TEST_LOADER` as described
+below. The fixture uses the host loader for the test binaries and bind-mounts
+the disposable fixture directory; it does not test ASB's installer or perform an
+official workload evaluation.
+
 To check the separate container-to-host control transport, run
 `relay_control_probe.py` with a new output directory and set
 `ASB_RELAY_BINARY` to a built ASB executable, `ASB_TEST_NODE` to Node,

@@ -14,6 +14,7 @@ import tempfile
 import tarfile
 import threading
 import time
+from urllib.parse import urlsplit
 
 if os.geteuid() != 0 or len(sys.argv) != 2 or not os.environ.get('ASB_GOOSE_BINARY'):
     raise SystemExit('Run as root with ASB_GOOSE_BINARY set and one new disposable output directory')
@@ -80,6 +81,41 @@ command = [str(Path(os.environ['ASB_GOOSE_BINARY']).resolve()),'run','--no-sessi
 if os.environ.get('ASB_PROBE_DELEGATE') == '1' or os.environ.get('ASB_PROBE_BACKGROUND') == '1':
     command[command.index('developer')] = 'developer,summon'
     command[-1] = 'Delegate the task of writing probe.txt to a child agent.'
+
+def run_agent(run_workspace, run_env, output):
+    image = os.environ.get('ASB_TEST_CONTAINER_IMAGE')
+    if not image:
+        return subprocess.run(command,cwd=run_workspace,env=run_env,stdout=output,stderr=subprocess.STDOUT,timeout=120)
+    required = ('ASB_RELAY_BINARY', 'ASB_TEST_LIB_DIR', 'ASB_TEST_LOADER')
+    if any(not os.environ.get(name) for name in required):
+        raise RuntimeError('container fixture needs ASB_RELAY_BINARY, ASB_TEST_LIB_DIR and ASB_TEST_LOADER')
+    sys.path.insert(0, str(asb/'assets/benchmarks'))
+    from asb_relay import HostRelay
+    container = None
+    relay = None
+    try:
+        container=subprocess.check_output(['docker','run','-d','--network','none','--entrypoint','/bin/sh',
+            '-v',str(root)+':'+str(root),'-v',str(run_workspace)+':'+str(run_workspace),
+            '-v',os.environ['ASB_TEST_LIB_DIR']+':/host-lib:ro',
+            '-v',os.environ['ASB_RELAY_BINARY']+':/opt/asb:ro',
+            '-v',os.environ['ASB_GOOSE_BINARY']+':/opt/goose:ro',
+            image,'-c','sleep 180'],text=True).strip()
+        host_port=urlsplit(run_env['OPENAI_HOST']).port
+        relay=HostRelay([('127.0.0.1',host_port)],['docker','exec','-i',container,
+            '/host-lib/'+os.environ['ASB_TEST_LOADER'],'--library-path','/host-lib','/opt/asb','__asb-relay'])
+        guest_env={key:value for key,value in run_env.items() if key in ('HOME','OPENAI_HOST','OPENAI_BASE_PATH','OPENAI_API_KEY') or key.startswith(('GOOSE_','ASB_GOOSE_'))}
+        guest_env['OPENAI_HOST']=f'http://127.0.0.1:{relay.ports[0]}'
+        if 'ASB_GOOSE_ID_MAP_URL' in guest_env:
+            guest_env['ASB_GOOSE_ID_MAP_URL']=guest_env['OPENAI_HOST']+'/.asb/goose-session-map'
+        args=['docker','exec','-w',str(run_workspace)]
+        for key,value in guest_env.items():args += ['-e',f'{key}={value}']
+        args += [container,'/host-lib/'+os.environ['ASB_TEST_LOADER'],'--library-path','/host-lib','/opt/goose',*command[1:]]
+        result=subprocess.run(args,stdout=output,stderr=subprocess.STDOUT,timeout=120)
+        relay.check()
+        return result
+    finally:
+        if relay:relay.close()
+        if container:subprocess.run(['docker','rm','-f',container],stdout=subprocess.DEVNULL,check=False)
 try:
     if os.environ.get('ASB_RUN_BROKER_PROBE') != '1':
         with (root/'goose.log').open('w') as output:
@@ -137,7 +173,7 @@ try:
             cassette=root/'llm.jsonl'
             record_tape,record_port=tape('record',cassette,workspace,'record',f'http://127.0.0.1:{server.server_port}')
             with (root/'record.log').open('w') as output:
-                a=subprocess.run(command,cwd=workspace,env=env | {'OPENAI_HOST':f'http://127.0.0.1:{record_port}','ASB_GOOSE_PROBE_SOCKET':str(record_socket),'ASB_GOOSE_PROBE_MODE':'record','ASB_GOOSE_PROBE_MARKER':str(marker)},stdout=output,stderr=subprocess.STDOUT,timeout=120)
+                a=run_agent(workspace,env | {'OPENAI_HOST':f'http://127.0.0.1:{record_port}','ASB_GOOSE_PROBE_SOCKET':str(record_socket),'ASB_GOOSE_PROBE_MODE':'record','ASB_GOOSE_PROBE_MARKER':str(marker)},output)
             stop_tape(record_tape);stop(record)
             stop(service)
             archive=root/'snapshot-streams.tar'
@@ -171,7 +207,7 @@ try:
             def run_replica(entry):
                 index,run_workspace,_,_,_,_,run_env=entry
                 with (root/f'replay-{index}.log').open('w') as output:
-                    return subprocess.run(command,cwd=run_workspace,env=run_env,stdout=output,stderr=subprocess.STDOUT,timeout=120).returncode
+                    return run_agent(run_workspace,run_env,output).returncode
             try:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
                     codes=list(pool.map(run_replica,replicas))
