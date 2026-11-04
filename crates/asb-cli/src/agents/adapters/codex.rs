@@ -19,6 +19,9 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_estimated_disk_mib(1024)
+.with_tape_wire_extension(include_str!(
+    "../../../assets/scripts/codex-native-wire.mjs"
+))
 .with_tool_replay(prepare_tool_replay)
 .with_mcp_servers()
 .with_mcp_relay()
@@ -697,6 +700,22 @@ fn declared_mcp_configuration(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tape_wire_normalizes_only_codex_generated_input_ids() {
+        let output = std::process::Command::new("node")
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/codex_native_wire.mjs"),
+            )
+            .output()
+            .expect("node is required for the tape wire fixture");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn incomplete_native_stream_does_not_count_stderr_task_text() {
         let output = r#"{"type":"thread.started","thread_id":"test"}"#;
