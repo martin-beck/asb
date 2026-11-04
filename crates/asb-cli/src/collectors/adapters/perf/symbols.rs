@@ -46,7 +46,9 @@ impl measurements::Session {
             .open(&guest_script)
             .map_err(|error| format!("cannot create guest mapping helper: {error}"))?;
         guest_file
-            .write_all(include_bytes!("../../../../assets/scripts/perf-guest-mappings.py"))
+            .write_all(include_bytes!(
+                "../../../../assets/scripts/perf-guest-mappings.py"
+            ))
             .map_err(|error| format!("cannot write guest mapping helper: {error}"))?;
         drop(guest_file);
         let executable = measurements::resolve_executable(self.tool_dir.as_deref(), "perf");
