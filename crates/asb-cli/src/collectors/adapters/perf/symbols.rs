@@ -74,3 +74,17 @@ impl measurements::Session {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn offline_symbol_custody_fixtures_run_in_the_rust_gate() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/perf-symbol-custody/test_custody.py");
+        let status = std::process::Command::new("python3")
+            .arg(fixture)
+            .status()
+            .unwrap();
+        assert!(status.success(), "symbol custody fixtures failed");
+    }
+}
