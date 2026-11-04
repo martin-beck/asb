@@ -68,32 +68,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_guest_artifact_answer(validate_guest_answer);
 
 fn finalize_native_recording(pending: &[u8], workspace_sha256: &str) -> Result<Vec<u8>, Error> {
-    if workspace_sha256.len() != 64
-        || !workspace_sha256
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        || pending.is_empty()
-        || pending.len() > 16 * 1024 * 1024 - 120
-        || pending.last() != Some(&b'\n')
-    {
-        return Err(Error::Run(
-            "Continue native recording or settled snapshot digest is invalid".into(),
-        ));
-    }
-    let mut completed = pending.to_vec();
-    completed.extend_from_slice(
-        format!("{{\"event\":\"workspace_effect\",\"sha256\":\"{workspace_sha256}\"}}\n")
-            .as_bytes(),
-    );
-    let native = crate::cassette::NativeTrack {
-        complete: true,
-        events: completed.iter().filter(|byte| **byte == b'\n').count() as u64,
-        bytes: completed.len() as u64,
-        sha256: crate::cassette::digest(&completed),
-    };
-    crate::cassette::NativeToolTransport::from_sidecar(&native, &completed)
-        .map_err(|_| Error::Run("Continue native recording is invalid or incomplete".into()))?;
-    Ok(completed)
+    super::super::native_guest::finalize("continue", pending, workspace_sha256)
 }
 
 fn compaction_status(value: &serde_json::Value) -> bool {
@@ -397,39 +372,19 @@ fn start_recording_service(
     native_tool: Option<&std::path::Path>,
     snapshot_sha256: Option<&str>,
 ) -> Result<Option<super::super::auxiliary::AuxiliaryService>, Error> {
-    let variable = match mode {
-        Some(crate::tape::Mode::Record) => "ASB_FS_MARKER_SOCKET",
-        Some(crate::tape::Mode::Replay) => "ASB_FS_REPLAY_SOCKET",
-        None => return Ok(None),
-    };
-    let Some(marker) = std::env::var_os(variable) else {
+    let Some((mode, marker, snapshot)) =
+        super::super::native_guest::selection(mode, snapshot_sha256)?
+    else {
         return Ok(None);
-    };
-    let snapshot = if mode == Some(crate::tape::Mode::Replay) {
-        let digest = snapshot_sha256.ok_or_else(|| {
-            Error::Run("Continue replay requires the staged snapshot digest".into())
-        })?;
-        if digest.len() != 64
-            || !digest
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err(Error::Run(
-                "Continue replay snapshot digest is invalid".into(),
-            ));
-        }
-        format!("sha256:{digest}")
-    } else {
-        String::new()
     };
     start_recording_service_with_marker(
         command,
         executable,
         run_dir,
-        mode,
+        Some(mode),
         marker,
         native_tool,
-        std::ffi::OsStr::new(&snapshot),
+        &snapshot,
     )
 }
 
@@ -442,9 +397,7 @@ fn start_recording_service_with_marker(
     native_tool: Option<&std::path::Path>,
     snapshot_archive: &std::ffi::OsStr,
 ) -> Result<Option<super::super::auxiliary::AuxiliaryService>, Error> {
-    if mode.is_none() {
-        return Ok(None);
-    }
+    let Some(mode) = mode else { return Ok(None) };
     let cli = std::fs::canonicalize(executable).map_err(|_| {
         Error::Run("Continue executable is unavailable for native recording".into())
     })?;
@@ -457,29 +410,7 @@ fn start_recording_service_with_marker(
             "Continue native recording requires the installed pinned bundle".into(),
         ));
     }
-    let directory = run_dir.join("continue");
-    std::fs::create_dir_all(&directory).map_err(crate::io_error)?;
-    for (name, source) in [
-        (
-            "native-tool-service.mjs",
-            include_str!("../../../assets/scripts/native-tool-service.mjs"),
-        ),
-        (
-            "native-tool-broker.mjs",
-            include_str!("../../../assets/scripts/native-tool-broker.mjs"),
-        ),
-        (
-            "native-tool-custody.mjs",
-            include_str!("../../../assets/scripts/native-tool-custody.mjs"),
-        ),
-        (
-            "native-tool-sidecar.mjs",
-            include_str!("../../../assets/scripts/native-tool-sidecar.mjs"),
-        ),
-        (
-            "native-tool-session.mjs",
-            include_str!("../../../assets/scripts/native-tool-session.mjs"),
-        ),
+    let assets = [
         (
             "continue-native-bootstrap.mjs",
             include_str!("../../../assets/scripts/continue-native-bootstrap.mjs"),
@@ -496,70 +427,21 @@ fn start_recording_service_with_marker(
             "continue-native-dispatch.mjs",
             include_str!("../../../assets/scripts/continue-native-dispatch.mjs"),
         ),
-        (
-            "native-tool-dispatch.mjs",
-            include_str!("../../../assets/scripts/native-tool-dispatch.mjs"),
-        ),
-        (
-            "native-snapshot-boundary.mjs",
-            include_str!("../../../assets/scripts/native-snapshot-boundary.mjs"),
-        ),
-    ] {
-        std::fs::write(directory.join(name), source).map_err(crate::io_error)?;
-    }
-    let socket = directory.join("broker.sock");
-    let mut service = std::process::Command::new("node");
-    if let Some((_, Some(path))) = command.get_envs().find(|(name, _)| *name == "PATH") {
-        service.env("PATH", path);
-    }
-    service
-        .arg(directory.join("native-tool-service.mjs"))
-        .arg(&socket)
-        .arg(&bundle);
-    if mode == Some(crate::tape::Mode::Replay) {
-        service
-            .arg(native_tool.ok_or_else(|| {
-                Error::Run(
-                    "Continue snapshot replay requires a recorded native tool sidecar".into(),
-                )
-            })?)
-            .arg(snapshot_archive)
-            .arg(&marker);
-    } else {
-        service.arg(directory.join("native-tool-pending.jsonl"));
-    }
-    let service = super::super::auxiliary::AuxiliaryService::start(&mut service)?;
-    let bootstrap = directory.join("continue-native-bootstrap.mjs");
-    let bootstrap = bootstrap
-        .to_str()
-        .ok_or_else(|| Error::Run("Continue bootstrap path is not UTF-8".into()))?
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    let existing = command
-        .get_envs()
-        .find(|(name, _)| *name == "NODE_OPTIONS")
-        .map(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
-        .unwrap_or_else(|| std::env::var_os("NODE_OPTIONS"))
-        .unwrap_or_default();
-    let mut options = existing;
-    if !options.is_empty() {
-        options.push(" ");
-    }
-    options.push(format!("--import=\"{bootstrap}\""));
-    command
-        .env("NODE_OPTIONS", options)
-        .env("ASB_CONTINUE_BUNDLE", bundle)
-        .env(
-            "ASB_CONTINUE_MODE",
-            if mode == Some(crate::tape::Mode::Replay) {
-                "replay"
-            } else {
-                "record"
-            },
-        )
-        .env("ASB_CONTINUE_SOCKET", socket)
-        .env("ASB_CONTINUE_MARKER", marker);
-    Ok(Some(service))
+    ];
+    super::super::native_guest::start(
+        command,
+        super::super::native_guest::Settings {
+            agent: "continue",
+            bundle: &bundle,
+            run_dir,
+            mode,
+            marker,
+            native_tool,
+            snapshot: snapshot_archive,
+            assets: &assets,
+        },
+    )
+    .map(Some)
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {

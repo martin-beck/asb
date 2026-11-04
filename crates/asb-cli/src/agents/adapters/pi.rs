@@ -20,8 +20,16 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_estimated_disk_mib(768)
 .with_complete_tool_replay(prepare_tool_replay)
+.with_native_tool_transport()
+.with_guest_service(start_native_service)
+.with_deferred_native_recording(finalize_native_recording)
 .with_collection(collect)
 .with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "pi",
+        filename: "native-tool-pending.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
     super::super::ArtifactSpec {
         namespace: "summary",
         filename: "pi-summary.json",
@@ -131,6 +139,18 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
                 ..AgentArtifacts::default()
             },
         };
+    if let Some(bytes) = context
+        .frozen
+        .bytes("native-tool-pending.jsonl")
+        .filter(|bytes| !bytes.is_empty())
+    {
+        artifacts
+            .sealed_artifacts
+            .push(super::super::SealedArtifact {
+                kind: "native-tool-deferred".into(),
+                bytes: bytes.to_vec(),
+            });
+    }
     // Pi opted into the deterministic extension, so this adapter owns the
     // corresponding manifest selection.  The generic dispatcher only seals
     // the opaque bytes returned in AgentArtifacts.
@@ -498,9 +518,12 @@ fn prepare_summary(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         .to_str()
         .ok_or_else(|| Error::Run("Pi summary extension path is not valid UTF-8".into()))?;
     let summary = context.run_dir.join("summary/pi-summary.json");
-    context
-        .command
-        .args(["--no-extensions", "--extension", extension]);
+    if std::env::var_os("ASB_FS_MARKER_SOCKET").is_none()
+        && std::env::var_os("ASB_FS_REPLAY_SOCKET").is_none()
+    {
+        context.command.arg("--no-extensions");
+    }
+    context.command.args(["--extension", extension]);
     context.command.env("ASB_PI_SUMMARY_PATH", summary);
     Ok(())
 }
@@ -563,6 +586,13 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
+    if (tape.mode == crate::tape::Mode::Record
+        && std::env::var_os("ASB_FS_MARKER_SOCKET").is_some())
+        || (tape.mode == crate::tape::Mode::Replay
+            && std::env::var_os("ASB_FS_REPLAY_SOCKET").is_some())
+    {
+        return Ok(());
+    }
     let launch =
         super::super::tool_replay_mcp::per_call_launch(context, tape, TOOL_PROGRESS_FILENAME)?;
     let extension = context.runtime_dir.join("pi/asb-local-tools.ts");
@@ -663,6 +693,60 @@ export default function(pi) {
 }
 "#;
 
+fn finalize_native_recording(pending: &[u8], snapshot_sha256: &str) -> Result<Vec<u8>, Error> {
+    super::super::native_guest::finalize("pi", pending, snapshot_sha256)
+}
+
+fn start_native_service(
+    command: &mut std::process::Command,
+    executable: &str,
+    run_dir: &Path,
+    mode: Option<crate::tape::Mode>,
+    native_tool: Option<&Path>,
+    snapshot_sha256: Option<&str>,
+) -> Result<Option<super::super::auxiliary::AuxiliaryService>, Error> {
+    let Some((mode, marker, snapshot)) =
+        super::super::native_guest::selection(mode, snapshot_sha256)?
+    else {
+        return Ok(None);
+    };
+    let cli = std::fs::canonicalize(executable)
+        .map_err(|_| Error::Run("Pi executable is unavailable for native recording".into()))?;
+    let bundle = cli
+        .ancestors()
+        .map(|ancestor| {
+            ancestor.join("node_modules/@mariozechner/pi-agent-core/dist/agent-loop.js")
+        })
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            Error::Run("Pi native recording requires the installed pinned agent-core bundle".into())
+        })?;
+    let assets = [
+        (
+            "pi-native-bootstrap.mjs",
+            include_str!("../../../assets/scripts/pi-native-bootstrap.mjs"),
+        ),
+        (
+            "pi-native-transform.mjs",
+            include_str!("../../../assets/scripts/pi-native-transform.mjs"),
+        ),
+    ];
+    super::super::native_guest::start(
+        command,
+        super::super::native_guest::Settings {
+            agent: "pi",
+            bundle: &bundle,
+            run_dir,
+            mode,
+            marker,
+            native_tool,
+            snapshot: &snapshot,
+            assets: &assets,
+        },
+    )
+    .map(Some)
+}
+
 fn configure_provider(
     command: &mut std::process::Command,
     directory: &Path,
@@ -698,6 +782,25 @@ fn configure_provider(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_snapshot_recording_is_bound_to_pi_and_the_settled_digest() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/continue_native_sidecar_emit.mjs");
+        let emit = |pi: bool| {
+            let mut command = std::process::Command::new("node");
+            command.arg(&fixture).arg("--pending");
+            if pi {
+                command.arg("--pi");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success());
+            output.stdout
+        };
+        let digest = crate::cassette::digest(b"snapshot");
+        assert!(super::finalize_native_recording(&emit(true), &digest).is_ok());
+        assert!(super::finalize_native_recording(&emit(false), &digest).is_err());
+        assert!(super::finalize_native_recording(&emit(true), "bad").is_err());
+    }
     use super::*;
     use crate::agents::AgentAdapter;
 
