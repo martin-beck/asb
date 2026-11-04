@@ -2448,6 +2448,116 @@ mod tests {
     }
 
     #[test]
+    fn replay_normalizes_only_complete_structured_sympy_test_seed_banner() {
+        let root = test_root();
+        let cassette = root.join("sympy-test-seed.jsonl");
+        let recorded = r#"{"model":"m","input":[{"type":"function_call_output","output":"========= test process starts =========\nplatform linux -- Python 3.12\nrandom seed: 42489611\n========= tests finished: 0 passed, 1 skipped =========\nretained diagnostic"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let replayed = recorded.replace("42489611", "70288294");
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&session, "/v1/responses", &replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        for changed in [
+            replayed.replace("0 passed, 1 skipped", "1 passed, 0 skipped"),
+            replayed.replace("retained diagnostic", "changed diagnostic"),
+            replayed.replace("test process starts", "different process starts"),
+        ] {
+            let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+            assert!(request_to(&session, "/v1/responses", &changed).contains("409 Conflict"));
+            assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+        }
+
+        let malformed = root.join("sympy-malformed-seed.jsonl");
+        let malformed_recorded = recorded.replace("42489611", "not-a-number");
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": malformed_recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&malformed, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &malformed, None, false, &root).unwrap();
+        assert!(
+            request_to(
+                &session,
+                "/v1/responses",
+                &malformed_recorded.replace("not-a-number", "70288294"),
+            )
+            .contains("409 Conflict")
+        );
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        let outside = root.join("sympy-seed-outside-banner.jsonl");
+        let outside_recorded = recorded.replace("random seed: 42489611\n", "").replace(
+            "retained diagnostic",
+            "retained diagnostic\nrandom seed: 42489611",
+        );
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": outside_recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&outside, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &outside, None, false, &root).unwrap();
+        assert!(
+            request_to(
+                &session,
+                "/v1/responses",
+                &outside_recorded.replace("42489611", "70288294"),
+            )
+            .contains("409 Conflict")
+        );
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        let doubled = root.join("sympy-double-seed.jsonl");
+        let doubled_recorded = recorded.replace(
+            "random seed: 42489611",
+            "random seed: 42489611\nrandom seed: 12345678",
+        );
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": doubled_recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&doubled, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &doubled, None, false, &root).unwrap();
+        assert!(
+            request_to(
+                &session,
+                "/v1/responses",
+                &doubled_recorded.replace("42489611", "70288294"),
+            )
+            .contains("409 Conflict")
+        );
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        let prompt_seed = root.join("sympy-prompt-seed.jsonl");
+        let prompt_recorded = recorded.replace(
+            "\"input\":[{\"type\":\"function_call_output\",\"output\":",
+            "\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":",
+        );
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": prompt_recorded},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{\"ok\":true}"}
+        });
+        std::fs::write(&prompt_seed, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &prompt_seed, None, false, &root).unwrap();
+        assert!(
+            request_to(
+                &session,
+                "/v1/responses",
+                &prompt_recorded.replace("42489611", "70288294"),
+            )
+            .contains("409 Conflict")
+        );
+        assert!(session.stop().unwrap_err().to_string().contains("rejected"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_normalizes_only_codex_shell_envelope_wall_time() {
         let root = test_root();
         let cassette = root.join("codex-shell-wall-time.jsonl");
