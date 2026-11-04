@@ -395,6 +395,7 @@ fn start_recording_service(
     run_dir: &std::path::Path,
     mode: Option<crate::tape::Mode>,
     native_tool: Option<&std::path::Path>,
+    snapshot_sha256: Option<&str>,
 ) -> Result<Option<super::super::auxiliary::AuxiliaryService>, Error> {
     let variable = match mode {
         Some(crate::tape::Mode::Record) => "ASB_FS_MARKER_SOCKET",
@@ -404,6 +405,23 @@ fn start_recording_service(
     let Some(marker) = std::env::var_os(variable) else {
         return Ok(None);
     };
+    let snapshot = if mode == Some(crate::tape::Mode::Replay) {
+        let digest = snapshot_sha256.ok_or_else(|| {
+            Error::Run("Continue replay requires the staged snapshot digest".into())
+        })?;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(Error::Run(
+                "Continue replay snapshot digest is invalid".into(),
+            ));
+        }
+        format!("sha256:{digest}")
+    } else {
+        String::new()
+    };
     start_recording_service_with_marker(
         command,
         executable,
@@ -411,7 +429,7 @@ fn start_recording_service(
         mode,
         marker,
         native_tool,
-        std::path::Path::new("/asb-snapshot-storage/workspace-snapshots.tar"),
+        std::ffi::OsStr::new(&snapshot),
     )
 }
 
@@ -422,7 +440,7 @@ fn start_recording_service_with_marker(
     mode: Option<crate::tape::Mode>,
     marker: std::ffi::OsString,
     native_tool: Option<&std::path::Path>,
-    snapshot_archive: &std::path::Path,
+    snapshot_archive: &std::ffi::OsStr,
 ) -> Result<Option<super::super::auxiliary::AuxiliaryService>, Error> {
     if mode.is_none() {
         return Ok(None);
@@ -768,7 +786,7 @@ await dispatch({name:'Read',arguments:{path:'fixture'},tool:{run:async()=>{write
             Some(crate::tape::Mode::Record),
             marker.clone().into_os_string(),
             None,
-            &root.join("unused-snapshot"),
+            root.join("unused-snapshot").as_os_str(),
         )
         .unwrap()
         .unwrap();
@@ -798,7 +816,7 @@ await dispatch({name:'Read',arguments:{path:'fixture'},tool:{run:async()=>{write
             Some(crate::tape::Mode::Replay),
             marker.into_os_string(),
             Some(&sidecar),
-            &archive,
+            archive.as_os_str(),
         )
         .unwrap()
         .unwrap();

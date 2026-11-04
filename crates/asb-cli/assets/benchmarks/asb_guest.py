@@ -475,6 +475,9 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
         replay = task.tool_mode == 'replay'
         if replay and not any(item['target'] == 'workspace-snapshots.tar' for item in request.get('private_inputs', [])):
             raise ExecutionError('snapshot replay archive is missing from the selected cassette')
+        if replay:
+            # The staging step has verified these exact bytes while copying.
+            guest['snapshot_archive_sha256'] = next(item['sha256'] for item in request['private_inputs'] if item['target'] == 'workspace-snapshots.tar')
         supervisor=GuestSnapshot(task,auxiliary,owner,docker_command(),deadline,replay=replay)
         resources.push(lambda exc_type, exc, traceback: settle_on_exit(supervisor, exc_type, exc, traceback))
         environment['ASB_FS_REPLAY_SOCKET' if replay else 'ASB_FS_MARKER_SOCKET']='/opt/asb-private/snapshot.sock'

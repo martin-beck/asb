@@ -47,6 +47,12 @@ try {
   replay.stdin.end('S\n');
   assert.equal((await replayExit)[0],0);
   await new Promise(resolve => marker.close(resolve));
+  const byDigest = spawn(process.execPath,[service,join(root,'digest.sock'),program,sidecar,`sha256:${digest('snapshot')}`,markerPath],{stdio:['pipe','pipe','ignore']});
+  const digestExit = once(byDigest,'exit');
+  assert.equal((await once(byDigest.stdout,'data'))[0].toString(),'READY\n');
+  // No request was replayed, so settlement must reject the incomplete tape.
+  byDigest.stdin.end('S\n');
+  assert.notEqual((await digestExit)[0],0);
   writeFileSync(archive,'different snapshot');
   const mismatch = spawn(process.execPath,[service,join(root,'bad.sock'),program,sidecar,archive,markerPath],{stdio:['ignore','ignore','ignore']});
   assert.notEqual((await once(mismatch,'exit'))[0],0);

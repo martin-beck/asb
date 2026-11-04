@@ -16,8 +16,10 @@ async function digest(path) {
   return hash.digest('hex');
 }
 const programSha256 = await digest(program);
+const snapshotSha256 = mode === 'replay' && archive.startsWith('sha256:') ? archive.slice(7) : mode === 'replay' ? await digest(archive) : '';
+if (mode === 'replay' && !/^[a-f0-9]{64}$/.test(snapshotSha256)) throw new Error('Continue replay snapshot digest is invalid');
 const broker = mode === 'record' ? new ContinueBroker('record') : replayBroker(await readFile(target), {
-  programSha256, workspaceEffectSha256: await digest(archive), applyEffects: replayEffects(marker),
+  programSha256, workspaceEffectSha256: snapshotSha256, applyEffects: replayEffects(marker),
 });
 await broker.listen(socket);
 process.stdout.write('READY\n');

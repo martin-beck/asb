@@ -33,12 +33,29 @@ impl AuxiliaryService {
         });
         match receive.recv_timeout(Duration::from_secs(15)) {
             Ok(Ok(line)) if line == "READY\n" => Ok(Self { child, diagnostics }),
-            _ => {
+            result => {
+                let timed_out = matches!(result, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
                 let _ = child.kill();
                 let _ = child.wait();
-                Err(Error::Run(
-                    "adapter auxiliary service did not become ready".into(),
-                ))
+                let diagnostic = diagnostics
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap_or_default();
+                let text = String::from_utf8_lossy(&diagnostic);
+                let reason = if timed_out {
+                    "readiness timed out"
+                } else if text.contains("does not match the selected program and workspace effects")
+                {
+                    "recorded program or snapshot digest does not match"
+                } else if text.contains("ENOENT") {
+                    "required service input is missing"
+                } else if text.contains("sidecar") {
+                    "native sidecar validation failed"
+                } else {
+                    "service exited before readiness"
+                };
+                Err(Error::Run(format!(
+                    "adapter auxiliary service did not become ready: {reason}"
+                )))
             }
         }
     }
@@ -105,6 +122,17 @@ mod tests {
         let mut service = AuxiliaryService::start(&mut command).unwrap();
         let error = service.settle().unwrap_err().to_string();
         assert!(error.contains("size limit"));
+        assert!(!error.contains("private-value"));
+    }
+    #[test]
+    fn service_startup_classifies_mismatch_without_exposing_output() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "printf 'does not match the selected program and workspace effects private-value\\n' >&2; exit 1"]);
+        let error = match AuxiliaryService::start(&mut command) {
+            Ok(_) => panic!("service unexpectedly started"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("digest does not match"));
         assert!(!error.contains("private-value"));
     }
 }

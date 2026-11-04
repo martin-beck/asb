@@ -144,6 +144,7 @@ pub(crate) trait AgentAdapter: Sync {
         _run_dir: &Path,
         _mode: Option<crate::tape::Mode>,
         _native_tool: Option<&Path>,
+        _snapshot_sha256: Option<&str>,
     ) -> Result<Option<auxiliary::AuxiliaryService>, Error> {
         Ok(None)
     }
@@ -564,6 +565,7 @@ pub(super) struct StaticAdapter {
             &Path,
             Option<crate::tape::Mode>,
             Option<&Path>,
+            Option<&str>,
         ) -> Result<Option<auxiliary::AuxiliaryService>, Error>,
     >,
     finalize_native_recording: Option<fn(&[u8], &str) -> Result<Vec<u8>, Error>>,
@@ -659,6 +661,7 @@ impl StaticAdapter {
             &Path,
             Option<crate::tape::Mode>,
             Option<&Path>,
+            Option<&str>,
         ) -> Result<Option<auxiliary::AuxiliaryService>, Error>,
     ) -> Self {
         self.guest_service = Some(hook);
@@ -948,9 +951,17 @@ impl AgentAdapter for StaticAdapter {
         run_dir: &Path,
         mode: Option<crate::tape::Mode>,
         native_tool: Option<&Path>,
+        snapshot_sha256: Option<&str>,
     ) -> Result<Option<auxiliary::AuxiliaryService>, Error> {
         self.guest_service.map_or(Ok(None), |hook| {
-            hook(command, executable, run_dir, mode, native_tool)
+            hook(
+                command,
+                executable,
+                run_dir,
+                mode,
+                native_tool,
+                snapshot_sha256,
+            )
         })
     }
     fn finalize_native_recording(

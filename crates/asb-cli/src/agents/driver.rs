@@ -97,6 +97,8 @@ pub(crate) struct GuestRequest {
     /// while retaining the independently mounted task workspace.
     #[serde(default)]
     pub snapshot_private_mount: bool,
+    #[serde(default)]
+    pub snapshot_archive_sha256: Option<String>,
     /// Exact provider-tape path forwarded by the owning runner.  It is never
     /// inferred from the provider endpoint because record and replay are both
     /// routed through loopback services.
@@ -747,6 +749,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
             }
         }),
         native_tool.map(|native| native.path),
+        request.snapshot_archive_sha256.as_deref(),
     )?;
     configure_execution_identity(
         &mut command,

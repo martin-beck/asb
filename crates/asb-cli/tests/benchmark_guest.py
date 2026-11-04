@@ -130,6 +130,24 @@ class GuestBootstrapTests(unittest.TestCase):
             self.assertTrue(guest['snapshot_private_mount'])
             self.assertEqual(supervisor.call_args.args[1],tools)
 
+    def test_snapshot_replay_forwards_the_verified_archive_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'.asb').mkdir();(root/'.asb/project.toml').write_text('')
+            execute=lambda *args,**kwargs:{'stdout':b'','stderr':b'','exit_code':0,'timed_out':False,'cancelled':False}
+            task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),image_identity={},execute=execute),
+                                 artifacts=root,checked=lambda _:b'',snapshot=True,tool_mode='replay')
+            request={'project_root':str(root),'tools_root':str(root),'binary':'fixture',
+                     'request':{'config':{'agent':'fixture'}},'bootstrap':{},
+                     'private_inputs':[{'target':'workspace-snapshots.tar','sha256':'a'*64}],
+                     'auxiliary_tools':{'btrfs':'a','mkfs.btrfs':'b','rsync':'c'}}
+            with patch('asb_guest.bundle',return_value=([],{})), patch('asb_guest.stage_runtime',return_value=(0,0)), \
+                 patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), patch('asb_guest.stage_bootstrap',return_value=[]), \
+                 patch('asb_guest.stage_auxiliary_tools',return_value={'btrfs':'a','mkfs.btrfs':'b','rsync':'c'}), \
+                 patch('asb_docker.docker_command',return_value=['docker']), patch('asb_snapshot_control.GuestSnapshot'):
+                guest,environment=prepare_agent(task,request,None,resources=SimpleNamespace(push=lambda _:None))
+            self.assertEqual(guest['snapshot_archive_sha256'],'a'*64)
+            self.assertEqual(environment['ASB_FS_REPLAY_SOCKET'],'/opt/asb-private/snapshot.sock')
+
     def test_incompatible_optional_qemu_does_not_block_required_tools(self):
         with tempfile.TemporaryDirectory() as directory:
             task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),image_identity={}),
