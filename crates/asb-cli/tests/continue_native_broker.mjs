@@ -71,6 +71,14 @@ try {
   assert.equal(await replayDispatch({ name: 'Subagent', arguments: {} }, {}, async () => { executions++; return 'delegated'; }), 'delegated');
   await offline.finish();
   assert.equal(executions, 3, 'the replayed native call must never execute');
+  const invalid = new ContinueBroker('record');
+  await invalid.listen(socket);
+  const invalidDispatch = createNativeDispatcher('record', socket);
+  const thrown = { reason: 'non-Error value' };
+  await assert.rejects(invalidDispatch({ name: 'Fetch', arguments: {} }, {}, async () => { throw thrown; }), error => error === thrown);
+  assert.equal(invalid.pending.size, 0, 'invalid exchanges must not remain pending');
+  await assert.rejects(invalid.finish(), /unfinished/);
+  await invalid.abort();
   const custody = new ContinueBroker('record');
   await custody.listen(socket);
   const dispatch = createNativeDispatcher('record', socket);

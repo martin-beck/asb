@@ -53,6 +53,14 @@ export class ContinueBroker {
         result.catch(() => {});
         this.pending.set(token, { resolve, reject, result });
         reply(socket, { ok: true, token });
+      } else if (this.mode === 'record' && message.op === 'invalidate') {
+        const item = this.pending.get(message.token);
+        if (!item) throw new Error('Continue broker invalidation has no active call');
+        this.pending.delete(message.token);
+        this.session.abort();
+        item.reject(new Error('Continue tool exchange could not be recorded'));
+        try { await item.result; } catch { /* the recording is invalid */ }
+        reply(socket, { ok: true });
       } else if (this.mode === 'record' && message.op === 'finish') {
         const item = this.pending.get(message.token);
         if (!item || !message.outcome || typeof message.outcome.ok !== 'boolean') throw new Error('Continue broker finish has no active call');

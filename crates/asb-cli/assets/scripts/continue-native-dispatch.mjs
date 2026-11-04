@@ -21,7 +21,13 @@ export function createNativeDispatcher(mode, socket, {
     let value;
     try { value = await invoke(); }
     catch (error) {
-      if (!(error instanceof Error)) throw error;
+      if (!(error instanceof Error)) {
+        // The sidecar cannot represent arbitrary thrown values. Unblock the
+        // coordinator and invalidate the recording while preserving the
+        // exact value observed by the agent.
+        await brokerRequest(socket, { op: 'invalidate', token });
+        throw error;
+      }
       await end(request, token);
       await brokerRequest(socket, { op: 'finish', token, outcome: { ok: false, name: error.name, message: error.message } });
       throw error;
