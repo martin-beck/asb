@@ -20,6 +20,22 @@ SOURCE_HASHES = {
     'crates/goose/src/agents/extension_manager/lease.rs': 'b2061f486a8baa9b927458a9090900c986fbbe8f03e3835021f00d75cca6fdee',
     'crates/goose/src/agents/extension_manager/mod.rs': '3ac2ca7454c9cca5a5f477f38e1f12fb70e4f34da8b3dfb6b16c0062417cb0a1',
 }
+PATCHED_HASHES = {
+    'crates/goose-cli/Cargo.toml': '85c8c0f90c785454432922210c0f1119e4b635ec380c96013bbdf47d26db28e2',
+    'crates/goose-cli/src/main.rs': 'd1b2eb1aebaf8ce161b6ab5c867c4862daf1a05ad0e06f9b61f7ff830eb6db55',
+    'crates/goose/Cargo.toml': '84ba15ff6478d61785e3d35db55af2eccc0d7736346a1fc0ad5b7ac7c797fb03',
+    'crates/goose/src/agents/extension_manager/lease.rs': '53b847435e061f484f319acfe986aede6e84908cd2751bcee915183bd6a46247',
+    'crates/goose/src/agents/extension_manager/mod.rs': 'a266dc22d432df3301b668ea20bcd35e0eebaafd2eb4cdfdfe19f8db81fe97b7',
+    'crates/goose/src/agents/extension_manager/asb_native_probe.rs': '38db71d17a667a7412a6c1f4f6458174dc8b9c94d2c3276bcdfd2893f685e407',
+}
+
+
+def matches(source, expected):
+    try:
+        return bool(expected) and all(hashlib.sha256((source / relative).read_bytes()).hexdigest() == digest
+                                      for relative, digest in expected.items())
+    except OSError:
+        return False
 
 
 def prepare(source, patch):
@@ -33,13 +49,10 @@ def prepare(source, patch):
         raise ValueError(f'Goose {version!r} is not supported by this hook; expected {SUPPORTED_VERSION}. Update and test the adapter patch for this version.')
     if not patch.is_file():
         raise ValueError('ASB Goose dispatch patch is missing; reinstall ASB')
-    for relative, expected in SOURCE_HASHES.items():
-        try:
-            actual = hashlib.sha256((source / relative).read_bytes()).hexdigest()
-        except OSError as error:
-            raise ValueError('Goose dispatch source is incomplete; use a clean supported source checkout') from error
-        if actual != expected:
-            raise ValueError('Goose dispatch source does not match the supported layout or is already patched; use a clean source checkout and update the adapter for changed Goose layouts.')
+    if matches(source, PATCHED_HASHES):
+        return
+    if SOURCE_HASHES and not matches(source, SOURCE_HASHES):
+        raise ValueError('Goose dispatch source does not match the supported layout; use a clean source checkout and update the adapter for changed Goose layouts.')
     # A project-local extracted source tree can be nested below ASB's own Git
     # checkout. Without a ceiling Git silently ignores every patch path outside
     # that nested directory while still reporting success.
@@ -57,6 +70,8 @@ def prepare(source, patch):
     applied = subprocess.run(['git', 'apply', '--unidiff-zero', str(patch)], cwd=source, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if applied.returncode:
         raise ValueError('Goose dispatch patch could not be applied; preserve the source checkout and retry with a clean source tree.')
+    if SOURCE_HASHES and not matches(source, PATCHED_HASHES):
+        raise ValueError('Goose dispatch patch produced an unexpected source layout; preserve the source checkout for diagnosis.')
 
 
 def main():

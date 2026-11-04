@@ -1,5 +1,6 @@
 """Offline tests for the experimental Goose source adapter."""
 import importlib.util
+import hashlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -65,6 +66,20 @@ class GooseNativePrepareTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'does not match'):
                     prepare.prepare(root, patch_file)
             run.assert_not_called()
+
+    def test_exact_prepared_source_is_retryable_but_modified_source_is_rejected(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root = Path(directory); patch_file = self.setup_source(root)
+            dispatch = root / 'dispatch.rs'; dispatch.write_text('before\n')
+            patch_file.write_text('diff --git a/dispatch.rs b/dispatch.rs\n--- a/dispatch.rs\n+++ b/dispatch.rs\n@@ -1 +1 @@\n-before\n+after\n')
+            digest = lambda data: hashlib.sha256(data).hexdigest()
+            with patch.object(prepare, 'SOURCE_HASHES', {'dispatch.rs':digest(b'before\n')}), patch.object(prepare, 'PATCHED_HASHES', {'dispatch.rs':digest(b'after\n')}):
+                prepare.prepare(root, patch_file)
+                prepare.prepare(root, patch_file)
+                self.assertEqual(dispatch.read_text(), 'after\n')
+                dispatch.write_text('modified\n')
+                with self.assertRaisesRegex(ValueError, 'does not match'):
+                    prepare.prepare(root, patch_file)
 
     def test_missing_workspace_is_actionable(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
