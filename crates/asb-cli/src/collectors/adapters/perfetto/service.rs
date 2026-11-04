@@ -1,7 +1,8 @@
-//! Owned manual Tracebox services shared by concurrent sessions, never autostart.
+//! Owned manual Tracebox services with a separate tracefs instance per session.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -80,13 +81,7 @@ impl Service {
         {
             return Err("Perfetto instance configuration does not belong to this project. Run `asb init --configure-host` to create its own instances; do not reuse another project's tracing instance.".into());
         }
-        if let Some(service) = services.get(&root).and_then(Weak::upgrade) {
-            if service.executable != executable {
-                return Err("concurrent Perfetto sessions selected different executables; stop them before changing the tool installation".into());
-            }
-            service.check_alive()?;
-            return Ok(service);
-        }
+        services.retain(|_, service| service.strong_count() != 0);
         let directory = root.join(".asb/perfetto");
         fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
         let tracefs = if Path::new("/sys/kernel/tracing/instances").is_dir() {
@@ -95,30 +90,13 @@ impl Service {
             Path::new("/sys/kernel/debug/tracing")
         };
         for instance in settings.perfetto_instances {
-            use std::os::unix::fs::OpenOptionsExt;
             let lease_path = directory.join(format!("{instance}.lease"));
-            let lock = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&lease_path)
-                .map_err(|e| format!("cannot open Perfetto instance lease: {e}"))?;
-            if lock.try_lock().is_err() {
+            if services.get(&lease_path).and_then(Weak::upgrade).is_some() {
                 continue;
             }
-            // A reset/reconfiguration may have replaced a lease pathname
-            // after open but before lock. Never start against an unlinked old
-            // inode while another process can lock the new coordination file.
-            use std::os::unix::fs::MetadataExt;
-            let opened = lock.metadata().map_err(|e| e.to_string())?;
-            let current = fs::metadata(&lease_path).map_err(|_| "Perfetto lease changed during project reset; retry after initialization completes")?;
-            if opened.nlink() == 0 || opened.ino() != current.ino() || opened.dev() != current.dev()
-            {
-                return Err("Perfetto lease changed during project reset; retry after initialization completes".into());
-            }
+            let Some(lock) = try_lease(&lease_path)? else {
+                continue;
+            };
             let marker = tracefs
                 .join("instances")
                 .join(&instance)
@@ -146,10 +124,10 @@ impl Service {
                 Some(&helper),
             )?);
             service.check_alive()?;
-            services.insert(root, Arc::downgrade(&service));
+            services.insert(lease_path, Arc::downgrade(&service));
             return Ok(service);
         }
-        Err("all of this project's Perfetto instances are leased by other ASB processes. Wait for one of those runs to finish, or use a separately initialized benchmark project; no running capture was stopped.".into())
+        Err("all of this project's Perfetto instances are in use. Wait for a capture to finish or run `asb init --configure-host` to configure the available project instances; no running capture was stopped.".into())
     }
 
     fn start(
@@ -305,6 +283,33 @@ impl Service {
         }
         Ok(())
     }
+}
+
+fn try_lease(path: &Path) -> Result<Option<File>, String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| format!("cannot open Perfetto instance lease: {error}"))?;
+    if lock.try_lock().is_err() {
+        return Ok(None);
+    }
+    let opened = lock.metadata().map_err(|error| error.to_string())?;
+    let current = fs::metadata(path).map_err(
+        |_| "Perfetto lease changed during project reset; retry after initialization completes",
+    )?;
+    if opened.nlink() == 0 || opened.ino() != current.ino() || opened.dev() != current.dev() {
+        return Err(
+            "Perfetto lease changed during project reset; retry after initialization completes"
+                .into(),
+        );
+    }
+    Ok(Some(lock))
 }
 
 fn producer_registered(command: &mut Command) -> Result<bool, String> {
@@ -583,6 +588,30 @@ mod coverage_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    #[test]
+    fn concurrent_sessions_hold_distinct_instance_leases() {
+        let root = std::env::temp_dir()
+            .join(crate::workloads::TaskIdentity::local("perfetto-slots", None).attempt_id);
+        std::fs::create_dir_all(&root).unwrap();
+        let paths: Vec<_> = (0..4)
+            .map(|index| root.join(format!("{index}.lease")))
+            .collect();
+        let mut leases: Vec<_> = paths
+            .iter()
+            .map(|path| super::try_lease(path).unwrap().unwrap())
+            .collect();
+        assert!(
+            paths
+                .iter()
+                .all(|path| super::try_lease(path).unwrap().is_none())
+        );
+        drop(leases.remove(2));
+        let replacement = super::try_lease(&paths[2]).unwrap().unwrap();
+        assert!(super::try_lease(&paths[2]).unwrap().is_none());
+        drop(replacement);
+        drop(leases);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use super::*;
 
     #[test]
