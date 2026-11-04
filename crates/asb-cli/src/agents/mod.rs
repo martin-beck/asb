@@ -139,6 +139,16 @@ pub(crate) trait AgentAdapter: Sync {
     fn supports_native_tool_transport(&self) -> bool {
         false
     }
+    /// Bind an adapter-private pending native stream to settled workspace data.
+    fn finalize_native_recording(
+        &self,
+        _pending: &[u8],
+        _workspace_sha256: &str,
+    ) -> Result<Vec<u8>, Error> {
+        Err(Error::Run(
+            "agent does not support deferred native recording".into(),
+        ))
+    }
     /// Whether this adapter owns a bounded guest-workspace effect capsule.
     /// Remote orchestration may only transfer the opaque bytes; capture and
     /// application remain adapter responsibilities.
@@ -536,6 +546,7 @@ pub(super) struct StaticAdapter {
     mcp_servers: bool,
     mcp_relay: bool,
     native_tool_transport: bool,
+    finalize_native_recording: Option<fn(&[u8], &str) -> Result<Vec<u8>, Error>>,
     max_steps: bool,
     native_workspace_capsule: Option<(WorkspaceCapsuleCaptureHook, WorkspaceCapsuleApplyHook)>,
     collect: Option<CollectionHook>,
@@ -586,6 +597,7 @@ impl StaticAdapter {
             mcp_servers: false,
             mcp_relay: false,
             native_tool_transport: false,
+            finalize_native_recording: None,
             max_steps: false,
             native_workspace_capsule: None,
             collect: None,
@@ -616,6 +628,14 @@ impl StaticAdapter {
 
     pub(super) const fn with_collection(mut self, collect: CollectionHook) -> Self {
         self.collect = Some(collect);
+        self
+    }
+
+    pub(super) const fn with_deferred_native_recording(
+        mut self,
+        finalize: fn(&[u8], &str) -> Result<Vec<u8>, Error>,
+    ) -> Self {
+        self.finalize_native_recording = Some(finalize);
         self
     }
 
@@ -886,6 +906,17 @@ impl AgentAdapter for StaticAdapter {
     }
     fn supports_native_tool_transport(&self) -> bool {
         self.native_tool_transport
+    }
+    fn finalize_native_recording(
+        &self,
+        pending: &[u8],
+        workspace_sha256: &str,
+    ) -> Result<Vec<u8>, Error> {
+        self.finalize_native_recording
+            .ok_or_else(|| Error::Run("agent does not support deferred native recording".into()))?(
+            pending,
+            workspace_sha256,
+        )
     }
     fn supports_native_workspace_capsule(&self) -> bool {
         self.native_workspace_capsule.is_some()

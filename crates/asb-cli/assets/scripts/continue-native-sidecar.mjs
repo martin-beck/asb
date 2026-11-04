@@ -15,6 +15,16 @@ const keys = (value, expected) => value && typeof value === 'object' && !Array.i
 
 export function encodeSidecar(exchanges, programSha256, workspaceEffectSha256) {
   if (!validDigest(programSha256) || !validDigest(workspaceEffectSha256)) throw new Error('Continue sidecar requires real program and workspace-effect digests');
+  const prefix = encodePendingSidecar(exchanges, programSha256);
+  const output = Buffer.concat([prefix, Buffer.from(JSON.stringify({event:'workspace_effect',sha256:workspaceEffectSha256})+'\n')]);
+  if (output.length > MAX_SIDECAR) throw new Error('Continue sidecar exceeds supported bounds');
+  return output;
+}
+
+// Private intermediate only: it is not a valid sidecar until the host binds
+// it to the actual settled snapshot archive digest.
+export function encodePendingSidecar(exchanges, programSha256) {
+  if (!validDigest(programSha256)) throw new Error('Continue sidecar requires a real program digest');
   if (!Array.isArray(exchanges) || !exchanges.length || exchanges.length * 3 + 4 > MAX_EVENTS) throw new Error('Continue sidecar exchange count is invalid');
   // Reuse replay's ordering and shape validation before writing any bytes.
   new ReplaySession(exchanges);
@@ -33,7 +43,7 @@ export function encodeSidecar(exchanges, programSha256, workspaceEffectSha256) {
     events.push({event:'poll',alias},{event:'write',alias,request_sha256:digest(request),request_b64:request.toString('base64')},
       {event:'output',alias,response_sha256:digest(output),output_b64:output.toString('base64')});
   }
-  events.push({event:'exit',alias,success:true},{event:'workspace_effect',sha256:workspaceEffectSha256});
+  events.push({event:'exit',alias,success:true});
   const output = Buffer.from(events.map(event=>JSON.stringify(event)).join('\n')+'\n');
   if (output.length > MAX_SIDECAR) throw new Error('Continue sidecar exceeds supported bounds');
   return output;

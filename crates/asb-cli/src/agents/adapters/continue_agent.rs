@@ -33,6 +33,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_estimated_disk_mib(1024)
+.with_deferred_native_recording(finalize_native_recording)
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_complete_tool_replay(prepare_tool_replay)
 .with_replay_credential_vars(&["CONTINUE_API_KEY"])
@@ -58,6 +59,35 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_final_response(final_response)
 .with_artifact_final_response(final_response_with_session)
 .with_guest_artifact_answer(validate_guest_answer);
+
+fn finalize_native_recording(pending: &[u8], workspace_sha256: &str) -> Result<Vec<u8>, Error> {
+    if workspace_sha256.len() != 64
+        || !workspace_sha256
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || pending.is_empty()
+        || pending.len() > 16 * 1024 * 1024 - 120
+        || pending.last() != Some(&b'\n')
+    {
+        return Err(Error::Run(
+            "Continue native recording or settled snapshot digest is invalid".into(),
+        ));
+    }
+    let mut completed = pending.to_vec();
+    completed.extend_from_slice(
+        format!("{{\"event\":\"workspace_effect\",\"sha256\":\"{workspace_sha256}\"}}\n")
+            .as_bytes(),
+    );
+    let native = crate::cassette::NativeTrack {
+        complete: true,
+        events: completed.iter().filter(|byte| **byte == b'\n').count() as u64,
+        bytes: completed.len() as u64,
+        sha256: crate::cassette::digest(&completed),
+    };
+    crate::cassette::NativeToolTransport::from_sidecar(&native, &completed)
+        .map_err(|_| Error::Run("Continue native recording is invalid or incomplete".into()))?;
+    Ok(completed)
+}
 
 fn compaction_status(value: &serde_json::Value) -> bool {
     let Some(object) = value.as_object() else {
@@ -522,6 +552,23 @@ fn configure(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn deferred_native_recording_binds_only_a_valid_settled_snapshot_digest() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/continue_native_sidecar_emit.mjs");
+        let output = std::process::Command::new("node")
+            .arg(fixture)
+            .arg("--pending")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let digest = crate::cassette::digest(b"settled snapshot archive");
+        let completed = super::finalize_native_recording(&output.stdout, &digest).unwrap();
+        assert!(String::from_utf8_lossy(&completed).contains(&digest));
+        assert!(super::finalize_native_recording(&output.stdout, "invalid").is_err());
+        assert!(super::finalize_native_recording(b"invalid\n", &digest).is_err());
+        assert!(super::finalize_native_recording(&completed, &digest).is_err());
+    }
     #[test]
     fn native_sidecar_prototype_passes_common_transport_validation() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -2,7 +2,15 @@
 // sidecar. Callers obtain digests from the actual program and settled workspace
 // effect evidence; no default or synthetic effect digest is supplied here.
 import { ContinueBroker } from './continue-native-broker.mjs';
-import { encodeSidecar, decodeSidecar } from './continue-native-sidecar.mjs';
+import { encodeSidecar, encodePendingSidecar, decodeSidecar } from './continue-native-sidecar.mjs';
+
+// Private intermediate for the host recorder. It cannot be published as a
+// native sidecar until the settled workspace archive has been measured.
+export async function sealPendingBroker(broker, { programSha256 }) {
+  if (!(broker instanceof ContinueBroker) || broker.mode !== 'record') throw new TypeError('Continue recording broker is required');
+  if (typeof programSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(programSha256)) throw new Error('Continue sidecar requires actual program digest');
+  return broker.finish(events => encodePendingSidecar(events, programSha256));
+}
 
 export async function sealBroker(broker, { programSha256, workspaceEffectSha256 }) {
   if (!(broker instanceof ContinueBroker) || broker.mode !== 'record') throw new TypeError('Continue recording broker is required');

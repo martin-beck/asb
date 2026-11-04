@@ -7,7 +7,7 @@ import { connect, createServer } from 'node:net';
 import { once } from 'node:events';
 import { ContinueBroker, brokerRequest } from '../assets/scripts/continue-native-broker.mjs';
 import { createNativeDispatcher } from '../assets/scripts/continue-native-dispatch.mjs';
-import { sealBroker, replayBroker } from '../assets/scripts/continue-native-custody.mjs';
+import { sealBroker, sealPendingBroker, replayBroker } from '../assets/scripts/continue-native-custody.mjs';
 import { createHash } from 'node:crypto';
 import { recordBoundaries, replayEffects, snapshotBoundary } from '../assets/scripts/continue-snapshot-boundary.mjs';
 
@@ -124,6 +124,13 @@ try {
   assert.equal(await restoredDispatch({name:'Fetch',arguments:{url:'fixture'}},{},async()=>{throw new Error('must not execute')}), 'captured');
   await restored.finish();
   assert.equal(applied,1);
+  const pendingBroker = new ContinueBroker('record');
+  await pendingBroker.listen(socket);
+  await createNativeDispatcher('record',socket)({name:'Read',arguments:{}},{},async()=> 'ok');
+  await assert.rejects(sealPendingBroker(pendingBroker,{programSha256:'invalid'}),/program digest/);
+  const pendingSidecar = await sealPendingBroker(pendingBroker,{programSha256});
+  assert.doesNotMatch(pendingSidecar.toString(), /workspace_effect/);
+  assert.throws(()=>replayBroker(pendingSidecar,{programSha256,workspaceEffectSha256,applyEffects:async()=>{}}), /count|lifecycle/);
   // Exercise the real adapter marker protocol with a local fixture service.
   // This models effect application; it is not a Btrfs snapshot qualification.
   const markerSocket = join(root, 'marker.sock');

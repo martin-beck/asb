@@ -495,11 +495,6 @@ impl Recorder {
             // The producer is adapter-owned, but the recorder owns the only
             // conversion from private bytes to cassette-native metadata. This
             // prevents adapters from minting an unchecked track declaration.
-            let mut native_tool = result
-                .native_tool_sidecar
-                .as_deref()
-                .map(seal_native_tool_sidecar)
-                .transpose()?;
             let track = Track {
                 recorder: capture.map(|capture| capture.adapter.clone()),
                 recorded_max_steps: self.planned.as_ref().and_then(|planned| planned.max_steps),
@@ -585,6 +580,38 @@ impl Recorder {
             } else {
                 None
             };
+            // The adapter interprets its own pending stream only after the
+            // recorder has measured the actual settled snapshot archive.
+            let mut deferred = result
+                .sealed_artifacts
+                .iter()
+                .filter(|item| item.kind == "native-tool-deferred");
+            let pending = deferred.next();
+            if deferred.next().is_some()
+                || (pending.is_some() && result.native_tool_sidecar.is_some())
+            {
+                return Err(Error::Run(
+                    "multiple native tool recordings claim one track".into(),
+                ));
+            }
+            let completed_native = pending
+                .map(|item| {
+                    let digest = snapshot_artifact.as_ref().ok_or_else(|| {
+                        Error::Run(
+                            "deferred native recording requires a settled workspace snapshot"
+                                .into(),
+                        )
+                    })?;
+                    crate::agents::find(result.agent)
+                        .ok_or_else(|| Error::Run("native recording agent is unavailable".into()))?
+                        .finalize_native_recording(&item.bytes, &digest.sha256)
+                })
+                .transpose()?;
+            let mut native_tool = completed_native
+                .as_deref()
+                .or(result.native_tool_sidecar.as_deref())
+                .map(seal_native_tool_sidecar)
+                .transpose()?;
             if let (Some(artifact), Some(source)) = (snapshot_artifact, snapshot_file.as_mut()) {
                 artifact_inputs.push(ArtifactInput { artifact, source });
             }
@@ -608,6 +635,7 @@ impl Recorder {
             let mut sealed_artifacts: Vec<_> = result
                 .sealed_artifacts
                 .iter()
+                .filter(|sidecar| sidecar.kind != "native-tool-deferred")
                 .map(|sidecar| {
                     (
                         Artifact {
