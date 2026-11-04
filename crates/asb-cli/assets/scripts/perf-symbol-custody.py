@@ -145,7 +145,7 @@ def capture_guest_noid(container, script, row, cache_home, max_bytes):
 
 
 def prepare_symfs(listing, cache_home, ambiguous):
-    """Enable a mirror only when every recorded file can be represented."""
+    """Mirror known build IDs and retain available no-build-ID images."""
     if ambiguous:
         return False
     root = pathlib.Path(cache_home) / 'symfs'
@@ -153,6 +153,7 @@ def prepare_symfs(listing, cache_home, ambiguous):
     if not root.is_dir():
         return False
     paths = {}
+    missing_noid = 0
     try:
         for line in listing.splitlines():
             fields = line.split(None, 1)
@@ -178,7 +179,7 @@ def prepare_symfs(listing, cache_home, ambiguous):
             target = root.joinpath(*name[1:].split('/'))
             if buildid is None:
                 if not target.is_file() or target.is_symlink():
-                    return False
+                    missing_noid += 1
                 continue
             image = (buildroot / buildid[:2] / buildid[2:] / 'elf').resolve(strict=True)
             with image.open('rb') as source:
@@ -198,7 +199,7 @@ def prepare_symfs(listing, cache_home, ambiguous):
                     os.link(debug.resolve(strict=True), target_debug)
         marker = pathlib.Path(cache_home) / 'symfs-ready'
         with marker.open('x') as output:
-            output.write('complete recorded-image mirror\n')
+            json.dump({'schema_version': 1, 'missing_no_build_id_images': missing_noid}, output)
         return True
     except (OSError, ValueError, TypeError):
         return False
@@ -653,10 +654,18 @@ def settle_recorded_images(root_fd, data, cache_home, perf, symbol_root, uid, gi
                     remaining -= retained
     final = verify_buildids(listing, cache_home)
     symfs_ready = prepare_symfs(listing, cache_home, ambiguous)
+    missing_noid = None
+    if symfs_ready:
+        try:
+            with open(pathlib.Path(cache_home) / 'symfs-ready', encoding='utf-8') as marker:
+                missing_noid = json.load(marker)['missing_no_build_id_images']
+        except (OSError, ValueError, KeyError):
+            symfs_ready = False
+            (pathlib.Path(cache_home) / 'symfs-ready').unlink(missing_ok=True)
     return {'recovered_recorded_images': recovered, 'recovered_bytes': initial_remaining - remaining,
             'missing_recorded_images': len(final['missing']),
             'missing_debug_images': len(final['missing_debug']), 'unverified_entries': final['unverified'],
-            'symfs_ready': symfs_ready}
+            'symfs_ready': symfs_ready, 'symfs_missing_no_build_id_images': missing_noid}
 
 
 def main():
@@ -684,6 +693,7 @@ def main():
     guest_seen = set()
     guest_paths = {}
     guest_ambiguous = set()
+    guest_captured_paths = set()
     guest_noid = 0
     guest_failures = 0
     stopping = False
@@ -754,6 +764,9 @@ def main():
                     previous = guest_paths.setdefault(path, key)
                     if previous != key:
                         guest_ambiguous.add(path)
+                        if path in guest_captured_paths:
+                            guest_captured_paths.remove(path)
+                            guest_noid -= 1
                         if path.startswith('/') and all(part not in ('', '.', '..') for part in path[1:].split('/')):
                             try:
                                 (pathlib.Path(cache_home) / 'symfs').joinpath(*path[1:].split('/')).unlink(missing_ok=True)
@@ -777,6 +790,8 @@ def main():
                     else:
                         size += copied[0]
                         guest_noid += int(copied[1])
+                        if copied[1]:
+                            guest_captured_paths.add(path)
                     # Bound collector work per scan; short-lived mappings can
                     # be missed and are explicitly not claimed as complete.
                     break

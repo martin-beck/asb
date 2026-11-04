@@ -1,6 +1,7 @@
 import importlib.util
 import contextlib
 import io
+import json
 import os
 import shutil
 from pathlib import Path
@@ -39,7 +40,7 @@ class CustodyTest(unittest.TestCase):
                     self.assertFalse(module.guest_command('invalid', script, ['scan'], out, 100, 2))
 
     @unittest.skipUnless(shutil.which('cc'), 'requires a C compiler')
-    def test_symfs_requires_every_recorded_image_and_matching_build_ids(self):
+    def test_symfs_requires_known_build_ids_but_reports_missing_no_id_images(self):
         with tempfile.TemporaryDirectory(prefix='asb-symbol-mirror-') as directory:
             root = Path(directory); source = root / 'test.c'; binary = root / 'binary'
             source.write_text('int main(void) { return 0; }\n')
@@ -53,11 +54,12 @@ class CustodyTest(unittest.TestCase):
             noid.parent.mkdir(parents=True)
             noid.write_bytes(b'\x7fELFno-build-id')
             listing = f'{buildid} /guest/withid\n    /guest/noid\n'
-            self.assertFalse(module.prepare_symfs(listing + '    /guest/missing\n', root, set()))
+            self.assertFalse(module.prepare_symfs(listing + 'deadbeef /guest/missing-known\n', root, set()))
             self.assertFalse((root / 'symfs-ready').exists())
             self.assertFalse(module.prepare_symfs(listing, root, {'/guest/noid'}))
-            self.assertTrue(module.prepare_symfs(listing, root, set()))
+            self.assertTrue(module.prepare_symfs(listing + '    /guest/missing-noid\n', root, set()))
             self.assertTrue((root / 'symfs-ready').is_file())
+            self.assertEqual(json.loads((root / 'symfs-ready').read_text())['missing_no_build_id_images'], 1)
             self.assertTrue(os.path.samefile(cached, root / 'symfs/guest/withid'))
 
     def test_container_identity_requires_one_cgroup_and_same_process_generation(self):
