@@ -669,6 +669,14 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
     // executions.  Adapters then add only their own selected-provider state.
     let state_root = request.runtime_dir.join("agent-state");
     prepare_fresh_state(&mut command, &state_root)?;
+    if request.process_lifetime == crate::workloads::session::ProcessLifetime::ThroughEvaluation {
+        // The original same-shell evaluator observes the workload user's
+        // home. A retained client must write its service configuration there;
+        // client-specific XDG state remains private to this attempt.
+        let home = std::env::var_os("HOME")
+            .ok_or_else(|| Error::Input("retained workload has no home directory".into()))?;
+        command.env("HOME", home);
+    }
     if request.replay {
         super::mask_replay_credentials(&mut command);
     }

@@ -1010,7 +1010,7 @@ fn retained_guest_reports_actual_principal_and_keeps_its_service_alive() {
     fixture_writer::write_file(
         &project.0,
         &executable,
-        "#!/bin/sh\nsleep 20 >/dev/null 2>&1 &\nprintf '%s' $! > retained-service.pid\nexit 0\n",
+        "#!/bin/sh\nsleep 20 >/dev/null 2>&1 &\nprintf '%s' $! > retained-service.pid\nprintf fixture > \"$HOME/retained-home-check\"\nexit 0\n",
     )
     .unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1073,6 +1073,10 @@ fn retained_guest_reports_actual_principal_and_keeps_its_service_alive() {
     }
     let service =
         std::fs::read_to_string(project.0.join("workspace/retained-service.pid")).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(project.0.join("retained-home-check")).unwrap(),
+        "fixture"
+    );
     assert!(std::path::Path::new(&format!("/proc/{service}")).exists());
     let _ = Command::new("kill")
         .args(["-TERM", service.trim()])
