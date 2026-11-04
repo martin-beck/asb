@@ -20,12 +20,18 @@ const coreModule = {
         }
         return {finishReason: 'completed'};
       },
+      async getAccumulatedUsage(sessionId) {
+        assert.equal(sessionId, 'session');
+        return {aggregateUsage: {inputTokens: 7, outputTokens: 3}};
+      },
       async dispose() { disposed++; },
     };
   }},
 };
 const config = {coreModule, transport: {}, mode: 'record', workspace: '/fixture', provider: 'fixture', model: 'model', baseUrl: 'http://127.0.0.1', apiKey: 'key', prompt: 'task', maxIterations: 200};
-assert.equal((await runClineNativeSession(config)).finishReason, 'completed');
+const completed = await runClineNativeSession(config);
+assert.equal(completed.finishReason, 'completed');
+assert.deepEqual(completed.aggregateUsage, {inputTokens: 7, outputTokens: 3});
 assert.equal(captured.hookErrorMode, 'throw');
 assert.equal(captured.maxIterations, 200);
 assert.equal(captured.enableSpawnAgent && captured.enableAgentTeams, true);
