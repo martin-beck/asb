@@ -4,6 +4,7 @@ use crate::install::Recipe;
 use crate::project;
 use std::path::Path;
 
+mod agentsysperf;
 pub(crate) mod bpftrace;
 mod cli2key;
 mod flamegraph;
@@ -254,6 +255,7 @@ fn executable_candidates(
 static REGISTRY: &[&dyn ToolAdapter] = &[
     &node::ADAPTER,
     &uv::ADAPTER,
+    &agentsysperf::ADAPTER,
     &cli2key::ADAPTER,
     &mpstat::ADAPTER,
     &iostat::ADAPTER,
@@ -482,6 +484,28 @@ mod tests {
                 }
                 _ => panic!("{id} must install the actual official Python harness"),
             }
+        }
+    }
+
+    #[test]
+    fn agentsysperf_runtime_is_an_exact_project_local_source_revision() {
+        let adapter = find("agentsysperf").expect("AgentSysPerf is installable");
+        assert!(adapter.kind() == ToolKind::Support);
+        assert_eq!(adapter.executable(), Some("agentsysperf"));
+        match adapter.recipe() {
+            Recipe::Python {
+                package,
+                dependencies,
+                executable,
+            } => {
+                assert_eq!(
+                    package,
+                    "agentsysperf @ git+https://github.com/intel/agentsysperf.git@a760738988552fafc62068dbb2da36cc562a6d78"
+                );
+                assert!(dependencies.is_empty());
+                assert_eq!(executable, "agentsysperf");
+            }
+            _ => panic!("AgentSysPerf must use its pinned upstream Python package"),
         }
     }
 }
