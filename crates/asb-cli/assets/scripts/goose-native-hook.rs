@@ -64,6 +64,42 @@ where
     let internal = |message: String| {
         rmcp::ErrorData::new(rmcp::model::ErrorCode::INTERNAL_ERROR, message, None)
     };
+    // Delegation must execute on replay so the child can consume its own LLM
+    // and tool exchanges. Submit the parent exchange concurrently: the
+    // broker preserves recorded dispatch/completion order around the child.
+    let delegated = matches!(
+        call.get("extension").and_then(Value::as_str),
+        Some("summon" | "orchestrator")
+    );
+    if delegated && probe.mode == "replay" {
+        let recorded = dispatch(
+            &probe.socket,
+            &probe.mode,
+            call,
+            cancel,
+            probe.marker.as_deref(),
+            || async {
+                Err(io::Error::other(
+                    "delegation replay must not invoke broker callback",
+                ))
+            },
+        );
+        let (recorded, actual) = tokio::join!(recorded, invoke);
+        let value = recorded.map_err(|error| internal(error.to_string()))?;
+        let sealed =
+            serde_json::from_value::<Result<rmcp::model::CallToolResult, rmcp::ErrorData>>(value)
+                .map_err(|error| internal(error.to_string()))?;
+        let sealed_value =
+            serde_json::to_value(&sealed).map_err(|error| internal(error.to_string()))?;
+        let actual_value =
+            serde_json::to_value(&actual).map_err(|error| internal(error.to_string()))?;
+        if sealed_value != actual_value {
+            return Err(internal(
+                "delegated tool result differs from recording".into(),
+            ));
+        }
+        return actual;
+    }
     let value = dispatch(
         &probe.socket,
         &probe.mode,
