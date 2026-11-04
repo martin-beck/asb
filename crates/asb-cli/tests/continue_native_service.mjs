@@ -7,11 +7,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
-import { brokerRequest } from '../assets/scripts/continue-native-broker.mjs';
-import { encodeSidecar } from '../assets/scripts/continue-native-sidecar.mjs';
+import { brokerRequest } from '../assets/scripts/native-tool-broker.mjs';
+import { encodeSidecar } from '../assets/scripts/native-tool-sidecar.mjs';
 
 const root = mkdtempSync(join(tmpdir(), 'asb-continue-service-'));
-const service = fileURLToPath(new URL('../assets/scripts/continue-native-service.mjs', import.meta.url));
+const service = fileURLToPath(new URL('../assets/scripts/native-tool-service.mjs', import.meta.url));
 try {
   const program = join(root, 'bundle.mjs');
   writeFileSync(program, 'fixture bundle');

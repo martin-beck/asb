@@ -581,7 +581,7 @@ mod tests {
         let output = root.join("record.jsonl");
         std::fs::write(&bundle, b"fixture").unwrap();
         let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/scripts/continue-native-service.mjs");
+            .join("assets/scripts/native-tool-service.mjs");
         let mut scope = DescendantScope::new().unwrap();
         let mut service = Command::new("node")
             .arg(script)

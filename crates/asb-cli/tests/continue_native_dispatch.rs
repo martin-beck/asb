@@ -13,6 +13,8 @@ fn native_dispatch_prototype_handles_loader_ordering_and_child_transport() {
         "continue_native_sidecar.mjs",
         "continue_native_supervisor.mjs",
         "continue_native_service.mjs",
+        "pi_native_transform.mjs",
+        "pi_native_integration.mjs",
     ] {
         let output = std::process::Command::new("node")
             .arg(root.join("tests").join(fixture))

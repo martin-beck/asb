@@ -1,7 +1,7 @@
 // Loaded into the pinned Continue process and any Node descendants.
 import { installDispatchHook } from './continue-dispatch-hook.mjs';
 import { createNativeDispatcher } from './continue-native-dispatch.mjs';
-import { recordBoundaries } from './continue-snapshot-boundary.mjs';
+import { recordBoundaries } from './native-snapshot-boundary.mjs';
 
 const { ASB_CONTINUE_BUNDLE: bundle, ASB_CONTINUE_MODE: mode,
   ASB_CONTINUE_SOCKET: socket, ASB_CONTINUE_MARKER: marker } = process.env;

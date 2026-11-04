@@ -15,6 +15,7 @@ pub(crate) mod determinism;
 pub(crate) mod mcp_framing;
 pub(crate) mod mcp_relay;
 pub(crate) mod mcp_transcript;
+mod native_guest;
 pub(crate) mod native_trace;
 pub(crate) mod tool_replay;
 pub(crate) mod tool_replay_mcp;
@@ -1338,9 +1339,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             capable,
-            vec!["codex", "openhands", "openjiuwen", "hermes", "continue"]
+            vec![
+                "codex",
+                "pi",
+                "openhands",
+                "openjiuwen",
+                "hermes",
+                "continue"
+            ]
         );
-        assert!(!find("pi").unwrap().supports_native_tool_transport());
+        assert!(find("pi").unwrap().supports_native_tool_transport());
         let adapter = find("codex").unwrap();
         assert!(select_process(adapter, "not-executed", None).is_ok());
     }
@@ -1379,7 +1387,7 @@ mod tests {
         // merely by declaring an unrelated native artifact, while native
         // adapters are not required to pretend their transport is MCP/local.
         assert!(local_sidecar(find("pi").unwrap()));
-        assert!(!native_sidecar(find("pi").unwrap()));
+        assert!(native_sidecar(find("pi").unwrap()));
         assert!(native_sidecar(find("openhands").unwrap()));
         assert!(!local_sidecar(find("openhands").unwrap()));
     }

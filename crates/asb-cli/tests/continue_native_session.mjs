@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { RecordingSession, ReplaySession } from '../assets/scripts/continue-native-session.mjs';
+import { RecordingSession, ReplaySession } from '../assets/scripts/native-tool-session.mjs';
 
 let release;
 const firstWait = new Promise(resolve => { release = resolve; });

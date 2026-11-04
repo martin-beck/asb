@@ -5,6 +5,19 @@ use super::{
 use crate::{Error, install::Recipe};
 use std::path::Path;
 const TOOL_PROGRESS_FILENAME: &str = "pi-progress.json";
+// Pi's Responses client uses its freshly generated session UUID only as a
+// provider-side prompt cache key. It changes across replay launches.
+const TAPE_WIRE_EXTENSION: &str = r#"
+export function normalizeRequest(request) {
+  const body = request?.body;
+  if (request?.url?.endsWith('/responses') && body && typeof body === 'object'
+      && typeof body.prompt_cache_key === 'string'
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.prompt_cache_key)) {
+    body.prompt_cache_key = '<asb-pi-session-cache>';
+  }
+  return body;
+}
+"#;
 
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "pi",
@@ -20,8 +33,17 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_estimated_disk_mib(768)
 .with_complete_tool_replay(prepare_tool_replay)
+.with_native_tool_transport()
+.with_tape_wire_extension(TAPE_WIRE_EXTENSION)
+.with_guest_service(start_native_service)
+.with_deferred_native_recording(finalize_native_recording)
 .with_collection(collect)
 .with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "pi",
+        filename: "native-tool-pending.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
     super::super::ArtifactSpec {
         namespace: "summary",
         filename: "pi-summary.json",
@@ -131,6 +153,18 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
                 ..AgentArtifacts::default()
             },
         };
+    if let Some(bytes) = context
+        .frozen
+        .bytes("native-tool-pending.jsonl")
+        .filter(|bytes| !bytes.is_empty())
+    {
+        artifacts
+            .sealed_artifacts
+            .push(super::super::SealedArtifact {
+                kind: "native-tool-deferred".into(),
+                bytes: bytes.to_vec(),
+            });
+    }
     // Pi opted into the deterministic extension, so this adapter owns the
     // corresponding manifest selection.  The generic dispatcher only seals
     // the opaque bytes returned in AgentArtifacts.
@@ -498,9 +532,12 @@ fn prepare_summary(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         .to_str()
         .ok_or_else(|| Error::Run("Pi summary extension path is not valid UTF-8".into()))?;
     let summary = context.run_dir.join("summary/pi-summary.json");
-    context
-        .command
-        .args(["--no-extensions", "--extension", extension]);
+    if std::env::var_os("ASB_FS_MARKER_SOCKET").is_none()
+        && std::env::var_os("ASB_FS_REPLAY_SOCKET").is_none()
+    {
+        context.command.arg("--no-extensions");
+    }
+    context.command.args(["--extension", extension]);
     context.command.env("ASB_PI_SUMMARY_PATH", summary);
     Ok(())
 }
@@ -563,6 +600,13 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
+    if (tape.mode == crate::tape::Mode::Record
+        && std::env::var_os("ASB_FS_MARKER_SOCKET").is_some())
+        || (tape.mode == crate::tape::Mode::Replay
+            && std::env::var_os("ASB_FS_REPLAY_SOCKET").is_some())
+    {
+        return Ok(());
+    }
     let launch =
         super::super::tool_replay_mcp::per_call_launch(context, tape, TOOL_PROGRESS_FILENAME)?;
     let extension = context.runtime_dir.join("pi/asb-local-tools.ts");
@@ -663,6 +707,60 @@ export default function(pi) {
 }
 "#;
 
+fn finalize_native_recording(pending: &[u8], snapshot_sha256: &str) -> Result<Vec<u8>, Error> {
+    super::super::native_guest::finalize("pi", pending, snapshot_sha256)
+}
+
+fn start_native_service(
+    command: &mut std::process::Command,
+    executable: &str,
+    run_dir: &Path,
+    mode: Option<crate::tape::Mode>,
+    native_tool: Option<&Path>,
+    snapshot_sha256: Option<&str>,
+) -> Result<Option<super::super::auxiliary::AuxiliaryService>, Error> {
+    let Some((mode, marker, snapshot)) =
+        super::super::native_guest::selection(mode, snapshot_sha256)?
+    else {
+        return Ok(None);
+    };
+    let cli = std::fs::canonicalize(executable)
+        .map_err(|_| Error::Run("Pi executable is unavailable for native recording".into()))?;
+    let bundle = cli
+        .ancestors()
+        .map(|ancestor| {
+            ancestor.join("node_modules/@mariozechner/pi-agent-core/dist/agent-loop.js")
+        })
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            Error::Run("Pi native recording requires the installed pinned agent-core bundle".into())
+        })?;
+    let assets = [
+        (
+            "pi-native-bootstrap.mjs",
+            include_str!("../../../assets/scripts/pi-native-bootstrap.mjs"),
+        ),
+        (
+            "pi-native-transform.mjs",
+            include_str!("../../../assets/scripts/pi-native-transform.mjs"),
+        ),
+    ];
+    super::super::native_guest::start(
+        command,
+        super::super::native_guest::Settings {
+            agent: "pi",
+            bundle: &bundle,
+            run_dir,
+            mode,
+            marker,
+            native_tool,
+            snapshot: &snapshot,
+            assets: &assets,
+        },
+    )
+    .map(Some)
+}
+
 fn configure_provider(
     command: &mut std::process::Command,
     directory: &Path,
@@ -698,7 +796,52 @@ fn configure_provider(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_snapshot_recording_is_bound_to_pi_and_the_settled_digest() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/continue_native_sidecar_emit.mjs");
+        let emit = |pi: bool| {
+            let mut command = std::process::Command::new("node");
+            command.arg(&fixture).arg("--pending");
+            if pi {
+                command.arg("--pi");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success());
+            output.stdout
+        };
+        let digest = crate::cassette::digest(b"snapshot");
+        assert!(super::finalize_native_recording(&emit(true), &digest).is_ok());
+        assert!(super::finalize_native_recording(&emit(false), &digest).is_err());
+        assert!(super::finalize_native_recording(&emit(true), "bad").is_err());
+    }
     use super::*;
+
+    #[test]
+    fn replay_normalizes_only_pi_response_session_cache_uuid() {
+        let root = std::env::temp_dir().join(format!("asb-pi-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("extension.mjs"), super::TAPE_WIRE_EXTENSION).unwrap();
+        std::fs::write(root.join("test.mjs"), r#"import { normalizeRequest } from './extension.mjs';
+const one = '00112233-4455-6677-8899-aabbccddeeff';
+const two = '11112233-4455-6677-8899-aabbccddeeff';
+const norm = (url, key, input = 'one') => normalizeRequest({url,body:{prompt_cache_key:key,input}});
+if (JSON.stringify(norm('/v1/responses',one)) !== JSON.stringify(norm('/v1/responses',two))) throw Error('session differs');
+if (JSON.stringify(norm('/v1/chat/completions',one)) === JSON.stringify(norm('/v1/chat/completions',two))) throw Error('wrong endpoint changed');
+if (norm('/v1/responses','user-key').prompt_cache_key !== 'user-key') throw Error('non-UUID changed');
+if (JSON.stringify(norm('/v1/responses',one,'one')) === JSON.stringify(norm('/v1/responses',two,'two'))) throw Error('input changed');
+"#).unwrap();
+        let output = std::process::Command::new("node")
+            .arg(root.join("test.mjs"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use crate::agents::AgentAdapter;
 
     fn frozen_collection_artifacts(
