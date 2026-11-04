@@ -116,6 +116,7 @@ impl CollectorStates {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum SharedArtifact {
     StackSamples,
+    PerfSymbolCache,
 }
 
 pub(crate) enum ArtifactDisplay {
