@@ -588,6 +588,11 @@ pub(crate) fn dependency_tools(selected: &[String]) -> Vec<&'static str> {
     let mut tools = Vec::new();
     for id in &expanded {
         if let Some(adapter) = find(id) {
+            if let Some(tool) = adapter.tool_id()
+                && !tools.contains(&tool)
+            {
+                tools.push(tool);
+            }
             for dependency in adapter.dependencies() {
                 if let Some(tool) = find(dependency).and_then(|item| item.tool_id())
                     && !tools.contains(&tool)
@@ -642,6 +647,16 @@ pub(crate) fn selected_or_environment(id: &str, selected: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_agentsysperf_installs_its_own_runtime_and_perf_dependency() {
+        let selected = vec!["agentsysperf".to_owned()];
+        assert_eq!(
+            dependency_tools(&selected),
+            vec!["agentsysperf", "perf"],
+            "a selected collector must expose both its own runtime and its collector tool dependencies"
+        );
+    }
 
     #[test]
     fn host_setting_descriptors_belong_to_collectors_and_remain_unique() {

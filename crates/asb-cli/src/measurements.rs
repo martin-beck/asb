@@ -162,7 +162,7 @@ pub fn available_collectors() -> Vec<String> {
 pub fn default_collectors() -> Vec<String> {
     available_collectors()
         .into_iter()
-        .filter(|collector| collector != "bpftrace")
+        .filter(|collector| collector != "bpftrace" && collector != "agentsysperf")
         .collect()
 }
 
@@ -720,6 +720,13 @@ impl Session {
             .entry(name.to_owned())
             .or_default()
             .wall_ms = now.duration_since(started).as_millis();
+    }
+
+    /// A collector may derive a post-execution record from an observed
+    /// lifecycle component, but cannot turn a missing boundary into a
+    /// zero-duration measurement.
+    pub(crate) fn component_timing(&self, name: &str) -> Option<&ComponentTiming> {
+        self.component_timings.get(name)
     }
 
     fn write_component_measurements(&self) -> Result<(), String> {
@@ -2294,6 +2301,12 @@ mod tests {
             !default_collectors()
                 .iter()
                 .any(|collector| collector == "bpftrace")
+        );
+        assert!(
+            !default_collectors()
+                .iter()
+                .any(|collector| collector == "agentsysperf"),
+            "the optional AgentSysPerf runtime is intentionally large and must be explicitly selected"
         );
     }
 }
