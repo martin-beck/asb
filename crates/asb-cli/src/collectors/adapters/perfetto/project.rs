@@ -101,7 +101,7 @@ pub(crate) fn instance_names(root: &Path) -> Result<Vec<String>, String> {
     for byte in root.as_os_str().as_encoded_bytes() {
         hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
     }
-    Ok((0..2)
+    Ok((0..4)
         .map(|slot| format!("asb-{hash:016x}-{slot}"))
         .collect())
 }
@@ -269,7 +269,7 @@ fn configure_at_with_consent(
             .collect());
     }
     let traverse = parent_metadata.mode() & 1 == 0;
-    writeln!(output, "Optional Perfetto setup creates or repairs two project-specific tracefs instances. Separate ASB processes lease separate instances; concurrent replicas share a service. The following commands change only new instances or this user's existing instances, plus execute-only traversal of the instances parent if needed (not write/list permission). Existing foreign-owned instances will not be adopted:").map_err(crate::io_error)?;
+    writeln!(output, "Optional Perfetto setup creates or repairs four project-specific tracefs instances. Each concurrent capture leases its own instance. The following commands change only new instances or this user's existing instances, plus execute-only traversal of the instances parent if needed (not write/list permission). Existing foreign-owned instances will not be adopted:").map_err(crate::io_error)?;
     if traverse {
         writeln!(output, "  sudo chmod o+x -- {}", parent.display()).map_err(crate::io_error)?;
     }
@@ -479,7 +479,7 @@ mod tests {
         let root = std::env::temp_dir();
         let names = instance_names(&root).unwrap();
         assert_eq!(names, instance_names(&root.join(".")).unwrap());
-        assert_eq!(names.len(), 2);
+        assert_eq!(names.len(), 4);
         assert!(
             names
                 .iter()
