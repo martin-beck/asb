@@ -141,7 +141,11 @@ fn analyze_unix(session: &Session, records: &std::path::Path) -> Value {
     let Some(executable) = crate::tools::host_executable(&executable) else {
         return json!({"schema_version": 1, "status": "unavailable", "reason": "project-local AgentSysPerf executable is unavailable"});
     };
-    let stdout_path = session.dir.join("agentsysperf-analysis.stdout.json");
+    // This is raw diagnostic evidence, not a collector document.  The
+    // analyzer deliberately emits a human preamble before its JSON array, so
+    // a `.json` suffix would make comparison's generic collector discovery
+    // reject an otherwise valid completed measurement.
+    let stdout_path = session.dir.join("agentsysperf-analysis.stdout.log");
     let stderr_path = session.dir.join("agentsysperf-analysis.stderr.log");
     let stdout = match fs::File::create(&stdout_path) {
         Ok(file) => file,
@@ -639,7 +643,7 @@ mod tests {
         let output = analyze(&session, &root.join("records"));
         assert_eq!(output["status"], "observed");
         assert_eq!(output["findings"][0]["analyzer"], "fixture");
-        assert!(root.join("agentsysperf-analysis.stdout.json").is_file());
+        assert!(root.join("agentsysperf-analysis.stdout.log").is_file());
         assert!(root.join("agentsysperf-analysis.stderr.log").is_file());
         drop(session);
         let _ = fs::remove_dir_all(root);
