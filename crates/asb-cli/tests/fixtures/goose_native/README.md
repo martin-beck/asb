@@ -35,3 +35,18 @@ sudo env ASB_BTRFS_FIXTURE_DIR=/path/to/new/disposable-btrfs-fixture \
 The fixture retains its images and diagnostics for inspection. It tests
 snapshot recording and restoration only; it does not execute Goose or qualify
 full filesystem replay.
+
+For the combined Goose and Btrfs fixture, first build the patched Goose CLI
+with `--features rustls-tls,scheduler,goose/asb-native-probe`. Then run:
+
+```sh
+sudo env ASB_GOOSE_BINARY=/absolute/path/to/patched/goose \
+  ASB_TEST_NODE=/absolute/path/to/node \
+  python3 "$ASB_ROOT/crates/asb-cli/tests/fixtures/goose_native/goose_btrfs_probe.py" \
+  /path/to/new/disposable-goose-btrfs-fixture
+```
+
+This fixture records a Goose background child and replays four independent
+replicas with the mock provider stopped, using real Btrfs snapshot streams.
+It is not an ASB CLI or SWE-bench qualification and does not cover all Goose
+tools, arbitrary filesystem access, or all subagent behaviors.
