@@ -193,6 +193,19 @@ impl WorkloadAdapter for LiveCodeBenchAdapter {
         let project_root = context.project_root.to_path_buf();
         let task_id = task.id.clone();
         let dataset = catalog_data.dataset.clone();
+        // A response-only workload has no mutable workspace baseline.  Ask the
+        // official evaluator whether the empty submission resolves the exact
+        // installed task instead.  This is necessary evidence for ASB's
+        // task-resolution contract; failures stay unknown rather than being
+        // guessed as a passing or failing baseline.
+        let baseline_passed = baseline_result(evaluate(
+            &tool,
+            &catalog_path,
+            &source,
+            &project_root,
+            &task_id,
+            "",
+        ));
         Ok(Box::new(
             FileSession::new_dynamic(
                 context,
@@ -208,7 +221,7 @@ impl WorkloadAdapter for LiveCodeBenchAdapter {
                     )
                 }),
                 KnownEvaluationKind::UpstreamHarness,
-                None,
+                baseline_passed,
             )
             .with_dataset(dataset),
         ))
@@ -217,6 +230,12 @@ impl WorkloadAdapter for LiveCodeBenchAdapter {
     fn prepare_source(&self, _workloads: &Path, _workspace: &Path) -> Result<usize, String> {
         Err("LiveCodeBench tasks require their installed official task catalog".into())
     }
+}
+
+fn baseline_result(result: Result<Evaluation, String>) -> Option<bool> {
+    result
+        .ok()
+        .map(|evaluation| evaluation == Evaluation::Passed)
 }
 
 fn evaluate(
@@ -312,6 +331,16 @@ fn evaluate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_only_baseline_preserves_official_failure_and_unknown_error() {
+        assert_eq!(baseline_result(Ok(Evaluation::Passed)), Some(true));
+        assert_eq!(
+            baseline_result(Ok(Evaluation::Failed("empty response".into()))),
+            Some(false)
+        );
+        assert_eq!(baseline_result(Err("evaluator unavailable".into())), None);
+    }
 
     #[test]
     fn every_official_livecodebench_population_has_an_adapter_owned_trial_extension() {
