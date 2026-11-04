@@ -749,17 +749,30 @@ pub(crate) fn parse_perf_stat_metrics(output: &str) -> BTreeMap<String, f64> {
 }
 
 fn perf_metric_name(event: &str) -> Option<&'static str> {
+    // On Intel hybrid CPUs `perf stat` expands an architected event into
+    // separate `cpu_core/<event>/` and `cpu_atom/<event>/` rows. They remain
+    // separate raw-quality observations, while ASB's validated scalar/series
+    // aggregates deliberately sum their common architectural metric.
+    let event = event
+        .strip_prefix("cpu_core/")
+        .or_else(|| event.strip_prefix("cpu_atom/"))
+        .and_then(|event| event.strip_suffix('/'))
+        .unwrap_or(event);
     match event {
         "task-clock" => Some("task_clock_ms"),
         "context-switches" => Some("context_switches"),
         "cpu-migrations" => Some("cpu_migrations"),
         "page-faults" => Some("page_faults"),
-        "cycles" | "cpu_core/cycles/" | "cpu_atom/cycles/" => Some("observed_cycles_count"),
-        "instructions" | "cpu_core/instructions/" | "cpu_atom/instructions/" => {
-            Some("observed_instructions_count")
-        }
+        "cycles" => Some("observed_cycles_count"),
+        "instructions" => Some("observed_instructions_count"),
         "cache-misses" => Some("cache_misses_count"),
         "branch-misses" => Some("branch_misses_count"),
+        // `perf` adds slots to a hybrid Topdown event group. Retain it as an
+        // observed counter so its presence cannot invalidate the complete
+        // process-scoped capture, even when no current analyzer consumes it.
+        "slots" => Some("topdown_slots_count"),
+        "topdown-fe-bound" => Some("topdown_fe_bound_count"),
+        "topdown-be-bound" => Some("topdown_be_bound_count"),
         "l1d_cache_refill" => Some("observed_l1d_cache_refill_count"),
         "stall_backend" => Some("observed_stall_backend_count"),
         "stall_frontend" => Some("observed_stall_frontend_count"),
@@ -909,6 +922,16 @@ mod tests {
             parsed.timestamps["perf.observed_cycles_count"],
             [100.0, 500.0]
         );
+    }
+
+    #[test]
+    fn hybrid_pmu_aliases_normalize_all_selected_architectural_events() {
+        let parsed = super::parse_perf_stat(std::io::Cursor::new(
+            "0.1,2,,cpu_core/cache-misses/,1,\n0.1,3,,cpu_atom/cache-misses/,1,\n0.1,4,,cpu_core/branch-misses/,1,\n0.1,5,,cpu_atom/branch-misses/,1,\n0.1,6,,cpu_core/topdown-fe-bound/,1,\n0.1,7,,cpu_atom/topdown-fe-bound/,1,\n"
+        )).unwrap();
+        assert_eq!(parsed.metrics["perf.cache_misses_count"], 5.0);
+        assert_eq!(parsed.metrics["perf.branch_misses_count"], 9.0);
+        assert_eq!(parsed.metrics["perf.topdown_fe_bound_count"], 13.0);
     }
 
     #[test]
