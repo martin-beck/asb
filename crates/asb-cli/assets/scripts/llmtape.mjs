@@ -315,6 +315,22 @@ function normalizeUnifiedDiffHeaderMtime(value) {
   );
 }
 
+function normalizeSympyTestRandomSeed(value) {
+  // SymPy's test-process banner prints a freshly generated random seed.  The
+  // seed is run-local presentation data, but the rest of the summary remains
+  // a meaningful replay input.  Require one complete banner and exactly one
+  // well-formed seed line so arbitrary seed values, truncated output, and
+  // multiple test runs in one result remain strict.
+  const starts = [...value.matchAll(/^=+ test process starts =+\r?$/gm)];
+  const finishes = [...value.matchAll(/^=+ tests finished: .+\r?$/gm)];
+  const seeds = [...value.matchAll(/^(random seed:[ \t]*)\d+(?=\r?$)/gm)];
+  if (starts.length !== 1 || finishes.length !== 1 || seeds.length !== 1
+      || starts[0].index >= seeds[0].index || seeds[0].index >= finishes[0].index) {
+    return value;
+  }
+  return value.replace(/^(random seed:[ \t]*)\d+(?=\r?$)/m, "$1<asb-seed>");
+}
+
 // Python renders a callable's process-local address in its fixed repr.  This
 // is terminal presentation noise, not a tool result change.  Keep the exact
 // existing callable-rendering rule in one helper so it applies both before
@@ -668,6 +684,7 @@ function normalizeCassetteBody(body, url = "") {
             .replace(/^(Wall time: )\d+(?:\.\d+)? seconds(?=\r?\nOutput:)/, "$1<asb-wall-time> seconds");
           value = normalizeUnittestElapsed(value);
           value = normalizeUnifiedDiffHeaderMtime(value);
+          value = normalizeSympyTestRandomSeed(value);
         }
         value = normalizeFunctionRenderingAddress(value);
         value = normalizeObjectRenderingAddress(value);
