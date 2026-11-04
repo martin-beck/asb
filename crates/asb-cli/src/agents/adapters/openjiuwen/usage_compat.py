@@ -5,6 +5,7 @@ delta's output-only usage. This process-local compatibility fix merges the
 cumulative fields; it does not alter model requests or generated content.
 """
 import atexit
+import asyncio
 import base64
 import contextvars
 import hashlib
@@ -147,6 +148,9 @@ except ImportError:
 _native_events = []
 _native_cursor = 0
 _record_dispatch_cursor = 0
+_replay_completion_order = []
+_replay_completion_cursor = 0
+_replay_completion_condition = None
 # OpenJiuwen can start independent direct tools concurrently.  Invocation
 # ancestry is therefore task-local: a process-global mutable list would turn a
 # concurrently-started root call into a child of whichever task happened to
@@ -303,6 +307,20 @@ def _replay_exchanges(events):
     return [(write, output) for _ordinal, write, output in exchanges]
 
 
+async def _await_recorded_completion(ordinal):
+    """Release concurrent roots in the order their live calls completed."""
+    global _replay_completion_condition, _replay_completion_cursor
+    if _replay_completion_condition is None:
+        _replay_completion_condition = asyncio.Condition()
+    async with _replay_completion_condition:
+        await _replay_completion_condition.wait_for(
+            lambda: _replay_completion_cursor < len(_replay_completion_order)
+            and _replay_completion_order[_replay_completion_cursor] == ordinal
+        )
+        _replay_completion_cursor += 1
+        _replay_completion_condition.notify_all()
+
+
 def _load_final_history():
     """Return one adapter-private final-history stream from sealed outputs."""
     global _sealed_history, _sealed_final_outputs
@@ -387,6 +405,9 @@ def _matches_request(write, request):
 
 if _replay_path:
     _native_events = _load_replay()
+    _replay_completion_order = [
+        _invocation(event)['ordinal'] for event in _native_events if event.get('event') == 'write'
+    ]
 elif _record_path:
     os.makedirs(os.path.dirname(_record_path), exist_ok=True)
     _native_events = [
@@ -424,11 +445,6 @@ if _record_path or _replay_path:
             config = getattr(agent, "_deep_config", None)
             if config is not None:
                 config.enable_read_image_multimodal = False
-                # Native direct tools are captured as an ordered adapter
-                # transcript. Keep the benchmark launch profile serial so a
-                # batch of concurrent tool completions cannot reorder the
-                # model-facing results between record and replay.
-                config.parallel_tool_calls = False
             return agent, tracker
 
         _agent_factory.create_agent = _create_text_only_agent
@@ -750,6 +766,7 @@ try:
                 # not a provenance marker: a reconstructed result can let a
                 # discarded object's id be reused before execute() runs.
                 _replayed_output_events[id(result)] = (result, output)
+                await _await_recorded_completion(invocation['ordinal'])
                 return result
             invocation = None
             invocation_token = None
@@ -900,6 +917,8 @@ if _replay_path:
     _recorded_exchanges = sum(1 for event in _native_events if event.get("event") == "write")
     if _native_cursor != _recorded_exchanges:
         raise SystemExit("ASB OpenJiuwen native replay left recorded native tool exchanges unconsumed")
+    if _replay_completion_cursor != len(_replay_completion_order):
+        raise SystemExit("ASB OpenJiuwen native replay left recorded tool completions unconsumed")
     _recorded_final_messages = sum(
         1
         for event in _native_events
