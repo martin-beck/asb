@@ -69,6 +69,12 @@ impl<'a> PreparedSweep<'a> {
             &sweep,
             options.invocation_dir.unwrap_or_else(|| Path::new(".")),
         )?;
+        // A sweep is one invocation: reject every statically invalid MCP
+        // selection before capacity/dependency preflight or old-result
+        // rotation.  Do not let a valid early entry hide a later input error.
+        for entry in &plan.entries {
+            crate::runner::validate_mcp_configuration(&entry.configuration, options.mcp_mode)?;
+        }
         plan.execution_mode = match mode {
             None => plan::SavedExecutionMode::Live,
             Some(crate::tape::Mode::Record) => plan::SavedExecutionMode::Record,

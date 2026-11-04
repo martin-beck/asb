@@ -1,4 +1,5 @@
 """Actual native and guest A/B artifact isolation, entirely local fixtures."""
+import gzip
 import json
 import os
 from pathlib import Path
@@ -146,7 +147,8 @@ def deferred_collection(run, record):
     assert filename == "artifact-0", receipt
     artifact = run / "exports" / filename
     assert artifact.is_file() and not artifact.is_symlink(), artifact
-    payload = json.loads(artifact.read_text())
+    with gzip.open(artifact, "rt", encoding="utf-8") as source:
+        payload = json.load(source)
     assert payload["schema_version"] == 1, payload
     assert set(payload) == {"schema_version", "documents", "bytes"}, payload
     return payload

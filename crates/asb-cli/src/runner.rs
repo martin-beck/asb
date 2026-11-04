@@ -49,6 +49,15 @@ const MAX_OUTPUT: usize = 1024 * 1024;
 const MAX_AGENT_RUNTIME: Duration =
     Duration::from_secs(crate::planning::DEFAULT_NATIVE_EXECUTION_SECONDS);
 
+/// Validate static MCP configuration before public execution entry points
+/// allocate resources. Attempt admission repeats this for internal paths.
+pub(crate) fn validate_mcp_configuration(
+    config: &BenchmarkConfig,
+    mcp_tape_mode: Option<tape::Mode>,
+) -> Result<(), Error> {
+    attempt::validate_mcp_configuration(config, mcp_tape_mode)
+}
+
 fn emit_warning(
     warnings: &Mutex<BTreeSet<String>>,
     output: &mut dyn Write,
@@ -268,6 +277,10 @@ pub(crate) fn run_with_diagnostics(
         }),
         ..options
     };
+    // Reject a static MCP mismatch before allocating a campaign, checking
+    // capacity, starting collectors, or discovering/installing dependencies.
+    // Attempt admission repeats this validation for internal call paths.
+    validate_mcp_configuration(&config, options.mcp_mode)?;
     if options.native_capsule_record.is_some()
         && (options.mode != Some(tape::Mode::Record)
             || config.concurrency != 1
@@ -280,12 +293,10 @@ pub(crate) fn run_with_diagnostics(
     }
     if options.native_capsule_replay.is_some()
         && (options.mode != Some(tape::Mode::Replay)
-            || config.concurrency != 1
             || options.repeat.is_some_and(|repeat| repeat != 1))
     {
         return Err(Error::Input(
-            "--native-capsule-replay requires --llm-replay, concurrency = 1, and at most --repeat 1"
-                .into(),
+            "--native-capsule-replay requires --llm-replay and at most --repeat 1".into(),
         ));
     }
     let disk_policy = crate::planning::resolve(&config)?;
@@ -1676,12 +1687,33 @@ fn command_for(
     command_for_with_interface(config, provider_base_url, prompt, interface, None)
 }
 
+#[cfg(test)]
 fn command_for_with_interface(
     config: &BenchmarkConfig,
     provider_base_url: Option<&str>,
     prompt: &str,
     interface: Option<crate::endpoint::Interface>,
     max_steps: Option<u64>,
+) -> Result<CommandSpec, Error> {
+    command_for_with_native_tool(
+        config,
+        provider_base_url,
+        prompt,
+        interface,
+        max_steps,
+        None,
+        None,
+    )
+}
+
+fn command_for_with_native_tool(
+    config: &BenchmarkConfig,
+    provider_base_url: Option<&str>,
+    prompt: &str,
+    interface: Option<crate::endpoint::Interface>,
+    max_steps: Option<u64>,
+    native_tool_mode: Option<tape::Mode>,
+    native_tool: Option<agents::NativeToolContext<'_>>,
 ) -> Result<CommandSpec, Error> {
     if let Some(adapter) = agents::find(&config.agent) {
         if max_steps.is_some() && !adapter.supports_max_steps() {
@@ -1697,8 +1729,8 @@ fn command_for_with_interface(
             interface,
             prompt,
             max_steps,
-            native_tool_mode: None,
-            native_tool: None,
+            native_tool_mode,
+            native_tool,
         }));
     }
     let agent_names = agents::names().collect::<Vec<_>>();
@@ -1732,6 +1764,37 @@ mod tests {
     };
     use crate::benchmark::BenchmarkConfig;
     use crate::measurements::TokenUsage;
+
+    #[test]
+    fn direct_mcp_recording_rejects_before_execution_preflight() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-preflight-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = root.join("benchmark.toml");
+        std::fs::write(
+            &config,
+            "agent='pi'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='fixture'\n",
+        )
+        .unwrap();
+        let error = run_with_tape(
+            config.to_str().unwrap(),
+            super::RunOptions {
+                mcp_mode: Some(crate::tape::Mode::Record),
+                ..Default::default()
+            },
+            &mut Vec::new(),
+        )
+        .expect_err("an undeclared MCP relay must fail before execution preflight");
+        assert!(
+            error
+                .to_string()
+                .contains("requires at least one [[mcp_servers]]")
+        );
+        assert!(!root.join("results").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn replay_uses_each_selected_tracks_step_limit_unless_explicitly_overridden() {
@@ -2594,7 +2657,7 @@ mod tests {
     }
 
     #[test]
-    fn native_capsule_replay_rejects_repeat_or_concurrency_before_execution() {
+    fn native_capsule_replay_rejects_repeat_before_execution() {
         let root = std::env::temp_dir().join(format!(
             "asb-native-capsule-replay-preflight-{}",
             crate::workloads::TaskIdentity::local("capsule-replay-preflight", None).attempt_id
@@ -2618,6 +2681,7 @@ mod tests {
             super::RunOptions {
                 mode: Some(crate::tape::Mode::Replay),
                 native_capsule_replay: Some(capsule.to_str().unwrap()),
+                repeat: Some(2),
                 ..Default::default()
             },
             &mut Vec::new(),

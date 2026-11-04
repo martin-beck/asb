@@ -4,6 +4,7 @@ use super::super::{
 };
 use crate::measurements;
 mod bootstrap;
+mod observer;
 mod project;
 mod service;
 mod state_summary;
@@ -109,8 +110,11 @@ impl CollectorAdapter for PerfettoCollector {
         session: &mut measurements::Session,
         selected: &[String],
     ) -> Result<(), String> {
-        session.state::<PerfettoState>().borrow_mut().enabled =
-            super::super::selected_or_environment("perfetto", selected);
+        let enabled = super::super::selected_or_environment("perfetto", selected);
+        session.state::<PerfettoState>().borrow_mut().enabled = enabled;
+        if enabled {
+            session.enable_perfetto_observer()?;
+        }
         Ok(())
     }
     fn producer_policy(&self, _: &str) -> measurements::ProducerPolicy {
@@ -253,7 +257,19 @@ fn process(
 
 fn finish(session: &mut measurements::Session) -> Result<(), String> {
     let state = session.state::<PerfettoState>();
-    let state = state.borrow();
+    let mut state = state.borrow_mut();
+    if let Some(observer) = state.observer.as_mut() {
+        observer.finish();
+    }
+    if !state.observer_reports.is_empty() {
+        state.observer_warning = state
+            .observer_reports
+            .iter()
+            .filter_map(|(report, producer)| {
+                validate_observation_report(report, session.trace_id(), producer).err()
+            })
+            .next();
+    }
     if !state.enabled {
         return Ok(());
     }
@@ -272,6 +288,8 @@ fn finish(session: &mut measurements::Session) -> Result<(), String> {
             "capture_complete": state.capture_complete,
             "capture_warning": state.capture_warning,
             "analysis_warning": state.analysis_warning,
+            "observation_reports": state.observer_reports.iter().map(|(path, _)| measurements::file_name(path)).collect::<Vec<_>>(),
+            "request_observation_warning": state.observer_warning,
         }),
     )?;
     write_perfetto_metric_svgs(
@@ -538,6 +556,34 @@ mod report_tests {
         );
         assert!(!graph.svg.contains("Observed thread-time: 0.00"));
     }
+
+    #[test]
+    fn request_observation_reports_are_bounded_and_run_scoped() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-perfetto-request-report-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let report = root.join("perfetto-requests.json");
+        fs::write(
+            &report,
+            r#"{"schema_version":1,"producer":"llmtape","trace_id":"run-1","complete":true}"#,
+        )
+        .unwrap();
+        assert!(validate_observation_report(&report, "run-1", "llmtape").is_ok());
+        assert!(
+            validate_observation_report(&report, "other-run", "llmtape")
+                .unwrap_err()
+                .contains("does not belong")
+        );
+        fs::write(&report, b"not-json").unwrap();
+        assert!(
+            validate_observation_report(&report, "run-1", "llmtape")
+                .unwrap_err()
+                .contains("malformed")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[derive(Default)]
@@ -548,6 +594,9 @@ struct PerfettoState {
     pid: Option<u32>,
     trace_marker: Option<PathBuf>,
     trace_marker_output: Option<File>,
+    observer: Option<observer::Relay>,
+    observer_reports: Vec<(PathBuf, &'static str)>,
+    observer_warning: Option<String>,
     marker_verified: bool,
     marker_warning: Option<String>,
     scope_warning: Option<String>,
@@ -565,6 +614,50 @@ struct PerfettoState {
 // Keep the native trace (the authoritative collector artifact), but bound the
 // optional derived metrics, series, and SVG timeline before invoking it.
 const MAX_TRACE_PROCESSOR_INPUT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_OBSERVATION_REPORT_BYTES: u64 = 64 * 1024;
+
+/// The producer report is diagnostic evidence, not a second source of truth
+/// for task grading or scheduler scope.  Keep malformed, stale, incomplete,
+/// or oversized reports visible to users without allowing an observer failure
+/// to discard an otherwise valid Perfetto capture.
+fn validate_observation_report(path: &Path, trace_id: &str, producer: &str) -> Result<(), String> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        format!(
+            "LLM request observation report is unavailable at {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.len() > MAX_OBSERVATION_REPORT_BYTES {
+        return Err(format!(
+            "LLM request observation report at {} exceeds the {} KiB bound",
+            path.display(),
+            MAX_OBSERVATION_REPORT_BYTES / 1024
+        ));
+    }
+    let report: serde_json::Value = serde_json::from_slice(
+        &fs::read(path)
+            .map_err(|error| format!("cannot read LLM request observation report: {error}"))?,
+    )
+    .map_err(|error| format!("LLM request observation report is malformed: {error}"))?;
+    let field = |name: &str| report.get(name).and_then(serde_json::Value::as_str);
+    if report
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+    {
+        return Err("LLM request observation report has an unsupported schema version".into());
+    }
+    if field("producer") != Some(producer) {
+        return Err("LLM request observation report has an unexpected producer".into());
+    }
+    if field("trace_id") != Some(trace_id) {
+        return Err("LLM request observation report does not belong to this benchmark run".into());
+    }
+    if report.get("complete").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err("LLM request observation report is incomplete".into());
+    }
+    Ok(())
+}
 
 fn analysis_budget_warning(trace: &Path) -> Option<String> {
     let size = trace.metadata().ok()?.len();
@@ -603,6 +696,50 @@ fn wait_for_capture_ready(collector: &mut Collector, timeout: Duration) -> Resul
 }
 
 impl measurements::Session {
+    fn enable_perfetto_observer(&mut self) -> Result<(), String> {
+        let state = self.state::<PerfettoState>();
+        let mut state = state.borrow_mut();
+        if state.observer.is_none() {
+            state.observer = Some(observer::Relay::new()?);
+        }
+        Ok(())
+    }
+
+    /// Private producer capability. It exposes an observer descriptor, never
+    /// a tracefs pathname or the collector's trace-marker descriptor.
+    pub(crate) fn perfetto_observer_context(
+        &mut self,
+        report: &str,
+    ) -> Result<Option<(File, String, PathBuf)>, String> {
+        let state = self.state::<PerfettoState>();
+        let mut state = state.borrow_mut();
+        let Some(observer) = state.observer.as_ref() else {
+            return Ok(None);
+        };
+        let producer = observer.producer_fd()?;
+        let report = self.dir.join(report);
+        state.observer_reports.push((report.clone(), "llmtape"));
+        Ok(Some((producer, self.trace_id.clone(), report)))
+    }
+
+    /// Private producer capability for ASB-owned local-tool and MCP relays.
+    /// The consumer receives a relay descriptor, never a tracefs pathname.
+    pub(crate) fn perfetto_tool_observer_context(
+        &mut self,
+    ) -> Result<Option<(File, String, PathBuf)>, String> {
+        let state = self.state::<PerfettoState>();
+        let mut state = state.borrow_mut();
+        let Some(observer) = state.observer.as_ref() else {
+            return Ok(None);
+        };
+        let producer = observer.producer_fd()?;
+        let report = self.dir.join("perfetto-tools.json");
+        state
+            .observer_reports
+            .push((report.clone(), "asb-tool-service"));
+        Ok(Some((producer, self.trace_id.clone(), report)))
+    }
+
     pub(crate) fn start_perfetto_for_pid(&mut self, pid: u32) -> Result<(), String> {
         self.state::<PerfettoState>().borrow_mut().pid = Some(pid);
         if !self.state::<PerfettoState>().borrow().enabled {
@@ -699,6 +836,11 @@ impl measurements::Session {
                 state.service = service;
                 state.trace = Some(trace);
                 state.trace_marker = marker_output.as_ref().map(|_| marker.to_path_buf());
+                if let (Some(observer), Some(output)) =
+                    (state.observer.as_ref(), marker_output.as_ref())
+                {
+                    observer.activate(output, pid, &self.trace_id)?;
+                }
                 state.trace_marker_output = marker_output;
             }
             Err(error) if !env_true("ASB_MEASURE_PERFETTO") => write_unavailable(
@@ -1336,8 +1478,11 @@ pub(crate) fn perfetto_scope_sql(pid: u32, trace_id: &str) -> String {
     // A numeric PID may have several UPIDs in a long trace. Select only the
     // unique generation alive at the agent-start marker. Without a marker,
     // a unique PID generation is required; ambiguity must not become zero data.
+    // A gated agent can first be scheduled after its start marker. When its
+    // start time is absent, accept an observed in-lifetime event only if it
+    // is the sole PID generation in the trace.
     format!(
-        "WITH RECURSIVE tree(upid) AS (SELECT upid FROM root UNION ALL SELECT p.upid FROM process p JOIN tree t ON p.parent_upid=t.upid), marker_bounds AS (SELECT MIN(ts) FILTER (WHERE name='asb.agent.started.{trace_id}') AS marker_start, MAX(ts) FILTER (WHERE name='asb.agent.exited.{trace_id}') AS marker_end FROM slice), root_candidates AS (SELECT p.upid,p.start_ts,p.end_ts,COALESCE(p.start_ts,(SELECT MIN(s.ts) FROM sched s JOIN thread th ON s.utid=th.utid WHERE th.upid=p.upid)) AS first_seen FROM process p WHERE p.pid={pid}), eligible_roots AS (SELECT r.upid FROM root_candidates r CROSS JOIN marker_bounds m WHERE (m.marker_start IS NOT NULL AND r.first_seen <= m.marker_start AND (r.end_ts IS NULL OR r.end_ts >= m.marker_start)) OR (m.marker_start IS NULL AND (SELECT COUNT(*) FROM root_candidates)=1)), root AS (SELECT upid FROM eligible_roots WHERE (SELECT COUNT(*) FROM eligible_roots)=1), process_bounds AS (SELECT MIN(start_ts) AS process_start, MAX(end_ts) AS process_end FROM process WHERE upid IN tree), scheduler_bounds AS (SELECT MIN(s.ts) AS scheduler_start, MAX(s.ts+s.dur) AS scheduler_end FROM sched s JOIN thread th ON s.utid=th.utid WHERE th.upid IN tree), bounds AS (SELECT COALESCE(marker_start,process_start,scheduler_start) AS start_ts, COALESCE(marker_end,process_end,scheduler_end) AS end_ts FROM process_bounds CROSS JOIN scheduler_bounds CROSS JOIN marker_bounds)",
+        "WITH RECURSIVE tree(upid) AS (SELECT upid FROM root UNION ALL SELECT p.upid FROM process p JOIN tree t ON p.parent_upid=t.upid), marker_bounds AS (SELECT MIN(ts) FILTER (WHERE name='asb.agent.started.{trace_id}') AS marker_start, MAX(ts) FILTER (WHERE name='asb.agent.exited.{trace_id}') AS marker_end FROM slice), root_candidates AS (SELECT p.upid,p.start_ts,p.end_ts,COALESCE(p.start_ts,(SELECT MIN(s.ts) FROM sched s JOIN thread th ON s.utid=th.utid WHERE th.upid=p.upid)) AS first_seen FROM process p WHERE p.pid={pid}), eligible_roots AS (SELECT r.upid FROM root_candidates r CROSS JOIN marker_bounds m WHERE (m.marker_start IS NOT NULL AND r.first_seen <= m.marker_start AND (r.end_ts IS NULL OR r.end_ts >= m.marker_start)) OR (m.marker_start IS NOT NULL AND m.marker_end>m.marker_start AND r.start_ts IS NULL AND r.first_seen>=m.marker_start AND r.first_seen<m.marker_end AND (r.end_ts IS NULL OR r.end_ts>=r.first_seen) AND (SELECT COUNT(*) FROM root_candidates)=1) OR (m.marker_start IS NULL AND (SELECT COUNT(*) FROM root_candidates)=1)), root AS (SELECT upid FROM eligible_roots WHERE (SELECT COUNT(*) FROM eligible_roots)=1), process_bounds AS (SELECT MIN(start_ts) AS process_start, MAX(end_ts) AS process_end FROM process WHERE upid IN tree), scheduler_bounds AS (SELECT MIN(s.ts) AS scheduler_start, MAX(s.ts+s.dur) AS scheduler_end FROM sched s JOIN thread th ON s.utid=th.utid WHERE th.upid IN tree), bounds AS (SELECT COALESCE(marker_start,process_start,scheduler_start) AS start_ts, COALESCE(marker_end,process_end,scheduler_end) AS end_ts FROM process_bounds CROSS JOIN scheduler_bounds CROSS JOIN marker_bounds)",
     )
 }
 
@@ -1350,8 +1495,12 @@ pub(crate) fn perfetto_config(pid: Option<u32>) -> String {
             "      tids_to_trace: {pid}\n      tracefs_options {{ name: \"event-fork\" state: STATE_ENABLED }}\n"
         )
     });
-    // Collect only events consumed by scheduler/process-lifetime queries.
-    // Redundant sched_stat events multiply traffic on a busy shared host.
+    // Keep scheduler/process lifetime events for ASB's derived metrics and
+    // raw syscall boundaries for Perfetto's native per-thread slices.  The
+    // latter are intentionally not parsed into ASB metrics: entry-to-exit
+    // duration includes descheduling and blocking, not CPU or I/O wait time.
+    // Redundant sched_stat events still multiply traffic on a busy shared
+    // host without adding useful data.
     let configuration = r#"duration_ms: 3600000
 write_into_file: true
 file_write_period_ms: 1000
@@ -1374,6 +1523,8 @@ data_sources {
       ftrace_events: "sched/sched_process_free"
       ftrace_events: "task/task_newtask"
       ftrace_events: "task/task_rename"
+      ftrace_events: "raw_syscalls/sys_enter"
+      ftrace_events: "raw_syscalls/sys_exit"
       ftrace_events: "ftrace/print"
     }
   }
@@ -1530,7 +1681,7 @@ mod marker_tests {
     }
 
     #[test]
-    fn config_collects_scheduler_process_and_trace_marker_events() {
+    fn config_collects_scheduler_process_syscall_and_trace_marker_events() {
         let config = perfetto_config(None);
         for event in [
             "sched/sched_switch",
@@ -1538,6 +1689,8 @@ mod marker_tests {
             "sched/sched_wakeup_new",
             "sched/sched_process_exit",
             "task/task_newtask",
+            "raw_syscalls/sys_enter",
+            "raw_syscalls/sys_exit",
             "ftrace/print",
         ] {
             assert!(config.contains(event), "missing {event}");
@@ -1806,6 +1959,13 @@ if case=='unique-legacy': c.execute('DELETE FROM process WHERE upid!=2')
 if case=='ambiguous': c.execute('UPDATE process SET end_ts=NULL WHERE upid=1')
 if case=='unknown-start': c.execute('UPDATE process SET start_ts=NULL WHERE upid IN (2,3)')
 if case=='invalid-bounds': c.execute("UPDATE slice SET ts=80 WHERE name='asb.agent.exited.fixture'")
+if case in ('delayed-first','delayed-after-end','delayed-ambiguous','known-late-start'):
+ c.execute('DELETE FROM process WHERE upid IN (1,3,5)')
+ c.execute('DELETE FROM sched WHERE utid=2 AND ts=90')
+ c.execute('UPDATE process SET start_ts=NULL WHERE upid=2')
+if case=='delayed-after-end': c.execute('UPDATE sched SET ts=220 WHERE utid=2')
+if case=='delayed-ambiguous': c.execute('INSERT INTO process VALUES(6,42,NULL,NULL,NULL)')
+if case=='known-late-start': c.execute('UPDATE process SET start_ts=110 WHERE upid=2')
 print(json.dumps(c.execute(sys.argv[1]).fetchall()))
 "#;
         let output = Command::new("python3")
@@ -1854,6 +2014,23 @@ print(json.dumps(c.execute(sys.argv[1]).fetchall()))
             scope_fixture_query(&format!("{scope} SELECT upid FROM root"), "unique-legacy"),
             serde_json::json!([[2]])
         );
+    }
+
+    #[test]
+    fn delayed_first_sample_requires_one_unknown_start_generation_within_agent_lifetime() {
+        let scope = perfetto_scope_sql(42, "fixture");
+        let query = format!("{scope} SELECT upid FROM root");
+        assert_eq!(
+            scope_fixture_query(&query, "delayed-first"),
+            serde_json::json!([[2]])
+        );
+        for scenario in ["delayed-after-end", "delayed-ambiguous", "known-late-start"] {
+            assert_eq!(
+                scope_fixture_query(&query, scenario),
+                serde_json::json!([]),
+                "{scenario}"
+            );
+        }
     }
 
     #[test]

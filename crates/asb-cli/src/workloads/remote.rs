@@ -1782,6 +1782,45 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_guest_capsule_replays_stage_independent_copies() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-guest-capsule-parallel-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source");
+        let bytes = vec![37u8; 200_001];
+        std::fs::write(&source, &bytes).unwrap();
+        let handles: Vec<_> = (0..4)
+            .map(|index| {
+                let source = source.clone();
+                let artifacts = root.join(format!("replica-{index}"));
+                std::fs::create_dir(&artifacts).unwrap();
+                std::thread::spawn(move || {
+                    let mut inputs = Vec::new();
+                    stage_native_capsule(
+                        Some(crate::workloads::session::NativeCapsule::Replay(&source)),
+                        &artifacts,
+                        &mut inputs,
+                    )
+                    .unwrap();
+                    inputs.pop().unwrap().source
+                })
+            })
+            .collect();
+        let staged: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        for path in &staged {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        std::fs::write(&staged[0], b"replica mutation").unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        for path in &staged[1..] {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_private_input_hashes_multiple_chunks() {
         let root = std::env::temp_dir().join(format!(
             "asb-replay-stream-{}",

@@ -169,6 +169,9 @@ except ImportError:
 _native_events = []
 _native_cursor = 0
 _record_dispatch_cursor = 0
+_replay_completion_order = []
+_replay_completion_cursor = 0
+_replay_completion_condition = None
 # OpenJiuwen can start independent direct tools concurrently.  Invocation
 # ancestry is therefore task-local: a process-global mutable list would turn a
 # concurrently-started root call into a child of whichever task happened to
@@ -196,6 +199,10 @@ def _trace_once(item):
 _recorded_outputs = {}
 _replayed_renders = {}
 _replayed_output_events = {}
+
+class _NativeStringResult(str):
+    """Give each string result its own identity for native-tool provenance."""
+
 # Private, process-local provenance. A final ToolMessage is eligible only
 # when AbilityManager rendered the exact output returned by a wrapped native
 # tool. Values and tool-call ids are not provenance: synthetic messages can
@@ -321,6 +328,20 @@ def _replay_exchanges(events):
     return [(write, output) for _ordinal, write, output in exchanges]
 
 
+async def _await_recorded_completion(ordinal):
+    """Release concurrent roots in the order their live calls completed."""
+    global _replay_completion_condition, _replay_completion_cursor
+    if _replay_completion_condition is None:
+        _replay_completion_condition = asyncio.Condition()
+    async with _replay_completion_condition:
+        await _replay_completion_condition.wait_for(
+            lambda: _replay_completion_cursor < len(_replay_completion_order)
+            and _replay_completion_order[_replay_completion_cursor] == ordinal
+        )
+        _replay_completion_cursor += 1
+        _replay_completion_condition.notify_all()
+
+
 def _load_final_history():
     """Return one adapter-private final-history stream from sealed outputs."""
     global _sealed_history, _sealed_final_outputs
@@ -405,6 +426,9 @@ def _matches_request(write, request):
 
 if _replay_path:
     _native_events = _load_replay()
+    _replay_completion_order = [
+        _invocation(event)['ordinal'] for event in _native_events if event.get('event') == 'write'
+    ]
 elif _record_path:
     os.makedirs(os.path.dirname(_record_path), exist_ok=True)
     _native_events = [
@@ -717,9 +741,13 @@ try:
                     raise RuntimeError(
                         "ASB OpenJiuwen native replay sidecar has no rendered tool result"
                     )
-                result = ToolOutput.model_validate(_materialize_workspace(
-                    envelope["tool_output"]
-                ))
+                value = _materialize_workspace(envelope["tool_output"])
+                if isinstance(value, str):
+                    result = _NativeStringResult(value)
+                elif isinstance(value, dict):
+                    result = ToolOutput.model_validate(value)
+                else:
+                    raise RuntimeError("ASB OpenJiuwen native replay tool output has an unsupported type")
                 rendered = envelope["rendered"]
                 if isinstance(rendered, str):
                     _replayed_renders[id(result)] = _materialize_workspace(rendered)
@@ -728,6 +756,7 @@ try:
                 # discarded object's id be reused before execute() runs.
                 _replayed_output_events[id(result)] = (result, output)
                 await _snapshot_boundary("replay", "end", f"openjiuwen-{invocation['ordinal']}")
+                await _await_recorded_completion(invocation['ordinal'])
                 return result
             invocation = None
             invocation_token = None
@@ -762,11 +791,22 @@ try:
             if invocation is not None and invocation["depth"] != 0:
                 return output
             if _record_path:
+                # Web tools may return the same interned string for multiple
+                # invocations. Preserve the string value while giving each
+                # result distinct identity at the rendering boundary.
+                if isinstance(output, str):
+                    output = _NativeStringResult(output)
                 # Keep the opaque sidecar portable across fresh replay
                 # workspaces. The foreground client still receives the live
                 # output; only the sealed replay artifact uses this marker.
+                if isinstance(output, str):
+                    tool_output = output
+                elif isinstance(output, ToolOutput):
+                    tool_output = output.model_dump()
+                else:
+                    raise RuntimeError("ASB OpenJiuwen native recording tool output has an unsupported type")
                 encoded = _canonical({
-                    "tool_output": _normalize_workspace(output.model_dump()),
+                    "tool_output": _normalize_workspace(tool_output),
                     "rendered": None,
                     "message": None,
                 })
@@ -813,6 +853,18 @@ try:
         ("code", CodeTool),
     ):
         _wrap_native_tool(_tool_name, _tool_type)
+    # Web tools return strings and otherwise perform live network requests on
+    # replay. Capture their native results in the same ordered sidecar.
+    for _module, _tool_name, _class_name in (
+        ("fetch_webpage", "fetch_webpage", "WebFetchWebpageTool"),
+        ("free_search", "free_search", "WebFreeSearchTool"),
+        ("paid_search", "paid_search", "WebPaidSearchTool"),
+    ):
+        try:
+            _web_module = __import__(f"openjiuwen.harness.tools.web.{_module}", fromlist=[_class_name])
+        except ImportError:
+            continue
+        _wrap_native_tool(_tool_name, getattr(_web_module, _class_name))
 except ImportError:
     pass
 
@@ -863,6 +915,8 @@ if _replay_path:
     _recorded_exchanges = sum(1 for event in _native_events if event.get("event") == "write")
     if _native_cursor != _recorded_exchanges:
         raise SystemExit("ASB OpenJiuwen native replay left recorded native tool exchanges unconsumed")
+    if _replay_completion_cursor != len(_replay_completion_order):
+        raise SystemExit("ASB OpenJiuwen native replay left recorded tool completions unconsumed")
     _recorded_final_messages = sum(
         1
         for event in _native_events

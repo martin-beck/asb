@@ -11,6 +11,7 @@ import { pathToFileURL } from "node:url";
 import { quiesceNetworkRequests, networkFetch } from "./network-fetch.mjs";
 import { CaptureSession, completedSseResponse, responseDelivery } from "./capture-session.mjs";
 import { normalizeOpenAiSseWorkspacePaths, normalizeWorkspacePaths, replaceExactWorkspace } from "./tape-normalization.mjs";
+import { RequestTracing } from "./request-tracing.mjs";
 
 const MAX_BODY = 16 * 1024 * 1024;
 const MAX_DELAY_MS = 60 * 60 * 1000;
@@ -68,6 +69,7 @@ const capture = captureReceipt
   ? new CaptureSession(cassette, { pid: process.pid, nonce: captureNonce })
   : null;
 const activeCaptures = new Set();
+const requestTracing = new RequestTracing();
 if (respectRecordTimings && mode !== "replay") {
   usage("--respect-record-timings is only valid with replay");
 }
@@ -1126,7 +1128,18 @@ async function handle(request, response, recording) {
 }
 
 const server = http.createServer((request, response) => {
+  const observation = requestTracing.begin();
+  let observationSettled = false;
+  const settleObservation = (reason) => {
+    if (observationSettled) return;
+    observationSettled = true;
+    if (reason) requestTracing.failure(observation, reason);
+    requestTracing.end(observation);
+  };
+  response.once("finish", () => settleObservation());
+  response.once("close", () => settleObservation(response.writableEnded ? undefined : "cancelled"));
   const fail = (error) => {
+    settleObservation("http_error");
     if (!response.destroyed) {
       if (!response.headersSent) response.writeHead(502, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: String(error.message || error) }));
@@ -1193,6 +1206,7 @@ async function waitCaptures(milliseconds) {
 async function shutdown() {
   if (stopping) return;
   stopping = true;
+  requestTracing.close();
   capture?.drain();
   server.close();
   try {

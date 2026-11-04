@@ -82,11 +82,6 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
     }
 }
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
-    if let Some(tape) = context.tape
-        && tape.mode == crate::tape::Mode::Record
-    {
-        prepare_tool_transport(context, tape)?;
-    }
     context
         .command
         .arg("--output")
@@ -665,6 +660,13 @@ mod tests {
         assert!(arguments.windows(2).any(|pair| {
             pair[0] == "--environment-class" && pair[1] == "asb_mini_swe_tools.AsbTapeEnvironment"
         }));
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|arg| *arg == "--environment-class")
+                .count(),
+            1
+        );
         let command_environment = environment(&command);
         let transcript = run_dir.join("tool-replay/local-tools.jsonl");
         assert_eq!(

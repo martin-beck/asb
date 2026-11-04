@@ -199,8 +199,10 @@ impl<'a> ConfiguredAttempt<'a> {
                 config.agent
             )));
         }
-        validate_mcp_server_capability(config)?;
-        validate_mcp_relay_capability(config, mcp_tape_mode)?;
+        // This is deliberately retained at admission as a defence-in-depth
+        // guard.  Direct runs and complete sweep populations perform the same
+        // static validation before capacity, dependency, or collector work.
+        validate_mcp_configuration(config, mcp_tape_mode)?;
         let mut discovered_tool_support = None;
         let selected_offer = instrument_phase(
             measurement_session.as_mut(),
@@ -251,6 +253,19 @@ impl<'a> ConfiguredAttempt<'a> {
 /// Reject declarations that an adapter would otherwise ignore.  Ordinary MCP
 /// configuration is adapter-owned, so this check deliberately stays separate
 /// from ASB's semantic local-tool replay capability.
+/// Validate static MCP configuration before any execution-side effects.
+///
+/// This is shared by direct runs and sweep population preflight.  The
+/// configured-attempt call remains a defence-in-depth guard for internal
+/// callers which bypass those public entry points.
+pub(super) fn validate_mcp_configuration(
+    config: &BenchmarkConfig,
+    mcp_tape_mode: Option<tape::Mode>,
+) -> Result<(), Error> {
+    validate_mcp_server_capability(config)?;
+    validate_mcp_relay_capability(config, mcp_tape_mode)
+}
+
 fn validate_mcp_server_capability(config: &BenchmarkConfig) -> Result<(), Error> {
     if !config.mcp_servers.is_empty()
         && let Some(adapter) = agents::find(&config.agent)
@@ -686,6 +701,18 @@ impl<'a> ReadyAttempt<'a> {
             {
                 emit_warning(warnings, output, "Selected external workload runs only an adapter smoke exercise, not an upstream benchmark task. Benchmark task success will be unavailable; an official dataset and evaluator are not integrated yet.".into())?;
             }
+            let perfetto_observer = tape_cassette
+                .is_some()
+                .then(|| {
+                    measurement_session
+                        .as_mut()
+                        .map(|session| session.perfetto_observer_context("perfetto-requests.json"))
+                        .transpose()
+                })
+                .transpose()
+                .map_err(Error::Run)?
+                .flatten()
+                .flatten();
             let tape_session = instrument_phase(
                 measurement_session.as_mut(),
                 LifecyclePhase::ProxyPreparation,
@@ -727,6 +754,17 @@ impl<'a> ReadyAttempt<'a> {
                                 invocation_dir: options
                                     .invocation_dir
                                     .unwrap_or_else(|| Path::new(".")),
+                                perfetto_observer: perfetto_observer
+                                    .as_ref()
+                                    .map(|(file, _, _)| file.try_clone())
+                                    .transpose()
+                                    .map_err(|error| Error::Run(error.to_string()))?,
+                                perfetto_trace_id: perfetto_observer
+                                    .as_ref()
+                                    .map(|(_, trace_id, _)| trace_id.clone()),
+                                perfetto_report: perfetto_observer
+                                    .as_ref()
+                                    .map(|(_, _, report)| report.clone()),
                             },
                         )?))
                     } else {
@@ -845,6 +883,8 @@ impl<'a> ReadyAttempt<'a> {
                 .native_tool_inputs
                 .and_then(|inputs| inputs.get(options.replica.index.checked_sub(1)?))
                 .and_then(|input| input.native_tool_launch().zip(input.native_tool.as_deref()));
+            #[cfg(test)]
+            let native_tool: Option<(&crate::cassette::NativeToolLaunch, &Path)> = None;
             let isolated = prepared.workload.execute(
                 &mut workloads::ExecutionContext {
                     launch,
@@ -940,6 +980,8 @@ impl<'a> ReadyAttempt<'a> {
                         mcp_tape_cassette: mcp_tape_cassette
                             .as_ref()
                             .map(|(_, cassette)| cassette.as_path()),
+                        native_tool: native_tool
+                            .map(|(launch, path)| agents::NativeToolContext { launch, path }),
                     },
                 }
                 .prepare(prepared.measurements.as_mut())?;

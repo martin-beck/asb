@@ -256,6 +256,14 @@ cumulative one-second `@asb_*` snapshots as well as their final aggregates.
 Perfetto remains the authoritative timestamped native trace and now also
 extracts timestamped scheduler-event and scheduler-duration series from the
 trace processor; those timestamps are used as the line-chart x coordinates.
+Its agent-process-tree trace also includes raw syscall entry and exit events.
+Open a new `.perfetto-trace` in the official Perfetto UI, select an agent
+process or thread, and expand its slice track to inspect paired syscall
+durations. Those durations are entry-to-exit wall time (including blocking or
+descheduling), not CPU time or exact I/O wait. Raw syscall events can include
+kernel-visible argument and return values, so treat a trace as sensitive
+diagnostic evidence. Existing traces cannot gain events that were not
+recorded.
 If perf permissions,
 samples, or FlameGraph tools are unavailable, `flamegraph.json` records the
 reason and status as `unavailable`; an ordinary `asb run` is unaffected.

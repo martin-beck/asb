@@ -288,8 +288,14 @@ ASB is deliberately split into a small CLI and a file-backed workload directory:
   boundary and relevant service/kernel loss counters. A limit, missing boundary
   or reported loss marks the collector failed and suppresses scheduler metrics,
   series and timelines; the task's independent official grade is preserved.
-  Only scheduler switch/wakeup and process-lifetime events consumed by the
-  analysis are enabled; redundant `sched_stat_*` events are not collected.
+  Scheduler switch/wakeup, process-lifetime, fixed lifecycle markers, and raw
+  syscall entry/exit events are enabled. Perfetto pairs syscall entries and
+  exits into per-thread slices; their durations are entry-to-exit wall time,
+  including blocking or descheduling, not CPU time or exact I/O wait. ASB does
+  not derive or publish syscall metrics from them. Raw syscall records can
+  contain kernel-visible argument and return values, so complete traces remain
+  sensitive diagnostic artifacts. Redundant `sched_stat_*` events are not
+  collected.
   Scheduler-state output does not establish exact I/O-wait classification
   without the optional kernel blocked-reason event. These buffers are per
   capture/CPU, so operators must bound concurrency for available host memory.

@@ -308,6 +308,7 @@ mod adapter_layout_tests {
                     "native_trace.rs",
                     "tool_replay.rs",
                     "tool_replay_mcp.rs",
+                    "tool_tracing.rs", // Shared MCP and local-tool Perfetto observation.
                 ],
                 root_directories: &[],
                 shared_family_adapters: &[],
@@ -534,9 +535,21 @@ mod tests {
         );
         assert!(String::from_utf8_lossy(&stderr).contains("cannot be used with"));
         stderr.clear();
+        let project_root = std::env::temp_dir().join(format!(
+            "asb-parser-project-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(project_root.join(".asb")).unwrap();
+        std::fs::write(
+            project_root.join(".asb/project.toml"),
+            toml::to_string(&crate::project::ProjectConfig::default()).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             run(
                 &[
+                    "--project-dir".into(),
+                    project_root.as_os_str().to_owned(),
                     "run".into(),
                     "a.toml".into(),
                     "--respect-record-timings".into()
@@ -547,5 +560,6 @@ mod tests {
             2
         );
         assert!(String::from_utf8_lossy(&stderr).contains("requires --replay"));
+        std::fs::remove_dir_all(project_root).unwrap();
     }
 }

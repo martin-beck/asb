@@ -870,6 +870,7 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
             "core/single_agent/agents",
             "harness/cli/agent",
             "harness/tools/shell",
+            "harness/tools/web",
             "harness/tools",
         ] {
             std::fs::create_dir_all(package.join(relative)).unwrap();
@@ -892,6 +893,7 @@ print(value.content, value.usage_metadata.input_tokens, value.usage_metadata.out
             "harness/cli/agent/__init__.py",
             "harness/tools/__init__.py",
             "harness/tools/shell/__init__.py",
+            "harness/tools/web/__init__.py",
         ] {
             std::fs::write(package.join(relative), "").unwrap();
         }
@@ -1043,9 +1045,9 @@ class _Tool(Tool):
         # were dispatched. Their task-local ancestry must remain root-level,
         # and replay must use dispatch ordinal rather than sidecar append
         # order.
-        if inputs.get("concurrent") == "first":
+        if inputs.get("concurrent") in ("first", "final-first"):
             await asyncio.sleep(0.01)
-        elif inputs.get("concurrent") == "second":
+        elif inputs.get("concurrent") in ("second", "final-second"):
             await asyncio.sleep(0)
         with open(os.environ["ASB_TEST_NATIVE_EXECUTED"], "a", encoding="utf-8") as marker:
             marker.write(self.label + "\n")
@@ -1071,6 +1073,26 @@ class GrepTool(_Tool): label = "grep"
             format!("{}\nclass CodeTool(_Tool): label = 'code'\n", tools),
         )
         .unwrap();
+        let web_tools = r#"
+class _WebTool(_Tool):
+    async def invoke(self, inputs, **kwargs):
+        with open(os.environ["ASB_TEST_NATIVE_EXECUTED"], "a", encoding="utf-8") as marker:
+            marker.write(self.label + "\n")
+        return "shared web result"
+    def render_for_llm(self, output):
+        return os.environ["ASB_TEST_RENDER_PREFIX"] + output
+"#;
+        for (module, class, label) in [
+            ("fetch_webpage", "WebFetchWebpageTool", "fetch_webpage"),
+            ("free_search", "WebFreeSearchTool", "free_search"),
+            ("paid_search", "WebPaidSearchTool", "paid_search"),
+        ] {
+            std::fs::write(
+                package.join(format!("harness/tools/web/{module}.py")),
+                format!("{tools}\n{web_tools}\nclass {class}(_WebTool): label = '{label}'\n"),
+            )
+            .unwrap();
+        }
         let python = std::process::Command::new("python3")
             .args(["-c", "import sys; print(sys.executable)"])
             .output()
@@ -1088,6 +1110,9 @@ from openjiuwen.harness.cli.agent import factory
 from openjiuwen.harness.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool
 from openjiuwen.harness.tools.shell import BashTool
 from openjiuwen.harness.tools.code import CodeTool
+from openjiuwen.harness.tools.web.fetch_webpage import WebFetchWebpageTool
+from openjiuwen.harness.tools.web.free_search import WebFreeSearchTool
+from openjiuwen.harness.tools.web.paid_search import WebPaidSearchTool
 from openjiuwen.core.single_agent.ability_manager import AbilityManager, ToolMessage
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 from openjiuwen.core.context_engine.context.context import Context
@@ -1099,7 +1124,7 @@ async def main():
     assert factory._build_subagents(None) == ["subagent-enabled"]
     result = []
     context = Context()
-    for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool):
+    for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool, WebFetchWebpageTool, WebFetchWebpageTool, WebFreeSearchTool, WebPaidSearchTool):
         instance = tool()
         # A wrapped native tool can call another wrapped native tool before
         # the outer result is returned to AbilityManager. The inner exchange
@@ -1124,9 +1149,22 @@ async def main():
         assert isinstance(mixed[2][1].tool_call_id, str)
         assert mixed[3][1].content == "unrelated-after"
         result.append(mixed[2][1].tool_call_id)
+    completion_order = []
     async def concurrent_root(label):
-        return await ReadFileTool().invoke({{"concurrent": label}})
+        result = await ReadFileTool().invoke({{"concurrent": label}})
+        completion_order.append(label)
+        return result
+    if os.environ.get("ASB_TEST_CANCEL_WAITING_ROOT"):
+        pending = asyncio.create_task(concurrent_root("first"))
+        try:
+            await asyncio.wait_for(asyncio.shield(pending), timeout=0.05)
+            raise AssertionError("later recorded completion was released early")
+        except asyncio.TimeoutError:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        return
     await asyncio.gather(concurrent_root("first"), concurrent_root("second"))
+    assert completion_order == ["second", "first"], completion_order
     async def concurrent_context(label):
         tool = ReadFileTool()
         output = await tool.invoke({{"context": label}})
@@ -1140,6 +1178,14 @@ async def main():
             None, None, None, context, output, ToolMessage("concurrent-" + label, "live")
         )
     await asyncio.gather(concurrent_context("first"), concurrent_context("second"))
+    first = asyncio.create_task(concurrent_root("final-first"))
+    await asyncio.sleep(0)
+    if os.environ.get("ASB_TEST_CANCEL_LAST_COMPLETION"):
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        await concurrent_root("final-second")
+        return
+    await asyncio.gather(first, concurrent_root("final-second"))
     print(json.dumps(result, sort_keys=True))
 asyncio.run(main())
 "#,
@@ -1207,7 +1253,7 @@ asyncio.run(main())
         );
         assert_eq!(
             std::fs::read_to_string(&marker).unwrap().lines().count(),
-            21
+            31
         );
         assert_eq!(
             std::fs::read_to_string(&sidecar)
@@ -1215,7 +1261,7 @@ asyncio.run(main())
                 .lines()
                 .filter(|line| line.contains(r#""event":"write""#))
                 .count(),
-            20,
+            30,
             "nested helper calls must not become independent replay exchanges"
         );
         std::fs::remove_file(&marker).unwrap();
@@ -1243,14 +1289,14 @@ asyncio.run(main())
                 .iter()
                 .filter(|line| line.starts_with("tool-begin:"))
                 .count(),
-            20
+            30
         );
         assert_eq!(
             messages
                 .iter()
                 .filter(|line| line.starts_with("tool-end:"))
                 .count(),
-            40
+            60
         );
         drop(messages);
         assert!(
@@ -1269,6 +1315,40 @@ asyncio.run(main())
             !marker.exists(),
             "native tool replay executed a direct tool"
         );
+        let cancelled = super::process(entry.to_str().unwrap())
+            .unwrap()
+            .direct()
+            .arg("--asb-native-tool-replay")
+            .arg(&sidecar)
+            .env("PYTHONPATH", &root)
+            .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_TEST_WORKSPACE", &replay_workspace)
+            .env("ASB_TEST_RENDER_PREFIX", "replay:")
+            .env("ASB_TEST_CANCEL_WAITING_ROOT", "1")
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
+            .output()
+            .unwrap();
+        assert!(!cancelled.status.success());
+        assert!(String::from_utf8_lossy(&cancelled.stderr).contains("unconsumed"));
+        assert!(!marker.exists(), "cancelled replay executed a direct tool");
+        let cancelled_last = super::process(entry.to_str().unwrap())
+            .unwrap()
+            .direct()
+            .arg("--asb-native-tool-replay")
+            .arg(&sidecar)
+            .env("PYTHONPATH", &root)
+            .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_TEST_WORKSPACE", &replay_workspace)
+            .env("ASB_TEST_RENDER_PREFIX", "replay:")
+            .env("ASB_TEST_CANCEL_LAST_COMPLETION", "1")
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
+            .output()
+            .unwrap();
+        assert!(!cancelled_last.status.success());
+        assert!(
+            String::from_utf8_lossy(&cancelled_last.stderr).contains("tool completions unconsumed")
+        );
+        assert!(!marker.exists(), "cancelled replay executed a direct tool");
         let missing_nesting = root.join("native-missing-nesting.jsonl");
         let remove_nesting = std::process::Command::new(python.trim())
             .args([
