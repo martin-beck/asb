@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { ContinueBroker, brokerRequest } from '../assets/scripts/continue-native-broker.mjs';
 import { createNativeDispatcher } from '../assets/scripts/continue-native-dispatch.mjs';
+import { sealBroker, replayBroker } from '../assets/scripts/continue-native-custody.mjs';
+import { createHash } from 'node:crypto';
 
 const root = mkdtempSync(join(tmpdir(), 'asb-continue-broker-'));
 const socket = join(root, 'broker.sock');
@@ -69,5 +71,21 @@ try {
   assert.equal(await replayDispatch({ name: 'Subagent', arguments: {} }, {}, async () => { executions++; return 'delegated'; }), 'delegated');
   await offline.finish();
   assert.equal(executions, 3, 'the replayed native call must never execute');
+  const custody = new ContinueBroker('record');
+  await custody.listen(socket);
+  const dispatch = createNativeDispatcher('record', socket);
+  assert.equal(await dispatch({name:'Fetch',arguments:{url:'fixture'}},{},async()=> 'captured'), 'captured');
+  const programSha256 = createHash('sha256').update('fixture-program').digest('hex');
+  const workspaceEffectSha256 = createHash('sha256').update('fixture-effects').digest('hex');
+  await assert.rejects(sealBroker(custody,{programSha256,workspaceEffectSha256:'invalid'}),/requires actual/);
+  const sealed = await sealBroker(custody,{programSha256,workspaceEffectSha256});
+  assert.throws(()=>replayBroker(sealed,{programSha256,workspaceEffectSha256:'0'.repeat(64),applyEffects:async()=>{}}),/does not match/);
+  let applied = 0;
+  const restored = replayBroker(sealed,{programSha256,workspaceEffectSha256,applyEffects:async()=>{ applied++; }});
+  await restored.listen(socket);
+  const restoredDispatch = createNativeDispatcher('replay', socket);
+  assert.equal(await restoredDispatch({name:'Fetch',arguments:{url:'fixture'}},{},async()=>{throw new Error('must not execute')}), 'captured');
+  await restored.finish();
+  assert.equal(applied,1);
   console.log('Continue broker parent/child ordering checks passed');
 } finally { rmSync(root, { recursive: true, force: true }); }

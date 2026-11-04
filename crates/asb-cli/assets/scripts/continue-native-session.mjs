@@ -32,11 +32,11 @@ export class RecordingSession {
     } catch (error) { this.invalid = true; throw error; }
     return value;
   }
-  finish() {
+  preview() {
     if (this.closed || this.invalid || this.active.size) throw new Error('Continue recording has unfinished tool calls');
-    this.closed = true;
     return clone(this.completed);
   }
+  finish() { const events = this.preview(); this.closed = true; return events; }
   abort() { this.invalid = true; this.closed = true; }
 }
 
