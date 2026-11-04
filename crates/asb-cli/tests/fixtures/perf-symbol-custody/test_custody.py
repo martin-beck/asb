@@ -1,4 +1,6 @@
 import importlib.util
+import contextlib
+import io
 import os
 import shutil
 from pathlib import Path
@@ -16,6 +18,18 @@ spec.loader.exec_module(module)
 
 
 class CustodyTest(unittest.TestCase):
+    def test_inaccessible_guest_root_reports_the_permission_problem(self):
+        stderr = io.StringIO()
+        argv = ['helper', '12', '34', '1000', '1000', '/cache', '/perf',
+                '/symbols', 'fifo:/request,/ack', '56', '78', '/perf.data']
+        with mock.patch.object(module.sys, 'argv', argv), \
+             mock.patch.object(module, 'identity', side_effect=[(1, 34), (1, 78)]), \
+             mock.patch.object(module.os, 'open', side_effect=PermissionError('denied')), \
+             contextlib.redirect_stderr(stderr):
+            self.assertEqual(module.main(), 2)
+        self.assertIn('Cannot access the benchmark process root', stderr.getvalue())
+        self.assertIn('denied', stderr.getvalue())
+
     @unittest.skipUnless(shutil.which('cc'), 'requires a C compiler')
     def test_settlement_recovers_short_lived_recorded_image_from_pinned_root(self):
         with tempfile.TemporaryDirectory(prefix='asb-symbol-settle-') as directory:

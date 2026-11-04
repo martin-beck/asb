@@ -469,7 +469,9 @@ def main():
                 return 2
             try:
                 root_fd = os.open(f'/proc/{root}/root', os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
-            except OSError:
+            except OSError as error:
+                print('Cannot access the benchmark process root for perf symbol capture: '
+                      f'{error}. Guest files must be readable by the benchmark user.', file=sys.stderr)
                 return 2
             after = identity(root)
             if after is None or after[1] != start:
