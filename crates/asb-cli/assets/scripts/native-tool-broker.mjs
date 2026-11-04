@@ -1,7 +1,7 @@
 // Adapter-owned IPC coordinator prototype. The owner controls socket lifetime,
 // persistence and snapshot application; clients only exchange tool events.
 import { createServer, connect } from 'node:net';
-import { RecordingSession, ReplaySession, normalizeRequest } from './native-tool-session.mjs';
+import { RecordingSession, ReplaySession, normalizeRequest, encodeThrown, decodeThrown } from './native-tool-session.mjs';
 
 const MAX_MESSAGE = 16 * 1024 * 1024;
 function frame(socket) {
@@ -44,7 +44,7 @@ export class NativeToolBroker {
       if (this.sealing) throw new Error('Native tool broker is sealing its recording');
       if (this.mode === 'replay' && message.op === 'invoke') {
         try { reply(socket, { ok: true, value: await this.session.invoke(message.request) }); }
-        catch (error) { reply(socket, { ok: false, name: error.name, message: error.message }); }
+        catch (error) { reply(socket, error instanceof Error ? { ok: false, name: error.name, message: error.message } : { ok: false, thrown: encodeThrown(error) }); }
       } else if (this.mode === 'record' && message.op === 'start') {
         const request = normalizeRequest(message.request);
         const token = this.nextToken++;
@@ -68,6 +68,7 @@ export class NativeToolBroker {
         if (!item || !message.outcome || typeof message.outcome.ok !== 'boolean') throw new Error('Native tool broker finish has no active call');
         this.pending.delete(message.token);
         if (message.outcome.ok) item.resolve(message.outcome.value);
+        else if (Object.hasOwn(message.outcome, 'thrown')) item.reject(decodeThrown(message.outcome.thrown));
         else { const error = new Error(message.outcome.message); error.name = message.outcome.name; item.reject(error); }
         try { await item.result; } catch { /* recorded tool failure */ }
         reply(socket, { ok: true });
@@ -109,6 +110,7 @@ export async function brokerRequest(path, message) {
   const response = frame(socket);
   socket.once('connect', () => socket.write(`${payload}\n`));
   const result = await response;
+  if (!result.ok && Object.hasOwn(result, 'thrown')) throw decodeThrown(result.thrown);
   if (!result.ok) { const error = new Error(result.message); error.name = result.name || 'Error'; throw error; }
   return result;
 }

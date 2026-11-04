@@ -74,12 +74,29 @@ try {
   assert.equal(await replayDispatch({ name: 'Subagent', arguments: {} }, {}, async () => { executions++; return 'delegated'; }), 'delegated');
   await offline.finish();
   assert.equal(executions, 3, 'the replayed native call must never execute');
+  for (const thrown of [{ reason: 'fixture' }, 'cancelled', null, undefined, 4n]) {
+    const throwing = new NativeToolBroker('record');
+    await throwing.listen(socket);
+    const dispatchThrow = createNativeDispatcher('record', socket);
+    let caught = false;
+    try { await dispatchThrow({ name: 'Fetch', arguments: {} }, {}, async () => { throw thrown; }); }
+    catch (error) { caught = true; assert.equal(error, thrown); }
+    assert.equal(caught, true);
+    const thrownEvents = await throwing.finish();
+    const playback = new NativeToolBroker('replay', thrownEvents);
+    await playback.listen(socket);
+    caught = false;
+    try { await createNativeDispatcher('replay', socket)({ name: 'Fetch', arguments: {} }, {}, async () => assert.fail('must not execute')); }
+    catch (error) { caught = true; assert.deepEqual(error, thrown); }
+    assert.equal(caught, true);
+    await playback.finish();
+  }
   const invalid = new NativeToolBroker('record');
   await invalid.listen(socket);
   const invalidDispatch = createNativeDispatcher('record', socket);
-  const thrown = { reason: 'non-Error value' };
+  const thrown = Symbol('unrepresentable');
   await assert.rejects(invalidDispatch({ name: 'Fetch', arguments: {} }, {}, async () => { throw thrown; }), error => error === thrown);
-  assert.equal(invalid.pending.size, 0, 'invalid exchanges must not remain pending');
+  assert.equal(invalid.pending.size, 0);
   await assert.rejects(invalid.finish(), /unfinished/);
   await invalid.abort();
   for (const makeValue of [() => undefined, () => 1n, () => { const value = {}; value.self = value; return value; }]) {

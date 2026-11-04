@@ -1,5 +1,6 @@
 // Shared native exchange routing; adapters define request and delegation semantics.
 import { brokerRequest } from './native-tool-broker.mjs';
+import { encodeThrown } from './native-tool-session.mjs';
 
 export function createNativeDispatcher(mode, socket, {
   isDelegation = () => false,
@@ -32,15 +33,15 @@ export function createNativeDispatcher(mode, socket, {
     let value;
     try { value = await invoke(); }
     catch (error) {
-      if (!(error instanceof Error)) {
-        // The sidecar cannot represent arbitrary thrown values. Unblock the
-        // coordinator and invalidate the recording while preserving the
-        // exact value observed by the agent.
-        await brokerRequest(socket, { op: 'invalidate', token });
+      let outcome;
+      try {
+        outcome = error instanceof Error ? { ok: false, name: error.name, message: error.message } : { ok: false, thrown: encodeThrown(error) };
+      } catch {
+        await brokerRequest(socket, { op: 'invalidate', token }).catch(() => {});
         throw error;
       }
       await boundary(end);
-      await brokerRequest(socket, { op: 'finish', token, outcome: { ok: false, name: error.name, message: error.message } });
+      await brokerRequest(socket, { op: 'finish', token, outcome });
       throw error;
     }
     await boundary(end);

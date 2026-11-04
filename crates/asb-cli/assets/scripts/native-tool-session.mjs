@@ -11,6 +11,17 @@ function canonical(value) {
 }
 function clone(value) { return JSON.parse(canonical(value)); }
 export function normalizeRequest(value) { return clone(value); }
+export function encodeThrown(value) {
+  if (value === undefined) return { kind: 'undefined' };
+  if (typeof value === 'bigint') return { kind: 'bigint', value: String(value) };
+  return { kind: 'json', value: clone(value) };
+}
+export function decodeThrown(value) {
+  if (value?.kind === 'undefined' && Object.keys(value).length === 1) return undefined;
+  if (value?.kind === 'bigint' && Object.keys(value).length === 2 && typeof value.value === 'string' && /^-?(0|[1-9][0-9]*)$/.test(value.value)) return BigInt(value.value);
+  if (value?.kind === 'json' && Object.keys(value).length === 2 && Object.hasOwn(value, 'value')) return clone(value.value);
+  throw new TypeError('Native tool thrown value is invalid');
+}
 
 export class RecordingSession {
   constructor() { this.next = 0; this.completed = []; this.active = new Set(); this.closed = false; this.invalid = false; }
@@ -23,8 +34,10 @@ export class RecordingSession {
     try {
       value = await execute();
     } catch (error) {
-      if (!(error instanceof Error)) { this.invalid = true; throw error; }
-      this.completed.push({ ordinal, request: normalized, outcome: { ok: false, name: error.name, message: error.message } });
+      try {
+        const outcome = error instanceof Error ? { ok: false, name: error.name, message: error.message } : { ok: false, thrown: encodeThrown(error) };
+        this.completed.push({ ordinal, request: normalized, outcome });
+      } catch (encodingError) { this.invalid = true; throw encodingError; }
       throw error;
     } finally { this.active.delete(ordinal); }
     try {
@@ -48,9 +61,10 @@ export class ReplaySession {
     if (this.byDispatch.some((event, index) => event.ordinal !== index || !event.request || !event.outcome ||
         typeof event.outcome.ok !== 'boolean' ||
         (event.outcome.ok && !Object.hasOwn(event.outcome, 'value')) ||
-        (!event.outcome.ok && (typeof event.outcome.name !== 'string' || typeof event.outcome.message !== 'string')))) {
+        (!event.outcome.ok && !Object.hasOwn(event.outcome, 'thrown') && (typeof event.outcome.name !== 'string' || typeof event.outcome.message !== 'string')))) {
       throw new Error('Native tool replay events are incomplete');
     }
+    for (const event of this.byDispatch) if (!event.outcome.ok && Object.hasOwn(event.outcome, 'thrown')) decodeThrown(event.outcome.thrown);
     this.applyEffects = applyEffects;
     this.nextDispatch = 0;
     this.nextCompletion = 0;
@@ -89,6 +103,7 @@ export class ReplaySession {
         this.assigned.delete(event.ordinal);
         this.nextCompletion++;
         if (event.outcome.ok) item.resolve(clone(event.outcome.value));
+        else if (Object.hasOwn(event.outcome, 'thrown')) item.reject(decodeThrown(event.outcome.thrown));
         else { const error = new Error(event.outcome.message); error.name = event.outcome.name; item.reject(error); }
       }
     } finally { this.draining = false; }
