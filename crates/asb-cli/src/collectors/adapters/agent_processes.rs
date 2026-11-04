@@ -40,6 +40,14 @@ struct Identity {
     executable: PathBuf,
     interpreter: Option<PathBuf>,
     runtime_arguments: Option<(String, String)>,
+    bundled: Option<BundledIdentity>,
+}
+
+#[derive(Clone)]
+struct BundledIdentity {
+    loader: PathBuf,
+    library_path: PathBuf,
+    payload: PathBuf,
 }
 
 #[derive(Default)]
@@ -394,6 +402,7 @@ impl Identity {
                     executable,
                     interpreter: None,
                     runtime_arguments: Some((first.clone(), args.get(1)?.clone())),
+                    bundled: None,
                 });
             }
             if first.starts_with('-') {
@@ -408,6 +417,7 @@ impl Identity {
                 .ok()?,
                 interpreter: Some(executable),
                 runtime_arguments: None,
+                bundled: None,
             });
         }
         let prefix = read_bounded(&executable, 4096).ok()?;
@@ -424,10 +434,12 @@ impl Identity {
         } else {
             None
         };
+        let bundled = bundled_identity(&executable, &prefix);
         Some(Self {
             executable,
             interpreter,
             runtime_arguments: None,
+            bundled,
         })
     }
 
@@ -437,6 +449,9 @@ impl Identity {
         // their process title. Keep checking its executable and tree membership
         // (the latter at both ends of the sample) rather than admitting every
         // process using the same interpreter.
+        if self.bundled.is_some() && self.matches_bundled(proc) {
+            return true;
+        }
         if admitted {
             let executable = self.interpreter.as_ref().unwrap_or(&self.executable);
             return fs::read_link(proc.join("exe")).is_ok_and(|path| path == *executable);
@@ -444,7 +459,34 @@ impl Identity {
         self.matches(proc)
     }
 
+    fn matches_bundled(&self, proc: &Path) -> bool {
+        let Some(bundle) = &self.bundled else {
+            return false;
+        };
+        if !fs::read_link(proc.join("exe")).is_ok_and(|path| path == bundle.loader) {
+            return false;
+        }
+        let Ok(args) = read_bounded(&proc.join("cmdline"), 64 * 1024) else {
+            return false;
+        };
+        let mut args = args.split(|byte| *byte == 0).skip(1);
+        args.next() == Some(b"--library-path".as_slice())
+            && args.next().is_some_and(|arg| {
+                std::str::from_utf8(arg)
+                    .ok()
+                    .is_some_and(|s| Path::new(s) == bundle.library_path)
+            })
+            && args.next().is_some_and(|arg| {
+                std::str::from_utf8(arg)
+                    .ok()
+                    .is_some_and(|s| Path::new(s) == bundle.payload)
+            })
+    }
+
     fn matches(&self, proc: &Path) -> bool {
+        if self.matches_bundled(proc) {
+            return true;
+        }
         if let Some((flag, entry)) = &self.runtime_arguments {
             if !fs::read_link(proc.join("exe")).is_ok_and(|path| path == self.executable) {
                 return false;
@@ -489,6 +531,46 @@ impl Identity {
         };
         fs::canonicalize(path).is_ok_and(|path| path == self.executable)
     }
+}
+
+fn bundled_identity(executable: &Path, outer: &[u8]) -> Option<BundledIdentity> {
+    let outer = std::str::from_utf8(outer).ok()?;
+    let inner = outer
+        .strip_prefix("#!/bin/sh\nexec ")?
+        .strip_suffix(" \"$@\"\n")?;
+    let inner = Path::new(inner);
+    if !inner.is_absolute() || inner.file_name()? != executable.file_name()? {
+        return None;
+    }
+    let tool = inner.parent()?;
+    if tool.file_name()? != executable.file_name()? || tool.parent()?.file_name()? != "tools" {
+        return None;
+    }
+    let text = read_bounded(inner, 4096).ok()?;
+    let text = std::str::from_utf8(&text).ok()?;
+    let line = text
+        .strip_prefix("#!/bin/sh\nexec ")?
+        .strip_suffix(" \"$@\"\n")?;
+    let mut parts = line.split(' ');
+    let loader = PathBuf::from(parts.next()?);
+    if parts.next()? != "--library-path" {
+        return None;
+    }
+    let library_path = PathBuf::from(parts.next()?);
+    let payload = PathBuf::from(parts.next()?);
+    if parts.next().is_some()
+        || library_path != tool.join("lib")
+        || loader.parent()? != library_path
+        || !loader.file_name()?.to_str()?.starts_with("ld-")
+        || payload != tool.join("bin").join(executable.file_name()?)
+    {
+        return None;
+    }
+    Some(BundledIdentity {
+        loader: fs::canonicalize(loader).ok()?,
+        library_path,
+        payload,
+    })
 }
 
 impl Totals {
@@ -893,6 +975,74 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn bundled_launcher_matches_only_its_loader_and_payload() {
+        use std::os::unix::fs::symlink;
+        let root =
+            std::env::temp_dir().join(format!("asb-bundled-identity-{}", std::process::id()));
+        let tool = root.join("runtime/tools/agent");
+        fs::create_dir_all(tool.join("lib")).unwrap();
+        fs::create_dir_all(tool.join("bin")).unwrap();
+        let loader = tool.join("lib/ld-test.so");
+        let payload = tool.join("bin/agent");
+        fs::write(&loader, "loader").unwrap();
+        fs::write(&payload, "payload").unwrap();
+        let inner = tool.join("agent");
+        fs::write(
+            &inner,
+            format!(
+                "#!/bin/sh\nexec {} --library-path {} {} \"$@\"\n",
+                loader.display(),
+                tool.join("lib").display(),
+                payload.display()
+            ),
+        )
+        .unwrap();
+        let outer = root.join("agent");
+        fs::write(
+            &outer,
+            format!("#!/bin/sh\nexec {} \"$@\"\n", inner.display()),
+        )
+        .unwrap();
+        let identity = Identity::resolve(outer.to_str().unwrap(), &[]).unwrap();
+        assert!(identity.bundled.is_some());
+        let proc = root.join("proc");
+        fs::create_dir(&proc).unwrap();
+        symlink(&loader, proc.join("exe")).unwrap();
+        fs::write(
+            proc.join("cmdline"),
+            format!(
+                "{}\0--library-path\0{}\0{}\0",
+                loader.display(),
+                tool.join("lib").display(),
+                payload.display()
+            ),
+        )
+        .unwrap();
+        assert!(identity.matches(&proc));
+        assert!(identity.matches_sample(&proc, true));
+        fs::write(
+            proc.join("cmdline"),
+            format!(
+                "{}\0--library-path\0{}\0/bin/other\0",
+                loader.display(),
+                tool.join("lib").display()
+            ),
+        )
+        .unwrap();
+        assert!(!identity.matches(&proc));
+        assert!(!identity.matches_sample(&proc, true));
+        fs::write(&inner, "#!/bin/sh\nexec /bin/other \"$@\"\n").unwrap();
+        assert!(
+            Identity::resolve(outer.to_str().unwrap(), &[])
+                .unwrap()
+                .bundled
+                .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn native_identity_does_not_match_an_unrelated_process() {
         if !cfg!(target_os = "linux") {
@@ -902,6 +1052,7 @@ mod tests {
             executable: PathBuf::from("/not/the/selected/agent"),
             interpreter: None,
             runtime_arguments: None,
+            bundled: None,
         };
         assert!(!identity.matches(Path::new("/proc/self")));
         let identity =
@@ -924,6 +1075,7 @@ mod tests {
             executable: fs::canonicalize(&script).unwrap(),
             interpreter: Some(executable.clone()),
             runtime_arguments: None,
+            bundled: None,
         };
         symlink(&executable, root.join("exe")).unwrap();
         fs::write(
@@ -971,6 +1123,7 @@ mod tests {
             executable,
             interpreter: None,
             runtime_arguments: Some(("-c".into(), "agent_launcher()".into())),
+            bundled: None,
         };
         fs::write(
             root.join("cmdline"),
