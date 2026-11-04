@@ -1693,12 +1693,33 @@ fn command_for(
     command_for_with_interface(config, provider_base_url, prompt, interface, None)
 }
 
+#[cfg(test)]
 fn command_for_with_interface(
     config: &BenchmarkConfig,
     provider_base_url: Option<&str>,
     prompt: &str,
     interface: Option<crate::endpoint::Interface>,
     max_steps: Option<u64>,
+) -> Result<CommandSpec, Error> {
+    command_for_with_native_tool(
+        config,
+        provider_base_url,
+        prompt,
+        interface,
+        max_steps,
+        None,
+        None,
+    )
+}
+
+fn command_for_with_native_tool(
+    config: &BenchmarkConfig,
+    provider_base_url: Option<&str>,
+    prompt: &str,
+    interface: Option<crate::endpoint::Interface>,
+    max_steps: Option<u64>,
+    native_tool_mode: Option<tape::Mode>,
+    native_tool: Option<agents::NativeToolContext<'_>>,
 ) -> Result<CommandSpec, Error> {
     if let Some(adapter) = agents::find(&config.agent) {
         if max_steps.is_some() && !adapter.supports_max_steps() {
@@ -1714,8 +1735,8 @@ fn command_for_with_interface(
             interface,
             prompt,
             max_steps,
-            native_tool_mode: None,
-            native_tool: None,
+            native_tool_mode,
+            native_tool,
         }));
     }
     let agent_names = agents::names().collect::<Vec<_>>();
