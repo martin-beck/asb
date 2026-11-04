@@ -52,6 +52,10 @@ export class NativeToolBroker {
         const token = this.nextToken++;
         this.pending.set(token, reservation);
         reply(socket, { ok: true, token });
+      } else if (this.mode === 'replay' && message.op === 'inspect') {
+        const reservation = this.pending.get(message.token);
+        if (!reservation) throw new Error('Native tool broker inspection has no active call');
+        reply(socket, { ok: true, outcome: await reservation.assignment });
       } else if (this.mode === 'replay' && message.op === 'release') {
         const reservation = this.pending.get(message.token);
         if (!reservation) throw new Error('Native tool broker release has no active call');

@@ -70,10 +70,23 @@ export async function replayHook(event, { directory, socket }) {
     try {
       const request = normalizeRequest({tool: event.tool_name, input: event.tool_input});
       const {token} = await brokerRequest(socket, {op: 'reserve', request});
+      const {outcome} = await brokerRequest(socket, {op: 'inspect', token});
+      if (!outcome?.ok || !['success', 'failure'].includes(outcome.value?.kind) || typeof outcome.value.json !== 'string')
+        throw new Error('Claude native replay recorded outcome is invalid');
+      const expected = outcome.value;
+      let command = ':';
+      if (event.tool_name === 'Bash' && expected.kind === 'failure') {
+        const failure = JSON.parse(expected.json);
+        const match = typeof failure.error === 'string' && failure.error.match(/^Exit code ([1-9][0-9]{0,2})(?:\n([\s\S]*))?$/);
+        if (!match || Number(match[1]) > 255 || failure.is_interrupt !== false)
+          throw new Error('Claude native replay probe cannot reproduce this Bash failure');
+        const text = (match[2] ?? '').replaceAll("'", "'\\''");
+        command = `printf '%s' '${text}'; exit ${match[1]}`;
+      }
       // Claude tracks which paths its own Read tool opened before allowing
       // an Edit. Keep the original Read in the isolated replay workspace.
-      const substitute = normalizeRequest(event.tool_name === 'Bash' ? {...event.tool_input, command: ':'} : event.tool_input);
-      await file.writeFile(JSON.stringify({token, substitute}));
+      const substitute = normalizeRequest(event.tool_name === 'Bash' ? {...event.tool_input, command} : event.tool_input);
+      await file.writeFile(JSON.stringify({token, substitute, expected}));
       await file.close();
       return {hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: substitute}};
     } catch (error) {
@@ -81,14 +94,23 @@ export async function replayHook(event, { directory, socket }) {
       throw error;
     }
   }
-  if (event.hook_event_name !== 'PostToolUse') throw new Error('Claude native replay probe expected a successful tool');
+  if (!['PostToolUse', 'PostToolUseFailure'].includes(event.hook_event_name))
+    throw new Error('Claude native replay probe expected a tool completion');
   const data = JSON.parse(await readFile(state, 'utf8'));
   if (!Number.isSafeInteger(data.token) || data.token < 0 ||
       JSON.stringify(data.substitute) !== JSON.stringify(normalizeRequest(event.tool_input)))
     throw new Error('Claude native replay completion does not match its start');
   const {value} = await brokerRequest(socket, {op: 'release', token: data.token});
-  if (value?.kind !== 'success' || typeof value.json !== 'string')
-    throw new Error('Claude native replay probe cannot restore this result');
+  if (JSON.stringify(value) !== JSON.stringify(data.expected))
+    throw new Error('Claude native replay outcome changed after reservation');
+  if (value.kind === 'failure') {
+    const actual = JSON.stringify({error: event.error, is_interrupt: event.is_interrupt});
+    if (event.hook_event_name !== 'PostToolUseFailure' || actual !== value.json)
+      throw new Error('Claude native replay failure differs from recording');
+    await unlink(state);
+    return {};
+  }
+  if (event.hook_event_name !== 'PostToolUse') throw new Error('Claude native replay expected a successful tool');
   const result = JSON.parse(value.json);
   await unlink(state);
   return {hookSpecificOutput: {hookEventName: 'PostToolUse', updatedToolOutput: result}};

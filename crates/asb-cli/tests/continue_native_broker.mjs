@@ -212,6 +212,8 @@ try {
   const childCall = await brokerRequest(socket, {op: 'reserve', request: {tool: 'child'}});
   await assert.rejects(delayed.finish(), /unfinished/);
   assert.deepEqual(delayedEffects, []);
+  assert.deepEqual((await brokerRequest(socket, {op: 'inspect', token: childCall.token})).outcome, {ok: true, value: 'child'});
+  assert.deepEqual(delayedEffects, []);
   assert.equal((await brokerRequest(socket, {op: 'release', token: childCall.token})).value, 'child');
   assert.deepEqual(delayedEffects, [1]);
   assert.equal((await brokerRequest(socket, {op: 'release', token: parent.token})).value, 'parent');
