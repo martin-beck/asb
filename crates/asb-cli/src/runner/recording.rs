@@ -25,7 +25,13 @@ fn capture_matches_track(track: &Track, capture: &proxy::capture::CaptureEvidenc
             .unwrap_or(crate::proxy::legacy_recorder_name())
             == capture.adapter
         && capture.sha256 == track.sha256
-        && capture.complete == track.complete
+        && (capture.complete == track.complete
+            || (capture.complete
+                && !track.complete
+                && track
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact.kind == "workspace-snapshots")))
 }
 
 /// Adapter-owned sidecars share a deliberately small aggregate budget.  Relay
@@ -489,18 +495,16 @@ impl Recorder {
             // The producer is adapter-owned, but the recorder owns the only
             // conversion from private bytes to cassette-native metadata. This
             // prevents adapters from minting an unchecked track declaration.
-            let mut native_tool = result
-                .native_tool_sidecar
-                .as_deref()
-                .map(seal_native_tool_sidecar)
-                .transpose()?;
             let track = Track {
                 recorder: capture.map(|capture| capture.adapter.clone()),
                 recorded_max_steps: self.planned.as_ref().and_then(|planned| planned.max_steps),
                 id: (batch - 1) * self.concurrency as u64 + replica.index as u64,
                 batch,
                 replica: replica.index as u64,
-                complete: capture.is_some_and(|capture| capture.complete),
+                // Snapshot replay is not yet connected; preserve the payload
+                // without advertising this track as fully replayable.
+                complete: capture.is_some_and(|capture| capture.complete)
+                    && result.snapshot_artifact.is_none(),
                 process_success: Some(result.process_success),
                 workload_success: result.workload_success,
                 bytes,
@@ -556,6 +560,42 @@ impl Recorder {
                 sha256: crate::cassette::digest(bytes.get_ref()),
             });
             let mut artifact_inputs = Vec::new();
+            let mut snapshot_file = result
+                .snapshot_artifact
+                .as_deref()
+                .map(|path| {
+                    open_payload_with_limit(path, Limits::default().max_artifact_bytes)?
+                        .ok_or_else(|| Error::Io("snapshot recording archive is missing".into()))
+                })
+                .transpose()?;
+            let snapshot_artifact = if let Some(source) = snapshot_file.as_mut() {
+                let (bytes, sha256) =
+                    payload_identity_with_limit(source, Limits::default().max_artifact_bytes)?;
+                source.seek(SeekFrom::Start(0)).map_err(io_error)?;
+                Some(Artifact {
+                    kind: "workspace-snapshots".into(),
+                    bytes,
+                    sha256,
+                })
+            } else {
+                None
+            };
+            // The adapter interprets its own pending stream only after the
+            // recorder has measured the actual settled snapshot archive.
+            let completed_native = finalize_deferred_native(
+                result.agent,
+                &result.sealed_artifacts,
+                result.native_tool_sidecar.as_deref(),
+                snapshot_artifact.as_ref(),
+            )?;
+            let mut native_tool = completed_native
+                .as_deref()
+                .or(result.native_tool_sidecar.as_deref())
+                .map(seal_native_tool_sidecar)
+                .transpose()?;
+            if let (Some(artifact), Some(source)) = (snapshot_artifact, snapshot_file.as_mut()) {
+                artifact_inputs.push(ArtifactInput { artifact, source });
+            }
             if let (Some(artifact), Some(source)) =
                 (local_tools_artifact.clone(), local_tools.as_mut())
             {
@@ -576,6 +616,7 @@ impl Recorder {
             let mut sealed_artifacts: Vec<_> = result
                 .sealed_artifacts
                 .iter()
+                .filter(|sidecar| sidecar.kind != "native-tool-deferred")
                 .map(|sidecar| {
                     (
                         Artifact {
@@ -776,6 +817,33 @@ fn seal_native_tool_sidecar(bytes: &[u8]) -> Result<(NativeTrack, std::io::Curso
     Ok((native, std::io::Cursor::new(bytes)))
 }
 
+fn finalize_deferred_native(
+    agent: &str,
+    artifacts: &[crate::agents::SealedArtifact],
+    native: Option<&[u8]>,
+    snapshot: Option<&Artifact>,
+) -> Result<Option<Vec<u8>>, Error> {
+    let mut deferred = artifacts
+        .iter()
+        .filter(|item| item.kind == "native-tool-deferred");
+    let pending = deferred.next();
+    if deferred.next().is_some() || (pending.is_some() && native.is_some()) {
+        return Err(Error::Run(
+            "multiple native tool recordings claim one track".into(),
+        ));
+    }
+    pending
+        .map(|item| {
+            let snapshot = snapshot.ok_or_else(|| {
+                Error::Run("deferred native recording requires a settled workspace snapshot".into())
+            })?;
+            crate::agents::find(agent)
+                .ok_or_else(|| Error::Run("native recording agent is unavailable".into()))?
+                .finalize_native_recording(&item.bytes, &snapshot.sha256)
+        })
+        .transpose()
+}
+
 fn validate_sealed_artifact_budget(
     artifacts: &[crate::agents::SealedArtifact],
 ) -> Result<(), Error> {
@@ -894,6 +962,10 @@ fn raw_cleanup_warning(track_id: u64) -> String {
 }
 
 fn open_payload(output: &Path) -> Result<Option<File>, Error> {
+    open_payload_with_limit(output, Limits::default().max_track_bytes)
+}
+
+fn open_payload_with_limit(output: &Path, limit: u64) -> Result<Option<File>, Error> {
     match fs::symlink_metadata(output) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io_error(error)),
@@ -913,7 +985,7 @@ fn open_payload(output: &Path) -> Result<Option<File>, Error> {
     }
     let file = options.open(output).map_err(io_error)?;
     let metadata = file.metadata().map_err(io_error)?;
-    if !metadata.is_file() || metadata.len() > Limits::default().max_track_bytes {
+    if !metadata.is_file() || metadata.len() > limit {
         return Err(Error::Io(
             "recording producer is invalid or oversized".into(),
         ));
@@ -921,7 +993,10 @@ fn open_payload(output: &Path) -> Result<Option<File>, Error> {
     Ok(Some(file))
 }
 fn payload_identity(file: &mut File) -> Result<(u64, String), Error> {
-    let limit = Limits::default().max_track_bytes;
+    payload_identity_with_limit(file, Limits::default().max_track_bytes)
+}
+
+fn payload_identity_with_limit(file: &mut File, limit: u64) -> Result<(u64, String), Error> {
     if file.metadata().map_err(io_error)?.len() > limit {
         return Err(Error::Io("recording payload exceeds limit".into()));
     }
@@ -988,6 +1063,28 @@ mod tests {
         assert!(capture_matches_track(&track, &capture));
         capture.adapter = "other-recorder".into();
         assert!(!capture_matches_track(&track, &capture));
+    }
+
+    #[test]
+    fn snapshot_artifact_uses_artifact_limit_instead_of_track_limit() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-snapshot-limit-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("snapshot");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(Limits::default().max_track_bytes + 1).unwrap();
+        drop(file);
+        let mut file = std::fs::File::open(&path).unwrap();
+        assert!(payload_identity(&mut file).is_err());
+        assert_eq!(
+            payload_identity_with_limit(&mut file, Limits::default().max_artifact_bytes)
+                .unwrap()
+                .0,
+            Limits::default().max_track_bytes + 1
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1324,6 +1421,65 @@ mod tests {
             bytes: vec![0; MAX_SEALED_ARTIFACT_BYTES + 1],
         };
         assert!(validate_sealed_artifact_budget(&[over]).is_err());
+    }
+
+    #[test]
+    fn deferred_native_uses_settled_snapshot_and_rejects_conflicting_inputs() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/continue_native_sidecar_emit.mjs");
+        let output = std::process::Command::new("node")
+            .arg(fixture)
+            .arg("--pending")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let pending = crate::agents::SealedArtifact {
+            kind: "native-tool-deferred".into(),
+            bytes: output.stdout,
+        };
+        let snapshot = Artifact {
+            kind: "workspace-snapshots".into(),
+            bytes: 7,
+            sha256: crate::cassette::digest(b"archive"),
+        };
+        let complete = finalize_deferred_native(
+            "continue",
+            std::slice::from_ref(&pending),
+            None,
+            Some(&snapshot),
+        )
+        .unwrap()
+        .unwrap();
+        let (native, _) = seal_native_tool_sidecar(&complete).unwrap();
+        let transport = NativeToolTransport::from_sidecar(&native, &complete).unwrap();
+        assert_eq!(transport.workspace_effect_sha256(), snapshot.sha256);
+        assert!(
+            finalize_deferred_native("continue", std::slice::from_ref(&pending), None, None)
+                .is_err()
+        );
+        assert!(
+            finalize_deferred_native(
+                "continue",
+                std::slice::from_ref(&pending),
+                Some(b"other"),
+                Some(&snapshot)
+            )
+            .is_err()
+        );
+        assert!(
+            finalize_deferred_native(
+                "continue",
+                &[pending.clone(), pending],
+                None,
+                Some(&snapshot)
+            )
+            .is_err()
+        );
+        assert!(
+            finalize_deferred_native("other-agent", &[], None, None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

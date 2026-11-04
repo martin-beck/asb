@@ -11,7 +11,28 @@ import contextvars
 import hashlib
 import os
 import runpy
+import socket
+import threading
 import sys
+
+async def _snapshot_boundary(mode, action, alias):
+    """Notify the optional workload snapshot service without blocking other tools."""
+    variable = "ASB_FS_MARKER_SOCKET" if mode == "record" else "ASB_FS_REPLAY_SOCKET"
+    path = os.environ.get(variable)
+    if not path:
+        return
+    identity = f":{os.getpid()}:{threading.get_native_id()}" if mode == "record" else ""
+    def exchange():
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.connect(path)
+                connection.sendall(f"tool-{action}:{alias}{identity}\n".encode("ascii"))
+                with connection.makefile("rb") as response:
+                    if not response.readline(32).strip().isdigit():
+                        raise RuntimeError("OpenJiuwen snapshot boundary was rejected")
+        except (OSError, UnicodeError) as error:
+            raise RuntimeError("OpenJiuwen snapshot boundary is unavailable") from error
+    await asyncio.to_thread(exchange)
 
 # OpenJiuwen exposes its turn limit through this environment setting, not a
 # CLI option. Consume the adapter-private argument before importing its CLI.
@@ -419,38 +440,6 @@ elif _record_path:
         json.loads(_event("session_alias", alias=_native_alias, session="openjiuwen-native-1")),
     ]
 
-# Vector-memory requests and asynchronously-created subagents have state that
-# does not belong to this benchmark attempt (an embedding cache and scheduling
-# respectively).  They make the provider request order depend on leftovers
-# outside the sealed tape.  The normal interactive client keeps them; ASB's
-# record/replay launch profile deliberately uses only the selected foreground
-# agent and its sealed direct-tool sidecar.
-if _record_path or _replay_path:
-    try:
-        from openjiuwen.harness.cli.agent import factory as _agent_factory
-
-        _agent_factory._build_memory_rail = lambda _cfg: None
-        _agent_factory._build_subagents = lambda _model: []
-
-        # The upstream CLI otherwise starts an asynchronous image-capability
-        # probe in every fresh process.  It is unrelated to these text-only
-        # benchmarks, consumes an unrecorded provider request, and makes a
-        # fresh replay begin on a different request than its recording.  Pin
-        # this adapter launch profile to text-only before the agent is started;
-        # interactive OpenJiuwen remains unchanged.
-        _create_agent = _agent_factory.create_agent
-
-        def _create_text_only_agent(*args, **kwargs):
-            agent, tracker = _create_agent(*args, **kwargs)
-            config = getattr(agent, "_deep_config", None)
-            if config is not None:
-                config.enable_read_image_multimodal = False
-            return agent, tracker
-
-        _agent_factory.create_agent = _create_text_only_agent
-    except ImportError:
-        pass
-
 try:
     from openjiuwen.harness.tools.filesystem import (
         EditFileTool,
@@ -766,6 +755,7 @@ try:
                 # not a provenance marker: a reconstructed result can let a
                 # discarded object's id be reused before execute() runs.
                 _replayed_output_events[id(result)] = (result, output)
+                await _snapshot_boundary("replay", "end", f"openjiuwen-{invocation['ordinal']}")
                 await _await_recorded_completion(invocation['ordinal'])
                 return result
             invocation = None
@@ -779,8 +769,16 @@ try:
                 }
                 _record_dispatch_cursor += 1
                 invocation_token = _record_invocation_stack.set((*stack, invocation["ordinal"]))
+            snapshot_alias = (f"openjiuwen-{invocation['ordinal']}"
+                              if invocation is not None and invocation["depth"] == 0 else None)
             try:
-                output = await original_invoke(self, inputs, **kwargs)
+                if snapshot_alias is not None:
+                    await _snapshot_boundary("record", "begin", snapshot_alias)
+                try:
+                    output = await original_invoke(self, inputs, **kwargs)
+                finally:
+                    if snapshot_alias is not None:
+                        await _snapshot_boundary("record", "end", snapshot_alias)
             finally:
                 if invocation is not None:
                     _record_invocation_stack.reset(invocation_token)

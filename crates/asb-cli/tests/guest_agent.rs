@@ -111,8 +111,133 @@ fn guest_uses_registered_adapter_prepares_before_gate_and_preserves_output_and_f
     qualify_guest_directory(false, false);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
+fn native_auxiliary_service_is_ready_before_gated_agent_runs() {
+    let project = Project::new();
+    let bundle = project
+        .0
+        .join(".asb-tools/pi/node_modules/@mariozechner/pi-agent-core/dist/agent-loop.js");
+    std::fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+    std::fs::write(bundle, "export {};").unwrap();
+    let fixture_bin = project.0.join("fixture-bin");
+    std::fs::create_dir_all(&fixture_bin).unwrap();
+    let node = fixture_bin.join("node");
+    fixture_writer::write_file(
+        &project.0,
+        &node,
+        "#!/bin/sh\n: > \"$2.started\"\nprintf 'READY\\n'\nread line\ntest \"$line\" = S\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(node, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let executable = project.0.join(".asb-tools/pi/bin/pi");
+    fixture_writer::write_file(&project.0, &executable,
+        "#!/bin/sh\ntest -f \"$ASB_NATIVE_SOCKET.started\" || exit 81\nprintf ready > native-service-observed\nexit 0\n").unwrap();
+    std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut request = project.request();
+    request["tool_tape_cassette"] = project
+        .0
+        .join("recording.jsonl")
+        .to_string_lossy()
+        .to_string()
+        .into();
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_asb"))
+            .arg("__asb-agent")
+            .isolated_env()
+            .env(
+                "PATH",
+                std::env::join_paths(
+                    std::iter::once(fixture_bin)
+                        .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+                )
+                .unwrap(),
+            )
+            .env("HOME", &project.0)
+            .env("ASB_FS_MARKER_SOCKET", project.0.join("marker.sock"))
+            .env("ASB_GUEST_AGENT_REQUEST", request.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
+    let mut ready = String::new();
+    stdout.read_line(&mut ready).unwrap();
+    let principal = fixture_gate_pid(&ready);
+    assert_ne!(principal, process.0.id());
+    assert!(
+        project
+            .0
+            .join("private/attempt/pi/native-tool-service.mjs")
+            .is_file()
+    );
+    assert!(
+        project
+            .0
+            .join("private/attempt/pi/broker.sock.started")
+            .exists()
+    );
+    assert!(!project.0.join("workspace/native-service-observed").exists());
+    resume_fixture_pid(&mut process, principal);
+    let mut remaining = String::new();
+    stdout.read_to_string(&mut remaining).unwrap();
+    let status = process.0.wait().unwrap();
+    let mut stderr = String::new();
+    process
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(
+        project
+            .0
+            .join("private/attempt/pi/native-tool-service.mjs")
+            .is_file()
+    );
+    assert!(
+        project
+            .0
+            .join("workspace/native-service-observed")
+            .is_file(),
+        "status={status}, output={remaining}, stderr={stderr}"
+    );
+}
 
+#[test]
+fn invalid_native_auxiliary_configuration_fails_before_guest_gate() {
+    let project = Project::new();
+    let mut request = project.request();
+    request["tool_tape_cassette"] = project
+        .0
+        .join("recording.jsonl")
+        .to_string_lossy()
+        .to_string()
+        .into();
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_asb"))
+            .arg("__asb-agent")
+            .isolated_env()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("HOME", &project.0)
+            .env("ASB_FS_MARKER_SOCKET", project.0.join("marker.sock"))
+            .env("ASB_GUEST_AGENT_REQUEST", request.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout = BufReader::new(process.0.stdout.take().unwrap());
+    let mut first = String::new();
+    stdout.read_line(&mut first).unwrap();
+    assert!(first.is_empty(), "invalid service reached the launch gate");
+    assert!(!process.0.wait().unwrap().success());
+    assert!(!project.0.join("workspace/performed.txt").exists());
+}
+
+#[test]
 fn guest_stages_a_declared_mcp_server_through_the_recording_relay_before_launch() {
     let project = Project::new();
     let program = project.0.join(".asb-tools/codex/bin/codex");

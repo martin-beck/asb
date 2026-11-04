@@ -68,6 +68,24 @@ class ArchiveContainer:
 
 
 class GuestBootstrapTests(unittest.TestCase):
+    def test_preinstalled_native_agent_does_not_run_guest_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'.asb').mkdir();(root/'.asb/project.toml').write_text('')
+            calls=[]
+            def execute(*args,**kwargs):
+                calls.append(args)
+                return {'stdout':b'','stderr':b'','exit_code':0,'timed_out':False,'cancelled':False}
+            task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),image_identity={},execute=execute),
+                                 artifacts=root,checked=lambda _:b'')
+            request={'project_root':str(root),'tools_root':str(root),'binary':'fixture',
+                     'request':{'config':{'agent':'fixture'}},'bootstrap':{},'auxiliary_tools':{}}
+            with patch('asb_guest.bundle',return_value=([],{})), patch('asb_guest.stage_runtime',return_value=(0,0)), \
+                 patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \
+                 patch('asb_guest.stage_bootstrap',return_value=([],['fixture'])), \
+                 patch('asb_guest.stage_auxiliary_tools',return_value={}):
+                prepare_agent(task,request,None)
+            self.assertEqual(calls,[])
+
     def test_guest_preparation_forwards_staged_auxiliary_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);(root/'.asb').mkdir();(root/'.asb/project.toml').write_text('')
@@ -80,12 +98,85 @@ class GuestBootstrapTests(unittest.TestCase):
             with patch('asb_guest.bundle',return_value=([],{})), \
                  patch('asb_guest.stage_runtime',return_value=(0,0)), \
                  patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \
-                 patch('asb_guest.stage_bootstrap',return_value=[]), \
+                 patch('asb_guest.stage_bootstrap',return_value=([],[])), \
                  patch('asb_guest.stage_auxiliary_tools',return_value={'btrfs':'/opt/asb-private/tools/btrfs/btrfs'}) as stage:
-                _, environment=prepare_agent(task,request,None)
+                guest, environment=prepare_agent(task,request,None)
             stage.assert_called_once_with(task,{'btrfs':'/some/tool'},(0,0))
+            self.assertNotIn('snapshot_private_mount', guest)
             self.assertEqual(json.loads(environment['ASB_AUXILIARY_TOOLS']),
                              {'btrfs':'/opt/asb-private/tools/btrfs/btrfs'})
+
+    def test_snapshot_guest_requests_private_mount_namespace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'.asb').mkdir();(root/'.asb/project.toml').write_text('')
+            execute=lambda *args,**kwargs:{'stdout':b'','stderr':b'','exit_code':0,'timed_out':False,'cancelled':False}
+            task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),image_identity={},execute=execute),
+                                 artifacts=root,checked=lambda _:b'',snapshot=True,tool_mode='record')
+            request={'project_root':str(root),'tools_root':str(root),'binary':'fixture',
+                     'request':{'config':{'agent':'fixture'}},'bootstrap':{},
+                     'auxiliary_tools':{'btrfs':'a','mkfs.btrfs':'b','rsync':'c'}}
+            resources=SimpleNamespace(push=lambda _:None)
+            with patch('asb_guest.bundle',return_value=([],{})), \
+                 patch('asb_guest.stage_runtime',return_value=(0,0)), \
+                 patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \
+                 patch('asb_guest.stage_bootstrap',return_value=([],[])), \
+                 patch('asb_guest.stage_auxiliary_tools',return_value={'btrfs':'a','mkfs.btrfs':'b','rsync':'c'}), \
+                 patch('asb_docker.docker_command',return_value=['docker']), \
+                 patch('asb_snapshot_control.GuestSnapshot'):
+                guest, environment=prepare_agent(task,request,None,resources=resources)
+            self.assertTrue(guest['snapshot_private_mount'])
+            self.assertEqual(environment['ASB_FS_MARKER_SOCKET'],'/opt/asb-private/snapshot.sock')
+
+    def test_snapshot_guest_accepts_optional_qcow_tools(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'.asb').mkdir();(root/'.asb/project.toml').write_text('')
+            execute=lambda *args,**kwargs:{'stdout':b'','stderr':b'','exit_code':0,'timed_out':False,'cancelled':False}
+            task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),image_identity={},execute=execute),
+                                 artifacts=root,checked=lambda _:b'',snapshot=True,tool_mode='record')
+            tools={'btrfs':'a','mkfs.btrfs':'b','rsync':'c','qemu-img':'d','qemu-storage-daemon':'e'}
+            request={'project_root':str(root),'tools_root':str(root),'binary':'fixture',
+                     'request':{'config':{'agent':'fixture'}},'bootstrap':{},'auxiliary_tools':tools}
+            resources=SimpleNamespace(push=lambda _:None)
+            with patch('asb_guest.bundle',return_value=([],{})), \
+                 patch('asb_guest.stage_runtime',return_value=(0,0)), \
+                 patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \
+                 patch('asb_guest.stage_bootstrap',return_value=([],[])), \
+                 patch('asb_guest.stage_auxiliary_tools',return_value=tools), \
+                 patch('asb_docker.docker_command',return_value=['docker']), \
+                 patch('asb_snapshot_control.GuestSnapshot') as supervisor:
+                guest,_=prepare_agent(task,request,None,resources=resources)
+            self.assertTrue(guest['snapshot_private_mount'])
+            self.assertEqual(supervisor.call_args.args[1],tools)
+
+    def test_snapshot_replay_forwards_the_verified_archive_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'.asb').mkdir();(root/'.asb/project.toml').write_text('')
+            execute=lambda *args,**kwargs:{'stdout':b'','stderr':b'','exit_code':0,'timed_out':False,'cancelled':False}
+            task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),image_identity={},execute=execute),
+                                 artifacts=root,checked=lambda _:b'',snapshot=True,tool_mode='replay')
+            request={'project_root':str(root),'tools_root':str(root),'binary':'fixture',
+                     'request':{'config':{'agent':'fixture'}},'bootstrap':{},
+                     'private_inputs':[{'target':'workspace-snapshots.tar','sha256':'a'*64}],
+                     'auxiliary_tools':{'btrfs':'a','mkfs.btrfs':'b','rsync':'c'}}
+            with patch('asb_guest.bundle',return_value=([],{})), patch('asb_guest.stage_runtime',return_value=(0,0)), \
+                 patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), patch('asb_guest.stage_bootstrap',return_value=([],[])), \
+                 patch('asb_guest.stage_auxiliary_tools',return_value={'btrfs':'a','mkfs.btrfs':'b','rsync':'c'}), \
+                 patch('asb_docker.docker_command',return_value=['docker']), patch('asb_snapshot_control.GuestSnapshot'):
+                guest,environment=prepare_agent(task,request,None,resources=SimpleNamespace(push=lambda _:None))
+            self.assertEqual(guest['snapshot_archive_sha256'],'a'*64)
+            self.assertEqual(environment['ASB_FS_REPLAY_SOCKET'],'/opt/asb-private/snapshot.sock')
+
+    def test_incompatible_optional_qemu_does_not_block_required_tools(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),image_identity={}),
+                                 artifacts=Path(directory),checked=lambda command:None)
+            def bundle(source,name,architecture,root):
+                if name == 'qemu-storage-daemon':
+                    raise ExecutionError('incompatible optional executable')
+                return ([],None)
+            with patch('asb_guest.bundle_tool',side_effect=bundle), patch('asb_guest.upload'):
+                paths=stage_auxiliary_tools(task,{'btrfs':'a','qemu-img':'b','qemu-storage-daemon':'c'},(1,2))
+            self.assertEqual(paths,{'btrfs':'/opt/asb-private/tools/btrfs/btrfs'})
 
     @unittest.skipUnless(os.environ.get('ASB_TEST_HOST_ASB'), 'needs just-built ASB')
     def test_auxiliary_tool_staging_uses_private_prefix(self):
@@ -111,6 +202,25 @@ class GuestBootstrapTests(unittest.TestCase):
             container.files.clear();source.write_bytes(payload+b'changed')
             with self.assertRaises(ExecutionError):stage_private_inputs(task,[item])
             self.assertEqual(container.files,[])
+
+    def test_large_snapshot_archive_uses_streaming_stager(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[3]/'target') as directory:
+            root=Path(directory);source=root/'snapshot.tar';storage=root/'storage';storage.mkdir()
+            with source.open('wb') as file:file.truncate(64*1024**2+1)
+            task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),snapshot_storage=storage),artifacts=root)
+            digest=hashlib.sha256()
+            with source.open('rb') as file:
+                for chunk in iter(lambda:file.read(1024*1024),b''):digest.update(chunk)
+            item={'source':str(source),'target':'workspace-snapshots.tar','bytes':source.stat().st_size,
+                  'sha256':digest.hexdigest()}
+            with patch('asb_guest.upload_files') as upload:
+                stage_private_inputs(task,[item],owner=(123,456))
+            upload.assert_not_called()
+            self.assertEqual((storage/'workspace-snapshots.tar').stat().st_size,item['bytes'])
+            with self.assertRaises(FileExistsError):stage_private_inputs(task,[item])
+            self.assertTrue((storage/'workspace-snapshots.tar').exists())
+            item['target']='ordinary.jsonl'
+            with self.assertRaises(ExecutionError):stage_private_inputs(task,[item])
     def test_guest_timeout_propagates_without_inventing_it_from_other_values(self):
         for value, expected in [(True, True), (False, False), ("true", False), (None, False)]:
             result = {"metadata": {"timed_out": value}, "timed_out": False}
@@ -496,11 +606,36 @@ class GuestBootstrapTests(unittest.TestCase):
             task = SimpleNamespace(workspace=SimpleNamespace(container=container),artifacts=root,
                                    checked=lambda argv:calls.append(argv))
             plan = {"runtime_tools":["example-runtime"],"assets":[{"source":str(source),"target":"example/cache/package.tar.gz"}]}
-            self.assertEqual(stage_bootstrap(task,plan,tools),["example-runtime"])
+            self.assertEqual(stage_bootstrap(task,plan,tools),(["example-runtime"],[]))
             self.assertEqual(container.files,[("/opt/asb-project/.asb-tools","example/cache/package.tar.gz",source.read_bytes())])
             receipt = json.loads((root/"bootstrap.json").read_text())
             self.assertNotIn(str(root),json.dumps(receipt))
             self.assertEqual(receipt["assets"][0]["bytes"],len(source.read_bytes()))
+
+    def test_native_executable_is_staged_with_loader_and_skips_guest_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); tools = root/'tools'; source=tools/'example/bin/example'
+            source.parent.mkdir(parents=True); source.write_bytes(b'native fixture')
+            container=Container(); calls=[]
+            task=SimpleNamespace(workspace=SimpleNamespace(container=container),artifacts=root,
+                                 checked=lambda argv:calls.append(argv))
+            files=[('tools/example/example',b'loader wrapper',0o755),('tools/example/bin/example',b'native fixture',0o755)]
+            receipt={'files':[{'name':name,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()} for name,data,_ in files]}
+            asset={'source':str(source),'target':'example/bin/example','native_executable':True}
+            with patch('asb_guest.bundle_tool',return_value=(files,receipt)):
+                runtimes,native=stage_bootstrap(task,{'runtime_tools':[],'assets':[asset]},tools)
+            self.assertEqual((runtimes,native),([],['example']))
+            launcher=next(data for destination,name,data in container.files if name=='example/bin/example')
+            self.assertIn(b'/example/native-runtime/tools/example/example',launcher)
+            evidence=json.loads((root/'bootstrap.json').read_text())
+            self.assertEqual(evidence['native_executables'][0]['files'],receipt['files'])
+            self.assertNotIn(str(root),json.dumps(evidence))
+
+            untouched=Container()
+            task.workspace.container=untouched
+            with patch('asb_guest.bundle_tool',return_value=(files,receipt)), self.assertRaises(ExecutionError):
+                stage_bootstrap(task,{'runtime_tools':[],'assets':[asset,{'source':str(source),'target':'../escape'}]},tools)
+            self.assertEqual(untouched.files,[])
 
     def test_bootstrap_rejects_escape_symlinks_duplicate_targets_and_invalid_dependencies(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -514,7 +649,9 @@ class GuestBootstrapTests(unittest.TestCase):
             external = root/"private"
             external.write_bytes(b"must-not-be-staged")
             assets = [{"source":str(source),"target":"../escape"},{"source":str(source),"target":"/escape"},
-                      {"source":str(external),"target":"package"},{"source":str(link),"target":"package"}]
+                      {"source":str(external),"target":"package"},{"source":str(link),"target":"package"},
+                      {"source":str(source),"target":"package","native_executable":True},
+                      {"source":str(source),"target":"package","native_executable":"yes"}]
             for asset in assets:
                 container = Container()
                 task = SimpleNamespace(workspace=SimpleNamespace(container=container),artifacts=root,checked=lambda _:None)

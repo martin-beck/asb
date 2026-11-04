@@ -30,6 +30,49 @@ const PROGRESS_POLL: Duration = Duration::from_millis(250);
 const PROGRESS_TRANSCRIPT_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_PRIVATE_REPLAY_INPUT: u64 = 64 * 1024 * 1024;
 
+/// Resolve experimental snapshot tools from the project first, then PATH.
+fn snapshot_auxiliary_tools(
+    enabled: bool,
+    tools_root: &Path,
+    search: Option<&std::ffi::OsStr>,
+) -> Result<std::collections::BTreeMap<String, PathBuf>, String> {
+    let mut tools = std::collections::BTreeMap::new();
+    if !enabled {
+        return Ok(tools);
+    }
+    for (name, directory) in [
+        ("btrfs", "btrfs"),
+        ("mkfs.btrfs", "btrfs"),
+        ("rsync", "rsync"),
+    ] {
+        let local = tools_root.join(directory).join("bin").join(name);
+        let executable = if crate::executables::is_executable(&local) {
+            Some(local)
+        } else {
+            crate::tools::host_executable_in_at(Path::new(name), search, tools_root)
+        };
+        let executable = executable.ok_or_else(|| format!(
+            "snapshot workspace needs `{name}`; install btrfs-progs and rsync in the project environment or use a VM with those tools"
+        ))?;
+        tools.insert(name.into(), executable);
+    }
+    // Optional thin-image fallback for filesystems that cannot create sparse
+    // files. A sparse-capable project does not require QEMU to be installed.
+    let qemu = ["qemu-img", "qemu-storage-daemon"].map(|name| {
+        let local = tools_root.join("qemu").join("bin").join(name);
+        if crate::executables::is_executable(&local) {
+            Some(local)
+        } else {
+            crate::tools::host_executable_in_at(Path::new(name), search, tools_root)
+        }
+    });
+    if let [Some(img), Some(storage)] = qemu {
+        tools.insert("qemu-img".into(), img);
+        tools.insert("qemu-storage-daemon".into(), storage);
+    }
+    Ok(tools)
+}
+
 fn workload_tool_mode(mode: Option<crate::tape::Mode>) -> &'static str {
     match mode {
         Some(crate::tape::Mode::Record) => "record",
@@ -243,11 +286,17 @@ fn replay_private_inputs(
     // sidecars it actually published, so a provider-tape-only adapter remains
     // replayable without pretending it supports local-tool, deterministic, or
     // native execution replay.
-    let mut stage = |source: PathBuf, description: &str| -> Result<(), String> {
+    let mut stage = |source: PathBuf,
+                     description: &str,
+                     limit: u64,
+                     target_override: Option<&str>|
+     -> Result<(), String> {
         let metadata = std::fs::symlink_metadata(&source)
             .map_err(|_| format!("{description} is unavailable"))?;
-        if !metadata.file_type().is_file() || metadata.len() > MAX_PRIVATE_REPLAY_INPUT {
-            return Err(format!("{description} is invalid or exceeds 64 MiB"));
+        if !metadata.file_type().is_file() || metadata.len() > limit {
+            return Err(format!(
+                "{description} is invalid or exceeds its size limit"
+            ));
         }
         let mut file =
             std::fs::File::open(&source).map_err(|_| format!("{description} is unavailable"))?;
@@ -270,11 +319,13 @@ fn replay_private_inputs(
         if length != metadata.len() {
             return Err(format!("{description} changed while preparing guest input"));
         }
-        let target = source
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| format!("{description} has no filename"))?
-            .to_owned();
+        let target = target_override.map(str::to_owned).unwrap_or(
+            source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| format!("{description} has no filename"))?
+                .to_owned(),
+        );
         inputs.push(PrivateInput {
             source,
             target,
@@ -289,7 +340,7 @@ fn replay_private_inputs(
         (manifest, "sealed deterministic replay manifest"),
     ] {
         match std::fs::symlink_metadata(&source) {
-            Ok(_) => stage(source, description)?,
+            Ok(_) => stage(source, description, MAX_PRIVATE_REPLAY_INPUT, None)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(format!("{description} is unavailable")),
         }
@@ -300,7 +351,12 @@ fn replay_private_inputs(
                 .map_err(|_| "sealed native replay trace is unavailable".to_owned())?;
             crate::agents::native_trace::canonicalize(&bytes)
                 .map_err(|_| "sealed native replay trace is malformed".to_owned())?;
-            stage(native_trace, "sealed native replay trace")?;
+            stage(
+                native_trace,
+                "sealed native replay trace",
+                MAX_PRIVATE_REPLAY_INPUT,
+                None,
+            )?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err("sealed native replay trace is unavailable".into()),
@@ -309,8 +365,24 @@ fn replay_private_inputs(
         for server in mcp_servers {
             let source = crate::agents::mcp_relay::replay_bundle_path(path, &server.id)
                 .map_err(|error| error.to_string())?;
-            stage(source, "sealed MCP relay sidecar")?;
+            stage(
+                source,
+                "sealed MCP relay sidecar",
+                MAX_PRIVATE_REPLAY_INPUT,
+                None,
+            )?;
         }
+    }
+    let snapshots = replay_sidecar(path, "workspace-snapshots", "tar")?;
+    match std::fs::symlink_metadata(&snapshots) {
+        Ok(_) => stage(
+            snapshots,
+            "sealed workspace snapshot archive",
+            crate::cassette::Limits::default().max_artifact_bytes,
+            Some("workspace-snapshots.tar"),
+        )?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("sealed workspace snapshot archive is unavailable".into()),
     }
     Ok(inputs)
 }
@@ -763,6 +835,16 @@ pub(crate) fn launch(
         "ASB_WORKLOAD_TOOL_MODE",
         workload_tool_mode(context.tool_mode),
     );
+    command.env(
+        "ASB_EXPERIMENTAL_SNAPSHOT",
+        if std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        {
+            "1"
+        } else {
+            "0"
+        },
+    );
     command.arg(tool.join(helper));
     if let Some(operation) = operation {
         command.arg(operation);
@@ -1075,7 +1157,14 @@ impl Session {
             network: std::env::var("ASB_BENCHMARK_NETWORK").ok(),
             artifact_output: &artifact_output,
             private_inputs,
-            auxiliary_tools: Default::default(),
+            auxiliary_tools: snapshot_auxiliary_tools(
+                std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT").as_deref()
+                    == Some(std::ffi::OsStr::new("1"))
+                    && context.tool_tape_cassette.is_some()
+                    && context.config.workload.starts_with("swe-bench"),
+                &tools_root,
+                std::env::var_os("PATH").as_deref(),
+            )?,
             request: json!({"process_lifetime":self.process_lifetime,"config":config,"connection":connection,"prompt":self.invocation.input.instructions,"timeout_seconds":self.agent_timeout.as_secs_f64(),"max_steps":context.max_steps,
                 "project_root":"/opt/asb-project","runtime_dir":"/opt/asb-private","run_dir":"/opt/asb-private/attempt","replay":context.replay,
                 "tape_cassette":tape_cassette,
@@ -1297,6 +1386,18 @@ impl Session {
             .into_iter()
             .collect();
         let mut result = completed.into_execution()?;
+        if std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+            && context.tool_tape_cassette.is_some()
+            && !context.tool_replay
+            && context.config.workload.starts_with("swe-bench")
+        {
+            let archive = self.artifacts.join("snapshot-streams.tar");
+            if !archive.is_file() {
+                return Err("snapshot stream archive is missing from controller artifacts".into());
+            }
+            result.metadata.snapshot_artifact = Some(archive);
+        }
         result.collector_errors = collector_errors;
         Ok(result)
     }
@@ -1566,6 +1667,59 @@ mod tests {
 
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_tools_prefer_project_then_path_and_report_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "asb-snapshot-tools-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        let tools = root.join("tools");
+        let host = root.join("host");
+        std::fs::create_dir_all(tools.join("btrfs/bin")).unwrap();
+        std::fs::create_dir_all(&host).unwrap();
+        for path in [
+            tools.join("btrfs/bin/btrfs"),
+            host.join("btrfs"),
+            host.join("mkfs.btrfs"),
+            host.join("rsync"),
+        ] {
+            std::fs::write(&path, b"fixture").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(
+            snapshot_auxiliary_tools(false, &tools, None)
+                .unwrap()
+                .is_empty()
+        );
+        let selected = snapshot_auxiliary_tools(true, &tools, Some(host.as_os_str())).unwrap();
+        assert_eq!(selected["btrfs"], tools.join("btrfs/bin/btrfs"));
+        assert_eq!(selected["rsync"], host.join("rsync"));
+        assert!(!selected.contains_key("qemu-img"));
+        for name in ["qemu-img", "qemu-storage-daemon"] {
+            let path = host.join(name);
+            std::fs::write(&path, b"fixture").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let with_qemu = snapshot_auxiliary_tools(true, &tools, Some(host.as_os_str())).unwrap();
+        assert_eq!(with_qemu["qemu-img"], host.join("qemu-img"));
+        assert_eq!(
+            with_qemu["qemu-storage-daemon"],
+            host.join("qemu-storage-daemon")
+        );
+        std::fs::remove_file(host.join("qemu-storage-daemon")).unwrap();
+        let incomplete = snapshot_auxiliary_tools(true, &tools, Some(host.as_os_str())).unwrap();
+        assert!(!incomplete.contains_key("qemu-img"));
+        std::fs::remove_file(host.join("rsync")).unwrap();
+        assert!(
+            snapshot_auxiliary_tools(true, &tools, Some(host.as_os_str()))
+                .unwrap_err()
+                .contains("rsync")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn workload_tool_intent_covers_all_modes() {
         assert_eq!(workload_tool_mode(None), "none");
@@ -1680,6 +1834,38 @@ mod tests {
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].bytes, data.len() as u64);
         assert_eq!(inputs[0].sha256, crate::cassette::digest(&data));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_snapshot_input_follows_replica_and_is_stream_hashed() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-snapshot-replay-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let data = vec![42u8; 200_001];
+        std::fs::write(root.join("workspace-snapshots-concurrency-3.tar"), &data).unwrap();
+        let inputs = replay_private_inputs(
+            Some(&root.join("replay-concurrency-3.jsonl")),
+            true,
+            &[],
+            false,
+        )
+        .unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].target, "workspace-snapshots.tar");
+        assert_eq!(inputs[0].sha256, crate::cassette::digest(&data));
+        assert!(
+            replay_private_inputs(
+                Some(&root.join("replay-concurrency-2.jsonl")),
+                true,
+                &[],
+                false
+            )
+            .unwrap()
+            .is_empty()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

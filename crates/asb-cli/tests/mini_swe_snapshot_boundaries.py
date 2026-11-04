@@ -8,7 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from mini_swe_binary_replay import LocalEnvironment, transport
 
@@ -21,6 +21,21 @@ SCRATCH.mkdir(parents=True, exist_ok=True)
 
 
 class SnapshotBoundaryTest(unittest.TestCase):
+    def test_marker_clients_have_no_adapter_deadline(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory)
+            with patch.dict(os.environ, {'ASB_MINI_SWE_TOOL_TAPE':str(root/'tape'),
+                                         'ASB_MINI_SWE_TOOL_MODE':'record',
+                                         'ASB_FS_MARKER_SOCKET':'/fixture',
+                                         'ASB_FS_REPLAY_SOCKET':'/fixture'}, clear=True):
+                namespace={};exec(compile(transport,'asb_mini_swe_tools.py','exec'),namespace)
+                connection=MagicMock();connection.__enter__.return_value=connection
+                connection.makefile.return_value.__enter__.return_value.readline.return_value=b'1\n'
+                with patch.object(namespace['socket'],'socket',return_value=connection):
+                    self.assertTrue(namespace['_filesystem_marker']('begin','tool'))
+                    self.assertTrue(namespace['_filesystem_replay_boundary']('tool'))
+                connection.settimeout.assert_not_called()
+
     def test_adapter_records_tool_result_and_snapshot(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root = Path(directory)

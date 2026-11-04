@@ -198,9 +198,11 @@ def stage_bootstrap(task, plan, tools, owner=None):
             or any(not isinstance(name,str) or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,79}",name) for name in runtimes)
             or len(set(runtimes)) != len(runtimes) or not isinstance(assets,list) or len(assets) > 64):
         raise ExecutionError("selected tool installation bootstrap plan exceeds its limits")
-    staged,targets,total = [],set(),0
+    staged,targets,total,native,native_receipts,native_bundles = [],set(),0,[],[],[]
     for asset in assets:
-        if not isinstance(asset,dict) or set(asset) != {"source","target"}:
+        if (not isinstance(asset,dict) or not {"source","target"}.issubset(asset)
+                or set(asset)-{"source","target","native_executable"}
+                or type(asset.get('native_executable',False)) is not bool):
             raise ExecutionError("invalid declared tool bootstrap asset")
         if not isinstance(asset["source"],str) or not isinstance(asset["target"],str):
             raise ExecutionError("invalid declared tool bootstrap path")
@@ -216,23 +218,50 @@ def stage_bootstrap(task, plan, tools, owner=None):
         if size > 256 * 1024**2 or total > 512 * 1024**2:
             raise ExecutionError("selected tool bootstrap assets exceed 512 MiB")
         targets.add(str(target))
+        if asset.get('native_executable',False):
+            if len(target.parts) != 3 or target.parts[1] != 'bin':
+                raise ExecutionError('native bootstrap executable target is invalid')
+            tool,name=target.parts[0],target.parts[2]
+            native_root=f'/opt/asb-project/.asb-tools/{tool}/native-runtime'
+            architecture=getattr(task.workspace,'image_identity',{}).get('architecture')
+            files,receipt=bundle_tool(source,name,architecture,root=native_root)
+            bundle_size=sum(len(content) for _,content,_ in files)
+            total += bundle_size-size
+            if total > 512 * 1024**2:
+                raise ExecutionError('selected tool bootstrap assets exceed 512 MiB')
+            directories=set()
+            for relative,_,_ in files:
+                parent=Path(relative).parent
+                while str(parent) not in ('.',''):
+                    directories.add(native_root+'/'+parent.as_posix())
+                    parent=parent.parent
+            native_bundles.append((native_root,files,directories))
+            launcher=(f'#!/bin/sh\nexec {native_root}/tools/{name}/{name} "$@"\n').encode()
+            staged.append((str(target),launcher,0o755))
+            native.append(tool)
+            native_receipts.append({'target':str(target),'files':receipt['files']})
+            continue
         with source.open("rb") as incoming:
             content = incoming.read(256 * 1024**2 + 1)
         if len(content) != size:
             raise ExecutionError("tool bootstrap asset changed while it was being staged")
         staged.append((str(target),content,0o600))
     root = "/opt/asb-project/.asb-tools"
+    for native_root,files,directories in native_bundles:
+        task.checked(['mkdir','-p',*sorted(directories,key=lambda value:(value.count('/'),value))])
+        upload(task.workspace.container,native_root,files,temporary_dir=task.artifacts,owner=owner)
     for target in sorted({str(Path(name).parent) for name,_,_ in staged}):
         task.checked(["mkdir","-p",root+"/"+target])
     if staged:
         upload(task.workspace.container,root,staged,temporary_dir=task.artifacts,owner=owner)
     receipt = {"schema_version":1,"runtime_tools":runtimes,
+               "native_executables":native_receipts,
                "assets":[{"target":name,"bytes":len(content),"sha256":hashlib.sha256(content).hexdigest()}
                          for name,content,_ in staged]}
     path = task.artifacts / "bootstrap.json"
     path.write_text(json.dumps(receipt,sort_keys=True)+"\n")
     path.chmod(0o600)
-    return runtimes
+    return runtimes,native
 
 
 def stage_private_inputs(task, inputs, owner=None):
@@ -249,13 +278,42 @@ def stage_private_inputs(task, inputs, owner=None):
                 or Path(source).is_symlink() or not Path(source).is_file()
                 or not re.fullmatch(r"[A-Za-z0-9+_.-]{1,256}",target)
                 or len(item["sha256"]) != 64 or not re.fullmatch(r"[0-9a-f]{64}",item["sha256"])
-                or target in targets or item["bytes"] < 0 or item["bytes"] > 64 * 1024**2):
+                or target in targets or item["bytes"] < 0
+                or item["bytes"] > (64 * 1024**3 if target == 'workspace-snapshots.tar' else 64 * 1024**2)):
             raise ExecutionError("guest private replay input is invalid")
-        total += item['bytes']
+        if target != 'workspace-snapshots.tar':
+            total += item['bytes']
         if total > 64 * 1024**2:
             raise ExecutionError("sealed local-tool replay transcript changed before guest staging")
         targets.add(target)
-        staged.append((target,source,item['bytes'],item['sha256'],0o600))
+        if target == 'workspace-snapshots.tar':
+            storage = getattr(task.workspace, 'snapshot_storage', None)
+            if storage is None or not Path(storage).is_dir():
+                raise ExecutionError('snapshot replay requires owned project storage')
+            destination = Path(storage)/target
+            digest = hashlib.sha256()
+            count = 0
+            created = False
+            try:
+                with open(source, 'rb') as src, destination.open('xb') as dst:
+                    created = True
+                    while True:
+                        chunk = src.read(1024*1024)
+                        if not chunk:
+                            break
+                        count += len(chunk)
+                        if count > item['bytes']:
+                            raise ExecutionError('snapshot archive changed during guest staging')
+                        digest.update(chunk)
+                        dst.write(chunk)
+                if count != item['bytes'] or digest.hexdigest() != item['sha256']:
+                    raise ExecutionError('snapshot archive changed during guest staging')
+            except BaseException:
+                if created:
+                    destination.unlink(missing_ok=True)
+                raise
+        else:
+            staged.append((target,source,item['bytes'],item['sha256'],0o600))
     if staged:
         upload_files(task.workspace.container,"/opt/asb-private",staged,temporary_dir=task.artifacts,owner=owner)
 
@@ -266,8 +324,23 @@ def stage_auxiliary_tools(task, tools, owner):
         raise ExecutionError('guest auxiliary tools must be a name-to-path mapping')
     paths = {}
     architecture = getattr(task.workspace,'image_identity',{}).get('architecture')
+    optional = {'qemu-img', 'qemu-storage-daemon'}
+    optional_bundles = {}
+    if optional.issubset(tools):
+        try:
+            optional_bundles = {name: bundle_tool(tools[name],name,architecture,root='/opt/asb-private')
+                                for name in optional}
+        except (ExecutionError, OSError):
+            # A sparse workspace does not use QEMU. An unavailable or
+            # incompatible optional fallback must not prevent its preparation.
+            optional_bundles = {}
     for name, source in tools.items():
-        files, _ = bundle_tool(source,name,architecture,root='/opt/asb-private')
+        if name in optional:
+            if name not in optional_bundles:
+                continue
+            files, _ = optional_bundles[name]
+        else:
+            files, _ = bundle_tool(source,name,architecture,root='/opt/asb-private')
         directories = set()
         for relative,_,_ in files:
             parent = Path(relative).parent
@@ -388,7 +461,7 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
     guest = dict(guest,task_identity=task_identity,owned_instrumentation=ownership)
     upload(container, "/opt/asb-project/.asb", [("project.toml", configuration.encode(), 0o600)],temporary_dir=task.artifacts,owner=owner)
     stage_private_inputs(task,request.get("private_inputs",[]),owner=owner)
-    runtimes = stage_bootstrap(task,request.get("bootstrap"),tools,owner=owner)
+    runtimes, native_tools = stage_bootstrap(task,request.get("bootstrap"),tools,owner=owner)
     package_tree = request["bootstrap"].get("npm_package_tree")
     if package_tree is not None:
         stage_npm_package_tree(task,package_tree,tools,tool,owner=owner)
@@ -400,7 +473,7 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
     auxiliary = stage_auxiliary_tools(task,request.get("auxiliary_tools",{}),owner)
     if auxiliary:
         environment['ASB_AUXILIARY_TOOLS'] = json.dumps(auxiliary,sort_keys=True,separators=(',',':'))
-    for selected in [*runtimes, *([] if package_tree is not None else [tool])]:
+    for selected in [*runtimes, *([] if package_tree is not None or tool in native_tools else [tool])]:
         result = task.workspace.execute(["/bin/sh", "-c", 'cd /opt/asb-project && exec /opt/asb-runtime/asb tool install "$1"', "asb", selected],
                                         environment=environment, timeout=min(900,preparation_budget.remaining()) if preparation_budget else 900, output_limit=256 * 1024,
                                         cancelled=ForwardingCancellation(cancelled, relays),
@@ -421,6 +494,23 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
                 path.write_bytes(detail.output)
                 path.chmod(0o600)
             raise ExecutionError("selected agent runtime installation failed; inspect private install artifacts")
+    if getattr(task,'snapshot',False):
+        if task.tool_mode not in ('record', 'replay'):
+            raise ExecutionError('experimental snapshot requires tool recording or replay')
+        if resources is None or not {'btrfs','mkfs.btrfs','rsync'}.issubset(auxiliary):
+            raise ExecutionError('experimental snapshot preparation needs staged filesystem tools')
+        from asb_docker import docker_command
+        from asb_snapshot_control import GuestSnapshot, settle_on_exit
+        replay = task.tool_mode == 'replay'
+        if replay and not any(item['target'] == 'workspace-snapshots.tar' for item in request.get('private_inputs', [])):
+            raise ExecutionError('snapshot replay archive is missing from the selected cassette')
+        if replay:
+            # The staging step has verified these exact bytes while copying.
+            guest['snapshot_archive_sha256'] = next(item['sha256'] for item in request['private_inputs'] if item['target'] == 'workspace-snapshots.tar')
+        supervisor=GuestSnapshot(task,auxiliary,owner,docker_command(),deadline,replay=replay)
+        resources.push(lambda exc_type, exc, traceback: settle_on_exit(supervisor, exc_type, exc, traceback))
+        environment['ASB_FS_REPLAY_SOCKET' if replay else 'ASB_FS_MARKER_SOCKET']='/opt/asb-private/snapshot.sock'
+        guest['snapshot_private_mount'] = True
     return guest,environment
 
 
@@ -595,8 +685,8 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
     result.update(exact)
     observation.update(exact)
     # A failed agent can still produce valid metadata. Preserve the diagnostic
-    # tails before later workload settlement, which may fail and otherwise
-    # hide the original cause from the caller.
+    # tails before the snapshot supervisor settles, since settlement may fail
+    # and otherwise hide the original cause from the caller.
     if result['metadata'].get('exit_code') not in (None, 0) or result.get('exit_code') not in (None, 0):
         for stream, tail in output_tails.items():
             if not tail:

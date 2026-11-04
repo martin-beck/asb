@@ -20,8 +20,7 @@ fn guest_execution_reports_its_own_timeout() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let result = super::super::run_guest_process(
-        &mut command,
-        None,
+        (&mut command, None, None),
         None,
         &mut Vec::new(),
         &mut Vec::new(),

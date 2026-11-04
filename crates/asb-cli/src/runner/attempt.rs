@@ -1547,6 +1547,9 @@ impl ResultFacts {
             native_trace,
             native_tool_sidecar,
             sealed_artifacts,
+            snapshot_artifact: guest
+                .as_ref()
+                .and_then(|guest| guest.snapshot_artifact.clone()),
             cassette: tape_cassette
                 .as_ref()
                 .map(|(_, cassette)| cassette.display().to_string()),

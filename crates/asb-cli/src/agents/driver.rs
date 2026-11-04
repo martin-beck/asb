@@ -93,6 +93,12 @@ pub(crate) struct GuestRequest {
     pub run_dir: PathBuf,
     #[serde(default)]
     pub replay: bool,
+    /// Hide the snapshot supervisor's private storage mount from the agent
+    /// while retaining the independently mounted task workspace.
+    #[serde(default)]
+    pub snapshot_private_mount: bool,
+    #[serde(default)]
+    pub snapshot_archive_sha256: Option<String>,
     /// Exact provider-tape path forwarded by the owning runner.  It is never
     /// inferred from the provider endpoint because record and replay are both
     /// routed through loopback services.
@@ -238,6 +244,9 @@ pub(crate) struct GuestResult {
     /// directory after this small result record crosses the guest boundary.
     #[serde(skip)]
     pub sealed_artifacts: Vec<super::SealedArtifact>,
+    /// Controller-local snapshot stream archive, never serialized to the guest.
+    #[serde(skip)]
+    pub snapshot_artifact: Option<PathBuf>,
     /// Small receipts for opaque sidecars. Their bytes remain in the guest
     /// until the workload controller copies each verified file directly to its
     /// private host artifact directory.
@@ -446,6 +455,52 @@ fn activate_unprivileged_project_access(
     Ok(())
 }
 
+/// Snapshot bookkeeping is an ASB implementation detail, not part of the
+/// task filesystem. Keep it out of the agent's view without changing the
+/// supervisor's mount namespace or detaching the task's workspace bind.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn hide_snapshot_storage() -> Result<(), Error> {
+    use std::ffi::CString;
+    let root = CString::new("/").expect("static mount path");
+    let storage = CString::new("/asb-snapshot-storage").expect("static mount path");
+    // SAFETY: paths are NUL-terminated constants; these calls affect only the
+    // current process after unshare, which gives it a private mount namespace.
+    unsafe {
+        if libc::unshare(libc::CLONE_NEWNS) != 0 {
+            return Err(Error::Run(format!(
+                "cannot isolate snapshot bookkeeping mount: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if libc::mount(
+            std::ptr::null(),
+            root.as_ptr(),
+            std::ptr::null(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            std::ptr::null(),
+        ) != 0
+        {
+            return Err(Error::Run(format!(
+                "cannot make snapshot mount namespace private: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if libc::umount2(storage.as_ptr(), libc::MNT_DETACH) != 0 {
+            return Err(Error::Run(format!(
+                "cannot hide snapshot bookkeeping mount: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn hide_snapshot_storage() -> Result<(), Error> {
+    Err(Error::Run("snapshot mount isolation requires Linux".into()))
+}
+
 /// Permit traversal into the already writable `agent-state` child without
 /// exposing the sealed runtime prefix for listing, reading, or writing.
 #[cfg(target_os = "linux")]
@@ -472,6 +527,7 @@ fn grant_unprivileged_traverse(_: &Path) -> Result<(), Error> {
 struct PreparedGuest {
     command: Command,
     agent_route: Option<crate::launch::CommandRoute>,
+    auxiliary_plan: Option<super::auxiliary::AuxiliaryPlan>,
     stdin_prompt: Option<Vec<u8>>,
     artifact_owner: super::ArtifactOwner,
     instrumentation: Option<crate::workloads::staging::Guard>,
@@ -709,6 +765,20 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
                 cassette,
             }),
     })?;
+    let auxiliary_plan = adapter.prepare_guest_service(
+        &mut command,
+        process_program,
+        &request.run_dir,
+        request.tool_tape_cassette.as_ref().map(|_| {
+            if request.tool_replay {
+                crate::tape::Mode::Replay
+            } else {
+                crate::tape::Mode::Record
+            }
+        }),
+        native_tool.map(|native| native.path),
+        request.snapshot_archive_sha256.as_deref(),
+    )?;
     configure_execution_identity(
         &mut command,
         adapter.execution_identity(),
@@ -718,6 +788,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
     Ok(PreparedGuest {
         command,
         agent_route,
+        auxiliary_plan,
         stdin_prompt,
         artifact_owner,
         instrumentation,
@@ -727,6 +798,11 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
 
 fn run(request: GuestRequest) -> Result<u8, Error> {
     request.capsule.validate()?;
+    // Establish this before preparation or collectors can start threads;
+    // Linux cannot unshare the filesystem context after it is shared.
+    if request.snapshot_private_mount {
+        hide_snapshot_storage()?;
+    }
     let retained =
         request.process_lifetime == crate::workloads::session::ProcessLifetime::ThroughEvaluation;
     if retained {
@@ -770,11 +846,17 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     let PreparedGuest {
         mut command,
         mut agent_route,
+        auxiliary_plan,
         stdin_prompt,
         mut artifact_owner,
         instrumentation,
         execution_identity,
     } = prepare(&request)?;
+    if retained && auxiliary_plan.is_some() {
+        return Err(Error::Run(
+            "adapter auxiliary recording requires agent cleanup before evaluation".into(),
+        ));
+    }
     // Keep the same launch identity even if a tool renames/deletes its cwd.
     // Looking up current_dir again after execution can erase a valid outcome.
     let workspace = command
@@ -809,7 +891,6 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         &request.project_root,
         &request.runtime_dir,
     )?;
-    // Other platforms retain the existing driver gate.
     if agent_route.is_none() {
         println!("__ASB_GATE__:{}", std::process::id());
         std::io::stdout().flush().map_err(crate::io_error)?;
@@ -821,6 +902,9 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             "guest agent gate currently requires Unix signals".into(),
         ));
     }
+    let mut auxiliary = auxiliary_plan
+        .map(super::auxiliary::AuxiliaryPlan::start)
+        .transpose()?;
     #[cfg(target_os = "linux")]
     let retained_pid = std::cell::Cell::new(None);
     #[cfg(target_os = "linux")]
@@ -888,8 +972,13 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             .map_err(crate::io_error)?;
         let gated_agent = agent_route.is_some();
         let captured = crate::runner::run_guest_process(
-            &mut command,
-            agent_route.take(),
+            (
+                &mut command,
+                agent_route.take(),
+                auxiliary
+                    .as_mut()
+                    .map(super::auxiliary::AuxiliaryService::child),
+            ),
             stdin_prompt.as_deref(),
             #[cfg(unix)]
             &mut transport_out,
@@ -913,7 +1002,16 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
                 }
                 Ok(())
             },
-        )?;
+        );
+        let captured = match captured {
+            Ok(value) => value,
+            Err(error) => {
+                if let Some(detail) = auxiliary.as_mut().and_then(|service| service.early_exit()) {
+                    return Err(Error::Run(format!("{error}; {detail}")));
+                }
+                return Err(error);
+            }
+        };
         (
             captured.output,
             captured.transcript_truncated,
@@ -921,6 +1019,9 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             captured.observation,
         )
     };
+    if let Some(service) = auxiliary.as_mut() {
+        service.settle()?;
+    }
     let namespace_collectors = capture
         .as_mut()
         .map(|session| session.export_execution_namespace_state())
@@ -991,6 +1092,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         native_tool_sidecar: None,
         deferred_collection: None,
         sealed_artifacts: Vec::new(),
+        snapshot_artifact: None,
         exported_artifacts: Vec::new(),
         adapter_errors: Vec::new(),
         execution_failure: {
@@ -1296,6 +1398,7 @@ mod artifact_publication_tests {
                 native_tool_sidecar: None,
                 deferred_collection: None,
                 sealed_artifacts: Vec::new(),
+                snapshot_artifact: None,
                 exported_artifacts: Vec::new(),
                 adapter_errors: Vec::new(),
                 execution_failure: None,

@@ -99,6 +99,10 @@ type PostInstallHook = fn(
 pub(crate) struct GuestAsset {
     pub source: std::path::PathBuf,
     pub target: std::path::PathBuf,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_executable: bool,
+    #[serde(skip)]
+    pub runtime_tools: &'static [&'static str],
     #[serde(skip)]
     pub distribution: Option<(&'static str, &'static str)>,
 }

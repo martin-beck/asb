@@ -130,3 +130,30 @@ instructions. Consequently this experiment does not provide the required
 interception-based playback that returns recorded tool results without launching
 recorded tools. It also does not replace the existing LLM and MCP proxies.
 Do not promote a successful VM trace into a claim of complete native-tool replay.
+
+## Experimental snapshot mount visibility
+
+The snapshot supervisor keeps its storage in its own container mount namespace.
+The guest driver enters a private mount namespace and detaches the internal
+storage mount before starting the agent. The task workspace remains available
+through its separate bind mount, and the supervisor retains its original mount.
+This avoids exposing snapshot copies to agent commands such as `find /`.
+This is bookkeeping isolation, not a sandbox or a guarantee of native tool
+replay; the tool interception and snapshot-ordering gaps above still apply.
+
+Snapshot marker capture and replay do not impose a separate per-tool deadline.
+An out-of-order marker waits for its recorded predecessor until the execution
+ends or the service is invalidated. Shutdown wakes pending markers and closes
+idle client connections before joining server threads. This does not establish
+that overlapping filesystem mutations can be replayed correctly.
+
+Snapshot workspace images are sparse and default to the storage space available
+on the project filesystem at preparation time. This removes the previous fixed
+4 GiB logical image size; actual writes can still fail if the filesystem fills
+or cannot represent the image. An explicit size remains available for offline
+fixtures. On a filesystem that allocates a small sparse probe eagerly, an
+available `qemu-img` and `qemu-storage-daemon` pair can provide a thin qcow2
+image through FUSE. Both tools must currently be installed project-locally or
+available on the host, and the guest needs FUSE and loop support. Automatic
+tool installation and a VM fallback are not yet implemented. This sizing change
+does not establish complete native replay.

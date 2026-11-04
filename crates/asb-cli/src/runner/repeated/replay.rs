@@ -182,6 +182,7 @@ impl Prepared {
                     bytes,
                     sha256,
                     complete,
+                    workspace_snapshots,
                     local_tools,
                     tool_protocol,
                     deterministic_manifest,
@@ -217,6 +218,11 @@ impl Prepared {
                         track.bytes,
                         track.sha256.clone(),
                         Some(track.complete),
+                        track
+                            .artifacts
+                            .iter()
+                            .any(|artifact| artifact.kind == "workspace-snapshots")
+                            .then(|| PathBuf::from(format!("inputs/workspace-snapshots-{id}.tar"))),
                         track
                             .artifacts
                             .iter()
@@ -264,6 +270,7 @@ impl Prepared {
                         None,
                         None,
                         None,
+                        None,
                         Vec::new(),
                         None,
                         None,
@@ -284,6 +291,7 @@ impl Prepared {
                     source: path,
                     private: PathBuf::from(format!("inputs/track-{id}.jsonl")),
                     local_tools,
+                    workspace_snapshots,
                     tool_protocol,
                     deterministic_manifest,
                     native_trace,
@@ -350,6 +358,17 @@ impl Prepared {
                         .copy_artifact_to(
                             input.track.expect("selected bundle track"),
                             "local-tools",
+                            file,
+                        )
+                        .map_err(input_error)
+                })?;
+            }
+            if let Some(snapshots) = &input.workspace_snapshots {
+                publish_stream(&root.join(snapshots), |file| {
+                    self.source
+                        .copy_artifact_to(
+                            input.track.expect("selected bundle track"),
+                            "workspace-snapshots",
                             file,
                         )
                         .map_err(input_error)
@@ -519,6 +538,7 @@ pub(super) fn stage_selected(
         };
         fs::hard_link(root.join(&input.private), &destination).map_err(crate::io_error)?;
         stage_local_tools(root, input, &destination, slot.replica, concurrency)?;
+        stage_workspace_snapshots(root, input, &destination)?;
         stage_tool_protocol(root, input, &destination)?;
         stage_determinism_manifest(root, input, &destination, slot.replica, concurrency)?;
         stage_native_trace(root, input, &destination, slot.replica, concurrency)?;
@@ -534,6 +554,21 @@ fn stage_mcp_relays(root: &Path, input: &ReplayInput, destination: &Path) -> Res
     for relay in &input.mcp_relays {
         let destination = replay_sidecar(destination, &format!("mcp-relay-{}", relay.id), "jsonl")?;
         fs::hard_link(root.join(&relay.bundle), destination).map_err(crate::io_error)?;
+    }
+    Ok(())
+}
+
+fn stage_workspace_snapshots(
+    root: &Path,
+    input: &ReplayInput,
+    destination: &Path,
+) -> Result<(), Error> {
+    if let Some(snapshots) = &input.workspace_snapshots {
+        fs::hard_link(
+            root.join(snapshots),
+            replay_sidecar(destination, "workspace-snapshots", "tar")?,
+        )
+        .map_err(crate::io_error)?;
     }
     Ok(())
 }
@@ -687,6 +722,7 @@ mod tests {
             source: PathBuf::from("sealed.asb.zip"),
             private: PathBuf::from("inputs/track-7.jsonl"),
             local_tools: Some(PathBuf::from("inputs/local-tools-7.jsonl")),
+            workspace_snapshots: Some(PathBuf::from("inputs/workspace-snapshots-7.tar")),
             tool_protocol: None,
             deterministic_manifest: None,
             native_trace: None,
@@ -696,7 +732,18 @@ mod tests {
             sha256: "a".repeat(64),
         };
         let destination = root.join("batch/replay-concurrency-3.jsonl");
+        fs::write(root.join("inputs/workspace-snapshots-7.tar"), b"snapshot").unwrap();
         stage_local_tools(&root, &input, &destination, 3, 4).unwrap();
+        stage_workspace_snapshots(&root, &input, &destination).unwrap();
+        assert_eq!(
+            fs::read(root.join("batch/workspace-snapshots-concurrency-3.tar")).unwrap(),
+            b"snapshot"
+        );
+        assert!(
+            !root
+                .join("batch/workspace-snapshots-concurrency-1.tar")
+                .exists()
+        );
         assert_eq!(
             fs::read(root.join("batch/local-tools-concurrency-3.jsonl")).unwrap(),
             b"{\"sequence\":1}\n"
@@ -721,6 +768,7 @@ mod tests {
             source: root.join("source"),
             private: PathBuf::from("inputs/track-1.jsonl"),
             local_tools: Some(PathBuf::from("inputs/local-tools-1.jsonl")),
+            workspace_snapshots: None,
             tool_protocol: None,
             deterministic_manifest: None,
             native_trace: None,
@@ -755,6 +803,7 @@ mod tests {
             source: root.join("source"),
             private: PathBuf::from("inputs/track-1.jsonl"),
             local_tools: None,
+            workspace_snapshots: None,
             tool_protocol: Some(PathBuf::from("inputs/tool-protocol-1.json")),
             deterministic_manifest: None,
             native_trace: None,
@@ -787,6 +836,7 @@ mod tests {
             source: PathBuf::from("sealed.asb.zip"),
             private: PathBuf::from("inputs/track-7.jsonl"),
             local_tools: None,
+            workspace_snapshots: None,
             tool_protocol: None,
             deterministic_manifest: Some(PathBuf::from("inputs/determinism-manifest-7.json")),
             native_trace: None,
@@ -834,6 +884,7 @@ mod tests {
             source: PathBuf::from("sealed.asb.zip"),
             private: PathBuf::from("inputs/track-7.jsonl"),
             local_tools: None,
+            workspace_snapshots: None,
             tool_protocol: None,
             deterministic_manifest: None,
             native_trace: Some(PathBuf::from("inputs/native-trace-7.jsonl")),
@@ -875,6 +926,7 @@ mod tests {
             source: PathBuf::from("sealed.asb.zip"),
             private: PathBuf::from("inputs/track-7.jsonl"),
             local_tools: None,
+            workspace_snapshots: None,
             tool_protocol: None,
             deterministic_manifest: None,
             native_trace: Some(PathBuf::from("inputs/native-trace-7.jsonl")),
@@ -912,6 +964,7 @@ mod tests {
             source: PathBuf::from("sealed.asb.zip"),
             private: PathBuf::from("inputs/track-7.jsonl"),
             local_tools: None,
+            workspace_snapshots: None,
             tool_protocol: None,
             deterministic_manifest: None,
             native_trace: None,

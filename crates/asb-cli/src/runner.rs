@@ -131,6 +131,8 @@ struct RunResult<'a> {
     /// Adapter-owned bounded sidecars retained only by the sealed cassette.
     #[serde(skip)]
     sealed_artifacts: Vec<agents::SealedArtifact>,
+    #[serde(skip)]
+    snapshot_artifact: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cassette: Option<String>,
     /// Actual capture directory, including a CLI --measurements override.
@@ -1686,14 +1688,19 @@ fn wait_for_agent_exec(
 }
 
 pub(crate) fn run_guest_process(
-    command: &mut Command,
-    route: Option<crate::launch::CommandRoute>,
+    launch: (
+        &mut Command,
+        Option<crate::launch::CommandRoute>,
+        Option<&mut std::process::Child>,
+    ),
     stdin_prompt: Option<&[u8]>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     runtime: Duration,
     on_spawn: &mut dyn FnMut(u32) -> Result<(), Error>,
 ) -> Result<GuestProcessOutput, Error> {
+    #[allow(unused_mut, unused_variables)]
+    let (command, route, mut auxiliary) = launch;
     #[cfg(target_os = "linux")]
     let mut descendants = crate::process_gate::DescendantScope::new()
         .map_err(|error| Error::Run(format!("cannot retain guest agent descendants: {error}")))?;
@@ -1750,7 +1757,10 @@ pub(crate) fn run_guest_process(
         PresentationPolicy::CancelOnTransportFailure,
         &mut || {
             #[cfg(target_os = "linux")]
-            return descendants.quiesce();
+            return match auxiliary.as_deref_mut() {
+                Some(service) => descendants.quiesce_except(service),
+                None => descendants.quiesce(),
+            };
             #[cfg(not(target_os = "linux"))]
             Ok(())
         },
@@ -2655,8 +2665,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let result = super::run_guest_process(
-            &mut command,
-            None,
+            (&mut command, None, None),
             None,
             &mut stdout,
             &mut stderr,
@@ -3033,6 +3042,7 @@ mod tests {
             native_trace: None,
             native_tool_sidecar: None,
             sealed_artifacts: Vec::new(),
+            snapshot_artifact: None,
             cassette: None,
             measurement_directory: None,
             stdout: "done".into(),

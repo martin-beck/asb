@@ -74,6 +74,8 @@ fn default_and_static_adapter_hooks_have_explicit_nonexecuting_contracts() {
         Ok(vec![GuestAsset {
             source: root.join("source"),
             target: PathBuf::from("guest-target"),
+            native_executable: false,
+            runtime_tools: &[],
             distribution: Some(("https://fixture.invalid/archive", "fixture-hash")),
         }])
     }

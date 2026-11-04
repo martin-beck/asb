@@ -7,6 +7,7 @@ claimed to be local-host PIDs: the caller must establish that separately.
 """
 import json
 import math
+from pathlib import Path
 import re
 import threading
 import time
@@ -182,7 +183,7 @@ class ManagedDockerWorkspace:
         return workspace
 
     def __init__(self, client, image, attempt, workdir, memory_bytes=4 * 1024**3,
-                 cpus=2, pids=512, journal=None):
+                 cpus=2, pids=512, journal=None, snapshot=False, snapshot_storage=None):
         if not re.fullmatch(r"asb-[0-9a-f]{32}", attempt):
             raise ExecutionError("workspace requires a unique ASB attempt identity")
         if not isinstance(workdir, str) or not workdir.startswith("/") or "\x00" in workdir:
@@ -192,6 +193,8 @@ class ManagedDockerWorkspace:
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", image.id):
             raise ExecutionError("workspace image must resolve to a content identity")
         self.client, self.image, self.attempt, self.workdir = client, image, attempt, workdir
+        self.snapshot = snapshot
+        self.snapshot_storage = Path(snapshot_storage).absolute() if snapshot_storage is not None else None
         self.limits = {"memory_bytes": memory_bytes, "cpus": cpus, "pids": pids}
         self.container = None
         self.journal = journal
@@ -214,6 +217,14 @@ class ManagedDockerWorkspace:
             mem_limit=self.limits["memory_bytes"], nano_cpus=int(self.limits["cpus"] * 10**9),
             pids_limit=self.limits["pids"],
         )
+        if self.snapshot:
+            # Experimental isolated container/VM backend; ordinary workloads
+            # retain their existing container configuration.
+            if self.snapshot_storage is None or not self.snapshot_storage.is_dir():
+                raise ExecutionError('snapshot workspace requires an owned project storage directory')
+            creation.update(volumes={str(self.snapshot_storage): {'bind':'/asb-snapshot-storage','mode':'rw'}},
+                            cap_add=['SYS_ADMIN'], devices=['/dev/loop-control:/dev/loop-control:rwm'],
+                            device_cgroup_rules=['b 7:* rwm','c 10:229 rwm'], security_opt=['apparmor=unconfined'])
         if self.journal is not None:
             self.journal.direct_container(creation)
         self.container = self.client.containers.create(**creation)

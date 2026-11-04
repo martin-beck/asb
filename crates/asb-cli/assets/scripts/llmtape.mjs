@@ -1006,6 +1006,22 @@ async function handle(request, response, recording) {
     chunks.push(bytes);
   }
   const body = Buffer.concat(chunks, bodySize);
+  // Adapter-owned control messages are handled locally and never enter the
+  // provider transcript. The tape core does not interpret their payload.
+  if (agentWireExtension?.controlRequest) {
+    try {
+      const control = await agentWireExtension.controlRequest({ method: request.method, url: requestPath(request.url), body, mode });
+      if (control !== undefined) {
+        response.writeHead(control ? 204 : 400, { connection: "close" });
+        response.end();
+        return;
+      }
+    } catch {
+      response.writeHead(400, { connection: "close" });
+      response.end();
+      return;
+    }
+  }
   const normalizedBody = normalizeRequestBody(request.url || "/", body.toString("utf8"));
   const recordedRequest = {
     method: request.method || "GET",

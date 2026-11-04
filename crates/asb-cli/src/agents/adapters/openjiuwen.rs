@@ -922,10 +922,12 @@ def configure_log_config(config):
             package.join("harness/cli/agent/factory.py"),
             r#"
 class Config:
-    enable_read_image_multimodal = None
-    parallel_tool_calls = None
+    enable_read_image_multimodal = True
+    parallel_tool_calls = True
 class Agent:
     _deep_config = Config()
+def _build_memory_rail(_cfg): return "memory-enabled"
+def _build_subagents(_model): return ["subagent-enabled"]
 def create_agent(_cfg):
     return Agent(), object()
 "#,
@@ -1116,8 +1118,10 @@ from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 from openjiuwen.core.context_engine.context.context import Context
 async def main():
     agent, _tracker = factory.create_agent(None)
-    assert agent._deep_config.enable_read_image_multimodal is False
-    assert agent._deep_config.parallel_tool_calls is None
+    assert agent._deep_config.enable_read_image_multimodal is True
+    assert agent._deep_config.parallel_tool_calls is True
+    assert factory._build_memory_rail(None) == "memory-enabled"
+    assert factory._build_subagents(None) == ["subagent-enabled"]
     result = []
     context = Context()
     for tool in (ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool, BashTool, CodeTool, WebFetchWebpageTool, WebFetchWebpageTool, WebFreeSearchTool, WebPaidSearchTool):
@@ -1190,6 +1194,33 @@ asyncio.run(main())
         )
         .unwrap();
         std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let socket = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!(".openjiuwen-snapshot-{}.sock", std::process::id()));
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_messages = messages.clone();
+        let server_stop = stop.clone();
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            while !server_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut line = String::new();
+                        std::io::BufReader::new(stream.try_clone().unwrap())
+                            .read_line(&mut line)
+                            .unwrap();
+                        server_messages.lock().unwrap().push(line);
+                        stream.write_all(b"1\n").unwrap();
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("snapshot test listener failed: {error}"),
+                }
+            }
+        });
         let sidecar = root.join("native.jsonl");
         let marker = root.join("executed");
         let log_marker = root.join("log-configured");
@@ -1205,6 +1236,7 @@ asyncio.run(main())
             .env("ASB_TEST_WORKSPACE", &record_workspace)
             .env("ASB_TEST_RENDER_PREFIX", "record:")
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_RECORD", &sidecar)
+            .env("ASB_FS_MARKER_SOCKET", &socket)
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &record_workspace)
             .output()
             .unwrap();
@@ -1244,9 +1276,29 @@ asyncio.run(main())
             .env("ASB_TEST_LOG_CONFIGURED", &log_marker)
             .env("ASB_TEST_WORKSPACE", &replay_workspace)
             .env("ASB_TEST_RENDER_PREFIX", "replay:")
+            .env("ASB_FS_REPLAY_SOCKET", &socket)
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
             .output()
             .unwrap();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        server.join().unwrap();
+        std::fs::remove_file(&socket).unwrap();
+        let messages = messages.lock().unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|line| line.starts_with("tool-begin:"))
+                .count(),
+            30
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|line| line.starts_with("tool-end:"))
+                .count(),
+            60
+        );
+        drop(messages);
         assert!(
             replay.status.success(),
             "{}",

@@ -25,6 +25,12 @@ class LocalWorkspace:
 
 
 class SubmissionRecoveryTests(unittest.TestCase):
+    def test_snapshot_baseline_uses_attempt_storage(self):
+        ordinary=task_module.SweBenchTask(None,'catalog','fixture','artifacts')
+        snapshot=task_module.SweBenchTask(None,'catalog','fixture','artifacts',tool_mode='replay',snapshot=True)
+        self.assertEqual(ordinary.submission_git_dir(),task_module.SUBMISSION_GIT_DIR)
+        self.assertEqual(snapshot.submission_git_dir(),'/asb-snapshot-storage/baseline.git')
+
     def test_reflog_digest_ignores_cross_ref_order_but_binds_each_entry(self):
         first = b'HEAD@{0}\x00commit\x00reset\x00actor\x00email\x00\n'
         second = b'refs/heads/base@{0}\x00commit\x00create\x00actor\x00email\x00\n'
@@ -60,6 +66,7 @@ class SubmissionRecoveryTests(unittest.TestCase):
     def test_task_preserves_tool_mode(self):
         for mode in ('none','record','replay'):
             self.assertEqual(task_module.SweBenchTask(None,'catalog','fixture','artifacts',tool_mode=mode).tool_mode,mode)
+            self.assertEqual(task_module.SweBenchTask(None,'catalog','fixture','artifacts',tool_mode=mode,snapshot=True).snapshot,mode!='none')
         with self.assertRaisesRegex(ValueError,'unsupported workload tool mode'):
             task_module.SweBenchTask(None,'catalog','fixture','artifacts',tool_mode='unexpected')
 

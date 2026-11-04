@@ -5,7 +5,6 @@ use super::{
 use crate::{Error, install::Recipe};
 use std::path::Path;
 const TOOL_PROGRESS_FILENAME: &str = "pi-progress.json";
-
 // Pi's Responses client uses its freshly generated session UUID only as a
 // provider-side prompt cache key. It changes across replay launches.
 const TAPE_WIRE_EXTENSION: &str = r#"
@@ -35,8 +34,16 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_estimated_disk_mib(768)
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_complete_tool_replay(prepare_tool_replay)
+.with_native_tool_transport()
+.with_guest_service(start_native_service)
+.with_deferred_native_recording(finalize_native_recording)
 .with_collection(collect)
 .with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "pi",
+        filename: "native-tool-pending.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
     super::super::ArtifactSpec {
         namespace: "summary",
         filename: "pi-summary.json",
@@ -146,6 +153,18 @@ fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
                 ..AgentArtifacts::default()
             },
         };
+    if let Some(bytes) = context
+        .frozen
+        .bytes("native-tool-pending.jsonl")
+        .filter(|bytes| !bytes.is_empty())
+    {
+        artifacts
+            .sealed_artifacts
+            .push(super::super::SealedArtifact {
+                kind: "native-tool-deferred".into(),
+                bytes: bytes.to_vec(),
+            });
+    }
     // Pi opted into the deterministic extension, so this adapter owns the
     // corresponding manifest selection.  The generic dispatcher only seals
     // the opaque bytes returned in AgentArtifacts.
@@ -513,9 +532,12 @@ fn prepare_summary(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         .to_str()
         .ok_or_else(|| Error::Run("Pi summary extension path is not valid UTF-8".into()))?;
     let summary = context.run_dir.join("summary/pi-summary.json");
-    context
-        .command
-        .args(["--no-extensions", "--extension", extension]);
+    if std::env::var_os("ASB_FS_MARKER_SOCKET").is_none()
+        && std::env::var_os("ASB_FS_REPLAY_SOCKET").is_none()
+    {
+        context.command.arg("--no-extensions");
+    }
+    context.command.args(["--extension", extension]);
     context.command.env("ASB_PI_SUMMARY_PATH", summary);
     Ok(())
 }
@@ -578,6 +600,13 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
+    if (tape.mode == crate::tape::Mode::Record
+        && std::env::var_os("ASB_FS_MARKER_SOCKET").is_some())
+        || (tape.mode == crate::tape::Mode::Replay
+            && std::env::var_os("ASB_FS_REPLAY_SOCKET").is_some())
+    {
+        return Ok(());
+    }
     let launch =
         super::super::tool_replay_mcp::per_call_launch(context, tape, TOOL_PROGRESS_FILENAME)?;
     let extension = context.runtime_dir.join("pi/asb-local-tools.ts");
@@ -678,6 +707,64 @@ export default function(pi) {
 }
 "#;
 
+fn finalize_native_recording(pending: &[u8], snapshot_sha256: &str) -> Result<Vec<u8>, Error> {
+    super::super::native_guest::finalize("pi", pending, snapshot_sha256)
+}
+
+fn start_native_service(
+    command: &mut std::process::Command,
+    executable: &str,
+    run_dir: &Path,
+    mode: Option<crate::tape::Mode>,
+    native_tool: Option<&Path>,
+    snapshot_sha256: Option<&str>,
+) -> Result<Option<super::super::auxiliary::AuxiliaryPlan>, Error> {
+    let Some((mode, marker, snapshot)) =
+        super::super::native_guest::selection(mode, snapshot_sha256)?
+    else {
+        return Ok(None);
+    };
+    let cli = std::fs::canonicalize(executable)
+        .map_err(|_| Error::Run("Pi executable is unavailable for native recording".into()))?;
+    let bundle = cli
+        .ancestors()
+        .map(|ancestor| {
+            ancestor.join("node_modules/@mariozechner/pi-agent-core/dist/agent-loop.js")
+        })
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            Error::Run("Pi native recording requires the installed pinned agent-core bundle".into())
+        })?;
+    let assets = [
+        (
+            "pi-native-bootstrap.mjs",
+            include_str!("../../../assets/scripts/pi-native-bootstrap.mjs"),
+        ),
+        (
+            "pi-native-transform.mjs",
+            include_str!("../../../assets/scripts/pi-native-transform.mjs"),
+        ),
+        (
+            "pi-fetch-diagnostic.mjs",
+            include_str!("../../../assets/scripts/pi-fetch-diagnostic.mjs"),
+        ),
+    ];
+    super::super::native_guest::start(
+        command,
+        super::super::native_guest::Settings {
+            agent: "pi",
+            bundle: &bundle,
+            run_dir,
+            mode,
+            marker,
+            native_tool,
+            snapshot: &snapshot,
+            assets: &assets,
+        },
+    )
+    .map(Some)
+}
+
 fn configure_provider(
     command: &mut std::process::Command,
     directory: &Path,
@@ -713,7 +800,62 @@ fn configure_provider(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_snapshot_recording_is_bound_to_pi_and_the_settled_digest() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/continue_native_sidecar_emit.mjs");
+        let emit = |pi: bool| {
+            let mut command = std::process::Command::new("node");
+            command.arg(&fixture).arg("--pending");
+            if pi {
+                command.arg("--pi");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success());
+            output.stdout
+        };
+        let digest = crate::cassette::digest(b"snapshot");
+        assert!(super::finalize_native_recording(&emit(true), &digest).is_ok());
+        assert!(super::finalize_native_recording(&emit(false), &digest).is_err());
+        assert!(super::finalize_native_recording(&emit(true), "bad").is_err());
+    }
     use super::*;
+
+    #[test]
+    fn fetch_diagnostic_preserves_results_and_sanitizes_failures() {
+        let root = std::env::temp_dir().join(format!("asb-pi-fetch-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("diagnostic.mjs"),
+            include_str!("../../../assets/scripts/pi-fetch-diagnostic.mjs"),
+        )
+        .unwrap();
+        std::fs::write(root.join("test.mjs"), r#"import {installFetchDiagnostic} from './diagnostic.mjs';
+import {createServer} from 'node:net';
+const logs=[]; let failure=false; const originalError=new Error('secret request data',{cause:{code:'ECONNREFUSED'}});
+const target={fetch:async function(value){if(failure) throw originalError; return {value, receiver:this===target};}};
+installFetchDiagnostic(target,text=>logs.push(text));
+const response=await target.fetch('ok'); if(response.value!=='ok'||!response.receiver) throw Error('success changed');
+failure=true; for(let i=0;i<10;i++){try{await target.fetch('secret url')}catch(error){if(error!==originalError)throw Error('error changed')}}
+if(logs.length!==8||logs.some(s=>s!=='ASB Pi fetch transport failure: ECONNREFUSED\n'))throw Error('unsanitized or unbounded');
+const throwing={fetch:async()=>{throw new Error('secret')}};installFetchDiagnostic(throwing,()=>{throw Error('report failed')});
+try{await throwing.fetch()}catch(error){if(error.message!=='secret')throw Error('report masked error')}
+const server=createServer();await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const port=server.address().port;await new Promise(resolve=>server.close(resolve));
+const actualLogs=[];const actual={fetch:globalThis.fetch};installFetchDiagnostic(actual,text=>actualLogs.push(text));
+try{await actual.fetch(`http://127.0.0.1:${port}/secret`);throw Error('unexpected fetch success')}catch(error){if(error.message==='unexpected fetch success')throw error}
+if(actualLogs.length!==1||!actualLogs[0].includes('ECONNREFUSED')||actualLogs[0].includes(String(port)))throw Error('real network failure not sanitized');
+"#).unwrap();
+        let output = std::process::Command::new("node")
+            .arg(root.join("test.mjs"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn replay_normalizes_only_pi_response_session_cache_uuid() {

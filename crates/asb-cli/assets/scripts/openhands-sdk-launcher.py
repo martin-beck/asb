@@ -10,12 +10,31 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
 from typing import Any
 
 from openhands.sdk.tool import ToolExecutor
+
+
+def snapshot_boundary(mode: str, action: str, alias: str) -> None:
+    """Notify the optional workload-owned snapshot service around a terminal call."""
+    variable = 'ASB_FS_MARKER_SOCKET' if mode == 'record' else 'ASB_FS_REPLAY_SOCKET'
+    path = os.environ.get(variable)
+    if not path:
+        return
+    suffix = f':{os.getpid()}:{threading.get_native_id()}' if mode == 'record' else ''
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.connect(path)
+            connection.sendall(f'tool-{action}:{alias}{suffix}\n'.encode('ascii'))
+            with connection.makefile('rb') as response:
+                if not response.readline(32).strip().isdigit():
+                    raise RuntimeError('OpenHands snapshot boundary was rejected')
+    except (OSError, UnicodeError) as error:
+        raise RuntimeError('OpenHands snapshot boundary is unavailable') from error
 
 
 def with_terminal_executor(agent: Any, executor: Any) -> Any:
@@ -46,6 +65,8 @@ class NativeTerminalExecutor(ToolExecutor):
     def __init__(self, bridge: str, mode: str, sidecar: str, launch_json: str) -> None:
         self._mode = mode
         self._delegate = None
+        self._sequence = 0
+        self._sequence_lock = threading.Lock()
         self._bridge_lock = threading.Lock()
         if mode == "record":
             from openhands.tools.terminal.impl import TerminalExecutor
@@ -63,13 +84,21 @@ class NativeTerminalExecutor(ToolExecutor):
         from openhands.tools.terminal import TerminalObservation
         from openhands.tools.terminal.metadata import CmdOutputMetadata
 
+        with self._sequence_lock:
+            self._sequence += 1
+            alias = f'openhands-{self._sequence}'
+
         request = {
             "kind": "terminal_action", "schema_version": 1,
             "command": action.command, "is_input": action.is_input,
             "timeout": action.timeout, "reset": action.reset,
         }
         if self._delegate is not None:
-            observation = self._delegate(action)
+            snapshot_boundary('record', 'begin', alias)
+            try:
+                observation = self._delegate(action)
+            finally:
+                snapshot_boundary('record', 'end', alias)
             request = {"kind": "record_terminal", "schema_version": 1,
                        "action": request, "observation": {
                            "kind": "terminal_observation", "schema_version": 1,
@@ -80,8 +109,9 @@ class NativeTerminalExecutor(ToolExecutor):
                        }}
         assert self._bridge.stdin is not None
         assert self._bridge.stdout is not None
-        # Pair each bridge request with its response even when the SDK invokes
-        # tools concurrently. The native tool execution remains outside this lock.
+        # Keep a request and its response together. SDK tools can run in
+        # parallel, and a shared stdio bridge otherwise lets one caller read
+        # another caller's observation. Tool execution itself remains parallel.
         with self._bridge_lock:
             self._bridge.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
             self._bridge.stdin.flush()
@@ -96,6 +126,7 @@ class NativeTerminalExecutor(ToolExecutor):
         expected = {"kind", "schema_version", "content", "is_error", "command", "exit_code", "timeout", "metadata"}
         if set(response) != expected or response["kind"] != "terminal_observation":
             raise RuntimeError("ASB native terminal bridge returned an invalid observation")
+        snapshot_boundary('replay', 'end', alias)
         return TerminalObservation(
             content=[TextContent(text=response["content"])],
             is_error=response["is_error"], command=response["command"],

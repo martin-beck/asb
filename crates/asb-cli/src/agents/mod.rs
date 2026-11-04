@@ -5,6 +5,7 @@
 
 mod adapters;
 mod artifacts;
+pub(crate) mod auxiliary;
 #[allow(
     dead_code,
     reason = "capsule staging follows the validated manifest contract"
@@ -14,6 +15,7 @@ pub(crate) mod determinism;
 pub(crate) mod mcp_framing;
 pub(crate) mod mcp_relay;
 pub(crate) mod mcp_transcript;
+mod native_guest;
 pub(crate) mod native_trace;
 pub(crate) mod tool_replay;
 pub(crate) mod tool_replay_mcp;
@@ -136,8 +138,29 @@ pub(crate) trait AgentAdapter: Sync {
         false
     }
     fn prepare(&self, context: &mut PreparationContext<'_>) -> Result<(), Error>;
+    fn prepare_guest_service(
+        &self,
+        _command: &mut Command,
+        _executable: &str,
+        _run_dir: &Path,
+        _mode: Option<crate::tape::Mode>,
+        _native_tool: Option<&Path>,
+        _snapshot_sha256: Option<&str>,
+    ) -> Result<Option<auxiliary::AuxiliaryPlan>, Error> {
+        Ok(None)
+    }
     fn supports_native_tool_transport(&self) -> bool {
         false
+    }
+    /// Bind an adapter-private pending native stream to settled workspace data.
+    fn finalize_native_recording(
+        &self,
+        _pending: &[u8],
+        _workspace_sha256: &str,
+    ) -> Result<Vec<u8>, Error> {
+        Err(Error::Run(
+            "agent does not support deferred native recording".into(),
+        ))
     }
     /// Whether this adapter owns a bounded guest-workspace effect capsule.
     /// Remote orchestration may only transfer the opaque bytes; capture and
@@ -500,6 +523,15 @@ pub(super) fn final_result_counter(stdout: &str, field: &str) -> Option<u64> {
 
 type CommandBuilder = for<'a> fn(&CommandContext<'a>) -> CommandSpec;
 type PreparationHook = for<'a> fn(&mut PreparationContext<'a>) -> Result<(), Error>;
+type GuestServiceHook = fn(
+    &mut Command,
+    &str,
+    &Path,
+    Option<crate::tape::Mode>,
+    Option<&Path>,
+    Option<&str>,
+) -> Result<Option<auxiliary::AuxiliaryPlan>, Error>;
+type DeferredNativeHook = fn(&[u8], &str) -> Result<Vec<u8>, Error>;
 type ToolReplayHook = for<'a> fn(&mut PreparationContext<'a>, TapeContext<'a>) -> Result<(), Error>;
 type CollectionHook = for<'a> fn(&CollectionContext<'a>) -> AgentArtifacts;
 /// An adapter-selected extension which may attach its own bounded replay
@@ -536,6 +568,8 @@ pub(super) struct StaticAdapter {
     mcp_servers: bool,
     mcp_relay: bool,
     native_tool_transport: bool,
+    guest_service: Option<GuestServiceHook>,
+    finalize_native_recording: Option<DeferredNativeHook>,
     max_steps: bool,
     native_workspace_capsule: Option<(WorkspaceCapsuleCaptureHook, WorkspaceCapsuleApplyHook)>,
     collect: Option<CollectionHook>,
@@ -586,6 +620,8 @@ impl StaticAdapter {
             mcp_servers: false,
             mcp_relay: false,
             native_tool_transport: false,
+            guest_service: None,
+            finalize_native_recording: None,
             max_steps: false,
             native_workspace_capsule: None,
             collect: None,
@@ -616,6 +652,18 @@ impl StaticAdapter {
 
     pub(super) const fn with_collection(mut self, collect: CollectionHook) -> Self {
         self.collect = Some(collect);
+        self
+    }
+    pub(super) const fn with_guest_service(mut self, hook: GuestServiceHook) -> Self {
+        self.guest_service = Some(hook);
+        self
+    }
+
+    pub(super) const fn with_deferred_native_recording(
+        mut self,
+        finalize: DeferredNativeHook,
+    ) -> Self {
+        self.finalize_native_recording = Some(finalize);
         self
     }
 
@@ -886,6 +934,37 @@ impl AgentAdapter for StaticAdapter {
     }
     fn supports_native_tool_transport(&self) -> bool {
         self.native_tool_transport
+    }
+    fn prepare_guest_service(
+        &self,
+        command: &mut Command,
+        executable: &str,
+        run_dir: &Path,
+        mode: Option<crate::tape::Mode>,
+        native_tool: Option<&Path>,
+        snapshot_sha256: Option<&str>,
+    ) -> Result<Option<auxiliary::AuxiliaryPlan>, Error> {
+        self.guest_service.map_or(Ok(None), |hook| {
+            hook(
+                command,
+                executable,
+                run_dir,
+                mode,
+                native_tool,
+                snapshot_sha256,
+            )
+        })
+    }
+    fn finalize_native_recording(
+        &self,
+        pending: &[u8],
+        workspace_sha256: &str,
+    ) -> Result<Vec<u8>, Error> {
+        self.finalize_native_recording
+            .ok_or_else(|| Error::Run("agent does not support deferred native recording".into()))?(
+            pending,
+            workspace_sha256,
+        )
     }
     fn supports_native_workspace_capsule(&self) -> bool {
         self.native_workspace_capsule.is_some()
@@ -1258,8 +1337,20 @@ mod tests {
             .filter(|adapter| adapter.supports_native_tool_transport())
             .map(|adapter| adapter.id())
             .collect::<Vec<_>>();
-        assert_eq!(capable, vec!["codex", "openhands", "openjiuwen", "hermes"]);
-        assert!(!find("pi").unwrap().supports_native_tool_transport());
+        assert_eq!(
+            capable,
+            vec![
+                "codex",
+                "pi",
+                "openhands",
+                "openjiuwen",
+                "goose",
+                "hermes",
+                "continue"
+            ]
+        );
+        assert!(find("pi").unwrap().supports_native_tool_transport());
+        assert!(find("goose").unwrap().supports_native_tool_transport());
         let adapter = find("codex").unwrap();
         assert!(select_process(adapter, "not-executed", None).is_ok());
     }
@@ -1298,7 +1389,7 @@ mod tests {
         // merely by declaring an unrelated native artifact, while native
         // adapters are not required to pretend their transport is MCP/local.
         assert!(local_sidecar(find("pi").unwrap()));
-        assert!(!native_sidecar(find("pi").unwrap()));
+        assert!(native_sidecar(find("pi").unwrap()));
         assert!(native_sidecar(find("openhands").unwrap()));
         assert!(!local_sidecar(find("openhands").unwrap()));
     }

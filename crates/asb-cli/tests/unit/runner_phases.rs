@@ -1141,6 +1141,76 @@ fn recording_association_binds_actual_attempt_and_preserves_uncertain_raw_captur
 }
 
 #[test]
+fn recording_streams_snapshot_artifact_but_keeps_track_incomplete() {
+    let fixture = Fixture::new();
+    let campaign = fixture.0.canonicalize().unwrap().join("campaign-snapshot");
+    std::fs::create_dir_all(campaign.join("batch-1")).unwrap();
+    let destination =
+        super::super::recording::preflight(&fixture.0.join("snapshot.asb.zip")).unwrap();
+    let recorder = super::super::recording::Recorder::new(
+        destination.clone(),
+        campaign.clone(),
+        "campaign-snapshot".into(),
+        1,
+        1,
+        None,
+    );
+    let mut result = result();
+    let snapshot = fixture.0.join("snapshot.tar");
+    let bytes = vec![42u8; 200_001];
+    std::fs::write(&snapshot, &bytes).unwrap();
+    result.snapshot_artifact = Some(snapshot);
+    recorder
+        .prepare(&recording_identity(&result), 1, &[1])
+        .unwrap();
+    let producer = super::super::recording::base(&campaign, 1);
+    std::fs::write(&producer, b"{}\n").unwrap();
+    let capture = crate::proxy::capture::CaptureEvidence {
+        adapter: "llmtape".into(),
+        output: producer.clone(),
+        complete: true,
+        accepted: 1,
+        completed: 1,
+        failed: 0,
+        recorded: 1,
+        inference_requests: 1,
+        bytes: 3,
+        sha256: crate::cassette::digest(b"{}\n"),
+    };
+    let proxy = crate::proxy::Evidence {
+        captures: vec![capture],
+        output_files: vec![producer],
+        cleanup_confirmed: true,
+    };
+    let evidence = recorder
+        .commit(1, replica::Identity::default(), &result, &proxy)
+        .unwrap();
+    let mut rendered = Vec::new();
+    render_json(&result, &mut rendered).unwrap();
+    let mut summary: serde_json::Value = serde_json::from_slice(&rendered).unwrap();
+    summary["execution"] =
+        serde_json::json!({"campaign":"campaign-snapshot","batch":1,"replica":1,"slot":1});
+    evidence
+        .validate_summary(&summary, &proxy.captures)
+        .unwrap();
+    let publication = recorder.finalize(true).unwrap().unwrap();
+    assert!(
+        publication
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("incomplete track"))
+    );
+    let mut archive =
+        crate::cassette::Archive::open(&destination, crate::cassette::Limits::default()).unwrap();
+    assert!(!archive.manifest().tracks[0].complete);
+    let mut restored = Vec::new();
+    archive
+        .copy_artifact_to(1, "workspace-snapshots", &mut restored)
+        .unwrap();
+    assert_eq!(restored, bytes);
+}
+
+#[test]
 fn recording_setup_failure_retains_partial_bytes_with_unknown_outcomes() {
     let fixture = Fixture::new();
     let campaign = fixture.0.canonicalize().unwrap().join("campaign-1");
@@ -1224,6 +1294,7 @@ fn result() -> RunResult<'static> {
         local_tool_transcript: None,
         deterministic_manifest: None,
         sealed_artifacts: Vec::new(),
+        snapshot_artifact: None,
         cassette: None,
         measurement_directory: None,
         stdout: "submission".into(),
