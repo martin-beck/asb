@@ -6,7 +6,11 @@ use support::IsolatedEnvironment;
 #[test]
 fn native_hooks_preserve_delegation_and_replay_tool_results() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    for fixture in ["cline_native_hooks.mjs", "cline_native_transport.mjs"] {
+    for fixture in [
+        "cline_native_hooks.mjs",
+        "cline_native_transport.mjs",
+        "cline_native_session.mjs",
+    ] {
         let output = std::process::Command::new("node")
             .arg(root.join("tests").join(fixture))
             .current_dir(root)
