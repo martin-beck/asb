@@ -36,6 +36,8 @@ test('tailed SymPy metadata and elapsed summaries preserve substantive differenc
     if (prefix) assert.notEqual(normalizeToolResult({text: replayed.replace('testbed/bin/python', 'other/bin/python'), tool}), canonical);
     const clipped = replayed.replace('cache:              yes\n', '');
     assert.match(normalizeToolResult({text: clipped, tool}), /random seed:        98765/);
+    const duplicate = '==== test process starts ====\n' + replayed.replace('random seed:        98765', 'random seed: malformed\nrandom seed:        98765');
+    assert.match(normalizeToolResult({text: duplicate, tool}), /random seed:        98765/);
   }
   const outputOnly = body + short;
   assert.equal(normalizeToolResult({text: outputOnly, tool}), normalizeToolResult({text: body + long, tool}));
