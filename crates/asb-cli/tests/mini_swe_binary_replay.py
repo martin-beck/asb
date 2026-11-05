@@ -16,7 +16,7 @@ class Submitted(Exception):
 
 class LocalEnvironment:
     def __init__(self, **kwargs):
-        self.config = types.SimpleNamespace(cwd=kwargs['cwd'])
+        self.config = types.SimpleNamespace(cwd=kwargs['cwd'], timeout=kwargs.get('timeout', 30))
 
     def execute(self, action, cwd='', *, timeout=None):
         root = Path(cwd or self.config.cwd)
@@ -45,7 +45,7 @@ class BinaryReplayTests(unittest.TestCase):
                 namespace={};exec(compile(transport,'asb_mini_swe_tools.py','exec'),namespace)
                 recorder=namespace['AsbTapeEnvironment'](cwd=str(root))
                 for index in range(129):
-                    recorder._record({'command':f'command-{index}', 'cwd':'', 'timeout':None},{'returncode':0,'output':'done'},[])
+                    recorder._record({'command':f'command-{index}', 'cwd':'', 'timeout':None, 'effective_timeout':30},{'returncode':0,'output':'done'},[])
             with patch.dict(os.environ, {'ASB_MINI_SWE_TOOL_TAPE':str(tape), 'ASB_MINI_SWE_TOOL_MODE':'replay'}, clear=True):
                 namespace={};exec(compile(transport,'asb_mini_swe_tools.py','exec'),namespace)
                 replay=namespace['AsbTapeEnvironment'](cwd=str(root))
@@ -69,7 +69,7 @@ class BinaryReplayTests(unittest.TestCase):
             result = namespace['AsbTapeEnvironment'](cwd=str(recorded)).execute({'command': 'run tests'})
             self.assertEqual(result['returncode'], 0)
             entry = json.loads(tape.read_text())
-            self.assertEqual(entry['request'], {'command':'run tests', 'cwd':'', 'timeout':None})
+            self.assertEqual(entry['request'], {'command':'run tests', 'cwd':'', 'timeout':None, 'effective_timeout':30})
             self.assertIn('write_binary', [effect['kind'] for effect in entry['effects']])
             os.environ['ASB_MINI_SWE_TOOL_MODE'] = 'replay'
             namespace = {}
@@ -84,7 +84,7 @@ class BinaryReplayTests(unittest.TestCase):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory); tape=root/'tape.jsonl'
-            request={'command':'run tests','cwd':'','timeout':12}
+            request={'command':'run tests','cwd':'','timeout':12,'effective_timeout':12}
             tape.write_text(json.dumps({'schema_version':1,'sequence':1,'tool':'mini-swe.bash',
                                         'request':request,'result':{'returncode':0,'output':'done'}})+'\n')
             with patch.dict(os.environ, {'ASB_MINI_SWE_TOOL_TAPE':str(tape), 'ASB_MINI_SWE_TOOL_MODE':'replay'}, clear=True):
@@ -99,6 +99,21 @@ class BinaryReplayTests(unittest.TestCase):
                                             'request':{'command':'run tests'},'result':{'returncode':0,'output':'done'}})+'\n')
                 with self.assertRaisesRegex(RuntimeError,'differs from the recording'):
                     environment(cwd=str(root)).execute({'command':'run tests'},cwd='',timeout=12)
+
+    def test_replay_rejects_changed_configured_default_timeout(self):
+        import os
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); tape=root/'tape.jsonl'
+            request={'command':'run tests','cwd':'','timeout':None,'effective_timeout':30}
+            tape.write_text(json.dumps({'schema_version':1,'sequence':1,'tool':'mini-swe.bash',
+                                        'request':request,'result':{'returncode':0,'output':'done'}})+'\n')
+            with patch.dict(os.environ, {'ASB_MINI_SWE_TOOL_TAPE':str(tape), 'ASB_MINI_SWE_TOOL_MODE':'replay'}, clear=True):
+                namespace={};exec(compile(transport,'asb_mini_swe_tools.py','exec'),namespace)
+                environment=namespace['AsbTapeEnvironment']
+                self.assertEqual(environment(cwd=str(root),timeout=30).execute({'command':'run tests'})['output'],'done')
+                with self.assertRaisesRegex(RuntimeError,'execution context differs'):
+                    environment(cwd=str(root),timeout=60).execute({'command':'run tests'})
 
 
 if __name__ == '__main__':
