@@ -232,19 +232,19 @@ class AsbTapeEnvironment(LocalEnvironment):
             handle.write(encoded + "\n")
         self._entries.append(entry)
 
-    def _record(self, command, result, effects):
+    def _record(self, request, result, effects):
         event = {
             "schema_version": 1,
             "sequence": len(self._entries) + 1,
             "tool": "mini-swe.bash",
-            "request": {"command": command},
+            "request": request,
             "result": result,
         }
         if effects:
             event["effects"] = effects
         self._append(event)
 
-    def _record_failure(self, command, failure):
+    def _record_failure(self, request, failure):
         # `_effects` reports an oversized mutation as an observable failure.
         # The rejected call remains causally observable: otherwise replay
         # advances its provider tape and asks for a later, unrecorded tool
@@ -254,7 +254,7 @@ class AsbTapeEnvironment(LocalEnvironment):
             "schema_version": 1,
             "sequence": len(self._entries) + 1,
             "tool": "mini-swe.bash",
-            "request": {"command": command},
+            "request": request,
             "result": None,
             "failure": failure,
         }
@@ -333,12 +333,13 @@ class AsbTapeEnvironment(LocalEnvironment):
 
     def execute(self, action, cwd="", *, timeout=None):
         command = action.get("command", "")
+        request = {"command": command, "cwd": cwd, "timeout": timeout}
         if _MODE == "record":
             if os.environ.get('ASB_FS_MARKER_SOCKET'):
                 # The boundary service owns workspace effects in this mode.
                 alias = f'mini-swe-{len(self._entries) + 1}'
                 if not _filesystem_marker('begin', alias):
-                    self._record_failure(command, 'Mini-SWE filesystem operation boundary is unavailable')
+                    self._record_failure(request, 'Mini-SWE filesystem operation boundary is unavailable')
                     raise RuntimeError('Mini-SWE filesystem operation boundary is unavailable')
                 try:
                     try:
@@ -349,10 +350,10 @@ class AsbTapeEnvironment(LocalEnvironment):
                 finally:
                     ended = _filesystem_marker('end', alias)
                     if not ended:
-                        self._record_failure(command, 'Mini-SWE filesystem operation boundary is unavailable')
+                        self._record_failure(request, 'Mini-SWE filesystem operation boundary is unavailable')
                         raise RuntimeError('Mini-SWE filesystem operation boundary is unavailable')
                     elif 'output' in locals():
-                        self._record(command, output, [])
+                        self._record(request, output, [])
                 return output
             root = self._root(cwd)
             before = self._snapshot(root)
@@ -362,16 +363,16 @@ class AsbTapeEnvironment(LocalEnvironment):
                 try:
                     effects = self._effects(root, before, self._snapshot(root))
                 except RuntimeError as error:
-                    self._record_failure(command, str(error))
+                    self._record_failure(request, str(error))
                     raise
-                self._record(command, {"submitted": list(submitted.messages)}, effects)
+                self._record(request, {"submitted": list(submitted.messages)}, effects)
                 raise
             try:
                 effects = self._effects(root, before, self._snapshot(root))
             except RuntimeError as error:
-                self._record_failure(command, str(error))
+                self._record_failure(request, str(error))
                 raise
-            self._record(command, output, effects)
+            self._record(request, output, effects)
             return output
         if self._position >= len(self._entries):
             raise RuntimeError("Mini-SWE replay requested an unrecorded local tool result")
@@ -381,9 +382,9 @@ class AsbTapeEnvironment(LocalEnvironment):
             entry.get("schema_version") != 1
             or entry.get("sequence") != self._position
             or entry.get("tool") != "mini-swe.bash"
-            or entry.get("request", {}).get("command") != command
+            or entry.get("request") != request
         ):
-            raise RuntimeError("Mini-SWE replay local tool command differs from the recording")
+            raise RuntimeError("Mini-SWE replay local tool command or execution context differs from the recording")
         failure = entry.get("failure")
         if failure is not None:
             if (
@@ -763,8 +764,8 @@ mod tests {
 
     #[test]
     fn mini_swe_seals_bounded_workspace_effect_failures_for_exact_replay() {
-        assert!(TOOL_TRANSPORT.contains("def _record_failure(self, command, failure):"));
-        assert!(TOOL_TRANSPORT.contains("self._record_failure(command, str(error))"));
+        assert!(TOOL_TRANSPORT.contains("def _record_failure(self, request, failure):"));
+        assert!(TOOL_TRANSPORT.contains("self._record_failure(request, str(error))"));
         assert!(TOOL_TRANSPORT.contains("Mini-SWE replay local tool failure is malformed"));
         assert!(
             TOOL_TRANSPORT
