@@ -61,6 +61,18 @@ Future SPE, pressure and BPF adapters must prove equivalent process-tree/cgroup
 scope; unavailable isolation produces unavailable data, never a host-wide fallback.
 An advertised SPE/uncore PMU alone does not establish scoped measurement support.
 
+Native execution uses the actual stopped agent principal beneath its guardian
+for every process-scoped collector. Guardian custody/cleanup remains separate;
+the guardian and ASB controller are excluded from the inherited measurement
+tree. The principal is bound to both process generations and parent links before
+attachment, and resumes through the owned principal's pidfd after collectors
+and any cohort rendezvous are ready. Native execution timing begins at that
+release boundary rather than counting guardian/collector preparation as agent
+execution. `measurement-target.json` records the selected principal and excluded
+guardian/controller identities without command text or environment values.
+CPU accounting may move only that verified stopped principal into its exclusive
+leaf; container execution continues to preserve existing container membership.
+
 ## Qualification target
 
 Read-only discovery on node26 found a Kunpeng-920 with Arm PMUv3, SPE and

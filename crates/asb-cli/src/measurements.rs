@@ -440,6 +440,7 @@ pub struct Session {
     component_starts: BTreeMap<String, Instant>,
     component_timings: BTreeMap<String, ComponentTiming>,
     process_identity: Option<ProcessIdentity>,
+    measurement_guardian: Option<ProcessIdentity>,
     incomplete_collectors: BTreeMap<String, String>,
     clock_ticks_per_second: Option<u64>,
 }
@@ -631,6 +632,7 @@ impl Session {
             component_starts: BTreeMap::new(),
             component_timings: BTreeMap::new(),
             process_identity: None,
+            measurement_guardian: None,
             incomplete_collectors: BTreeMap::new(),
             clock_ticks_per_second: clock_ticks_per_second(),
         };
@@ -903,10 +905,51 @@ impl Session {
     pub(crate) fn measurement_target(&self) -> Option<ProcessIdentity> {
         self.process_identity
     }
+    pub(crate) fn measurement_guardian(&self) -> Option<ProcessIdentity> {
+        self.measurement_guardian
+    }
 
     /// Attach collectors to the selected child after it has been spawned.
     pub fn attach_pid(&mut self, pid: u32) -> Result<(), String> {
+        self.measurement_guardian = None;
         self.process_identity = ProcessIdentity::read(pid);
+        self.attach_collectors(pid)
+    }
+
+    /// Native collectors observe the actual stopped agent under our owned
+    /// guardian, not the ASB guardian's accounting/capture/cleanup activity.
+    pub(crate) fn attach_native_principal(
+        &mut self,
+        root: ProcessIdentity,
+        guardian: ProcessIdentity,
+    ) -> Result<(), String> {
+        let gate = ProcessIdentity::record_at(Path::new("/proc"), guardian.pid);
+        let principal = ProcessIdentity::record_at(Path::new("/proc"), root.pid);
+        if gate != Some((guardian, std::process::id())) || principal != Some((root, guardian.pid)) {
+            return Err(
+                "native measurement target is not the bound principal under ASB's owned guardian"
+                    .into(),
+            );
+        }
+        self.process_identity = Some(root);
+        self.measurement_guardian = Some(guardian);
+        write_json(
+            &self.dir.join("measurement-target.json"),
+            &serde_json::json!({
+                "schema_version":1,"scope":"agent-process-tree","source":"owned-stopped-native-principal",
+                "root":{"pid":root.pid,"start_time_ticks":root.start_time_ticks},
+                "excluded_guardian":{"pid":guardian.pid,"start_time_ticks":guardian.start_time_ticks},
+                "excluded_controller_pid":std::process::id()
+            }),
+        )?;
+        self.attach_collectors(root.pid)?;
+        if !root.matches() || !guardian.matches() {
+            return Err("native measurement identity changed during attachment".into());
+        }
+        Ok(())
+    }
+
+    fn attach_collectors(&mut self, pid: u32) -> Result<(), String> {
         #[cfg(test)]
         if self.test_attach_failure {
             return Err("injected collector attachment failure".into());
@@ -932,6 +975,7 @@ impl Session {
         if !root.matches() {
             return Err("isolated process identity changed before collector attachment".into());
         }
+        self.measurement_guardian = None;
         self.process_identity = Some(root);
         for collector in self.adapters.clone() {
             if collector.requires_pid() {

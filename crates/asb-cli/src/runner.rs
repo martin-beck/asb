@@ -1180,18 +1180,25 @@ fn run_measured_agent_with_launch_progress(
         .as_ref()
         .is_some_and(crate::launch::CommandRoute::is_gated);
     #[cfg(target_os = "linux")]
+    let measure_principal = gated && session.is_some();
+    let deferred_begin =
+        launch.is_some() || (gated && session.is_some() && cfg!(target_os = "linux"));
+    #[cfg(target_os = "linux")]
     let admission = if let Some(route) = route.filter(|route| route.is_gated()) {
         let validated = route
             .validate_gate(command)
             .map_err(|error| Error::Run(format!("cannot validate ASB gate launch: {error}")))?;
         Some(
-            crate::process_gate::Admission::with_principal_observation(validated).map_err(
-                |error| {
-                    Error::Run(format!(
-                        "cannot establish ASB process gate custody: {error}"
-                    ))
-                },
-            )?,
+            (if measure_principal {
+                crate::process_gate::Admission::with_measured_principal(validated)
+            } else {
+                crate::process_gate::Admission::with_principal_observation(validated)
+            })
+            .map_err(|error| {
+                Error::Run(format!(
+                    "cannot establish ASB process gate custody: {error}"
+                ))
+            })?,
         )
     } else {
         None
@@ -1213,7 +1220,7 @@ fn run_measured_agent_with_launch_progress(
         };
         emit(LifecycleEvent::MeasurementsReady)?;
         emit(LifecycleEvent::AgentSpawn)?;
-        if launch.is_none() {
+        if !deferred_begin {
             emit(LifecycleEvent::AgentExecuteBegin)?;
         }
         #[cfg(target_os = "linux")]
@@ -1262,11 +1269,6 @@ fn run_measured_agent_with_launch_progress(
         // inherited terminal input after receiving ASB's instruction document.
         drop(stdin);
     }
-    if let Some(session) = session.as_deref_mut()
-        && let Err(error) = session.event(LifecycleEvent::AgentStarted)
-    {
-        return Err(native_launch_failure(&mut child, launch, error));
-    }
     #[cfg(unix)]
     if launch.is_some()
         && let Err(error) = child.wait_stopped()
@@ -1277,9 +1279,47 @@ fn run_measured_agent_with_launch_progress(
             format!("native launch target is not stopped: {error}"),
         ));
     }
+    #[cfg(target_os = "linux")]
+    let principal = if measure_principal {
+        match child.start_measured_principal() {
+            Ok(pid) => {
+                let root = measurements::ProcessIdentity::read(pid);
+                let guardian = measurements::ProcessIdentity::read(child.id());
+                match root.zip(guardian) {
+                    Some(pair) => Some(pair),
+                    None => {
+                        return Err(native_launch_failure(
+                            &mut child,
+                            launch,
+                            "native measurement principal or guardian disappeared",
+                        ));
+                    }
+                }
+            }
+            Err(error) => return Err(native_launch_failure(&mut child, launch, error)),
+        }
+    } else {
+        None
+    };
     if let Some(session) = session.as_deref_mut()
-        && let Err(error) = session.attach_pid(child.id())
+        && let Err(error) = session.event(LifecycleEvent::AgentStarted)
     {
+        return Err(native_launch_failure(&mut child, launch, error));
+    }
+    let attachment = if let Some(session) = session.as_deref_mut() {
+        #[cfg(target_os = "linux")]
+        if let Some((root, guardian)) = principal {
+            session.attach_native_principal(root, guardian)
+        } else {
+            session.attach_pid(child.id())
+        }
+        #[cfg(not(target_os = "linux"))]
+        session.attach_pid(child.id())
+    } else {
+        Ok(())
+    };
+    if let Err(error) = attachment {
+        let session = session.as_deref_mut().expect("attachment requires session");
         let mut primary = error;
         for event in [
             LifecycleEvent::AgentExecuteEnd,
@@ -1291,19 +1331,34 @@ fn run_measured_agent_with_launch_progress(
         }
         return Err(native_launch_failure(&mut child, launch, primary));
     }
-    if let Some(launch) = launch {
-        if let Err(error) = launch.ready() {
-            return Err(native_launch_failure(&mut child, Some(launch), error));
-        }
+    if let Some(launch) = launch
+        && let Err(error) = launch.ready()
+    {
+        return Err(native_launch_failure(&mut child, Some(launch), error));
+    }
+    if deferred_begin {
         if let Some(session) = session.as_deref_mut()
             && let Err(error) = session.event(LifecycleEvent::AgentExecuteBegin)
         {
-            return Err(native_launch_failure(&mut child, Some(launch), error));
+            return Err(native_launch_failure(&mut child, launch, error));
         }
         started = Instant::now();
     }
     #[cfg(unix)]
-    if gated && let Err(error) = child.resume() {
+    let resumed = if gated {
+        #[cfg(target_os = "linux")]
+        if let Some((root, _)) = principal {
+            child.resume_measured_principal(root.pid)
+        } else {
+            child.resume()
+        }
+        #[cfg(not(target_os = "linux"))]
+        child.resume()
+    } else {
+        Ok(())
+    };
+    #[cfg(unix)]
+    if let Err(error) = resumed {
         return Err(native_launch_failure(
             &mut child,
             launch,

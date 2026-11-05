@@ -14,6 +14,39 @@ fn root() -> std::path::PathBuf {
     root
 }
 
+#[test]
+fn measured_resume_rejects_a_pid_outside_the_owned_principal() {
+    let scope = test_support::Scope::new();
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    let (mut command, route) = command(
+        &binary,
+        "/bin/sh",
+        &["-c".into(), "printf principal".into()],
+    );
+    let mut gate = Admission::with_measured_principal(route.validate_gate(&mut command).unwrap())
+        .unwrap()
+        .spawn()
+        .unwrap();
+    let principal = gate.start_measured_principal().unwrap();
+    assert!(gate.resume_measured_principal(std::process::id()).is_err());
+    gate.resume_measured_principal(principal).unwrap();
+    assert!(gate.wait().unwrap().success());
+    let mut output = String::new();
+    gate.take_stdout()
+        .unwrap()
+        .read_to_string(&mut output)
+        .unwrap();
+    assert_eq!(output, "principal");
+    drop(gate);
+    scope.wait_finished();
+}
+
 fn command(gate: &Path, program: &str, args: &[String]) -> (Command, crate::launch::CommandRoute) {
     let mut launch = crate::launch::ProcessLaunch::new(program);
     for arg in args {

@@ -15,6 +15,91 @@ fn offline_sdk_session_protocol_fixtures_run_in_the_rust_gate() {
 }
 
 struct Fixture(PathBuf);
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_collectors_attach_to_stopped_agent_principal_and_exclude_guardian() {
+    struct Probe;
+    static PROBE: Probe = Probe;
+    impl crate::collectors::CollectorAdapter for Probe {
+        fn id(&self) -> &'static str {
+            "fixture-principal-scope"
+        }
+        fn requires_pid(&self) -> bool {
+            true
+        }
+        fn attach_pid(&self, session: &mut measurements::Session, pid: u32) -> Result<(), String> {
+            let root = session.measurement_target().ok_or("missing root")?;
+            let guardian = session.measurement_guardian().ok_or("missing guardian")?;
+            assert_eq!(pid, root.pid);
+            assert_ne!(pid, guardian.pid);
+            assert_ne!(pid, std::process::id());
+            let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+            assert!(
+                status
+                    .lines()
+                    .any(|l| l.starts_with("State:") && l.split_whitespace().nth(1) == Some("T"))
+            );
+            assert!(!session.dir.join("executed").exists());
+            std::fs::write(
+                session.dir.join("attached"),
+                format!("{pid} {}", guardian.pid),
+            )
+            .unwrap();
+            Ok(())
+        }
+        fn lifecycle_event(
+            &self,
+            session: &mut measurements::Session,
+            event: LifecycleEvent,
+        ) -> Result<(), String> {
+            if event == LifecycleEvent::AgentExecuteBegin {
+                assert!(
+                    session.dir.join("attached").exists(),
+                    "execution clock must begin after attachment"
+                );
+                assert!(!session.dir.join("executed").exists());
+            }
+            Ok(())
+        }
+    }
+    let fixture = Fixture::new();
+    let dir = fixture.0.join("measure");
+    let mut session = measurements::Session::start_with_collectors(&dir, &[], None).unwrap();
+    session.add_test_adapter(&PROBE);
+    let gate = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    let (mut command, route) = crate::launch::ProcessLaunch::new("/bin/sh").native(Some(&gate));
+    command
+        .args([
+            "-c",
+            "printf '%s' \"$$\" > \"$1\"; printf '%s' \"$$\"",
+            "fixture",
+        ])
+        .arg(dir.join("executed"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let target = route.target(&command);
+    let output = run_measured_agent(
+        &mut command,
+        &target,
+        Some(route),
+        Some(&mut session),
+        false,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert!(output.output.status.success());
+    let attached = std::fs::read_to_string(dir.join("attached")).unwrap();
+    let root = attached.split_whitespace().next().unwrap();
+    assert_eq!(std::fs::read_to_string(dir.join("executed")).unwrap(), root);
+    assert_eq!(String::from_utf8(output.output.stdout).unwrap(), root);
+}
 impl Fixture {
     fn new() -> Self {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))

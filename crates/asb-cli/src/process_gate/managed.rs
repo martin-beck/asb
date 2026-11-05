@@ -231,6 +231,55 @@ impl ManagedGate {
         }
     }
 
+    /// Resume only this guardian's proven stopped principal, using a pidfd so
+    /// an exit/PID-reuse race cannot signal an unrelated process.
+    pub(crate) fn resume_measured_principal(&mut self, pid: u32) -> io::Result<()> {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let gate = self.id();
+        let control = self
+            .control
+            .as_mut()
+            .ok_or_else(|| io::Error::other("measured principal control is missing"))?;
+        control.poll(gate)?;
+        if control.principal != Some(pid) || control.exited.is_some() {
+            return Err(io::Error::other(
+                "measured principal differs from guardian custody",
+            ));
+        }
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful pidfd_open returns a newly owned descriptor.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
+        let parent = status
+            .lines()
+            .find_map(|l| l.strip_prefix("PPid:"))
+            .and_then(|p| p.trim().parse::<u32>().ok());
+        let stopped = status
+            .lines()
+            .any(|l| l.starts_with("State:") && l.split_whitespace().nth(1) == Some("T"));
+        if parent != Some(gate) || !stopped {
+            return Err(io::Error::other(
+                "measured principal is not stopped under its owned guardian",
+            ));
+        }
+        if unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                fd.as_raw_fd(),
+                libc::SIGCONT,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     /// Establish current-ABI custody without admitting the application. This
     /// is also revalidated before CONT after any shared launch rendezvous.
     pub(crate) fn wait_stopped(&mut self) -> io::Result<()> {

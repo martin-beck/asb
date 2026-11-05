@@ -96,7 +96,7 @@ impl CollectorAdapter for CpuAccounting {
     fn attach_pid(&self, session: &mut Session, pid: u32) -> Result<(), String> {
         let state = session.state::<State>();
         let mut state = state.borrow_mut();
-        match attach(pid, session.cgroup_parent()) {
+        match attach(pid, session.cgroup_parent(), session.measurement_guardian()) {
             Ok(leaf) => state.leaf = Some(leaf),
             Err(reason) => state.reason = Some(reason),
         }
@@ -302,7 +302,11 @@ fn parse_cpu_stat(text: &str) -> Option<(u64, u64)> {
     Some((user?, system?))
 }
 
-fn attach(pid: u32, configured_parent: Option<&Path>) -> Result<Leaf, String> {
+fn attach(
+    pid: u32,
+    configured_parent: Option<&Path>,
+    guardian: Option<measurements::ProcessIdentity>,
+) -> Result<Leaf, String> {
     if !cfg!(target_os = "linux") {
         return Err("cgroup-v2 accounting requires Linux".into());
     }
@@ -336,8 +340,15 @@ fn attach(pid: u32, configured_parent: Option<&Path>) -> Result<Leaf, String> {
             .lines()
             .find_map(|s| s.strip_prefix("PPid:"))
             .and_then(|s| s.trim().parse::<u32>().ok());
-        if ppid != Some(std::process::id()) {
-            return Err("CPU accounting requires ASB's direct process gate child".into());
+        let expected_parent = match guardian {
+            Some(guardian) if guardian.matches() => guardian.pid,
+            Some(_) => return Err("CPU accounting guardian generation changed".into()),
+            None => std::process::id(),
+        };
+        if ppid != Some(expected_parent) {
+            return Err(
+                "CPU accounting requires the verified stopped agent under its owned parent".into(),
+            );
         }
         if status
             .lines()
@@ -570,7 +581,7 @@ mod tests {
             }
         }
         let mut child = Guard(Command::new("sh").args(["-c", "kill -STOP $$; for i in 1 2 3; do python3 -c 'import time; end=time.process_time()+0.05; exec(\"while time.process_time() < end: pass\")' || exit 1; done"]).spawn().unwrap());
-        let leaf = attach(child.0.id(), None)
+        let leaf = attach(child.0.id(), None, None)
             .expect("run this test under systemd-run --user --scope -p Delegate=yes");
         let path = leaf.path.clone();
         assert_eq!(read_cpu_stat(&path.join("cpu.stat")).unwrap(), (0, 0));
