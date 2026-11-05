@@ -41,6 +41,11 @@ fn optional_export_uses_regenerated_evidence_and_preserves_report_on_failure() {
     )
     .unwrap();
     fs::write(measured.join("agentsysperf-analysis.json"),r#"{"status":"unqualified","interpretation_status":"unqualified","findings":[{"analyzer":"unqualified-remedy","confidence":1.0}]}"#).unwrap();
+    fs::write(
+        measured.join("system.json"),
+        r#"{"schema_version":2,"architecture":"aarch64","logical_cpus":8}"#,
+    )
+    .unwrap();
     let source = root.join("sweep.toml");
     let path = source.to_str().unwrap();
     generate_with_links(path, &mut Vec::new(), false).unwrap();
@@ -91,6 +96,17 @@ fn optional_export_uses_regenerated_evidence_and_preserves_report_on_failure() {
         fs::read_to_string(measured.join("bottlenecks.json"))
             .unwrap()
             .contains("forged-old-analysis")
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.get_string(6).unwrap() == "context-value"
+                && r.get_string(7).unwrap() == "host.logical_cpus"
+                && r.get_string(9).unwrap() == "retained-host-metadata")
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r.get_string(6).unwrap() != "measurement"
+                || !r.get_string(7).unwrap().starts_with("host."))
     );
     drop(reader);
     let before_html = fs::read(report.join("report.html")).unwrap();
@@ -181,6 +197,7 @@ fn retained_native_export_preserves_scoped_counter_and_phase_evidence() {
     for row in reader.get_row_iter(None).unwrap() {
         let row = row.unwrap();
         let family = row.get_string(6).unwrap();
+        assert!(family != "measurement" || !row.get_string(7).unwrap().starts_with("host."));
         if family == "phase_alignments" && row.get_string(10).unwrap() == "observed" {
             let details: Value = serde_json::from_str(row.get_string(11).unwrap()).unwrap();
             assert_eq!(details["clock"], "PERF_TIME_CONV");
