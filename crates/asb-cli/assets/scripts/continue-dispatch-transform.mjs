@@ -2,7 +2,7 @@
 // that one call structurally and wrap it without changing the tool registry,
 // arguments, return value, or error behavior. This adapter-owned transform is
 // only suitable for the pinned client; reject unknown or ambiguous layouts.
-export function transformDispatch(source) {
+export function transformDispatch(source, {restoreReadState = false} = {}) {
   if (typeof source !== 'string') throw new TypeError('Continue bundle must be text');
   const pattern = /await\s+([A-Za-z_$][\w$]*)\.tool\.run\(\1\.preprocessResult\?\.args\?\?\1\.arguments,([A-Za-z_$][\w$]*)\)/g;
   const matches = [...source.matchAll(pattern)];
@@ -11,7 +11,20 @@ export function transformDispatch(source) {
   }
   const [call, request, context] = matches[0];
   const invocation = `${request}.tool.run(${request}.preprocessResult?.args??${request}.arguments,${context})`;
-  const replacement = `await globalThis[Symbol.for('asb.continue.nativeDispatch.v1')](${request},${context},()=>${invocation})`;
+  let replacement = `await globalThis[Symbol.for('asb.continue.nativeDispatch.v1')](${request},${context},()=>${invocation})`;
+  if (restoreReadState) {
+    // The native Read tool updates a private in-memory set used by Edit's
+    // preprocessor. Replay substitutes the tool result, so reproduce that
+    // adapter-owned state transition after its recorded effects are applied.
+    const marker = [...source.matchAll(/return\s+([\w$]+)\(([\w$]+)\),`Content of /g)];
+    const filesystem = [...source.matchAll(/([\w$]+)\.realpathSync\(([\w$]+)\),[\w$]+=\1\.readFileSync\(/g)];
+    if (marker.length !== 1 || filesystem.length !== 1 ||
+        !source.includes(`function ${marker[0][1]}(e){`) || !source.includes('name:"Read",displayName:"Read"')) {
+      throw new Error('Continue replay Read state hook is unsupported or ambiguous');
+    }
+    const fn = marker[0][1], fs = filesystem[0][1];
+    replacement = `await (async()=>{const result=${replacement};if(process.env.ASB_CONTINUE_MODE==='replay'&&${request}.name==='Read'){const args=${request}.preprocessResult?.args??${request}.arguments;${fn}(${fs}.realpathSync(args.filepath))}return result})()`;
+  }
   return source.slice(0, matches[0].index) + replacement + source.slice(matches[0].index + call.length);
 }
 
