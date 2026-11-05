@@ -7,6 +7,8 @@ class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args):pass
  def do_POST(self):
   data=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))));Handler.calls+=1
+  if self.path.endswith('/__asb_native_tool_consumed'):
+   self.send_response(200);self.send_header('Content-Length','0');self.end_headers();return
   tools=data.get('tools',[]);names=[x.get('function',{}).get('name','') for x in tools];name=next((n for n in names if n.lower()=='bash'),None)
   has_result=any(x.get('role')=='tool' for x in data.get('messages',[]))
   if name and not has_result:

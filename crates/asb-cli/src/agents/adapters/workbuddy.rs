@@ -353,6 +353,10 @@ fn start_native_service(
             "workbuddy-native-transform.mjs",
             include_str!("../../../assets/scripts/workbuddy-native-transform.mjs"),
         ),
+        (
+            "workbuddy-native-context.mjs",
+            include_str!("../../../assets/scripts/workbuddy-native-context.mjs"),
+        ),
     ];
     super::super::native_guest::start(
         command,
