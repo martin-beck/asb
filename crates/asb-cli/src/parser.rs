@@ -271,6 +271,7 @@ pub(crate) fn run_with_interactive(
                     "--respect-record-timings requires --replay or --llm-replay; recording always stores response delays",
                 );
             }
+            warn_live_tools(tape, stderr);
             let report_path = resolve(&options.path);
             let measurement_dir = options.measurements.as_deref().map(&resolve);
             let cassette = options.cassette.as_deref().map(&resolve);
@@ -332,6 +333,7 @@ pub(crate) fn run_with_interactive(
                     "--respect-record-timings requires --replay or --llm-replay; recording always stores response delays",
                 );
             }
+            warn_live_tools(tape, stderr);
             let generated_preset = match options.preset.as_deref() {
                 Some(preset) => {
                     match config::setup_preset_for_sweep(preset, options.json, &base, stdout) {
@@ -596,6 +598,15 @@ fn tape_selection(flags: TapeFlags) -> Result<TapeSelection, CliError> {
             .then_some(direction)
             .flatten(),
     })
+}
+
+fn warn_live_tools(selection: TapeSelection, stderr: &mut dyn Write) {
+    if selection.llm == Some(tape::Mode::Replay) && selection.tool.is_none() {
+        let _ = writeln!(
+            stderr,
+            "Warning: LLM-only replay can execute native tool commands and access external services; provider responses alone are replayed."
+        );
+    }
 }
 
 fn fail(stderr: &mut dyn Write, message: &str) -> u8 {
@@ -957,6 +968,66 @@ mod tape_flag_tests {
             let selection = tape_selection(TapeFlags::from_sweep(&args)).unwrap();
             assert!(selection.tool.is_none() && selection.tool_explicit);
         }
+    }
+
+    #[test]
+    fn llm_only_replay_warns_on_stderr_for_run_and_sweep_including_json() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-replay-warning-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(root.join(".asb")).unwrap();
+        std::fs::write(
+            root.join(".asb/project.toml"),
+            toml::to_string(&project::ProjectConfig::default()).unwrap(),
+        )
+        .unwrap();
+        for command in ["run", "sweep"] {
+            for flag in ["--llm-replay", "--llmreplay"] {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                let result = run(
+                    &[
+                        command.into(),
+                        "/nonexistent-asb-replay-warning.toml".into(),
+                        flag.into(),
+                        "--json".into(),
+                        "--project-dir".into(),
+                        root.clone().into_os_string(),
+                    ],
+                    &mut stdout,
+                    &mut stderr,
+                );
+                assert_eq!(result, 2);
+                assert!(stdout.is_empty());
+                let stderr = String::from_utf8(stderr).unwrap();
+                assert!(
+                    stderr.contains("LLM-only replay can execute native tool commands"),
+                    "{command} {flag}: {stderr}"
+                );
+            }
+        }
+        for selection in [
+            TapeSelection {
+                carrier: Some(tape::Mode::Record),
+                llm: Some(tape::Mode::Record),
+                tool: None,
+                tool_explicit: true,
+                mcp: None,
+            },
+            TapeSelection {
+                carrier: Some(tape::Mode::Replay),
+                llm: Some(tape::Mode::Replay),
+                tool: Some(tape::Mode::Replay),
+                tool_explicit: true,
+                mcp: None,
+            },
+        ] {
+            let mut stderr = Vec::new();
+            warn_live_tools(selection, &mut stderr);
+            assert!(stderr.is_empty());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
