@@ -1228,7 +1228,7 @@ mod tests {
         assert_eq!(rows.lines().count(), 7);
         let capture = serde_json::json!({
             "request": {"body": serde_json::json!({
-                "input": [{"call_id": "call-1", "output": "Chunk ID: recorded\nWall time: 0.2164 seconds\nProcess exited with code 0\nOriginal token count: 7\nfixture"}]
+                "input": [{"call_id": "call-1", "output": "Chunk ID: recorded\nWall time: 0.2164 seconds\nProcess exited with code 0\nOriginal token count: 7\nOutput:\nfixture"}]
             }).to_string()}
         });
         // Provider request snapshots can retain the same already-completed
@@ -1280,6 +1280,10 @@ mod tests {
         assert!(emitted.status.success());
         assert_eq!(String::from_utf8(emitted.stdout).unwrap(), "fixture");
         assert!(
+            emitted.stderr.is_empty(),
+            "normal emitter exit must not report an error"
+        );
+        assert!(
             !marker.exists(),
             "the recorded native command must never run in replay"
         );
@@ -1315,6 +1319,39 @@ mod tests {
             ),
         );
         assert!(!mismatch.status.success());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_emitter_preserves_nonzero_status_without_reporting_hook_failure() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-codex-emitter-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("hook.py");
+        let state = root.join("state.json");
+        let progress = root.join("progress.json");
+        std::fs::write(&script, NATIVE_HOOKS).unwrap();
+        let response = serde_json::to_vec(&"Chunk ID: recorded\nWall time: 0.01 seconds\nProcess exited with code 7\nOutput:\nfixture").unwrap();
+        std::fs::write(
+            &state,
+            serde_json::json!({"pending": {}, "next": 0, "replay": [["", encode_base64(&response)]]}).to_string(),
+        )
+        .unwrap();
+        let output = std::process::Command::new("python3")
+            .arg(&script)
+            .args(["emit", "0"])
+            .env("ASB_CODEX_NATIVE_MODE", "replay")
+            .env("ASB_CODEX_NATIVE_SIDECAR", root.join("sidecar.jsonl"))
+            .env("ASB_CODEX_NATIVE_PROGRESS", &progress)
+            .env("ASB_CODEX_NATIVE_STATE", &state)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(output.stdout, b"fixture");
+        assert!(output.stderr.is_empty());
+        assert!(!progress.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 
