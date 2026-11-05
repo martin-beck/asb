@@ -8,6 +8,31 @@ import subprocess
 import time
 
 
+def replay_roots(baseline, target, extras):
+    """Restore the recorded root layout, or validate an explicit override."""
+    baseline = Path(baseline)
+    marker = baseline / '.asb-snapshot-roots.json'
+    configured = [str(Path(item).resolve()) for item in [target, *extras]]
+    if not marker.exists():
+        if extras:
+            raise ValueError('snapshot archive does not describe its captured roots')
+        return [target]
+    try:
+        recorded = json.loads(marker.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as error:
+        raise ValueError('snapshot archive does not describe its captured roots') from error
+    if (not isinstance(recorded, list) or len(recorded) < 2
+            or any(not isinstance(item, str) or not Path(item).is_absolute() for item in recorded)
+            or recorded[0] != configured[0] or (extras and recorded != configured)
+            or not all((baseline / str(i)).is_dir() for i in range(len(recorded)))):
+        raise ValueError('snapshot archive does not match the configured roots')
+    paths = [Path(item) for item in recorded]
+    if (any(path.is_symlink() or not path.is_dir() or str(path.resolve()) != str(path) for path in paths)
+            or any(a == b or a in b.parents or b in a.parents for i, a in enumerate(paths) for b in paths[i+1:])):
+        raise ValueError('snapshot archive roots are unavailable or overlap')
+    return recorded
+
+
 class SnapshotWorkspace:
     """Own a sparse filesystem image, dynamic loop device and task subvolume."""
     def __init__(self, image, mountpoint, size, mkfs, btrfs, rsync, qemu_img=None, qemu_storage=None):
