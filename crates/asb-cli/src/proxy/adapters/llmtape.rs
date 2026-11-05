@@ -3473,6 +3473,96 @@ mod tests {
     }
 
     #[test]
+    fn codex_replay_maps_running_session_in_streamed_followup_calls() {
+        let root = test_root();
+        let cassette = root.join("codex-running.jsonl");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for index in 0..2 {
+                let (mut connection, _) = listener.accept().unwrap();
+                let mut data = [0u8; 16384];
+                let _ = connection.read(&mut data).unwrap();
+                let args = r#"{"session_id":111,"yield_time_ms":1000}"#;
+                let item = serde_json::json!({"id":"fixture-poll","type":"function_call","name":"write_stdin","call_id":"poll","arguments":args});
+                let events = [
+                    serde_json::json!({"type":"response.function_call_arguments.delta","item_id":"fixture-poll","delta":args}),
+                    serde_json::json!({"type":"response.function_call_arguments.done","item_id":"fixture-poll","arguments":args}),
+                    serde_json::json!({"type":"response.output_item.done","item":item}),
+                    serde_json::json!({"type":"response.completed","response":{"output":[item]}}),
+                ];
+                let body = if index == 0 {
+                    events
+                        .into_iter()
+                        .map(|event| format!("data: {event}\n\n"))
+                        .collect::<String>()
+                } else {
+                    "{}".into()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    if index == 0 {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    },
+                    body.len(),
+                    body
+                );
+                connection.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let session = Session::start_for_agent(
+            Mode::Record,
+            &cassette,
+            Some(&upstream),
+            false,
+            &root,
+            Some("codex"),
+            None,
+        )
+        .unwrap();
+        let running = |id| {
+            format!(
+                "Chunk ID: abc\nWall time: 1.0 seconds\nProcess running with session ID {id}\nOutput:\npartial"
+            )
+        };
+        let body = |id, include_poll| {
+            let mut input = vec![
+                serde_json::json!({"type":"function_call_output","call_id":"call","output":running(id)}),
+            ];
+            if include_poll {
+                input.push(serde_json::json!({"type":"function_call","name":"write_stdin","arguments":serde_json::json!({"session_id":id,"yield_time_ms":1000}).to_string()}));
+            }
+            serde_json::json!({"model":"fixture","input":input}).to_string()
+        };
+        assert!(request_to(&session, "/v1/responses", &body(111, false)).contains("200 OK"));
+        assert!(request_to(&session, "/v1/responses", &body(111, true)).contains("200 OK"));
+        session.stop().unwrap();
+        server.join().unwrap();
+        let replay = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("codex"),
+            None,
+        )
+        .unwrap();
+        let response = request_to(&replay, "/v1/responses", &body(222, false));
+        assert!(response.contains("200 OK"), "{response}");
+        assert!(
+            response.contains("\\\"session_id\\\":222"),
+            "rewritten response must use the live session"
+        );
+        let response = request_to(&replay, "/v1/responses", &body(222, true));
+        assert!(response.contains("200 OK"), "{response}");
+        replay.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_tool_attribution_is_recorded_without_forwarding_the_header() {
         let root = test_root();
         let cassette = root.join("native-attribution.jsonl");
