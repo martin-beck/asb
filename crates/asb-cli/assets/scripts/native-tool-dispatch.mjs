@@ -7,19 +7,27 @@ export function createNativeDispatcher(mode, socket, {
   toRequest,
   encodeResult = value => value,
   decodeResult = value => value,
+  invokeRecorded = (_token, invoke) => invoke(),
+  beforeReplay,
   begin = async () => {},
   end = async () => {},
   snapshotOrder = false,
 } = {}) {
   if (!['record', 'replay'].includes(mode) || typeof socket !== 'string' || !socket ||
-      typeof isDelegation !== 'function' || typeof toRequest !== 'function' || typeof encodeResult !== 'function' || typeof decodeResult !== 'function' || typeof begin !== 'function' || typeof end !== 'function' || typeof snapshotOrder !== 'boolean') {
+      typeof isDelegation !== 'function' || typeof toRequest !== 'function' || typeof encodeResult !== 'function' || typeof decodeResult !== 'function' || typeof invokeRecorded !== 'function' || (beforeReplay !== undefined && typeof beforeReplay !== 'function') || typeof begin !== 'function' || typeof end !== 'function' || typeof snapshotOrder !== 'boolean') {
     throw new TypeError('native dispatcher configuration is invalid');
   }
   return async (call, context, invoke) => {
     if (typeof invoke !== 'function') throw new TypeError('Native tool native tool invocation is invalid');
     if (isDelegation(call, context)) return invoke();
     const request = toRequest(call, context);
-    if (mode === 'replay') return decodeResult((await brokerRequest(socket, { op: 'invoke', request })).value);
+    if (mode === 'replay') {
+      if (!beforeReplay) return decodeResult((await brokerRequest(socket, { op: 'invoke', request })).value);
+      const {token} = await brokerRequest(socket, {op:'reserve', request});
+      const {ordinal} = await brokerRequest(socket, {op:'inspect', token});
+      await beforeReplay(ordinal);
+      return decodeResult((await brokerRequest(socket, {op:'release', token})).value);
+    }
     const { token } = await brokerRequest(socket, { op: 'start', request });
     // A failed boundary leaves workspace effects unaccounted for. Invalidate
     // the exchange and release its pending token before propagating failure.
@@ -40,7 +48,7 @@ export function createNativeDispatcher(mode, socket, {
     };
     await boundary(begin);
     let value;
-    try { value = await invoke(); }
+    try { value = await invokeRecorded(token, invoke); }
     catch (error) {
       let outcome;
       try {

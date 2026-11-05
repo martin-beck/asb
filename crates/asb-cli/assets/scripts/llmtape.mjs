@@ -802,6 +802,21 @@ let replayOrderWaiters = 0;
 // entries available for a delayed matching probe, at most once per entry.
 const deferredProbes = [];
 const skippedProbeIndices = new Set();
+// Nested provider exchanges belong to a particular recorded native tool.
+// The tool adapter signals only after matching that exact tool invocation.
+const completedNativeTools = new Set();
+function nativeToolKey(context) {
+  if (!context || typeof context.agent !== 'string' || !/^[a-z][a-z0-9-]{0,31}$/.test(context.agent) || !Number.isSafeInteger(context.ordinal) || context.ordinal < 0) return null;
+  return `${context.agent}:${context.ordinal}`;
+}
+function advanceNativeTools() {
+  while (cursor < interactions.length) {
+    const key = nativeToolKey(interactions[cursor]?.native_tool_context);
+    if (!key || !completedNativeTools.has(key)) break;
+    skippedProbeIndices.add(cursor);
+    cursor += 1;
+  }
+}
 let rejected = 0;
 let firstMismatch = null;
 const progressPath = `${cassette}.progress.json`;
@@ -1036,6 +1051,35 @@ async function handle(request, response, recording) {
     chunks.push(bytes);
   }
   const body = Buffer.concat(chunks, bodySize);
+  // Private native-tool attribution is carried only to this proxy. Never
+  // forward it to providers or include it in request matching material.
+  const attribution = request.headers['x-asb-native-tool'];
+  delete request.headers['x-asb-native-tool'];
+  let nativeToolContext;
+  if (attribution !== undefined) {
+    const match = typeof attribution === 'string' && /^v1:([a-z][a-z0-9-]{0,31}):(0|[1-9][0-9]*)$/.exec(attribution);
+    const ordinal = match ? Number(match[2]) : NaN;
+    if (!match || !Number.isSafeInteger(ordinal)) {
+      response.writeHead(400, { connection: 'close' });
+      response.end();
+      return;
+    }
+    nativeToolContext = { agent: match[1], ordinal };
+  }
+  if (requestPath(request.url).split('?', 1)[0].endsWith('/__asb_native_tool_consumed')) {
+    let key;
+    try { key = nativeToolKey(JSON.parse(body.toString('utf8'))); } catch { /* malformed control */ }
+    if (mode !== 'replay' || request.method !== 'POST' || !key) {
+      response.writeHead(400, { connection: 'close' });
+    } else {
+      completedNativeTools.add(key);
+      advanceNativeTools();
+      writeProgress();
+      response.writeHead(204, { connection: 'close' });
+    }
+    response.end();
+    return;
+  }
   // Adapter-owned control messages are handled locally and never enter the
   // provider transcript. The tape core does not interpret their payload.
   if (agentWireExtension?.controlRequest) {
@@ -1067,6 +1111,7 @@ async function handle(request, response, recording) {
   if (mode === "replay") {
     const deadline = performance.now() + MAX_REPLAY_ORDER_WAIT_MS;
     while (true) {
+      advanceNativeTools();
       if (isReplayProbe(recordedRequest)) {
         const deferred = deferredProbes.findIndex((index) => requestKey(interactions[index].request) === requestKey(recordedRequest));
         if (deferred >= 0) {
@@ -1087,6 +1132,7 @@ async function handle(request, response, recording) {
         && requestKey(recordedRequest) === requestKey(interactions[cursor].request)) {
         const probe = interactions[cursor];
         cursor += 1;
+        advanceNativeTools();
         writeProgress();
         await deliverRecordedResponse(response, probe);
         return;
@@ -1104,6 +1150,7 @@ async function handle(request, response, recording) {
         deferredProbes.push(cursor);
         skippedProbeIndices.add(cursor);
         cursor += 1;
+        advanceNativeTools();
         writeProgress();
       }
       const expectedCursor = cursor;
@@ -1143,6 +1190,7 @@ async function handle(request, response, recording) {
       return;
     }
     cursor += 1;
+    advanceNativeTools();
     writeProgress();
     await deliverRecordedResponse(response, interaction);
     return;
@@ -1185,6 +1233,7 @@ async function handle(request, response, recording) {
       request_received_unix_ms: requestReceivedUnixMs,
       response_observed_unix_ms: Math.round(performance.timeOrigin + performance.now()),
     },
+    ...(nativeToolContext ? { native_tool_context: nativeToolContext } : {}),
   };
   if (capture) capture.append(recording.token, interaction, isInferenceRequest(recordedRequest));
   else {

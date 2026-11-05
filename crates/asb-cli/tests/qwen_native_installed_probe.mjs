@@ -23,6 +23,10 @@ await new Promise(resolve => markerServer.listen(marker, resolve));
 const provider = httpServer(async (request, response) => {
   let raw = '';
   for await (const chunk of request) raw += chunk;
+  if (request.url.endsWith('/__asb_native_tool_consumed')) {
+    assert.deepEqual(JSON.parse(raw), {agent:'qwen-code',ordinal:0});
+    response.writeHead(204); response.end(); return;
+  }
   const input = JSON.parse(raw);
   const completed = (input.messages || []).some(message => message.role === 'tool');
   calls++;

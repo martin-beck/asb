@@ -221,6 +221,10 @@ fn start_native_service(
             "qwen-native-transform.mjs",
             include_str!("../../../assets/scripts/qwen-native-transform.mjs"),
         ),
+        (
+            "qwen-native-context.mjs",
+            include_str!("../../../assets/scripts/qwen-native-context.mjs"),
+        ),
     ];
     super::super::native_guest::start(
         command,
@@ -349,6 +353,17 @@ mod tests {
     fn native_dispatch_records_and_replays_without_executing_tools() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/qwen_native_integration.mjs");
+        let status = std::process::Command::new("node")
+            .arg(fixture)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn native_context_isolated_between_tools_and_provider_requests() {
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/qwen_native_context.mjs");
         let status = std::process::Command::new("node")
             .arg(fixture)
             .status()
