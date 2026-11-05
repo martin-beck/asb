@@ -432,6 +432,22 @@ fn bundle_choices_and_numeric_incomplete_status_remain_distinct() {
 }
 
 #[test]
+fn legacy_snapshot_bundle_preserves_unknown_status_and_can_be_selected() {
+    let mut bundle = selected(plan(ExecutionMode::Replay, 1, 1, false), true);
+    bundle.replay_inputs[0].complete = None;
+    bundle.replay_inputs[0].workspace_snapshots =
+        Some(PathBuf::from("inputs/workspace-snapshots-64.tar"));
+    assert!(bundle.validate_layout().is_ok());
+    bundle.replay_selection.as_mut().unwrap().selector = Some(crate::cassette::Selector::Id(64));
+    assert!(bundle.validate_layout().is_ok());
+    bundle.replay_inputs[0].workspace_snapshots =
+        Some(PathBuf::from("inputs/workspace-snapshots-65.tar"));
+    assert!(bundle.validate_layout().is_err());
+    bundle.replay_inputs[0].workspace_snapshots = None;
+    assert!(bundle.validate_layout().is_err());
+}
+
+#[test]
 fn selected_legacy_keeps_backend_limits_without_reading_or_allocating_payloads() {
     let mut numeric = selected(plan(ExecutionMode::Replay, 1, 1, false), false);
     numeric.replay_inputs[0].bytes = 65 * 1024 * 1024;
