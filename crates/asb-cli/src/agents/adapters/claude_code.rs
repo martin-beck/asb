@@ -6,19 +6,7 @@ use crate::Error;
 use crate::install::Recipe;
 use std::path::Path;
 
-// Claude regenerates this environment header from the current date on every
-// launch. Keep all task content and other system-message text significant.
-const TAPE_WIRE_EXTENSION: &str = r#"
-export function normalizeRequest(request) {
-  const body = request?.body;
-  if (!Array.isArray(body?.system)) return body;
-  for (const block of body.system) {
-    if (block?.type !== 'text' || typeof block.text !== 'string') continue;
-    block.text = block.text.replace(/^(CWD: [^\n]+\nDate: )\d{4}-\d{2}-\d{2}(?=\n|$)/, '$1<asb-claude-date>');
-  }
-  return body;
-}
-"#;
+const TAPE_WIRE_EXTENSION: &str = include_str!("../../../assets/scripts/claude-native-wire.mjs");
 pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "claude-code",
     "claude",
@@ -375,6 +363,21 @@ fn start_native_service(
         .ok_or_else(|| Error::Run("Claude native hook runtime is missing".into()))?
         .to_path_buf();
     if mode == crate::tape::Mode::Replay {
+        let endpoint = command
+            .get_envs()
+            .find_map(|(name, value)| {
+                (name == "ANTHROPIC_BASE_URL")
+                    .then_some(value)
+                    .flatten()
+                    .and_then(std::ffi::OsStr::to_str)
+            })
+            .ok_or_else(|| Error::Run("Claude native replay needs its LLM replay endpoint".into()))?
+            .trim_end_matches('/')
+            .to_owned();
+        command.env(
+            "ASB_CLAUDE_ID_MAP_URL",
+            format!("{endpoint}/.asb/claude-task-map"),
+        );
         let ready = runtime.join("webfetch-ready.json");
         service
             .env(
@@ -898,6 +901,12 @@ if (normalizeRequest(altered).system[0].text === a.system[0].text) throw Error('
             cmd.get_envs()
                 .any(|(name, value)| name == "ASB_CLAUDE_WEB_READY" && value.is_some())
         );
+        assert!(cmd.get_envs().any(|(name, value)| {
+            name == "ASB_CLAUDE_ID_MAP_URL"
+                && value == Some(std::ffi::OsStr::new(
+                    "http://127.0.0.1:4321/.asb/claude-task-map",
+                ))
+        }));
         assert!(
             cmd.get_envs()
                 .any(|(name, value)| name == "ASB_CLAUDE_NATIVE_MODE"

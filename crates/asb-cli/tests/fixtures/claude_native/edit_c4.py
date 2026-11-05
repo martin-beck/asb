@@ -13,7 +13,8 @@ import tempfile
 
 fixture_dir = Path(os.environ['ASB_CLAUDE_FIXTURE_DIR']).resolve()
 binary = Path(os.environ['ASB_CLAUDE_BINARY']).resolve()
-script = Path(__file__).with_name('edit.mjs').resolve()
+delegated = os.environ.get('ASB_CLAUDE_TEST_DELEGATE') == '1'
+script = Path(__file__).with_name('delegate.mjs' if delegated else 'edit.mjs').resolve()
 root = Path(tempfile.mkdtemp(prefix='c4-edit-', dir=fixture_dir))
 target = root/'workspace'
 target.mkdir()
@@ -22,7 +23,8 @@ uid, gid = str(os.getuid()), str(os.getgid())
 if uid == '0':
     raise SystemExit('Run as an unprivileged user with passwordless sudo')
 preserved = ','.join(['ASB_CLAUDE_FIXTURE_DIR', 'ASB_CLAUDE_BINARY',
-                      'ASB_CLAUDE_FIXED_WORKSPACE', 'ASB_CLAUDE_PHASE', 'ASB_CLAUDE_EVENTS'])
+                      'ASB_CLAUDE_FIXED_WORKSPACE', 'ASB_CLAUDE_PHASE', 'ASB_CLAUDE_EVENTS',
+                      'ASB_CLAUDE_STRICT_TAPE'])
 command = ('mount --bind "$1" "$2" && ip link set lo up && '
            'exec setpriv --reuid "$3" --regid "$4" --init-groups "$5" "$6"')
 node = shutil.which('node')
@@ -35,14 +37,15 @@ def run(label, phase):
     source.mkdir()
     env = dict(os.environ, ASB_CLAUDE_FIXTURE_DIR=str(fixture_dir), ASB_CLAUDE_BINARY=str(binary),
                ASB_CLAUDE_FIXED_WORKSPACE=str(target), ASB_CLAUDE_PHASE=phase,
-               ASB_CLAUDE_EVENTS=str(cassette))
+               ASB_CLAUDE_EVENTS=str(cassette), ASB_CLAUDE_STRICT_TAPE='1' if delegated else '')
     result = subprocess.run(['sudo', '-n', '--preserve-env='+preserved, 'unshare', '--mount', '--net',
                              '--propagation', 'private', 'sh', '-c', command, 'asb-fixture',
                              str(source), str(target), uid, gid, node, str(script)],
                             env=env, text=True, capture_output=True, timeout=180)
     if result.returncode:
         raise RuntimeError(f'{label} failed: {result.stderr[-2000:]}')
-    if (source/'fixture.txt').read_text() != 'after\n':
+    expected = 'fixture child content\n' if delegated else 'after\n'
+    if (source/'fixture.txt').read_text() != expected:
         raise RuntimeError(f'{label} produced an unexpected file')
     return result.stdout.strip()
 

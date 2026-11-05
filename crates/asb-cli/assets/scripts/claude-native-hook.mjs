@@ -64,7 +64,7 @@ export async function recordHook(event, { directory, socket, marker }) {
 // tools and failure shapes before this can be selected by the adapter.
 export async function replayHook(event, { directory, socket, webProxy }) {
   const state = statePath(directory, event);
-  if (!socket || !['Bash', 'Read', 'Edit', 'Write', 'WebSearch', 'WebFetch'].includes(event.tool_name) || !event.tool_input ||
+  if (!socket || !['Agent', 'Bash', 'Read', 'Edit', 'Write', 'WebSearch', 'WebFetch'].includes(event.tool_name) || !event.tool_input ||
       typeof event.tool_input !== 'object' || Array.isArray(event.tool_input))
     throw new TypeError('Claude native replay probe does not support this native tool');
   if (event.tool_name === 'WebFetch' && !webProxy)
@@ -87,9 +87,9 @@ export async function replayHook(event, { directory, socket, webProxy }) {
         const text = (match[2] ?? '').replaceAll("'", "'\\''");
         command = `printf '%s' '${text}'; exit ${match[1]}`;
       }
-      // Claude tracks paths read and changed by its own tools. Execute these
-      // deterministic file operations in the isolated replay workspace, then
-      // reconcile the recorded boundary before publishing the recorded result.
+      // Let Claude's native file and child-agent tools run inside the isolated
+      // replay guest. Child provider requests still use the configured replay
+      // proxy. Reconcile each recorded boundary before publishing its result.
       const substitute = normalizeRequest(event.tool_name === 'Bash' ? {...event.tool_input, command} : event.tool_input);
       await file.writeFile(JSON.stringify({token, substitute, expected}));
       await file.close();
@@ -117,6 +117,15 @@ export async function replayHook(event, { directory, socket, webProxy }) {
   }
   if (event.hook_event_name !== 'PostToolUse') throw new Error('Claude native replay expected a successful tool');
   const result = JSON.parse(value.json);
+  if (event.tool_name === 'Agent' && (result.agentId || event.tool_response?.agentId)) {
+    const endpoint = process.env.ASB_CLAUDE_ID_MAP_URL;
+    if (!endpoint) throw new Error('Claude delegated replay needs its local task mapping endpoint');
+    const response = await fetch(endpoint, {method: 'POST', headers: {'content-type': 'application/json'},
+      body: JSON.stringify({live_id: event.tool_response?.agentId, recorded_id: result.agentId,
+        live_path: event.tool_response?.outputFile, recorded_path: result.outputFile}),
+      signal: AbortSignal.timeout(10000)});
+    if (!response.ok) throw new Error('Claude delegated task mapping was rejected');
+  }
   await unlink(state);
   return {hookSpecificOutput: {hookEventName: 'PostToolUse', updatedToolOutput: result}};
 }
