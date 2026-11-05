@@ -1532,7 +1532,16 @@ impl ResultFacts {
             steps,
             tool_calls,
             tool_calls_available,
-            adapter_tool_call_count: adapter_artifacts.tool_call_count,
+            adapter_tool_call_count: adapter_artifacts.tool_call_count.or_else(|| {
+                capture_complete
+                    .then(|| {
+                        agents::find(&config.agent).and_then(|adapter| {
+                            adapter
+                                .tool_call_count(&bounded(&child.stdout), &bounded(&child.stderr))
+                        })
+                    })
+                    .flatten()
+            }),
             local_tool_transcript,
             deterministic_manifest,
             native_trace,

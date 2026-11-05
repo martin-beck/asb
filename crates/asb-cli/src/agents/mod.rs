@@ -297,6 +297,10 @@ pub(crate) trait AgentAdapter: Sync {
     fn step_count(&self, _stdout: &str, _stderr: &str) -> Option<u64> {
         None
     }
+    /// Count adapter-observed completed tool calls from a complete client stream.
+    fn tool_call_count(&self, _stdout: &str, _stderr: &str) -> Option<usize> {
+        None
+    }
     /// Extract an adapter-owned counter before an isolated guest is removed.
     fn guest_step_count(&self, _run_dir: &Path) -> Option<u64> {
         None
@@ -569,6 +573,7 @@ type ArtifactFinalResponseHook = fn(&str, &FrozenArtifacts, &Path, bool) -> Opti
 type GuestArtifactAnswerHook = fn(&str, &FrozenArtifacts) -> bool;
 type ProcessHook = fn(&str) -> Result<crate::launch::ProcessLaunch, Error>;
 type StepCountHook = fn(&str, &str) -> Option<u64>;
+type ToolCallCountHook = fn(&str, &str) -> Option<usize>;
 type GuestStepCountHook = fn(&Path) -> Option<u64>;
 type FailureHook = fn(&str, &str) -> Option<String>;
 type PreferredExecutablesHook = fn(&Path) -> Vec<PathBuf>;
@@ -635,6 +640,7 @@ pub(super) struct StaticAdapter {
     guest_artifact_answer: Option<GuestArtifactAnswerHook>,
     process: Option<ProcessHook>,
     step_count: Option<StepCountHook>,
+    tool_call_count: Option<ToolCallCountHook>,
     guest_step_count: Option<GuestStepCountHook>,
     failure: Option<FailureHook>,
     response_failure: Option<ResponseFailureHook>,
@@ -692,6 +698,7 @@ impl StaticAdapter {
             guest_artifact_answer: None,
             process: None,
             step_count: None,
+            tool_call_count: None,
             guest_step_count: None,
             failure: None,
             response_failure: None,
@@ -844,6 +851,10 @@ impl StaticAdapter {
 
     pub(super) const fn with_step_count(mut self, hook: StepCountHook) -> Self {
         self.step_count = Some(hook);
+        self
+    }
+    pub(super) const fn with_tool_call_count(mut self, hook: ToolCallCountHook) -> Self {
+        self.tool_call_count = Some(hook);
         self
     }
     pub(super) const fn with_guest_step_count(mut self, hook: GuestStepCountHook) -> Self {
@@ -1141,6 +1152,9 @@ impl AgentAdapter for StaticAdapter {
     }
     fn step_count(&self, stdout: &str, stderr: &str) -> Option<u64> {
         self.step_count.and_then(|hook| hook(stdout, stderr))
+    }
+    fn tool_call_count(&self, stdout: &str, stderr: &str) -> Option<usize> {
+        self.tool_call_count.and_then(|hook| hook(stdout, stderr))
     }
     fn guest_step_count(&self, run_dir: &Path) -> Option<u64> {
         self.guest_step_count.and_then(|hook| hook(run_dir))
