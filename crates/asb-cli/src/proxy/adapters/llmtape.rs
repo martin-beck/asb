@@ -3424,6 +3424,55 @@ mod tests {
     }
 
     #[test]
+    fn codex_recording_retains_private_call_id_relationships() {
+        let root = test_root();
+        let cassette = root.join("codex-correlation.jsonl");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 16384];
+            let count = connection.read(&mut request).unwrap();
+            let observed = String::from_utf8_lossy(&request[..count]).into_owned();
+            connection.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+            observed
+        });
+        let session = Session::start_for_agent(
+            Mode::Record,
+            &cassette,
+            Some(&upstream),
+            false,
+            &root,
+            Some("codex"),
+            None,
+        )
+        .unwrap();
+        let body = r#"{"model":"fixture","prompt_cache_key":"conversation-1","input":[{"type":"function_call_output","call_id":"call-a","output":"one"},{"type":"function_call_output","call_id":"call-b","output":"two"}]}"#;
+        assert!(request_to(&session, "/v1/responses", body).contains("200 OK"));
+        session.stop().unwrap();
+        let forwarded = server.join().unwrap();
+        assert!(!forwarded.contains("agent_record_metadata"));
+        assert!(forwarded.contains("call-a") && forwarded.contains("call-b"));
+        let row: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(&cassette).unwrap().trim()).unwrap();
+        assert_eq!(
+            row["agent_record_metadata"],
+            serde_json::json!({"schema_version":1,"conversation":"conversation-1","output_call_ids":["call-a","call-b"]})
+        );
+        let normalized: serde_json::Value =
+            serde_json::from_str(row["request"]["body"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            normalized["input"][0]["call_id"],
+            "<asb-codex-input-call-id>"
+        );
+        assert_eq!(
+            normalized["input"][1]["call_id"],
+            "<asb-codex-input-call-id>"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_tool_attribution_is_recorded_without_forwarding_the_header() {
         let root = test_root();
         let cassette = root.join("native-attribution.jsonl");

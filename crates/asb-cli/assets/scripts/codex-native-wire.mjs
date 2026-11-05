@@ -21,3 +21,16 @@ export function normalizeRequest({ url, body }) {
   }
   return body;
 }
+
+// The normalized cassette key deliberately replaces generated call IDs.
+// Retain their private, per-conversation relationship for the native adapter;
+// these values are never added to the provider request or matching key.
+export function recordMetadata({url, body}) {
+  if (typeof url !== 'string' || !/\/responses(?:\?|$)/.test(url) ||
+      !body || typeof body !== 'object' || !Array.isArray(body.input)) return undefined;
+  const conversation = typeof body.prompt_cache_key === 'string' ? body.prompt_cache_key : null;
+  const ids = body.input.filter(item => item?.type === 'function_call_output').map(item => item.call_id);
+  if ((conversation !== null && conversation.length > 512) || ids.length > 16384 ||
+      ids.some(id => typeof id !== 'string' || !id || id.length > 512)) return undefined;
+  return {schema_version: 1, conversation, output_call_ids: ids};
+}

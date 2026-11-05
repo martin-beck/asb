@@ -932,6 +932,16 @@ async function handle(request, response, recording) {
       return;
     }
   }
+  let agentRecordMetadata;
+  if (mode === 'record' && agentWireExtension?.recordMetadata) {
+    let parsed;
+    try {
+      parsed = JSON.parse(body.toString('utf8'));
+    } catch {
+      // Invalid/non-JSON provider bodies remain the provider's concern.
+    }
+    if (parsed !== undefined) agentRecordMetadata = agentWireExtension.recordMetadata({url: requestPath(request.url), body: parsed});
+  }
   const normalizedBody = normalizeRequestBody(request.url || "/", body.toString("utf8"));
   const recordedRequest = {
     method: request.method || "GET",
@@ -1071,6 +1081,7 @@ async function handle(request, response, recording) {
       response_observed_unix_ms: Math.round(performance.timeOrigin + performance.now()),
     },
     ...(nativeToolContext ? { native_tool_context: nativeToolContext } : {}),
+    ...(agentRecordMetadata !== undefined ? { agent_record_metadata: agentRecordMetadata } : {}),
   };
   if (capture) capture.append(recording.token, interaction, isInferenceRequest(recordedRequest));
   else {
