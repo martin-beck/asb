@@ -22,6 +22,8 @@ parser.add_argument("--project", type=Path, required=True)
 parser.add_argument("--config", required=True)
 parser.add_argument("--require-series", action="append", default=[],
                     help="also require populated metrics and time series for this collector")
+parser.add_argument("--require-windows", action="store_true",
+                    help="require same-domain verified agent lifetime overlap")
 args = parser.parse_args()
 binary = args.asb.resolve(strict=True)
 project = args.project.resolve(strict=True)
@@ -86,6 +88,7 @@ if not observed or any(p in observed for p in [runner.pid, noise.pid, os.getpid(
 reports = list(project.glob("results/pressure-runs/run-*/**/kernel-pressure.json"))
 if len(reports) != 2:
     raise SystemExit("Expected exactly two retained pressure result documents")
+windows = []
 for path in reports:
     result = json.loads(path.read_text())
     if result["status"] not in {"completed", "partial"} or not result["series"] or not result["target"]:
@@ -99,10 +102,26 @@ for path in reports:
         raise SystemExit("Pressure root is not the verified actual agent principal")
     if target["excluded_guardian"]["pid"] in observed or target["excluded_controller_pid"] in observed:
         raise SystemExit("Agent cgroup included ASB guardian/controller activity")
+    if args.require_windows:
+        window = json.loads((path.parent / "execution-window.json").read_text())
+        if (window["status"] != "observed" or window["root"] != target["root"]
+                or window["clock"] != "CLOCK_MONOTONIC"
+                or window["scope"] != "verified-native-agent-principal-lifetime"
+                or not window["clock_domain"] or window["live_observations"] < 2
+                or window["start_bound_ns"] >= window["end_bound_ns"]):
+            raise SystemExit("Missing valid verified native lifetime window: " + str(path))
+        windows.append(window)
     for collector in args.require_series:
         if not collector or not all(c.isascii() and (c.isalnum() or c == '-') for c in collector):
             raise SystemExit("Invalid collector identifier for series qualification")
         observed_collector = json.loads((path.parent / (collector + ".json")).read_text())
         if observed_collector["status"] != "completed" or not observed_collector["metrics"] or not observed_collector["series"]:
             raise SystemExit("Collector did not publish validated series: " + collector)
+if args.require_windows:
+    if len(windows) != 2 or len({w["clock_domain"] for w in windows}) != 1:
+        raise SystemExit("Replica lifetime clocks are not comparable")
+    overlap = min(w["end_bound_ns"] for w in windows) - max(w["start_bound_ns"] for w in windows)
+    if overlap <= 0:
+        raise SystemExit("No observed live principal overlap")
+    print("Verified native agent lifetime overlap_ms=" + str(overlap / 1_000_000))
 print("Verified agent leaves exclude ASB, fixture and unrelated CPU/memory load")

@@ -139,6 +139,7 @@ fn progress_receives_incremental_transcript_and_is_finished() {
         Duration::from_secs(1),
         PresentationPolicy::PreserveEvidence,
         Some(&mut spy),
+        None,
         &mut || Ok(()),
     )
     .unwrap();
@@ -496,4 +497,31 @@ fn uncertain_drop_never_writes_to_a_full_stderr_pipe() {
     drop(fault);
     receipts.wait_finished();
     std::process::exit(0);
+}
+
+#[test]
+fn live_observation_does_not_require_output_or_terminal_progress_and_stops_at_exit() {
+    let mut observations = 0;
+    let mut exited = false;
+    let output = capture_with_output_streams_progress(
+        child("sleep 0.15"),
+        false,
+        &mut io::sink(),
+        None,
+        Duration::from_secs(2),
+        PresentationPolicy::PreserveEvidence,
+        None,
+        Some(&mut || {
+            observations += 1;
+        }),
+        &mut || {
+            exited = true;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(output.output.status.success());
+    assert!(observations >= 2);
+    assert!(exited);
+    assert!(output.output.stdout.is_empty() && output.output.stderr.is_empty());
 }

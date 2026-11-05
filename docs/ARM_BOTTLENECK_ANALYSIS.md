@@ -290,3 +290,29 @@ reason to capture unrelated system activity. Static CPU/PMU capability inventory
 remains separate from runtime measurements. Missing agent evidence is explicitly
 unavailable, without falling back to host `/proc/stat`, load averages or memory
 availability.
+
+
+## Observed native agent lifetime windows
+
+Measured native launches now publish `execution-window.json`. A bounded observer
+checks only the already verified principal's process generation, at most once
+per 100 ms in the existing capture loop. It does not start another collector
+process, depend on terminal progress, inspect other tasks or widen scope.
+The `CLOCK_MONOTONIC` domain is identified by a digest of boot and observer time
+namespace identities. Domain changes, failed execution observation, unsupported
+hosts and fewer than two live observations leave the interval unavailable.
+This is distinct from SPE/perf timestamps; no implicit clock conversion exists.
+
+The stored start is after the first successful live observation, and the end
+is before the last. Both observation uncertainties and unsampled launch/exit
+tails are excluded. A principal that has exited cannot extend the interval;
+remaining descendants are not guessed. The interval proves a conservative
+principal lifetime, including sleeping/stopped time, not CPU residency or
+continuous useful work. An analysis can compare these bounds only within an
+identical clock domain. Dispatch admission and per-session elapsed times remain
+insufficient to prove overlap. Container/direct launches have no fallback to
+an ASB controller or container management process.
+
+The clock policy follows the Linux manuals for
+[CLOCK_MONOTONIC](https://man7.org/linux/man-pages/man2/clock_gettime.2.html) and
+[time namespaces](https://man7.org/linux/man-pages/man7/time_namespaces.7.html).

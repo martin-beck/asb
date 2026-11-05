@@ -520,3 +520,16 @@ fn summary_retention_is_bounded_and_unscored_success_is_not_a_resolved_task() {
     assert_eq!(summary["unscored_count"], max_runs);
     assert!(summary["success_rate"].is_null());
 }
+
+#[test]
+fn execution_window_has_no_direct_process_or_controller_fallback() {
+    let fixture = Fixture::new();
+    let mut session = Session::start_with_collectors(&fixture.0, &[], None).unwrap();
+    assert!(session.native_execution_sampler().is_none());
+    session.attach_pid(std::process::id()).unwrap();
+    assert!(session.native_execution_sampler().is_none());
+    session.event(LifecycleEvent::AgentExecuteEnd).unwrap();
+    let window = session.execution_window_document();
+    assert_eq!(window["status"], "unavailable");
+    assert!(window["start_bound_ns"].is_null() && window["end_bound_ns"].is_null());
+}

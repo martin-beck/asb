@@ -8,6 +8,7 @@
 use crate::collectors;
 pub(crate) mod analysis;
 mod cohort;
+mod execution_window;
 mod producer;
 mod snapshot;
 pub(crate) use producer::command as producer_command;
@@ -53,7 +54,7 @@ pub struct ComponentTiming {
 }
 
 /// A PID is reusable; samplers bind it to one kernel process generation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct ProcessIdentity {
     pub pid: u32,
     pub start_time_ticks: u64,
@@ -441,6 +442,7 @@ pub struct Session {
     component_timings: BTreeMap<String, ComponentTiming>,
     process_identity: Option<ProcessIdentity>,
     measurement_guardian: Option<ProcessIdentity>,
+    execution_window: Rc<RefCell<execution_window::Window>>,
     incomplete_collectors: BTreeMap<String, String>,
     clock_ticks_per_second: Option<u64>,
 }
@@ -633,6 +635,7 @@ impl Session {
             component_timings: BTreeMap::new(),
             process_identity: None,
             measurement_guardian: None,
+            execution_window: Rc::new(RefCell::new(execution_window::Window::default())),
             incomplete_collectors: BTreeMap::new(),
             clock_ticks_per_second: clock_ticks_per_second(),
         };
@@ -662,6 +665,17 @@ impl Session {
         // Timestamp the event before potentially slow collector shutdown or
         // processing, so their overhead cannot become agent execution time.
         self.record_component_event(event);
+        match event {
+            collectors::LifecycleEvent::AgentExecuteEnd => self.execution_window.borrow_mut().end(),
+            collectors::LifecycleEvent::RunFailed
+            | collectors::LifecycleEvent::AgentWaitFailed
+            | collectors::LifecycleEvent::AgentAttachFailed
+            | collectors::LifecycleEvent::AgentSpawnFailed => {
+                self.execution_window.borrow_mut().invalidate()
+            }
+            _ => {}
+        }
+
         for collector in self.adapters.clone() {
             if let Err(error) = collector.lifecycle_event(self, event) {
                 errors.push(error);
@@ -730,6 +744,19 @@ impl Session {
     /// zero-duration measurement.
     pub(crate) fn component_timing(&self, name: &str) -> Option<&ComponentTiming> {
         self.component_timings.get(name)
+    }
+
+    /// Shared observation for collector-owned analysis; never derives a window
+    /// from dispatch admission, controller lifetime or wall-clock timestamps.
+    pub(crate) fn execution_window_document(&self) -> serde_json::Value {
+        self.execution_window.borrow().document()
+    }
+
+    /// Native caller requests this only after releasing the generation-bound
+    /// actual principal. No direct/container/ASB guardian fallback exists.
+    pub(crate) fn native_execution_sampler(&self) -> Option<execution_window::Sampler> {
+        self.measurement_guardian?;
+        execution_window::Sampler::new(self.execution_window.clone(), self.process_identity?)
     }
 
     /// Project-local tool root selected by the resolved execution plan.
@@ -1022,6 +1049,10 @@ impl Session {
             observe(adapter.finish(&mut self));
         }
         observe(self.write_component_measurements());
+        observe(write_json(
+            &self.dir.join("execution-window.json"),
+            &self.execution_window_document(),
+        ));
         observe(analysis::publish(
             &self.dir,
             self.component_timing("agent.execute"),

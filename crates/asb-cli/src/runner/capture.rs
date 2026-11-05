@@ -432,6 +432,7 @@ pub(super) fn capture_with_output_streams(
         runtime,
         policy,
         None,
+        None,
         after_exit,
     )
 }
@@ -447,6 +448,7 @@ pub(super) fn capture_with_output_streams_progress(
     runtime: Duration,
     policy: PresentationPolicy,
     mut progress: Option<&mut dyn Progress>,
+    mut observe_live: Option<&mut dyn FnMut()>,
     after_exit: &mut dyn FnMut() -> io::Result<()>,
 ) -> io::Result<CapturedOutput> {
     let result = capture_inner(
@@ -457,6 +459,7 @@ pub(super) fn capture_with_output_streams_progress(
         runtime,
         policy,
         &mut progress,
+        &mut observe_live,
         after_exit,
     );
     if let Some(progress) = progress {
@@ -479,6 +482,7 @@ fn capture_inner(
     runtime: Duration,
     policy: PresentationPolicy,
     progress_display: &mut Option<&mut dyn Progress>,
+    observe_live: &mut Option<&mut dyn FnMut()>,
     after_exit: &mut dyn FnMut() -> io::Result<()>,
 ) -> io::Result<CapturedOutput> {
     let stdout = child
@@ -500,6 +504,11 @@ fn capture_inner(
     loop {
         if status.is_none() {
             status = child.try_wait()?;
+            if status.is_none()
+                && let Some(observe) = observe_live.as_deref_mut()
+            {
+                observe();
+            }
             if status.is_none() && Instant::now() >= execution_deadline {
                 timed_out = true;
                 status = Some(child.stop()?);
