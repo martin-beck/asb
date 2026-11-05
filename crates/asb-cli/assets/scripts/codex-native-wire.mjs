@@ -29,7 +29,15 @@ export function recordMetadata({url, body}) {
   if (typeof url !== 'string' || !/\/responses(?:\?|$)/.test(url) ||
       !body || typeof body !== 'object' || !Array.isArray(body.input)) return undefined;
   const conversation = typeof body.prompt_cache_key === 'string' ? body.prompt_cache_key : null;
-  const ids = body.input.filter(item => item?.type === 'function_call_output').map(item => item.call_id);
+  const outputs = body.input.filter(item => item?.type === 'function_call_output');
+  const ids = outputs.map(item => item.call_id);
   if (ids.some(id => typeof id !== 'string' || !id)) return undefined;
-  return {schema_version: 1, conversation, output_call_ids: ids};
+  const running_wait_ms = outputs.map(item => {
+    if (typeof item.output !== 'string') return null;
+    const match = item.output.match(/^Chunk ID: [^\r\n]+\r?\nWall time: (\d+(?:\.\d+)?) seconds\r?\nProcess running with session ID /);
+    if (!match) return null;
+    const duration = Number(match[1]);
+    return Number.isFinite(duration) && duration >= 0 ? Math.ceil(duration * 1000) + 250 : null;
+  });
+  return {schema_version: 1, conversation, output_call_ids: ids, running_wait_ms};
 }

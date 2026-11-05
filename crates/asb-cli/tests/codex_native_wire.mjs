@@ -36,4 +36,6 @@ const metadata = recordMetadata({url:'/v1/responses',body:{prompt_cache_key:long
 assert.equal(metadata.conversation, longId);
 assert.equal(metadata.output_call_ids.length, manyOutputs.length);
 assert.equal(recordMetadata({url:'/v1/responses',body:{input:[{type:'function_call_output'}]}}), undefined);
+const running = recordMetadata({url:'/v1/responses',body:{input:[{type:'function_call_output',call_id:'call',output:'Chunk ID: abc\nWall time: 1.25 seconds\nProcess running with session ID 1\nOutput:\n'}]}});
+assert.deepEqual(running.running_wait_ms,[1500]);
 console.log('Codex generated input IDs are normalized only at their protocol locations');

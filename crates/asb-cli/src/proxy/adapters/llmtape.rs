@@ -3457,7 +3457,7 @@ mod tests {
             serde_json::from_str(std::fs::read_to_string(&cassette).unwrap().trim()).unwrap();
         assert_eq!(
             row["agent_record_metadata"],
-            serde_json::json!({"schema_version":1,"conversation":"conversation-1","output_call_ids":["call-a","call-b"]})
+            serde_json::json!({"schema_version":1,"conversation":"conversation-1","output_call_ids":["call-a","call-b"],"running_wait_ms":[null,null]})
         );
         let normalized: serde_json::Value =
             serde_json::from_str(row["request"]["body"].as_str().unwrap()).unwrap();

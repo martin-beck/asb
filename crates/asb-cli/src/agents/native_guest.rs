@@ -124,6 +124,9 @@ pub(super) fn broker(
     };
     let mut service = Command::new("node");
     service
+        .env_remove("ASB_NATIVE_SETTLEMENT_MODULE")
+        .env_remove("ASB_NATIVE_SETTLEMENT_DIRECTORY")
+        .env_remove("ASB_NATIVE_SETTLEMENT_MARKER")
         .env_remove("ASB_CLAUDE_WEB_PLAN")
         .env_remove("ASB_CLAUDE_WEB_EVIDENCE")
         .env_remove("ASB_CLAUDE_WEB_READY")

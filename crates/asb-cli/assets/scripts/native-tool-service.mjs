@@ -62,6 +62,12 @@ try {
     const state = process.env.ASB_NATIVE_HOOK_STATE;
     if (!state || (await readdir(state)).length) throw new Error('Claude native hook state is missing or unfinished');
   }
+  const settlementModule = process.env.ASB_NATIVE_SETTLEMENT_MODULE;
+  if (settlementModule) {
+    const {settlePending} = await import(settlementModule);
+    if (typeof settlePending !== 'function') throw new Error('Native tool settlement extension is invalid');
+    await settlePending({directory:process.env.ASB_NATIVE_SETTLEMENT_DIRECTORY, socket, marker:process.env.ASB_NATIVE_SETTLEMENT_MARKER, mode, broker});
+  }
   if (mode === 'record') {
     const pending = await sealPendingBroker(broker, { programSha256, agent });
     const file = await open(target, 'wx', 0o600);

@@ -394,9 +394,16 @@ fn start_native_service(
         snapshot: &snapshot,
         assets: &assets,
     };
-    let (service, directory, socket) = super::super::native_guest::broker(command, &settings)?;
+    let (mut service, directory, socket) = super::super::native_guest::broker(command, &settings)?;
     let state = directory.join("hook-state");
     std::fs::create_dir_all(&state).map_err(crate::io_error)?;
+    service
+        .env(
+            "ASB_NATIVE_SETTLEMENT_MODULE",
+            directory.join("codex-native-hook.mjs"),
+        )
+        .env("ASB_NATIVE_SETTLEMENT_DIRECTORY", &state)
+        .env("ASB_NATIVE_SETTLEMENT_MARKER", &marker);
     command
         .env("ASB_CODEX_NATIVE_DIRECTORY", state)
         .env("ASB_CODEX_NATIVE_SOCKET", socket)
@@ -447,14 +454,7 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     if native_snapshot(context.tape.map(|tape| tape.mode)) {
         let script = "node --input-type=module -e 'import(process.env.ASB_CODEX_NATIVE_ENTRY).then(m=>m.main()).catch(e=>{console.error(e.message);process.exitCode=1})'";
         let entry = serde_json::json!([{"matcher":"Bash", "hooks":[{"type":"command", "command":script, "timeout":120}]}]);
-        let hooks = if context
-            .tape
-            .is_some_and(|tape| tape.mode == crate::tape::Mode::Replay)
-        {
-            serde_json::json!({"hooks":{"PreToolUse":entry}})
-        } else {
-            serde_json::json!({"hooks":{"PreToolUse":entry,"PostToolUse":entry}})
-        };
+        let hooks = serde_json::json!({"hooks":{"PreToolUse":entry}});
         std::fs::write(
             directory.join("hooks.json"),
             serde_json::to_vec(&hooks).map_err(|error| {
@@ -609,8 +609,10 @@ fn bind_provider_tool_outputs(
         streamed: bool,
     }
     let mut histories = std::collections::BTreeMap::<String, History>::new();
-    let mut outputs =
-        std::collections::BTreeMap::<(String, String), std::collections::VecDeque<Vec<u8>>>::new();
+    let mut outputs = std::collections::BTreeMap::<
+        (String, String),
+        std::collections::VecDeque<(Vec<u8>, Option<u64>)>,
+    >::new();
     for line in capture.lines() {
         let row: serde_json::Value = serde_json::from_str(line)
             .map_err(|_| "Codex provider capture is invalid".to_owned())?;
@@ -633,6 +635,12 @@ fn bind_provider_tool_outputs(
             .and_then(serde_json::Value::as_array);
         if metadata.is_some() && raw_ids.is_none() {
             return Err("Codex provider correlation metadata is invalid".into());
+        }
+        let waits = metadata
+            .and_then(|value| value.get("running_wait_ms"))
+            .and_then(serde_json::Value::as_array);
+        if waits.is_some_and(|waits| Some(waits.len()) != raw_ids.map(Vec::len)) {
+            return Err("Codex provider timing metadata does not match the request".into());
         }
         let mut current = body
             .get("input")
@@ -689,7 +697,7 @@ fn bind_provider_tool_outputs(
                 }
             }
             let mut pending = history.calls.clone();
-            for (id, output) in appended {
+            for (index, (id, output)) in appended.iter().enumerate() {
                 let position = if identified {
                     pending
                         .iter()
@@ -707,7 +715,12 @@ fn bind_provider_tool_outputs(
                         outputs
                             .entry((conversation.clone(), id.clone()))
                             .or_default()
-                            .push_back(output.clone());
+                            .push_back((
+                                output.clone(),
+                                waits
+                                    .and_then(|waits| waits.get(history.prior.len() + index))
+                                    .and_then(serde_json::Value::as_u64),
+                            ));
                     }
                     // This provider operation resumes an already-owned
                     // process; it has no PreToolUse native shell boundary.
@@ -722,11 +735,16 @@ fn bind_provider_tool_outputs(
         } else {
             // Fixture/legacy captures without a streamed Responses envelope
             // retain the historical conservative one-result-per-hook route.
-            for (id, output) in appended {
+            for (index, (id, output)) in appended.iter().enumerate() {
                 outputs
                     .entry((conversation.clone(), id.clone()))
                     .or_default()
-                    .push_back(output.clone());
+                    .push_back((
+                        output.clone(),
+                        waits
+                            .and_then(|waits| waits.get(history.prior.len() + index))
+                            .and_then(serde_json::Value::as_u64),
+                    ));
             }
         }
         history.prior = current;
@@ -807,7 +825,7 @@ fn bind_provider_tool_outputs(
                 }
                 matching[0].clone()
             };
-            let output = outputs
+            let (output, running_wait_ms) = outputs
                 .get_mut(&key)
                 .and_then(|queue| queue.pop_front())
                 .ok_or_else(|| {
@@ -816,7 +834,15 @@ fn bind_provider_tool_outputs(
             let text = String::from_utf8(output)
                 .map_err(|_| "Codex provider tool result is not UTF-8".to_owned())?;
             let result = if broker {
-                serde_json::json!({"ok":true,"value":text})
+                if text
+                    .lines()
+                    .nth(2)
+                    .is_some_and(|line| line.starts_with("Process running with session ID "))
+                    && running_wait_ms.is_none()
+                {
+                    return Err("Codex running tool result has no recorded response timing".into());
+                }
+                serde_json::json!({"ok":true,"value":{"output":text,"running_wait_ms":running_wait_ms}})
             } else {
                 serde_json::json!(text)
             };
@@ -2123,8 +2149,14 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(output(1), serde_json::json!({"ok":true,"value":"A"}));
-        assert_eq!(output(3), serde_json::json!({"ok":true,"value":"B"}));
+        assert_eq!(
+            output(1),
+            serde_json::json!({"ok":true,"value":{"output":"A","running_wait_ms":null}})
+        );
+        assert_eq!(
+            output(3),
+            serde_json::json!({"ok":true,"value":{"output":"B","running_wait_ms":null}})
+        );
         assert_eq!(rows.last().unwrap()["event"], "exit");
         std::fs::remove_dir_all(root).unwrap();
     }
