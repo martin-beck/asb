@@ -58,6 +58,10 @@ assert.equal(JSON.parse(rewritten[0].delta + rewritten[1].delta).session_id,222)
 assert.equal(JSON.parse(rewritten[2].arguments).session_id,222);
 assert.equal(JSON.parse(rewritten[3].item.arguments).session_id,222);
 assert.equal(JSON.parse(rewritten[4].response.output[0].arguments).session_id,222);
+const otherLive = structuredClone(liveInput); otherLive.input[0].output=recordedRunning.replace('111','333');
+observeReplayExchange({body:otherLive,interaction:{agent_record_metadata:{conversation:'other',running_session_ids:['111']}}});
+const otherRewrite = rewriteReplayResponse({body:streamed,interaction:{agent_record_metadata:{conversation:'other'}}}).split('\n').filter(line=>line.startsWith('data: ')).map(line=>JSON.parse(line.slice(6)));
+assert.equal(JSON.parse(otherRewrite[3].item.arguments).session_id,333);
 configureReplay({interactions:[{request:{}}]});
 assert.equal(normalizeRequest({url:'/v1/responses',body:structuredClone(recordedInput)}).input[1].arguments,recordedInput.input[1].arguments);
 assert.equal(rewriteReplayResponse({body:streamed}),streamed);

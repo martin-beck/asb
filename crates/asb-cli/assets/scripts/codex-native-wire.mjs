@@ -3,20 +3,25 @@
 // leaving provider IDs, tool arguments and user content request-significant.
 const processAliases = new Map();
 const replayProcesses = new Map();
-let nextProcess = 1;
 let processMappingEnabled = true;
 export function configureReplay({interactions}) {
   processMappingEnabled = interactions.some(row => Array.isArray(row?.agent_record_metadata?.running_session_ids));
 }
 const runningId = output => typeof output === 'string' ? output.match(/^Chunk ID: [^\r\n]+\r?\nWall time: \d+(?:\.\d+)? seconds\r?\nProcess running with session ID (\d+)/)?.[1] : undefined;
-function alias(id) {
-  if (!processAliases.has(id)) processAliases.set(id, `<asb-codex-process-${nextProcess++}>`);
-  return processAliases.get(id);
+function aliases(conversation) {
+  if (!processAliases.has(conversation)) processAliases.set(conversation,new Map());
+  return processAliases.get(conversation);
+}
+function alias(conversation,id) {
+  const sessions=aliases(conversation);
+  if (!sessions.has(id)) sessions.set(id, `<asb-codex-process-${sessions.size+1}>`);
+  return sessions.get(id);
 }
 
 export function normalizeRequest({ url, body }) {
   if (typeof url !== 'string' || !/\/responses(?:\?|$)/.test(url) ||
       !body || typeof body !== 'object') return body;
+  const conversation = typeof body.prompt_cache_key === 'string' ? body.prompt_cache_key : '';
   if (typeof body.prompt_cache_key === 'string' &&
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.prompt_cache_key)) {
     body.prompt_cache_key = '<asb-codex-session-cache>';
@@ -26,12 +31,13 @@ export function normalizeRequest({ url, body }) {
   for (const item of body.input) {
     if (processMappingEnabled && item?.type === 'function_call_output') {
       const session = runningId(item.output);
-      if (session) alias(session);
+      if (session) alias(conversation,session);
     }
     if (processMappingEnabled && item?.type === 'function_call' && item.name === 'write_stdin' && typeof item.arguments === 'string') {
       try {
         const args = JSON.parse(item.arguments), id = String(args.session_id);
-        if (processAliases.has(id)) item.arguments = JSON.stringify({...args, session_id:processAliases.get(id)});
+        const sessions=aliases(conversation);
+        if (sessions.has(id)) item.arguments = JSON.stringify({...args, session_id:sessions.get(id)});
       } catch { /* Leave unsupported argument forms untouched. */ }
     }
     if (!item || typeof item !== 'object' || typeof item.id !== 'string') continue;
@@ -73,19 +79,21 @@ export function observeReplayExchange({body, interaction}) {
   if (!processMappingEnabled) return;
   if (!body || !Array.isArray(body.input)) return;
   const recorded = interaction?.agent_record_metadata?.running_session_ids;
+  const conversation = interaction?.agent_record_metadata?.conversation ?? '';
   if (!Array.isArray(recorded)) return;
   const outputs = body.input.filter(item => item?.type === 'function_call_output');
   if (recorded.length !== outputs.length) throw new Error('Codex replay process metadata does not match the request');
   for (let i=0; i<outputs.length; i++) {
     const live = runningId(outputs[i].output), prior = recorded[i];
     if (prior === null && live === undefined) continue;
-    if (typeof prior !== 'string' || !live || (replayProcesses.has(prior) && replayProcesses.get(prior) !== live))
+    const key=JSON.stringify([conversation,prior]);
+    if (typeof prior !== 'string' || !live || (replayProcesses.has(key) && replayProcesses.get(key) !== live))
       throw new Error('Codex replay process identity differs from its recording');
-    replayProcesses.set(prior,live);
+    replayProcesses.set(key,live);
   }
 }
 
-export function rewriteReplayResponse({body}) {
+export function rewriteReplayResponse({body,interaction}) {
   if (!processMappingEnabled) return body;
   if (typeof body !== 'string' || !body.includes('data:')) return body;
   const lines = body.split(/(?<=\n)/), events = new Map(), replacements = new Map();
@@ -96,7 +104,7 @@ export function rewriteReplayResponse({body}) {
     events.set(i,{event,prefix:match[1],newline:match[3] ?? ''});
     const item=event.type === 'response.output_item.done' ? event.item : undefined;
     if (item?.type !== 'function_call' || item.name !== 'write_stdin' || typeof item.arguments !== 'string') continue;
-    const args=JSON.parse(item.arguments), id=String(args.session_id), live=replayProcesses.get(id);
+    const args=JSON.parse(item.arguments), id=String(args.session_id), conversation=interaction?.agent_record_metadata?.conversation ?? '', live=replayProcesses.get(JSON.stringify([conversation,id]));
     if (!live) throw new Error('Codex replay has no matching running process session');
     replacements.set(item.id, JSON.stringify({...args,session_id:Number(live)}));
   }
