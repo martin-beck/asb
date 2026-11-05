@@ -25,6 +25,42 @@ class LocalWorkspace:
 
 
 class SubmissionRecoveryTests(unittest.TestCase):
+    def test_replay_snapshot_scratch_is_attempt_scoped_and_recorded(self):
+        scratch=Path(__file__).resolve().parents[3]/'target/snapshot-storage-tests'
+        scratch.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            root=Path(directory).resolve();artifacts=root/'artifacts';artifacts.mkdir();storage_root=root/'scratch';storage_root.mkdir()
+            attempt='asb-'+'a'*32
+            with patch.dict(os.environ,{'ASB_EXPERIMENTAL_SNAPSHOT_STORAGE_ROOT':str(storage_root)}):
+                storage=task_module.snapshot_storage_path(artifacts,attempt,'replay')
+                self.assertEqual(storage,storage_root/attempt)
+                location=json.loads((artifacts/'snapshot-storage-location.json').read_text())
+                self.assertEqual(location['path'],str(storage));self.assertEqual(location['attempt'],attempt)
+                self.assertEqual(location['scope'],'experimental-retained-replay-scratch')
+                with self.assertRaises(FileExistsError):task_module.snapshot_storage_path(artifacts,attempt,'replay')
+            self.assertTrue(storage.is_dir())
+
+    def test_recording_uses_project_storage_even_with_replay_scratch_configured(self):
+        scratch=Path(__file__).resolve().parents[3]/'target/snapshot-storage-tests'
+        scratch.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            root=Path(directory).resolve();artifacts=root/'artifacts';artifacts.mkdir()
+            with patch.dict(os.environ,{'ASB_EXPERIMENTAL_SNAPSHOT_STORAGE_ROOT':str(root/'missing')}):
+                storage=task_module.snapshot_storage_path(artifacts,'asb-'+'b'*32,'record')
+            self.assertEqual(storage,artifacts/'snapshot-storage');self.assertTrue(storage.is_dir())
+            self.assertFalse((artifacts/'snapshot-storage-location.json').exists())
+
+    def test_replay_rejects_invalid_scratch_root_without_allocating_storage(self):
+        scratch=Path(__file__).resolve().parents[3]/'target/snapshot-storage-tests'
+        scratch.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            artifacts=Path(directory)/'artifacts';artifacts.mkdir()
+            for value in ('relative',str(Path(directory)/'missing')):
+                with self.subTest(value=value),patch.dict(os.environ,{'ASB_EXPERIMENTAL_SNAPSHOT_STORAGE_ROOT':value}):
+                    with self.assertRaisesRegex(task_module.ExecutionError,'existing absolute directory'):
+                        task_module.snapshot_storage_path(artifacts,'asb-'+'c'*32,'replay')
+            self.assertEqual(list(artifacts.iterdir()),[])
+
     def test_snapshot_baseline_uses_attempt_storage(self):
         ordinary=task_module.SweBenchTask(None,'catalog','fixture','artifacts')
         snapshot=task_module.SweBenchTask(None,'catalog','fixture','artifacts',tool_mode='replay',snapshot=True)

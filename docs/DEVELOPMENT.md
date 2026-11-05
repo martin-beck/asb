@@ -64,6 +64,11 @@ to a JSON array of extra guest paths, such as `["/tmp"]`, during both record
 and replay. This is experimental: copying an already-live socket does not
 preserve its listener, and an overlay or bind mount does not by itself solve
 the socket's lifecycle and identity semantics. Use only disposable task guests.
+For SWE-bench replay experiments, an existing absolute directory can be supplied
+as `ASB_EXPERIMENTAL_SNAPSHOT_STORAGE_ROOT` to place each attempt's snapshot
+scratch there. The attempt stores a location record under the project; scratch
+is retained rather than silently deleted. The setting does not affect recording
+or the ordinary default location.
 The offline `crates/asb-cli/tests/fixtures/fs_snapshot/multiroot.py` probe
 records a workspace and a separate temporary directory, then checks four
 concurrent replays in private mount namespaces. Run it as root in a private
