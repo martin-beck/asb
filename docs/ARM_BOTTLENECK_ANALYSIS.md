@@ -498,3 +498,31 @@ production overhead or a confidence interval. `overhead.json` retains every
 observation, profile order, input fingerprints, medians, ranges and these limits.
 This qualifies this fixed-work instrumentation comparison, not a real Pi client,
 LLM-provider behavior, every CPU or a maximum acceptable collector overhead.
+
+
+## Raw-clock SPE execution alignment
+
+The SPE producer explicitly selects `--clockid monotonic_raw`; an implicit perf
+clock is insufficient for cross-source alignment. Native execution-window
+receipts additionally retain `CLOCK_MONOTONIC_RAW` enclosing pre-release and
+owned-exit bounds. Existing adjusted-monotonic lifetime/cohort bounds are
+unchanged. Failure to obtain the optional raw bounds does not invalidate the
+existing lifetime evidence or suppress separately valid SPE measurements.
+
+A shared pure alignment module requires a completed native window, matching
+PID and process generation, a known boot/time-namespace domain, validated SPE
+and matching explicit raw-clock semantics. Samples must lie inside the raw
+principal envelope, allowing only perf script's disclosed 999 ns rounding at
+the starting boundary. There is no estimated raw-to-adjusted clock offset or
+conversion. Descendants that outlive the principal remain in SPE's validated
+task population, but cannot receive principal-envelope alignment here.
+
+Qualified SPE series use seconds from the observed pre-release bound while
+retaining one-second bins anchored at the first sample. Raw first/last sample
+timestamps and the alignment receipt remain in `arm-spe-quality.json`.
+Unavailable alignment keeps the original first-sample-relative series with an
+explicit origin. The offline engine recomputes alignment from those raw source
+fields and `execution-window.json`; it never trusts saved alignment conclusions.
+Comparison JSON and HTML disclose observed offsets or an unavailable reason.
+These are execution-envelope offsets, not LLM/tool phase classifications or CPU
+residency. Old captures without an explicit matching clock remain unaligned.

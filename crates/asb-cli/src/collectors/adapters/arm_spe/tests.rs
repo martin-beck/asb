@@ -22,6 +22,10 @@ fn selection_is_bounded_and_does_not_accept_unknown_or_duplicate_options() {
 fn record_selection_never_expands_to_host_or_cpu_wide_scope() {
     let args = args("arm_spe_0", 42, &Options::default());
     assert!(args.windows(2).any(|pair| pair == ["-p", "42"]));
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["--clockid", "monotonic_raw"])
+    );
     assert!(args.contains(&"--inherit".into()));
     assert!(args.windows(2).any(|pair| pair[0] == "--max-size"));
     assert!(args.windows(2).any(|pair| pair == ["--max-size", "256M"]));

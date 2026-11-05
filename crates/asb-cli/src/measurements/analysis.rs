@@ -51,6 +51,7 @@ struct Report {
     kernel: Vec<kernel::Diagnostic>,
     sampling: Vec<sampling::SamplingAnalysis>,
     counter_groups: Vec<counter_groups::Group>,
+    phase_alignments: Vec<super::phase_alignment::Alignment>,
 }
 
 fn analyze(timing: Option<&super::ComponentTiming>) -> Report {
@@ -68,6 +69,7 @@ fn analyze(timing: Option<&super::ComponentTiming>) -> Report {
         kernel: Vec::new(),
         sampling: Vec::new(),
         counter_groups: Vec::new(),
+        phase_alignments: Vec::new(),
     }
 }
 
@@ -77,6 +79,7 @@ pub(super) fn publish(
 ) -> Result<serde_json::Value, String> {
     let mut documents = std::collections::BTreeMap::new();
     for name in [
+        "execution-window",
         "perf-stat-plan",
         "perf-stat-quality",
         "perf-stat",
@@ -110,6 +113,7 @@ pub(super) fn publish(
     report.kernel = kernel::analyze(&documents);
     report.counter_groups = counter_groups::analyze(&documents);
     report.sampling = sampling::analyze(&documents);
+    report.phase_alignments = sampling::phase_alignments(&documents);
     let value = serde_json::to_value(report).map_err(|error| error.to_string())?;
     super::write_json(&dir.join("bottlenecks.json"), &value)?;
     Ok(value)
@@ -144,5 +148,6 @@ pub(crate) fn from_documents(
     report.kernel = kernel::analyze(documents);
     report.counter_groups = counter_groups::analyze(documents);
     report.sampling = sampling::analyze(documents);
+    report.phase_alignments = sampling::phase_alignments(documents);
     serde_json::to_value(report).expect("analysis contains only finite values")
 }

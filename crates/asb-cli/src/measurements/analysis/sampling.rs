@@ -17,19 +17,7 @@ pub(super) fn analyze(documents: &BTreeMap<String, Value>) -> Vec<SamplingAnalys
     if !documents.contains_key("arm-spe-plan") {
         return Vec::new();
     }
-    let quality = documents.get("arm-spe-quality").filter(|q| {
-        q.get("schema_version").and_then(Value::as_u64) == Some(1)
-            && q.get("status").and_then(Value::as_str) == Some("observed")
-            && q.get("scope").and_then(Value::as_str) == Some("agent-process-tree")
-            && q.pointer("/raw_record_quality/aux_records")
-                .and_then(Value::as_u64)
-                .is_some_and(|n| n > 0)
-            && documents
-                .get("arm-spe")
-                .and_then(|d| d.get("status"))
-                .and_then(Value::as_str)
-                == Some("completed")
-    });
+    let quality = validated_quality(documents);
     let mut metrics = Vec::new();
     let count = |name| quality?.get("sample_counts")?.get(name)?.as_u64();
     let memory = count("memory").filter(|n| *n > 0);
@@ -82,6 +70,35 @@ pub(super) fn analyze(documents: &BTreeMap<String, Value>) -> Vec<SamplingAnalys
         metrics,
         limitations: "Classification counts are normalized by decoded memory samples, not cache accesses or retired instructions. SPE filters and sample population are implementation-dependent and sampling bias remains possible. Latency is sampled operation weight in cycles, not isolated DRAM service time or elapsed wall time. Missing classifications/weights remain unavailable. This does not implement a CPU-independent Topdown model or prove a kernel bottleneck.",
     }]
+}
+
+fn validated_quality(documents: &BTreeMap<String, Value>) -> Option<&Value> {
+    documents.get("arm-spe-quality").filter(|q| {
+        q.get("schema_version").and_then(Value::as_u64) == Some(1)
+            && q.get("status").and_then(Value::as_str) == Some("observed")
+            && q.get("scope").and_then(Value::as_str) == Some("agent-process-tree")
+            && q.pointer("/raw_record_quality/aux_records")
+                .and_then(Value::as_u64)
+                .is_some_and(|n| n > 0)
+            && documents
+                .get("arm-spe")
+                .and_then(|d| d.get("status"))
+                .and_then(Value::as_str)
+                == Some("completed")
+    })
+}
+
+pub(super) fn phase_alignments(
+    documents: &BTreeMap<String, Value>,
+) -> Vec<crate::measurements::phase_alignment::Alignment> {
+    if !documents.contains_key("arm-spe-plan") {
+        return Vec::new();
+    }
+    let null = Value::Null;
+    vec![crate::measurements::phase_alignment::spe(
+        validated_quality(documents).unwrap_or(&null),
+        documents.get("execution-window").unwrap_or(&null),
+    )]
 }
 
 #[cfg(test)]

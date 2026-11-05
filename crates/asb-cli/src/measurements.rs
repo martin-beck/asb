@@ -9,6 +9,7 @@ use crate::collectors;
 pub(crate) mod analysis;
 mod cohort;
 mod execution_window;
+pub(crate) mod phase_alignment;
 mod producer;
 mod snapshot;
 pub(crate) use producer::command as producer_command;

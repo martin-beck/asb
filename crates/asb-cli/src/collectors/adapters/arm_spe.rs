@@ -81,6 +81,8 @@ fn select_pmu(pmus: &[super::arm_platform::Pmu]) -> Result<String, String> {
 fn args(pmu: &str, pid: u32, options: &Options) -> Vec<String> {
     vec![
         "record".into(),
+        "--clockid".into(),
+        "monotonic_raw".into(),
         "-e".into(),
         format!("{pmu}/ts_enable=1,load_filter=1,store_filter=1/"),
         "-c".into(),
@@ -225,22 +227,37 @@ impl CollectorAdapter for ArmSpe {
             root.pid,
             state.options.budget_bytes + 16 * MIB,
         )?;
-        let decoded = decoder::decode(session, &raw, &quality)?;
-        measurements::write_json(
-            &session.dir.join("arm-spe-quality.json"),
-            &serde_json::json!({
-                "schema_version":1,"scope":"agent-process-tree","status":"observed",
-                "root":{"pid":root.pid,"start_time_ticks":root.start_time_ticks},
-                "period":state.options.period,"raw_record_quality":quality,
-                "sample_counts":decoded.counts,"observed_tasks":decoded.observed_tasks,
-            "memory_latency_weight_sum_cycles":decoded.memory_latency_weight_sum,
-            "memory_latency_known_samples":decoded.memory_latency_known_samples,
-                "first_sample_ns":decoded.first_sample_ns,"last_sample_ns":decoded.last_sample_ns,
-            "clock":"perf default recording clock; task lifetimes validate sample alignment; decoded timestamps have microsecond precision",
-                "series_origin":"first observed sample; one-second bins; final bin can be partial; absent bins are not invented zeroes",
-                "limitations":"No reported loss/truncation flags, complete task metadata and a successful decoder are required. This cannot rule out sampling bias or unreported hardware loss. Counts are sampled observations, not full event counts or retired instructions. Memory weights are sampled operation latency in cycles, not isolated DRAM service time. Synthesized event populations overlap and must not be added. Ambiguous task reuse is rejected."
-            }),
-        )?;
+        let mut decoded = decoder::decode(session, &raw, &quality)?;
+        let mut quality_document = serde_json::json!({
+            "schema_version":1,"scope":"agent-process-tree","status":"observed",
+            "root":{"pid":root.pid,"start_time_ticks":root.start_time_ticks},
+            "period":state.options.period,"raw_record_quality":quality,
+            "sample_counts":decoded.counts,"observed_tasks":decoded.observed_tasks,
+        "memory_latency_weight_sum_cycles":decoded.memory_latency_weight_sum,
+        "memory_latency_known_samples":decoded.memory_latency_known_samples,
+            "first_sample_ns":decoded.first_sample_ns,"last_sample_ns":decoded.last_sample_ns,
+        "clock":"CLOCK_MONOTONIC_RAW",
+            "timestamp_precision_ns":1000,
+            "series_origin":"first observed sample; one-second bins; final bin can be partial; absent bins are not invented zeroes",
+            "limitations":"No reported loss/truncation flags, complete task metadata and a successful decoder are required. This cannot rule out sampling bias or unreported hardware loss. Counts are sampled observations, not full event counts or retired instructions. Memory weights are sampled operation latency in cycles, not isolated DRAM service time. Synthesized event populations overlap and must not be added. Ambiguous task reuse is rejected."
+        });
+        let alignment = measurements::phase_alignment::spe(
+            &quality_document,
+            &session.execution_window_document(),
+        );
+        if let Some(offset) = alignment.first_sample_offset_seconds {
+            for times in decoded.timestamps.values_mut() {
+                for time in times {
+                    *time += offset;
+                }
+            }
+            quality_document["series_origin"] = serde_json::json!(
+                "verified native principal pre-release raw-clock bound; one-second bins anchored at first sample; absent bins are not invented zeroes"
+            );
+        }
+        quality_document["phase_alignment"] =
+            serde_json::to_value(alignment).map_err(|e| e.to_string())?;
+        measurements::write_json(&session.dir.join("arm-spe-quality.json"), &quality_document)?;
         let mut result = ProcessData::from_output(context);
         result.status = "completed".into();
         result.metrics = decoded.metrics;
