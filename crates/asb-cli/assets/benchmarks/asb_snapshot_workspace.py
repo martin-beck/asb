@@ -58,7 +58,7 @@ class SnapshotWorkspace:
                 raise RuntimeError(f'qcow2 snapshot export failed; inspect {logfile}')
             time.sleep(.05)
 
-    def prepare(self, source, extra_sources=()):
+    def prepare(self, source, extra_sources=(), seed=True):
         source = Path(source)
         if not source.is_dir():
             raise ValueError('snapshot workspace source is unavailable')
@@ -125,6 +125,8 @@ class SnapshotWorkspace:
             subprocess.run(['mount', '-t', 'btrfs', self.loop, str(self.mountpoint)], check=True, timeout=60)
             self.mounted = True
             workspace = self.mountpoint/'workspace'
+            if not seed:
+                return workspace
             subprocess.run(self.btrfs + ['subvolume', 'create', str(workspace)], check=True,
                            stdout=subprocess.DEVNULL, timeout=60)
             if extras:
@@ -149,6 +151,18 @@ class SnapshotWorkspace:
             if isinstance(error, (OSError, subprocess.SubprocessError)):
                 raise RuntimeError('snapshot workspace preparation failed; retained image') from error
             raise
+
+    def restore_baseline(self, baseline):
+        """Create a writable, shared-data workspace from a received snapshot."""
+        workspace = self.mountpoint/'workspace'
+        if not self.mounted or not Path(baseline).is_dir() or workspace.exists():
+            raise ValueError('snapshot replay baseline or workspace is unavailable')
+        try:
+            subprocess.run(self.btrfs + ['subvolume', 'snapshot', str(baseline), str(workspace)],
+                           check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=300)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError('snapshot replay baseline could not be restored') from error
+        return workspace
 
     def close(self):
         if self.mounted:

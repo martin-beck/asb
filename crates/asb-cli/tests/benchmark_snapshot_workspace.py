@@ -17,6 +17,33 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class WorkspaceTest(unittest.TestCase):
+    def test_replay_creates_workspace_from_received_snapshot_without_copying_source(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory).resolve();source=root/'source';source.mkdir()
+            workspace=SnapshotWorkspace(root/'image',root/'mount',1024**3,['mkfs'],['btrfs'],['rsync'])
+            with patch('asb_snapshot_workspace.subprocess.run') as run, \
+                 patch('builtins.open',unittest.mock.mock_open()), \
+                 patch('asb_snapshot_workspace.fcntl.ioctl',return_value=42), \
+                 patch('asb_snapshot_workspace.os.mknod'):
+                mounted=workspace.prepare(source,seed=False)
+                self.assertFalse(mounted.exists())
+                baseline=root/'mount'/'snapshots'/'snapshot-00000001';baseline.mkdir(parents=True)
+                self.assertEqual(workspace.restore_baseline(baseline),mounted)
+                commands=[call.args[0] for call in run.call_args_list]
+                self.assertIn(['btrfs','subvolume','snapshot',str(baseline),str(mounted)],commands)
+                self.assertFalse(any(command[0]=='rsync' for command in commands))
+                workspace.close()
+
+    def test_replay_refuses_missing_or_already_restored_baseline(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);workspace=SnapshotWorkspace(root/'image',root/'mount',1024,['mkfs'],['btrfs'],['rsync'])
+            workspace.mounted=True;workspace.mountpoint.mkdir()
+            with self.assertRaisesRegex(ValueError,'baseline or workspace is unavailable'):
+                workspace.restore_baseline(root/'missing')
+            baseline=root/'baseline';baseline.mkdir();(workspace.mountpoint/'workspace').mkdir()
+            with self.assertRaisesRegex(ValueError,'baseline or workspace is unavailable'):
+                workspace.restore_baseline(baseline)
+
     def test_multiple_roots_share_one_snapshot_and_preserve_contents(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory).resolve();source=root/'source';extra=root/'extra'

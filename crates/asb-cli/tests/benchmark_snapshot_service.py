@@ -69,7 +69,7 @@ class SnapshotServiceTest(unittest.TestCase):
             closed=[]
             class Workspace:
                 def __init__(self,*_args):self.mountpoint=root
-                def prepare(self,*_args):return mounted
+                def prepare(self,*_args,**_kwargs):return mounted
                 def close(self):closed.append(True)
             args=['--target',str(root/'task'),'--extra-root',str(root/'temporary'),
                   '--root',str(root/'storage'),'--socket',str(root/'marker'),
@@ -290,7 +290,8 @@ class SnapshotServiceTest(unittest.TestCase):
             path=root/'marker.sock';waiting=threading.Event();closed=[];clients=[]
             class Workspace:
                 def __init__(self,*args):self.mountpoint=workspace
-                def prepare(self,_source):return workspace
+                def prepare(self,_source,*_args,**_kwargs):return workspace
+                def restore_baseline(self,_baseline):return workspace
                 def close(self):closed.append(True)
             def replay(boundaries,apply):
                 service=SnapshotReplay(boundaries,apply);wait=service.changed.wait
@@ -327,7 +328,8 @@ class SnapshotServiceTest(unittest.TestCase):
             path=root/'marker.sock';closed=[];sizes=[]
             class Workspace:
                 def __init__(self,*args):self.mountpoint=workspace;sizes.append(args[2])
-                def prepare(self,_source):return workspace
+                def prepare(self,_source,*_args,**_kwargs):return workspace
+                def restore_baseline(self,_baseline):return workspace
                 def close(self):closed.append(True)
             args=['--target',str(workspace),'--root',str(root/'storage'),'--socket',str(path),
                   '--output',str(root/'out'),'--btrfs','btrfs','--mkfs','mkfs',
