@@ -28,20 +28,6 @@ struct State {
     enabled: bool,
     scaling_requested: bool,
     platform: Option<PlatformManifest>,
-    host_start: Option<HostSample>,
-}
-
-/// Host-context samples are deliberately separate from the AgentSysPerf L1/L3
-/// records below.  They support sweep-level saturation diagnosis, while the
-/// per-agent records remain restricted to the verified agent process tree.
-#[derive(Clone, Copy)]
-struct HostSample {
-    total_ticks: u64,
-    idle_ticks: u64,
-    iowait_ticks: u64,
-    runnable_tasks: u64,
-    logical_cpus: u64,
-    memory_available_kib: u64,
 }
 
 /// Capability evidence for optional processor telemetry.  Event names are
@@ -132,21 +118,10 @@ impl CollectorAdapter for AgentSysPerfCollector {
         Ok(())
     }
 
-    fn start(&self, session: &mut Session) -> Result<(), String> {
-        let state_handle = session.state::<State>();
-        let mut state = state_handle.borrow_mut();
-        if state.enabled {
-            state.host_start = host_sample();
-        }
-        Ok(())
-    }
-
     fn finish(&self, session: &mut Session) -> Result<(), String> {
         if !session.state::<State>().borrow().enabled {
             return Ok(());
         }
-
-        write_host_telemetry(session)?;
 
         let Some(timing) = session.component_timing("agent.execute") else {
             return write_unavailable(session, "ASB did not observe an agent execution interval.");
@@ -184,97 +159,6 @@ impl CollectorAdapter for AgentSysPerfCollector {
             }),
         )
     }
-}
-
-/// Write host-wide context which may be consumed by a later sweep bridge.
-/// It is intentionally never flattened into ASB's agent-only metrics or
-/// passed to the per-agent Analyzer records: scheduler and memory pressure
-/// have a different scope than the agent process tree.
-fn write_host_telemetry(session: &mut Session) -> Result<(), String> {
-    let start = session.state::<State>().borrow().host_start;
-    let end = host_sample();
-    let value = match (start, end) {
-        (Some(start), Some(end)) if end.total_ticks > start.total_ticks => {
-            let total = end.total_ticks - start.total_ticks;
-            let idle = end.idle_ticks.saturating_sub(start.idle_ticks);
-            let iowait = end.iowait_ticks.saturating_sub(start.iowait_ticks);
-            json!({
-                "schema_version": 1,
-                "collector": "agentsysperf:l1-resource",
-                "status": "observed",
-                "scope": "host-context",
-                "runqueue_is_host_wide": true,
-                "logical_cpus_host": end.logical_cpus,
-                "cpu_busy_pct": 100.0 * (total.saturating_sub(idle)) as f64 / total as f64,
-                "iowait_pct": 100.0 * iowait as f64 / total as f64,
-                "runnable_tasks_at_finish": end.runnable_tasks,
-                "memory_available_kib_start": start.memory_available_kib,
-                "memory_available_kib_end": end.memory_available_kib,
-                "memory_available_kib_min": start.memory_available_kib.min(end.memory_available_kib),
-                "limitations": "Host-context observations are diagnostic sweep inputs only. They are never attributed to the selected agent process tree or used as benchmark scores."
-            })
-        }
-        _ => json!({
-            "schema_version": 1,
-            "collector": "agentsysperf:l1-resource",
-            "status": "unavailable",
-            "scope": "host-context",
-            "reason": "could not obtain two valid host telemetry samples",
-            "metrics": {}
-        }),
-    };
-    measurements::write_json(
-        &session.dir.join("agentsysperf-host-telemetry.json"),
-        &value,
-    )
-}
-
-fn host_sample() -> Option<HostSample> {
-    let stat = fs::read_to_string("/proc/stat").ok()?;
-    let cpu = stat.lines().find(|line| {
-        line.strip_prefix("cpu")
-            .is_some_and(|suffix| suffix.starts_with(char::is_whitespace))
-    })?;
-    let counters = cpu
-        .split_whitespace()
-        .skip(1)
-        .map(str::parse::<u64>)
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
-    if counters.len() < 5 {
-        return None;
-    }
-    let total_ticks = counters.iter().copied().sum::<u64>();
-    let idle_ticks = counters[3].saturating_add(counters[4]);
-    let iowait_ticks = counters[4];
-    let loadavg = fs::read_to_string("/proc/loadavg").ok()?;
-    let runnable_tasks = loadavg
-        .split_whitespace()
-        .nth(3)?
-        .split_once('/')?
-        .0
-        .parse()
-        .ok()?;
-    let memory_available_kib =
-        fs::read_to_string("/proc/meminfo")
-            .ok()?
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix("MemAvailable:")?
-                    .split_whitespace()
-                    .next()?
-                    .parse()
-                    .ok()
-            })?;
-    let logical_cpus = std::thread::available_parallelism().ok()?.get() as u64;
-    Some(HostSample {
-        total_ticks,
-        idle_ticks,
-        iowait_ticks,
-        runnable_tasks,
-        logical_cpus,
-        memory_available_kib,
-    })
 }
 
 fn analyze(session: &Session, records: &std::path::Path) -> Value {
@@ -903,6 +787,26 @@ fn metric(values: &Map<String, Value>, name: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_tree_export_never_samples_host_activity() {
+        let root =
+            std::env::temp_dir().join(format!("asb-agentsysperf-no-host-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let mut session = Session::start_with_collectors(&root, &[], None).unwrap();
+        ADAPTER
+            .configure(&mut session, &["agentsysperf:l1-resource".into()])
+            .unwrap();
+        ADAPTER.start(&mut session).unwrap();
+        ADAPTER.finish(&mut session).unwrap();
+        assert!(!root.join("agentsysperf-host-telemetry.json").exists());
+        let result: Value =
+            serde_json::from_slice(&fs::read(root.join("agentsysperf.json")).unwrap()).unwrap();
+        assert_eq!(result["status"], "unavailable");
+        assert_eq!(result["scope"], "selected-agent-process-tree");
+        drop(session);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn mapped_l3_records_calculate_ipc_only_from_observed_counts() {

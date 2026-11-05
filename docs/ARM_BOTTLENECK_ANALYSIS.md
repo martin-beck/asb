@@ -283,3 +283,10 @@ host had PSI disabled, so unavailable PSI remained explicit. Retained raw
 record diagnostics included perf's optional `discard` format lookup warning;
 raw AUX loss flags were zero and decoding had no diagnostics. Neither outcome
 proves absence of sampling bias or unreported hardware loss.
+
+AgentSysPerf exports retain only agent-scoped source observations. Its former
+host-context CPU/load/memory sampler is removed: diagnostic context is not a
+reason to capture unrelated system activity. Static CPU/PMU capability inventory
+remains separate from runtime measurements. Missing agent evidence is explicitly
+unavailable, without falling back to host `/proc/stat`, load averages or memory
+availability.
