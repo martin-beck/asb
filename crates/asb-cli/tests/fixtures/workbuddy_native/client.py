@@ -4,15 +4,17 @@ root=pathlib.Path(tempfile.mkdtemp(prefix='workbuddy-client-',dir=os.environ['AS
 home=root/'home'; home.mkdir();work=root/'work';work.mkdir();config=home/'config';config.mkdir()
 class Handler(BaseHTTPRequestHandler):
  calls=0
+ attributed=0
  def log_message(self,*args):pass
  def do_POST(self):
   data=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))));Handler.calls+=1
+  if self.headers.get('x-asb-native-tool'): Handler.attributed+=1
   if self.path.endswith('/__asb_native_tool_consumed'):
    self.send_response(200);self.send_header('Content-Length','0');self.end_headers();return
-  tools=data.get('tools',[]);names=[x.get('function',{}).get('name','') for x in tools];name=next((n for n in names if n.lower()=='bash'),None)
+  tools=data.get('tools',[]);names=[x.get('function',{}).get('name','') for x in tools];name=next((n for n in names if n.lower()==('webfetch' if os.environ.get('ASB_WORKBUDDY_WEB_PROBE') else 'bash')),None)
   has_result=any(x.get('role')=='tool' for x in data.get('messages',[]))
   if name and not has_result:
-   msg={'role':'assistant','content':None,'tool_calls':[{'id':'call_fixture','type':'function','function':{'name':name,'arguments':json.dumps({'command':'printf workbuddy_native > evidence.txt; cat evidence.txt'})}}]};finish='tool_calls'
+   msg={'role':'assistant','content':None,'tool_calls':[{'id':'call_fixture','type':'function','function':{'name':name,'arguments':json.dumps({'url':'https://example.com/','prompt':'Summarize the page'} if os.environ.get('ASB_WORKBUDDY_WEB_PROBE') else {'command':'printf workbuddy_native > evidence.txt; cat evidence.txt'})}}]};finish='tool_calls'
   else:msg={'role':'assistant','content':'done'};finish='stop'
   if data.get('stream'):
    event={'id':'fixture','object':'chat.completion.chunk','created':1,'model':'fixture','choices':[{'index':0,'delta':msg,'finish_reason':finish}]};b=('data: '+json.dumps(event)+'\n\ndata: [DONE]\n\n').encode();ctype='text/event-stream'
@@ -26,5 +28,5 @@ for k in ('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all
 try:
  p=subprocess.run([os.environ['ASB_WORKBUDDY_BINARY'],'--print','--output-format','json','--model','fixture','--no-session-persistence','-y','Use bash.'],cwd=work,env=env,capture_output=True,text=True,timeout=90)
  (root/'stdout.log').write_text(p.stdout);(root/'stderr.log').write_text(p.stderr)
- print(json.dumps({'exit':p.returncode,'provider_calls':Handler.calls,'root':str(root),'command_executed':(work/'evidence.txt').exists()}))
+ print(json.dumps({'exit':p.returncode,'provider_calls':Handler.calls,'attributed':Handler.attributed,'root':str(root),'command_executed':(work/'evidence.txt').exists()}))
 finally:server.shutdown();server.server_close()

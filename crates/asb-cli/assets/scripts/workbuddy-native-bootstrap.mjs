@@ -5,13 +5,21 @@ import {createNativeDispatcher} from './native-tool-dispatch.mjs';
 import {recordBoundaries} from './native-snapshot-boundary.mjs';
 import {transformWorkBuddyDispatch} from './workbuddy-native-transform.mjs';
 import {installWorkBuddyToolContext} from './workbuddy-native-context.mjs';
+import http from 'node:http';
+import https from 'node:https';
+import {syncBuiltinESMExports} from 'node:module';
 
 const {ASB_NATIVE_BUNDLE:bundle,ASB_NATIVE_MODE:mode,ASB_NATIVE_SOCKET:socket,ASB_NATIVE_MARKER:marker}=process.env;
 if (!bundle || !socket || !marker || !['record','replay'].includes(mode)) throw new Error('WorkBuddy native bootstrap configuration is incomplete');
 const expected=pathToFileURL(realpathSync(bundle)).href;
 const providerBase=process.env.CODEBUDDY_BASE_URL;
 const toolContext=mode === 'record' && providerBase ? installWorkBuddyToolContext(providerBase) : undefined;
-if (toolContext) globalThis.fetch=toolContext.wrapFetch(globalThis.fetch);
+if (toolContext) {
+  globalThis.fetch=toolContext.wrapFetch(globalThis.fetch);
+  http.request=toolContext.wrapRequest(http.request,'http:');
+  https.request=toolContext.wrapRequest(https.request,'https:');
+  syncBuiltinESMExports();
+}
 const dispatch=createNativeDispatcher(mode,socket,{
   isDelegation: call => ['task','agent','subagent'].includes(call.name.toLowerCase()),
   toRequest: call => ({tool:call.name,input:call.input}),
