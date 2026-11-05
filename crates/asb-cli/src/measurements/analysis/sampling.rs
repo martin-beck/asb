@@ -56,6 +56,9 @@ pub(super) fn analyze(documents: &BTreeMap<String, Value>) -> Vec<SamplingAnalys
             .as_str()?
             .parse::<u128>()
             .ok()?;
+        if weight < denominator as u128 || weight > denominator as u128 * u64::MAX as u128 {
+            return None;
+        }
         let value = weight as f64 / denominator as f64;
         (value.is_finite() && value > 0.0).then_some(value)
     });
