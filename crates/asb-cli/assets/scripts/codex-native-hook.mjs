@@ -4,7 +4,6 @@ import { createHash } from 'node:crypto';
 import { open, readFile, readdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
 import { brokerRequest } from './native-tool-broker.mjs';
 import { normalizeRequest } from './native-tool-session.mjs';
 import { snapshotBoundary } from './native-snapshot-boundary.mjs';
@@ -101,24 +100,23 @@ export async function replayHook(event, {socket}) {
   const running = result.running_wait_ms !== null;
   if (running) {
     if (!Number.isSafeInteger(result.running_wait_ms) || result.running_wait_ms < 0) throw new Error('Codex running tool timing is invalid');
-    const helper = spawn(process.execPath, [fileURLToPath(import.meta.url), 'release', socket, String(token), String(result.running_wait_ms)], {detached:true,stdio:'ignore'});
-    helper.unref();
   } else {
     const {value} = await brokerRequest(socket, {op:'release', token});
     if (JSON.stringify(value) !== JSON.stringify(outcome.value)) throw new Error('Codex native replay result changed after reservation');
   }
   const argument = Buffer.from(JSON.stringify(result), 'utf8').toString('base64');
-  const command = `${quote(process.execPath)} ${quote(fileURLToPath(import.meta.url))} emit ${quote(argument)} ${quote(String(result.running_wait_ms ?? 0))}`;
+  const command = `${quote(process.execPath)} ${quote(fileURLToPath(import.meta.url))} emit ${quote(argument)} ${quote(String(result.running_wait_ms ?? 0))} ${quote(running ? socket : '')} ${quote(running ? String(token) : '')}`;
   return {hookSpecificOutput: {hookEventName:'PreToolUse', permissionDecision:'allow', updatedInput:{...event.tool_input, command}}};
 }
 
-export async function emitRecorded(value, waitMs = 0, followups = []) {
+export async function emitRecorded(value, waitMs = 0, followups = [], release) {
   const match = value.match(/^Chunk ID: [^\r\n]+\r?\nWall time: (?:\d+(?:\.\d+)?|<asb-wall-time>) seconds\r?\nProcess exited with code (-?\d+)\r?\n(?:Original token count: (?:\d+|<asb-token-count>)\r?\n)?Output:\r?\n([\s\S]*)$/);
   if (!match) {
     const running = value.match(/^Chunk ID: [^\r\n]+\r?\nWall time: (?:\d+(?:\.\d+)?|<asb-wall-time>) seconds\r?\nProcess running with session ID [^\r\n]+\r?\n(?:Original token count: (?:\d+|<asb-token-count>)\r?\n)?Output:\r?\n([\s\S]*)$/);
     if (!running || !Number.isSafeInteger(waitMs) || waitMs <= 0) throw new Error('Codex native replay result has an unsupported shell envelope');
     process.stdout.write(running[1]);
     await new Promise(resolve => setTimeout(resolve, waitMs));
+    if (release) await release();
     for (const followup of followups) await emitRecorded(followup.output, followup.running_wait_ms ?? 0);
     return;
   }
@@ -148,14 +146,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === 'e
   const value = Buffer.from(process.argv[3] ?? '', 'base64').toString('utf8');
   let result; try { result=JSON.parse(value); } catch { result={output:value}; }
   if (typeof result === 'string') result={output:result};
-  emitRecorded(result.output, Number(process.argv[4] ?? 0), result.followups ?? []).catch(error => {console.error(error.message);process.exitCode=1;});
+  const socket=process.argv[5], token=process.argv[6];
+  const release=socket && token ? () => brokerRequest(socket,{op:'release',token:Number(token)}) : undefined;
+  emitRecorded(result.output, Number(process.argv[4] ?? 0), result.followups ?? [], release).catch(error => {console.error(error.message);process.exitCode=1;});
 } else if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === 'hook') {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });
 } else if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === 'finish') {
   const event = JSON.parse(Buffer.from(process.argv[3] ?? '', 'base64').toString('utf8'));
   recordHook(event, {directory:process.env.ASB_CODEX_NATIVE_DIRECTORY,socket:process.env.ASB_CODEX_NATIVE_SOCKET,marker:process.env.ASB_CODEX_NATIVE_MARKER})
     .catch(error => {console.error(error.message);process.exitCode=1;});
-} else if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === 'release') {
-  const [, , , socket, token, wait] = process.argv;
-  setTimeout(() => brokerRequest(socket, {op:'release',token:Number(token)}).catch(() => {process.exitCode=1;}), Number(wait));
 }
