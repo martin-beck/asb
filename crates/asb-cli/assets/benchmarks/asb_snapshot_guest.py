@@ -13,7 +13,7 @@ import time
 
 from asb_snapshot_service import (MarkerServer, SnapshotService, SnapshotReplay,
                                   SnapshotApplier, export_snapshot_streams,
-                                  receive_snapshot_streams)
+                                  load_replay_boundaries)
 from asb_snapshot_workspace import SnapshotWorkspace
 
 
@@ -56,6 +56,63 @@ def unpack_streams(archive, destination):
         raise ValueError('snapshot archive is missing its journals')
 
 
+def receive_archive(archive, destination, command):
+    """Receive snapshot members directly, retaining the verified input archive."""
+    destination = Path(destination)
+    with tarfile.open(archive, 'r:*') as source:
+        members = source.getmembers()
+        names = [member.name for member in members]
+        if (len(names) != len(set(names)) or any(not member.isfile() for member in members)
+                or any(not (name in ('boundaries.jsonl', 'markers.jsonl') or
+                            re.fullmatch(r'snapshot-[0-9]{8}\.btrfs', name)) for name in names)):
+            raise ValueError('snapshot archive contains an unexpected entry')
+        if not {'boundaries.jsonl', 'markers.jsonl'}.issubset(names):
+            raise ValueError('snapshot archive is missing its journals')
+        journals = {}
+        for name in ('boundaries.jsonl', 'markers.jsonl'):
+            with source.extractfile(name) as stream:
+                journals[name] = stream.read()
+        entries = [json.loads(line) for line in journals['boundaries.jsonl'].splitlines()]
+        if len(entries) < 2:
+            raise ValueError('snapshot stream set is incomplete')
+        expected = []
+        for index, entry in enumerate(entries, 1):
+            name = f'snapshot-{index:08d}'
+            if not isinstance(entry, dict) or entry.get('sequence') != index or entry.get('snapshot') != name:
+                raise ValueError('snapshot stream set is malformed')
+            expected.append(name+'.btrfs')
+        if set(names) != set(expected) | set(journals):
+            raise ValueError('snapshot stream set does not match its journal')
+        destination.mkdir(parents=True, exist_ok=False)
+        for name in expected:
+            process = subprocess.Popen(list(command)+['receive',str(destination)], stdin=subprocess.PIPE,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            failures = []
+            def feed():
+                try:
+                    with source.extractfile(name) as stream:
+                        shutil.copyfileobj(stream, process.stdin, length=1024*1024)
+                except (OSError, tarfile.TarError) as error:
+                    failures.append(error)
+                finally:
+                    try: process.stdin.close()
+                    except OSError: pass
+            worker = threading.Thread(target=feed, daemon=True)
+            worker.start()
+            try:
+                code = process.wait(timeout=300)
+            except BaseException:
+                process.kill(); process.wait(); worker.join(timeout=10)
+                raise
+            worker.join(timeout=10)
+            if worker.is_alive() or failures or code:
+                raise RuntimeError('snapshot stream receive failed; retained partial output')
+        for name, content in journals.items():
+            with (destination/name).open('xb') as output:
+                output.write(content)
+        return load_replay_boundaries(destination)
+
+
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     for name in ('target','root','socket','output','btrfs','mkfs','rsync'):
@@ -83,8 +140,7 @@ def main(argv=None):
                      else workspace.prepare(args.target))
         store = root/'filesystem/snapshots'
         if args.replay_archive:
-            unpack_streams(args.replay_archive, root/'streams')
-            boundaries = receive_snapshot_streams(root/'streams', store, [args.btrfs])
+            boundaries = receive_archive(args.replay_archive, store, [args.btrfs])
             if args.extra_root:
                 baseline = store/'snapshot-00000001'
                 try:
@@ -96,10 +152,6 @@ def main(argv=None):
                     raise ValueError('snapshot archive does not match the configured roots')
             mounted=workspace.restore_baseline(store/'snapshot-00000001')
             service = SnapshotReplay(boundaries, SnapshotApplier(store, mounted, [args.rsync]))
-            # The verified input archive remains available. Once all streams
-            # have been received and validated, their extracted copies are
-            # regenerable and need not consume space for the whole replay.
-            shutil.rmtree(root/'streams')
         roots = [args.target] + args.extra_root
         for index, target in enumerate(roots):
             source = mounted/str(index) if args.extra_root else mounted

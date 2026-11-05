@@ -28,6 +28,51 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_archive_streams_directly_to_receive_and_preserves_input(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);archive=root/'input.tar';received=[]
+            boundaries=b'{"sequence":1,"snapshot":"snapshot-00000001"}\n{"sequence":2,"snapshot":"snapshot-00000002"}\n'
+            with tarfile.open(archive,'w') as output:
+                for name,data in [('boundaries.jsonl',boundaries),('markers.jsonl',b'fixture\n'),
+                                  ('snapshot-00000001.btrfs',b'first'),('snapshot-00000002.btrfs',b'second')]:
+                    info=tarfile.TarInfo(name);info.size=len(data);output.addfile(info,io.BytesIO(data))
+            class Sink(io.BytesIO):
+                def close(self):received.append(self.getvalue());super().close()
+            def spawn(*_args,**_kwargs):
+                return SimpleNamespace(stdin=Sink(),wait=lambda **_:0)
+            with patch.object(asb_snapshot_guest.subprocess,'Popen',side_effect=spawn), \
+                 patch.object(asb_snapshot_guest,'load_replay_boundaries',return_value=[('fixture',2)]):
+                result=asb_snapshot_guest.receive_archive(archive,root/'received',['btrfs'])
+            self.assertEqual(result,[('fixture',2)]);self.assertEqual(received,[b'first',b'second'])
+            self.assertEqual((root/'received'/'boundaries.jsonl').read_bytes(),boundaries)
+            self.assertTrue(archive.is_file())
+
+    def test_archive_rejects_unlisted_snapshot_before_receive(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);archive=root/'input.tar'
+            boundaries=b'{"sequence":1,"snapshot":"snapshot-00000001"}\n{"sequence":2,"snapshot":"snapshot-00000002"}\n'
+            with tarfile.open(archive,'w') as output:
+                for name,data in [('boundaries.jsonl',boundaries),('markers.jsonl',b''),
+                                  ('snapshot-00000001.btrfs',b'first'),('snapshot-00000003.btrfs',b'wrong')]:
+                    info=tarfile.TarInfo(name);info.size=len(data);output.addfile(info,io.BytesIO(data))
+            with patch.object(asb_snapshot_guest.subprocess,'Popen') as spawn:
+                with self.assertRaisesRegex(ValueError,'does not match its journal'):
+                    asb_snapshot_guest.receive_archive(archive,root/'received',['btrfs'])
+            spawn.assert_not_called();self.assertFalse((root/'received').exists());self.assertTrue(archive.is_file())
+
+    def test_archive_receive_failure_retains_input_and_partial_output(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);archive=root/'input.tar'
+            boundaries=b'{"sequence":1,"snapshot":"snapshot-00000001"}\n{"sequence":2,"snapshot":"snapshot-00000002"}\n'
+            with tarfile.open(archive,'w') as output:
+                for name,data in [('boundaries.jsonl',boundaries),('markers.jsonl',b''),
+                                  ('snapshot-00000001.btrfs',b'first'),('snapshot-00000002.btrfs',b'second')]:
+                    info=tarfile.TarInfo(name);info.size=len(data);output.addfile(info,io.BytesIO(data))
+            with patch.object(asb_snapshot_guest.subprocess,'Popen',return_value=SimpleNamespace(stdin=io.BytesIO(),wait=lambda **_:1)):
+                with self.assertRaisesRegex(RuntimeError,'retained partial output'):
+                    asb_snapshot_guest.receive_archive(archive,root/'received',['btrfs'])
+            self.assertTrue(archive.is_file());self.assertTrue((root/'received').is_dir())
+
     def test_guest_binds_all_roots_and_unmounts_in_reverse_order(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory).resolve();mounted=root/'mounted';mounted.mkdir()
@@ -82,13 +127,11 @@ class SnapshotServiceTest(unittest.TestCase):
                 shutil.copytree(root/'prepared/filesystem/snapshots',destination)
                 return []
             with patch.object(asb_snapshot_guest,'SnapshotWorkspace',Workspace), \
-                 patch.object(asb_snapshot_guest,'unpack_streams'), \
-                 patch.object(asb_snapshot_guest,'receive_snapshot_streams',side_effect=receive), \
-                 patch.object(asb_snapshot_guest.shutil,'rmtree') as cleanup, \
+                 patch.object(asb_snapshot_guest,'receive_archive',side_effect=receive), \
                  patch.object(asb_snapshot_guest.subprocess,'run') as run:
                 with self.assertRaisesRegex(ValueError,'does not match the configured roots'):
                     asb_snapshot_guest.main(args)
-            run.assert_not_called();cleanup.assert_not_called();self.assertEqual(closed,[True])
+            run.assert_not_called();self.assertEqual(closed,[True])
 
     def test_guest_unmounts_first_root_if_second_mount_fails(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
@@ -310,11 +353,9 @@ class SnapshotServiceTest(unittest.TestCase):
                   '--rsync','rsync','--size','1024','--replay-archive',str(root/'archive')]
             try:
                 with patch.object(asb_snapshot_guest,'SnapshotWorkspace',Workspace), \
-                     patch.object(asb_snapshot_guest,'unpack_streams'), \
-                     patch.object(asb_snapshot_guest,'receive_snapshot_streams',return_value=[('first',2),('second',3)]), \
+                     patch.object(asb_snapshot_guest,'receive_archive',return_value=[('first',2),('second',3)]), \
                      patch.object(asb_snapshot_guest,'SnapshotApplier',return_value=lambda _:None), \
                      patch.object(asb_snapshot_guest,'SnapshotReplay',side_effect=replay), \
-                     patch.object(asb_snapshot_guest.shutil,'rmtree'), \
                      patch.object(asb_snapshot_guest.subprocess,'run'), \
                      patch.object(asb_snapshot_guest.sys,'stdin',Input()):
                     with self.assertRaisesRegex(RuntimeError,'unconsumed or failed'):
@@ -338,10 +379,8 @@ class SnapshotServiceTest(unittest.TestCase):
                   '--rsync','rsync','--replay-archive',str(root/'archive')]
             output=io.StringIO()
             with patch.object(asb_snapshot_guest,'SnapshotWorkspace',Workspace), \
-                 patch.object(asb_snapshot_guest,'unpack_streams'), \
-                 patch.object(asb_snapshot_guest,'receive_snapshot_streams',return_value=[]), \
+                 patch.object(asb_snapshot_guest,'receive_archive',return_value=[]), \
                  patch.object(asb_snapshot_guest,'SnapshotApplier',return_value=lambda _:None), \
-                 patch.object(asb_snapshot_guest.shutil,'rmtree'), \
                  patch.object(asb_snapshot_guest.subprocess,'run'), \
                  patch.object(asb_snapshot_guest.sys,'stdin',io.StringIO('STOP\n')), \
                  patch.object(asb_snapshot_guest.sys,'stdout',output):

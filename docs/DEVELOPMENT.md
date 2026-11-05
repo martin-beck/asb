@@ -53,7 +53,9 @@ subvolume and binds each at its original guest path, so a tool boundary
 captures their effects together. The archive records the ordered paths and
 replay rejects a different layout. Replay creates its writable workspace as a
 Btrfs snapshot of the received baseline, sharing unchanged data instead of
-copying the prepared workspace and then overwriting it. This is an opt-in filesystem experiment,
+copying the prepared workspace and then overwriting it. Snapshot streams are
+received directly from the retained archive, avoiding a second extracted copy.
+This is an opt-in filesystem experiment,
 not automatic full-filesystem capture: special files, active sockets, other
 paths, overlapping tool mutations and full agent replay remain unqualified.
 Do not mark a cassette complete based on this facility alone.
