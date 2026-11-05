@@ -570,6 +570,22 @@ impl ProxySession for RunningLlmtape {
                     self.cassette.display()
                 )));
             }
+            let omitted = value
+                .get("unrequested_optional_probes")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            if omitted > total {
+                return Err(Error::Run(
+                    "replay optional-probe count is malformed".into(),
+                ));
+            }
+            if omitted > 0 {
+                self._scratch.retain = true;
+                eprintln!(
+                    "Replay omitted {omitted} recorded optional capability probe(s); progress retained at {}",
+                    progress.display()
+                );
+            }
         }
         Ok(())
     }

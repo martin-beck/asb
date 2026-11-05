@@ -2,6 +2,21 @@
 // Only hook-observed pairs may be aliased; unrelated task content remains exact.
 const ids = new Map(), paths = new Map(), liveToRecorded = new Map(), recordedToLive = new Map(), taskPaths = new Map();
 let next = 0;
+export function isReplayProbe(request) {
+  const path = String(request?.url || '').split('?',1)[0];
+  let body = request?.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch { return false; }
+  }
+  return request?.method === 'POST' && path === '/v1/messages/count_tokens' &&
+    typeof body?.model === 'string' && Array.isArray(body?.messages);
+}
+export function maySkipRecordedProbe(interaction) {
+  if (!isReplayProbe(interaction?.request)) return undefined;
+  // A 404 established that the endpoint was unsupported; a successful count
+  // can influence context management and must remain an exact replay event.
+  return interaction?.response?.status === 404;
+}
 function bind(map, live, recorded, alias) {
   if (typeof live !== 'string' || !live || typeof recorded !== 'string' || !recorded)
     throw new Error('Claude task mapping is invalid');

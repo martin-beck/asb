@@ -812,6 +812,7 @@ function writeProgress() {
       consumed: cursor,
       total: interactions.length,
       rejected,
+      unrequested_optional_probes: deferredProbes.length,
       ...(firstMismatch ? { first_mismatch: firstMismatch } : {}),
     }));
   }
@@ -955,6 +956,13 @@ function isReplayProbe(request) {
   return false;
 }
 
+// Adapter-owned probe classes may require a particular recorded response to
+// be safely omitted. An absent veto preserves existing probe behavior.
+function isSkippableRecordedProbe(interaction) {
+  return Boolean(interaction?.request && isReplayProbe(interaction.request)) &&
+    agentWireExtension?.maySkipRecordedProbe?.(interaction) !== false;
+}
+
 // Replay admission and inference accounting are distinct: embeddings must be
 // replayed, but they are not language-model inference requests.
 function isInferenceRequest(request) {
@@ -992,7 +1000,7 @@ async function awaitReplayTurn(request, response, deadline) {
   replayOrderWaiters += 1;
   try {
     while (cursor < target && performance.now() < deadline && !response.destroyed && !stopping) {
-      if (interactions[cursor]?.request && isReplayProbe(interactions[cursor].request) && maySkipCurrentProbe(request)) return true;
+      if (isSkippableRecordedProbe(interactions[cursor]) && maySkipCurrentProbe(request)) return true;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     return !response.destroyed && !stopping;
@@ -1058,6 +1066,7 @@ async function handle(request, response, recording) {
         const deferred = deferredProbes.findIndex((index) => requestKey(interactions[index].request) === requestKey(recordedRequest));
         if (deferred >= 0) {
           const [index] = deferredProbes.splice(deferred, 1);
+          writeProgress();
           await deliverRecordedResponse(response, interactions[index]);
           return;
         }
@@ -1082,7 +1091,7 @@ async function handle(request, response, recording) {
       // next request is not a probe, or it exactly matches a later probe.
       while (interactions[cursor]?.request
         && maySkipCurrentProbe(recordedRequest)
-        && isReplayProbe(interactions[cursor].request)
+        && isSkippableRecordedProbe(interactions[cursor])
         // If this client did issue the next probe, it must consume its own
         // recorded exchange. Only probes absent from the client request may be
         // skipped.
