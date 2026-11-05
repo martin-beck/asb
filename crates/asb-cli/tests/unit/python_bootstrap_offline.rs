@@ -20,6 +20,10 @@ for name, search in [('bootstrap', str(base / 'fake-bin')),
     env = {'PATH': search, 'HOME': str(root), 'TERM': 'dumb',
            'ASB_BOOTSTRAP_RECORD': str(marker),
            'all_proxy': 'socks5h://127.0.0.1:9'}
+    # This control isolates Python's own bootstrap decision from init's
+    # independent preparation of other missing project tools.
+    if name == 'supported':
+        env['ASB_INIT_OFFLINE'] = '1'
     if 'LLVM_PROFILE_FILE' in os.environ:
         env['LLVM_PROFILE_FILE'] = os.environ['LLVM_PROFILE_FILE']
     result = subprocess.run([request['asb'], 'init'], cwd=root, env=env,
