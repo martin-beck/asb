@@ -15,7 +15,7 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).parents[1] / "assets/benchmarks"))
 from asb_execution import ExecutionError
-from asb_guest import (execute_agent, export_agent_artifacts, stage_npm_package_tree, stage_private_inputs, stage_auxiliary_tools, prepare_agent, propagate_guest_timeout,
+from asb_guest import (execute_agent, export_agent_artifacts, stage_npm_package_tree, stage_python_package_tree, stage_private_inputs, stage_auxiliary_tools, prepare_agent, propagate_guest_timeout,
                        stage_public_cache, stage_bootstrap, PreparationBudget)
 from asb_runtime import elf as inspect_elf
 from asb_guest import experimental_snapshot_roots
@@ -740,6 +740,37 @@ class GuestBootstrapTests(unittest.TestCase):
             self.assertNotIn(str(tools), json.dumps(receipt))
             with self.assertRaises(ExecutionError):
                 stage_npm_package_tree(task, tree, tools, "other-agent")
+
+    def test_python_package_tree_stages_only_selected_bounded_archives(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = root / "tools"
+            cache = tools / "openjiuwen/cache"
+            cache.mkdir(parents=True)
+            runtime, packages = cache / "runtime.tar.gz", cache / "packages.tar.gz"
+            for path, name in [(runtime, "cpython/bin/python3.12"), (packages, "bin/openjiuwen")]:
+                with tarfile.open(path, "w:gz") as archive:
+                    payload = b"fixture"
+                    entry = tarfile.TarInfo(name)
+                    entry.size, entry.mode = len(payload), 0o755
+                    archive.addfile(entry, io.BytesIO(payload))
+            container, calls = Container(), []
+            task = SimpleNamespace(workspace=SimpleNamespace(container=container, image_identity={"architecture":"amd64"}), checked=lambda argv: calls.append(argv))
+            tree = {"runtime":str(runtime), "packages":str(packages), "runtime_name":"cpython",
+                    "version":"3.12", "architecture":"amd64", "target":"openjiuwen", "executable":"openjiuwen"}
+            stage_python_package_tree(task, tree, tools, "openjiuwen")
+            self.assertEqual(len(container.files), 2)
+            self.assertTrue(any("--without-pip" in call for call in calls))
+            with self.assertRaises(ExecutionError):
+                stage_python_package_tree(task, tree, tools, "other")
+            with self.assertRaises(ExecutionError):
+                stage_python_package_tree(task, dict(tree, architecture="arm64"), tools, "openjiuwen")
+            with tarfile.open(packages, "w:gz") as archive:
+                entry = tarfile.TarInfo("bin/escape")
+                entry.type, entry.linkname = tarfile.SYMTYPE, "../../outside"
+                archive.addfile(entry)
+            with self.assertRaisesRegex(ExecutionError, "escaping link"):
+                stage_python_package_tree(task, tree, tools, "openjiuwen")
 
     def test_bootstrap_uses_exact_selected_tool_and_private_request_not_argv(self):
         for timed_out, measured, confirmed in [(False, False, True), (True, False, False), (False, True, True), (False, False, False)]:

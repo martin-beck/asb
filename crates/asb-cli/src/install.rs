@@ -287,6 +287,20 @@ pub(crate) struct GuestBootstrap {
     assets: Vec<tools::GuestAsset>,
     public_package_cache: bool,
     npm_package_tree: Option<NpmPackageTree>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    python_package_tree: Option<PythonPackageTree>,
+}
+
+/// Portable interpreter and installed package payload for a Python guest.
+#[derive(serde::Serialize)]
+pub(crate) struct PythonPackageTree {
+    runtime: PathBuf,
+    packages: PathBuf,
+    runtime_name: String,
+    version: String,
+    architecture: &'static str,
+    target: String,
+    executable: &'static str,
 }
 
 /// A bounded, project-owned npm installation that is staged into an isolated
@@ -308,6 +322,7 @@ impl GuestBootstrap {
             assets: Vec::new(),
             public_package_cache: false,
             npm_package_tree: None,
+            python_package_tree: None,
         }
     }
 }
@@ -346,6 +361,7 @@ fn guest_bootstrap_in(
         assets: Vec::new(),
         public_package_cache: matches!(recipe, Recipe::Npm { .. }),
         npm_package_tree: None,
+        python_package_tree: None,
     };
     let primary_assets = recipe.guest_assets(context, &tools_root.join(id), &mut progress)?;
     if let Some(assets) = &primary_assets {
@@ -401,7 +417,219 @@ fn guest_bootstrap_in(
             executable: program,
         });
     }
+    if let Recipe::Python { executable, .. } = recipe
+        && std::env::consts::OS == "linux"
+        && matches!(std::env::consts::ARCH, "x86_64" | "aarch64")
+    {
+        plan.python_package_tree = Some(python_guest_package_tree_in(
+            context,
+            &tools_root.join(id),
+            id,
+            executable,
+        )?);
+        // The payload already contains the interpreter and installed client.
+        plan.runtime_tools.clear();
+    }
     Ok(plan)
+}
+
+fn python_guest_package_tree_in(
+    context: &OperationContext,
+    root: &Path,
+    id: &str,
+    executable: &'static str,
+) -> InstallResult<PythonPackageTree> {
+    let architecture =
+        match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64") => "amd64",
+            ("linux", "aarch64") => "arm64",
+            _ => return Err(Error::Input(
+                "Portable Python guest staging requires a matching Linux x86_64 or aarch64 host"
+                    .into(),
+            )
+            .into()),
+        };
+    let venv = root.join("venv");
+    if !crate::executables::is_executable(&venv.join("bin").join(executable)) {
+        return Err(Error::Input(format!(
+            "Python agent `{id}` is not installed; run `asb tool install {id}` first"
+        ))
+        .into());
+    }
+    let cache = root.join("cache");
+    fs::create_dir_all(&cache).map_err(crate::io_error)?;
+    let tools_root = root
+        .parent()
+        .ok_or_else(|| Error::Input("Python tool parent is missing".into()))?;
+    ensure_runtime_dependency_in(
+        context,
+        "uv",
+        tools_root,
+        &mut std::io::sink(),
+        &mut |_, _| {},
+    )?;
+    let uv = tools::resolve("uv", context.root(), &context.project().tools_dir)
+        .map(PathBuf::from)
+        .or_else(|| tools::host_executable(Path::new("uv")))
+        .ok_or_else(|| Error::Input("uv is unavailable after runtime preparation".into()))?;
+    let owner = ProducerDirectory::open(root)?;
+    let mut scope = owner.scope(context);
+    let mut version = scope.prepare(
+        venv.join("bin/python"),
+        Purpose::Version,
+        "Python guest version",
+    )?;
+    version.capture(process::Capture::inspection());
+    version
+        .command_mut()
+        .args([
+            "-I",
+            "-S",
+            "-c",
+            "import sys; print('%d.%d' % sys.version_info[:2])",
+        ])
+        .stdin(Stdio::null());
+    let result = scope.run(version)?;
+    let text = std::str::from_utf8(&result.stdout).unwrap_or("").trim();
+    if !result.status.success() || !matches!(text, "3.12" | "3.13") {
+        return Err(Error::Input(
+            "Python agent requires a compatible 3.12 or 3.13 environment".into(),
+        )
+        .into());
+    }
+    let version = text.to_owned();
+    // Keep the patch release stable across recording and replay: agents may
+    // include the interpreter version in provider-visible system prompts.
+    let pinned = if version == "3.12" {
+        "3.12.12"
+    } else {
+        "3.13.15"
+    };
+    let install_dir = root
+        .parent()
+        .ok_or_else(|| Error::Input("Python tool parent is missing".into()))?
+        .join("uv/python");
+    fs::create_dir_all(&install_dir).map_err(crate::io_error)?;
+    let mut find = scope.prepare(&uv, Purpose::Version, "portable Python lookup")?;
+    find.capture(process::Capture::inspection());
+    find.command_mut()
+        .args([
+            "python",
+            "find",
+            "--no-config",
+            "--no-python-downloads",
+            "--managed-python",
+            pinned,
+        ])
+        .env("UV_PYTHON_INSTALL_DIR", &install_dir)
+        .stdin(Stdio::null());
+    let mut found = scope.run(find)?;
+    if !found.status.success() || found.stdout.is_empty() {
+        let mut install = scope.prepare(&uv, Purpose::Configure, "portable Python installation")?;
+        install
+            .command_mut()
+            .args(["python", "install", "--install-dir"])
+            .arg(&install_dir)
+            .arg(pinned)
+            .stdin(Stdio::null());
+        if !scope.run(install)?.status.success() {
+            return Err(Error::Input(format!("Could not prepare portable Python {pinned}; install it with `uv python install --install-dir {} {pinned}` and retry", install_dir.display())).into());
+        }
+        let mut retry = scope.prepare(&uv, Purpose::Version, "portable Python lookup")?;
+        retry.capture(process::Capture::inspection());
+        retry
+            .command_mut()
+            .args([
+                "python",
+                "find",
+                "--no-config",
+                "--no-python-downloads",
+                "--managed-python",
+                pinned,
+            ])
+            .env("UV_PYTHON_INSTALL_DIR", &install_dir)
+            .stdin(Stdio::null());
+        found = scope.run(retry)?;
+    }
+    let interpreter = std::str::from_utf8(&found.stdout).unwrap_or("").trim();
+    if !found.status.success() || interpreter.is_empty() {
+        return Err(Error::Input(format!(
+            "Portable Python {pinned} could not be located after installation"
+        ))
+        .into());
+    }
+    let interpreter = fs::canonicalize(interpreter).map_err(crate::io_error)?;
+    let runtime = interpreter
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| Error::Input("portable Python layout is invalid".into()))?;
+    let runtime_name = runtime
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::Input("portable Python path is invalid".into()))?
+        .to_owned();
+    let runtime_archive = cache.join("guest-python-runtime.tar.gz");
+    let packages_archive = cache.join("guest-python-packages.tar.gz");
+    let runtime_tmp = cache.join(format!(
+        ".guest-python-runtime-{}.tar.gz",
+        tools::runtime::unique_id()
+    ));
+    let packages_tmp = cache.join(format!(
+        ".guest-python-packages-{}.tar.gz",
+        tools::runtime::unique_id()
+    ));
+    let mut pack = scope.prepare("tar", Purpose::Package, "portable Python archive")?;
+    pack.command_mut()
+        .arg("--exclude=*.pyc")
+        .arg("--exclude=__pycache__")
+        .arg("-C")
+        .arg(
+            runtime
+                .parent()
+                .ok_or_else(|| Error::Input("portable Python parent is missing".into()))?,
+        )
+        .arg("-czf")
+        .arg(&runtime_tmp)
+        .arg(&runtime_name)
+        .stdin(Stdio::null());
+    if !scope.run(pack)?.status.success() {
+        return Err(Error::Io("could not package portable Python".into()).into());
+    }
+    let mut pack = scope.prepare("tar", Purpose::Package, "Python agent package archive")?;
+    pack.command_mut()
+        .arg("--exclude=*.pyc")
+        .arg("--exclude=__pycache__")
+        .arg("--exclude=bin/python*")
+        .arg("-czf")
+        .arg(&packages_tmp)
+        .arg("-C")
+        .arg(venv.join(format!("lib/python{version}")))
+        .arg("site-packages")
+        .arg("-C")
+        .arg(&venv)
+        .arg("bin")
+        .stdin(Stdio::null());
+    if !scope.run(pack)?.status.success() {
+        return Err(Error::Io("could not package Python agent environment".into()).into());
+    }
+    owner.consume(scope.finish()?)?;
+    for path in [&runtime_tmp, &packages_tmp] {
+        let metadata = fs::metadata(path).map_err(crate::io_error)?;
+        if !metadata.is_file() || metadata.len() > 512 * 1024 * 1024 {
+            return Err(Error::Input("Python guest archive exceeds 512 MiB".into()).into());
+        }
+    }
+    fs::rename(runtime_tmp, &runtime_archive).map_err(crate::io_error)?;
+    fs::rename(packages_tmp, &packages_archive).map_err(crate::io_error)?;
+    Ok(PythonPackageTree {
+        runtime: runtime_archive,
+        packages: packages_archive,
+        runtime_name,
+        version,
+        architecture,
+        target: id.into(),
+        executable,
+    })
 }
 
 fn npm_guest_package_tree_in(context: &OperationContext, root: &Path) -> InstallResult<PathBuf> {

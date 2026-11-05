@@ -203,7 +203,7 @@ def stage_public_cache(container, project, temporary_dir=None, owner=None):
 def stage_bootstrap(task, plan, tools, owner=None):
     """Consume declared installer assets; never infer dependencies from names."""
     if (not isinstance(plan,dict) or not {"runtime_tools","assets"}.issubset(plan)
-            or set(plan)-{"runtime_tools","assets","public_package_cache","npm_package_tree"}
+            or set(plan)-{"runtime_tools","assets","public_package_cache","npm_package_tree","python_package_tree"}
             or type(plan.get("public_package_cache",False)) is not bool):
         raise ExecutionError("selected tool installation bootstrap plan is missing or invalid")
     runtimes,assets = plan["runtime_tools"],plan["assets"]
@@ -427,6 +427,65 @@ def stage_npm_package_tree(task, tree, tools, selected, owner=None):
     path.chmod(0o600)
 
 
+def stage_python_package_tree(task, tree, tools, selected):
+    """Stage an installed Python client and a portable matching interpreter."""
+    keys = {"runtime", "packages", "runtime_name", "version", "architecture", "target", "executable"}
+    if not isinstance(tree, dict) or set(tree) != keys or not all(isinstance(tree[key], str) for key in keys):
+        raise ExecutionError("Python package-tree bootstrap is invalid")
+    target, executable, version, runtime_name = (tree[key] for key in ("target", "executable", "version", "runtime_name"))
+    if (target != selected or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,79}", target)
+            or not re.fullmatch(r"[A-Za-z0-9+_.-]{1,256}", executable)
+            or version not in ("3.12", "3.13")
+            or tree["architecture"] not in ("amd64", "arm64")
+            or getattr(task.workspace, "image_identity", {}).get("architecture") != tree["architecture"]
+            or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", runtime_name)):
+        raise ExecutionError("Python package-tree identity is invalid")
+    destination = "/opt/asb-project/.asb-tools/" + target
+    stage = destination + "/python-guest"
+    task.checked(["mkdir", "-p", stage])
+    for key, allowed in (("runtime", {runtime_name}), ("packages", {"site-packages", "bin"})):
+        source = Path(tree[key])
+        if (not source.is_absolute() or source.is_symlink() or not source.is_file()
+                or not source.resolve().is_relative_to((tools / target).resolve())
+                or source.stat().st_size > 512 * 1024**2):
+            raise ExecutionError("Python package-tree archive escapes its selected guest tool")
+        try:
+            with tarfile.open(source, mode="r:gz") as archive:
+                members, total = archive.getmembers(), 0
+                if not 1 <= len(members) <= 200000:
+                    raise ExecutionError("Python package-tree member count is invalid")
+                for member in members:
+                    parts = Path(member.name).parts
+                    if (not parts or member.name.startswith("/") or ".." in parts or parts[0] not in allowed
+                            or not (member.isdir() or member.isfile() or member.issym() or member.islnk())):
+                        raise ExecutionError("Python package-tree contains an unsafe member")
+                    if member.isfile():
+                        total += member.size
+                        if member.size > 512 * 1024**2 or total > 2 * 1024**3:
+                            raise ExecutionError("Python package-tree exceeds its unpacked bound")
+                    if member.issym() or member.islnk():
+                        link = member.linkname
+                        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(member.name) if member.issym() else "", link))
+                        if (not link or link.startswith("/") or resolved.startswith("../") or
+                                not Path(resolved).parts or Path(resolved).parts[0] not in allowed):
+                            raise ExecutionError("Python package-tree contains an escaping link")
+        except (OSError, tarfile.TarError) as error:
+            raise ExecutionError("Python package-tree archive cannot be inspected") from error
+        with source.open("rb") as incoming:
+            if not task.workspace.container.put_archive(stage, incoming):
+                raise ExecutionError("could not stage Python package-tree bootstrap")
+    interpreter = stage + "/" + runtime_name + "/bin/python" + version
+    venv = destination + "/venv"
+    task.checked([interpreter, "-m", "venv", "--without-pip", venv])
+    task.checked(["cp", "-a", stage + "/site-packages/.", venv + "/lib/python" + version + "/site-packages/"])
+    task.checked(["cp", "-a", stage + "/bin/.", venv + "/bin/"])
+    # Installed console scripts retain host shebangs. Rewrite only Python
+    # shebangs and leave all other files untouched.
+    rewrite = "import pathlib,sys\np=pathlib.Path(sys.argv[1]); py=sys.argv[2].encode()\nfor f in p.iterdir():\n if f.is_symlink() or not f.is_file(): continue\n with f.open('rb') as h: line=h.readline(4096)\n if line.startswith(b'#!') and line.endswith(b'\\n') and b'python' in line.lower():\n  if f.stat().st_size > 16*1024*1024: raise ValueError('Python launcher exceeds limit')\n  b=f.read_bytes(); f.write_bytes(b'#!'+py+b'\\n'+b[len(line):])\n"
+    task.checked([venv + "/bin/python", "-c", rewrite, venv + "/bin", venv + "/bin/python"])
+    task.checked(["test", "-x", venv + "/bin/" + executable])
+
+
 def prepare_agent(task, request, cancelled, resources=None, relays=None, preparation_budget=None):
     """Install the exact selected client independently of provider execution."""
     guest = request.get("request")
@@ -478,6 +537,9 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
     package_tree = request["bootstrap"].get("npm_package_tree")
     if package_tree is not None:
         stage_npm_package_tree(task,package_tree,tools,tool,owner=owner)
+    python_tree = request["bootstrap"].get("python_package_tree")
+    if python_tree is not None:
+        stage_python_package_tree(task,python_tree,tools,tool)
     check_budget()
     if request["bootstrap"].get("public_package_cache",False):
         stage_public_cache(container, project,temporary_dir=task.artifacts,owner=owner)
@@ -486,7 +548,7 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
     auxiliary = stage_auxiliary_tools(task,request.get("auxiliary_tools",{}),owner)
     if auxiliary:
         environment['ASB_AUXILIARY_TOOLS'] = json.dumps(auxiliary,sort_keys=True,separators=(',',':'))
-    for selected in [*runtimes, *([] if package_tree is not None or tool in native_tools else [tool])]:
+    for selected in [*runtimes, *([] if package_tree is not None or python_tree is not None or tool in native_tools else [tool])]:
         result = task.workspace.execute(["/bin/sh", "-c", 'cd /opt/asb-project && exec /opt/asb-runtime/asb tool install "$1"', "asb", selected],
                                         environment=environment, timeout=min(900,preparation_budget.remaining()) if preparation_budget else 900, output_limit=256 * 1024,
                                         cancelled=ForwardingCancellation(cancelled, relays),
