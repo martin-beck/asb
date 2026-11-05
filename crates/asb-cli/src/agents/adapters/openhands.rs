@@ -55,6 +55,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_bridge_aliases(&["__asb-openhands-native-bridge"])
 .with_output_usage(output_usage)
 .with_guest_step_count(guest_step_count)
+.with_guest_token_usage(guest_token_usage)
 .with_final_response(final_response);
 
 // The CLI emits individual events, including arbitrary observation content;
@@ -248,6 +249,15 @@ fn guest_step_count(run_dir: &std::path::Path) -> Option<u64> {
     conversation_state(run_dir)
         .as_ref()
         .and_then(conversation_steps)
+}
+
+fn guest_token_usage(
+    run_dir: &std::path::Path,
+    input_includes_cache: bool,
+) -> Option<crate::measurements::TokenUsage> {
+    let value = conversation_state(run_dir)?;
+    let usage = conversation_usage(&value, input_includes_cache);
+    usage.any().then_some(usage)
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
@@ -738,9 +748,17 @@ except RuntimeError as error:
             Some(13)
         );
         assert_eq!(ADAPTER.guest_step_count(&root), Some(1));
+        assert_eq!(
+            ADAPTER
+                .guest_token_usage(&root, false)
+                .unwrap()
+                .total_tokens,
+            Some(13)
+        );
         std::fs::create_dir_all(conversations.join("second")).unwrap();
         assert!(collect(&context).token_usage.is_none());
         assert_eq!(ADAPTER.guest_step_count(&root), None);
+        assert!(ADAPTER.guest_token_usage(&root, false).is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 }
