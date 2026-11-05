@@ -534,3 +534,15 @@ saved conclusions. Comparison JSON and HTML disclose offsets or an unavailable
 reason. These are execution-envelope offsets, not LLM/tool phase classifications
 or CPU residency. Old captures without matching clock evidence stay unaligned.
 The conversion follows [Linux perf's implementation](https://github.com/torvalds/linux/blob/master/tools/perf/util/tsc.c).
+
+Native qualification on Kunpeng-920 exercised two concurrent fixed-work clients
+with a completed offline tape. Both passed grading, retained disjoint SPE task
+populations, and produced execution-aligned series, regenerated JSON and HTML.
+Their first-sample offsets were approximately 12.8 ms and 6.4 ms inside enclosing
+principal phases of about 2.25 s and 2.20 s. A second two-replica qualification
+denied only `prctl(PR_SET_DUMPABLE)` in a disposable process-tree seccomp filter:
+the timer probe declined access, alignment stayed unavailable, and both grades
+and valid scoped SPE metrics remained available. The filter changed no host
+policy or other process. ASB, guardians and sibling CPU/memory noise were
+excluded in both cases. These are synthetic collector qualifications, not actual
+Pi/model performance results or evidence of CPU residency/causal bottlenecks.
