@@ -1,5 +1,13 @@
 # Development
 
+Linux guests for Python agents stage a project-local portable Python and the
+installed agent packages before execution. The host prepares the pinned Python
+runtime through `uv` when needed; the guest can then install neither Python
+nor packages from the network. Guest architecture must match the staged
+runtime. The staged interpreter patch version is stable across record and
+replay because agents may expose it in model requests. This bootstrap does not
+establish complete tool or filesystem replay coverage.
+
 `cargo test --locked --offline --lib measurements::analysis` checks the
 deterministic resource-analysis artifact, unavailable/invalid observations and
 concurrent thread-time semantics. The normal measurement-session tests also
