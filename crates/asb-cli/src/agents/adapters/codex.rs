@@ -1529,7 +1529,7 @@ mod tests {
             &state,
             "post",
             Some(
-                r#"{"tool_name":"Bash","tool_use_id":"fresh-replay-id","tool_response":"ignored-emitter-output"}"#,
+                r#"{"tool_name":"Bash","session_id":"replay-session","tool_use_id":"fresh-replay-id","tool_response":"ignored-emitter-output"}"#,
             ),
         );
         assert!(replay_post.status.success());
@@ -1554,6 +1554,58 @@ mod tests {
         );
         assert!(!mismatch.status.success());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_hook_tracks_same_call_id_in_independent_sessions() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-codex-hook-sessions-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("hook.py");
+        std::fs::write(&script, NATIVE_HOOKS).unwrap();
+        let sidecar = root.join("sidecar.jsonl");
+        let progress = root.join("progress.json");
+        let state = root.join("state.json");
+        for session in ["one", "two"] {
+            let event = serde_json::json!({"session_id":session,"tool_use_id":"same","tool_name":"Bash","tool_input":{"command":"true"}}).to_string();
+            assert!(
+                invoke_native_hook(
+                    &script,
+                    "record",
+                    &sidecar,
+                    &progress,
+                    &state,
+                    "pre",
+                    Some(&event)
+                )
+                .status
+                .success()
+            );
+        }
+        for session in ["two", "one"] {
+            let event =
+                serde_json::json!({"session_id":session,"tool_use_id":"same","tool_response":""})
+                    .to_string();
+            assert!(
+                invoke_native_hook(
+                    &script,
+                    "record",
+                    &sidecar,
+                    &progress,
+                    &state,
+                    "post",
+                    Some(&event)
+                )
+                .status
+                .success()
+            );
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(state).unwrap()).unwrap();
+        assert!(value["pending"].as_object().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -103,6 +103,13 @@ def _tool_id(value):
     return identifier
 
 
+def _identity(value):
+    session = value.get("session_id")
+    if session is not None and (not isinstance(session, str) or not session):
+        raise RuntimeError("Codex native hook session identity is invalid")
+    return json.dumps([session, _tool_id(value)], separators=(",", ":"))
+
+
 def _initialize(file):
     if file.tell() == 0:
         program = Path(sys.executable).read_bytes()
@@ -114,7 +121,7 @@ def _record_pre(value):
     request = _request(value)
     if len(request) > MAX_PAYLOAD_BYTES:
         raise RuntimeError("Codex native tool request exceeds its bound")
-    identifier = _tool_id(value)
+    identifier = _identity(value)
 
     def operation():
         state = _load_state()
@@ -140,7 +147,7 @@ def _record_post(value):
     response = _encode(value.get("tool_response"))
     if len(response) > MAX_PAYLOAD_BYTES:
         raise RuntimeError("Codex native tool response exceeds its bound")
-    identifier = _tool_id(value)
+    identifier = _identity(value)
 
     def operation():
         state = _load_state()
@@ -179,7 +186,7 @@ def _quote(argument):
 
 def _replay_pre(value):
     request = _request(value)
-    identifier = _tool_id(value)
+    identifier = _identity(value)
     def operation():
         state = _load_state()
         if not state["replay"]:
@@ -243,7 +250,7 @@ def _replay_command_result(value):
 
 
 def _replay_post(value):
-    identifier = _tool_id(value)
+    identifier = _identity(value)
 
     def operation():
         state = _load_state()
