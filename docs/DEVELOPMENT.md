@@ -1708,3 +1708,27 @@ host settings or contact an online provider. Deterministic tests under
 `measurements::phase_alignment`, `measurements::execution_window`, and
 `compare::analysis` cover missing clock/conversion evidence, identity mismatch, incomplete or failed
 capture, out-of-envelope samples and precise integer subtraction offline.
+
+The optional `tests/fixtures/arm_telemetry/faults.py` extends that same delegated
+fixture with `--mode collector-loss` or `--mode cancel`. Supply `--asb`,
+`--base-project`, a fresh `--project`, and an absolute `--node` executable.
+Invoke it in a fresh delegated `asb-pressure-*.service`, using the same
+`systemd-run` properties as the pressure/overhead qualification. The service's
+runtime should be bounded (for example `RuntimeMaxSec=150`). Never reuse an
+existing evidence project.
+
+The fixture stages the synthetic fixed-work client and offline tape. It waits
+for both actual agent trees, then signals through an owned pidfd. Collector loss
+selects only an inherited PID-scoped SPE recorder in the service's control
+cgroup whose recording belongs to the fresh project. It checks both completed
+workloads, work checksums, one failed/one valid SPE result, and absence of numeric
+sampling/phase conclusions for the lost capture. Cancellation sends SIGINT to
+the owned ASB process, requires an interrupted exit and observes the entire
+owned service empty apart from the fixture after driver/noise cleanup. It does
+not signal a process group, scan unrelated host processes or change persistent
+host settings. Failure receipts and raw captures remain in the fresh project.
+
+Ordinary CI runs only the fixture's unprivileged selector/evidence tests through
+the existing Python policy test step. It never starts these services or hardware
+benchmarks. These probes qualify an exercised native path; they do not establish
+adversarial sandbox containment, installed-agent correctness or model quality.
