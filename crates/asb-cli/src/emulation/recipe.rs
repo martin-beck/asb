@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// A benchmark runs natively unless an emulated backend is explicitly chosen.
@@ -45,6 +45,42 @@ fn verify_digest(path: &Path, expected: &str) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Create an isolated writable disk over the pinned, verified base image.
+/// The caller supplies a new VM directory; existing directories are preserved.
+pub fn create_x86_overlay(qemu_img: &OsStr, base: &Path, vm_dir: &Path) -> io::Result<PathBuf> {
+    create_overlay(qemu_img, base, vm_dir, X86_IMAGE_SHA256)
+}
+
+fn create_overlay(
+    qemu_img: &OsStr,
+    base: &Path,
+    vm_dir: &Path,
+    digest: &str,
+) -> io::Result<PathBuf> {
+    if qemu_img.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "qemu-img executable is empty",
+        ));
+    }
+    let base = base.canonicalize()?;
+    verify_digest(&base, digest)?;
+    std::fs::create_dir(vm_dir)?;
+    let disk = vm_dir.canonicalize()?.join("disk.qcow2");
+    let status = Command::new(qemu_img)
+        .args(["create", "-f", "qcow2", "-F", "qcow2", "-b"])
+        .arg(&base)
+        .arg(&disk)
+        .arg("250G")
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "qemu-img failed to create VM disk: {status}"
+        )));
+    }
+    Ok(disk)
 }
 
 /// Paths supplied by the caller; no host username or project location is embedded.
@@ -175,6 +211,63 @@ mod tests {
             verify_x86_image(&path).unwrap_err().kind(),
             io::ErrorKind::NotFound
         );
+    }
+
+    #[test]
+    fn verified_overlay_uses_base_and_does_not_replace_existing_vm() {
+        if Command::new("qemu-img").arg("--version").output().is_err() {
+            return;
+        }
+        let parent = std::env::current_dir()
+            .unwrap()
+            .join("target/vm-recipe-fixtures")
+            .join(format!("overlay-{}", std::process::id()));
+        std::fs::create_dir_all(&parent).unwrap();
+        let base = parent.join("base.qcow2");
+        assert!(
+            Command::new("qemu-img")
+                .args(["create", "-f", "qcow2"])
+                .arg(&base)
+                .arg("1M")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let digest = format!("{:x}", Sha256::digest(std::fs::read(&base).unwrap()));
+        let vm = parent.join("guest");
+        let disk = create_overlay(OsStr::new("qemu-img"), &base, &vm, &digest).unwrap();
+        let info = Command::new("qemu-img")
+            .args(["info", "--backing-chain", "--output=json"])
+            .arg(&disk)
+            .output()
+            .unwrap();
+        assert!(info.status.success());
+        assert!(
+            String::from_utf8(info.stdout)
+                .unwrap()
+                .contains(&base.canonicalize().unwrap().to_string_lossy().to_string())
+        );
+        assert_eq!(
+            create_overlay(OsStr::new("qemu-img"), &base, &vm, &digest)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        let rejected = parent.join("rejected");
+        assert_eq!(
+            create_x86_overlay(OsStr::new("qemu-img"), &base, &rejected)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            create_overlay(OsStr::new("qemu-img"), &base, &rejected, "wrong")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!rejected.exists());
+        std::fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
