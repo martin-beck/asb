@@ -122,7 +122,7 @@ class IndependentSnapshot:
         try:
             output, _ = process.communicate(action, timeout=600)
             expected = b'FORENSIC_SAVED_INCOMPLETE\n' if action == b'FORENSIC\n' else b'SAVED\n'
-            if process.returncode or expected not in output:
+            if process.returncode or output != expected:
                 raise ExecutionError('snapshot custodian did not settle; inspect snapshot-supervisor.log')
         finally:
             if process.poll() is None:
@@ -132,7 +132,7 @@ class IndependentSnapshot:
         try:
             self._settle(b'STOP\n')
             output, _ = self.preparer.communicate(b'CLEANUP\n', timeout=600)
-            if self.preparer.returncode or b'CLEANED\n' not in output:
+            if self.preparer.returncode or output != b'CLEANED\n':
                 raise ExecutionError('snapshot preparer did not settle; inspect snapshot-supervisor.log')
             self._remove_sidecar()
             if not self.replay:
@@ -142,6 +142,15 @@ class IndependentSnapshot:
                         if not path.is_file() or path.is_symlink():
                             raise ExecutionError('snapshot export contains an unexpected entry')
                         archive.add(path,arcname=path.name,recursive=False)
+        except BaseException as failure:
+            # A failed custodian or preparer must not leave the other local
+            # docker client alive. The journal still owns any container left
+            # behind for the task's interrupted-resource cleanup.
+            try:
+                self.abort()
+            except BaseException as cleanup:
+                failure.add_note(f'snapshot custody cleanup also failed: {type(cleanup).__name__}')
+            raise
         finally:
             self.log.close()
 

@@ -119,5 +119,28 @@ class IndependentTests(unittest.TestCase):
         self.assertEqual(self.prep.poll(),0)
         self.assertTrue(self.prep.stdin.closed)
 
+    def test_failed_custodian_settlement_aborts_preparer(self):
+        owner=self.start();self.side.output=b'NOT_SAVED\n'
+        with self.assertRaisesRegex(subject.ExecutionError, 'custodian did not settle'):
+            owner.close()
+        self.assertTrue(self.prep.stdin.closed)
+        self.assertEqual(self.prep.poll(),0)
+        self.sidecar.remove.assert_not_called()
+
+    def test_preparer_timeout_is_preserved_and_reaped(self):
+        owner=self.start()
+        self.prep.communicate=Mock(side_effect=subprocess.TimeoutExpired('docker exec',600))
+        with self.assertRaises(subprocess.TimeoutExpired):
+            owner.close()
+        self.assertTrue(self.prep.stdin.closed)
+        self.assertEqual(self.prep.poll(),0)
+        self.sidecar.remove.assert_not_called()
+
+    def test_preparer_rejects_success_marker_embedded_in_an_error(self):
+        owner=self.start();self.prep.output=b'NOT_CLEANED\n'
+        with self.assertRaisesRegex(subject.ExecutionError, 'preparer did not settle'):
+            owner.close()
+        self.sidecar.remove.assert_not_called()
+
 
 if __name__=='__main__':unittest.main()
