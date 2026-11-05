@@ -44,6 +44,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_tape_normalization_scripts(&[TapeNormalizationScript {
     id: "openhands-private-observations",
     workloads: &["*"],
+    tasks: &[],
     source: include_str!("../../../assets/scripts/agent-normalizers/openhands.mjs"),
 }])
 .with_replay_credential_vars(&["LLM_API_KEY"])

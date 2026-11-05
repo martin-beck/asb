@@ -15,11 +15,22 @@ fn shape(identity: &Compatibility) -> CompatibilityShape<'_> {
 #[test]
 fn shared_wire_projections_preserve_exact_existing_bytes_and_optional_fields() {
     let fixture = Fixture::new();
-    for (dataset, has_protocol) in [(false, false), (true, false), (false, true), (true, true)] {
+    for (dataset, has_protocol, has_normalization) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+        (true, false, true),
+        (false, true, true),
+        (true, true, true),
+    ] {
         let mut value = manifest(1);
         value.compatibility.model = "fixture/\"quoted\\模型".into();
         value.compatibility.dataset_sha256 = dataset.then(|| digest(b"dataset"));
         value.compatibility.protocol_sha256 = has_protocol.then(|| digest(b"protocol"));
+        value.compatibility.normalization_sha256 =
+            has_normalization.then(|| digest(b"normalization"));
         let c = &value.compatibility;
         let encoded = |text: &str| serde_json::to_string(text).unwrap();
         let protocol = c
@@ -27,8 +38,13 @@ fn shared_wire_projections_preserve_exact_existing_bytes_and_optional_fields() {
             .as_ref()
             .map(|digest| format!(",\"protocol_sha256\":{}", encoded(digest)))
             .unwrap_or_default();
+        let normalization = c
+            .normalization_sha256
+            .as_ref()
+            .map(|digest| format!(",\"normalization_sha256\":{}", encoded(digest)))
+            .unwrap_or_default();
         let compatibility = format!(
-            "{{\"agent\":{},\"provider\":{},\"model\":{},\"workload\":{},\"task\":{},\"dataset_sha256\":{},\"prompt_sha256\":{},\"material_sha256\":{}{protocol}}}",
+            "{{\"agent\":{},\"provider\":{},\"model\":{},\"workload\":{},\"task\":{},\"dataset_sha256\":{},\"prompt_sha256\":{},\"material_sha256\":{}{protocol}{normalization}}}",
             encoded(&c.agent),
             encoded(&c.provider),
             encoded(&c.model),
@@ -71,8 +87,100 @@ fn shared_wire_projections_preserve_exact_existing_bytes_and_optional_fields() {
         let planned = encoded_size(&shape(c).wire().unwrap(), u64::MAX).unwrap();
         let actual = encoded_size(c, u64::MAX).unwrap();
         assert!(planned >= actual);
-        assert_eq!(planned == actual, dataset && has_protocol);
+        assert_eq!(
+            planned == actual,
+            dataset && has_protocol && has_normalization
+        );
     }
+}
+
+#[test]
+fn normalization_artifact_is_reserved_for_each_track_before_admission() {
+    let fixture = Fixture::new();
+    let identity = manifest(0);
+    let destination = fixture.0.join("recording.zip");
+    let limits = Limits::default();
+    let base = RecordingReservation::for_plan(
+        shape(&identity.compatibility),
+        &identity.recording_id,
+        &destination,
+        2,
+        4,
+        limits,
+    )
+    .unwrap();
+    let with_policy = RecordingReservation::for_plan_with_normalization(
+        shape(&identity.compatibility),
+        &identity.recording_id,
+        &destination,
+        2,
+        4,
+        limits,
+    )
+    .unwrap();
+    assert!(with_policy.journal_bytes > base.journal_bytes);
+    assert!(with_policy.manifest_bytes > base.manifest_bytes);
+    assert!(with_policy.reference_bytes > base.reference_bytes);
+    assert!(with_policy.directory_bytes > base.directory_bytes);
+    let bounded = Limits {
+        max_directory_bytes: base.directory_bytes,
+        ..limits
+    };
+    assert!(
+        RecordingReservation::for_plan(
+            shape(&identity.compatibility),
+            &identity.recording_id,
+            &destination,
+            2,
+            4,
+            bounded
+        )
+        .is_ok()
+    );
+    assert!(
+        RecordingReservation::for_plan_with_normalization(
+            shape(&identity.compatibility),
+            &identity.recording_id,
+            &destination,
+            2,
+            4,
+            bounded
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn normalization_artifact_is_reserved_for_continuation_union() {
+    let fixture = Fixture::new();
+    let identity = manifest(0);
+    let destination = fixture.0.join("union.zip");
+    let origins = crate::cassette::OriginPlan {
+        schema_version: 1,
+        population: 4,
+        sources: Vec::new(),
+        imports: Vec::new(),
+    };
+    let base = RecordingReservation::for_origin_plan(
+        shape(&identity.compatibility),
+        &identity.recording_id,
+        &destination,
+        4,
+        &origins,
+        Limits::default(),
+    )
+    .unwrap();
+    let normalized = RecordingReservation::for_origin_plan_with_normalization(
+        shape(&identity.compatibility),
+        &identity.recording_id,
+        &destination,
+        4,
+        &origins,
+        Limits::default(),
+    )
+    .unwrap();
+    assert!(normalized.manifest_bytes > base.manifest_bytes);
+    assert!(normalized.directory_bytes > base.directory_bytes);
 }
 
 #[test]
@@ -86,7 +194,14 @@ fn planned_capacity_bounds_maximum_statistics_real_journals_and_published_proofs
             identity.compatibility.model = "escaped/\"model\\模型".into();
             identity.compatibility.dataset_sha256 = optional.then(|| digest(b"dataset"));
             identity.compatibility.protocol_sha256 = optional.then(|| digest(b"protocol"));
-            let capacity = RecordingReservation::for_plan(
+            identity.compatibility.normalization_sha256 =
+                optional.then(|| digest(b"normalization"));
+            let reserve = if optional {
+                RecordingReservation::for_plan_with_normalization
+            } else {
+                RecordingReservation::for_plan
+            };
+            let capacity = reserve(
                 shape(&identity.compatibility),
                 &identity.recording_id,
                 &destination,
@@ -254,7 +369,7 @@ fn directory_capacity_covers_digit_width_transitions_and_the_full_zip32_populati
             .unwrap()
             .metadata_bytes()
             .0;
-        let reserved = super::super::metadata::recording_directory_size(count).unwrap();
+        let reserved = super::super::metadata::recording_directory_size(count, false).unwrap();
         assert!(actual <= reserved, "count={count}, {actual} > {reserved}");
     }
     let fixture = Fixture::new();

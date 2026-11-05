@@ -265,7 +265,12 @@ impl Descriptor {
         let selection = plan.recording_selection.as_ref().ok_or_else(|| {
             Error::Input("recording continuation lost its original selection".into())
         })?;
-        RecordingReservation::for_origin_plan(
+        let reserve = if plan.normalization_policy.is_some() {
+            RecordingReservation::for_origin_plan_with_normalization
+        } else {
+            RecordingReservation::for_origin_plan
+        };
+        reserve(
             crate::cassette::CompatibilityShape {
                 agent: &plan.configuration.agent,
                 provider: &plan.configuration.provider,

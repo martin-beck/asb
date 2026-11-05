@@ -20,7 +20,7 @@ export function normalizeRequest(request) {
     for (const key of ["conversationRequestId", "messageId", "requestModelId", "requestModelName"]) {
       if (typeof next[key] === "string") next[key] = `<asb-workbuddy-${key}>`;
     }
-    next.content = visit(next.content);
+    if (!request.profileActive) next.content = visit(next.content);
     return next;
   });
   const normalized = { ...body, messages };

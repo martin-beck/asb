@@ -21,7 +21,7 @@ pub(super) fn load(path: &str) -> Result<LoadedReport, Error> {
         comparison_dir: layout.root.join("comparison"),
         plan: None,
         campaign: Some(
-            serde_json::json!({"campaign":layout.plan.campaign,"execution_mode":layout.plan.mode,"respect_record_timings":layout.plan.respect_record_timings,"repeat":layout.plan.repeat,"concurrency":layout.plan.concurrency,"replay_selection":layout.plan.replay_selection}),
+            serde_json::json!({"campaign":layout.plan.campaign,"execution_mode":layout.plan.mode,"respect_record_timings":layout.plan.respect_record_timings,"repeat":layout.plan.repeat,"concurrency":layout.plan.concurrency,"replay_selection":layout.plan.replay_selection,"normalization_policy":layout.plan.normalization_policy}),
         ),
         configurations: BTreeMap::from([(
             config.clone(),
@@ -179,6 +179,7 @@ pub(super) fn rows(
             "{index:03}-{}-batch-{}-replica-{}",
             configuration.agent, slot.batch, slot.replica
         );
+        row.planned_normalization_policy = layout.plan.normalization_policy.clone();
         for (href, physical) in &row.artifact_sources {
             let name = href.rsplit('/').next().unwrap_or(href);
             if matches!(

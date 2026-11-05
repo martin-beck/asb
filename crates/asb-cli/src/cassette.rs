@@ -69,6 +69,9 @@ pub struct Compatibility {
     /// only in earlier backend manifests; new run recordings must supply it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_sha256: Option<String>,
+    /// Explicit frozen normalization-policy identity; absent on legacy tapes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalization_sha256: Option<String>,
 }
 
 impl Compatibility {
@@ -91,6 +94,10 @@ impl Compatibility {
             || !valid_digest(&self.material_sha256)
             || self
                 .protocol_sha256
+                .as_deref()
+                .is_some_and(|value| !valid_digest(value))
+            || self
+                .normalization_sha256
                 .as_deref()
                 .is_some_and(|value| !valid_digest(value))
             || self

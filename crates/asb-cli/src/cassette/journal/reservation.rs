@@ -68,6 +68,30 @@ impl RecordingReservation {
             },
             limits,
             None,
+            false,
+        )
+    }
+
+    /// Reserve one normalizer-policy artifact per recorded track.
+    pub fn for_plan_with_normalization(
+        shape: CompatibilityShape<'_>,
+        recording_id: &str,
+        destination: &Path,
+        repeat: u64,
+        concurrency: u64,
+        limits: Limits,
+    ) -> Result<Self, Error> {
+        Self::reserve(
+            shape,
+            Layout {
+                recording_id,
+                destination,
+                repeat,
+                concurrency,
+            },
+            limits,
+            None,
+            true,
         )
     }
 
@@ -80,6 +104,46 @@ impl RecordingReservation {
         concurrency: u64,
         provenance: &crate::cassette::OriginPlan,
         limits: Limits,
+    ) -> Result<Self, Error> {
+        Self::for_origin_plan_inner(
+            shape,
+            recording_id,
+            destination,
+            concurrency,
+            provenance,
+            limits,
+            false,
+        )
+    }
+
+    /// Reserve a union with one normalizer-policy artifact per track.
+    pub fn for_origin_plan_with_normalization(
+        shape: CompatibilityShape<'_>,
+        recording_id: &str,
+        destination: &Path,
+        concurrency: u64,
+        provenance: &crate::cassette::OriginPlan,
+        limits: Limits,
+    ) -> Result<Self, Error> {
+        Self::for_origin_plan_inner(
+            shape,
+            recording_id,
+            destination,
+            concurrency,
+            provenance,
+            limits,
+            true,
+        )
+    }
+
+    fn for_origin_plan_inner(
+        shape: CompatibilityShape<'_>,
+        recording_id: &str,
+        destination: &Path,
+        concurrency: u64,
+        provenance: &crate::cassette::OriginPlan,
+        limits: Limits,
+        normalization: bool,
     ) -> Result<Self, Error> {
         provenance.validate(concurrency, limits)?;
         if provenance
@@ -101,6 +165,7 @@ impl RecordingReservation {
             },
             limits,
             Some(provenance),
+            normalization,
         )
     }
 
@@ -109,6 +174,7 @@ impl RecordingReservation {
         layout: Layout<'_>,
         limits: Limits,
         provenance: Option<&crate::cassette::OriginPlan>,
+        normalization: bool,
     ) -> Result<Self, Error> {
         let Layout {
             recording_id,
@@ -147,8 +213,9 @@ impl RecordingReservation {
             count,
             limits,
             provenance.and_then(|plan| plan.sources.len().checked_sub(1)),
+            normalization,
         )?;
-        let track = maximum_track(count, repeat, concurrency, limits);
+        let track = maximum_track(count, repeat, concurrency, limits, normalization);
         let reference = TrackEvidenceWire {
             schema_version: 1,
             destination,
@@ -163,7 +230,8 @@ impl RecordingReservation {
             .checked_mul(count)
             .ok_or_else(|| Error("recording reference capacity overflow".into()))?;
         let publication_bytes = super::publication::publication_capacity(recording_id, limits)?;
-        let directory_bytes = crate::cassette::metadata::recording_directory_size(count)?;
+        let directory_bytes =
+            crate::cassette::metadata::recording_directory_size(count, normalization)?;
         if directory_bytes > limits.max_directory_bytes {
             return Err(Error(
                 "planned recording directory exceeds metadata budget".into(),
@@ -232,8 +300,9 @@ pub(super) fn metadata_budget<M: Serialize>(
     count: u64,
     limits: Limits,
     import_source: Option<usize>,
+    normalization: bool,
 ) -> Result<MetadataCapacity, Error> {
-    let track = maximum_track(count, intent.repeat, concurrency, limits);
+    let track = maximum_track(count, intent.repeat, concurrency, limits, normalization);
     let start = Started {
         recording_id: recording_id.into(),
         id: count,
@@ -267,7 +336,13 @@ pub(super) fn metadata_budget<M: Serialize>(
     }
 }
 
-fn maximum_track(count: u64, repeat: u64, concurrency: u64, limits: Limits) -> Track {
+fn maximum_track(
+    count: u64,
+    repeat: u64,
+    concurrency: u64,
+    limits: Limits,
+    normalization: bool,
+) -> Track {
     Track {
         recorder: Some("a".repeat(64)),
         recorded_max_steps: Some(u64::MAX),
@@ -286,6 +361,13 @@ fn maximum_track(count: u64, repeat: u64, concurrency: u64, limits: Limits) -> T
             steps: Some(u64::MAX),
         },
         native: None,
-        artifacts: Vec::new(),
+        artifacts: normalization
+            .then(|| Artifact {
+                kind: "normalization-policy".into(),
+                bytes: limits.max_artifact_bytes,
+                sha256: "f".repeat(64),
+            })
+            .into_iter()
+            .collect(),
     }
 }

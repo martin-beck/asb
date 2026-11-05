@@ -23,6 +23,13 @@ const NETWORK_FETCH: &str = include_str!("../../../assets/scripts/network-fetch.
 const CAPTURE_SESSION: &str = include_str!("../../../assets/scripts/capture-session.mjs");
 const TAPE_NORMALIZATION: &str = include_str!("../../../assets/scripts/tape-normalization.mjs");
 const REQUEST_TRACING: &str = include_str!("../../../assets/scripts/request-tracing.mjs");
+const LEGACY_WORKLOAD_NORMALIZERS: &str =
+    include_str!("../../../assets/scripts/legacy-workload-normalizers.mjs");
+const TOOL_RESULT_NORMALIZATION: &str =
+    include_str!("../../../assets/scripts/tool-result-normalization.mjs");
+const NORMALIZER_SUPERVISOR: &str =
+    include_str!("../../../assets/scripts/normalizer-supervisor.mjs");
+const NORMALIZER_WORKER: &str = include_str!("../../../assets/scripts/normalizer-worker.mjs");
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 static START_LOCK: Mutex<()> = Mutex::new(());
 
@@ -77,6 +84,7 @@ struct Settings {
     /// invokes it without interpreting its wire protocol.
     wire_extension: Option<&'static str>,
     normalization_scripts: Vec<crate::agents::TapeNormalizationScript>,
+    custom_normalization: Option<crate::proxy::CustomNormalization>,
     perfetto_observer: Option<std::fs::File>,
     perfetto_trace_id: Option<String>,
     perfetto_report: Option<PathBuf>,
@@ -152,6 +160,10 @@ impl ProxyAdapter for LlmtapeAdapter {
         true
     }
 
+    fn supports_custom_normalization(&self) -> bool {
+        true
+    }
+
     fn recording_settings(
         &self,
         request: &crate::proxy::RecordingRequest<'_>,
@@ -164,6 +176,7 @@ impl ProxyAdapter for LlmtapeAdapter {
             invocation_dir: request.invocation_dir.to_path_buf(),
             wire_extension: request.wire_extension,
             normalization_scripts: request.normalization_scripts.clone(),
+            custom_normalization: request.custom_normalization.clone(),
             perfetto_observer: request
                 .perfetto_observer
                 .as_ref()
@@ -251,6 +264,40 @@ impl ProxyAdapter for LlmtapeAdapter {
         // only after listening. A released parent-selected port can be taken
         // by a different ASB process; a TCP connect does not prove ownership.
         let builtin = matches!(executable, ProxyExecutable::Builtin(_));
+        if !builtin && request.custom_normalization.is_some() {
+            return Err(Error::Input(
+                "external tape overrides do not support project replay normalizers".into(),
+            ));
+        }
+        let custom_policy = request
+            .custom_normalization
+            .as_ref()
+            .map(|custom| {
+                custom.policy.validate_sources().map_err(Error::Input)?;
+                let profiles = custom
+                    .policy
+                    .normalizers
+                    .iter()
+                    .map(|profile| {
+                        let source = std::str::from_utf8(&profile.source)
+                            .map_err(|_| Error::Input("frozen normalizer is not UTF-8".into()))?;
+                        Ok(serde_json::json!({"id": profile.id, "source": source}))
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                let payload = serde_json::to_vec(&serde_json::json!({
+                "profiles": profiles,
+                    "sha256": custom.policy.sha256,
+                "workload": {"id": custom.workload, "family": custom.family, "task_id": custom.task}
+            })).map_err(|error| Error::Run(error.to_string()))?;
+                let path = scratch.path.join("project-normalizers.json");
+                std::fs::write(&path, payload).map_err(|error| {
+                    Error::Run(format!(
+                        "cannot materialize frozen normalizer policy: {error}"
+                    ))
+                })?;
+                Ok::<_, Error>(path)
+            })
+            .transpose()?;
         let port = if builtin { 0 } else { free_port()? };
         let ready_file = scratch.path.join("ready.json");
         let mut command = executable.command();
@@ -262,6 +309,8 @@ impl ProxyAdapter for LlmtapeAdapter {
         command.env_remove("ASB_TAPE_MISMATCH_EVIDENCE");
         command.env_remove("ASB_TAPE_AGENT_WIRE_EXTENSION");
         command.env_remove("ASB_TAPE_AGENT_NORMALIZER");
+        command.env_remove("ASB_TAPE_CUSTOM_NORMALIZERS");
+        command.env_remove("ASB_TAPE_NORMALIZATION_EVIDENCE");
         command.env_remove("ASB_TAPE_PERFETTO_OBSERVER_FD");
         command.env_remove("ASB_TAPE_PERFETTO_TRACE_ID");
         command.env_remove("ASB_TAPE_PERFETTO_REQUEST_REPORT");
@@ -270,6 +319,13 @@ impl ProxyAdapter for LlmtapeAdapter {
         }
         if let Some(path) = normalization_script {
             command.env("ASB_TAPE_AGENT_NORMALIZER", path);
+        }
+        if let Some(path) = custom_policy {
+            command.env("ASB_TAPE_CUSTOM_NORMALIZERS", path);
+            command.env(
+                "ASB_TAPE_NORMALIZATION_EVIDENCE",
+                scratch.path.join("normalization.json"),
+            );
         }
         // An external ASB_LLM_TAPE override is an independently supplied
         // executable.  It must never receive the private observer capability
@@ -537,6 +593,7 @@ impl ProxySession for RunningLlmtape {
         };
         let stopped = stop_proxy(&mut child, self.builtin);
         self.cleanup_confirmed = stopped.is_ok();
+        let normalization_retention = self._scratch.retain_normalization_evidence();
         // A valid receipt survives a later cleanup failure. Verify it even when
         // exit status cannot establish resource cleanup, and keep both facts.
         let captured = self
@@ -555,7 +612,7 @@ impl ProxySession for RunningLlmtape {
             Some(Err(error)) => Some(error),
             None => None,
         };
-        if stopped.is_err() || capture_error.is_some() {
+        if stopped.is_err() || capture_error.is_some() || normalization_retention.is_err() {
             self._scratch.retain = true;
         }
         stopped.map_err(|error| {
@@ -570,6 +627,7 @@ impl ProxySession for RunningLlmtape {
                 self._scratch.path.display()
             )));
         }
+        normalization_retention?;
         if self.mode == Mode::Replay {
             let progress = self
                 .progress
@@ -641,6 +699,9 @@ impl ProxySession for RunningLlmtape {
         if let Some(mut child) = self.child.take() {
             self.cleanup_confirmed = stop_proxy(&mut child, self.builtin).is_ok();
             self._scratch.retain |= !self.cleanup_confirmed;
+        }
+        if self._scratch.retain_normalization_evidence().is_err() {
+            self._scratch.retain = true;
         }
         // A workload failure may abort the proxy before normal settlement can
         // report a replay mismatch. Preserve its private diagnostics so that
@@ -816,6 +877,19 @@ fn resolve_executable(directory: &Path, invocation_dir: &Path) -> Result<ProxyEx
             "cannot materialize tape request observation: {error}"
         ))
     })?;
+    for (name, source) in [
+        (
+            "legacy-workload-normalizers.mjs",
+            LEGACY_WORKLOAD_NORMALIZERS,
+        ),
+        ("tool-result-normalization.mjs", TOOL_RESULT_NORMALIZATION),
+        ("normalizer-supervisor.mjs", NORMALIZER_SUPERVISOR),
+        ("normalizer-worker.mjs", NORMALIZER_WORKER),
+    ] {
+        std::fs::write(directory.join(name), source).map_err(|error| {
+            Error::Run(format!("cannot materialize tape component {name}: {error}"))
+        })?;
+    }
     std::fs::write(&script, BUILTIN_PROXY).map_err(|error| {
         Error::Run(format!(
             "cannot materialize ASB's built-in tape proxy at {}: {error}",
@@ -856,6 +930,35 @@ struct Scratch {
 }
 
 impl Scratch {
+    /// Preserve content-free profile observations next to the owning private
+    /// session directory, independently of optional measurement collectors.
+    fn retain_normalization_evidence(&mut self) -> Result<Option<PathBuf>, Error> {
+        let evidence = self.path.join("normalization.json");
+        if !evidence.exists() {
+            return Ok(None);
+        }
+        let name = self
+            .path
+            .file_name()
+            .ok_or_else(|| Error::Run("cannot derive normalization evidence name".into()))?;
+        let destination = self
+            .path
+            .with_file_name(format!("{}.normalization.json", name.to_string_lossy()));
+        std::fs::hard_link(&evidence, &destination).map_err(|error| {
+            Error::Run(format!(
+                "cannot retain normalization evidence at {}: {error}",
+                destination.display()
+            ))
+        })?;
+        std::fs::remove_file(&evidence).map_err(|error| {
+            Error::Run(format!(
+                "cannot finish retaining normalization evidence at {}: {error}",
+                destination.display()
+            ))
+        })?;
+        Ok(Some(destination))
+    }
+
     fn create(parent: &Path) -> Result<Self, Error> {
         for _ in 0..100 {
             let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
@@ -1026,6 +1129,8 @@ mod tests {
                 workspace: &root,
                 agent: None,
                 workload: None,
+                task: None,
+                custom_normalization: None,
                 recorder: None,
                 invocation_dir: &root,
                 perfetto_observer: Some(std::fs::File::from(std::os::fd::OwnedFd::from(writer))),
@@ -1060,6 +1165,7 @@ mod tests {
             invocation_dir: std::path::Path::new("/fixture/nested"),
             wire_extension: None,
             normalization_scripts: Vec::new(),
+            custom_normalization: None,
             perfetto_observer: None,
             perfetto_trace_id: None,
             perfetto_report: None,
@@ -3833,11 +3939,13 @@ mod tests {
             crate::agents::TapeNormalizationScript {
                 id: "first",
                 workloads: &["fixture"],
+                tasks: &[],
                 source: "export function normalizeRequest(request) { return { ...request.body, first: true }; }",
             },
             crate::agents::TapeNormalizationScript {
                 id: "second",
                 workloads: &["fixture"],
+                tasks: &[],
                 source: "export function normalizeRequest(request) { return { ...request.body, second: request.body.first }; }",
             },
         ];
@@ -3864,6 +3972,7 @@ mod tests {
         let invalid = [crate::agents::TapeNormalizationScript {
             id: "invalid",
             workloads: &["fixture"],
+            tasks: &[],
             source: "export function normalizeRequest() { return null; }",
         }];
         let invalid_entry = super::materialize_normalizers(&root, &invalid)
@@ -3885,7 +3994,8 @@ mod tests {
     #[test]
     fn codex_normalizer_is_selected_by_agent_and_preserves_semantic_input() {
         let root = test_root();
-        let scripts = crate::agents::tape_normalization_scripts("codex", "swe-bench");
+        let scripts =
+            crate::agents::tape_normalization_scripts("codex", "swe-bench", Some("fixture"));
         assert_eq!(scripts.len(), 1);
         let entry = super::materialize_normalizers(&root, &scripts)
             .unwrap()
@@ -3939,6 +4049,8 @@ mod tests {
                 workspace: &root,
                 agent: Some("codex"),
                 workload: Some("swe-bench"),
+                task: Some("fixture"),
+                custom_normalization: None,
                 recorder: None,
                 invocation_dir: &root,
                 perfetto_observer: None,
@@ -3950,6 +4062,75 @@ mod tests {
         let replayed = recorded.replace("recorded", "replayed");
         assert!(request_to(&session, "/v1/responses", &replayed).contains("200 OK"));
         session.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn frozen_project_policy_reaches_embedded_replay_session() {
+        use crate::project::replay_normalization::{FrozenNormalizer, FrozenPolicy};
+        let root = test_root();
+        let cassette = root.join("custom-policy.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"role":"user","content":"solve"},{"role":"tool","content":"seed=1"}]}"#;
+        let source = b"export function normalizeToolResult({text}) { return text.replace(/seed=\\d+/, 'seed=<seed>'); }";
+        let policy = crate::proxy::CustomNormalization {
+            policy: FrozenPolicy::from_normalizers(vec![FrozenNormalizer {
+                id: "seed".into(),
+                source: source.to_vec(),
+                sha256: crate::cassette::digest(source),
+                selectors: crate::project::replay_normalization::ProfileSelectors {
+                    workloads: Some(vec!["fixture".into()]),
+                    ..Default::default()
+                },
+            }])
+            .unwrap(),
+            workload: "fixture".into(),
+            agent: "pi".into(),
+            family: None,
+            task: "one".into(),
+        };
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body": recorded.replace("seed=1", "seed=<seed>"), "custom_normalization_sha256": policy.policy.sha256},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = Session::start_for_agent_at(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            crate::tape::AgentContext {
+                workspace: &root,
+                agent: Some("pi"),
+                workload: Some("fixture"),
+                task: Some("one"),
+                custom_normalization: Some(policy),
+                recorder: None,
+                invocation_dir: &root,
+                perfetto_observer: None,
+                perfetto_trace_id: None,
+                perfetto_report: None,
+            },
+        )
+        .unwrap();
+        assert!(request(&session, &recorded.replace("seed=1", "seed=2")).contains("200 OK"));
+        session.stop().unwrap();
+        let evidence = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().ends_with(".normalization.json"))
+            })
+            .expect("normalizer observations survive proxy cleanup");
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(evidence).unwrap()).unwrap();
+        assert_eq!(value["profiles"][0]["id"], "seed");
+        assert_eq!(value["profiles"][0]["observations"], 1);
+        assert_eq!(value["profiles"][0]["changed"], 1);
+        assert_eq!(
+            value["count_scope"],
+            "result-block-visits-including-repeated-history"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

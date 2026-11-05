@@ -43,6 +43,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_tape_normalization_scripts(&[TapeNormalizationScript {
     id: "hermes-private-verification-path",
     workloads: &["*"],
+    tasks: &[],
     source: include_str!("../../../assets/scripts/agent-normalizers/hermes.mjs"),
 }])
 .with_tool_replay(prepare_native_tool_replay)

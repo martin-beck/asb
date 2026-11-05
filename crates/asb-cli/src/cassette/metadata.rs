@@ -17,12 +17,20 @@ use std::sync::{
 const DIRECTORY_HEADER_BYTES: usize = 46;
 const END_RECORD_BYTES: usize = 22;
 
-pub(super) fn recording_directory_size(count: u64) -> Result<u64, Error> {
+pub(super) fn recording_directory_size(count: u64, normalization: bool) -> Result<u64, Error> {
     // Each entry may need a ZIP64 extra field with two sizes and an offset.
     let manifest = DIRECTORY_HEADER_BYTES as u64 + "manifest.json".len() as u64 + 28;
     let track = DIRECTORY_HEADER_BYTES as u64 + format!("tracks/{count}.jsonl").len() as u64 + 28;
+    let artifact = if normalization {
+        DIRECTORY_HEADER_BYTES as u64
+            + format!("artifacts/{count}/normalization-policy.jsonl").len() as u64
+            + 28
+    } else {
+        0
+    };
     track
-        .checked_mul(count)
+        .checked_add(artifact)
+        .and_then(|bytes| bytes.checked_mul(count))
         .and_then(|bytes| bytes.checked_add(manifest))
         .and_then(|bytes| bytes.checked_add(END_RECORD_BYTES as u64 + 76))
         .ok_or_else(|| Error("recording ZIP directory capacity overflow".into()))

@@ -24,6 +24,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_tape_normalization_scripts(&[TapeNormalizationScript {
     id: "claude-code-device-telemetry",
     workloads: &["*"],
+    tasks: &[],
     source: include_str!("../../../assets/scripts/agent-normalizers/claude-code.mjs"),
 }])
 .with_tool_replay(prepare_tool_replay)

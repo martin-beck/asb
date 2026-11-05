@@ -150,6 +150,38 @@ fn campaign_seal_roots_bind_immutable_inputs_not_outputs_or_original_replay_path
 }
 
 #[test]
+fn campaign_input_verification_rejects_changed_or_missing_normalizer_sources() {
+    use crate::project::replay_normalization::{NormalizationSelection, ReplayConfig};
+    let (fixture, _, results) = published(crate::tape::Mode::Record);
+    fs::write(fixture.0.join("normalizer.mjs"), "original").unwrap();
+    let config: ReplayConfig = toml::from_str(
+        "[[normalizers]]\nid='test'\nmodule='normalizer.mjs'\nagents=['pi']\nworkloads=['bug-fix']",
+    )
+    .unwrap();
+    let frozen = config
+        .freeze(
+            &fixture.0,
+            &NormalizationSelection {
+                agent: "pi",
+                workload: "bug-fix",
+                family: None,
+                task: "bug-fix",
+            },
+        )
+        .unwrap();
+    let descriptor = frozen.descriptor().unwrap().unwrap();
+    let root = results.join("normalizer-test-campaign");
+    fs::create_dir(&root).unwrap();
+    frozen.persist(&root.join(".normalization")).unwrap();
+    assert!(verify_normalization(&root, Some(&descriptor)).is_ok());
+    fs::write(root.join(".normalization/00.mjs"), "changed").unwrap();
+    assert!(verify_normalization(&root, Some(&descriptor)).is_err());
+    fs::remove_file(root.join(".normalization/00.mjs")).unwrap();
+    assert!(verify_normalization(&root, Some(&descriptor)).is_err());
+    assert!(verify_normalization(&root, None).is_ok());
+}
+
+#[test]
 fn later_invalid_campaign_reference_cannot_become_an_input_declaration() {
     let (_fixture, plan, results) = published(crate::tape::Mode::Replay);
     let layouts = plan.read_campaigns(&results).unwrap();

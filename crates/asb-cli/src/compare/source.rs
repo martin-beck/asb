@@ -582,6 +582,7 @@ fn load_attempt(
         );
         return Ok(BenchmarkData {
             execution: None,
+            planned_normalization_policy: None,
             observation: Default::default(),
             id: RowId {
                 configuration: context.index,
@@ -835,6 +836,7 @@ fn load_attempt(
         load_collectors(&measurement_dir, measured, &mut metrics)?;
     super::analysis::regenerate(&mut collector_documents, &mut metrics)?;
     Ok(BenchmarkData {
+        planned_normalization_policy: None,
         execution: run_value
             .get("execution")
             .filter(|value| !value.is_null())
@@ -1264,6 +1266,7 @@ mod pricing_tests {
         pricing_fixture(|root| {
             std::fs::write(root.join("openrouter-pricing.json"), r#"{"schema_version":1,"provider":"openrouter","models":{"fixture":{"prompt":"0.000002","completion":"0.000004"}}}"#).unwrap();
             let make_row = |provider: &str| BenchmarkData {
+                planned_normalization_policy: None,
                 observation: Default::default(),
                 id: crate::compare::RowId {
                     configuration: 0,

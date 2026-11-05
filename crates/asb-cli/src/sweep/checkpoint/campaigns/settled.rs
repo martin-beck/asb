@@ -675,6 +675,8 @@ fn slot_roots(
         .map(|outcome| &outcome.policy)
         .cloned()
         .unwrap_or_default();
+    let base_protocol =
+        crate::runner::replay_protocol_fingerprint(entry.selection.module.as_ref(), &policy)?;
     if compatibility.agent != entry.configuration.agent
         || compatibility.provider != entry.configuration.provider
         || compatibility.model != entry.configuration.model
@@ -682,11 +684,11 @@ fn slot_roots(
         || compatibility.task != evidence.task.task_id
         || compatibility.dataset_sha256
             != crate::runner::dataset_fingerprint(evidence.task.dataset.as_ref())?
-        || compatibility.protocol_sha256
-            != Some(crate::runner::replay_protocol_fingerprint(
-                entry.selection.module.as_ref(),
-                &policy,
-            )?)
+        || !normalization_protocol_matches(
+            compatibility,
+            &base_protocol,
+            layout.plan.normalization_policy.as_ref(),
+        )?
     {
         return Err(resume_error(
             "prepared material identity differs from actual configuration/task/protocol",
@@ -843,4 +845,66 @@ fn slot_roots(
         roots.push(Root::path(format!("evidence-{index}"), path));
     }
     Ok(roots)
+}
+
+fn normalization_protocol_matches(
+    compatibility: &crate::cassette::Compatibility,
+    base_protocol: &str,
+    policy: Option<&crate::project::replay_normalization::PolicyDescriptor>,
+) -> Result<bool, Error> {
+    let normalization = policy.map(|policy| policy.sha256.as_str());
+    let expected =
+        crate::runner::replay_protocol_with_normalizer_digest(base_protocol, normalization)?;
+    Ok(
+        compatibility.normalization_sha256.as_deref() == normalization
+            && compatibility.protocol_sha256.as_deref() == Some(expected.as_str()),
+    )
+}
+
+#[cfg(test)]
+mod normalizer_tests {
+    use super::*;
+    use crate::project::replay_normalization::{FrozenNormalizer, FrozenPolicy, ProfileSelectors};
+
+    #[test]
+    fn settlement_checks_both_policy_identity_and_derived_protocol() {
+        let source = b"export function normalizeToolResult({text}) { return text; }";
+        let descriptor = FrozenPolicy::from_normalizers(vec![FrozenNormalizer {
+            id: "fixture".into(),
+            source: source.to_vec(),
+            sha256: crate::cassette::digest(source),
+            selectors: ProfileSelectors {
+                workloads: Some(vec!["bug-fix".into()]),
+                ..Default::default()
+            },
+        }])
+        .unwrap()
+        .descriptor()
+        .unwrap()
+        .unwrap();
+        let base = crate::cassette::digest(b"base protocol");
+        let derived =
+            crate::runner::replay_protocol_with_normalizer_digest(&base, Some(&descriptor.sha256))
+                .unwrap();
+        let mut compatibility = crate::cassette::Compatibility {
+            agent: "pi".into(),
+            provider: "local".into(),
+            model: "fixture".into(),
+            workload: "bug-fix".into(),
+            task: "bug-fix".into(),
+            dataset_sha256: None,
+            prompt_sha256: crate::cassette::digest(b"prompt"),
+            material_sha256: crate::cassette::digest(b"material"),
+            protocol_sha256: Some(derived),
+            normalization_sha256: Some(descriptor.sha256.clone()),
+        };
+        assert!(normalization_protocol_matches(&compatibility, &base, Some(&descriptor)).unwrap());
+        compatibility.normalization_sha256 = None;
+        assert!(!normalization_protocol_matches(&compatibility, &base, Some(&descriptor)).unwrap());
+        compatibility.normalization_sha256 = Some(descriptor.sha256.clone());
+        compatibility.protocol_sha256 = Some(base.clone());
+        assert!(!normalization_protocol_matches(&compatibility, &base, Some(&descriptor)).unwrap());
+        compatibility.normalization_sha256 = None;
+        assert!(normalization_protocol_matches(&compatibility, &base, None).unwrap());
+    }
 }

@@ -80,10 +80,18 @@ pub struct ProjectConfig {
     /// Project-local installer execution budgets; frozen for each operation.
     #[serde(default)]
     pub installation: InstallationConfig,
+    /// Project-specific replay-normalization profiles.
+    #[serde(default, skip_serializing_if = "ReplayConfig::is_empty")]
+    pub replay: ReplayConfig,
 }
 
 mod installation;
 pub use installation::InstallationConfig;
+// Resolution is staged here until run planning can bind the frozen policy to
+// cassette identity; configured profiles remain rejected in the meantime.
+#[allow(dead_code)]
+pub mod replay_normalization;
+pub use replay_normalization::ReplayConfig;
 
 /// Network proxies are separate from ASB's record/replay proxy adapters.
 /// Credentials must stay in the environment, not in project files.
@@ -249,6 +257,7 @@ impl Default for ProjectConfig {
             perfetto_instances: Vec::new(),
             proxy: NetworkProxy::default(),
             installation: InstallationConfig::default(),
+            replay: ReplayConfig::default(),
         }
     }
 }
@@ -1006,6 +1015,10 @@ pub fn load(start: &Path) -> Result<(PathBuf, ProjectConfig), Error> {
             })?;
             config
                 .installation
+                .validate()
+                .map_err(|error| Error::Input(format!("invalid {}: {error}", path.display())))?;
+            config
+                .replay
                 .validate()
                 .map_err(|error| Error::Input(format!("invalid {}: {error}", path.display())))?;
             return Ok((directory, config));

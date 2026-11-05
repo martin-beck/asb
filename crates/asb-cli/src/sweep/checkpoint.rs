@@ -451,6 +451,7 @@ impl Inputs {
         saved.validate()?;
         if plan.execution.is_some() {
             campaigns::verify_private_inputs(results, plan)?;
+            campaigns::verify_current_normalization(parent, results, plan, invocation_dir)?;
         }
         let current = Self::build(parent, results, plan, mode, replay_sources, invocation_dir)?;
         if current.initial != saved.initial {

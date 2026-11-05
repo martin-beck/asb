@@ -19,6 +19,7 @@ pub(super) struct BatchRun<'a> {
     /// bounded opaque bytes after the proxy settles.
     pub provider_capture_path: Option<PathBuf>,
     pub recording: Option<Arc<super::super::recording::Recorder>>,
+    pub normalization: Option<&'a crate::proxy::CustomNormalization>,
     pub reused: Option<&'a BTreeMap<usize, serde_json::Value>>,
 }
 
@@ -141,6 +142,7 @@ impl BatchRun<'_> {
                 cassette: self.cassette,
                 recording: self.recording.as_deref(),
                 provider_capture_path: self.provider_capture_path.as_deref(),
+                custom_normalization: self.normalization,
                 on_completion: Some(&observer),
                 reused: self.reused,
                 ..Default::default()
@@ -260,6 +262,76 @@ pub(crate) struct Continuation {
     pub recording: Option<Arc<super::super::recording::Recorder>>,
 }
 
+/// Reconcile the saved, private source snapshot with an explicitly configured
+/// project policy. Archived sources are evidence, never execution authority.
+fn restore_normalization(
+    root: &Path,
+    plan: &Plan,
+    invocation: &Path,
+    invocation_dir: Option<&Path>,
+) -> Result<Option<crate::proxy::CustomNormalization>, Error> {
+    let (project_root, settings) = crate::project::load_for_invocation(invocation, invocation_dir)?;
+    if settings.replay.is_empty() && plan.normalization_policy.is_none() {
+        return Ok(None);
+    }
+    let directory = crate::project::environment_path(
+        "ASB_WORKLOAD_DIR",
+        invocation_dir.unwrap_or_else(|| Path::new(".")),
+    )
+    .unwrap_or_else(|| crate::project::resolve(&project_root, &settings.workloads_dir));
+    let selection = if let Some(selection) = &plan.recording_selection {
+        selection.clone()
+    } else {
+        let catalog = crate::workloads::planning_catalog(&plan.configuration.workload, &directory)
+            .map_err(Error::Input)?;
+        crate::workloads::describe_selection(&plan.configuration, &directory, catalog.as_ref())
+            .map_err(Error::Input)?
+    };
+    let current = settings
+        .replay
+        .freeze_for_task(&project_root, &plan.configuration.agent, &selection)
+        .map_err(Error::Input)?;
+    let Some(frozen) =
+        restore_selected_snapshot(root, plan.normalization_policy.as_ref(), current)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(crate::proxy::CustomNormalization {
+        policy: frozen,
+        agent: plan.configuration.agent.clone(),
+        workload: selection.workload,
+        family: selection.module.map(|module| module.family),
+        task: selection.task_id,
+    }))
+}
+
+fn restore_selected_snapshot(
+    root: &Path,
+    saved: Option<&crate::project::replay_normalization::PolicyDescriptor>,
+    current: crate::project::replay_normalization::FrozenPolicy,
+) -> Result<Option<crate::project::replay_normalization::FrozenPolicy>, Error> {
+    let actual = current.descriptor().map_err(Error::Input)?;
+    if actual.as_ref() != saved {
+        return Err(Error::Input(
+            "configured replay normalizer policy changed since the campaign was planned".into(),
+        ));
+    }
+    let Some(descriptor) = actual else {
+        return Ok(None);
+    };
+    let frozen = crate::project::replay_normalization::FrozenPolicy::restore(
+        &root.join(".normalization"),
+        &descriptor,
+    )
+    .map_err(Error::Input)?;
+    if frozen != current {
+        return Err(Error::Input(
+            "saved replay normalizer source differs from the configured project policy".into(),
+        ));
+    }
+    Ok(Some(frozen))
+}
+
 pub(crate) fn continue_campaign(
     continued: Continuation,
     json: bool,
@@ -280,6 +352,14 @@ pub(crate) fn continue_campaign(
         recording,
     } = continued;
     plan.validate_layout()?;
+    // A newly added matching policy also changes replay semantics. Resolve it
+    // even when the original plan had no policy so continuation cannot
+    // silently run under a different configuration.
+    let normalization = if plan.mode != crate::planning::ExecutionMode::Live {
+        restore_normalization(&root, &plan, &invocation, invocation_dir)?
+    } else {
+        None
+    };
     // A generation covers the whole sweep, including configurations already
     // complete in an ancestor. Those configurations have no new publication
     // owner and must not create generation directories or replace their ledger.
@@ -423,6 +503,7 @@ pub(crate) fn continue_campaign(
                 .as_ref()
                 .map(|_| super::super::recording::producer(&root, number, 1, plan.concurrency)),
             recording: recording.clone(),
+            normalization: normalization.as_ref(),
             reused: Some(&reused),
         }
         .execute(dispatch, output, warnings)?;
@@ -453,5 +534,52 @@ pub(crate) fn continue_campaign(
         )))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod normalization_tests {
+    use super::*;
+    use crate::project::replay_normalization::{NormalizationSelection, ReplayConfig};
+
+    #[test]
+    fn continuation_requires_matching_local_policy_and_intact_saved_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-policy-restore-{}-{}",
+            std::process::id(),
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("module.mjs"), "source one").unwrap();
+        let config: ReplayConfig =
+            toml::from_str("[[normalizers]]\nid='n'\nmodule='module.mjs'\nworkloads=['suite']")
+                .unwrap();
+        let selection = NormalizationSelection {
+            agent: "pi",
+            workload: "suite",
+            family: None,
+            task: "case",
+        };
+        let original = config.freeze(&root, &selection).unwrap();
+        let descriptor = original.descriptor().unwrap().unwrap();
+        // A newly selected policy cannot be introduced into a legacy
+        // continuation that was planned without one.
+        assert!(restore_selected_snapshot(&root, None, original.clone()).is_err());
+        original.persist(&root.join(".normalization")).unwrap();
+        assert_eq!(
+            restore_selected_snapshot(&root, Some(&descriptor), original.clone()).unwrap(),
+            Some(original.clone())
+        );
+        std::fs::write(root.join("module.mjs"), "source two").unwrap();
+        let changed = config.freeze(&root, &selection).unwrap();
+        assert!(
+            restore_selected_snapshot(&root, Some(&descriptor), changed)
+                .unwrap_err()
+                .to_string()
+                .contains("changed")
+        );
+        std::fs::write(root.join(".normalization/00.mjs"), "tampered").unwrap();
+        assert!(restore_selected_snapshot(&root, Some(&descriptor), original).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -3,6 +3,34 @@ use crate::runner::campaign::ReplayInput;
 use serde_json::{Value, json};
 
 #[test]
+fn profile_cannot_be_added_to_a_legacy_replay_campaign() {
+    use crate::project::replay_normalization::{FrozenNormalizer, FrozenPolicy, ProfileSelectors};
+    let source = b"export function normalizeToolResult({text}) { return text; }";
+    let policy = FrozenPolicy::from_normalizers(vec![FrozenNormalizer {
+        id: "fixture".into(),
+        source: source.to_vec(),
+        sha256: crate::cassette::digest(source),
+        selectors: ProfileSelectors {
+            workloads: Some(vec!["bug-fix".into()]),
+            ..Default::default()
+        },
+    }])
+    .unwrap()
+    .descriptor()
+    .unwrap()
+    .unwrap();
+    let mut legacy = plan(ExecutionMode::Replay, 1, 1, false);
+    legacy.normalization_policy = Some(policy);
+    assert!(
+        legacy
+            .validate_layout()
+            .unwrap_err()
+            .to_string()
+            .contains("legacy recordings have no normalizer policy identity")
+    );
+}
+
+#[test]
 fn source_replay_identity_is_optional_historical_data_not_observed_material() {
     let mut value = selected(plan(ExecutionMode::Replay, 2, 2, false), true);
     let expected = crate::cassette::Compatibility {
@@ -15,11 +43,23 @@ fn source_replay_identity_is_optional_historical_data_not_observed_material() {
         prompt_sha256: crate::cassette::digest(b"source prompt"),
         material_sha256: crate::cassette::digest(b"source material"),
         protocol_sha256: Some(crate::cassette::digest(b"source protocol")),
+        normalization_sha256: None,
     };
     value.replay_compatibility = Some(expected.clone());
     // A valid source can deliberately differ from the requested configuration:
     // this is inspectable intent, and genuine material admission must refuse it.
     value.validate_layout().unwrap();
+    let mut different_policy = expected.clone();
+    different_policy.normalization_sha256 = Some(crate::cassette::digest(b"recorded policy"));
+    value.replay_compatibility = Some(different_policy);
+    assert!(
+        value
+            .validate_layout()
+            .unwrap_err()
+            .to_string()
+            .contains("normalizer policy differs")
+    );
+    value.replay_compatibility = Some(expected.clone());
     let wire = serde_json::to_value(&value).unwrap();
     assert_eq!(
         wire["replay_compatibility"],
@@ -135,6 +175,7 @@ fn plan(mode: ExecutionMode, concurrency: usize, repeat: u64, measured: bool) ->
         "agent='pi'\nprovider='openrouter'\nmodel='fixture'\nworkload='bug-fix'\nconcurrency={concurrency}"
     )).unwrap();
     let mut plan = Plan {
+        normalization_policy: None,
         replay_compatibility: None,
         recording_selection: None,
         recording_reservation: None,

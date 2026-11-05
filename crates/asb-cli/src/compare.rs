@@ -37,6 +37,7 @@ struct BenchmarkData {
     observation: crate::process_termination::Observation,
     id: RowId,
     execution: Option<Value>,
+    planned_normalization_policy: Option<crate::project::replay_normalization::PolicyDescriptor>,
     planning: Option<Value>,
     effective_budgets: Option<Value>,
     legacy_evaluation_provenance: Option<crate::workloads::outcome::LegacyEvaluationProvenance>,
@@ -608,6 +609,10 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             let text = serde_json::to_string_pretty(execution).unwrap_or_else(|_| "{}".into());
             format!("<details><summary>Execution / replay identity</summary><pre class=\"json-details\">{}</pre></details>", escape(&text))
         });
+        let normalization_details = benchmark.planned_normalization_policy.as_ref().map_or_else(String::new, |policy| {
+            let text = serde_json::to_string_pretty(policy).unwrap_or_else(|_| "{}".into());
+            format!("<details><summary>Planned replay normalization</summary><p>Declared campaign policy; a planned slot does not by itself prove execution.</p><pre class=\"json-details\">{}</pre></details>", escape(&text))
+        });
         let primary_details = benchmark
             .artifacts
             .iter()
@@ -702,7 +707,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload), escape(trial), escape(&attempt),
             runtime, success, tokens,
             format_args!("{primary_details}{}{}<p>{dispatch_details}</p>", evaluation_details, if benchmark.reconciled { "<p>Reconciled retained local outcome: current artifact consistency checked; no agent rerun or historical attestation.</p>" } else { "" }),
-            format_args!("{execution_details}{component_details}{analysis_details}"),
+            format_args!("{execution_details}{normalization_details}{component_details}{analysis_details}"),
             host_details,
             metrics_details,
             artifacts,

@@ -1120,6 +1120,7 @@ fn reserve_metadata(intent: &Intent, count: u64, limits: Limits) -> Result<(), E
             .provenance
             .as_ref()
             .and_then(|plan| plan.sources.len().checked_sub(1)),
+        intent.manifest.compatibility.normalization_sha256.is_some(),
     )
     .map(|_| ())
 }
