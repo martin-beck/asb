@@ -1072,6 +1072,13 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         &stderr,
         None,
     );
+    let usage = crate::usage::with_artifact_usage(
+        usage,
+        adapter.guest_token_usage(
+            &request.run_dir,
+            crate::providers::anthropic_input_includes_cache(&request.config.provider),
+        ),
+    );
     // Until the first durable publication transfers the frozen evidence, Drop
     // retains raw artifacts. This interim record never asserts settlement.
     let mut result = GuestResult {
