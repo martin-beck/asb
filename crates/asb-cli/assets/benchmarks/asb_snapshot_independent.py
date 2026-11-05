@@ -86,8 +86,11 @@ class IndependentSnapshot:
             self.process.stdin.write(b'START\n'); self.process.stdin.flush()
             if _line(self.process, deadline) != b'READY\n':
                 raise ExecutionError('snapshot custodian failed; inspect snapshot-supervisor.log')
-        except BaseException:
-            self.abort()
+        except BaseException as failure:
+            try:
+                self.abort()
+            except BaseException as cleanup:
+                failure.add_note(f'snapshot custody cleanup also failed: {type(cleanup).__name__}')
             raise
 
     def _remove_sidecar(self):
@@ -99,21 +102,32 @@ class IndependentSnapshot:
         self.sidecar = None
 
     def abort(self):
+        failures = []
         for process in (self.process, self.preparer):
             if process is not None and process.poll() is None:
                 try:
-                    process.stdin.close()
-                except BrokenPipeError:
-                    # The child may have exited after poll; still reap it and
-                    # close the other transport rather than masking the error.
-                    pass
-                try:
-                    process.wait(timeout=60)
-                except subprocess.TimeoutExpired:
-                    process.kill(); process.wait()
+                    try:
+                        process.stdin.close()
+                    except BrokenPipeError:
+                        # The child may have exited after poll; still reap it.
+                        pass
+                    try:
+                        process.wait(timeout=60)
+                    except subprocess.TimeoutExpired:
+                        process.kill(); process.wait()
+                except BaseException as error:
+                    failures.append(error)
+                    try:
+                        if process.poll() is None:
+                            process.kill()
+                            process.wait()
+                    except BaseException:
+                        pass
         # A journalled sidecar is retained on failed startup; the task's
         # existing interrupted-resource path owns any remaining container.
         self.log.close()
+        if failures:
+            raise failures[0]
 
     def _settle(self, action):
         process, self.process = self.process, None

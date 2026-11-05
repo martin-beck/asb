@@ -151,5 +151,15 @@ class IndependentTests(unittest.TestCase):
         self.assertEqual(self.prep.poll(),0)
         self.sidecar.remove.assert_not_called()
 
+    def test_startup_error_survives_cleanup_error_and_other_client_is_reaped(self):
+        subject._line.side_effect=[b'PREPARED\n',b'MOUNT:999\n']
+        self.side.stdin.close=Mock(side_effect=OSError('pipe failure'))
+        with self.assertRaisesRegex(subject.ExecutionError, 'wrong mount namespace') as caught:
+            self.start()
+        self.assertTrue(any('cleanup also failed: OSError' in note for note in caught.exception.__notes__))
+        self.assertTrue(self.prep.stdin.closed)
+        self.assertIsNotNone(self.side.poll())
+        self.assertEqual(self.prep.poll(),0)
+
 
 if __name__=='__main__':unittest.main()
