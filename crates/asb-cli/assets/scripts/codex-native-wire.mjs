@@ -30,7 +30,6 @@ export function recordMetadata({url, body}) {
       !body || typeof body !== 'object' || !Array.isArray(body.input)) return undefined;
   const conversation = typeof body.prompt_cache_key === 'string' ? body.prompt_cache_key : null;
   const ids = body.input.filter(item => item?.type === 'function_call_output').map(item => item.call_id);
-  if ((conversation !== null && conversation.length > 512) || ids.length > 16384 ||
-      ids.some(id => typeof id !== 'string' || !id || id.length > 512)) return undefined;
+  if (ids.some(id => typeof id !== 'string' || !id)) return undefined;
   return {schema_version: 1, conversation, output_call_ids: ids};
 }

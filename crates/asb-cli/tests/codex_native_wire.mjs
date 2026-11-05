@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { normalizeRequest } from '../assets/scripts/codex-native-wire.mjs';
+import { normalizeRequest, recordMetadata } from '../assets/scripts/codex-native-wire.mjs';
 const a = 'msg_00112233-4455-6677-8899-aabbccddeeff';
 const b = 'msg_11112233-4455-6677-8899-aabbccddeeff';
 const c = 'fco_22222233-4455-6677-8899-aabbccddeeff';
@@ -30,4 +30,10 @@ const cached = normalizeRequest({url:'/v1/responses', body:{prompt_cache_key:uui
 assert.equal(cached.prompt_cache_key, '<asb-codex-session-cache>');
 assert.equal(normalizeRequest({url:'/v1/responses',body:{prompt_cache_key:'user-cache',input:[]}}).prompt_cache_key, 'user-cache');
 assert.equal(normalizeRequest({url:'/v1/chat/completions',body:{prompt_cache_key:uuid}}).prompt_cache_key, uuid);
+const longId = 'x'.repeat(1024);
+const manyOutputs = Array.from({length: 17000}, () => ({type:'function_call_output',call_id:longId}));
+const metadata = recordMetadata({url:'/v1/responses',body:{prompt_cache_key:longId,input:manyOutputs}});
+assert.equal(metadata.conversation, longId);
+assert.equal(metadata.output_call_ids.length, manyOutputs.length);
+assert.equal(recordMetadata({url:'/v1/responses',body:{input:[{type:'function_call_output'}]}}), undefined);
 console.log('Codex generated input IDs are normalized only at their protocol locations');
