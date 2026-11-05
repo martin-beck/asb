@@ -348,6 +348,13 @@ impl NativeToolTransport {
         &self.workspace_effect_sha256
     }
 
+    /// Expose private requests only to the owning adapter for consistency checks.
+    pub(crate) fn recorded_requests(&self, alias: &str) -> Option<Vec<&[u8]>> {
+        self.exchanges
+            .get(alias)
+            .map(|items| items.iter().map(|item| item.request.as_slice()).collect())
+    }
+
     /// Validated completed sessions in stable alias order.
     pub fn sessions(&self) -> &[NativeSession] {
         &self.sessions

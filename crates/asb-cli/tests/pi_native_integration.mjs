@@ -31,9 +31,17 @@ export const result = await executePreparedToolCall({toolCall:{id:'one',name:'ba
 `);
   writeFileSync(entry,`import {result} from './agent-loop.mjs'; if(result.result.content[0].text!=='done'||result.result.details!==undefined)process.exit(3);`);
   const markers=[];
-  const marker=createServer(client=>client.once('data',data=>{markers.push(data.toString().trim());client.end('1\n');}));
+  const marker=createServer(client=>client.once('data',data=>{const message=data.toString().trim();markers.push(message);client.end(message.startsWith('tool-end:')?'2\n':'1\n');}));
   await new Promise(resolve=>marker.listen(markerPath,resolve));
   const bootstrap=fileURLToPath(new URL('../assets/scripts/pi-native-bootstrap.mjs',import.meta.url));
+  for (const mode of ['record','replay']) {
+    const missingMarker=spawn(process.execPath,[entry],{cwd:root,env:{PATH:process.env.PATH||'',NODE_OPTIONS:`--import=${JSON.stringify(bootstrap)}`,ASB_NATIVE_BUNDLE:bundle,ASB_NATIVE_MODE:mode,ASB_NATIVE_SOCKET:socket,FIXTURE_EFFECT:effect},stdio:['ignore','ignore','pipe']});
+    let missingMarkerError='';missingMarker.stderr.on('data',chunk=>missingMarkerError+=chunk);
+    const [missingMarkerCode]=await once(missingMarker,'exit');
+    assert.notEqual(missingMarkerCode,0);
+    assert.match(missingMarkerError,/requires the bundle, broker and snapshot marker/);
+    assert.equal(existsSync(effect),false,'missing snapshot marker must stop the native tool');
+  }
   async function run(mode,events=[]) {
     const broker=new NativeToolBroker(mode,events,replayEffects(markerPath,'pi'));await broker.listen(socket);
     const child=spawn(process.execPath,[entry],{cwd:root,env:{PATH:process.env.PATH||'',NODE_OPTIONS:`--import=${JSON.stringify(bootstrap)}`,ASB_NATIVE_BUNDLE:bundle,ASB_NATIVE_MODE:mode,ASB_NATIVE_SOCKET:socket,ASB_NATIVE_MARKER:markerPath,FIXTURE_EFFECT:effect},stdio:['ignore','ignore','pipe']});

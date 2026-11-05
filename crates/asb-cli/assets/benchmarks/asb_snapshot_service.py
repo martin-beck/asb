@@ -154,7 +154,7 @@ def load_replay_boundaries(store):
     return expected
 
 
-def export_snapshot_streams(store, destination, command):
+def export_snapshot_streams(store, destination, command, direct_send=False):
     """Export one baseline and incremental Btrfs streams to files."""
     store, destination = Path(store), Path(destination)
     load_replay_boundaries(store)
@@ -165,9 +165,10 @@ def export_snapshot_streams(store, destination, command):
         for entry in entries:
             snapshot = store / entry['snapshot']
             stream = destination / (entry['snapshot'] + '.btrfs')
-            args = list(command) + ['send']
+            args = ([sys.executable, str(Path(__file__).with_name('asb_snapshot_send.py'))]
+                    if direct_send else list(command) + ['send'])
             if previous is not None:
-                args += ['-p', str(previous)]
+                args += ['--parent' if direct_send else '-p', str(previous)]
             with stream.open('xb') as output:
                 subprocess.run(args + [str(snapshot)], check=True, stdin=subprocess.DEVNULL,
                                stdout=output, stderr=subprocess.DEVNULL, timeout=300)
@@ -280,6 +281,7 @@ class SnapshotReplay:
             raise ValueError('snapshot replay boundaries are malformed')
         self.apply = apply
         self.position = 0
+        self.waiting = {}
         self.failed = False
         self.closed = False
         self.lock = threading.RLock()
@@ -287,26 +289,35 @@ class SnapshotReplay:
 
     def marker(self, action, alias, process=None, thread=None):
         with self.changed:
-            while True:
-                if self.closed or self.failed:
-                    raise RuntimeError('snapshot replay is not active')
-                if action != 'end' or alias not in [item[0] for item in self.boundaries[self.position:]]:
-                    self.failed = True
-                    self.changed.notify_all()
-                    raise ValueError('snapshot replay boundary differs from the recording')
-                if self.boundaries[self.position][0] == alias:
-                    break
-                self.changed.wait()
-            sequence = self.boundaries[self.position][1]
-            try:
-                self.apply(sequence)
-            except BaseException:
+            if self.closed or self.failed:
+                raise RuntimeError('snapshot replay is not active')
+            remaining = sum(item[0] == alias for item in self.boundaries[self.position:])
+            if action != 'end' or self.waiting.get(alias, 0) >= remaining:
                 self.failed = True
                 self.changed.notify_all()
-                raise
-            self.position += 1
-            self.changed.notify_all()
-            return sequence
+                raise ValueError('snapshot replay boundary differs from the recording')
+            self.waiting[alias] = self.waiting.get(alias, 0) + 1
+            try:
+                while True:
+                    if self.closed or self.failed:
+                        raise RuntimeError('snapshot replay is not active')
+                    if self.boundaries[self.position][0] == alias:
+                        break
+                    self.changed.wait()
+                sequence = self.boundaries[self.position][1]
+                try:
+                    self.apply(sequence)
+                except BaseException:
+                    self.failed = True
+                    self.changed.notify_all()
+                    raise
+                self.position += 1
+                self.changed.notify_all()
+                return sequence
+            finally:
+                self.waiting[alias] -= 1
+                if not self.waiting[alias]:
+                    del self.waiting[alias]
 
     def invalidate(self):
         with self.changed:

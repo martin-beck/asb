@@ -5,6 +5,7 @@ import io
 import os
 from pathlib import Path
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,8 @@ ROOT=Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT/'crates/asb-cli/assets/benchmarks'))
 from asb_snapshot_service import MarkerServer,SnapshotService,SnapshotReplay,SnapshotApplier
 import asb_snapshot_service
+import asb_snapshot_send
+import asb_snapshot_handoff
 from asb_snapshot_guest import unpack_streams
 import asb_snapshot_guest
 from asb_snapshot_control import GuestSnapshot, settle_on_exit
@@ -28,6 +31,148 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_handoff_preparer_restores_only_after_explicit_cleanup(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);target=root/'target';target.mkdir();calls=[]
+            workspace=SimpleNamespace(prepare=lambda *a,**k: root/'mounted', close=lambda:calls.append('closed'))
+            args=SimpleNamespace(root=str(root/'state'),size=None,mkfs='mkfs',btrfs='btrfs',rsync='rsync',
+                                 qemu_img=None,qemu_storage=None,target=str(target),extra_root=[],
+                                 replay_archive=None,apply_final=True)
+            with patch.object(asb_snapshot_handoff,'SnapshotWorkspace',return_value=workspace), \
+                 patch.object(asb_snapshot_handoff.subprocess,'run',side_effect=lambda args,**k:calls.append(args)), \
+                 patch.object(asb_snapshot_handoff,'unmount_when_idle',side_effect=lambda target:calls.append('unmounted')), \
+                 patch.object(asb_snapshot_handoff.sys,'stdin',io.StringIO('CLEANUP\n')), \
+                 patch.object(asb_snapshot_handoff.sys,'stdout',io.StringIO()):
+                asb_snapshot_handoff.prepare(args)
+            self.assertEqual(calls[0][:2],['mount','--bind'])
+            self.assertEqual(calls[1],'unmounted')
+            self.assertEqual(calls[2][0],'rsync')
+            self.assertEqual(calls[3],'closed')
+
+    def test_handoff_preparer_eof_never_applies_or_publishes_completion(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);target=root/'target';target.mkdir();calls=[]
+            workspace=SimpleNamespace(prepare=lambda *a,**k: root/'mounted', close=lambda:calls.append('closed'))
+            args=SimpleNamespace(root=str(root/'state'),size=None,mkfs='mkfs',btrfs='btrfs',rsync='rsync',
+                                 qemu_img=None,qemu_storage=None,target=str(target),extra_root=[],
+                                 replay_archive=None,apply_final=True)
+            with patch.object(asb_snapshot_handoff,'SnapshotWorkspace',return_value=workspace), \
+                 patch.object(asb_snapshot_handoff.subprocess,'run',side_effect=lambda args,**k:calls.append(args)), \
+                 patch.object(asb_snapshot_handoff,'unmount_when_idle',side_effect=lambda target:calls.append('unmounted')), \
+                 patch.object(asb_snapshot_handoff.sys,'stdin',io.StringIO('')), \
+                 patch.object(asb_snapshot_handoff.sys,'stdout',io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError,'control ended unexpectedly'):
+                    asb_snapshot_handoff.prepare(args)
+            self.assertEqual(calls[0][:2],['mount','--bind'])
+            self.assertEqual(calls[1:],['unmounted','closed'])
+
+    def test_handoff_custody_eof_invalidates_without_export(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);calls=[]
+            service=SimpleNamespace(invalidate=lambda:calls.append('invalidated'),finish=lambda:calls.append('finished'))
+            server=SimpleNamespace(serve_forever=lambda:None,shutdown=lambda:calls.append('shutdown'),
+                                   interrupt_clients=lambda:calls.append('interrupted'),server_close=lambda:calls.append('closed'))
+            args=SimpleNamespace(root=str(root),replay_archive=None,rsync='rsync',btrfs='btrfs',verify_mount=False,
+                                 socket=str(root/'socket'),output=str(root/'output'))
+            with patch.object(asb_snapshot_handoff,'SnapshotService',return_value=service), \
+                 patch.object(asb_snapshot_handoff,'MarkerServer',return_value=server), \
+                 patch.object(asb_snapshot_handoff,'export_snapshot_streams') as exported, \
+                 patch.object(asb_snapshot_handoff.sys,'stdin',io.StringIO('')), \
+                 patch.object(asb_snapshot_handoff.sys,'stdout',io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError,'without complete settlement'):
+                    asb_snapshot_handoff.custody(args)
+            self.assertIn('invalidated',calls)
+            self.assertNotIn('finished',calls)
+            exported.assert_not_called()
+
+    def test_handoff_identity_must_be_accepted_before_service_starts(self):
+        args=SimpleNamespace(root='/unused',verify_mount=True)
+        with patch.object(asb_snapshot_handoff.os,'stat',return_value=SimpleNamespace(st_ino=123)), \
+             patch.object(asb_snapshot_handoff,'SnapshotService') as service, \
+             patch.object(asb_snapshot_handoff.sys,'stdin',io.StringIO('REJECT\n')), \
+             patch.object(asb_snapshot_handoff.sys,'stdout',io.StringIO()) as output:
+            with self.assertRaisesRegex(RuntimeError,'identity was not accepted'):
+                asb_snapshot_handoff.custody(args)
+        self.assertEqual(output.getvalue(),'MOUNT:123\n')
+        service.assert_not_called()
+
+    def test_handoff_forensic_evidence_is_explicitly_incomplete(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);state=root/'snapshot';state.mkdir();calls=[]
+            def finish():raise RuntimeError('invalidated')
+            service=SimpleNamespace(invalidate=lambda:calls.append('invalidated'),finish=finish)
+            server=SimpleNamespace(serve_forever=lambda:None,shutdown=lambda:None,
+                                   interrupt_clients=lambda:None,server_close=lambda:None)
+            args=SimpleNamespace(root=str(state),replay_archive=None,rsync='rsync',btrfs='btrfs',
+                                 verify_mount=False,socket=str(root/'socket'),output=str(root/'output'))
+            def run(argv,**kwargs):
+                if 'stdout' in kwargs and hasattr(kwargs['stdout'],'write'):kwargs['stdout'].write(b'fixture')
+            with patch.object(asb_snapshot_handoff,'SnapshotService',return_value=service), \
+                 patch.object(asb_snapshot_handoff,'MarkerServer',return_value=server), \
+                 patch.object(asb_snapshot_handoff.subprocess,'run',side_effect=run), \
+                 patch.object(asb_snapshot_handoff,'export_snapshot_streams') as exported, \
+                 patch.object(asb_snapshot_handoff.sys,'stdin',io.StringIO('FORENSIC\n')), \
+                 patch.object(asb_snapshot_handoff.sys,'stdout',io.StringIO()) as output:
+                asb_snapshot_handoff.custody(args)
+            self.assertIn('invalidated',calls)
+            self.assertEqual((root/'forensic-interrupted.btrfs').read_bytes(),b'fixture')
+            self.assertIs(json.loads((root/'forensic-interrupted.json').read_text())['complete'],False)
+            self.assertIn('FORENSIC_SAVED_INCOMPLETE',output.getvalue())
+            exported.assert_not_called()
+
+    def test_direct_export_keeps_order_and_parent_and_retains_failed_stream(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);store=root/'store';store.mkdir()
+            for name in ('snapshot-00000001','snapshot-00000002'):(store/name).mkdir()
+            (store/'boundaries.jsonl').write_text('\n'.join(json.dumps(x) for x in [
+                {'sequence':1,'snapshot':'snapshot-00000001','kind':'baseline','alias':None},
+                {'sequence':2,'snapshot':'snapshot-00000002','kind':'final','alias':None}])+'\n')
+            (store/'markers.jsonl').write_text('')
+            calls=[]
+            def run(args, **kwargs):
+                calls.append((args,kwargs['timeout']))
+                kwargs['stdout'].write(b'partial')
+                if len(calls)==2:raise subprocess.TimeoutExpired(args,kwargs['timeout'])
+            with patch.object(asb_snapshot_service.subprocess,'run',side_effect=run):
+                with self.assertRaisesRegex(RuntimeError,'retained partial output'):
+                    asb_snapshot_service.export_snapshot_streams(store,root/'out',['btrfs'],direct_send=True)
+            self.assertEqual(len(calls),2)
+            self.assertTrue(calls[0][0][1].endswith('asb_snapshot_send.py'))
+            self.assertEqual(calls[1][0][-3:],['--parent',str(store/'snapshot-00000001'),str(store/'snapshot-00000002')])
+            self.assertEqual([call[1] for call in calls],[300,300])
+            self.assertEqual((root/'out/snapshot-00000002.btrfs').read_bytes(),b'partial')
+            self.assertFalse((root/'out/boundaries.jsonl').exists())
+
+    def test_direct_send_uses_parent_tree_identity_and_closes_descriptors(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory); parent=root/'parent'; child=root/'child'
+            parent.mkdir(); child.mkdir(); calls=[]
+            def ioctl(fd, request, value, *rest):
+                calls.append((fd,request,value,rest))
+                if request == asb_snapshot_send._GET_SUBVOL_INFO:
+                    struct.pack_into('=Q',value,0,42)
+                return 0
+            with patch.object(asb_snapshot_send.platform,'machine',return_value='x86_64'), \
+                 patch.object(asb_snapshot_send.fcntl,'ioctl',side_effect=ioctl):
+                asb_snapshot_send.send(child,9,parent)
+            self.assertEqual([item[1] for item in calls],
+                             [asb_snapshot_send._GET_SUBVOL_INFO,asb_snapshot_send._SEND])
+            self.assertEqual(struct.unpack(asb_snapshot_send._SEND_ARGS,calls[1][2])[:5],(9,0,0,42,0))
+            for fd,_,_,_ in calls:
+                with self.assertRaises(OSError):os.fstat(fd)
+
+    def test_direct_send_rejects_unknown_abi_and_invalid_parent(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);parent=root/'parent';child=root/'child'
+            parent.mkdir();child.mkdir()
+            with patch.object(asb_snapshot_send.platform,'machine',return_value='unknown'):
+                with self.assertRaisesRegex(RuntimeError,'requires 64-bit Linux'):
+                    asb_snapshot_send.send(child,9,parent)
+            with patch.object(asb_snapshot_send.platform,'machine',return_value='x86_64'), \
+                 patch.object(asb_snapshot_send.fcntl,'ioctl',return_value=0):
+                with self.assertRaisesRegex(RuntimeError,'no subvolume identity'):
+                    asb_snapshot_send.send(child,9,parent)
+
     def test_archive_streams_directly_to_receive_and_preserves_input(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);archive=root/'input.tar';received=[]
@@ -268,6 +413,58 @@ class SnapshotServiceTest(unittest.TestCase):
                     later.result(timeout=2)
         with self.assertRaisesRegex(RuntimeError,'unconsumed or failed'):
             service.finish()
+
+    def test_replay_rejects_oversubscribed_later_boundary_without_waiting(self):
+        waiting=threading.Event()
+        service=SnapshotReplay([('first',2),('second',3)],lambda _:None)
+        wait=service.changed.wait
+        def observed_wait(timeout=None):
+            waiting.set()
+            return wait(timeout)
+        with patch.object(service.changed,'wait',side_effect=observed_wait):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                later=pool.submit(service.marker,'end','second')
+                self.assertTrue(waiting.wait(2))
+                with self.assertRaisesRegex(ValueError,'differs from the recording'):
+                    service.marker('end','second')
+                with self.assertRaisesRegex(RuntimeError,'not active'):
+                    later.result(timeout=2)
+        with self.assertRaisesRegex(RuntimeError,'unconsumed or failed'):
+            service.finish()
+
+    def test_replay_accepts_each_recorded_repeated_boundary(self):
+        service=SnapshotReplay([('first',2),('second',3),('second',4)],lambda _:None)
+        self.assertEqual(service.marker('end','first'),2)
+        self.assertEqual(service.marker('end','second'),3)
+        self.assertEqual(service.marker('end','second'),4)
+        service.finish()
+
+    def test_oversubscribed_socket_markers_release_both_clients(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            waiting=threading.Event()
+            service=SnapshotReplay([('first',2),('second',3)],lambda _:None)
+            wait=service.changed.wait
+            def observed_wait(timeout=None):
+                waiting.set()
+                return wait(timeout)
+            path=Path(directory)/'marker.sock';server=MarkerServer(path,service)
+            worker=threading.Thread(target=server.serve_forever,daemon=True);worker.start()
+            clients=[socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) for _ in range(2)]
+            try:
+                for client in clients:client.settimeout(2);client.connect(str(path))
+                with patch.object(service.changed,'wait',side_effect=observed_wait):
+                    clients[0].sendall(b'tool-end:second\n')
+                    self.assertTrue(waiting.wait(2))
+                    clients[1].sendall(b'tool-end:second\n')
+                    self.assertEqual(clients[1].recv(32),b'')
+                    self.assertEqual(clients[0].recv(32),b'')
+                with self.assertRaisesRegex(RuntimeError,'unconsumed or failed'):
+                    service.finish()
+            finally:
+                service.invalidate()
+                for client in clients:client.close()
+                server.shutdown();server.server_close();worker.join(timeout=2)
+                self.assertFalse(worker.is_alive())
 
     def test_finish_waits_for_active_boundary_application(self):
         applying=threading.Event();release=threading.Event();finished=threading.Event()

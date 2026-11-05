@@ -167,6 +167,15 @@ pub(crate) trait AgentAdapter: Sync {
             "agent does not support deferred native recording".into(),
         ))
     }
+    /// Adapter-owned consistency check over a sealed native stream and snapshot archive.
+    fn verify_native_snapshot(
+        &self,
+        _native: &[u8],
+        _snapshot: &mut std::fs::File,
+        _digest: &str,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
     /// Whether this adapter owns a bounded guest-workspace effect capsule.
     /// Remote orchestration may only transfer the opaque bytes; capture and
     /// application remain adapter responsibilities.
@@ -538,6 +547,7 @@ type GuestServiceHook = fn(
 ) -> Result<Option<auxiliary::AuxiliaryPlan>, Error>;
 type DeferredNativeHook = fn(&[u8], &str) -> Result<Vec<u8>, Error>;
 type GuestReplayEvidenceHook = fn(&Path) -> Result<Vec<u8>, Error>;
+type NativeSnapshotHook = fn(&[u8], &mut std::fs::File, &str) -> Result<(), Error>;
 type ToolReplayHook = for<'a> fn(&mut PreparationContext<'a>, TapeContext<'a>) -> Result<(), Error>;
 type CollectionHook = for<'a> fn(&CollectionContext<'a>) -> AgentArtifacts;
 /// An adapter-selected extension which may attach its own bounded replay
@@ -576,6 +586,7 @@ pub(super) struct StaticAdapter {
     native_tool_transport: bool,
     guest_service: Option<GuestServiceHook>,
     finalize_native_recording: Option<DeferredNativeHook>,
+    native_snapshot_check: Option<NativeSnapshotHook>,
     max_steps: bool,
     native_workspace_capsule: Option<(WorkspaceCapsuleCaptureHook, WorkspaceCapsuleApplyHook)>,
     collect: Option<CollectionHook>,
@@ -629,6 +640,7 @@ impl StaticAdapter {
             native_tool_transport: false,
             guest_service: None,
             finalize_native_recording: None,
+            native_snapshot_check: None,
             max_steps: false,
             native_workspace_capsule: None,
             collect: None,
@@ -672,6 +684,11 @@ impl StaticAdapter {
         finalize: DeferredNativeHook,
     ) -> Self {
         self.finalize_native_recording = Some(finalize);
+        self
+    }
+
+    pub(super) const fn with_native_snapshot_check(mut self, check: NativeSnapshotHook) -> Self {
+        self.native_snapshot_check = Some(check);
         self
     }
 
@@ -986,6 +1003,15 @@ impl AgentAdapter for StaticAdapter {
             pending,
             workspace_sha256,
         )
+    }
+    fn verify_native_snapshot(
+        &self,
+        native: &[u8],
+        snapshot: &mut std::fs::File,
+        digest: &str,
+    ) -> Result<(), Error> {
+        self.native_snapshot_check
+            .map_or(Ok(()), |check| check(native, snapshot, digest))
     }
     fn supports_native_workspace_capsule(&self) -> bool {
         self.native_workspace_capsule.is_some()

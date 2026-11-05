@@ -121,6 +121,7 @@ def main(argv=None):
     parser.add_argument('--qemu-img')
     parser.add_argument('--qemu-storage')
     parser.add_argument('--apply-final',action='store_true')
+    parser.add_argument('--direct-send',action='store_true')
     parser.add_argument('--replay-archive')
     parser.add_argument('--extra-root', action='append', default=[])
     args=parser.parse_args(argv)
@@ -176,7 +177,7 @@ def main(argv=None):
             Path(args.socket).unlink(missing_ok=True)
         service=None
         if not args.replay_archive:
-            export_snapshot_streams(store,args.output,[args.btrfs])
+            export_snapshot_streams(store,args.output,[args.btrfs],direct_send=args.direct_send)
         print('SAVED',flush=True)
     finally:
         if server is not None:

@@ -32,6 +32,7 @@ export class NativeToolBroker {
     this.connections = new Set();
     this.sealing = false;
     this.nextToken = 0;
+    this.snapshotSequences = new Map();
     this.server = createServer(socket => {
       this.connections.add(socket);
       socket.once('close', () => this.connections.delete(socket));
@@ -83,6 +84,11 @@ export class NativeToolBroker {
       } else if (this.mode === 'record' && message.op === 'finish') {
         const item = this.pending.get(message.token);
         if (!item || !message.outcome || typeof message.outcome.ok !== 'boolean') throw new Error('Native tool broker finish has no active call');
+        if (Object.hasOwn(message, 'snapshot_sequence')) {
+          if (!Number.isSafeInteger(message.snapshot_sequence) || message.snapshot_sequence < 2 ||
+              [...this.snapshotSequences.values()].includes(message.snapshot_sequence)) throw new Error('Native tool snapshot completion sequence is invalid');
+          this.snapshotSequences.set(message.token, message.snapshot_sequence);
+        }
         this.pending.delete(message.token);
         if (message.outcome.ok) item.resolve(message.outcome.value);
         else if (Object.hasOwn(message.outcome, 'thrown')) item.reject(decodeThrown(message.outcome.thrown));
@@ -99,8 +105,21 @@ export class NativeToolBroker {
     let events, encoded;
     try {
       if (this.pending.size) throw new Error('Native tool broker has unfinished calls');
-      if (encode) encoded = encode(this.session.preview());
-      events = this.session.finish();
+      if (this.mode === 'record') {
+        const preview = this.session.preview();
+        if (this.snapshotSequences.size) {
+          if (this.snapshotSequences.size !== preview.length || preview.some(event => !this.snapshotSequences.has(event.ordinal))) throw new Error('Native tool snapshot completion order is incomplete');
+          const sequences = [...this.snapshotSequences.values()].sort((a, b) => a - b);
+          if (sequences.some((sequence, index) => sequence !== index + 2)) throw new Error('Native tool snapshot completion order is incomplete');
+          for (const event of preview) event.snapshot_sequence = this.snapshotSequences.get(event.ordinal);
+        }
+        if (encode) encoded = encode(preview);
+        this.session.finish();
+        events = preview;
+      } else {
+        if (encode) throw new Error('Native tool replay cannot encode a recording');
+        events = this.session.finish();
+      }
     } catch (error) {
       this.sealing = false;
       throw error;

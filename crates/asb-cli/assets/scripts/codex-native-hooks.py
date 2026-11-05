@@ -223,7 +223,7 @@ def _replay_command_result(value):
         r"Chunk ID: [^\r\n]+\r?\n"
         r"Wall time: \d+(?:\.\d+)? seconds\r?\n"
         r"Process exited with code (-?\d+)\r?\n"
-        r"(?:Original token count: \d+\r?\n)?(.*)",
+        r"(?:Original token count: \d+\r?\n)?Output:\r?\n(.*)",
         text,
         flags=re.DOTALL,
     )
@@ -314,7 +314,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except BaseException as error:
+    except Exception as error:
         try:
             _progress(False, "Codex native hook failed")
         except BaseException:

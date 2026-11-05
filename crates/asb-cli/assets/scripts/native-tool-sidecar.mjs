@@ -29,7 +29,7 @@ export function encodePendingSidecar(exchanges, programSha256, agent = 'continue
   if (!Array.isArray(exchanges) || !exchanges.length || exchanges.length * 3 + 4 > MAX_EVENTS) throw new Error('Native tool sidecar exchange count is invalid');
   // Reuse replay's ordering and shape validation before writing any bytes.
   new ReplaySession(exchanges);
-  if (exchanges.some(exchange => !keys(exchange,['ordinal','request','outcome']) ||
+  if (exchanges.some(exchange => !(keys(exchange,['ordinal','request','outcome']) || keys(exchange,['ordinal','request','outcome','snapshot_sequence'])) ||
       (exchange.outcome.ok ? !keys(exchange.outcome,['ok','value']) : !(keys(exchange.outcome,['ok','name','message']) || keys(exchange.outcome,['ok','thrown']))))) {
     throw new Error('Native tool sidecar exchange contains unsupported fields');
   }
@@ -37,7 +37,7 @@ export function encodePendingSidecar(exchanges, programSha256, agent = 'continue
   const events = [{event:'launch',session,program_sha256:programSha256},{event:'session_alias',alias,session}];
   let total = 0;
   for (const exchange of exchanges) {
-    const request = Buffer.from(JSON.stringify({ordinal:exchange.ordinal,request:exchange.request}));
+    const request = Buffer.from(JSON.stringify({ordinal:exchange.ordinal,request:exchange.request,...(Object.hasOwn(exchange,'snapshot_sequence') ? {snapshot_sequence:exchange.snapshot_sequence} : {})}));
     const output = Buffer.from(JSON.stringify(exchange.outcome));
     total += request.length + output.length;
     if (request.length > LIMIT || output.length > LIMIT || total > TOTAL) throw new Error('Native tool sidecar payload exceeds supported bounds');
@@ -76,9 +76,9 @@ export function decodeSidecar(bytes, agent = 'continue') {
         !keys(write,['event','alias','request_sha256','request_b64']) || write.event !== 'write' || write.alias !== session.alias ||
         !keys(output,['event','alias','response_sha256','output_b64']) || output.event !== 'output' || output.alias !== session.alias) throw new Error('Native tool sidecar event order is invalid');
     const request = payload(write.request_b64,write.request_sha256), outcome = payload(output.output_b64,output.response_sha256);
-    if (!keys(request,['ordinal','request'])) throw new Error('Native tool sidecar request is invalid');
+    if (!(keys(request,['ordinal','request']) || keys(request,['ordinal','request','snapshot_sequence']))) throw new Error('Native tool sidecar request is invalid');
     if (!(outcome?.ok ? keys(outcome,['ok','value']) : (keys(outcome,['ok','name','message']) || keys(outcome,['ok','thrown'])))) throw new Error('Native tool sidecar outcome is invalid');
-    exchanges.push({ordinal:request.ordinal,request:request.request,outcome});
+    exchanges.push({ordinal:request.ordinal,request:request.request,outcome,...(Object.hasOwn(request,'snapshot_sequence') ? {snapshot_sequence:request.snapshot_sequence} : {})});
   }
   new ReplaySession(exchanges);
   return {exchanges,programSha256:launch.program_sha256,workspaceEffectSha256:effect.sha256};
