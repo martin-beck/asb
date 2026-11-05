@@ -8,8 +8,11 @@ official passing grade from an incomplete conversation is not replay success.
 
 Pi's existing sealed local-tool mode replaces its built-in tools, including
 the shell, with an allowlisted argv service. It does not preserve the native
-shell's interface or arbitrary behavior. Do not describe that mode, a proxy,
-or a filesystem snapshot alone as transparent replay of this workload.
+shell's interface or arbitrary behavior. Main also contains experimental Pi
+native dispatch and Btrfs snapshot machinery with bounded sidecars; it needs
+the complete coverage and qualification below before it can be presented as
+a general native replay solution. Do not describe either mode, a proxy, or a
+filesystem snapshot alone as transparent replay of this workload.
 
 ## Target and boundaries
 
