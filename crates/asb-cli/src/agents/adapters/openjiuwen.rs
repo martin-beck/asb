@@ -106,6 +106,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_max_steps()
 .with_final_response(final_response)
 .with_final_response_failure(final_response_failure)
+.with_execution_failure(execution_failure)
 .with_native_tool_transport()
 .with_artifact_specs(ARTIFACTS)
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
@@ -114,6 +115,46 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 
 fn final_response_failure(response: Option<&str>) -> Option<String> {
     response.is_none().then(|| "OpenJiuwen exited without a final response. Inspect the benchmark log for the terminal event or error.".into())
+}
+
+fn execution_failure(stdout: &str, _: &str) -> Option<String> {
+    let last = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .rfind(|event| event.get("type").and_then(|value| value.as_str()) == Some("answer"))?;
+    (last
+        .pointer("/payload/result_type")
+        .and_then(|value| value.as_str())
+        == Some("error")
+        && last
+            .pointer("/payload/output")
+            .and_then(|value| value.as_str())
+            == Some("Max iterations reached without completion"))
+    .then(|| "OpenJiuwen reached its iteration limit; rerun with a higher --max-steps value".into())
+}
+
+#[cfg(test)]
+mod iteration_diagnostic_tests {
+    use super::execution_failure;
+
+    #[test]
+    fn reports_only_the_latest_typed_iteration_failure() {
+        let failure = r#"{"type":"answer","payload":{"result_type":"error","output":"Max iterations reached without completion"}}"#;
+        let success = r#"{"type":"answer","payload":{"result_type":"answer","output":"done"}}"#;
+        assert!(
+            execution_failure(failure, "")
+                .unwrap()
+                .contains("--max-steps")
+        );
+        assert_eq!(
+            execution_failure(&format!("{failure}\n{success}"), ""),
+            None
+        );
+        assert_eq!(
+            execution_failure("Max iterations reached without completion", ""),
+            None
+        );
+    }
 }
 
 /// Launch the installed Python entry point with a narrow, in-process fix for
