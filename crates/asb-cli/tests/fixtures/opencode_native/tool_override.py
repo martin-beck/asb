@@ -5,7 +5,7 @@ root=pathlib.Path(tempfile.mkdtemp(prefix='opencode-native-probe-', dir=os.envir
 home=root/'home';home.mkdir(exist_ok=True)
 work=root/'work';work.mkdir(exist_ok=True)
 plugin=root/'plugin.mjs'
-plugin.write_text('export default async () => ({tool: {bash: {description:"fixture", args: {command: {type:"string"}}, execute: async (args) => { await Bun.write('+json.dumps(str(root/'called.json'))+', JSON.stringify(args)); return "intercepted" }}}});\n')
+plugin.write_text('export default async () => ({tool: {bash: {description:"fixture", args: {command: {type:"string"}, timeout: {type:"integer"}}, execute: async (args) => { await Bun.write('+json.dumps(str(root/'called.json'))+', JSON.stringify(args)); return "intercepted" }}}, "tool.definition": async (input, output) => { if (input.toolID === "bash") output.jsonSchema = {type:"object",properties:{command:{type:"string"},timeout:{type:"integer"}},required:["command"]} }});\n')
 class Handler(BaseHTTPRequestHandler):
  calls=0
  def log_message(self,*args):pass
@@ -13,7 +13,7 @@ class Handler(BaseHTTPRequestHandler):
   n=int(self.headers.get('Content-Length','0'));data=json.loads(self.rfile.read(n)); Handler.calls+=1
   (root/('request-%s.json'%Handler.calls)).write_text(json.dumps(data))
   if data.get('tools') and not any(m.get('role') == 'tool' for m in data.get('messages',[])):
-   message={'role':'assistant','content':None,'tool_calls':[{'id':'call_1','type':'function','function':{'name':'bash','arguments':json.dumps({'command':'touch SHOULD_NOT_EXIST'})}}]}; finish='tool_calls'
+   message={'role':'assistant','content':None,'tool_calls':[{'id':'call_1','type':'function','function':{'name':'bash','arguments':json.dumps({'command':'touch SHOULD_NOT_EXIST','timeout':1234})}}]}; finish='tool_calls'
   else:message={'role':'assistant','content':'done'};finish='stop'
   response={'id':'fixture','object':'chat.completion','created':1,'model':'fixture','choices':[{'index':0,'message':message,'finish_reason':finish}],'usage':{'prompt_tokens':1,'completion_tokens':1,'total_tokens':2}}
   delta={k:v for k,v in message.items() if k!='role'}; delta['role']='assistant'
@@ -29,5 +29,7 @@ try:
  result={'exit':p.returncode,'provider_calls':Handler.calls,'plugin_called':(root/'called.json').exists(),'original_executed':(work/'SHOULD_NOT_EXIST').exists()}
  print(json.dumps(result))
  assert p.returncode == 0 and result['plugin_called'] and not result['original_executed'], f'probe failed; inspect {root}'
+ assert json.loads((root/'called.json').read_text())['timeout'] == 1234
+ assert any(tool.get('function',{}).get('parameters',{}).get('required') == ['command'] for request in root.glob('request-*.json') for tool in json.loads(request.read_text()).get('tools',[]) if tool.get('function',{}).get('name') == 'bash'), f'provider schema changed; inspect {root}'
  assert any(m.get('role')=='tool' and m.get('content')=='intercepted' for request in root.glob('request-*.json') for m in json.loads(request.read_text()).get('messages', [])), f'provider did not receive replayed result; inspect {root}'
 finally:server.shutdown();server.server_close()
