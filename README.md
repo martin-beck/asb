@@ -127,6 +127,14 @@ Initialization prepares a project-local Python environment using an available
 Python 3.12 or 3.13. If neither is available, it uses `uv` to download Python
 3.12 into the project. If this is not possible, it warns and Python tool
 installation retries setup later; non-Python functionality remains available.
+Initialization also checks Node.js with npm, uv, Btrfs utilities, rsync with
+ACL and extended-attribute support, and the supported measurement tools. Missing
+tools are installed under the configured project tools directory without
+changing system packages. Source builds such as rsync and sysstat need a C
+compiler, make, tar, and the usual C build environment. ASB reports failed
+installations and the corresponding `asb tool install` command for retrying.
+An installer cannot supply kernel tracing permissions or start a container
+daemon; those remain host setup requirements for the features that use them.
 If the directory is already initialized, ASB warns and makes no changes;
 rerun with `--reset` to remove managed state and create a fresh project.
 On Linux, init lists every privileged command it may run (including sysctl

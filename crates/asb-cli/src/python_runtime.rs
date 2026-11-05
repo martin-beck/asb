@@ -188,6 +188,11 @@ pub(crate) fn ensure_in(
     }
     let interpreter = installed_python_in(&mut probe)?;
     probe_owner.consume(probe.finish()?)?;
+    if interpreter.is_none()
+        && std::env::var_os("ASB_INIT_OFFLINE").as_deref() == Some(std::ffi::OsStr::new("1"))
+    {
+        return Err(Error::Input("No compatible Python is available in offline mode; install Python 3.12 or 3.13, or retry `asb init` when online".into()).into());
+    }
     let env_dir = root.join(".asb/python/venv");
     fs::create_dir_all(env_dir.parent().expect("venv parent")).map_err(crate::io_error)?;
     if let Some(backup) = preserve_environment(&env_dir)? {

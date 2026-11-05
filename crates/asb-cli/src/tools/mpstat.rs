@@ -1,34 +1,27 @@
 use super::{StaticTool, ToolKind};
-use crate::install::Recipe;
+use crate::install::{InstallResult, OperationContext, ProgressStage, Recipe};
+use std::path::{Path, PathBuf};
 pub(super) static ADAPTER: StaticTool = StaticTool::new(
     "mpstat",
-    Recipe::Host {
+    Recipe::Custom {
         executable: "mpstat",
+        description: "build project-local sysstat collectors",
+        summary: "project-local mpstat and pidstat",
+        install,
+        guest_assets: None,
     },
     ToolKind::Collector,
 )
-.with_post_install(post_install);
-
-pub(super) fn post_install(
-    _context: &crate::install::OperationContext,
-    executable: &std::path::Path,
-    _progress: &mut dyn FnMut(u8, crate::install::ProgressStage),
-    _output: &mut dyn std::io::Write,
-) -> crate::install::InstallResult<()> {
-    let source = crate::install::host_executable("pidstat").map_err(|_| {
-        crate::Error::Io("CPU and I/O collection needs the matching sysstat `pidstat` binary; install sysstat and retry the ASB tool installation".into())
-    })?;
-    let destination = executable
-        .parent()
-        .ok_or_else(|| crate::Error::Io("mpstat executable has no parent directory".into()))?
-        .join("pidstat");
-    std::fs::copy(&source, &destination).map_err(|error| {
-        crate::Error::Io(format!(
-            "cannot copy process-scoped pidstat tool {} to {}: {error}",
-            source.display(),
-            destination.display()
-        ))
-    })?;
-    crate::install::make_executable(&destination)?;
-    Ok(())
+.with_init_runtime()
+.with_helper_executables(&["pidstat"])
+.with_host_probe(host_usable);
+fn install(
+    context: &OperationContext,
+    root: &Path,
+    progress: &mut dyn FnMut(u8, ProgressStage),
+) -> InstallResult<PathBuf> {
+    super::sysstat::install(context, root, progress, "mpstat")
+}
+fn host_usable(_: &OperationContext) -> InstallResult<bool> {
+    Ok(super::sysstat::host_usable("mpstat"))
 }

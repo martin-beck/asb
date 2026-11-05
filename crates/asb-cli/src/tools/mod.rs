@@ -6,6 +6,7 @@ use std::path::Path;
 
 mod agentsysperf;
 pub(crate) mod bpftrace;
+mod btrfs;
 mod cli2key;
 mod flamegraph;
 mod harbor;
@@ -16,8 +17,10 @@ mod mpstat;
 mod node;
 mod perf;
 mod perfetto;
+mod rsync;
 pub(crate) mod runtime;
 mod swebench;
+mod sysstat;
 mod terminal_bench;
 mod uv;
 
@@ -54,6 +57,9 @@ pub(crate) trait ToolAdapter: Sync {
         Ok(inputs)
     }
     fn kind(&self) -> ToolKind;
+    fn init_runtime(&self) -> bool {
+        false
+    }
     fn guest_assets(&self, _root: &Path) -> Result<Vec<GuestAsset>, crate::Error> {
         Ok(Vec::new())
     }
@@ -64,7 +70,11 @@ pub(crate) trait ToolAdapter: Sync {
         &self,
         _context: &crate::install::OperationContext,
     ) -> crate::install::InstallResult<bool> {
-        Ok(self.executable().is_some_and(host_program_on_path))
+        Ok(self.executable().is_some_and(host_program_on_path)
+            && self
+                .helper_executables()
+                .iter()
+                .all(|name| host_program_on_path(name)))
     }
     fn post_install(
         &self,
@@ -118,6 +128,7 @@ pub(crate) struct StaticTool {
         Option<fn(&crate::install::OperationContext) -> crate::install::InstallResult<bool>>,
     guest_assets: Option<GuestAssetsHook>,
     helper_executables: &'static [&'static str],
+    init_runtime: bool,
 }
 impl StaticTool {
     pub(crate) const fn new(id: &'static str, recipe: Recipe, kind: ToolKind) -> Self {
@@ -130,6 +141,7 @@ impl StaticTool {
             host_probe: None,
             guest_assets: None,
             helper_executables: &[],
+            init_runtime: false,
         }
     }
     pub(crate) const fn with_post_install(mut self, hook: PostInstallHook) -> Self {
@@ -138,6 +150,10 @@ impl StaticTool {
     }
     pub(crate) const fn with_runtime_path(mut self) -> Self {
         self.runtime_path = true;
+        self
+    }
+    pub(crate) const fn with_init_runtime(mut self) -> Self {
+        self.init_runtime = true;
         self
     }
     pub(crate) const fn with_helper_executables(mut self, names: &'static [&'static str]) -> Self {
@@ -157,6 +173,9 @@ impl StaticTool {
     }
 }
 impl ToolAdapter for StaticTool {
+    fn init_runtime(&self) -> bool {
+        self.init_runtime
+    }
     fn helper_executables(&self) -> &'static [&'static str] {
         self.helper_executables
     }
@@ -185,7 +204,11 @@ impl ToolAdapter for StaticTool {
         if let Some(probe) = self.host_probe {
             return probe(context);
         }
-        Ok(self.executable().is_some_and(host_program_on_path))
+        Ok(self.executable().is_some_and(host_program_on_path)
+            && self
+                .helper_executables()
+                .iter()
+                .all(|name| host_program_on_path(name)))
     }
     fn post_install(
         &self,
@@ -259,6 +282,8 @@ fn executable_candidates(
 static REGISTRY: &[&dyn ToolAdapter] = &[
     &node::ADAPTER,
     &uv::ADAPTER,
+    &btrfs::ADAPTER,
+    &rsync::ADAPTER,
     &agentsysperf::ADAPTER,
     &cli2key::ADAPTER,
     &mpstat::ADAPTER,
@@ -273,6 +298,10 @@ static REGISTRY: &[&dyn ToolAdapter] = &[
     &harbor::ADAPTER,
     &http::ADAPTER,
 ];
+
+pub(crate) fn init_runtimes() -> impl Iterator<Item = &'static dyn ToolAdapter> {
+    REGISTRY.iter().copied().filter(|tool| tool.init_runtime())
+}
 pub(crate) fn all() -> &'static [&'static dyn ToolAdapter] {
     REGISTRY
 }
@@ -511,5 +540,18 @@ mod tests {
             }
             _ => panic!("AgentSysPerf must use its pinned upstream Python package"),
         }
+    }
+
+    #[test]
+    fn initialization_runtimes_are_installable_support_tools() {
+        let runtimes = init_runtimes().map(|tool| tool.id()).collect::<Vec<_>>();
+        for id in ["node", "uv", "btrfs", "rsync"] {
+            assert!(runtimes.contains(&id), "{id} must be prepared at init");
+            let tool = find(id).unwrap();
+            assert!(tool.kind() == ToolKind::Support);
+            assert!(matches!(tool.recipe(), Recipe::Custom { .. }));
+        }
+        assert!(!runtimes.contains(&"cli2key"));
+        assert_eq!(find("btrfs").unwrap().helper_executables(), &["mkfs.btrfs"]);
     }
 }

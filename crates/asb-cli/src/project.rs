@@ -331,6 +331,49 @@ pub fn init(
         .map_err(|error| Error::Io(format!("cannot write {}: {error}", path.display())))?;
     let installation = crate::install::OperationContext::new(&root, &config)
         .map_err(crate::install::InstallFailure::into_public)?;
+    let tools_root = resolve(&root, &config.tools_dir);
+    let offline = cfg!(test)
+        || std::env::var_os("ASB_INIT_OFFLINE").as_deref() == Some(std::ffi::OsStr::new("1"));
+    for tool in crate::tools::init_runtimes() {
+        let id = tool.id();
+        let result = if offline {
+            crate::install::runtime_dependency_available_in(&installation, id, &tools_root)
+                .and_then(|available| if available { Ok(()) } else {
+                    Err(Error::Input(format!("{id} is unavailable in offline mode; run `asb tool install {id}` when online")).into())
+                })
+        } else {
+            let mut messages = Vec::new();
+            let mut last = None;
+            let mut progress = |percent: u8, stage: crate::install::ProgressStage| {
+                if last != Some((percent, stage)) {
+                    let _ = writeln!(output, "Preparing {id}: {} ({percent}%)", stage.label());
+                    last = Some((percent, stage));
+                }
+            };
+            let result = crate::install::ensure_runtime_dependency_in(
+                &installation,
+                id,
+                &tools_root,
+                &mut messages,
+                &mut progress,
+            );
+            output.write_all(&messages).map_err(super::io_error)?;
+            result
+        };
+        match result {
+            Ok(()) => {}
+            Err(crate::install::InstallFailure::Ordinary(error)) => {
+                writeln!(
+                    output,
+                    "Warning: project runtime {id} is not ready: {error}\nAfter fixing the reported prerequisite, retry with `asb tool install {id}`."
+                )
+                .map_err(super::io_error)?;
+            }
+            Err(crate::install::InstallFailure::Abort(abort)) => {
+                return Err(crate::install::InstallFailure::Abort(abort).into_public());
+            }
+        }
+    }
     let python = crate::python_runtime::ensure_in(&installation, output);
     let diagnostics = installation.report_diagnostics(output);
     match python {

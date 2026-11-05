@@ -107,6 +107,7 @@ fn host_discovery_checks_permissions_but_never_claims_a_project_local_installati
     script(&first.join("mpstat"), CONTENT);
     fs::set_permissions(first.join("mpstat"), fs::Permissions::from_mode(0o600)).unwrap();
     script(&second.join("mpstat"), CONTENT);
+    script(&second.join("pidstat"), CONTENT);
     script(&second.join("opencode"), CONTENT);
     let mut command = fixture.command("host");
     command.env("PATH", std::env::join_paths([first, second]).unwrap());
@@ -347,6 +348,8 @@ fn executable_policy_fixture_child() {
             );
             assert_eq!(install::host_executable("mpstat").unwrap(), expected);
             assert!(install::tool_available("mpstat", &tools_root));
+            fs::remove_file(root.join("host-second/pidstat")).unwrap();
+            assert!(!install::tool_available("mpstat", &tools_root));
             assert!(!install::tool_installed_locally("mpstat", &tools_root));
             assert!(tools::resolve("mpstat", &root, TOOLS).is_none());
             assert!(!install::tool_available("opencode", &tools_root));

@@ -235,9 +235,8 @@ pub(crate) enum Recipe {
         dependencies: &'static [&'static str],
         executable: &'static str,
     },
-    Host {
-        executable: &'static str,
-    },
+    #[allow(dead_code)] // Retained for host-only adapters and offline installer fixtures.
+    Host { executable: &'static str },
     Custom {
         executable: &'static str,
         description: &'static str,
@@ -1143,6 +1142,16 @@ pub fn tool_available(name: &str, tools_root: &Path) -> bool {
         crate::executables::Lookup::Unusable(_) => false,
         crate::executables::Lookup::Missing => {
             matches!(plan, Recipe::Host { executable } if host_executable(executable).is_ok())
+                || tools::find(name).is_some_and(|tool| {
+                    tool.init_runtime()
+                        && tool
+                            .executable()
+                            .is_some_and(|name| tools::host_executable(Path::new(name)).is_some())
+                        && tool
+                            .helper_executables()
+                            .iter()
+                            .all(|name| tools::host_executable(Path::new(name)).is_some())
+                })
         }
     }
 }
@@ -1851,7 +1860,7 @@ pub(crate) fn ensure_runtime_dependency_in(
         .ok_or_else(|| Error::Input(format!("runtime dependency `{id}` is not registered")))?;
     let owned_context = context.with_destination(&tools_root.join(id))?;
     let context = &owned_context;
-    if tool_installed_locally(id, tools_root) || tool.host_runtime_usable(context)? {
+    if runtime_dependency_available_in(context, id, tools_root)? {
         return Ok(());
     }
     let destination = install_recipe_in(
@@ -1865,6 +1874,32 @@ pub(crate) fn ensure_runtime_dependency_in(
     writeln!(output, "Installed required runtime {id} for this project.")
         .map_err(crate::io_error)?;
     Ok(())
+}
+
+pub(crate) fn runtime_dependency_available_in(
+    context: &OperationContext,
+    id: &str,
+    tools_root: &Path,
+) -> InstallResult<bool> {
+    let tool = tools::find(id)
+        .ok_or_else(|| Error::Input(format!("runtime dependency `{id}` is not registered")))?;
+    let local_complete = runtime_installed_locally(id, tools_root);
+    if tool_installed_locally(id, tools_root) {
+        // Resolution prefers a project tool. A partial local installation
+        // must be repaired even if a complete host installation exists.
+        return Ok(local_complete);
+    }
+    tool.host_runtime_usable(context)
+}
+
+fn runtime_installed_locally(id: &str, tools_root: &Path) -> bool {
+    let Some(tool) = tools::find(id) else {
+        return false;
+    };
+    tool_installed_locally(id, tools_root)
+        && tool.helper_executables().iter().all(|name| {
+            crate::executables::is_executable(&tools_root.join(id).join("bin").join(name))
+        })
 }
 
 /// Inspect cached inputs without destroying evidence needed for repair.
@@ -2405,6 +2440,33 @@ mod tests {
     use crate::tools::bpftrace::{
         bpftrace_host_commands, bpftrace_missing_dependency, bpftrace_source_commands,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_requires_all_project_local_helpers() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "asb-runtime-helpers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let bin = root.join("btrfs/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let main = bin.join("btrfs");
+        fs::write(&main, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&main, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!runtime_installed_locally("btrfs", &root));
+        let helper = bin.join("mkfs.btrfs");
+        fs::write(&helper, b"#!/bin/sh\nexit 0\n").unwrap();
+        assert!(!runtime_installed_locally("btrfs", &root));
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(runtime_installed_locally("btrfs", &root));
+        assert!(!runtime_installed_locally("unknown-tool", &root));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
