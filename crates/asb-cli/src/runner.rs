@@ -2866,6 +2866,7 @@ mod tests {
                 tool_mode: Some(crate::tape::Mode::Record),
                 tool_mode_explicit: true,
                 native_capsule_record: Some(capsule.to_str().unwrap()),
+                invocation_dir: Some(&root),
                 ..Default::default()
             },
             &mut Vec::new(),
@@ -2874,7 +2875,8 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("does not yet provide an ASB tool interception transport")
+                .contains("does not yet provide an ASB tool interception transport"),
+            "unexpected rejection: {error}"
         );
         assert!(!capsule.exists());
         std::fs::remove_dir_all(root).unwrap();
