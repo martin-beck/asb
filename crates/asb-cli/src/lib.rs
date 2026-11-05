@@ -8,6 +8,7 @@ mod collectors;
 mod compare;
 mod completion;
 mod config;
+mod cpu_profiles;
 mod disk_space;
 mod endpoint;
 mod evidence;

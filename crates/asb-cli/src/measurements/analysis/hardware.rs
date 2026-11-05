@@ -20,6 +20,7 @@ pub(super) struct PmuAnalysis {
     scope: &'static str,
     raw_integer_counts: BTreeMap<String, u64>,
     metrics: Vec<Metric>,
+    cpu_profile: crate::cpu_profiles::Selection,
     limitations: &'static str,
 }
 
@@ -67,6 +68,13 @@ const RATIOS: &[Ratio] = &[
         scale: 100.0,
         unit: "%",
     },
+    Ratio {
+        id: "frontend_stall_cycles_pct",
+        numerator: "stall_frontend",
+        denominator: "cpu_cycles",
+        scale: 100.0,
+        unit: "%",
+    },
 ];
 
 fn eligible(value: &Value) -> Option<(u64, f64)> {
@@ -79,7 +87,16 @@ fn eligible(value: &Value) -> Option<(u64, f64)> {
     let runtime = value.get("known_event_runtime_ns")?.as_f64()?;
     let min = value.get("min_running_pct")?.as_f64()?;
     let max = value.get("max_running_pct")?.as_f64()?;
-    if !runtime.is_finite() || runtime <= 0.0 || min != 100.0 || max != 100.0 {
+    // The shared perf record currently stores runtime as f64. Reject values
+    // outside exact integral-nanosecond comparison rather than admitting two
+    // different u64 runtimes that round to the same floating-point value.
+    if !runtime.is_finite()
+        || runtime <= 0.0
+        || runtime.fract() != 0.0
+        || runtime > 9_007_199_254_740_991.0
+        || min != 100.0
+        || max != 100.0
+    {
         return None;
     }
     Some((value.get("observed_integer_count")?.as_u64()?, runtime))
@@ -121,7 +138,7 @@ pub(super) fn analyze(documents: &BTreeMap<String, Value>) -> Vec<PmuAnalysis> {
             continue;
         };
         let names = group.split(',').collect::<Vec<_>>();
-        if names.len() > 6 || names.is_empty() {
+        if names.len() > 7 || names.is_empty() {
             continue;
         }
         let Some(pmu) = names[0]
@@ -147,6 +164,25 @@ pub(super) fn analyze(documents: &BTreeMap<String, Value>) -> Vec<PmuAnalysis> {
                 raw.insert((*name).to_owned(), count);
             }
         }
+        let platform = documents.get("arm-platform").filter(|p| {
+            p["schema_version"] == 1
+                && p["architecture"] == "aarch64"
+                && p["status"] == "discovered"
+                && p["scope"] == "host_context"
+        });
+        let cpus = platform
+            .and_then(|p| p.get("cpu_identity"))
+            .and_then(crate::cpu_profiles::decode)
+            .unwrap_or_default();
+        let domain = platform
+            .and_then(|p| p.get("pmus"))
+            .and_then(Value::as_array)
+            .and_then(|pmus| {
+                pmus.iter()
+                    .find(|p| p["name"] == pmu && p["domain"] == "cpu")
+            });
+        let cpu_profile =
+            crate::cpu_profiles::select(domain.and_then(|p| p["cpus"].as_str()), &cpus);
         let metrics = RATIOS.iter().map(|ratio| {
             let numerator = format!("{pmu}/{}/",ratio.numerator);
             let denominator = format!("{pmu}/{}/",ratio.denominator);
@@ -156,7 +192,9 @@ pub(super) fn analyze(documents: &BTreeMap<String, Value>) -> Vec<PmuAnalysis> {
             let (value, reason) = match pair {
                 Some(((n,n_runtime),(d,d_runtime))) if d>0 && n_runtime==d_runtime => {
                     let value = n as f64 / d as f64 * ratio.scale;
-                    if value.is_finite() { (Some(value), None) } else { (None,Some("nonfinite ratio")) }
+                    if cpu_profile.id==Some(crate::cpu_profiles::N1) && ratio.unit=="%" && n>d {
+                        (None,Some("CPU-specific cycle accounting exceeds the matched cycle count"))
+                    } else if value.is_finite() { (Some(value), None) } else { (None,Some("nonfinite ratio")) }
                 }
                 Some((_,(0,_))) => (None,Some("zero denominator; ratio is undefined")),
                 _ => (None,Some("missing, multiplexed, incomplete, or differently scheduled event group")),
@@ -165,7 +203,7 @@ pub(super) fn analyze(documents: &BTreeMap<String, Value>) -> Vec<PmuAnalysis> {
         }).collect();
         output.push(PmuAnalysis {
             pmu:pmu.into(), rule_version:1, scope:"agent-process-tree",
-            raw_integer_counts:raw, metrics,
+            raw_integer_counts:raw, metrics, cpu_profile,
             limitations:"Ratios describe observed, unscaled event groups with matching runtimes and reported 100% running time. Percentages are rounded by perf; no whole-run completeness, critical-path contribution, kernel-only attribution or CPU-specific Topdown classification is claimed.",
         });
     }
@@ -182,6 +220,54 @@ mod tests {
             ("arm-pmu-plan".into(),serde_json::json!({"schema_version":1,"plan":{"enabled":true,"groups":["{armv8_pmuv3_0/cpu_cycles/,armv8_pmuv3_0/inst_retired/}"]}})),
         ].into()
     }
+    #[test]
+    fn cpu_specific_cycle_accounting_requires_full_identity_and_coherent_counts() {
+        let mut input = docs();
+        let events = input.get_mut("arm-pmu").unwrap()["events"]
+            .as_object_mut()
+            .unwrap();
+        for (event, count) in [("stall_frontend", 25), ("stall_backend", 50)] {
+            let mut quality = events["armv8_pmuv3_0/cpu_cycles/"].clone();
+            quality["observed_integer_count"] = serde_json::json!(count);
+            events.insert(format!("armv8_pmuv3_0/{event}/"), quality);
+        }
+        input.get_mut("arm-pmu-plan").unwrap()["plan"]["groups"] = serde_json::json!([
+            "{armv8_pmuv3_0/cpu_cycles/,armv8_pmuv3_0/inst_retired/,armv8_pmuv3_0/stall_frontend/,armv8_pmuv3_0/stall_backend/}"
+        ]);
+        input.insert("arm-platform".into(),serde_json::json!({"schema_version":1,"architecture":"aarch64","status":"discovered","scope":"host_context","pmus":[{"name":"armv8_pmuv3_0","domain":"cpu","cpus":"0-1"}],
+            "cpu_identity":{"schema_version":1,"online_cpus":[0,1],"midr_by_cpu":{"0":0x410fd0c0u64,"1":0x411fd0c1u64},"unavailable_cpus":[]}}));
+        let output = serde_json::to_value(analyze(&input)).unwrap();
+        assert_eq!(output[0]["cpu_profile"]["id"], crate::cpu_profiles::N1);
+        assert_eq!(output[0]["metrics"][4]["value"], 50.0);
+        assert_eq!(output[0]["metrics"][5]["value"], 25.0);
+        let root =
+            crate::fixture_namespace::allocate(&std::env::temp_dir(), "asb-cpu-method-").unwrap();
+        for (name, value) in &input {
+            std::fs::write(root.join(format!("{name}.json")), value.to_string()).unwrap();
+        }
+        super::super::publish(&root, None).unwrap();
+        let published: Value =
+            serde_json::from_slice(&std::fs::read(root.join("bottlenecks.json")).unwrap()).unwrap();
+        assert_eq!(published, super::super::from_documents(&input));
+        std::fs::remove_dir_all(root).unwrap();
+
+        input.get_mut("arm-pmu").unwrap()["events"]["armv8_pmuv3_0/stall_frontend/"]["observed_integer_count"] =
+            serde_json::json!(150);
+        let output = serde_json::to_value(analyze(&input)).unwrap();
+        assert!(output[0]["metrics"][5]["value"].is_null());
+        assert!(
+            output[0]["metrics"][5]["unavailable_reason"]
+                .as_str()
+                .unwrap()
+                .contains("exceeds")
+        );
+        input.get_mut("arm-platform").unwrap()["cpu_identity"]["midr_by_cpu"]["1"] =
+            serde_json::json!(0x481fd010u64);
+        let output = serde_json::to_value(analyze(&input)).unwrap();
+        assert_eq!(output[0]["cpu_profile"]["status"], "unsupported");
+        assert!(output[0]["cpu_profile"]["id"].is_null());
+    }
+
     #[test]
     fn ratios_require_same_group_runtime_and_complete_observations() {
         let mut input = docs();
@@ -201,6 +287,24 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn fractional_or_rounded_large_runtime_cannot_prove_group_coherence() {
+        for runtime in [
+            serde_json::json!(1.5),
+            serde_json::json!(9_007_199_254_740_992u64),
+            serde_json::json!(9_007_199_254_740_993u64),
+        ] {
+            let mut input = docs();
+            input.get_mut("arm-pmu").unwrap()["events"]["armv8_pmuv3_0/cpu_cycles/"]["known_event_runtime_ns"] =
+                runtime.clone();
+            input.get_mut("arm-pmu").unwrap()["events"]["armv8_pmuv3_0/inst_retired/"]["known_event_runtime_ns"] =
+                runtime;
+            assert!(
+                serde_json::to_value(analyze(&input)).unwrap()[0]["metrics"][0]["value"].is_null()
+            );
+        }
+    }
+
     #[test]
     fn missing_plan_foreign_scope_and_zero_denominator_are_not_valid_ratios() {
         let mut input = docs();

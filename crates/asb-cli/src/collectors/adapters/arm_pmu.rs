@@ -29,7 +29,7 @@ impl CollectorAdapter for ArmPmu {
     }
     fn configure(&self, session: &mut Session, _: &[String]) -> Result<(), String> {
         let inventory = super::arm_platform::resolved_inventory(session);
-        let mut plan = make_plan(&inventory.pmus);
+        let mut plan = make_plan(&inventory.pmus, Some(&inventory.cpu_identity));
         plan.enabled = std::env::consts::ARCH == "aarch64";
         *session.state::<Plan>().borrow_mut() = plan;
         Ok(())
@@ -95,7 +95,10 @@ fn summarize(plan: &Plan, quality: Option<&serde_json::Value>) -> serde_json::Va
     })
 }
 
-fn make_plan(pmus: &[super::arm_platform::Pmu]) -> Plan {
+fn make_plan(
+    pmus: &[super::arm_platform::Pmu],
+    cpus: Option<&crate::cpu_profiles::CpuInventory>,
+) -> Plan {
     let mut groups = Vec::new();
     for pmu in pmus.iter().filter(|p| p.domain == "cpu") {
         if !["cpu_cycles", "inst_retired"]
@@ -104,7 +107,7 @@ fn make_plan(pmus: &[super::arm_platform::Pmu]) -> Plan {
         {
             continue;
         }
-        let events = [
+        let mut events = [
             "cpu_cycles",
             "inst_retired",
             "l1d_cache_refill",
@@ -116,6 +119,16 @@ fn make_plan(pmus: &[super::arm_platform::Pmu]) -> Plan {
         .filter(|event| pmu.events.contains_key(*event))
         .map(|event| format!("{}/{event}/", pmu.name))
         .collect::<Vec<_>>();
+        if cpus.is_some_and(|cpus| {
+            crate::cpu_profiles::select(pmu.cpus.as_deref(), cpus).id
+                == Some(crate::cpu_profiles::N1)
+        }) && pmu.events.contains_key("stall_frontend")
+        {
+            // N1 has six programmable counters plus the dedicated cycle
+            // counter. Preserve the existing six events and add its frontend
+            // cycle-accounting event in the same acknowledged group.
+            events.push(format!("{}/stall_frontend/", pmu.name));
+        }
         groups.push(format!("{{{}}}", events.join(",")));
     }
     Plan {
@@ -147,6 +160,7 @@ pub(super) fn metric_name(event: &str) -> Option<&'static str> {
         "l1d_tlb_refill" => Some("observed_l1d_tlb_refill_count"),
         "br_mis_pred" => Some("observed_branch_mispredictions_count"),
         "stall_backend" => Some("observed_stall_backend_count"),
+        "stall_frontend" => Some("observed_stall_frontend_count"),
         _ => None,
     }
 }
@@ -154,6 +168,45 @@ pub(super) fn metric_name(event: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn n1_cycle_accounting_adds_only_an_advertised_frontend_event_in_its_domain() {
+        let mut pmu = super::super::arm_platform::Pmu {
+            name: "armv8_pmuv3_0".into(),
+            domain: "cpu",
+            event_type: Some(10),
+            cpus: Some("0-1".into()),
+            cpumask: None,
+            formats: Default::default(),
+            events: [
+                "cpu_cycles",
+                "inst_retired",
+                "l1d_cache_refill",
+                "l1d_tlb_refill",
+                "br_mis_pred",
+                "stall_backend",
+                "stall_frontend",
+            ]
+            .into_iter()
+            .map(|event| (event.into(), "advertised".into()))
+            .collect(),
+        };
+        let mut cpus = crate::cpu_profiles::CpuInventory {
+            schema_version: 1,
+            online_cpus: vec![0, 1],
+            midr_by_cpu: [(0, 0x410fd0c0), (1, 0x411fd0c1)].into(),
+            unavailable_cpus: vec![],
+        };
+        let plan = make_plan(&[pmu.clone()], Some(&cpus));
+        assert_eq!(plan.groups[0].split(',').count(), 7);
+        assert!(plan.groups[0].contains("armv8_pmuv3_0/stall_frontend/"));
+        assert!(!make_plan(&[pmu.clone()], None).groups[0].contains("stall_frontend"));
+        cpus.midr_by_cpu.insert(1, 0x481fd010);
+        assert!(!make_plan(&[pmu.clone()], Some(&cpus)).groups[0].contains("stall_frontend"));
+        cpus.midr_by_cpu.insert(1, 0x410fd0c0);
+        pmu.events.remove("stall_frontend");
+        assert!(!make_plan(&[pmu], Some(&cpus)).groups[0].contains("stall_frontend"));
+    }
+
     #[test]
     fn absent_quality_never_becomes_a_zero_counter() {
         let plan = Plan {
@@ -182,11 +235,14 @@ mod tests {
             .into(),
             formats: Default::default(),
         };
-        let plan = make_plan(&[
-            pmu("armv8_pmuv3_0", "cpu"),
-            pmu("armv8_pmuv3_1", "cpu"),
-            pmu("hisi_ddr", "uncore"),
-        ]);
+        let plan = make_plan(
+            &[
+                pmu("armv8_pmuv3_0", "cpu"),
+                pmu("armv8_pmuv3_1", "cpu"),
+                pmu("hisi_ddr", "uncore"),
+            ],
+            None,
+        );
         assert_eq!(
             plan.groups,
             [
@@ -194,7 +250,7 @@ mod tests {
                 "{armv8_pmuv3_1/cpu_cycles/,armv8_pmuv3_1/inst_retired/}"
             ]
         );
-        assert!(make_plan(&[]).reason.is_some());
+        assert!(make_plan(&[], None).reason.is_some());
         assert_eq!(
             metric_name("armv8_pmuv3_0/cpu_cycles/"),
             Some("observed_cycles_count")

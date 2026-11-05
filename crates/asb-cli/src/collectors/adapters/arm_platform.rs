@@ -53,6 +53,7 @@ pub(crate) struct Inventory {
     reason: Option<String>,
     scope: &'static str,
     pub pmus: Vec<Pmu>,
+    pub cpu_identity: crate::cpu_profiles::CpuInventory,
     limitations: &'static str,
 }
 
@@ -69,10 +70,15 @@ pub(super) fn resolved_inventory(session: &mut Session) -> Inventory {
     state
         .inventory
         .get_or_insert_with(|| {
-            inventory(
+            let mut report = inventory(
                 Path::new("/sys/bus/event_source/devices"),
                 std::env::consts::ARCH,
-            )
+            );
+            if std::env::consts::ARCH == "aarch64" {
+                report.cpu_identity =
+                    crate::cpu_profiles::discover(Path::new("/sys/devices/system/cpu"));
+            }
+            report
         })
         .clone()
 }
@@ -164,6 +170,7 @@ pub(crate) fn inventory(root: &Path, architecture: &str) -> Inventory {
         reason: None,
         scope: "host_context",
         pmus: Vec::new(),
+        cpu_identity: Default::default(),
         limitations: "Discovery proves advertised capabilities only. Event readability, process attribution, counter availability and sample quality require runtime probes. Uncore counters are shared host context.",
     };
     let discovered = || -> Result<Vec<Pmu>, String> {

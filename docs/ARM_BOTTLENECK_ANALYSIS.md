@@ -357,3 +357,31 @@ or a guessed CPU utilization, and never computes a speedup from two lower bounds
 Identical names/boot do not establish identical inputs, budgets, instruments,
 host contention or provider behavior; the report discloses these limits rather
 than labeling the points a controlled scalability experiment.
+## CPU-specific methodology registry
+
+Arm platform inventory also records bounded per-online-CPU MIDR identities.
+This is capability metadata, not system/process activity. A shared static CPU
+methodology registry matches every CPU advertised by each core PMU domain;
+it never selects a processor from the first CPU, hostname or PMU name alone.
+Missing identities are unavailable and unregistered/mixed domains unsupported.
+The generic measured event ratios remain independent of methodology support.
+
+The first registered method is Neoverse N1 Cycle Accounting, identified by
+implementer 0x41 and part 0xd0c. It reports frontend and backend stalled cycles
+independently as percentages of matching observed CPU cycles. These are not
+four additive slot categories, elapsed-time fractions or proof of a bottleneck.
+On a matched N1 domain the shared producer adds an advertised `stall_frontend`
+event to the existing six-event group, preserving the existing events. N1's
+six programmable counters plus dedicated cycle counter can represent that
+seven-event group. Missing/unavailable/multiplexed counters still cannot produce
+ratios; inconsistent N1 stalled-cycle counts above matched cycles are unavailable.
+No event encoding is copied from another processor or invented from a name.
+
+The registered formulas and semantics follow Arm's
+[Neoverse N1 Core Telemetry Specification, 108070_0200_02](https://documentation-service.arm.com/static/66f7154a7243ed1626433643)
+and [Neoverse N1 PMU Guide, Issue 2.0](https://documentation-service.arm.com/static/66ace6ee0469d5197d40c93e).
+Kunpeng and other unregistered processors explicitly have no N1 methodology;
+their scoped generic counter and SPE results remain available where validated.
+This first profile does not implement Neoverse N2/V1/V2/V3 slot formulas, apply
+silicon errata workarounds, or claim native N1 hardware qualification from a
+Kunpeng run. Deterministic fixtures check the N1 formulas and domain rejection.

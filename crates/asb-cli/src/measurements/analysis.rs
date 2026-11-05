@@ -71,6 +71,7 @@ fn analyze(timing: Option<&super::ComponentTiming>) -> Report {
 pub(super) fn publish(dir: &Path, timing: Option<&super::ComponentTiming>) -> Result<(), String> {
     let mut documents = std::collections::BTreeMap::new();
     for name in [
+        "arm-platform",
         "arm-pmu",
         "arm-pmu-plan",
         "perfetto",
