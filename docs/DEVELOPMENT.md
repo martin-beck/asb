@@ -1,5 +1,17 @@
 # Development
 
+The opt-in `tests/fixtures/pi_native/snapshot_http_c4.py` runs the installed
+pinned Pi core and native Bash tool with the real Btrfs snapshot supervisor.
+In a disposable VM, set `ASB_PI_FIXTURE_DIR` to an existing writable directory,
+`ASB_TEST_PI_BUNDLE` and `ASB_TEST_PI_BASH` to the installed Pi modules, and
+put Node 22 on `PATH`. The VM needs passwordless sudo, user/mount/network
+namespaces, loop devices, Btrfs, rsync, QEMU storage tools, curl and iproute2.
+One tool records a loopback HTTP request and writes to the workspace and a
+second captured root. Four parallel network-isolated replays restore both
+effects and never rerun the command. The synthetic model and direct broker
+sidecar do not establish a complete ASB cassette or SWE-bench qualification.
+The fixture retains its owned images, streams and logs for inspection.
+
 SWE-bench clients execute in the conda environment named by the pinned SDK,
 after ASB has installed the agent. The task adapter retains the client's HOME
 and provider settings, and defaults Git author and committer dates to the base
