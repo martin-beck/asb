@@ -1917,13 +1917,20 @@ mod tests {
         for line in capture.lines() {
             let row: serde_json::Value = serde_json::from_str(line).unwrap();
             let (calls, _) = provider_function_calls(&row).unwrap();
+            let session = row
+                .pointer("/agent_record_metadata/conversation")
+                .and_then(serde_json::Value::as_str)
+                .expect("recorded conversation identity");
             for (name, id) in calls {
                 if name != "exec_command" {
                     continue;
                 }
                 let id = id.expect("provider call identity");
-                let request =
-                    encode_base64(serde_json::json!({"tool_use_id":id}).to_string().as_bytes());
+                let request = encode_base64(
+                    serde_json::json!({"session_id":session,"tool_use_id":id})
+                        .to_string()
+                        .as_bytes(),
+                );
                 sidecar
                     .push(serde_json::json!({"event":"write","request_b64":request}).to_string());
                 sidecar.push(serde_json::json!({"event":"output"}).to_string());
