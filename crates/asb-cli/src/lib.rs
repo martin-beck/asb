@@ -372,8 +372,9 @@ mod adapter_layout_tests {
             CategoryLayout {
                 category: "collectors",
                 ids: super::collectors::names().collect(),
-                // Category-wide bounded output codec, not a target adapter.
-                root_modules: &["mod.rs", "output.rs"],
+                // Category-wide bounded output codec and timestamp-unit
+                // normalization, not target-specific adapters.
+                root_modules: &["mod.rs", "output.rs", "time_unit.rs"],
                 root_directories: &[],
                 // This public selection ID is owned by the AgentSysPerf module.
                 shared_family_adapters: &[("agentsysperf:l1-resource", "agentsysperf.rs")],
