@@ -107,6 +107,23 @@ pub(super) fn html(documents: &BTreeMap<String, Value>) -> String {
             .into_iter()
             .flatten()
     }) {
+        if let Some(profile) = pmu.get("cpu_profile") {
+            let id = profile
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("unavailable");
+            let status = profile
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unavailable");
+            let reason = profile.get("reason").and_then(Value::as_str).unwrap_or("");
+            html.push_str(&format!(
+                "<p><strong>CPU methodology:</strong> {} — {}. {}</p>",
+                escape(id),
+                escape(status),
+                escape(reason)
+            ));
+        }
         html.push_str(&format!("<h4>{}</h4><table><thead><tr><th>Metric</th><th>Value</th><th>Unit / availability</th></tr></thead><tbody>",escape(pmu.get("pmu").and_then(Value::as_str).unwrap_or("PMU"))));
         for metric in pmu
             .get("metrics")
@@ -132,6 +149,10 @@ pub(super) fn html(documents: &BTreeMap<String, Value>) -> String {
             "<p class=\"muted\">{}</p>",
             escape(pmu.get("limitations").and_then(Value::as_str).unwrap_or(""))
         ));
+    }
+    if let Some(platform) = documents.get("arm-platform") {
+        let metadata = serde_json::to_string_pretty(platform).expect("platform metadata is JSON");
+        html.push_str(&format!("<details><summary>Arm CPU and PMU capabilities</summary><p>Capability inventory only. Shared uncore activity is not collected or attributed to agents.</p><pre>{}</pre></details>",escape(&metadata)));
     }
     html.push_str("</details>");
     html

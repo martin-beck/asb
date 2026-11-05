@@ -238,6 +238,7 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             "model": benchmark.model,
             "metrics": benchmark.metrics,
             "host_metadata": benchmark.host_metadata,
+            "arm_platform": benchmark.collector_documents.get("arm-platform"),
             "components": benchmark.components,
             "analysis": benchmark.collector_documents.get("bottlenecks"),
             "series": benchmark.series.iter().map(|(name, series)| (name, &series.values)).collect::<BTreeMap<_, _>>(),
