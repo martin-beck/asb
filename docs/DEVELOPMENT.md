@@ -1,11 +1,35 @@
 # Development
 
+SWE-bench clients execute in the conda environment named by the pinned SDK,
+after ASB has installed the agent. The task adapter retains the client's HOME
+and provider settings, and defaults Git author and committer dates to the base
+commit timestamp unless explicitly supplied. This stabilizes identical Git
+objects without masking different file contents. The changed client inputs
+have their own bundled replay identity; older bundled recordings made with the
+previous environment need a fresh recording. Legacy recordings lacking this
+identity cannot prove that their environment matches. These controls do not
+make live tool network access or agent execution deterministic.
+
 The offline `pi_native_integration.mjs` fixture sends one native tool's
 subprocess request to a private loopback HTTP server, then replays its recorded
 result four times. The server counter must stay at one and a tool-execution
 sentinel must remain absent on replay. This exercises the Pi dispatch and
 broker seam with a synthetic client and marker service; it does not qualify
 an installed agent, real snapshot effects, a full cassette, or SWE-bench.
+For the installed Pi core's crossed-order probe, set `ASB_TEST_PI_BUNDLE` to
+the pinned `pi-agent-core/dist/agent-loop.js` and run
+`node crates/asb-cli/tests/pi_native_installed_probe.mjs`. Setting
+`ASB_TEST_PI_HTTP=1` additionally lets recording contact one private loopback
+HTTP server, stops that server, and runs four parallel replays in separate
+network namespaces. The native tool invocation counter must remain unchanged.
+This exercises the installed core with synthetic tool definitions and marker
+service; it does not establish actual snapshot or SWE-bench coverage.
+The separate `pi_native_installed_shell_http.mjs` probe also requires
+`ASB_TEST_PI_BASH` naming the pinned coding agent's `dist/core/tools/bash.js`.
+It uses Pi's real Bash tool to run curl once, stops the loopback server, and
+checks four isolated native replays reproduce the result without rerunning
+the shell. Its marker service is synthetic; it does not validate filesystem
+snapshot application, a full cassette or an official workload.
 
 Linux guests for Python agents stage a project-local portable Python and the
 installed agent packages before execution. The host prepares the pinned Python

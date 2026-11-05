@@ -17,15 +17,21 @@ pub(crate) fn replay_protocol_fingerprint(
     module: Option<&crate::workloads::contracts::ModuleDescriptor>,
     policy: &crate::workloads::outcome::MetricPolicy,
 ) -> Result<String, Error> {
-    serde_json::to_vec(&serde_json::json!({
+    let mut identity = serde_json::json!({
         "contract":"asb-bundled-replay-v1",
         "agent_input":crate::agents::REPLAY_INPUT_CONTRACT,
         "tape_matching":crate::tape::REPLAY_MATCHING_CONTRACT,
         "material_scope":crate::workloads::session::REPLAY_MATERIAL_CONTRACT,
         "module":module,"metric_policy":policy
-    }))
-    .map(|bytes| crate::cassette::digest(&bytes))
-    .map_err(|error| Error::Run(error.to_string()))
+    });
+    // SWE-bench client environment and Git dates are replay inputs. Existing
+    // recordings used the image's base Python and must not be silently reused.
+    if module.is_some_and(|module| module.family == "swe-bench") {
+        identity["swe_client_environment"] = "sdk-conda-and-base-git-dates-v1".into();
+    }
+    serde_json::to_vec(&identity)
+        .map(|bytes| crate::cassette::digest(&bytes))
+        .map_err(|error| Error::Run(error.to_string()))
 }
 
 pub(crate) struct Gate {
@@ -624,6 +630,23 @@ fn unavailable() -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn swe_client_environment_changes_only_swe_replay_identity() {
+        let policy = crate::workloads::outcome::MetricPolicy::default();
+        for (name, changed) in [("swe-bench-lite", true), ("terminal-bench-1.0", false)] {
+            let module = crate::workloads::descriptor(name).unwrap();
+            let legacy = serde_json::json!({
+                "contract":"asb-bundled-replay-v1",
+                "agent_input":crate::agents::REPLAY_INPUT_CONTRACT,
+                "tape_matching":crate::tape::REPLAY_MATCHING_CONTRACT,
+                "material_scope":crate::workloads::session::REPLAY_MATERIAL_CONTRACT,
+                "module":module,"metric_policy":policy
+            });
+            let old = crate::cassette::digest(&serde_json::to_vec(&legacy).unwrap());
+            let current = replay_protocol_fingerprint(Some(&module), &policy).unwrap();
+            assert_eq!(current != old, changed, "{name}");
+        }
+    }
     #[test]
     fn replica_spawn_failure_releases_waiting_material_and_launch_gates() {
         let material_gate = Gate::new(2, None, Duration::from_secs(30)).unwrap();
