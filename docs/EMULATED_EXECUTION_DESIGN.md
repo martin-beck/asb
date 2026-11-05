@@ -40,3 +40,34 @@ real cross-architecture VM test covering one live run, record and offline replay
 all selected collectors and result/report retrieval. A separate sweep test must
 verify concurrency and per-benchmark output isolation. Default native execution
 must remain unchanged and tested.
+
+## Pinned-source architecture audit
+
+Architecture can be a property of an individual trial or of an optional nested
+virtual machine; it cannot always be represented by one workload-wide value.
+The following observations are from the source revisions pinned by ASB. They do
+not prove every task in a family has the same requirement:
+
+- Terminal-Bench 1.0 explicitly selects `linux/amd64` for
+  `broken-networking`, `conda-env-conflict-resolution`, `get-bitcoin-nodes`,
+  and `run-pdp11-code`. Other tasks in the same source are not thereby proven
+  x86-only.
+- SWE-bench Pro has 42 task Dockerfiles configuring an amd64 Chrome package
+  repository. This identifies a dependency assumption in those source files,
+  not a verified architecture requirement for its entire catalog.
+- The upstream SWE-Lancer image-build script explicitly selects an x86_64
+  base image. ASB currently stages the source catalog; it does not automatically
+  invoke that upstream image-build script.
+- AgentBench's optional Freebase Dockerfile downloads an x86_64 Virtuoso
+  distribution. That is not evidence that every AgentBench task is x86-only.
+- Terminal-Bench 2.0 and 2.1 include tasks that download an x86_64 Alpine ISO
+  for an inner QEMU VM. An x86 guest image does not by itself prove that the
+  outer benchmark host must be x86; emulation can be part of the task.
+
+The ASB source scan did not reveal explicit architecture markers in the pinned
+AgentDojo, Aider Polyglot or tau-bench sources inspected. Absence of a marker is
+not proof of cross-architecture execution. Core-Bench and SWE-efficiency source
+archives exceeded the audit download bound and were not inspected; data-only
+catalogs and dynamically supplied workloads also remain unqualified. A future
+trial-level architecture declaration needs source-backed metadata and must avoid
+turning an inner QEMU guest's architecture into a false host requirement.
