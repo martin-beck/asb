@@ -487,6 +487,9 @@ fn bind_provider_tool_outputs(
     let mut histories = std::collections::BTreeMap::<String, History>::new();
     let mut outputs =
         std::collections::BTreeMap::<String, std::collections::VecDeque<Vec<u8>>>::new();
+    // Hook IDs alone cannot distinguish two conversations that happen to use
+    // the same provider call ID. Never bind such outputs by arrival order.
+    let mut owners = std::collections::BTreeMap::<String, String>::new();
     for line in capture.lines() {
         let row: serde_json::Value = serde_json::from_str(line)
             .map_err(|_| "Codex provider capture is invalid".to_owned())?;
@@ -541,7 +544,7 @@ fn bind_provider_tool_outputs(
                     .to_owned();
             }
         }
-        let history = histories.entry(conversation).or_default();
+        let history = histories.entry(conversation.clone()).or_default();
         if !current.starts_with(&history.prior) {
             return Err("Codex provider tool result history diverges".into());
         }
@@ -579,10 +582,19 @@ fn bind_provider_tool_outputs(
                     // Codex presents its native Bash lifecycle hook as the
                     // Responses-compatible exec command. The native sidecar
                     // owns only that causal stream.
-                    "exec_command" => outputs
-                        .entry(id.clone())
-                        .or_default()
-                        .push_back(output.clone()),
+                    "exec_command" => {
+                        if owners.get(id).is_some_and(|owner| owner != &conversation) {
+                            return Err(
+                                "Codex provider call identity is ambiguous across conversations"
+                                    .into(),
+                            );
+                        }
+                        owners.insert(id.clone(), conversation.clone());
+                        outputs
+                            .entry(id.clone())
+                            .or_default()
+                            .push_back(output.clone());
+                    }
                     // This provider operation resumes an already-owned
                     // process; it has no PreToolUse native shell boundary.
                     "write_stdin" => (),
@@ -1765,6 +1777,21 @@ mod tests {
         assert_eq!(
             decode_base64(rows[3]["output_b64"].as_str().unwrap()).unwrap(),
             br#""B""#
+        );
+        std::fs::write(
+            &capture,
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                begin("a", "same"),
+                begin("b", "same"),
+                end("b", "same", "B"),
+                end("a", "same", "A")
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            bind_provider_tool_outputs(sidecar.as_bytes(), &capture).unwrap_err(),
+            "Codex provider call identity is ambiguous across conversations"
         );
         std::fs::remove_dir_all(root).unwrap();
     }
