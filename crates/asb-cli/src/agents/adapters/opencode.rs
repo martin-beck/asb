@@ -266,6 +266,7 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     )?)
     .map_err(|_| Error::Run("cannot configure OpenCode provider".into()))?;
     if native_snapshot(context.tape.map(|tape| tape.mode)) {
+        context.command.arg("--auto");
         let plugin = context
             .run_dir
             .join("opencode/opencode-native-launcher.mjs");
@@ -375,9 +376,19 @@ fn start_native_service(
         snapshot: &snapshot,
         assets: &assets,
     };
-    let (service, _, socket) = super::super::native_guest::broker(command, &settings)?;
+    let (mut service, directory, socket) = super::super::native_guest::broker(command, &settings)?;
+    let state = directory.join("hook-state");
+    std::fs::create_dir_all(&state).map_err(crate::io_error)?;
+    service
+        .env(
+            "ASB_NATIVE_SETTLEMENT_MODULE",
+            directory.join("opencode-native-plugin.mjs"),
+        )
+        .env("ASB_NATIVE_SETTLEMENT_DIRECTORY", &state)
+        .env("ASB_NATIVE_SETTLEMENT_MARKER", &marker);
     command
         .env("ASB_OPENCODE_SOCKET", socket)
+        .env("ASB_OPENCODE_STATE", state)
         .env("ASB_OPENCODE_MARKER", marker)
         .env(
             "ASB_OPENCODE_NATIVE_MODE",

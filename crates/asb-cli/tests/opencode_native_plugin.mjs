@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import {mkdtemp, rm} from 'node:fs/promises';
+import {mkdtemp, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {NativeToolBroker} from '../assets/scripts/native-tool-broker.mjs';
-import {createOpenCodeNativePlugin} from '../assets/scripts/opencode-native-plugin.mjs';
+import {NativeToolBroker, brokerRequest} from '../assets/scripts/native-tool-broker.mjs';
+import {createOpenCodeNativePlugin, settlePending} from '../assets/scripts/opencode-native-plugin.mjs';
 
 const dir=await mkdtemp(join(tmpdir(),'asb-opencode-native-'));
 const socket=join(dir,'broker.sock');
@@ -37,4 +37,10 @@ try {
   await assert.rejects(replay.tool.edit.execute({filePath:'missing'}),/file missing/);
   await broker.finish();
   assert.deepEqual(effects,[1,0,2]);
+  const interrupted=new NativeToolBroker('record'); await interrupted.listen(socket);
+  const {token}=await brokerRequest(socket,{op:'start',request:{tool:'edit',input:{filePath:'x'}}});
+  await writeFile(join(dir,'a'.repeat(64)+'.json'),JSON.stringify({token,error:'permission denied'}));
+  await settlePending({directory:dir,socket,mode:'record',broker:interrupted});
+  const settled=await interrupted.finish();
+  assert.equal(settled[0].outcome.message,'permission denied');
 } finally { await rm(dir,{recursive:true,force:true}); }

@@ -28,5 +28,5 @@ export async function recordedDefinitions(cassette, sidecar) {
 export default async function () {
   const mode = process.env.ASB_OPENCODE_NATIVE_MODE;
   const definitions = mode === 'replay' ? await recordedDefinitions(process.env.ASB_OPENCODE_CASSETTE, process.env.ASB_OPENCODE_SIDECAR) : {};
-  return createOpenCodeNativePlugin({mode, socket:process.env.ASB_OPENCODE_SOCKET, marker:process.env.ASB_OPENCODE_MARKER, definitions});
+  return createOpenCodeNativePlugin({mode, socket:process.env.ASB_OPENCODE_SOCKET, marker:process.env.ASB_OPENCODE_MARKER, directory:process.env.ASB_OPENCODE_STATE, definitions});
 }
