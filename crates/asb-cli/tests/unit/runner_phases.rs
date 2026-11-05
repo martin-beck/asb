@@ -60,6 +60,18 @@ fn native_collectors_attach_to_stopped_agent_principal_and_exclude_guardian() {
                 );
                 assert!(!session.dir.join("executed").exists());
             }
+            if event == LifecycleEvent::AgentExecuteEnd {
+                let observed = session.execution_window_document();
+                assert_eq!(observed["status"], "observed", "{observed}");
+                assert_eq!(
+                    observed["root"]["pid"],
+                    session.measurement_target().unwrap().pid
+                );
+                assert!(
+                    observed["end_bound_ns"].as_u64().unwrap()
+                        > observed["start_bound_ns"].as_u64().unwrap()
+                );
+            }
             Ok(())
         }
     }
@@ -78,7 +90,7 @@ fn native_collectors_attach_to_stopped_agent_principal_and_exclude_guardian() {
     command
         .args([
             "-c",
-            "printf '%s' \"$$\" > \"$1\"; printf '%s' \"$$\"",
+            "printf '%s' \"$$\" > \"$1\"; sleep 0.35; printf '%s' \"$$\"",
             "fixture",
         ])
         .arg(dir.join("executed"))

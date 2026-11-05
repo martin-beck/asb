@@ -1365,6 +1365,14 @@ fn run_measured_agent_with_launch_progress(
             format!("could not resume measured agent process: {error}"),
         ));
     }
+    let mut sampler = session
+        .as_deref()
+        .and_then(measurements::Session::native_execution_sampler);
+    let mut observe_live = || {
+        if let Some(sampler) = sampler.as_mut() {
+            sampler.observe();
+        }
+    };
     let mut execution_finished = None;
     let mut progress = progress.display();
     let result = capture::capture_with_output_streams_progress(
@@ -1377,11 +1385,13 @@ fn run_measured_agent_with_launch_progress(
         progress
             .as_mut()
             .map(|display| display as &mut dyn capture::Progress),
+        Some(&mut observe_live),
         &mut || {
             execution_finished = Some(Instant::now());
             Ok(())
         },
     );
+    drop(sampler);
     progress::status(interactive_progress, "tearing down execution collectors");
     // Freeze execution before collector/proxy teardown, even if that teardown
     // fails. A completed client output is evidence for official grading.
