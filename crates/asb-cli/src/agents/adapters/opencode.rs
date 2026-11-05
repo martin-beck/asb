@@ -56,6 +56,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_tool_replay(prepare_tool_replay)
 .with_native_tool_transport()
+.with_guest_replay_evidence(extract_guest_replay_evidence)
 .with_guest_service(start_native_service)
 .with_deferred_native_recording(finalize_native_recording)
 .with_native_snapshot_check(verify_native_snapshot)
@@ -271,9 +272,10 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
             .run_dir
             .join("opencode/opencode-native-launcher.mjs");
         configuration["plugin"] = serde_json::json!([plugin]);
-        if let Some(tape) = context.tape {
-            context.command.env("ASB_OPENCODE_CASSETTE", tape.cassette);
-        }
+        context.command.env(
+            "ASB_OPENCODE_EVIDENCE",
+            "/opt/asb-private/adapter-model-evidence.json",
+        );
     }
     context
         .command
@@ -338,6 +340,52 @@ fn native_snapshot(mode: Option<crate::tape::Mode>) -> bool {
         Some(crate::tape::Mode::Replay) => std::env::var_os("ASB_FS_REPLAY_SOCKET").is_some(),
         None => false,
     }
+}
+
+fn extract_guest_replay_evidence(track: &std::path::Path) -> Result<Vec<u8>, Error> {
+    use std::io::{BufRead, BufReader};
+    let metadata = std::fs::symlink_metadata(track)
+        .map_err(|_| Error::Run("OpenCode replay model track is unavailable".into()))?;
+    if !metadata.file_type().is_file()
+        || metadata.len() > crate::cassette::Limits::default().max_track_bytes
+    {
+        return Err(Error::Run(
+            "OpenCode replay model track is invalid or too large".into(),
+        ));
+    }
+    let file = std::fs::File::open(track).map_err(crate::io_error)?;
+    let mut definitions = serde_json::Map::new();
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(crate::io_error)?;
+        let row: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|_| Error::Run("OpenCode replay model track is malformed".into()))?;
+        let Some(raw) = row.pointer("/request/body").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Ok(body) = serde_json::from_str::<serde_json::Value>(raw) else {
+            continue;
+        };
+        let Some(tools) = body.get("tools").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for entry in tools {
+            let tool = entry.get("function").unwrap_or(entry);
+            let (Some(name), Some(schema)) = (
+                tool.get("name").and_then(|v| v.as_str()),
+                tool.get("parameters").or_else(|| tool.get("input_schema")),
+            ) else {
+                continue;
+            };
+            definitions.entry(name.to_owned()).or_insert_with(|| {
+                serde_json::json!({
+                    "description": tool.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                    "schema": schema,
+                })
+            });
+        }
+    }
+    serde_json::to_vec(&definitions)
+        .map_err(|_| Error::Run("cannot encode OpenCode tool definitions".into()))
 }
 
 fn start_native_service(
@@ -500,6 +548,34 @@ fn config(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn guest_replay_evidence_contains_only_tool_definitions() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-opencode-definitions-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let track = root.join("track.jsonl");
+        let body = serde_json::json!({"messages":[{"content":"private prompt"}],"tools":[{"type":"function","function":{"name":"bash","description":"shell","parameters":{"type":"object"}}}]});
+        std::fs::write(
+            &track,
+            format!(
+                "{}\n",
+                serde_json::json!({"request":{"body":body.to_string()}})
+            ),
+        )
+        .unwrap();
+        let evidence = super::extract_guest_replay_evidence(&track).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&evidence).unwrap();
+        assert_eq!(value["bash"]["schema"]["type"], "object");
+        assert!(
+            !String::from_utf8(evidence)
+                .unwrap()
+                .contains("private prompt")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn native_pending_recording_is_collected_for_cassette_publication() {
         let frozen = crate::agents::FrozenArtifacts::from_deferred_collection_bytes(
