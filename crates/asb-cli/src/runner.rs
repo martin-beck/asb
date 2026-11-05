@@ -643,15 +643,21 @@ fn run_dispatched(
     let gate = (options.verify_initial_material && options.preparation_gate.is_none())
         .then(|| batch::Gate::new(config.concurrency, None, Duration::from_secs(1800)))
         .transpose()?;
-    let settlement = (config.concurrency > 1 && options.settlement_barrier.is_none())
-        .then(|| {
-            batch::SettlementBarrier::selected(
-                config.concurrency,
-                &(1..=config.concurrency).collect::<Vec<_>>(),
-                Duration::from_secs(1800),
-            )
-        })
-        .transpose()?;
+    // Reused replicas do not launch or arrive at this new barrier.  Select
+    // exactly the same fresh slots that run_concurrent will actually start.
+    let fresh_slots = (1..=config.concurrency)
+        .filter(|slot| !options.reused.is_some_and(|saved| saved.contains_key(slot)))
+        .collect::<Vec<_>>();
+    let settlement =
+        (config.concurrency > 1 && options.settlement_barrier.is_none() && !fresh_slots.is_empty())
+            .then(|| {
+                batch::SettlementBarrier::selected(
+                    config.concurrency,
+                    &fresh_slots,
+                    Duration::from_secs(1800),
+                )
+            })
+            .transpose()?;
     let options = RunOptions {
         preparation_gate: options.preparation_gate.or(gate.as_ref()),
         settlement_barrier: options.settlement_barrier.or(settlement.as_ref()),
