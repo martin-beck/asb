@@ -246,6 +246,12 @@ def main():
         agent = root / ".asb-tools/pi/node_modules/.bin/pi"
         agent.write_text("#!/bin/sh\nprintf unexpected > invoked-agent\nexit 99\n")
         agent.chmod(0o755)
+        # The navigation sequence selects perf. Supply an inert project-local
+        # executable so this offline PTY fixture never downloads host tooling.
+        perf = root / ".asb-tools/perf/bin/perf"
+        perf.parent.mkdir(parents=True)
+        perf.write_text("#!/bin/sh\nexit 99\n")
+        perf.chmod(0o755)
 
         # Real search/select/step/concurrency events, including backwards nav.
         code, transcript = session(binary, root, ["setup", "tui"],
@@ -302,6 +308,10 @@ def main():
         raw_agent = raw_root / ".asb-tools/pi/node_modules/.bin/pi"
         raw_agent.write_bytes(agent.read_bytes())
         raw_agent.chmod(0o755)
+        raw_perf = raw_root / ".asb-tools/perf/bin/perf"
+        raw_perf.parent.mkdir(parents=True)
+        raw_perf.write_bytes(perf.read_bytes())
+        raw_perf.chmod(0o755)
         raw_prior = raw_root / "prior.toml"
         raw_prior.write_bytes(b"prior configuration unchanged")
         raw_paths = set(raw_root.iterdir())
@@ -361,6 +371,7 @@ def main():
         flamegraph.parent.mkdir(parents=True)
         flamegraph.write_text("#!/bin/sh\nexit 99\n")
         flamegraph.chmod(0o755)
+        perf.unlink()
         invoked.unlink(missing_ok=True)
         code, transcript = session(binary, root, ["setup", "tui"],
             b"pi \tlocal \t \tbug-fix \tflamegraph ", str(fixture_bin),
