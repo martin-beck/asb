@@ -439,3 +439,25 @@ Missing image access or short application lifetimes remain unavailable. This
 preserves sampled lower-bound semantics instead of publishing ASB's inherited
 pre-exec memory as an agent peak. Namespace export/import keeps bounded aggregate
 values and its explicit availability/completeness flags.
+
+
+## External analyzer interpretation
+
+A native Kunpeng qualification of the real pinned AgentSysPerf analyzer exposed
+unsupported interpretations: with no exported inference/tool child spans, its
+breakdown classified the entire agent interval as orchestration. Its memory
+heuristics also suggested Intel cache partitioning on Arm from RSS and IPC,
+without measured working-set, bandwidth or NUMA traffic. These are external
+heuristics, not qualified findings from ASB's captured observations.
+
+The compatibility adapter retains its bounded raw finding list and records
+analyzer completion separately from `interpretation_status: unqualified` and
+an explicit reason. It does not turn missing phases into zero work or promote
+architecture-inappropriate remedies. Comparison refuses confidence graphs from
+legacy documents with no interpretation qualification, or from unqualified
+findings. A future eligible contribution must explicitly provide qualified
+findings and their interpretation status. The current export supplies neither
+complete clock-aligned phase coverage nor a qualified external CPU methodology;
+this is an optional analysis limitation, not a benchmark execution gate.
+ASB's own regenerated counter, kernel-pressure and SPE observations remain
+available with their individual definitions, scope and quality.

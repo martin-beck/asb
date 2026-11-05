@@ -5,7 +5,9 @@
 //! default could observe unrelated host work.  This adapter instead exports
 //! already verified ASB process-tree observations for later offline analysis.
 
-use super::super::{CollectorAdapter, ReportGraph, ReportRow, SelectionExtension, SelectionOption};
+use super::super::{
+    ArtifactDisplay, CollectorAdapter, ReportGraph, ReportRow, SelectionExtension, SelectionOption,
+};
 use crate::measurements::{self, ComponentTiming, Session};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -14,6 +16,8 @@ use std::fs;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+mod interpretation;
 
 const MAX_ANALYSIS_BYTES: usize = 1024 * 1024;
 const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -102,6 +106,18 @@ impl CollectorAdapter for AgentSysPerfCollector {
         DEPENDENCIES
     }
 
+    fn prioritizes_artifact(&self, name: &str) -> bool {
+        name == "agentsysperf-analysis.json"
+    }
+
+    fn display_artifact(&self, name: &str) -> Option<ArtifactDisplay> {
+        (name == "agentsysperf-analysis.json").then_some(ArtifactDisplay::Status {
+            class: "agentsysperf-interpretation",
+            label: "External AgentSysPerf diagnostics",
+            suffix: "Analyzer completion does not qualify its diagnoses. Read interpretation_status and interpretation_reason. ASB's normalized hardware/kernel observations retain their own scope and quality.",
+        })
+    }
+
     fn report_graphs(&self, rows: &[ReportRow<'_>]) -> Vec<ReportGraph> {
         let mut graphs = bottleneck_graph(rows).into_iter().collect::<Vec<_>>();
         graphs.extend(scaling_graphs(rows));
@@ -172,7 +188,8 @@ impl CollectorAdapter for AgentSysPerfCollector {
                 "scaling_requested": session.state::<State>().borrow().scaling_requested,
                 "platform": session.state::<State>().borrow().platform,
                 "analysis": analysis["status"],
-                "limitations": "This is an ASB-owned process-tree export for offline AgentSysPerf analysis. It does not run AgentSysPerf's benchmark harness or accept system-wide perf attribution. Missing observations are omitted rather than represented as zero. L3 is exported only for one coherent PMU domain; hybrid domains remain separate in the normalized input and are never summed."
+                "analysis_interpretation": analysis["interpretation_status"],
+                "limitations": "This is an ASB-owned process-tree export for offline AgentSysPerf analysis. It does not run AgentSysPerf's benchmark harness or accept system-wide perf attribution. Missing observations are omitted rather than represented as zero. External analyzer completion does not qualify its causal classifications; see analysis_interpretation and the analysis reason. L3 is exported only for one coherent PMU domain; hybrid domains remain separate in the normalized input and are never summed."
             }),
         )
     }
@@ -276,9 +293,7 @@ fn analyze_unix(session: &Session, records: &std::path::Path) -> Value {
         return json!({"schema_version": 1, "status": "unavailable", "reason": "AgentSysPerf analysis failed", "exit": status.code()});
     }
     match analysis_findings(&stdout.expect("checked above")) {
-        Ok(findings) if findings.is_array() => {
-            json!({"schema_version": 1, "status": "observed", "findings": findings})
-        }
+        Ok(findings) if findings.is_array() => interpretation::document(findings),
         _ => {
             json!({"schema_version": 1, "status": "unavailable", "reason": "AgentSysPerf analysis did not return a JSON finding list"})
         }
@@ -318,10 +333,15 @@ fn bottleneck_graph(rows: &[ReportRow<'_>]) -> Option<ReportGraph> {
         let Some(analysis) = row.documents.get("agentsysperf-analysis") else {
             continue;
         };
-        if analysis.get("status").and_then(Value::as_str) != Some("observed") {
+        if analysis.get("status").and_then(Value::as_str) != Some("observed")
+            || analysis
+                .get("interpretation_status")
+                .and_then(Value::as_str)
+                != Some("qualified")
+        {
             continue;
         }
-        let Some(entries) = analysis.get("findings").and_then(Value::as_array) else {
+        let Some(entries) = analysis.get("qualified_findings").and_then(Value::as_array) else {
             continue;
         };
         for finding in entries {
@@ -1021,7 +1041,9 @@ mod tests {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         let session = Session::start_with_collectors(&root, &[], Some(&tools)).unwrap();
         let output = analyze(&session, &root.join("records"));
-        assert_eq!(output["status"], "observed");
+        assert_eq!(output["status"], "unqualified");
+        assert_eq!(output["execution_status"], "completed");
+        assert_eq!(output["interpretation_status"], "unqualified");
         assert_eq!(output["findings"][0]["analyzer"], "fixture");
         assert!(root.join("agentsysperf-analysis.stdout.log").is_file());
         assert!(root.join("agentsysperf-analysis.stderr.log").is_file());
@@ -1045,7 +1067,7 @@ mod tests {
         let metrics = std::collections::BTreeMap::new();
         let documents = std::collections::BTreeMap::from([(
             "agentsysperf-analysis".into(),
-            json!({"status":"observed","findings":[
+            json!({"status":"observed","interpretation_status":"qualified","qualified_findings":[
                 {"analyzer":"breakdown","verdict":"orchestration_heavy","confidence":0.75},
                 {"analyzer":"bad","verdict":"ignored","confidence":2.0}
             ]}),
@@ -1084,6 +1106,45 @@ mod tests {
         assert_eq!(graph.filename, "agentsysperf-bottleneck-findings.svg");
         assert!(graph.svg.contains("orchestration_heavy"));
         assert!(!graph.svg.contains("ignored"));
+    }
+
+    #[test]
+    fn legacy_and_unqualified_external_diagnostics_do_not_become_confidence_graphs() {
+        let metrics = BTreeMap::new();
+        for mut analysis in [
+            json!({"status":"observed","findings":[{"analyzer":"breakdown","verdict":"orchestration_heavy","confidence":0.75}]}),
+            interpretation::document(
+                json!([{"analyzer":"memory_bandwidth","verdict":"memory_bottleneck_moderate","confidence":0.6}]),
+            ),
+        ] {
+            // Even a diagnostic accidentally copied into this field cannot
+            // bypass the explicit interpretation qualification boundary.
+            analysis["qualified_findings"] = analysis["findings"].clone();
+            let documents = BTreeMap::from([("agentsysperf-analysis".into(), analysis)]);
+            assert!(
+                bottleneck_graph(&[ReportRow {
+                    label: "fixture",
+                    agent: "fixture",
+                    provider: "fixture",
+                    model: "fixture",
+                    workload: "fixture",
+                    trial: "fixture",
+                    configured_concurrency: 1,
+                    replica_index: None,
+                    execution_cohort: None,
+                    metrics: &metrics,
+                    components: None,
+                    documents: &documents,
+                }])
+                .is_none()
+            );
+        }
+        assert!(
+            ADAPTER
+                .display_artifact("agentsysperf-analysis.json")
+                .is_some()
+        );
+        assert!(ADAPTER.display_artifact("other.json").is_none());
     }
 
     #[test]
