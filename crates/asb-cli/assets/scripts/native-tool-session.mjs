@@ -93,17 +93,19 @@ export class ReplaySession {
     if (queued >= available) {
       throw new Error('Native tool replay has no matching remaining tool request');
     }
-    let item, assign, rejectAssignment;
+    let item, assign, rejectAssignment, identify, rejectIdentity;
     const assignment = new Promise((resolve, reject) => { assign = resolve; rejectAssignment = reject; });
+    const identity = new Promise((resolve, reject) => { identify = resolve; rejectIdentity = reject; });
     // One-step consumers do not inspect assignments; cancellation is still
     // observed even when no caller requests this early view.
     assignment.catch(() => {});
+    identity.catch(() => {});
     const outcome = new Promise((resolve, reject) => {
-      item = { key, resolve, reject, assign, rejectAssignment, released: false, applied: false };
+      item = { key, resolve, reject, assign, rejectAssignment, identify, rejectIdentity, released: false, applied: false };
       this.pending.push(item);
     });
     this.drain().catch(error => this.abort(error));
-    return { outcome, assignment, release: () => {
+    return { outcome, assignment, identity, release: () => {
       if (this.closed || item.released) throw new Error('Native tool replay reservation is unavailable');
       item.released = true;
       this.drain().catch(error => this.abort(error));
@@ -127,6 +129,7 @@ export class ReplaySession {
           this.assigned.set(expected.ordinal, item);
           this.nextDispatch++;
           item.assign(clone(expected.outcome));
+          item.identify(expected.ordinal);
         }
         const event = this.events[this.nextCompletion];
         const item = event && this.assigned.get(event.ordinal);
@@ -149,7 +152,7 @@ export class ReplaySession {
   }
   abort(error = new Error('Native tool replay was cancelled')) {
     this.closed = true;
-    for (const item of [...this.pending, ...this.assigned.values()]) { item.rejectAssignment(error); item.reject(error); }
+    for (const item of [...this.pending, ...this.assigned.values()]) { item.rejectAssignment(error); item.rejectIdentity(error); item.reject(error); }
     this.pending.length = 0;
     this.assigned.clear();
   }

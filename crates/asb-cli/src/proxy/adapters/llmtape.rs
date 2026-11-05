@@ -2935,6 +2935,38 @@ mod tests {
     }
 
     #[test]
+    fn mismatch_evidence_keeps_numeric_output_limits_but_redacts_credentials() {
+        let root = test_root();
+        let cassette = root.join("limits.jsonl");
+        let recorded = r#"{"model":"m","max_tokens":10,"access_token":"fixture-secret"}"#;
+        let line = serde_json::json!({
+            "request":{"method":"POST","url":"/v1/chat/completions","body":recorded},
+            "response":{"status":200,"headers":{"content-type":"application/json"},"body":"{}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let changed = r#"{"model":"m","max_tokens":11,"access_token":"fixture-secret"}"#;
+        assert!(request(&session, changed).contains("409 Conflict"));
+        assert!(session.stop().is_err());
+        let path = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().ends_with(".mismatch.json"))
+            })
+            .unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["expected"]["body"]["max_tokens"], 10);
+        assert_eq!(value["actual"]["body"]["max_tokens"], 11);
+        assert_eq!(value["actual"]["body"]["access_token"], "[redacted]");
+        assert!(!text.contains("fixture-secret"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_preserves_distinct_tool_call_ids_in_a_response() {
         let root = test_root();
         let cassette = root.join("tool-calls.jsonl");
@@ -3288,6 +3320,107 @@ mod tests {
             std::io::ErrorKind::WouldBlock
         );
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_tool_attribution_is_recorded_without_forwarding_the_header() {
+        let root = test_root();
+        let cassette = root.join("native-attribution.jsonl");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 8192];
+            let count = connection.read(&mut request).unwrap();
+            let observed = String::from_utf8_lossy(&request[..count]).to_lowercase();
+            connection.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+            observed
+        });
+        let session =
+            Session::start(Mode::Record, &cassette, Some(&upstream), false, &root).unwrap();
+        let address = session
+            .url()
+            .trim_start_matches("http://")
+            .trim_end_matches("/v1");
+        let mut socket = TcpStream::connect(address).unwrap();
+        let body = r#"{"model":"fixture"}"#;
+        write!(socket, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nX-Asb-Native-Tool: v1:qwen-code:7\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        assert!(response.contains("200 OK"));
+        session.stop().unwrap();
+        assert!(!server.join().unwrap().contains("x-asb-native-tool"));
+        let line = std::fs::read_to_string(&cassette).unwrap();
+        let row: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(
+            row["native_tool_context"],
+            serde_json::json!({"agent":"qwen-code","ordinal":7})
+        );
+        assert!(row["request"]["headers"].get("x-asb-native-tool").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replay_consumes_only_exchanges_of_the_matched_native_tool() {
+        let root = test_root();
+        let cassette = root.join("native-replay.jsonl");
+        let row = |body: &str, context: Option<serde_json::Value>| {
+            let mut value = serde_json::json!({
+                "request": {"method":"POST", "url":"/v1/chat/completions", "body":body},
+                "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{}"}
+            });
+            if let Some(context) = context {
+                value["native_tool_context"] = context;
+            }
+            value.to_string()
+        };
+        let first = r#"{"model":"first"}"#;
+        let nested = r#"{"model":"nested"}"#;
+        let last = r#"{"model":"last"}"#;
+        std::fs::write(
+            &cassette,
+            format!(
+                "{}\n{}\n{}\n",
+                row(first, None),
+                row(
+                    nested,
+                    Some(serde_json::json!({"agent":"qwen-code","ordinal":7}))
+                ),
+                row(last, None)
+            ),
+        )
+        .unwrap();
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request(&session, first).contains("200 OK"));
+        let control = "/v1/__asb_native_tool_consumed";
+        assert!(
+            request_to(&session, control, r#"{"agent":"qwen-code","ordinal":8}"#)
+                .contains("204 No Content")
+        );
+        assert!(
+            request_to(&session, control, r#"{"agent":"other-agent","ordinal":7}"#)
+                .contains("204 No Content")
+        );
+        assert!(
+            request_to(&session, control, r#"{"agent":"qwen-code","ordinal":-1}"#)
+                .contains("400 Bad Request")
+        );
+        let progress_path = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("cassette.jsonl.progress.json"))
+            .find(|path| path.is_file())
+            .unwrap();
+        let progress: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(progress_path).unwrap()).unwrap();
+        assert_eq!(progress["consumed"], 1);
+        assert!(
+            request_to(&session, control, r#"{"agent":"qwen-code","ordinal":7}"#)
+                .contains("204 No Content")
+        );
+        assert!(request(&session, last).contains("200 OK"));
+        session.stop().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

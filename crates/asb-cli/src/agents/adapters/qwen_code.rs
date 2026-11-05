@@ -42,6 +42,10 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_complete_tool_replay(prepare_tool_replay)
+.with_native_tool_transport()
+.with_guest_service(start_native_service)
+.with_deferred_native_recording(finalize_native_recording)
+.with_native_snapshot_check(verify_native_snapshot)
 .with_collection(collect)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
@@ -56,6 +60,11 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
         namespace: "tool-replay",
         filename: TOOL_PROGRESS_FILENAME,
         format: super::super::ArtifactFormat::Json,
+    },
+    super::super::ArtifactSpec {
+        namespace: "qwen-code",
+        filename: "native-tool-pending.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
     },
 ])
 .with_output_usage(output_usage)
@@ -143,16 +152,94 @@ fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> 
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
-    match super::super::tool_replay_mcp::verify_persistent_per_call_completion_receipt(
-        context.frozen.document(TOOL_PROGRESS_FILENAME),
-        context.frozen.bytes("local-tools.jsonl"),
-    ) {
-        Ok(()) => AgentArtifacts::default(),
-        Err(error) => AgentArtifacts {
-            errors: vec![error.to_string()],
-            ..AgentArtifacts::default()
-        },
+    let mut artifacts =
+        match super::super::tool_replay_mcp::verify_persistent_per_call_completion_receipt(
+            context.frozen.document(TOOL_PROGRESS_FILENAME),
+            context.frozen.bytes("local-tools.jsonl"),
+        ) {
+            Ok(()) => AgentArtifacts::default(),
+            Err(error) => AgentArtifacts {
+                errors: vec![error.to_string()],
+                ..AgentArtifacts::default()
+            },
+        };
+    if let Some(bytes) = context
+        .frozen
+        .bytes("native-tool-pending.jsonl")
+        .filter(|bytes| !bytes.is_empty())
+    {
+        artifacts
+            .sealed_artifacts
+            .push(super::super::SealedArtifact {
+                kind: "native-tool-deferred".into(),
+                bytes: bytes.to_vec(),
+            });
     }
+    artifacts
+}
+
+fn finalize_native_recording(pending: &[u8], digest: &str) -> Result<Vec<u8>, Error> {
+    super::super::native_guest::finalize("qwen-code", pending, digest)
+}
+
+fn verify_native_snapshot(
+    native: &[u8],
+    snapshot: &mut std::fs::File,
+    digest: &str,
+) -> Result<(), Error> {
+    super::pi::snapshot::verify_for("qwen-code", native, snapshot, digest)
+}
+
+fn start_native_service(
+    command: &mut std::process::Command,
+    executable: &str,
+    run_dir: &std::path::Path,
+    mode: Option<crate::tape::Mode>,
+    native_tool: Option<&std::path::Path>,
+    snapshot_sha256: Option<&str>,
+) -> Result<Option<super::super::auxiliary::AuxiliaryPlan>, Error> {
+    let Some((mode, marker, snapshot)) =
+        super::super::native_guest::selection(mode, snapshot_sha256)?
+    else {
+        return Ok(None);
+    };
+    let cli = std::fs::canonicalize(executable)
+        .map_err(|_| Error::Run("Qwen executable is unavailable for native recording".into()))?;
+    let bundle = cli
+        .ancestors()
+        .map(|ancestor| ancestor.join("node_modules/@qwen-code/qwen-code/chunks/chunk-WCM7H5HK.js"))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            Error::Run("Qwen native recording requires the pinned scheduler bundle".into())
+        })?;
+    let assets = [
+        (
+            "qwen-code-native-bootstrap.mjs",
+            include_str!("../../../assets/scripts/qwen-native-bootstrap.mjs"),
+        ),
+        (
+            "qwen-native-transform.mjs",
+            include_str!("../../../assets/scripts/qwen-native-transform.mjs"),
+        ),
+        (
+            "qwen-native-context.mjs",
+            include_str!("../../../assets/scripts/qwen-native-context.mjs"),
+        ),
+    ];
+    super::super::native_guest::start(
+        command,
+        super::super::native_guest::Settings {
+            agent: "qwen-code",
+            bundle: &bundle,
+            run_dir,
+            mode,
+            marker,
+            native_tool,
+            snapshot: &snapshot,
+            assets: &assets,
+        },
+    )
+    .map(Some)
 }
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     CommandSpec {
@@ -209,6 +296,13 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
+    if (tape.mode == crate::tape::Mode::Record
+        && std::env::var_os("ASB_FS_MARKER_SOCKET").is_some())
+        || (tape.mode == crate::tape::Mode::Replay
+            && std::env::var_os("ASB_FS_REPLAY_SOCKET").is_some())
+    {
+        return Ok(());
+    }
     // Qwen may replace the configured stdio MCP child after a tool response.
     // Keep the sealed transcript and replay cursor across those restarts.
     let launch =
@@ -244,6 +338,87 @@ fn prepare_tool_replay(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_dispatch_transform_preserves_calls_and_rejects_changed_layouts() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/qwen_native_transform.mjs");
+        let status = std::process::Command::new("node")
+            .arg(fixture)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn native_dispatch_records_and_replays_without_executing_tools() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/qwen_native_integration.mjs");
+        let status = std::process::Command::new("node")
+            .arg(fixture)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn native_context_isolated_between_tools_and_provider_requests() {
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/qwen_native_context.mjs");
+        let status = std::process::Command::new("node")
+            .arg(fixture)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn snapshot_mode_keeps_native_tools_available() {
+        const CASE: &str = "ASB_QWEN_SNAPSHOT_TEST";
+        if std::env::var_os(CASE).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "agents::adapters::qwen_code::tests::snapshot_mode_keeps_native_tools_available", "--nocapture"])
+                .env(CASE, "1")
+                .env("ASB_FS_MARKER_SOCKET", "/fixture/snapshot.sock")
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("asb-qwen-snapshot-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiChat,
+            base_url: "http://127.0.0.1:1234/v1".into(),
+            credential: Some("fixture".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        let mut command = std::process::Command::new("qwen");
+        prepare_tool_replay(
+            &mut PreparationContext {
+                command: &mut command,
+                model: "fixture",
+                connection: &connection,
+                workspace: &root,
+                runtime_dir: &root,
+                run_dir: &root,
+                mcp_servers: &[],
+                mcp_tape: None,
+                tape: None,
+            },
+            super::super::super::TapeContext {
+                mode: crate::tape::Mode::Record,
+                cassette: &root.join("cassette"),
+            },
+        )
+        .unwrap();
+        assert!(
+            !command
+                .get_args()
+                .any(|arg| arg == "--exclude-tools" || arg == "--mcp-config")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn only_successful_qwen_result_is_final() {
         let path = std::path::Path::new(".");

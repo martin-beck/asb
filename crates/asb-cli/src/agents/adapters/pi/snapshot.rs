@@ -13,11 +13,20 @@ const JOURNAL_LIMIT: u64 = 16 * 1024 * 1024;
 const ENTRY_LIMIT: usize = 8194;
 
 fn invalid() -> Error {
-    Error::Run("Pi native recording does not match its settled snapshot markers".into())
+    Error::Run("native recording does not match its settled snapshot markers".into())
 }
 
 /// Checks bounded private metadata; no captured tool arguments are reported.
 pub(super) fn verify(native: &[u8], snapshot: &mut File, digest: &str) -> Result<(), Error> {
+    verify_for("pi", native, snapshot, digest)
+}
+
+pub(in crate::agents::adapters) fn verify_for(
+    agent: &str,
+    native: &[u8],
+    snapshot: &mut File,
+    digest: &str,
+) -> Result<(), Error> {
     let track = NativeTrack {
         complete: true,
         events: native.iter().filter(|b| **b == b'\n').count() as u64,
@@ -25,17 +34,17 @@ pub(super) fn verify(native: &[u8], snapshot: &mut File, digest: &str) -> Result
         sha256: crate::cassette::digest(native),
     };
     let transport = NativeToolTransport::from_sidecar(&track, native).map_err(|_| invalid())?;
-    if transport.launch_session() != "pi-launch-1"
+    let launch = format!("{agent}-launch-1");
+    let tools = format!("{agent}-tools-1");
+    if transport.launch_session() != launch
         || transport.workspace_effect_sha256() != digest
         || transport.sessions().len() != 1
-        || transport.sessions()[0].alias() != "pi-tools-1"
+        || transport.sessions()[0].alias() != tools
         || !transport.sessions()[0].success()
     {
         return Err(invalid());
     }
-    let requests = transport
-        .recorded_requests("pi-tools-1")
-        .ok_or_else(invalid)?;
+    let requests = transport.recorded_requests(&tools).ok_or_else(invalid)?;
     let mut expected = Vec::with_capacity(requests.len());
     let mut ordinals = BTreeSet::new();
     for request in requests {
@@ -57,7 +66,7 @@ pub(super) fn verify(native: &[u8], snapshot: &mut File, digest: &str) -> Result
             .get("snapshot_sequence")
             .map(|item| item.as_u64().ok_or_else(invalid))
             .transpose()?;
-        expected.push((sequence, format!("pi-{ordinal}")));
+        expected.push((sequence, format!("{agent}-{ordinal}")));
     }
     if ordinals.iter().copied().ne(0..ordinals.len() as u64) {
         return Err(invalid());
@@ -202,19 +211,30 @@ mod tests {
     use std::io::Write;
 
     fn native(sequenced: bool) -> Vec<u8> {
+        native_for("pi", sequenced)
+    }
+
+    fn native_for(agent: &str, sequenced: bool) -> Vec<u8> {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/continue_native_sidecar_emit.mjs");
         let mut command = std::process::Command::new("node");
-        command.arg(fixture).args(["--pi", "--pending"]);
+        command
+            .arg(fixture)
+            .arg(format!("--{agent}"))
+            .arg("--pending");
         if sequenced {
             command.arg("--sequence");
         }
         let output = command.output().unwrap();
         assert!(output.status.success());
-        crate::agents::native_guest::finalize("pi", &output.stdout, &"a".repeat(64)).unwrap()
+        crate::agents::native_guest::finalize(agent, &output.stdout, &"a".repeat(64)).unwrap()
     }
 
     fn archive(path: &std::path::Path, wrong: bool, sequenced: bool) {
+        archive_for("pi", path, wrong, sequenced)
+    }
+
+    fn archive_for(agent: &str, path: &std::path::Path, wrong: bool, sequenced: bool) {
         let file = File::create(path).unwrap();
         let mut tar = tar::Builder::new(file);
         let mut add = |name: &str, bytes: &[u8]| {
@@ -224,13 +244,13 @@ mod tests {
             header.set_cksum();
             tar.append_data(&mut header, name, bytes).unwrap();
         };
-        let first = if sequenced || wrong { "pi-0" } else { "pi-1" };
-        let second = if sequenced { "pi-1" } else { "pi-0" };
+        let first = format!("{agent}-{}", if sequenced || wrong { 0 } else { 1 });
+        let second = format!("{agent}-{}", if sequenced { 1 } else { 0 });
         let boundaries = format!(
             "{{\"sequence\":1,\"kind\":\"baseline\",\"alias\":null,\"snapshot\":\"snapshot-00000001\"}}\n{{\"sequence\":2,\"kind\":\"tool-end\",\"alias\":\"{first}\",\"snapshot\":\"snapshot-00000002\"}}\n{{\"sequence\":3,\"kind\":\"tool-end\",\"alias\":\"{second}\",\"snapshot\":\"snapshot-00000003\"}}\n{{\"sequence\":4,\"kind\":\"final\",\"alias\":null,\"snapshot\":\"snapshot-00000004\"}}\n"
         );
         let markers = format!(
-            "{{\"sequence\":1,\"kind\":\"begin\",\"alias\":\"pi-0\",\"snapshot_sequence\":1}}\n{{\"sequence\":2,\"kind\":\"begin\",\"alias\":\"pi-1\",\"snapshot_sequence\":1}}\n{{\"sequence\":3,\"kind\":\"end\",\"alias\":\"{first}\",\"snapshot_sequence\":2}}\n{{\"sequence\":4,\"kind\":\"end\",\"alias\":\"{second}\",\"snapshot_sequence\":3}}\n"
+            "{{\"sequence\":1,\"kind\":\"begin\",\"alias\":\"{agent}-0\",\"snapshot_sequence\":1}}\n{{\"sequence\":2,\"kind\":\"begin\",\"alias\":\"{agent}-1\",\"snapshot_sequence\":1}}\n{{\"sequence\":3,\"kind\":\"end\",\"alias\":\"{first}\",\"snapshot_sequence\":2}}\n{{\"sequence\":4,\"kind\":\"end\",\"alias\":\"{second}\",\"snapshot_sequence\":3}}\n"
         );
         add("boundaries.jsonl", boundaries.as_bytes());
         add("markers.jsonl", markers.as_bytes());
@@ -239,6 +259,46 @@ mod tests {
         }
         tar.finish().unwrap();
         tar.into_inner().unwrap().flush().unwrap();
+    }
+
+    #[test]
+    fn shared_snapshot_validation_checks_qwen_identity_and_order() {
+        let root =
+            std::env::temp_dir().join(format!("asb-qwen-snapshot-binding-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let good = root.join("good.tar");
+        let wrong = root.join("wrong.tar");
+        archive_for("qwen-code", &good, false, true);
+        archive_for("pi", &wrong, false, true);
+        let native = native_for("qwen-code", true);
+        assert!(
+            verify_for(
+                "qwen-code",
+                &native,
+                &mut File::open(&good).unwrap(),
+                &"a".repeat(64)
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_for(
+                "qwen-code",
+                &native,
+                &mut File::open(&wrong).unwrap(),
+                &"a".repeat(64)
+            )
+            .is_err()
+        );
+        assert!(
+            verify_for(
+                "pi",
+                &native,
+                &mut File::open(&good).unwrap(),
+                &"a".repeat(64)
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
