@@ -417,6 +417,7 @@ mod tests {
         let task = crate::workloads::TaskIdentity::local("bug-fix", Some("case"));
         BenchmarkData {
             planned_normalization_policy: None,
+            normalization_observation: None,
             execution: None,
             observation: Default::default(),
             id: crate::compare::RowId {

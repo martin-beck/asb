@@ -692,6 +692,7 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
         })
         .collect::<Vec<_>>();
     assert_eq!(completions.len(), 4);
+    let mut evidence_paths = Vec::new();
     for completion in completions {
         let path = completion["proxy_evidence"]
             .as_array()
@@ -703,7 +704,43 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
         let evidence: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(evidence["policy_sha256"], policy_digest);
         assert_eq!(evidence["profiles"][0]["changed"], 1);
+        evidence_paths.push(PathBuf::from(path));
     }
+    let compared = compare_campaign(&project, &plan_path);
+    assert!(
+        compared.status.success(),
+        "comparison stderr={}",
+        String::from_utf8_lossy(&compared.stderr)
+    );
+    let original_evidence = fs::read(&evidence_paths[0]).unwrap();
+    let mut malformed: Value = serde_json::from_slice(&original_evidence).unwrap();
+    malformed["profiles"][0]["changed"] = json!(999);
+    fs::write(&evidence_paths[0], serde_json::to_vec(&malformed).unwrap()).unwrap();
+    let refused = compare_campaign(&project, &plan_path);
+    assert!(
+        !refused.status.success(),
+        "invalid normalization counts cannot be reported"
+    );
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("normalization change count"));
+    fs::write(&evidence_paths[0], original_evidence).unwrap();
+    let report_dir = plan_path.parent().unwrap().join("comparison");
+    let report: Value =
+        serde_json::from_slice(&fs::read(report_dir.join("comparison.json")).unwrap()).unwrap();
+    for row in report["benchmarks"].as_array().unwrap() {
+        assert_eq!(
+            row["normalization_observation"]["policy_sha256"],
+            policy_digest
+        );
+        assert_eq!(
+            row["normalization_observation"]["profiles"][0]["changed"],
+            1
+        );
+    }
+    assert!(
+        fs::read_to_string(report_dir.join("report.html"))
+            .unwrap()
+            .contains("Observed replay normalization")
+    );
     assert_eq!(
         summaries
             .iter()

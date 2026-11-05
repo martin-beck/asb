@@ -68,3 +68,5 @@ beside the tape session on shutdown, even when measurement collectors are
 disabled. Replay mismatch evidence also includes the active policy and counts.
 Up to 64 changed result visits include before/after SHA-256 digests and the
 IDs of profiles that changed the text; the evidence does not include the text.
+Campaign comparison JSON and HTML show the planned policy and, when a
+completed attempt retained valid observations, its observed counts separately.

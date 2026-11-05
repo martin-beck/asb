@@ -180,6 +180,10 @@ pub(super) fn rows(
             configuration.agent, slot.batch, slot.replica
         );
         row.planned_normalization_policy = layout.plan.normalization_policy.clone();
+        if let (Some(outcome), Some(policy)) = (&outcome, &layout.plan.normalization_policy) {
+            row.normalization_observation =
+                normalization_observation(layout, &outcome.value, policy)?;
+        }
         for (href, physical) in &row.artifact_sources {
             let name = href.rsplit('/').next().unwrap_or(href);
             if matches!(
@@ -193,6 +197,69 @@ pub(super) fn rows(
         rows.push(row);
     }
     Ok((rows, previews))
+}
+
+fn normalization_observation(
+    layout: &Layout,
+    outcome: &Value,
+    policy: &crate::project::replay_normalization::PolicyDescriptor,
+) -> Result<Option<Value>, Error> {
+    let Some(paths) = outcome.get("proxy_evidence").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    let matching = paths
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|path| path.ends_with(".normalization.json"))
+        .collect::<Vec<_>>();
+    if matching.len() > 1 {
+        return Err(Error::Input(
+            "multiple normalization observations for one attempt".into(),
+        ));
+    }
+    let Some(path) = matching.first() else {
+        return Ok(None);
+    };
+    let relative = Path::new(path)
+        .strip_prefix(&layout.root)
+        .map_err(|_| Error::Input("normalization observation is outside its campaign".into()))?;
+    let value = layout.declaration(relative, 1024 * 1024)?;
+    if value["schema_version"] != 1
+        || value["policy_sha256"] != policy.sha256
+        || value["count_scope"] != "result-block-visits-including-repeated-history"
+        || !value["failed"].is_boolean()
+    {
+        return Err(Error::Input(
+            "normalization observation does not match the campaign policy".into(),
+        ));
+    }
+    let profiles = value["profiles"]
+        .as_array()
+        .filter(|profiles| profiles.len() == policy.profiles.len())
+        .ok_or_else(|| Error::Input("invalid normalization observation profiles".into()))?;
+    let mut sanitized = Vec::with_capacity(profiles.len());
+    for (observed, expected) in profiles.iter().zip(&policy.profiles) {
+        let visits = observed["observations"]
+            .as_u64()
+            .ok_or_else(|| Error::Input("invalid normalization observation count".into()))?;
+        let changes = observed["changed"]
+            .as_u64()
+            .filter(|changes| *changes <= visits)
+            .ok_or_else(|| Error::Input("invalid normalization change count".into()))?;
+        if observed["id"] != expected.id {
+            return Err(Error::Input(
+                "normalization observation profile differs".into(),
+            ));
+        }
+        sanitized
+            .push(serde_json::json!({"id":expected.id,"observations":visits,"changed":changes}));
+    }
+    Ok(Some(serde_json::json!({
+        "policy_sha256": policy.sha256,
+        "count_scope": "result-block-visits-including-repeated-history",
+        "failed": value["failed"],
+        "profiles": sanitized,
+    })))
 }
 
 fn verify_recording(raw: &Value) -> Result<(), Error> {
