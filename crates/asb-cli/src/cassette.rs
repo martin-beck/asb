@@ -208,10 +208,24 @@ impl Track {
         self.native.as_ref().is_some_and(|native| native.complete)
     }
 
-    /// Complete failed attempts remain eligible, but known probe-only captures do
-    /// not supply inference traces. Missing legacy request statistics stay unknown.
+    /// Legacy snapshot tracks were marked incomplete regardless of capture
+    /// outcome. Permit attempts with a recorded process result to be replayed;
+    /// the original archive is retained and replay still validates its inputs.
+    pub fn legacy_snapshot_capture(&self) -> bool {
+        !self.complete
+            && self.process_success.is_some()
+            && self
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "workspace-snapshots")
+    }
+
+    /// Complete failed attempts and legacy snapshot captures remain eligible,
+    /// but known probe-only captures do not supply inference traces.
     pub fn automatically_selectable(&self) -> bool {
-        self.complete && self.bytes > 0 && self.statistics.requests != Some(0)
+        (self.complete || self.legacy_snapshot_capture())
+            && self.bytes > 0
+            && self.statistics.requests != Some(0)
     }
 }
 

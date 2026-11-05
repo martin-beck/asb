@@ -1136,6 +1136,34 @@ fn probe_only_capture_is_inspectable_but_not_automatically_selected() {
 }
 
 #[test]
+fn legacy_snapshot_tracks_can_be_selected_without_rewriting_the_archive() {
+    let mut catalogue = manifest(1);
+    let track = &mut catalogue.tracks[0];
+    track.complete = false;
+    track.process_success = Some(true);
+    track.statistics.requests = Some(1);
+    track.artifacts.push(Artifact {
+        kind: "workspace-snapshots".into(),
+        bytes: 1,
+        sha256: digest(b"x"),
+    });
+    assert!(track.legacy_snapshot_capture());
+    assert!(track.automatically_selectable());
+    assert!(!track.complete, "historical metadata remains unchanged");
+    assert_eq!(
+        SelectionPlan::build(&catalogue, 1, 1, 42, None, 20)
+            .unwrap()
+            .tracks,
+        [1]
+    );
+    catalogue.tracks[0].process_success = None;
+    assert!(!catalogue.tracks[0].automatically_selectable());
+    catalogue.tracks[0].process_success = Some(true);
+    catalogue.tracks[0].statistics.requests = Some(0);
+    assert!(!catalogue.tracks[0].automatically_selectable());
+}
+
+#[test]
 fn schema_identity_bounds_order_and_checked_slot_mapping() {
     let limits = Limits::default();
     let original = manifest(3);

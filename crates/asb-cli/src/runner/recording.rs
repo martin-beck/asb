@@ -501,10 +501,9 @@ impl Recorder {
                 id: (batch - 1) * self.concurrency as u64 + replica.index as u64,
                 batch,
                 replica: replica.index as u64,
-                // Snapshot replay is not yet connected; preserve the payload
-                // without advertising this track as fully replayable.
-                complete: capture.is_some_and(|capture| capture.complete)
-                    && result.snapshot_artifact.is_none(),
+                // Track completeness describes whether the recorded provider
+                // stream finished, independently of optional workspace data.
+                complete: capture.is_some_and(|capture| capture.complete),
                 process_success: Some(result.process_success),
                 workload_success: result.workload_success,
                 bytes,

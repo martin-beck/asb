@@ -217,7 +217,11 @@ impl Prepared {
                         self.path.clone(),
                         track.bytes,
                         track.sha256.clone(),
-                        Some(track.complete),
+                        if track.legacy_snapshot_capture() {
+                            None
+                        } else {
+                            Some(track.complete)
+                        },
                         track
                             .artifacts
                             .iter()
