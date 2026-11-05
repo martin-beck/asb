@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -25,6 +26,70 @@ class LocalWorkspace:
 
 
 class SubmissionRecoveryTests(unittest.TestCase):
+    def test_agent_environment_activates_sdk_environment_and_preserves_private_values(self):
+        task = task_module.SweBenchTask(None, 'catalog', 'fixture', 'artifacts')
+        task.row = {'base_commit':'a' * 40}
+        calls = []
+        def checked(argv, **options):
+            calls.append((argv, options))
+            if argv[0] == '/bin/bash':
+                return b'/opt/miniconda3/envs/testbed/bin:/custom/bin\0/opt/miniconda3/envs/testbed\0testbed\0' + b'1\0'
+            return b'1637276904\n'
+        task.checked = checked
+        sdk = types.ModuleType('swebench.image_builder.constants')
+        sdk.CONTAINER_ENV_NAME = 'testbed'
+        with patch.dict(sys.modules, {'swebench':types.ModuleType('swebench'),
+                                     'swebench.image_builder':types.ModuleType('swebench.image_builder'),
+                                     'swebench.image_builder.constants':sdk}):
+            result = task.agent_environment({'PATH':'/custom/bin', 'HOME':'/private',
+                                             'API_KEY':'secret', 'GIT_AUTHOR_DATE':'explicit'})
+            self.assertEqual(result['PATH'], '/opt/miniconda3/envs/testbed/bin:/custom/bin')
+            self.assertEqual(result['HOME'], '/private')
+            self.assertEqual(result['API_KEY'], 'secret')
+            self.assertEqual(result['GIT_AUTHOR_DATE'], 'explicit')
+            self.assertEqual(result['GIT_COMMITTER_DATE'], '@1637276904 +0000')
+            self.assertEqual(calls[0][1]['environment'], {'PATH':'/custom/bin'})
+            task.checked = lambda *args, **kwargs: b'invalid'
+            with self.assertRaises(task_module.ExecutionError):
+                task.agent_environment({})
+
+    def test_default_git_dates_stabilize_stash_without_masking_changed_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def git(*args, env=None):
+                return subprocess.run(['git', *args], cwd=root, env=env, check=True,
+                                      capture_output=True).stdout.strip().decode()
+            git('init', '-q')
+            git('config', 'user.name', 'Fixture')
+            git('config', 'user.email', 'fixture@example.invalid')
+            (root/'file').write_text('base\n')
+            git('add', 'file')
+            git('commit', '-qm', 'base')
+            task = task_module.SweBenchTask(None, 'catalog', 'fixture', root/'artifacts')
+            task.row = {'base_commit':git('rev-parse', 'HEAD')}
+            task.workspace = LocalWorkspace(root)
+            sdk = types.ModuleType('swebench.image_builder.constants')
+            sdk.CONTAINER_ENV_NAME = 'testbed'
+            actual_checked = task.checked
+            def checked(argv, **kwargs):
+                if argv[0] == '/bin/bash':
+                    return b'/opt/miniconda3/envs/testbed/bin:/usr/bin:/bin\0/opt/miniconda3/envs/testbed\0testbed\0' + b'1\0'
+                return actual_checked(argv, **kwargs)
+            task.checked = checked
+            with patch.dict(sys.modules, {'swebench':types.ModuleType('swebench'),
+                                         'swebench.image_builder':types.ModuleType('swebench.image_builder'),
+                                         'swebench.image_builder.constants':sdk}):
+                environment = task.agent_environment(os.environ.copy())
+            def stash(content):
+                (root/'file').write_text(content)
+                git('stash', 'push', '-q', env=environment)
+                result = git('rev-parse', 'refs/stash')
+                git('stash', 'drop', '-q', env=environment)
+                return result
+            first = stash('same\n')
+            self.assertEqual(first, stash('same\n'))
+            self.assertNotEqual(first, stash('different\n'))
+
     def test_replay_snapshot_scratch_is_attempt_scoped_and_recorded(self):
         scratch=Path(__file__).resolve().parents[3]/'target/snapshot-storage-tests'
         scratch.mkdir(parents=True,exist_ok=True)

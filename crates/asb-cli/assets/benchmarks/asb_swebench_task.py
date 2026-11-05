@@ -129,6 +129,40 @@ class SweBenchTask:
             raise ExecutionError(f"task repository operation {argv[0]} {argv[1]} failed (exit {result['exit_code']}, timeout {result['timed_out']}, truncated {result['output_truncated']})")
         return result["stdout"]
 
+    def agent_environment(self, environment, preparation_budget=None):
+        """Activate the SDK's task environment for the final client only."""
+        from swebench.image_builder.constants import CONTAINER_ENV_NAME
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", CONTAINER_ENV_NAME):
+            raise ExecutionError("invalid SWE-bench environment name")
+        def remaining():
+            return min(60, preparation_budget.remaining()) if preparation_budget else 60
+        # Only PATH is passed to the probe: provider credentials and HOME must
+        # never enter probe output or be overwritten by conda activation.
+        probe_environment = {"PATH": environment["PATH"]} if "PATH" in environment else None
+        output = self.checked(["/bin/bash", "-c",
+            'source /opt/miniconda3/bin/activate "$1" >/dev/null && '
+            'printf "%s\\0%s\\0%s\\0%s\\0" "$PATH" "$CONDA_PREFIX" "$CONDA_DEFAULT_ENV" "$CONDA_SHLVL"',
+            "asb-swe-env", CONTAINER_ENV_NAME], environment=probe_environment, timeout=remaining())
+        try:
+            fields = output.decode("utf-8").split("\0")
+            if len(fields) != 5 or fields[-1] or not all(fields[:4]):
+                raise ValueError()
+            path, prefix, name, level = fields[:4]
+            if not prefix.startswith("/") or name != CONTAINER_ENV_NAME or not level.isdigit():
+                raise ValueError()
+        except (UnicodeDecodeError, ValueError):
+            raise ExecutionError("SWE-bench task environment activation returned invalid metadata") from None
+        timestamp = self.checked(["git", "show", "-s", "--format=%ct", self.row["base_commit"]],
+                                 timeout=remaining()).strip()
+        if not re.fullmatch(rb"[0-9]{1,12}", timestamp):
+            raise ExecutionError("SWE-bench base commit timestamp is invalid")
+        result = dict(environment, PATH=path, CONDA_PREFIX=prefix,
+                      CONDA_DEFAULT_ENV=name, CONDA_SHLVL=level)
+        date = "@" + timestamp.decode("ascii") + " +0000"
+        result.setdefault("GIT_AUTHOR_DATE", date)
+        result.setdefault("GIT_COMMITTER_DATE", date)
+        return result
+
     def prepare_base_history(self, worktree, clean_git, base):
         """Retain the base and its ancestors, excluding later image history."""
         original = worktree + '/.git'
