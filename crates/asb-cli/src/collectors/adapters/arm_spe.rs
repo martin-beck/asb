@@ -88,8 +88,6 @@ fn args(pmu: &str, pid: u32, options: &Options) -> Vec<String> {
         "--inherit".into(),
         "-p".into(),
         pid.to_string(),
-        "--clockid".into(),
-        "mono".into(),
         "--max-size".into(),
         format!("{}M", options.budget_bytes / MIB),
         "--mmap-pages".into(),
@@ -227,7 +225,7 @@ impl CollectorAdapter for ArmSpe {
             "memory_latency_weight_sum_cycles":decoded.memory_latency_weight_sum,
             "memory_latency_known_samples":decoded.memory_latency_known_samples,
                 "first_sample_ns":decoded.first_sample_ns,"last_sample_ns":decoded.last_sample_ns,
-                "clock":"perf CLOCK_MONOTONIC; decoded timestamps have microsecond precision",
+            "clock":"perf default recording clock; task lifetimes validate sample alignment; decoded timestamps have microsecond precision",
                 "series_origin":"first observed sample; one-second bins; final bin can be partial; absent bins are not invented zeroes",
                 "limitations":"No reported loss/truncation flags, complete task metadata and a successful decoder are required. This cannot rule out sampling bias or unreported hardware loss. Counts are sampled observations, not full event counts or retired instructions. Memory weights are sampled operation latency in cycles, not isolated DRAM service time. Synthesized event populations overlap and must not be added. Ambiguous task reuse is rejected."
             }),
