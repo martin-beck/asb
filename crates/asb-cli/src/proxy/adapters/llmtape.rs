@@ -502,6 +502,11 @@ fn wait_for_ready(
             .try_wait()
             .map_err(|error| Error::Run(format!("cannot inspect tape proxy: {error}")))?
         {
+            // A failed owned child may have published a bounded actionable
+            // startup error immediately before exiting.
+            if let Some(path) = ready_file {
+                let _ = read_ready_port(path, process.id())?;
+            }
             return Err(Error::Run(format!(
                 "ASB's tape proxy exited before becoming ready with {status}; verify Node.js and the cassette format"
             )));
@@ -559,6 +564,36 @@ fn read_ready_port(path: &Path, child_id: u32) -> Result<Option<u16>, Error> {
         .map_err(|error| Error::Run(format!("cannot read tape readiness: {error}")))?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|_| Error::Run("tape proxy published malformed readiness".into()))?;
+    if bytes.len() <= 1024
+        && value["schema_version"] == 1
+        && value["pid"] == child_id
+        && value["error"]["kind"] == "normalizer_startup"
+    {
+        let reason = value["error"]["reason"].as_str().filter(|reason| {
+            matches!(
+                *reason,
+                "timed out during initialization"
+                    | "has invalid syntax"
+                    | "could not be initialized"
+                    | "worker failed"
+            )
+        });
+        let profile = value["error"]["profile"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control));
+        if let Some(reason) = reason {
+            let subject = profile.map_or_else(
+                || "Replay normalizer worker".to_owned(),
+                |id| format!("Replay normalizer `{id}`"),
+            );
+            return Err(Error::Input(format!(
+                "{subject} {reason}; check the selected project normalizer module and retry"
+            )));
+        }
+        return Err(Error::Run(
+            "tape proxy published invalid normalizer startup evidence".into(),
+        ));
+    }
     let port = value["port"]
         .as_u64()
         .and_then(|port| u16::try_from(port).ok());
@@ -1354,6 +1389,23 @@ mod tests {
         assert!(read_ready_port(&ready, 42).is_err());
         std::fs::write(&ready, b"not json").unwrap();
         assert!(read_ready_port(&ready, 42).is_err());
+        let startup = serde_json::json!({"schema_version":1,"pid":42,"error":{"kind":"normalizer_startup","profile":"fixture", "reason":"has invalid syntax"}});
+        std::fs::write(&ready, startup.to_string()).unwrap();
+        let error = read_ready_port(&ready, 42).unwrap_err().to_string();
+        assert!(error.contains("fixture") && error.contains("invalid syntax"));
+        let foreign = read_ready_port(&ready, 43).unwrap_err().to_string();
+        assert!(
+            !foreign.contains("fixture"),
+            "foreign startup evidence must not be trusted"
+        );
+        let bad_reason = serde_json::json!({"schema_version":1,"pid":42,"error":{"kind":"normalizer_startup","profile":"fixture", "reason":"private exception"}});
+        std::fs::write(&ready, bad_reason.to_string()).unwrap();
+        assert!(
+            !read_ready_port(&ready, 42)
+                .unwrap_err()
+                .to_string()
+                .contains("private exception")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
     use std::path::Path;
@@ -4154,6 +4206,62 @@ mod tests {
         assert_eq!(
             value["count_scope"],
             "result-block-visits-including-repeated-history"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_project_normalizer_reports_profile_before_proxy_ready() {
+        use crate::project::replay_normalization::{
+            FrozenNormalizer, FrozenPolicy, ProfileSelectors,
+        };
+        let root = test_root();
+        let source = b"export function normalizeToolResult({text}) { this is invalid";
+        let policy = crate::proxy::CustomNormalization {
+            policy: FrozenPolicy::from_normalizers(vec![FrozenNormalizer {
+                id: "broken-fixture".into(),
+                source: source.to_vec(),
+                sha256: crate::cassette::digest(source),
+                selectors: ProfileSelectors {
+                    workloads: Some(vec!["fixture".into()]),
+                    ..Default::default()
+                },
+            }])
+            .unwrap(),
+            workload: "fixture".into(),
+            agent: "pi".into(),
+            family: None,
+            task: "one".into(),
+        };
+        let error = match Session::start_for_agent_at(
+            Mode::Record,
+            &root.join("capture.jsonl"),
+            Some("http://127.0.0.1:1"),
+            false,
+            crate::tape::AgentContext {
+                workspace: &root,
+                agent: Some("pi"),
+                workload: Some("fixture"),
+                task: Some("one"),
+                custom_normalization: Some(policy),
+                recorder: None,
+                invocation_dir: &root,
+                perfetto_observer: None,
+                perfetto_trace_id: None,
+                perfetto_report: None,
+            },
+        ) {
+            Ok(_) => panic!("malformed normalizer unexpectedly started"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("broken-fixture"), "{error}");
+        assert!(
+            error.contains("check the selected project normalizer module"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("this is invalid"),
+            "source content must remain private"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

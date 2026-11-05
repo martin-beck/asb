@@ -46,6 +46,8 @@ from supported Responses, Chat Completions and Anthropic tool results, not
 prompts, assistant messages, tool arguments or other request fields. They
 must return a string and should be deterministic and idempotent. Scripts run
 in a bounded worker; this is not a security boundary for untrusted code.
+If a selected module cannot start, ASB identifies the profile and reports a
+bounded error before launching the agent; module exception text is not printed.
 
 The repository also provides opt-in examples for Python unittest and pytest
 summary timings, unified-diff header times, OpenCode search ordering, shell

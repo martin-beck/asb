@@ -46,11 +46,31 @@ if (normalizationEvidencePath && !isAbsolute(normalizationEvidencePath)) {
   throw new Error("invalid private normalization evidence destination");
 }
 const customPolicy = customPolicyPath ? JSON.parse(readFileSync(customPolicyPath, "utf8")) : null;
+const readyFile = process.env.ASB_TAPE_READY_FILE;
 if (customPolicy && !/^[0-9a-f]{64}$/.test(customPolicy.sha256 || "")) {
   throw new Error("invalid frozen normalizer policy identity");
 }
 const customSupervisor = customPolicy ? new NormalizerSupervisor(customPolicy.profiles) : null;
-if (customSupervisor) await customSupervisor.ready;
+if (customSupervisor) {
+  try { await customSupervisor.ready; }
+  catch (error) {
+    // Worker errors can contain arbitrary data. Publish only a known failure
+    // class and a configured profile ID into the private readiness channel.
+    const reasons = ["timed out during initialization", "has invalid syntax", "could not be initialized"];
+    const match = customPolicy.profiles.flatMap(({ id }) => reasons.map((reason) => ({ id, reason })))
+      .find(({ id, reason }) => error?.message === `normalizer ${id}: ${reason}`);
+    if (readyFile && isAbsolute(readyFile)) {
+      try {
+        const temporary = `${readyFile}.tmp`;
+        writeFileSync(temporary, JSON.stringify({ schema_version: 1, pid: process.pid,
+          error: { kind: "normalizer_startup", profile: match?.id ?? null, reason: match?.reason ?? "worker failed" } }),
+          { encoding: "utf8", mode: 0o600, flag: "wx" });
+        renameSync(temporary, readyFile);
+      } catch { /* normal startup failure remains visible if publication fails */ }
+    }
+    throw error;
+  }
+}
 let normalizationFailed = false;
 
 function normalizationEvidence(includeChanges = false) {
@@ -118,7 +138,6 @@ const mode = args.shift();
 let legacyRequestPolicy = false;
 if (mode !== "record" && mode !== "replay") usage("mode must be record or replay");
 const port = Number(option(args, "--port"));
-const readyFile = process.env.ASB_TAPE_READY_FILE;
 if (!Number.isInteger(port) || port < (readyFile ? 0 : 1) || port > 65535) usage("--port must be a valid TCP port");
 const cassette = mode === "record" ? option(args, "--out") : option(args, "--cassette");
 const upstream = mode === "record" ? option(args, "--upstream") : undefined;
