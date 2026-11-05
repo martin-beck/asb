@@ -62,6 +62,15 @@ mount namespace with `ASB_MULTIROOT_FIXTURE_DIR` set to a new disposable
 project-local directory. It needs Btrfs, rsync, loop devices and the optional
 QEMU storage tools used by the guest supervisor. It preserves its evidence.
 
+The opt-in `crates/asb-cli/tests/fixtures/claude_native/edit.mjs` probe uses
+an installed Claude Code binary and a synthetic loopback provider to record
+and replay a Read followed by an Edit. Set `ASB_CLAUDE_BINARY` to the binary
+and `ASB_CLAUDE_FIXTURE_DIR` to an existing disposable project directory. It
+checks recorded tool results and the final file contents; it does not exercise
+snapshot restoration, an external workload, or a complete cassette. The
+experimental replay lets Claude perform the native Edit in the isolated guest
+before applying the recorded snapshot boundary and reporting its result.
+
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without
 Docker, providers or installed clients. The opt-in

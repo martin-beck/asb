@@ -64,7 +64,7 @@ export async function recordHook(event, { directory, socket, marker }) {
 // tools and failure shapes before this can be selected by the adapter.
 export async function replayHook(event, { directory, socket, webProxy }) {
   const state = statePath(directory, event);
-  if (!socket || !['Bash', 'Read', 'WebSearch', 'WebFetch'].includes(event.tool_name) || !event.tool_input ||
+  if (!socket || !['Bash', 'Read', 'Edit', 'WebSearch', 'WebFetch'].includes(event.tool_name) || !event.tool_input ||
       typeof event.tool_input !== 'object' || Array.isArray(event.tool_input))
     throw new TypeError('Claude native replay probe does not support this native tool');
   if (event.tool_name === 'WebFetch' && !webProxy)
@@ -87,8 +87,9 @@ export async function replayHook(event, { directory, socket, webProxy }) {
         const text = (match[2] ?? '').replaceAll("'", "'\\''");
         command = `printf '%s' '${text}'; exit ${match[1]}`;
       }
-      // Claude tracks which paths its own Read tool opened before allowing
-      // an Edit. Keep the original Read in the isolated replay workspace.
+      // Claude tracks paths read and edited by its own tools. Execute these
+      // deterministic file operations in the isolated replay workspace, then
+      // reconcile the recorded boundary before publishing the recorded result.
       const substitute = normalizeRequest(event.tool_name === 'Bash' ? {...event.tool_input, command} : event.tool_input);
       await file.writeFile(JSON.stringify({token, substitute, expected}));
       await file.close();
