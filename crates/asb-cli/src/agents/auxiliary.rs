@@ -152,6 +152,19 @@ impl AuxiliaryService {
                         .contains("Claude WebFetch proxy has unconsumed recorded responses")
                     {
                         "Claude WebFetch replay left recorded responses unconsumed"
+                    } else if text
+                        .contains("Claude WebFetch proxy request has no recorded response")
+                    {
+                        "Claude WebFetch replay requested a response absent from its recording"
+                    } else if text.contains("Claude WebFetch tunnel has no recorded target") {
+                        "Claude WebFetch replay requested a tunnel absent from its recording"
+                    } else if text.contains("Claude WebFetch proxy TLS failed") {
+                        "Claude WebFetch replay TLS connection failed"
+                    } else if text.contains("Claude WebFetch TLS request is malformed")
+                        || text.contains("Claude WebFetch proxy request is malformed")
+                        || text.contains("Claude WebFetch tunnel target is malformed")
+                    {
+                        "Claude WebFetch replay received a malformed request"
                     } else if text.contains("Native tool replay left tool calls incomplete") {
                         "native tool replay left recorded calls incomplete"
                     } else if text.contains("unfinished") {
@@ -255,6 +268,27 @@ mod tests {
             (
                 "Native tool replay left tool calls incomplete",
                 "native tool replay left recorded calls incomplete",
+            ),
+            (
+                "Claude WebFetch proxy request has no recorded response",
+                "response absent from its recording",
+            ),
+            (
+                "Claude WebFetch tunnel has no recorded target",
+                "tunnel absent from its recording",
+            ),
+            ("Claude WebFetch proxy TLS failed", "TLS connection failed"),
+            (
+                "Claude WebFetch TLS request is malformed",
+                "received a malformed request",
+            ),
+            (
+                "Claude WebFetch proxy request is malformed",
+                "received a malformed request",
+            ),
+            (
+                "Claude WebFetch tunnel target is malformed",
+                "received a malformed request",
             ),
         ] {
             let mut command = std::process::Command::new("/bin/sh");
