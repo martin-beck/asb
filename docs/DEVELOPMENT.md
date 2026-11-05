@@ -70,6 +70,15 @@ checks recorded tool results and the final file contents; it does not exercise
 snapshot restoration, an external workload, or a complete cassette. The
 experimental replay lets Claude perform the native Edit in the isolated guest
 before applying the recorded snapshot boundary and reporting its result.
+`edit_c4.py` uses the same inputs plus passwordless sudo and Linux mount and
+network namespaces to replay one recording in four separate loopback-only
+replicas. `edit_snapshot_c4.py` additionally uses the real multi-root Btrfs
+supervisor: Claude records a Bash write to the second root, reads that file,
+then reads and edits the workspace. Four replays restore both roots from the
+same recording, compare the tool results and verify that an external counter
+shows the recorded Bash command was not rerun. It retains root-owned fixture
+evidence. These are synthetic loopback-provider tests, not SWE-bench or
+complete filesystem and agent qualification.
 
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without
