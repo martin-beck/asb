@@ -696,10 +696,11 @@ fn watch_requests(
 }
 
 fn is_report_asset(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|value| value.to_str()),
-        Some("html" | "svg" | "json" | "css" | "js")
-    )
+    path.file_name().and_then(|name| name.to_str()) == Some("observations.parquet")
+        || matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("html" | "svg" | "json" | "css" | "js")
+        )
 }
 fn state_path(root: &Path) -> PathBuf {
     root.join(".asb").join(STATE_NAME)
@@ -1260,6 +1261,8 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("report.html"), "report").unwrap();
         fs::write(source.join("graph.svg"), "svg").unwrap();
+        fs::write(source.join("observations.parquet"), b"PAR1exportPAR1").unwrap();
+        fs::write(source.join("workload.parquet"), b"private dataset").unwrap();
         fs::write(source.join("private.txt"), "private").unwrap();
         let trace = root.join("trace.perfetto-trace");
         fs::write(&trace, "trace").unwrap();
@@ -1267,6 +1270,11 @@ mod tests {
         materialize(&output, &source.join("report.html"), &[trace]).unwrap();
         assert!(output.join("report.html").is_file());
         assert!(output.join("graph.svg").is_file());
+        assert_eq!(
+            fs::read(output.join("observations.parquet")).unwrap(),
+            b"PAR1exportPAR1"
+        );
+        assert!(!output.join("workload.parquet").exists());
         assert!(!output.join("private.txt").exists());
         assert!(output.join("traces/0.perfetto-trace").is_file());
         let _ = fs::remove_dir_all(root);
