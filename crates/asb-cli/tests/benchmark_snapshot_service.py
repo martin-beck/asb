@@ -414,6 +414,31 @@ class SnapshotServiceTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'unconsumed or failed'):
             service.finish()
 
+    def test_replay_rejects_oversubscribed_later_boundary_without_waiting(self):
+        waiting=threading.Event()
+        service=SnapshotReplay([('first',2),('second',3)],lambda _:None)
+        wait=service.changed.wait
+        def observed_wait(timeout=None):
+            waiting.set()
+            return wait(timeout)
+        with patch.object(service.changed,'wait',side_effect=observed_wait):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                later=pool.submit(service.marker,'end','second')
+                self.assertTrue(waiting.wait(2))
+                with self.assertRaisesRegex(ValueError,'differs from the recording'):
+                    service.marker('end','second')
+                with self.assertRaisesRegex(RuntimeError,'not active'):
+                    later.result(timeout=2)
+        with self.assertRaisesRegex(RuntimeError,'unconsumed or failed'):
+            service.finish()
+
+    def test_replay_accepts_each_recorded_repeated_boundary(self):
+        service=SnapshotReplay([('first',2),('second',3),('second',4)],lambda _:None)
+        self.assertEqual(service.marker('end','first'),2)
+        self.assertEqual(service.marker('end','second'),3)
+        self.assertEqual(service.marker('end','second'),4)
+        service.finish()
+
     def test_finish_waits_for_active_boundary_application(self):
         applying=threading.Event();release=threading.Event();finished=threading.Event()
         def apply(_sequence):
