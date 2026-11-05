@@ -33,6 +33,8 @@ test('tailed SymPy metadata and elapsed summaries preserve substantive differenc
     assert.equal(normalizeToolResult({text: canonical, tool}), canonical);
     assert.notEqual(normalizeToolResult({text: replayed.replace('997 passed', '996 passed'), tool}), canonical);
     assert.notEqual(normalizeToolResult({text: replayed.replace('expected value', 'different failure'), tool}), canonical);
+    assert.notEqual(normalizeToolResult({text: replayed.replace(' seconds ===', ' seconds ====') , tool}), canonical);
+    assert.notEqual(normalizeToolResult({text: replayed.replace(' tests finished:', '  tests finished:'), tool}), canonical);
     if (prefix) assert.notEqual(normalizeToolResult({text: replayed.replace('testbed/bin/python', 'other/bin/python'), tool}), canonical);
     const clipped = replayed.replace('cache:              yes\n', '');
     assert.match(normalizeToolResult({text: clipped, tool}), /random seed:        98765/);
@@ -42,4 +44,9 @@ test('tailed SymPy metadata and elapsed summaries preserve substantive differenc
   const outputOnly = body + short;
   assert.equal(normalizeToolResult({text: outputOnly, tool}), normalizeToolResult({text: body + long, tool}));
   assert.equal(normalizeToolResult({text: outputOnly, tool:{name:'bash',arguments:{command:'cat result'}}}), outputOnly);
+  const noRightPadding = '= tests finished: 1 passed, in 9.99 seconds\r\n';
+  const noPadding = ' tests finished: 1 passed, in 11.10 seconds\r\n';
+  const result = normalizeToolResult({text:noRightPadding,tool});
+  assert.equal(normalizeToolResult({text:noPadding,tool}), result);
+  assert.equal(normalizeToolResult({text:result,tool}), result);
 });
