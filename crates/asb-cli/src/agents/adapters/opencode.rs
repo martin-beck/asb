@@ -428,8 +428,11 @@ fn start_native_service(
     if mode == crate::tape::Mode::Replay {
         let sidecar = native_tool
             .ok_or_else(|| Error::Run("OpenCode native replay sidecar is missing".into()))?;
-        let status = std::process::Command::new("node")
-            .arg("--input-type=module")
+        let mut preflight = std::process::Command::new("node");
+        if let Some((_, Some(path))) = command.get_envs().find(|(name, _)| *name == "PATH") {
+            preflight.env("PATH", path);
+        }
+        let status = preflight.arg("--input-type=module")
             .arg("-e")
             .arg("import {pathToFileURL} from 'node:url'; const m = await import(pathToFileURL(process.argv[1])); await m.recordedDefinitions(process.argv[2], process.argv[3]);")
             .arg(directory.join("opencode-native-launcher.mjs"))
