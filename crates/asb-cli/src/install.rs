@@ -1539,7 +1539,12 @@ pub(crate) fn workload_list_at(
         writeln!(output, "  (none)").map_err(super::io_error)?;
     } else {
         for name in trial_sets {
-            writeln!(output, "  {name} [trial set]").map_err(super::io_error)?;
+            writeln!(
+                output,
+                "  {} [trial set]",
+                crate::workloads::display_name(&name)
+            )
+            .map_err(super::io_error)?;
         }
     }
     writeln!(output, "Installable external workloads:").map_err(super::io_error)?;
