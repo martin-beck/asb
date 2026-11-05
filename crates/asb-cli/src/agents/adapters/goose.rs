@@ -42,6 +42,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_step_count(step_count)
 .with_output_usage(output_usage)
 .with_final_response(final_response)
+.with_final_response_failure(provider_failure)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
         namespace: "tool-replay",
@@ -56,6 +57,44 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 ])
 .with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"])
 .with_max_steps();
+
+// Goose can exit successfully after emitting its own provider error as the
+// final assistant message. Surface that failure without copying its URL or
+// arbitrary response body into public diagnostics.
+fn provider_failure(response: Option<&str>) -> Option<String> {
+    let text = response?.trim();
+    if text.starts_with("Ran into this error: Request failed:")
+        && text.ends_with("Please retry if you think this is a transient or recoverable error.")
+    {
+        Some(
+            "Goose provider request failed; inspect the agent log for the HTTP error and retry"
+                .into(),
+        )
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod provider_failure_tests {
+    use super::provider_failure;
+
+    #[test]
+    fn detects_goose_provider_failure_without_exposing_response() {
+        let error = "Ran into this error: Request failed: Resource not found (404) at https://example.invalid/private.\n\nPlease retry if you think this is a transient or recoverable error.";
+        let diagnostic = provider_failure(Some(error)).unwrap();
+        assert!(diagnostic.contains("provider request failed"));
+        assert!(!diagnostic.contains("example.invalid"));
+        assert_eq!(provider_failure(Some("The task is complete.")), None);
+        assert_eq!(
+            provider_failure(Some(
+                "Ran into this error: Request failed: this is task text"
+            )),
+            None
+        );
+        assert_eq!(provider_failure(None), None);
+    }
+}
 
 // Goose JSON mode emits a pretty-printed conversation summary after the run.
 fn final_response(output: &str, _: &Path) -> Option<String> {
@@ -396,12 +435,23 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
                 .env("ANTHROPIC_AUTH_TOKEN", key);
         }
         crate::endpoint::Interface::OpenAiChat => {
+            // Goose resolves OPENAI_BASE_PATH as an absolute path, so a path
+            // in OPENAI_HOST (for example OpenRouter's /api) would be lost.
+            let base = connection.base_url.trim_end_matches('/');
+            let scheme_end = base.find("://").ok_or_else(|| {
+                Error::Input("Goose provider endpoint must include a URL scheme".into())
+            })? + 3;
+            let path_start = base[scheme_end..]
+                .find('/')
+                .map_or(base.len(), |offset| scheme_end + offset);
+            let (origin, prefix) = base.split_at(path_start);
+            let completion_path = format!("{prefix}/chat/completions");
             context
                 .command
                 .env("GOOSE_PROVIDER", "openai")
                 .env("GOOSE_MODEL", context.model)
-                .env("OPENAI_HOST", connection.base_url.trim_end_matches("/v1"))
-                .env("OPENAI_BASE_PATH", "/v1/chat/completions")
+                .env("OPENAI_HOST", origin)
+                .env("OPENAI_BASE_PATH", completion_path)
                 .env("OPENAI_API_KEY", key);
         }
         _ => return Err(context.unsupported_endpoint("goose")),
@@ -931,6 +981,32 @@ mod tests {
         assert_eq!(env["OPENAI_BASE_PATH"], "/v1/chat/completions");
         assert_eq!(env["OPENAI_API_KEY"], "asb-replay");
         assert_eq!(env["GOOSE_DISABLE_SESSION_NAMING"], "true");
+    }
+
+    #[test]
+    fn openrouter_live_endpoint_preserves_api_prefix() {
+        let mut command = Command::new("goose");
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiChat,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            credential: Some("test-key".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        prepare_adapter(&mut PreparationContext {
+            command: &mut command,
+            model: "test-model",
+            connection: &connection,
+            workspace: Path::new("."),
+            runtime_dir: Path::new("."),
+            run_dir: Path::new("."),
+            mcp_servers: &[],
+            mcp_tape: None,
+            tape: None,
+        })
+        .unwrap();
+        let env = environment(&command);
+        assert_eq!(env["OPENAI_HOST"], "https://openrouter.ai");
+        assert_eq!(env["OPENAI_BASE_PATH"], "/api/v1/chat/completions");
     }
 
     #[test]
