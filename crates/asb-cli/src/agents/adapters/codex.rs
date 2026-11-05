@@ -31,12 +31,20 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_mcp_servers()
 .with_mcp_relay()
 .with_native_tool_transport()
+.with_guest_service(start_native_service)
+.with_deferred_native_recording(finalize_native_recording)
+.with_native_snapshot_check(verify_native_snapshot)
 .with_collection(collect)
 .with_step_count(step_count)
 .with_tool_call_count(tool_call_count)
 .with_output_usage(output_usage)
 .with_final_response(no_stdout_final_response)
 .with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "codex",
+        filename: "native-tool-pending.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
     super::super::ArtifactSpec {
         namespace: "codex-final-response",
         filename: "final.txt",
@@ -349,6 +357,77 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
     }
 }
 
+fn native_snapshot(mode: Option<crate::tape::Mode>) -> bool {
+    match mode {
+        Some(crate::tape::Mode::Record) => std::env::var_os("ASB_FS_MARKER_SOCKET").is_some(),
+        Some(crate::tape::Mode::Replay) => std::env::var_os("ASB_FS_REPLAY_SOCKET").is_some(),
+        None => false,
+    }
+}
+
+fn start_native_service(
+    command: &mut std::process::Command,
+    executable: &str,
+    run_dir: &std::path::Path,
+    mode: Option<crate::tape::Mode>,
+    native_tool: Option<&std::path::Path>,
+    snapshot_sha256: Option<&str>,
+) -> Result<Option<super::super::auxiliary::AuxiliaryPlan>, Error> {
+    let Some((mode, marker, snapshot)) =
+        super::super::native_guest::selection(mode, snapshot_sha256)?
+    else {
+        return Ok(None);
+    };
+    let bundle = std::fs::canonicalize(executable)
+        .map_err(|_| Error::Run("Codex native executable is unavailable".into()))?;
+    let assets = [(
+        "codex-native-hook.mjs",
+        include_str!("../../../assets/scripts/codex-native-hook.mjs"),
+    )];
+    let settings = super::super::native_guest::Settings {
+        agent: "codex",
+        bundle: &bundle,
+        run_dir,
+        mode,
+        marker: marker.clone(),
+        native_tool,
+        snapshot: &snapshot,
+        assets: &assets,
+    };
+    let (service, directory, socket) = super::super::native_guest::broker(command, &settings)?;
+    let state = directory.join("hook-state");
+    std::fs::create_dir_all(&state).map_err(crate::io_error)?;
+    command
+        .env("ASB_CODEX_NATIVE_DIRECTORY", state)
+        .env("ASB_CODEX_NATIVE_SOCKET", socket)
+        .env("ASB_CODEX_NATIVE_MARKER", marker)
+        .env(
+            "ASB_CODEX_NATIVE_ENTRY",
+            directory.join("codex-native-hook.mjs"),
+        )
+        .env(
+            "ASB_CODEX_NATIVE_MODE",
+            if mode == crate::tape::Mode::Replay {
+                "replay"
+            } else {
+                "record"
+            },
+        );
+    Ok(Some(super::super::auxiliary::AuxiliaryPlan::new(service)))
+}
+
+fn finalize_native_recording(pending: &[u8], digest: &str) -> Result<Vec<u8>, Error> {
+    super::super::native_guest::finalize("codex", pending, digest)
+}
+
+fn verify_native_snapshot(
+    native: &[u8],
+    snapshot: &mut std::fs::File,
+    digest: &str,
+) -> Result<(), Error> {
+    super::pi::snapshot::verify_for("codex", native, snapshot, digest)
+}
+
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     context
         .command
@@ -365,6 +444,33 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         context.mcp_tape,
         context.run_dir,
     )?;
+    if native_snapshot(context.tape.map(|tape| tape.mode)) {
+        let script = "node --input-type=module -e 'import(process.env.ASB_CODEX_NATIVE_ENTRY).then(m=>m.main()).catch(e=>{console.error(e.message);process.exitCode=1})'";
+        let entry = serde_json::json!([{"matcher":"Bash", "hooks":[{"type":"command", "command":script, "timeout":120}]}]);
+        let hooks = if context
+            .tape
+            .is_some_and(|tape| tape.mode == crate::tape::Mode::Replay)
+        {
+            serde_json::json!({"hooks":{"PreToolUse":entry}})
+        } else {
+            serde_json::json!({"hooks":{"PreToolUse":entry,"PostToolUse":entry}})
+        };
+        std::fs::write(
+            directory.join("hooks.json"),
+            serde_json::to_vec(&hooks).map_err(|error| {
+                Error::Run(format!("cannot encode Codex native hooks: {error}"))
+            })?,
+        )
+        .map_err(crate::io_error)?;
+        let config_path = directory.join("config.toml");
+        let config = std::fs::read_to_string(&config_path).map_err(crate::io_error)?;
+        std::fs::write(
+            &config_path,
+            config.replacen("[features]\n", "[features]\ncodex_hooks = true\n", 1),
+        )
+        .map_err(crate::io_error)?;
+        context.command.arg("--dangerously-bypass-hook-trust");
+    }
     context.command.env("CODEX_HOME", &directory);
     if let Some(key) = connection.credential.as_deref() {
         context.command.env("ASB_AGENT_API_KEY", key);
@@ -384,6 +490,9 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
+    if native_snapshot(Some(tape.mode)) {
+        return Ok(());
+    }
     // The existing MCP replay transport cannot capture these native features.
     // Limit only tape runs until the native transport can replay them.
     context.command.args([
@@ -440,10 +549,26 @@ fn prepare_tool_replay(
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
-    // Preserve the runner's provider-capture ownership boundary. Codex tape
-    // mode intentionally records tool effects only through the MCP relay.
-    let _ = context.provider_capture;
     let mut artifacts = super::super::mcp_relay::collect_artifacts(context);
+    if let Some(pending) = context
+        .frozen
+        .bytes("native-tool-pending.jsonl")
+        .filter(|bytes| !bytes.is_empty())
+    {
+        match context
+            .provider_capture
+            .ok_or_else(|| "Codex provider capture is unavailable".to_owned())
+            .and_then(|capture| bind_provider_tool_outputs(pending, capture))
+        {
+            Ok(bytes) => artifacts
+                .sealed_artifacts
+                .push(super::super::SealedArtifact {
+                    kind: "native-tool-deferred".into(),
+                    bytes,
+                }),
+            Err(error) => artifacts.errors.push(error),
+        }
+    }
     artifacts.final_response = final_response_from_frozen(context.frozen);
     artifacts
 }
@@ -460,7 +585,6 @@ fn final_response_from_frozen(frozen: &super::super::FrozenArtifacts) -> Option<
 /// that adapter-specific envelope with the sealed native exchange: its replay
 /// shim extracts the completed-shell payload and exit status before Codex
 /// renders a fresh volatile envelope.
-#[cfg(test)]
 fn bind_provider_tool_outputs(
     sidecar: &[u8],
     capture: &std::path::Path,
@@ -735,7 +859,6 @@ fn bind_provider_tool_outputs(
 /// Their results appear as the newly appended cumulative input items of the
 /// next request, so this adapter-local sequence identifies native shell calls
 /// without interpreting generic tape data.
-#[cfg(test)]
 fn provider_function_calls(
     row: &serde_json::Value,
 ) -> Result<(Vec<(String, Option<String>)>, bool), String> {
@@ -782,7 +905,6 @@ fn provider_function_calls(
     Ok((calls, true))
 }
 
-#[cfg(test)]
 fn decode_base64(value: &str) -> Result<Vec<u8>, ()> {
     fn digit(byte: u8) -> Result<u8, ()> {
         match byte {
@@ -817,7 +939,6 @@ fn decode_base64(value: &str) -> Result<Vec<u8>, ()> {
     Ok(bytes)
 }
 
-#[cfg(test)]
 fn encode_base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
