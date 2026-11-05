@@ -225,12 +225,6 @@ fn command(context: &CommandContext<'_>) -> CommandSpec {
             "--skip-git-repo-check".into(),
             "--ephemeral".into(),
             "--ignore-rules".into(),
-            "--disable".into(),
-            "multi_agent".into(),
-            "--disable".into(),
-            "apps".into(),
-            "--disable".into(),
-            "plugins".into(),
             "--json".into(),
             "--model".into(),
             context.config.model.clone(),
@@ -275,6 +269,16 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
+    // The existing MCP replay transport cannot capture these native features.
+    // Limit only tape runs until the native transport can replay them.
+    context.command.args([
+        "--disable",
+        "multi_agent",
+        "--disable",
+        "apps",
+        "--disable",
+        "plugins",
+    ]);
     let launch = super::super::tool_replay_mcp::allow_commuted_observations(
         super::super::tool_replay_mcp::launch(context, tape)?,
     );
@@ -652,14 +656,17 @@ fn configure(
     // replace a native function-tool result. When the tape profile is active,
     // expose only ASB's sealed MCP tool transport, which owns record/replay.
     // Ordinary live runs retain Codex's complete native tool set.
-    let replay_features = if replay_configuration_path.is_file() {
-        "shell_tool = false\n"
+    let (search, replay_features) = if replay_configuration_path.is_file() {
+        (
+            "web_search = \"disabled\"\n",
+            "apps = false\nplugins = false\nenable_mcp_apps = false\nshell_tool = false\n",
+        )
     } else {
-        ""
+        ("", "")
     };
     let mcp_configuration = declared_mcp_configuration(mcp_servers, mcp_tape, run_dir)?;
     let configuration = format!(
-        "model = {model}\nmodel_provider = \"asb_provider\"\nweb_search = \"disabled\"\n\n[features]\napps = false\nplugins = false\nenable_mcp_apps = false\n{replay_features}\n[model_providers.asb_provider]\nname = \"ASB provider\"\nbase_url = {base_url}\n{key}wire_api = \"responses\"\nrequires_openai_auth = false\n\n{mcp_configuration}{replay_configuration}"
+        "model = {model}\nmodel_provider = \"asb_provider\"\n{search}\n[features]\n{replay_features}\n[model_providers.asb_provider]\nname = \"ASB provider\"\nbase_url = {base_url}\n{key}wire_api = \"responses\"\nrequires_openai_auth = false\n\n{mcp_configuration}{replay_configuration}"
     );
     std::fs::write(directory.join("config.toml"), configuration).map_err(|error| {
         Error::Run(format!(
@@ -867,6 +874,13 @@ mod tests {
         .unwrap();
         let contents = std::fs::read_to_string(directory.join("config.toml")).unwrap();
         let config: toml::Value = toml::from_str(&contents).unwrap();
+        assert!(config.get("web_search").is_none());
+        for feature in ["apps", "plugins", "multi_agent", "shell_tool"] {
+            assert!(
+                config["features"].get(feature).is_none(),
+                "{feature} should retain its normal setting"
+            );
+        }
         assert_eq!(config["model"].as_str(), Some("model\"name"));
         assert_eq!(config["model_provider"].as_str(), Some("asb_provider"));
         assert_eq!(
@@ -1072,6 +1086,7 @@ mod tests {
         });
         assert_eq!(spec.prompt_delivery, PromptDelivery::Stdin);
         assert_eq!(spec.args.last().map(String::as_str), Some("-"));
+        assert!(!spec.args.iter().any(|argument| argument == "--disable"));
         assert!(
             !spec
                 .args
@@ -1140,6 +1155,10 @@ mod tests {
         );
         assert_eq!(config["model"].as_str(), Some("fixture-model"));
         assert_eq!(config["features"]["shell_tool"].as_bool(), Some(false));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--disable", "multi_agent"])
+        );
         assert!(config.get("hooks").is_none());
         assert!(
             !args
