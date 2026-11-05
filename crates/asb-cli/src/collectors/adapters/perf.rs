@@ -14,10 +14,9 @@ mod symbols;
 #[path = "../../../tests/unit/perf_stop_contract.rs"]
 mod stop_contract_tests;
 
-/// Build the process-scoped `perf record` arguments.  Attaching to the runner
-/// root with inheritance is deliberate: the root may fork a bridge, agent
-/// helper, or workload process after attachment, and each descendant must be
-/// included without sampling unrelated host processes.
+/// Attach to the selected agent root, never the ASB runner. Inheritance follows
+/// subsequently created agent threads and children without sampling siblings,
+/// collector processes or unrelated host activity.
 fn record_args(pid: u32) -> Vec<String> {
     vec![
         "record".into(),
@@ -519,11 +518,29 @@ struct PerfState {
     enabled: bool,
 }
 
+#[cfg(target_os = "linux")]
+fn validate_agent_target(
+    pid: u32,
+    identity: Option<measurements::ProcessIdentity>,
+) -> Result<(), String> {
+    let root = identity
+        .filter(|root| root.pid == pid && root.matches())
+        .ok_or("perf requires the live, generation-bound agent measurement target")?;
+    let runner = measurements::ProcessIdentity::read(std::process::id())
+        .ok_or("cannot verify ASB process identity before perf attachment")?;
+    if runner.in_tree(root) {
+        return Err("perf target includes ASB; select the agent process root instead".into());
+    }
+    Ok(())
+}
+
 impl measurements::Session {
     pub(crate) fn start_perf(&mut self, pid: u32) -> Result<(), String> {
         if !self.state::<PerfState>().borrow().enabled {
             return Ok(());
         }
+        #[cfg(target_os = "linux")]
+        validate_agent_target(pid, self.measurement_target())?;
         #[cfg(target_os = "linux")]
         let mut record_ready = readiness::Readiness::new(
             &self
@@ -545,7 +562,7 @@ impl measurements::Session {
             crate::evidence::Capture::create(&stdout_path)?,
             crate::evidence::Capture::create(&stderr_path)?,
         ];
-        // Attach to the runner root and inherit counters into every child.
+        // Attach to the verified agent root and inherit counters into every child.
         // Unlike a one-time comma-separated PID snapshot, perf's inheritance
         // follows helpers forked after attachment as well as descendants of
         // those helpers, while remaining scoped to this benchmark tree.
@@ -1261,5 +1278,75 @@ mod tests {
             == "task-clock,context-switches,cpu-migrations,page-faults,cycles,l1d_cache_refill"));
         assert!(args.windows(2).any(|pair| pair == ["-p", "42"]));
         assert!(!args.iter().any(|arg| arg == "-a"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn attachment_rejects_asb_ancestors_and_unbound_process_generations() {
+        use crate::measurements::ProcessIdentity;
+        let runner = ProcessIdentity::read(std::process::id()).unwrap();
+        assert!(
+            super::validate_agent_target(runner.pid, Some(runner))
+                .unwrap_err()
+                .contains("includes ASB")
+        );
+        // Selecting ASB's parent would inherit ASB and its collectors too.
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let parent_pid = stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let parent = ProcessIdentity::read(parent_pid).unwrap();
+        assert!(
+            super::validate_agent_target(parent.pid, Some(parent))
+                .unwrap_err()
+                .contains("includes ASB")
+        );
+        assert!(super::validate_agent_target(0, None).is_err());
+        assert!(super::validate_agent_target(runner.pid, None).is_err());
+        let stale = ProcessIdentity {
+            start_time_ticks: runner.start_time_ticks + 1,
+            ..runner
+        };
+        assert!(super::validate_agent_target(stale.pid, Some(stale)).is_err());
+        assert!(super::validate_agent_target(runner.pid + 1, Some(runner)).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn attachment_accepts_a_separate_live_child_agent_root() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let identity = crate::measurements::ProcessIdentity::read(child.id());
+        let result = super::validate_agent_target(child.id(), identity);
+        let _ = child.kill();
+        child.wait().unwrap();
+        result.unwrap();
+    }
+
+    #[test]
+    fn arm_groups_never_expand_collection_to_all_cpus_or_other_processes() {
+        let events = vec!["{armv8_pmuv3_0/cpu_cycles/,armv8_pmuv3_0/inst_retired/}".into()];
+        for args in [record_args(42), stat_args(42, 100, &events)] {
+            assert_eq!(args.windows(2).filter(|pair| pair[0] == "-p").count(), 1);
+            assert!(args.windows(2).any(|pair| pair == ["-p", "42"]));
+            assert!(args.iter().any(|arg| arg == "--inherit"));
+            assert!(!args.iter().any(|arg| matches!(
+                arg.as_str(),
+                "-a" | "--all-cpus" | "-C" | "--cpu" | "-G" | "--cgroup" | "--no-inherit"
+            )));
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg.contains("hisi_") || arg.contains("uncore"))
+            );
+        }
     }
 }
