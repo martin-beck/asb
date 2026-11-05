@@ -243,6 +243,23 @@ pub(crate) fn run_with_tape(
     run_with_diagnostics(path, options, output, &Mutex::new(BTreeSet::new()))
 }
 
+fn validate_explicit_tool_transport(
+    config: &BenchmarkConfig,
+    options: RunOptions<'_>,
+) -> Result<(), Error> {
+    if options.tool_mode_explicit
+        && options.effective_tool_mode().is_some()
+        && let Some(adapter) = agents::find(&config.agent)
+        && !adapter.supports_tool_replay()
+    {
+        return Err(Error::Input(format!(
+            "agent `{}` does not yet provide an ASB tool interception transport; use --llm-record/--llm-replay or choose an adapter with sealed tool replay",
+            config.agent
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn run_with_diagnostics(
     path: &str,
     options: RunOptions<'_>,
@@ -285,6 +302,7 @@ pub(crate) fn run_with_diagnostics(
     // capacity, starting collectors, or discovering/installing dependencies.
     // Attempt admission repeats this validation for internal call paths.
     validate_mcp_configuration(&config, options.mcp_mode)?;
+    validate_explicit_tool_transport(&config, options)?;
     if options.native_capsule_record.is_some()
         && (options.mode != Some(tape::Mode::Record)
             || config.concurrency != 1
