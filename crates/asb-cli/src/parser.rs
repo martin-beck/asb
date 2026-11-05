@@ -1189,7 +1189,7 @@ struct RunArgs {
     /// Record provider requests and responses.
     #[arg(long)]
     llm_record: bool,
-    /// Replay provider requests and responses.
+    /// Replay provider traffic; native tool commands may still run and access the network.
     #[arg(long = "llmreplay", visible_alias = "llm-replay")]
     llm_replay: bool,
     /// Record adapter-supported local tool calls and their agent-visible results.
@@ -1277,7 +1277,7 @@ struct SweepArgs {
     /// Record provider requests and responses.
     #[arg(long)]
     llm_record: bool,
-    /// Replay provider requests and responses.
+    /// Replay provider traffic; native tool commands may still run and access the network.
     #[arg(long = "llmreplay", visible_alias = "llm-replay")]
     llm_replay: bool,
     /// Record adapter-supported local tool calls and their agent-visible results.
