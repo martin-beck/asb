@@ -14,7 +14,7 @@ mod snapshot;
 pub(crate) use producer::command as producer_command;
 pub(crate) use producer::{Completion as ProducerCompletion, Policy as ProducerPolicy, Producer};
 use snapshot::ProcessTreeSnapshot;
-pub(crate) use snapshot::{SnapshotCommand, bounded_version};
+pub(crate) use snapshot::{SnapshotCommand, bounded_command, bounded_version};
 #[cfg(test)]
 mod coverage_tests;
 pub use cohort::ExecutionCohort;
@@ -1053,10 +1053,13 @@ impl Session {
             &self.dir.join("execution-window.json"),
             &self.execution_window_document(),
         ));
-        observe(analysis::publish(
-            &self.dir,
-            self.component_timing("agent.execute"),
-        ));
+        let analysis = analysis::publish(&self.dir, self.component_timing("agent.execute"));
+        if let Err(error) = &analysis {
+            observe(Err(error.clone()));
+        }
+        for adapter in self.adapters.clone() {
+            observe(adapter.after_analysis(&mut self, analysis.as_ref().ok()));
+        }
         observe(
             serde_json::to_value(&measurement)
                 .map_err(|error| error.to_string())
@@ -2014,8 +2017,59 @@ mod tests {
 
     #[test]
     fn writes_machine_readable_run_and_summary() {
+        struct LateProducer;
+        impl collectors::CollectorAdapter for LateProducer {
+            fn id(&self) -> &'static str {
+                "test-late-counter-producer"
+            }
+            fn finish(&self, session: &mut Session) -> Result<(), String> {
+                let quality = |n| serde_json::json!({"observed_integer_count":n,"observed_rows":1,"unavailable_rows":0,"unknown_quality_rows":0,"known_event_runtime_ns":1000,"min_running_pct":100,"max_running_pct":100});
+                for (name, value) in [
+                    (
+                        "perf-stat-plan",
+                        serde_json::json!({"schema_version":1,"scope":"agent-process-tree","root":{"pid":42,"start_time_ticks":7},"excluded_controller_pid":1,"inherit":true,"system_wide":false,"counter_mode":"unscaled-observed","groups":["{cycles,instructions}"]}),
+                    ),
+                    (
+                        "perf-stat-quality",
+                        serde_json::json!({"schema_version":1,"counter_mode":"unscaled-observed","events":{"cycles":quality(100),"instructions":quality(200)}}),
+                    ),
+                    ("perf-stat", serde_json::json!({"status":"completed"})),
+                ] {
+                    write_json(&session.dir.join(format!("{name}.json")), &value)?;
+                }
+                Ok(())
+            }
+        }
+        struct NormalizedConsumer;
+        impl collectors::CollectorAdapter for NormalizedConsumer {
+            fn id(&self) -> &'static str {
+                "test-normalized-counter-consumer"
+            }
+            fn finish(&self, session: &mut Session) -> Result<(), String> {
+                assert!(!session.dir.join("perf-stat-plan.json").exists());
+                Ok(())
+            }
+            fn after_analysis(
+                &self,
+                session: &mut Session,
+                analysis: Option<&serde_json::Value>,
+            ) -> Result<(), String> {
+                let analysis = analysis.expect("current analysis");
+                assert_eq!(analysis["counter_groups"][0]["instructions_per_cycle"], 2.0);
+                let saved: serde_json::Value = serde_json::from_slice(
+                    &fs::read(session.dir.join("bottlenecks.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(analysis, &saved);
+                write_json(&session.dir.join("normalized-consumer.json"), analysis)
+            }
+        }
+        static PRODUCER: LateProducer = LateProducer;
+        static CONSUMER: NormalizedConsumer = NormalizedConsumer;
         let dir = std::env::temp_dir().join(format!("asb-measure-{}", unix_ms()));
         let mut session = Session::start_with_collectors(&dir, &[], None).expect("session");
+        session.adapters.insert(0, &CONSUMER);
+        session.adapters.push(&PRODUCER);
         session
             .event(collectors::LifecycleEvent::RunStarted)
             .unwrap();
@@ -2112,6 +2166,8 @@ mod tests {
         let analysis: serde_json::Value =
             serde_json::from_slice(&fs::read(dir.join("bottlenecks.json")).unwrap()).unwrap();
         assert_eq!(analysis["engine"], "asb-resource-analysis-v1");
+        assert_eq!(analysis["counter_groups"][0]["instructions_per_cycle"], 2.0);
+        assert!(dir.join("normalized-consumer.json").is_file());
         assert_eq!(analysis["observations"][0]["unit"], "ms");
         assert_eq!(analysis["findings"].as_array().unwrap().len(), 3);
         let _ = fs::remove_dir_all(dir);

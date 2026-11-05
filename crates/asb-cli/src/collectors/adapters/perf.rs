@@ -612,6 +612,15 @@ impl measurements::Session {
         ];
         let hardware_events = super::arm_pmu::events(self)
             .unwrap_or_else(|| super::agentsysperf::telemetry_events(self));
+        measurements::write_json(
+            &self.dir.join("perf-stat-plan.json"),
+            &serde_json::json!({
+                "schema_version":1, "scope":"agent-process-tree", "counter_mode":"unscaled-observed",
+                "root":self.measurement_target(), "groups":hardware_events,
+                "excluded_controller_pid":std::process::id(), "excluded_guardian":self.measurement_guardian(),
+                "inherit":true, "system_wide":false,
+            }),
+        )?;
         let stat_args = stat_args(pid, measurement_interval_ms(), &hardware_events);
         let (mut command, route) = self.collector_command("perf")?;
         command.args(&stat_args);
@@ -689,7 +698,7 @@ struct PerfStat {
 #[derive(Default, serde::Serialize)]
 struct EventQuality {
     observed_value: Option<f64>,
-    /// Exact integer Arm hardware counts, independent of graph rounding.
+    /// Exact integer hardware counts, independent of graph rounding.
     observed_integer_count: Option<u64>,
     value_unit: &'static str,
     observed_rows: u64,
@@ -798,16 +807,16 @@ fn parse_perf_stat_bounded(mut reader: impl BufRead, max_bytes: u64) -> Result<P
             return Err("perf stat PMU counter overflow; no partial totals published".into());
         }
         quality.observed_value = Some(observed_value);
-        if super::arm_pmu::metric_name(fields[event_index]).is_some() {
+        if exact_hardware_event(fields[event_index]) {
             let integer = raw_value
                 .parse::<u64>()
-                .map_err(|_| "Arm hardware counter is not an exact integer")?;
+                .map_err(|_| "hardware counter is not an exact integer")?;
             quality.observed_integer_count = Some(
                 quality
                     .observed_integer_count
                     .unwrap_or(0)
                     .checked_add(integer)
-                    .ok_or("Arm hardware counter integer overflow")?,
+                    .ok_or("hardware counter integer overflow")?,
             );
         }
         let name = format!("perf.{name}");
@@ -880,6 +889,21 @@ pub(crate) fn parse_perf_stat_metrics(output: &str) -> BTreeMap<String, f64> {
         .unwrap_or_default()
 }
 
+fn exact_hardware_event(event: &str) -> bool {
+    if super::arm_pmu::metric_name(event).is_some() {
+        return true;
+    }
+    let event = event
+        .strip_prefix("cpu_core/")
+        .or_else(|| event.strip_prefix("cpu_atom/"))
+        .and_then(|event| event.strip_suffix('/'))
+        .unwrap_or(event);
+    matches!(
+        event,
+        "cycles" | "instructions" | "cache-misses" | "branch-misses"
+    )
+}
+
 fn perf_metric_name(event: &str) -> Option<&'static str> {
     if event.starts_with("armv8_pmuv3") {
         return super::arm_pmu::metric_name(event);
@@ -921,6 +945,29 @@ pub(crate) fn perf_permission_error() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn generic_and_hybrid_integer_counts_are_exact_and_never_cross_domains() {
+        let data = super::parse_perf_stat(std::io::Cursor::new(
+            "0.1,9007199254740993,,cycles,100,100.00,,\n0.1,11,,cpu_core/cycles/,100,100.00,,\n0.1,17,,cpu_atom/cycles/,100,100.00,,\n"
+        )).unwrap();
+        for (name, count) in [
+            ("cycles", 9007199254740993_u64),
+            ("cpu_core/cycles/", 11),
+            ("cpu_atom/cycles/", 17),
+        ] {
+            assert_eq!(data.quality[name].observed_integer_count, Some(count));
+        }
+        for value in ["1.5", "18446744073709551616"] {
+            let row = format!("0.1,{value},,cycles,100,100.00,,\n");
+            assert!(super::parse_perf_stat(std::io::Cursor::new(row)).is_err());
+        }
+        assert!(
+            super::parse_perf_stat(std::io::Cursor::new(
+                "0.1,18446744073709551615,,cycles,100,100.00,,\n0.2,1,,cycles,100,100.00,,\n"
+            ))
+            .is_err()
+        );
+    }
     #[test]
     fn arm_integer_counts_preserve_precision_and_pmu_quality_identity() {
         let data = super::parse_perf_stat(std::io::Cursor::new(

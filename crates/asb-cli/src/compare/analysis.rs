@@ -47,6 +47,19 @@ pub(super) fn regenerate(
             insert_unique(metrics, format!("analysis.{rule}"), value)?;
         }
     }
+    for group in analysis["counter_groups"].as_array().into_iter().flatten() {
+        if let (Some(pmu), Some(ipc)) = (
+            group["pmu"].as_str(),
+            group["instructions_per_cycle"].as_f64(),
+        ) && !pmu.starts_with("armv8_pmuv3")
+        {
+            insert_unique(
+                metrics,
+                format!("analysis.{}.instructions_per_cycle", path_key(pmu)),
+                ipc,
+            )?;
+        }
+    }
     documents.insert("bottlenecks".into(), analysis);
     Ok(())
 }
@@ -100,6 +113,14 @@ pub(super) fn html(documents: &BTreeMap<String, Value>) -> String {
         ));
     }
     html.push_str("</ul>");
+    for group in analysis["counter_groups"].as_array().into_iter().flatten() {
+        let pmu = group["pmu"].as_str().unwrap_or("unknown");
+        let status = group["status"].as_str().unwrap_or("unavailable");
+        let ipc = group["instructions_per_cycle"]
+            .as_f64()
+            .map_or_else(|| "unavailable".into(), |v| format!("{v:.4}"));
+        html.push_str(&format!("<details><summary>Grouped agent counters: {} — {} (IPC: {})</summary><p>Exact raw counts and compatible-runtime counts are distinct. Separate PMU domains are never added for ratios.</p><pre>{}</pre></details>",escape(pmu),escape(status),ipc,escape(&serde_json::to_string_pretty(group).expect("normalized group is JSON"))));
+    }
     for pmu in ["hardware", "sampling"].into_iter().flat_map(|family| {
         analysis
             .get(family)
@@ -196,6 +217,43 @@ pub(super) fn graph_section(name: &str) -> Option<crate::collectors::GraphSectio
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn grouped_counter_report_is_recomputed_with_quality_and_scope_guards() {
+        let counter = |n| json!({"observed_integer_count":n,"observed_rows":1,"unavailable_rows":0,"unknown_quality_rows":0,"known_event_runtime_ns":1000,"min_running_pct":100,"max_running_pct":100});
+        let mut documents = BTreeMap::from([
+            (
+                "perf-stat-plan".into(),
+                json!({"schema_version":1,"scope":"agent-process-tree","root":{"pid":42,"start_time_ticks":7},"excluded_controller_pid":1,"inherit":true,"system_wide":false,"counter_mode":"unscaled-observed","groups":["{cycles,instructions}"]}),
+            ),
+            (
+                "perf-stat-quality".into(),
+                json!({"schema_version":1,"counter_mode":"unscaled-observed","events":{"cycles":counter(100),"instructions":counter(200)}}),
+            ),
+            (
+                "perf-stat".into(),
+                json!({"status":"completed","metrics":{"perf.observed_cycles_count":1,"perf.observed_instructions_count":9999}}),
+            ),
+        ]);
+        let mut metrics = BTreeMap::new();
+        regenerate(&mut documents, &mut metrics).unwrap();
+        assert_eq!(metrics["analysis.generic_cpu.instructions_per_cycle"], 2.0);
+        assert!(html(&documents).contains("Grouped agent counters"));
+        assert!(html(&documents).contains("compatible-runtime counts"));
+        documents.get_mut("perf-stat-quality").unwrap()["events"]["cycles"]["min_running_pct"] =
+            json!(90);
+        metrics.clear();
+        regenerate(&mut documents, &mut metrics).unwrap();
+        assert!(metrics.is_empty());
+        assert!(documents["bottlenecks"]["counter_groups"][0]["instructions_per_cycle"].is_null());
+        documents.get_mut("perf-stat-plan").unwrap()["root"]["pid"] = json!(1);
+        regenerate(&mut documents, &mut metrics).unwrap();
+        assert!(
+            documents["bottlenecks"]["counter_groups"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
     #[test]
     fn regeneration_discards_saved_findings_and_preserves_original_documents() {
         let stale = json!({"findings":[{"rule":"invented","assessment":"observed"}]});

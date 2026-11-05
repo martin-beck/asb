@@ -114,20 +114,36 @@ impl CollectorAdapter for AgentSysPerfCollector {
         let mut state = state.borrow_mut();
         state.enabled = enabled;
         state.scaling_requested = selected.iter().any(|value| value == "agentsysperf:scaling");
-        state.platform = enabled.then(discover_platform);
+        state.platform = enabled.then(|| discover_platform(session));
         Ok(())
     }
 
-    fn finish(&self, session: &mut Session) -> Result<(), String> {
+    fn after_analysis(
+        &self,
+        session: &mut Session,
+        normalized: Option<&Value>,
+    ) -> Result<(), String> {
         if !session.state::<State>().borrow().enabled {
             return Ok(());
         }
 
+        let Some(normalized) =
+            normalized.filter(|value| value["engine"] == "asb-resource-analysis-v1")
+        else {
+            return write_unavailable(
+                session,
+                "Current normalized analysis is unavailable; raw counters and previous analysis are not substituted.",
+            );
+        };
+        measurements::write_json(
+            &session.dir.join("agentsysperf-normalized-input.json"),
+            normalized,
+        )?;
         let Some(timing) = session.component_timing("agent.execute") else {
             return write_unavailable(session, "ASB did not observe an agent execution interval.");
         };
         let span_id = format!("asb::{}::agent-execute", session.trace_id());
-        let records = match records(session, &span_id, timing) {
+        let records = match records(session, &span_id, timing, normalized) {
             Ok(records) => records,
             Err(reason) => return write_unavailable(session, &reason),
         };
@@ -151,11 +167,12 @@ impl CollectorAdapter for AgentSysPerfCollector {
                 "status": "observed",
                 "scope": "selected-agent-process-tree",
                 "analysis_input": "agentsysperf-records/measurement_records.json",
+                "normalized_input": "agentsysperf-normalized-input.json",
                 "records": records.len(),
                 "scaling_requested": session.state::<State>().borrow().scaling_requested,
                 "platform": session.state::<State>().borrow().platform,
                 "analysis": analysis["status"],
-                "limitations": "This is an ASB-owned process-tree export for offline AgentSysPerf analysis. It does not run AgentSysPerf's benchmark harness or accept system-wide perf attribution. Missing observations are omitted rather than represented as zero."
+                "limitations": "This is an ASB-owned process-tree export for offline AgentSysPerf analysis. It does not run AgentSysPerf's benchmark harness or accept system-wide perf attribution. Missing observations are omitted rather than represented as zero. L3 is exported only for one coherent PMU domain; hybrid domains remain separate in the normalized input and are never summed."
             }),
         )
     }
@@ -585,15 +602,21 @@ pub(super) fn telemetry_events(session: &mut Session) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn discover_platform() -> PlatformManifest {
+fn discover_platform(session: &Session) -> PlatformManifest {
     let architecture = match std::env::consts::ARCH {
         "aarch64" => "armv8",
         "x86_64" => "x86_64",
         other => other,
     };
-    let cpuinfo = fs::read_to_string("/proc/cpuinfo")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    let cpuinfo = fs::File::open("/proc/cpuinfo")
+        .ok()
+        .and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take(1024 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+            (bytes.len() <= 1024 * 1024)
+                .then(|| String::from_utf8_lossy(&bytes).to_ascii_lowercase())
+        })
+        .unwrap_or_default();
     let family = if architecture == "armv8" {
         "armv8"
     } else if cpuinfo.contains("authenticamd") || cpuinfo.contains("amd") {
@@ -603,26 +626,29 @@ fn discover_platform() -> PlatformManifest {
     } else {
         "unknown"
     };
-    let listing = Command::new("perf")
-        .args(["list", "--no-desc"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+    let local = session
+        .tool_directory()
+        .map(|root| crate::tools::local_lookup("perf", root));
+    let executable = match local {
+        Some(crate::executables::Lookup::Found(path)) => Some(path),
+        Some(crate::executables::Lookup::Unusable(_)) => None,
+        _ => crate::tools::host_executable(std::path::Path::new("perf")),
+    };
+    let listing = executable
+        .and_then(|path| {
+            measurements::bounded_command(
+                &path,
+                measurements::SnapshotCommand {
+                    arguments: vec!["list".into(), "--no-desc".into()],
+                    runtime: Duration::from_secs(3),
+                    stream_bytes: 1024 * 1024,
+                },
+            )
+        })
+        .filter(|(_, stderr)| stderr.is_empty())
+        .and_then(|(stdout, _)| String::from_utf8(stdout).ok())
         .unwrap_or_default();
-    let mut wanted = vec!["cycles", "instructions", "cache-misses", "branch-misses"];
-    match family {
-        "intel" => wanted.extend(["topdown-fe-bound", "topdown-be-bound"]),
-        // AMD gets the portable hardware counters above unless a future,
-        // separately qualified AMD PMU catalog is available.
-        "armv8" => wanted.extend(["l1d_cache_refill", "stall_backend", "stall_frontend"]),
-        _ => {}
-    }
-    let perf_events = wanted
-        .into_iter()
-        .filter(|event| perf_list_advertises(&listing, event))
-        .map(str::to_owned)
-        .collect();
+    let perf_events = telemetry_groups(&listing);
     PlatformManifest {
         family,
         architecture,
@@ -632,10 +658,43 @@ fn discover_platform() -> PlatformManifest {
 
 fn perf_list_advertises(listing: &str, event: &str) -> bool {
     listing.lines().any(|line| {
-        line.split_whitespace()
+        line.split('[')
             .next()
-            .is_some_and(|first| first == event)
+            .unwrap_or("")
+            .split(" OR ")
+            .any(|alias| alias.split_whitespace().next() == Some(event))
     })
+}
+
+fn telemetry_groups(listing: &str) -> Vec<String> {
+    let mut groups = Vec::new();
+    for domain in ["cpu_core", "cpu_atom"] {
+        let named = |event| format!("{domain}/{event}/");
+        if ["cycles", "instructions"]
+            .iter()
+            .all(|event| perf_list_advertises(listing, &named(event)))
+        {
+            let events = ["cycles", "instructions", "cache-misses", "branch-misses"]
+                .iter()
+                .map(named)
+                .filter(|event| perf_list_advertises(listing, event))
+                .collect::<Vec<_>>();
+            groups.push(format!("{{{}}}", events.join(",")));
+        }
+    }
+    if groups.is_empty()
+        && ["cycles", "instructions"]
+            .iter()
+            .all(|event| perf_list_advertises(listing, event))
+    {
+        let events = ["cycles", "instructions", "cache-misses", "branch-misses"]
+            .iter()
+            .filter(|event| perf_list_advertises(listing, event))
+            .copied()
+            .collect::<Vec<_>>();
+        groups.push(format!("{{{}}}", events.join(",")));
+    }
+    groups
 }
 
 fn write_unavailable(session: &Session, reason: &str) -> Result<(), String> {
@@ -656,6 +715,7 @@ fn records(
     session: &Session,
     span_id: &str,
     timing: &ComponentTiming,
+    normalized: &Value,
 ) -> Result<Vec<MeasurementRecord>, String> {
     let mut l1 = Map::new();
     l1.insert("kind".into(), json!("agent_execute"));
@@ -664,13 +724,8 @@ fn records(
         "duration_us".into(),
         json!(timing.wall_ms.saturating_mul(1_000)),
     );
-    if let Some(value) = timing.cpu_user_ms {
-        // `cpu_time_s` is CPU time, not just time spent in userspace.  The
-        // accounting collector has already validated both optional counters.
-        l1.insert(
-            "cpu_time_s".into(),
-            json!((value + timing.cpu_system_ms.unwrap_or_default()) / 1_000.0),
-        );
+    if let Some(value) = normalized_cpu_seconds(normalized) {
+        l1.insert("cpu_time_s".into(), json!(value));
     }
     let memory = read_observed_metrics(
         &session.dir.join("agent-memory.json"),
@@ -690,8 +745,7 @@ fn records(
         layer: "l1",
         payload: l1,
     }];
-    let perf = read_metrics(&session.dir.join("perf-stat.json"))?;
-    if let Some(l3) = l3_record(&perf) {
+    if let Some(l3) = l3_record(normalized) {
         result.push(MeasurementRecord {
             span_id: span_id.into(),
             layer: "l3",
@@ -701,58 +755,70 @@ fn records(
     Ok(result)
 }
 
-fn l3_record(perf: &Map<String, Value>) -> Option<Map<String, Value>> {
-    let mut l3 = Map::new();
-    for (from, to) in [
-        ("perf.observed_cycles_count", "cycles"),
-        ("perf.observed_instructions_count", "instructions"),
-        ("perf.cache_misses_count", "cache_misses"),
-        ("perf.branch_misses_count", "branch_misses"),
-        ("perf.observed_l1d_cache_refill_count", "l1d_cache_refill"),
-        ("perf.observed_stall_backend_count", "stall_backend"),
-        ("perf.observed_stall_frontend_count", "stall_frontend"),
-    ] {
-        if let Some(value) = metric(perf, from) {
-            l3.insert(to.into(), json!(value));
+fn normalized_cpu_seconds(normalized: &Value) -> Option<f64> {
+    let observations = normalized.get("observations")?.as_array()?;
+    let value = |id| {
+        let mut matches = observations.iter().filter(|o| o["id"] == id);
+        let observation = matches.next()?;
+        if matches.next().is_some()
+            || observation["availability"] != "observed"
+            || observation["scope"] != "agent_process_tree"
+            || observation["unit"] != "ms"
+            || observation["kind"] != "accumulated_thread_time"
+        {
+            return None;
         }
-    }
-    if let (Some(instructions), Some(cycles)) = (
-        l3.get("instructions").and_then(Value::as_f64),
-        l3.get("cycles").and_then(Value::as_f64),
-    ) && cycles > 0.0
-    {
-        l3.insert("ipc".into(), json!(instructions / cycles));
-    }
-    (!l3.is_empty()).then_some(l3)
+        observation
+            .get("value")?
+            .as_f64()
+            .filter(|v| v.is_finite() && *v >= 0.0)
+    };
+    let total = (value("cpu.user_ms")? + value("cpu.system_ms")?) / 1000.0;
+    total.is_finite().then_some(total)
 }
 
-fn read_metrics(path: &std::path::Path) -> Result<Map<String, Value>, String> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
-        Err(error) => {
-            return Err(format!(
-                "cannot read collector evidence at {}: {error}",
-                path.display()
-            ));
-        }
+fn l3_record(normalized: &Value) -> Option<Map<String, Value>> {
+    let groups = normalized.get("counter_groups")?.as_array()?;
+    // AgentSysPerf's compatibility shape has no PMU-domain dimension. Never
+    // sum heterogeneous counters or silently choose one side of a hybrid CPU.
+    let [group] = groups.as_slice() else {
+        return None;
     };
-    let value: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| format!("invalid collector evidence at {}", path.display()))?;
-    Ok(value
-        .get("metrics")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default())
+    if group["scope"] != "agent-process-tree" {
+        return None;
+    }
+    let counts = group.get("coherent_counts")?.as_object()?;
+    let mut l3 = Map::new();
+    for name in [
+        "cycles",
+        "instructions",
+        "cache_misses",
+        "branch_misses",
+        "l1d_cache_refill",
+        "stall_backend",
+        "stall_frontend",
+    ] {
+        if let Some(value) = counts.get(name).and_then(Value::as_u64) {
+            l3.insert(name.into(), json!(value));
+        }
+    }
+    if let Some(ipc) = group
+        .get("instructions_per_cycle")
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite() && *v >= 0.0)
+    {
+        l3.insert("ipc".into(), json!(ipc));
+    }
+    (!l3.is_empty()).then_some(l3)
 }
 
 fn read_observed_metrics(
     path: &std::path::Path,
     required_scope: &str,
 ) -> Result<Map<String, Value>, String> {
-    let bytes = fs::read(path).map_err(|error| {
+    let bytes = read_bounded(path).ok_or_else(|| {
         format!(
-            "cannot read required collector evidence at {}: {error}",
+            "required collector evidence at {} is unreadable or exceeds the bounded input limit",
             path.display()
         )
     })?;
@@ -798,26 +864,67 @@ mod tests {
             .configure(&mut session, &["agentsysperf:l1-resource".into()])
             .unwrap();
         ADAPTER.start(&mut session).unwrap();
-        ADAPTER.finish(&mut session).unwrap();
+        fs::write(
+            root.join("bottlenecks.json"),
+            br#"{"engine":"asb-resource-analysis-v1","counter_groups":[]}"#,
+        )
+        .unwrap();
+        fs::write(root.join("perf-stat.json"), br#"{"metrics":{"perf.observed_cycles_count":20,"perf.observed_instructions_count":30}}"#).unwrap();
+        ADAPTER.after_analysis(&mut session, None).unwrap();
         assert!(!root.join("agentsysperf-host-telemetry.json").exists());
         let result: Value =
             serde_json::from_slice(&fs::read(root.join("agentsysperf.json")).unwrap()).unwrap();
         assert_eq!(result["status"], "unavailable");
         assert_eq!(result["scope"], "selected-agent-process-tree");
+        assert!(!root.join("agentsysperf-records").exists());
         drop(session);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn mapped_l3_records_calculate_ipc_only_from_observed_counts() {
-        let mut metrics = Map::new();
-        metrics.insert("perf.observed_cycles_count".into(), json!(20.0));
-        metrics.insert("perf.observed_instructions_count".into(), json!(30.0));
-        let record = l3_record(&metrics).expect("observed hardware counters");
-        assert_eq!(record["cycles"], 20.0);
-        assert_eq!(record["instructions"], 30.0);
-        assert_eq!(record["ipc"], 1.5);
+    fn mapped_l3_requires_normalized_groups_and_preserves_exact_counts() {
+        let counts =
+            json!({"cycles":9_007_199_254_740_993_u64,"instructions":18_014_398_509_481_986_u64});
+        let group = json!({"scope":"agent-process-tree","coherent_counts":counts,"instructions_per_cycle":2.0});
+        let mut normalized = json!({"counter_groups":[group]});
+        let record = l3_record(&normalized).unwrap();
+        assert_eq!(record["cycles"].as_u64(), Some(9_007_199_254_740_993));
+        assert_eq!(record["ipc"], 2.0);
         assert!(!record.contains_key("cache_misses"));
+        normalized["counter_groups"][0]["instructions_per_cycle"] = Value::Null;
+        assert!(!l3_record(&normalized).unwrap().contains_key("ipc"));
+        let group = normalized["counter_groups"][0].clone();
+        normalized["counter_groups"]
+            .as_array_mut()
+            .unwrap()
+            .push(group);
+        assert!(
+            l3_record(&normalized).is_none(),
+            "hybrid domains must not be combined"
+        );
+        assert!(l3_record(&json!({"metrics":{"perf.observed_cycles_count":20,"perf.observed_instructions_count":30}})).is_none());
+    }
+
+    #[test]
+    fn normalized_cpu_requires_both_agent_scoped_observations() {
+        let observation = |id, value| json!({"id":id,"scope":"agent_process_tree","availability":"observed","unit":"ms","kind":"accumulated_thread_time","value":value});
+        let mut n = json!({"observations":[observation("cpu.user_ms",1500.0),observation("cpu.system_ms",500.0)]});
+        assert_eq!(normalized_cpu_seconds(&n), Some(2.0));
+        for (field, value) in [
+            ("scope", json!("unknown")),
+            ("availability", json!("unavailable")),
+            ("value", Value::Null),
+            ("value", json!(-1)),
+        ] {
+            let mut invalid = n.clone();
+            invalid["observations"][1][field] = value;
+            assert!(normalized_cpu_seconds(&invalid).is_none());
+        }
+        n["observations"].as_array_mut().unwrap().pop();
+        assert!(
+            normalized_cpu_seconds(&n).is_none(),
+            "missing system time is not zero"
+        );
     }
 
     #[test]
@@ -861,6 +968,25 @@ mod tests {
         let arm = "  cycles\n  instructions\n  cache-misses\n  branch-misses\n  l1d_cache_refill OR armv8_pmuv3_0/l1d_cache_refill/\n  stall_backend\n  stall_frontend\n";
         assert!(perf_list_advertises(arm, "l1d_cache_refill"));
         assert!(!perf_list_advertises(arm, "topdown-fe-bound"));
+        assert_eq!(
+            telemetry_groups(arm),
+            ["{cycles,instructions,cache-misses,branch-misses}"]
+        );
+        assert!(telemetry_groups("cpu_core/cycles/\n instructions\n").is_empty());
+        assert!(telemetry_groups("uncore_imc/cycles/\nuncore_imc/instructions/\n").is_empty());
+        assert!(!perf_list_advertises(
+            "a description about cycles",
+            "cycles"
+        ));
+        assert_eq!(
+            telemetry_groups(
+                "cycles OR cpu_core/cycles/ [Hardware event]\ninstructions OR cpu_core/instructions/\ncpu_atom/cycles/\ncpu_atom/instructions/\ncpu_atom/branch-misses/\n"
+            ),
+            [
+                "{cpu_core/cycles/,cpu_core/instructions/}",
+                "{cpu_atom/cycles/,cpu_atom/instructions/,cpu_atom/branch-misses/}"
+            ]
+        );
     }
 
     #[test]

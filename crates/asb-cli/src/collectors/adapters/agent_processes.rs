@@ -351,7 +351,7 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
 
     fn graph_section(&self, name: &str) -> Option<GraphSection> {
         name.starts_with(&format!("metric-{}.", self.id())).then_some(if MEMORY {
-            GraphSection { title: "Agent memory", description: "Sampled peak aggregate RSS (MiB) of matching agent processes only. Tool subprocesses and host memory are excluded; shared pages may be counted in multiple agent processes." }
+            GraphSection { title: "Agent memory", description: "Sampled peak aggregate RSS (MiB) of the verified agent process tree, including its tool subprocesses. ASB and unrelated host tasks are excluded; shared pages may be counted in multiple processes." }
         } else {
             GraphSection { title: "Agent workers", description: "Observed additional agent OS processes per execution, excluding the primary agent and tool subprocesses. Sampling may miss short-lived workers; logical subagents inside one process are not measured." }
         })
@@ -717,15 +717,38 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn memory_scope_accounts_for_the_verified_execution_tree() {
-        let root = measurements::ProcessIdentity::read(std::process::id()).unwrap();
+        use std::process::{Command, Stdio};
+        let spawn = || {
+            Command::new("/bin/cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        let mut agent = spawn();
+        let mut sibling = spawn();
+        let root = measurements::ProcessIdentity::read(agent.id()).unwrap();
         let unrelated = Identity::resolve("/bin/false", &[]).unwrap();
         let mut totals = Totals::default();
 
-        totals.sample(root, &unrelated, true);
-
-        assert_eq!(totals.samples, 1);
-        assert_eq!(totals.seen.len(), 1);
-        assert!(totals.peak_rss_kib > 0);
+        let assertions = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            totals.sample(root, &unrelated, true);
+            assert_eq!(totals.samples, 1);
+            assert_eq!(totals.seen.len(), 1);
+            assert!(totals.seen.contains(&(root.pid, root.start_time_ticks)));
+            assert!(
+                totals
+                    .seen
+                    .iter()
+                    .all(|(pid, _)| *pid != sibling.id() && *pid != std::process::id())
+            );
+            assert!(totals.peak_rss_kib > 0);
+        }));
+        for child in [&mut agent, &mut sibling] {
+            let _ = child.kill();
+            child.wait().unwrap();
+        }
+        assertions.unwrap();
     }
 
     #[test]

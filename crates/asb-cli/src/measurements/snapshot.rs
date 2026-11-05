@@ -134,6 +134,23 @@ pub(crate) struct SnapshotCommand {
     pub stream_bytes: usize,
 }
 
+/// Bounded, owned capability discovery. Unsupported hosts return unavailable.
+pub(crate) fn bounded_command(
+    executable: &std::path::Path,
+    request: SnapshotCommand,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    #[cfg(target_os = "linux")]
+    {
+        let result = observe(executable, request, &AtomicBool::new(false), true).ok()??;
+        Some((result.stdout, result.stderr))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (executable, request);
+        None
+    }
+}
+
 pub(crate) fn bounded_version(
     executable: &std::path::Path,
     argument: &str,
@@ -488,4 +505,54 @@ fn observe(
     _: bool,
 ) -> Result<Option<Observation>, String> {
     Err("bounded process-tree snapshot supervision requires Linux native gate support".into())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn discovery_is_owned_and_rejects_partial_oversized_failed_or_slow_output() {
+        let request = |script: &str, runtime| SnapshotCommand {
+            arguments: vec![
+                "-I".into(),
+                "-S".into(),
+                "-B".into(),
+                "-c".into(),
+                script.into(),
+            ],
+            runtime,
+            stream_bytes: 128,
+        };
+        let python = std::path::Path::new("python3");
+        let output = bounded_command(
+            python,
+            request("print('cycles\\ninstructions')", Duration::from_secs(2)),
+        )
+        .unwrap();
+        assert_eq!(output.0, b"cycles\ninstructions\n");
+        assert!(output.1.is_empty());
+        for script in [
+            "print('cycles'); raise SystemExit(1)",
+            "print('x'*129)",
+            "import sys; sys.stderr.write('x'*129)",
+            "import time; print('cycles',flush=True); time.sleep(5)",
+        ] {
+            assert!(
+                bounded_command(
+                    python,
+                    request(
+                        script,
+                        if script.contains("sleep") {
+                            Duration::from_millis(200)
+                        } else {
+                            Duration::from_secs(2)
+                        }
+                    )
+                )
+                .is_none(),
+                "{script}"
+            );
+        }
+    }
 }
