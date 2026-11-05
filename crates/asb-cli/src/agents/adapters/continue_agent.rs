@@ -37,7 +37,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_guest_service(start_recording_service)
 .with_native_tool_transport()
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
-.with_complete_tool_replay(prepare_tool_replay)
+.with_tool_replay(prepare_tool_replay)
 .with_replay_credential_vars(&["CONTINUE_API_KEY"])
 .with_state_environment_vars(&["CONTINUE_CONFIG", "CONTINUE_GLOBAL_DIR"])
 .with_artifact_specs(&[

@@ -54,7 +54,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_estimated_disk_mib(1024)
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
-.with_complete_tool_replay(prepare_tool_replay)
+.with_tool_replay(prepare_tool_replay)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
         namespace: "tool-replay",

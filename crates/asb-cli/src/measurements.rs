@@ -752,6 +752,11 @@ impl Session {
         self.execution_window.borrow().document()
     }
 
+    #[cfg(test)]
+    pub(crate) fn execution_window_clock_available() -> bool {
+        execution_window::clock_domain().is_some()
+    }
+
     /// Native caller requests this immediately before releasing the generation-bound
     /// actual principal. No direct/container/ASB guardian fallback exists.
     pub(crate) fn native_execution_sampler(&self) -> Option<execution_window::Sampler> {

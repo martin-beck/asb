@@ -57,7 +57,7 @@ fn validate_native_replay(
             .map_err(|error| Error::Input(error.to_string()))?;
     } else if mode == Some(tape::Mode::Replay)
         && agents::find(agent).is_some_and(|adapter| {
-            adapter.supports_native_tool_transport() && !adapter.supports_tool_replay()
+            adapter.supports_native_tool_transport() && !adapter.has_tool_replay_hook()
         })
     {
         return Err(Error::Input("native tool replay requires the selected recorded tool sidecar; record a complete tool tape before replay".into()));
@@ -390,7 +390,7 @@ mod tests {
         );
         assert!(validate_native_replay("openjiuwen", Some(tape::Mode::Record), None).is_ok());
         assert!(validate_native_replay("openjiuwen", None, None).is_ok());
-        assert!(validate_native_replay("codex", Some(tape::Mode::Replay), None).is_err());
+        assert!(validate_native_replay("codex", Some(tape::Mode::Replay), None).is_ok());
         assert!(validate_native_replay("codex", None, None).is_ok());
         assert!(validate_native_replay("pi", Some(tape::Mode::Replay), None).is_ok());
     }
