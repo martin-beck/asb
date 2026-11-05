@@ -84,12 +84,13 @@ same recording, compare the tool results and verify that an external counter
 shows the recorded Bash command was not rerun. It retains root-owned fixture
 evidence. These are synthetic loopback-provider tests, not SWE-bench or
 complete filesystem and agent qualification.
-Set `ASB_CLAUDE_TEST_DELEGATE=1` when running `edit_c4.py` to record a native
-Agent call and its child's Read, then replay one LLM tape and native cassette
-in four isolated replicas. The mock provider is stopped during replay, and
-each tape must consume every recorded request without rejection. This probes
-an asynchronous child but does not qualify every delegation pattern or a
-SWE-bench run.
+Set `ASB_CLAUDE_TEST_DELEGATE=1` when running either `edit_c4.py` or
+`edit_snapshot_c4.py` to record a native Agent call and its child's Read, then
+replay one LLM tape and native cassette in four isolated replicas. The mock
+provider is stopped during replay, and each tape must consume every recorded
+request without rejection. The snapshot variant uses real Btrfs boundaries,
+but the child's own `/tmp` files remain outside its captured roots. This
+probes one asynchronous child, not every delegation pattern or a SWE-bench run.
 
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without
