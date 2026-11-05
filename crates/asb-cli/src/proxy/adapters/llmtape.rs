@@ -968,6 +968,7 @@ mod tests {
     #[test]
     fn builtin_observer_survives_exec_without_changing_parent_descriptor() {
         use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::fs::MetadataExt;
         use std::os::unix::net::UnixStream;
         let (mut reader, writer) = UnixStream::pair().unwrap();
         reader
@@ -977,7 +978,14 @@ mod tests {
             unsafe { std::fs::File::from_raw_fd(std::os::fd::IntoRawFd::into_raw_fd(writer)) };
         let file = file.try_clone().unwrap();
         let fd = file.as_raw_fd();
-        let script = format!("require('node:fs').writeSync({fd}, 'observed')");
+        // The runtime may reuse a closed descriptor number for its own files.
+        // Check its identity before treating a successful write as inheritance.
+        let metadata = file.metadata().unwrap();
+        let script = format!(
+            "const f=require('node:fs'), s=f.fstatSync({fd}); if(s.dev!=={} || s.ino!=={}) process.exit(1); f.writeSync({fd}, 'observed')",
+            metadata.dev(),
+            metadata.ino()
+        );
         let status = std::process::Command::new("node")
             .args(["-e", &script])
             .stderr(std::process::Stdio::null())
