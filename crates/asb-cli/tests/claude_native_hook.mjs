@@ -69,8 +69,12 @@ try {
   const failedEdit = {...edit, tool_use_id: 'failed-edit'};
   assert.equal((await hook({...failedEdit, hook_event_name: 'PreToolUse'})).code, 0);
   assert.equal((await hook({...failedEdit, hook_event_name: 'PostToolUseFailure', error: 'fixture edit failed', is_interrupt: false})).code, 0);
+  const write = {...base, tool_use_id: 'write-call', tool_name: 'Write', tool_input: {file_path: join(root, 'written'), content: 'fixture'}};
+  const writeResult = {filePath: write.tool_input.file_path, content: 'fixture'};
+  assert.equal((await hook({...write, hook_event_name: 'PreToolUse'})).code, 0);
+  assert.equal((await hook({...write, hook_event_name: 'PostToolUse', tool_response: writeResult})).code, 0);
   const events = await broker.finish();
-  assert.equal(events.length, 9);
+  assert.equal(events.length, 10);
   assert.deepEqual(events.slice(4, 6).map(event => JSON.parse(event.outcome.value.json).child), ['b', 'a']);
   assert.deepEqual(JSON.parse(events[1].outcome.value.json), {error: failureText, is_interrupt: false});
   assert.deepEqual(events[0].request, {tool: 'Read', input: {file_path: '/fixture'}});
@@ -158,6 +162,18 @@ try {
   const failedEditAfter = await hook({...failedEdit, hook_event_name: 'PostToolUseFailure', error: 'fixture edit failed', is_interrupt: false}, 'replay');
   assert.equal(failedEditAfter.code, 0, failedEditAfter.err);
   await failedEditPlayback.finish();
+  const writePlayback = new NativeToolBroker('replay', [{...events[9], ordinal: 0}], async () => {
+    assert.equal(readFileSync(write.tool_input.file_path, 'utf8'), 'fixture');
+  });
+  await writePlayback.listen(socket);
+  const writeBefore = await hook({...write, hook_event_name: 'PreToolUse'}, 'replay');
+  assert.equal(writeBefore.code, 0, writeBefore.err);
+  assert.deepEqual(JSON.parse(writeBefore.out).hookSpecificOutput.updatedInput, write.tool_input);
+  writeFileSync(write.tool_input.file_path, 'fixture');
+  const writeAfter = await hook({...write, hook_event_name: 'PostToolUse', tool_response: {ignored: true}}, 'replay');
+  assert.equal(writeAfter.code, 0, writeAfter.err);
+  assert.deepEqual(JSON.parse(writeAfter.out).hookSpecificOutput.updatedToolOutput, writeResult);
+  await writePlayback.finish();
   const failed = await hook({...base, hook_event_name: 'PostToolUse', tool_response: {}});
   assert.notEqual(failed.code, 0);
   assert.match(readFileSync(join(root, 'hook-failed'), 'utf8'), /failed/);

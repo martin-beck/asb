@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
 import io
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -381,6 +382,31 @@ class SnapshotServiceTest(unittest.TestCase):
                 SnapshotApplier(store,workspace,['rsync'])(2)
             self.assertGreaterEqual(run.call_count,3)
             self.assertTrue(all('timeout' not in call.kwargs for call in run.call_args_list))
+
+    def test_snapshot_replay_accepts_only_matching_preapplied_file_additions(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);store=root/'store';store.mkdir();workspace=root/'workspace';workspace.mkdir()
+            before=store/'snapshot-00000001';after=store/'snapshot-00000002';before.mkdir();after.mkdir()
+            (after/'created').write_text('recorded');(workspace/'created').write_text('recorded')
+            with patch('asb_snapshot_service.subprocess.run') as run:
+                SnapshotApplier(store,workspace,['rsync'])(2)
+            run.assert_called_once()
+            (workspace/'created').write_text('different')
+            with self.assertRaisesRegex(ValueError,'differs from its recorded snapshot'):
+                SnapshotApplier(store,workspace,['rsync'])(2)
+            (workspace/'unrelated').write_text('extra')
+            with self.assertRaisesRegex(ValueError,'unexpected files'):
+                SnapshotApplier(store,workspace,['rsync'])(2)
+
+    def test_snapshot_replay_rejects_preapplied_file_with_wrong_hardlinks(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);store=root/'store';store.mkdir();workspace=root/'workspace';workspace.mkdir()
+            before=store/'snapshot-00000001';after=store/'snapshot-00000002';before.mkdir();after.mkdir()
+            (before/'existing').write_text('recorded');(after/'existing').write_text('recorded')
+            os.link(after/'existing',after/'created')
+            (workspace/'existing').write_text('recorded');(workspace/'created').write_text('recorded')
+            with self.assertRaisesRegex(ValueError,'different hard-link topology'):
+                SnapshotApplier(store,workspace,['rsync'])(2)
 
     def test_snapshot_settlement_points_to_retained_guest_failure(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
