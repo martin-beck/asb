@@ -55,9 +55,19 @@ impl<'a> Admission<'a> {
         Ok(admission)
     }
 
+    /// A cancelled workload controller must finish stopping its owned guest.
+    pub(crate) fn with_workload_controller(
+        validated: crate::launch::ValidatedGate<'a>,
+    ) -> io::Result<Self> {
+        let admission = Self::with_principal_observation(validated)?;
+        admission.command.env(super::WORKLOAD_CLEANUP, "1");
+        Ok(admission)
+    }
+
     fn prepare(validated: crate::launch::ValidatedGate<'a>, controlled: bool) -> io::Result<Self> {
         let command = validated.into_command();
         command.env_remove(super::MEASURE_PRINCIPAL);
+        command.env_remove(super::WORKLOAD_CLEANUP);
         let keeper = OwnedReaper::new("asb-gate-custody").map_err(io::Error::other)?;
         let (receiver, writer) = Receiver::pair()?;
         let fd = writer.as_raw_fd();

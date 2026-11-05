@@ -9,6 +9,11 @@ use support::IsolatedEnvironment;
 static PYTHON_PROTOCOL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
+fn swebench_session_cancellation_does_not_interrupt_cleanup_twice() {
+    python_protocol("benchmark_swebench_signal.py");
+}
+
+#[test]
 fn snapshot_boundary_service_preserves_marker_and_lifecycle_order() {
     python_protocol("benchmark_snapshot_service.py");
 }
