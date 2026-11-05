@@ -422,3 +422,20 @@ PMU definitions. Those static fields never become agent activity graphs.
 Ratios whose reported event runtimes cannot be compared as exactly representable
 integral nanoseconds remain unavailable; large/fractional f64 runtimes cannot
 silently establish group coherence after rounding.
+
+## Memory scope independent of launcher discovery
+
+Tree memory sampling uses the live generation-bound agent root below its ASB
+controller. Resolving a script interpreter or proving an inherited PATH is not
+required to observe that tree. Worker census still requires the exact selected
+entry point and stays unavailable when that identity cannot be resolved.
+ASB itself, its ancestors and the owned guardian cannot become memory roots;
+changing roots after attachment invalidates that capture rather than mixing data.
+
+The stopped native principal initially retains its ASB parent's image before
+executing the application. RSS sampling waits until a non-ASB image is visible
+and excludes the known parent/controller images from descendant observations.
+Missing image access or short application lifetimes remain unavailable. This
+preserves sampled lower-bound semantics instead of publishing ASB's inherited
+pre-exec memory as an agent peak. Namespace export/import keeps bounded aggregate
+values and its explicit availability/completeness flags.

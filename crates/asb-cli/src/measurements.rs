@@ -102,6 +102,15 @@ impl ProcessIdentity {
         self.matches_at(Path::new("/proc"))
     }
 
+    pub(crate) fn parent(self) -> Option<Self> {
+        let (observed, parent) = Self::record_at(Path::new("/proc"), self.pid)?;
+        if observed != self {
+            return None;
+        }
+        let parent = Self::read(parent)?;
+        self.matches().then_some(parent)
+    }
+
     fn matches_at(self, proc: &Path) -> bool {
         Self::read_at(proc, self.pid) == Some(self)
     }
