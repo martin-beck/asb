@@ -122,6 +122,10 @@ class Discovery:
             raise InputError("Python runtime path population exceeded")
         self.program(info["executable"])
         _,loader = asb_runtime.elf_identity(info["executable"])
+        # A direct loader probe of an extension does not inherit the Python
+        # executable's $ORIGIN/../lib search path. Preserve that search path
+        # for standalone distributions (including project-local uv Python).
+        python_lib = Path(info["executable"]).resolve().parent.parent / "lib"
         for item in paths:
             if not isinstance(item,str) or not item or not Path(item).is_absolute():
                 raise InputError("Python runtime path is not absolute")
@@ -132,15 +136,15 @@ class Discovery:
                 for child in sorted(Path(item).iterdir()):
                     if child.name not in ["site-packages","dist-packages"]:
                         self.file(child)
-                        self.python_extensions(child,loader)
+                        self.python_extensions(child,loader,python_lib)
             else:
                 self.file(item)
-                self.python_extensions(Path(item),loader)
+                self.python_extensions(Path(item),loader,python_lib)
         for item in os.environ.get("PYTHONPATH", "").split(os.pathsep):
             if item:
                 self.file(item)
 
-    def python_extensions(self,root,loader):
+    def python_extensions(self,root,loader,python_lib=None):
         if not loader or root in self.native_scanned:
             return
         self.native_scanned.add(root)
@@ -160,6 +164,10 @@ class Discovery:
         for name in ["LD_LIBRARY_PATH","LD_PRELOAD"]:
             if name in os.environ:
                 environment[name] = os.environ[name]
+        if python_lib and python_lib.is_dir():
+            inherited = environment.get("LD_LIBRARY_PATH")
+            environment["LD_LIBRARY_PATH"] = os.pathsep.join(
+                [inherited, str(python_lib)] if inherited else [str(python_lib)])
         for path in sorted(candidates):
             self.file(path)
             # Only extension entry points have PyInit exports. Audited wheels'

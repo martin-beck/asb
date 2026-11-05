@@ -236,6 +236,22 @@ assert children[0].poll() is not None
                 self.assertEqual(resolve.call_args.args[1],module)
                 self.assertIn(str(library),discovery.paths)
 
+    def test_python_extension_probes_include_the_interpreter_library_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            modules = root / "modules"
+            modules.mkdir()
+            module = modules / "module.abi3.so"
+            module.write_bytes(native_image("PyInit_module"))
+            python_lib = root / "python" / "lib"
+            python_lib.mkdir(parents=True)
+            with patch.dict(os.environ, {"LD_LIBRARY_PATH": "/fixture-prior"}), \
+                 patch.object(subject.asb_runtime, "elf_identity", return_value=(62, None)), \
+                 patch.object(subject.asb_runtime, "resolve_dependencies", return_value={}) as resolve:
+                subject.Discovery().python_extensions(modules, "/fixture-loader", python_lib)
+                self.assertEqual(resolve.call_args.args[2]["LD_LIBRARY_PATH"],
+                                 "/fixture-prior" + os.pathsep + str(python_lib))
+
     def test_native_symbol_tables_are_bounded(self):
         with tempfile.TemporaryDirectory() as directory:
             file = Path(directory)/"module.so"

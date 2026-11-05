@@ -79,6 +79,9 @@ def project(parent, name, mode):
     node = root / "fixture-bin/node"
     node.write_text("#!/bin/sh\nprintf 'v22.0.0\\n'\n")
     node.chmod(0o755)
+    npx = root / "fixture-bin/npx"
+    npx.write_text("#!/bin/sh\nexit 0\n")
+    npx.chmod(0o755)
     # Exercise a current, unique workload identifier without network access.
     # The fake extractor creates the smallest valid pinned AgentBench tree.
     curl = root / "fixture-bin/curl"

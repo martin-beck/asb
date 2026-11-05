@@ -14,11 +14,21 @@ pub(super) static ADAPTER: StaticTool = StaticTool::new(
     },
     ToolKind::Support,
 )
+.with_init_runtime()
 .with_runtime_path()
+.with_helper_executables(&["npm", "npx"])
 .with_host_probe(host_usable)
 .with_guest_assets(guest_assets);
 
 fn host_usable(context: &crate::install::OperationContext) -> crate::install::InstallResult<bool> {
+    let local_bin =
+        crate::project::resolve(context.root(), &context.project().tools_dir).join("node/bin");
+    if ["npm", "npx"].iter().any(|program| {
+        super::host_executable(Path::new(program)).is_none()
+            && !crate::executables::is_executable(&local_bin.join(program))
+    }) {
+        return Ok(false);
+    }
     let Some(program) = super::host_executable(Path::new("node")) else {
         return Ok(false);
     };

@@ -22,7 +22,8 @@ pub(super) static ADAPTER: StaticTool = StaticTool::new(
         guest_assets: None,
     },
     ToolKind::Collector,
-);
+)
+.with_init_runtime();
 
 /// Copy the host bpftrace binary and persist the kernel pairing used to
 /// install it.  bpftrace is kernel-sensitive; using the exact host binary and

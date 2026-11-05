@@ -14,7 +14,8 @@ pub(super) static ADAPTER: StaticTool = StaticTool::new(
     },
     ToolKind::Collector,
 )
-.with_helper_executables(&["stackcollapse-perf.pl"]);
+.with_helper_executables(&["stackcollapse-perf.pl"])
+.with_init_runtime();
 
 fn install(
     context: &OperationContext,

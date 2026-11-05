@@ -25,7 +25,8 @@ pub(super) static ADAPTER: StaticTool = StaticTool::new(
         guest_assets: None,
     },
     ToolKind::Collector,
-);
+)
+.with_init_runtime();
 
 fn install_perf(
     context: &OperationContext,

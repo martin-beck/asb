@@ -16,6 +16,7 @@ impl IsolatedEnvironment for Command {
         // Integration fixtures launch the separately compiled debug CLI. Its
         // capacity premise is explicit and cannot exist in release builds.
         self.env("ASB_TEST_AVAILABLE_MIB", "18446744073709551615");
+        self.env("ASB_INIT_OFFLINE", "1");
         self
     }
 }
@@ -30,16 +31,38 @@ fn isolated_environment_preserves_only_coverage_instrumentation() {
     let expected = std::env::var_os("LLVM_PROFILE_FILE");
     match expected.as_ref() {
         Some(value) => {
-            assert_eq!(actual.len(), 2);
-            assert_eq!(actual[0].0, "LLVM_PROFILE_FILE");
-            assert_eq!(actual[0].1, Some(value.as_os_str()));
-            assert_eq!(actual[1].0, "ASB_TEST_AVAILABLE_MIB");
-            assert_eq!(actual[1].1, Some("18446744073709551615".as_ref()));
+            assert_eq!(actual.len(), 3);
+            assert!(
+                actual
+                    .iter()
+                    .any(|(key, item)| *key == "LLVM_PROFILE_FILE"
+                        && *item == Some(value.as_os_str()))
+            );
+            assert!(
+                actual
+                    .iter()
+                    .any(|(key, value)| *key == "ASB_TEST_AVAILABLE_MIB"
+                        && *value == Some("18446744073709551615".as_ref()))
+            );
+            assert!(
+                actual
+                    .iter()
+                    .any(|(key, value)| *key == "ASB_INIT_OFFLINE" && *value == Some("1".as_ref()))
+            );
         }
         None => {
-            assert_eq!(actual.len(), 1);
-            assert_eq!(actual[0].0, "ASB_TEST_AVAILABLE_MIB");
-            assert_eq!(actual[0].1, Some("18446744073709551615".as_ref()));
+            assert_eq!(actual.len(), 2);
+            assert!(
+                actual
+                    .iter()
+                    .any(|(key, value)| *key == "ASB_TEST_AVAILABLE_MIB"
+                        && *value == Some("18446744073709551615".as_ref()))
+            );
+            assert!(
+                actual
+                    .iter()
+                    .any(|(key, value)| *key == "ASB_INIT_OFFLINE" && *value == Some("1".as_ref()))
+            );
         }
     }
 }

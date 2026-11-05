@@ -155,6 +155,7 @@ fn host_recipe_replacement_never_follows_destination_symlink() {
 fn npm_recipe_uses_local_cache_manifest_and_reports_installer_failures() {
     let fixture = Fixture::new();
     fixture.script("node", "printf 'v22.20.0\\n'");
+    fixture.script("npx", "exit 0");
     fixture.script(
         "npm",
         r#"test "$1" = install
@@ -177,6 +178,7 @@ esac"#,
 fn npm_recipe_uses_project_local_only_runtime_path() {
     let fixture = Fixture::new();
     fixture.script("node", "printf 'v22.20.0\\n'");
+    fixture.script("npx", "exit 0");
     let npm = fixture.0.join("tools/node/bin/npm");
     fs::create_dir_all(npm.parent().unwrap()).unwrap();
     crate::write_test_file(
@@ -784,12 +786,8 @@ fn npm_contract(root: &Path) {
         5
     );
     assert!(
-        missing.to_string().contains("npm"),
-        "actual missing npm failure: {missing}"
-    );
-    assert!(
-        missing.to_string().contains("fnm install --lts"),
-        "actual missing npm repair: {missing}"
+        missing.to_string().contains("curl"),
+        "bootstrap needs its download transport: {missing}"
     );
 }
 

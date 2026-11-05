@@ -72,6 +72,10 @@ impl Project {
         // Preserve instrumentation for coverage runs, without inheriting keys.
         command.envs(extra.iter().copied());
         #[cfg(unix)]
+        if matches!(self.1, PythonPreparation::IntentionalBootstrap) {
+            command.env_remove("ASB_INIT_OFFLINE");
+        }
+        #[cfg(unix)]
         if args.first() == Some(&"init") && matches!(self.1, PythonPreparation::Ordinary) {
             let search = command
                 .get_envs()

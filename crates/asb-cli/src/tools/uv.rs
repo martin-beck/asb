@@ -14,6 +14,7 @@ pub(super) static ADAPTER: StaticTool = StaticTool::new(
     },
     ToolKind::Support,
 )
+.with_init_runtime()
 .with_runtime_path()
 .with_guest_assets(guest_assets);
 

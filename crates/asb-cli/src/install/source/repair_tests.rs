@@ -799,6 +799,8 @@ fn raw_project_child(root: &Path) {
     let npm = root.join("bin/npm");
     fs::write(&npm,b"#!/bin/sh\nset -eu\ntest -x \"${PATH%%:*}/node\"\ntest \"$5\" = fixture-raw@1\n/bin/mkdir -p \"$3/node_modules/.bin\" \"$NPM_CONFIG_CACHE\"\nprintf '#!/bin/sh\\nexit 0\\n' > \"$3/node_modules/.bin/fixture-client\"\nprintf seen > \"$NPM_CONFIG_CACHE/seen\"\n/bin/chmod 755 \"$3/node_modules/.bin/fixture-client\"\n").unwrap();
     fs::set_permissions(&npm, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::copy(&npm, node.parent().unwrap().join("npm")).unwrap();
+    fs::copy(&npm, node.parent().unwrap().join("npx")).unwrap();
     let package = project.join(&tools).join("raw-package");
     let installed = super::super::install_recipe(
         super::super::Recipe::Npm {

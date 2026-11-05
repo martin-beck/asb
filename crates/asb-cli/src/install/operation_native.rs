@@ -703,6 +703,7 @@ mod tests {
         .unwrap();
         for (name, script) in [
             ("node", "#!/bin/sh\nprintf 'v22.0.0\\n'\n"),
+            ("npx", "#!/bin/sh\nexit 0\n"),
             (
                 "npm",
                 "#!/bin/sh\nprintf '%s' $$ > principal\nexec /usr/bin/sleep 60\n",
