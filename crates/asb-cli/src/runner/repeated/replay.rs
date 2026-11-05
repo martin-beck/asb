@@ -318,6 +318,24 @@ impl Prepared {
     pub fn stage(&mut self, root: &Path, inputs: &mut [ReplayInput]) -> Result<(), Error> {
         private_directory(&root.join("inputs"), false)?;
         for input in inputs {
+            if let Some(manifest) = self.source.manifest() {
+                let track = manifest
+                    .track(input.track.expect("selected input identity"))
+                    .map_err(input_error)?;
+                let expected = if track.legacy_snapshot_capture() {
+                    None
+                } else {
+                    Some(track.complete)
+                };
+                if input.complete != expected
+                    || (input.complete.is_none() && input.workspace_snapshots.is_none())
+                {
+                    return Err(Error::Input(
+                        "selected recording status changed after planning; no agent was started"
+                            .into(),
+                    ));
+                }
+            }
             let expected_recorder = self
                 .source
                 .manifest()

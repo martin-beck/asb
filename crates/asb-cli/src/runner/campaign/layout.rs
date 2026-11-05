@@ -212,11 +212,20 @@ impl Plan {
             } else {
                 64 * 1024 * 1024
             };
+            let legacy_snapshot = input.track.is_some_and(|id| {
+                input.workspace_snapshots.as_ref().is_some_and(|path| {
+                    exact_path(
+                        path,
+                        &PathBuf::from(format!("inputs/workspace-snapshots-{id}.tar")),
+                    )
+                })
+            });
             if !exact_path(&input.private, &expected)
                 || input.source.as_os_str().is_empty()
                 || !crate::cassette::valid_digest(&input.sha256)
                 || input.bytes > max_bytes
-                || input.complete.is_some() != bundled
+                || (!bundled && input.complete.is_some())
+                || (bundled && input.complete.is_none() && !legacy_snapshot)
                 || input.recorded_max_steps == Some(0)
                 || (!bundled && input.recorded_max_steps.is_some())
             {
@@ -287,11 +296,11 @@ impl Plan {
                 if selection.tracks[0] != id {
                     return Err(invalid("numeric selector differs from selected track"));
                 }
-            } else if self
-                .replay_inputs
-                .iter()
-                .any(|input| input.complete != Some(true) || input.bytes == 0)
-            {
+            } else if self.replay_inputs.iter().any(|input| {
+                (input.complete != Some(true)
+                    && !(input.complete.is_none() && input.workspace_snapshots.is_some()))
+                    || input.bytes == 0
+            }) {
                 return Err(invalid(
                     "automatic/statistic selection includes an incomplete or empty trace",
                 ));
