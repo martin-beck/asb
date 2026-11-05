@@ -6,6 +6,7 @@ import { normalizeRequest } from './native-tool-session.mjs';
 export function createOpenCodeNativePlugin({ mode, socket, marker, definitions = {} }) {
   if (!['record', 'replay'].includes(mode) || !socket) throw new TypeError('OpenCode native tool configuration is invalid');
   const active = new Map();
+  const settlements = new Set();
   const key = input => JSON.stringify([input.sessionID, input.callID]);
   const request = (name, args) => normalizeRequest({tool:name, input:args});
   // Delegation remains native so child sessions can make their own recorded calls.
@@ -13,6 +14,7 @@ export function createOpenCodeNativePlugin({ mode, socket, marker, definitions =
   if (mode === 'record') return {
     'tool.execute.before': async (input, output) => {
       if (delegated(input.tool)) return;
+      await Promise.all([...settlements]);
       const id = key(input);
       if (active.has(id)) throw new Error('OpenCode tool call is already active');
       const {token} = await brokerRequest(socket, {op:'start', request:request(input.tool, output.args)});
@@ -31,6 +33,24 @@ export function createOpenCodeNativePlugin({ mode, socket, marker, definitions =
         await brokerRequest(socket, message);
         active.delete(id);
       } catch (error) { await brokerRequest(socket, {op:'invalidate',token}).catch(() => {}); active.delete(id); throw error; }
+    },
+    // OpenCode only invokes execute.after on success. Failed calls are
+    // published as tool-part updates instead, including their actual error.
+    event: ({event}) => {
+      const part = event?.type === 'message.part.updated' ? event.properties?.part : undefined;
+      if (part?.type !== 'tool' || part.state?.status !== 'error' || delegated(part.tool)) return;
+      const id = key({sessionID:part.sessionID, callID:part.callID}), token = active.get(id);
+      if (token === undefined) return;
+      active.delete(id);
+      const settlement = (async () => { try {
+        const sequence = await snapshotBoundary(marker, 'record', 'end', token, 'opencode');
+        const message = {op:'finish',token,outcome:{ok:false,name:'Error',message:String(part.state.error ?? 'OpenCode tool failed')}};
+        if (sequence !== undefined) message.snapshot_sequence = sequence;
+        await brokerRequest(socket, message);
+      } catch (error) { await brokerRequest(socket, {op:'invalidate',token}).catch(() => {}); throw error; } })();
+      settlements.add(settlement);
+      settlement.finally(() => settlements.delete(settlement)).catch(() => {});
+      return settlement;
     },
   };
   const tool = {};

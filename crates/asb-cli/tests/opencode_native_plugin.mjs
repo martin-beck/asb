@@ -18,12 +18,14 @@ try {
   await record['tool.execute.before']({tool:'task',sessionID:'parent',callID:'2'},{args:{}});
   await record['tool.execute.after'](child,{title:'read',output:'content',metadata:{}});
   await record['tool.execute.after'](call,{title:'shell',output:'x',metadata:{exit:0}});
+  await record['tool.execute.before']({tool:'edit',sessionID:'parent',callID:'3'},{args:{filePath:'missing'}});
+  await record.event({event:{type:'message.part.updated',properties:{part:{type:'tool',tool:'edit',sessionID:'parent',callID:'3',state:{status:'error',error:'file missing'}}}}});
   const events=await recorder.finish();
-  assert.equal(events.length,2);
+  assert.equal(events.length,3);
   const effects=[];
   const broker=new NativeToolBroker('replay',events,async event=>effects.push(event.ordinal));
   await broker.listen(socket);
-  const definitions={bash:{description:'shell',schema:{type:'object',properties:{command:{type:'string'},timeout:{type:'integer'}},required:['command']}},read:{description:'read',schema:{type:'object',properties:{filePath:{type:'string'}}}},task:{description:'delegate',schema:{type:'object'}}};
+  const definitions={bash:{description:'shell',schema:{type:'object',properties:{command:{type:'string'},timeout:{type:'integer'}},required:['command']}},read:{description:'read',schema:{type:'object',properties:{filePath:{type:'string'}}}},edit:{description:'edit',schema:{type:'object',properties:{filePath:{type:'string'}}}},task:{description:'delegate',schema:{type:'object'}}};
   const replay=createOpenCodeNativePlugin({mode:'replay',socket,definitions});
   assert.equal(replay.tool.task,undefined);
   const schema={}; await replay['tool.definition']({toolID:'bash'},schema);
@@ -32,6 +34,7 @@ try {
   const read=replay.tool.read.execute({filePath:'a'});
   assert.deepEqual(await read,{title:'read',output:'content',metadata:{}});
   assert.deepEqual(await shell,{title:'shell',output:'x',metadata:{exit:0}});
+  await assert.rejects(replay.tool.edit.execute({filePath:'missing'}),/file missing/);
   await broker.finish();
-  assert.deepEqual(effects,[1,0]);
+  assert.deepEqual(effects,[1,0,2]);
 } finally { await rm(dir,{recursive:true,force:true}); }
