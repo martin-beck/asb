@@ -84,3 +84,9 @@ virtio storage and network, and 8 GiB guest memory. Docker Buildx must support
 The current manual qualification also installs packages inside the guest; their
 versions and the full provisioning/transfer lifecycle are not yet pinned or
 implemented as an ASB recipe. The candidate is not qualified by boot alone.
+
+The draft includes independently tested recipe primitives in
+`crates/asb-cli/src/emulation/recipe.rs`: native is the default selection, and
+the x86 recipe constructs QEMU arguments without shell interpolation. They
+are not yet connected to the ASB library or CLI. Image acquisition, guest
+provisioning, execution, transport and qualification are still required.
