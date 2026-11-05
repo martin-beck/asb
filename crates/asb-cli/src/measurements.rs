@@ -270,7 +270,9 @@ struct CollectorResult {
     /// Bounded samples emitted by collectors that support interval output.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     series: BTreeMap<String, Vec<f64>>,
-    /// Timestamp in milliseconds for each adapter's observed series sample.
+    /// Declared unit for this adapter's observed series samples.
+    series_timestamp_unit: collectors::TimeUnit,
+    /// Timestamp in the declared unit for each observed series sample.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     series_timestamps: BTreeMap<String, Vec<f64>>,
 }
@@ -1273,6 +1275,7 @@ impl Session {
                 metrics: data.metrics,
                 series: data.series,
                 series_timestamps: data.timestamps,
+                series_timestamp_unit: collector.adapter.series_timestamp_unit(),
             };
             if let Err(error) =
                 write_json(&self.dir.join(format!("{}.json", collector.name)), &result)
@@ -1451,6 +1454,9 @@ pub(crate) fn write_unavailable(path: &Path, collector: &str, error: String) -> 
             metrics: BTreeMap::new(),
             series: BTreeMap::new(),
             series_timestamps: BTreeMap::new(),
+            series_timestamp_unit: collectors::find(collector)
+                .map(|a| a.series_timestamp_unit())
+                .unwrap_or_default(),
         },
     )
 }

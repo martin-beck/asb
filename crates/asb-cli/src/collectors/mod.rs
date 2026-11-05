@@ -5,9 +5,11 @@
 
 pub(crate) mod adapters;
 mod output;
+pub(crate) mod time_unit;
 #[cfg(test)]
 pub(crate) use output::process_output_fixture;
 pub(crate) use output::{read_complete_output, validate_processed_output};
+pub(crate) use time_unit::TimeUnit;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -257,6 +259,10 @@ pub(crate) struct SelectionExtension {
 }
 
 pub(crate) trait CollectorAdapter: Sync {
+    /// Timestamp unit emitted by this adapter, also used for its legacy records.
+    fn series_timestamp_unit(&self) -> TimeUnit {
+        TimeUnit::Milliseconds
+    }
     fn private_service_aliases(&self) -> &'static [&'static str] {
         &[]
     }

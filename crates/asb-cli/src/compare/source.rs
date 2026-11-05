@@ -1185,6 +1185,14 @@ fn load_collectors(
         // numerical series: scraping its last token created noisy and
         // misleading graphs for repeated mpstat/iostat samples.
         if let Some(collector_series) = collector.get("series") {
+            let unit =
+                crate::collectors::time_unit::resolve(name, collector.get("series_timestamp_unit"))
+                    .map_err(|reason| {
+                        Error::Input(format!(
+                            "invalid timestamp unit in {}: {reason}",
+                            file.display()
+                        ))
+                    })?;
             let collector_timestamps = collector.get("series_timestamps");
             let timestamp_map = collector_timestamps.and_then(Value::as_object);
             if let Some(series_map) = collector_series.as_object() {
@@ -1203,6 +1211,7 @@ fn load_collectors(
                             timestamp_map.and_then(|map| map.get(metric)),
                             &file,
                             metric,
+                            unit,
                         )?,
                     )?;
                 }
@@ -1210,7 +1219,7 @@ fn load_collectors(
                 insert_unique(
                     &mut series,
                     name.to_owned(),
-                    TimeSeries::parse(collector_series, collector_timestamps, &file, name)?,
+                    TimeSeries::parse(collector_series, collector_timestamps, &file, name, unit)?,
                 )?;
             }
         }
@@ -1335,5 +1344,60 @@ mod pricing_tests {
                 .to_string();
             assert!(error.contains("must be a regular file"));
         });
+    }
+}
+
+#[cfg(test)]
+mod timestamp_unit_tests {
+    use super::*;
+    #[test]
+    fn loader_normalizes_declared_and_adapter_legacy_units_without_rewriting_sources() {
+        let root =
+            crate::fixture_namespace::allocate(&std::env::temp_dir(), "asb-report-time-unit-")
+                .unwrap();
+        let spe = json!({"status":"completed","series":{"arm-spe.memory":[1,2]},"series_timestamps":{"arm-spe.memory":[0.01,2.20768677]}});
+        let path = root.join("arm-spe.json");
+        fs::write(&path, spe.to_string()).unwrap();
+        let pressure =
+            json!({"series":{"pressure":[1,2]},"series_timestamps":{"pressure":[1.0,2.0]}});
+        fs::write(root.join("kernel-pressure.json"), pressure.to_string()).unwrap();
+        let (series, _, _, documents) = load_collectors(&root, true, &mut BTreeMap::new()).unwrap();
+        assert!(
+            (series["arm-spe.memory"].timestamps_ms.as_ref().unwrap()[1] - 2207.68677).abs() < 1e-9
+        );
+        assert_eq!(
+            series["pressure"].timestamps_ms.as_ref().unwrap(),
+            &vec![1000.0, 2000.0]
+        );
+        assert_eq!(documents["arm-spe"], spe);
+        assert_eq!(fs::read_to_string(&path).unwrap(), spe.to_string());
+        let mut explicit = spe.clone();
+        explicit["series_timestamp_unit"] = json!("milliseconds");
+        fs::write(&path, explicit.to_string()).unwrap();
+        let (series, _, _, _) = load_collectors(&root, true, &mut BTreeMap::new()).unwrap();
+        assert_eq!(
+            series["arm-spe.memory"].timestamps_ms.as_ref().unwrap(),
+            &vec![0.01, 2.20768677]
+        );
+        for invalid in [json!("minutes"), json!(null), json!(123)] {
+            explicit["series_timestamp_unit"] = invalid;
+            fs::write(&path, explicit.to_string()).unwrap();
+            assert!(
+                load_collectors(&root, true, &mut BTreeMap::new())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("series_timestamp_unit")
+            );
+        }
+        explicit["series_timestamp_unit"] = json!("seconds");
+        explicit["series_timestamps"]["arm-spe.memory"][1] = json!(f64::MAX);
+        fs::write(&path, explicit.to_string()).unwrap();
+        assert!(
+            load_collectors(&root, true, &mut BTreeMap::new())
+                .unwrap_err()
+                .to_string()
+                .contains("convertible to milliseconds")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

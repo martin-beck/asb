@@ -96,6 +96,9 @@ fn args(pmu: &str, pid: u32, options: &Options) -> Vec<String> {
 }
 
 impl CollectorAdapter for ArmSpe {
+    fn series_timestamp_unit(&self) -> crate::collectors::TimeUnit {
+        crate::collectors::TimeUnit::Seconds
+    }
     fn id(&self) -> &'static str {
         "arm-spe"
     }
