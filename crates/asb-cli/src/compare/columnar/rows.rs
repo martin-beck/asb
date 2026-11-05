@@ -33,10 +33,34 @@ fn record(
 }
 
 pub(super) fn observations(export: &mut Export, benchmark: &BenchmarkData) -> Result<(), Error> {
+    // Adapters retain ownership of clock semantics. Project only declared
+    // timestamp/scope metadata; never scrape captures or special-case a tool.
+    let references = benchmark
+        .collector_documents
+        .iter()
+        .filter_map(|(name, document)| {
+            let fields = [
+                "clock",
+                "scope",
+                "root",
+                "target",
+                "series_origin",
+                "series_timestamp_unit",
+                "phase_alignment",
+            ]
+            .into_iter()
+            .filter_map(|key| {
+                document
+                    .get(key)
+                    .map(|value| (key.to_owned(), value.clone()))
+            })
+            .collect::<serde_json::Map<_, _>>();
+            (!fields.is_empty()).then_some((name.clone(), Value::Object(fields)))
+        })
+        .collect::<BTreeMap<_, _>>();
     let context = json!({"result_source":benchmark.result_source,"execution_cohort":benchmark.execution_cohort,
         "measurement_target":benchmark.collector_documents.get("measurement-target"),
-        "spe_series_origin":benchmark.collector_documents.get("arm-spe-quality").map(|q| &q["series_origin"]),
-        "spe_phase_alignment":benchmark.collector_documents.get("arm-spe-quality").map(|q| &q["phase_alignment"]),"limitations":"Collector-defined scalar semantics; missing metrics are not synthesized. Analysis-specific rows retain their explicit scope and evidence separately."});
+        "time_references":references,"limitations":"Collector-defined scalar semantics; missing metrics are not synthesized. Analysis-specific rows retain their explicit scope and evidence separately."});
     export.push(record(benchmark,"context","host-metadata","not-numeric","retained-host-metadata","retained",
         (&json!({"host_metadata":benchmark.host_metadata,"arm_platform":benchmark.collector_documents.get("arm-platform"),"context":context}),None))?)?;
     for (name, value) in &benchmark.metrics {

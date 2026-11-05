@@ -195,7 +195,7 @@ fn retained_native_export_preserves_scoped_counter_and_phase_evidence() {
         if family == "series" && row.get_string(7).unwrap().contains("arm-spe") {
             series = true;
             let details: Value = serde_json::from_str(row.get_string(11).unwrap()).unwrap();
-            let expected = details["context"]["spe_phase_alignment"]["last_sample_offset_seconds"]
+            let expected = details["context"]["time_references"]["arm-spe-quality"]["phase_alignment"]["last_sample_offset_seconds"]
                 .as_f64()
                 .unwrap();
             let time = row.get_double(13).unwrap();
