@@ -44,6 +44,12 @@ jobs:
       # The dedicated runner provisions the supported host Python. Do not
       # prepend Actions' toolcache interpreter: native gate fixtures execute
       # the host toolchain and must retain its matching runtime libraries.
+      - name: Test instrumentation fixture policies
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python3 -m unittest discover -s crates/asb-cli/tests/fixtures/arm_telemetry -p 'test_*.py'
+          node --check crates/asb-cli/tests/fixtures/arm_telemetry/fixed_work.js
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Build
