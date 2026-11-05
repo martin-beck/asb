@@ -1,6 +1,6 @@
 use super::{
     AgentArtifacts, CollectionContext, CommandContext, CommandSpec, PreparationContext,
-    StaticAdapter,
+    StaticAdapter, TapeNormalizationScript,
 };
 use crate::{Error, install::Recipe};
 // The SDK derives this cache hint from its freshly generated conversation UUID.
@@ -41,6 +41,11 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
+.with_tape_normalization_scripts(&[TapeNormalizationScript {
+    id: "openhands-private-observations",
+    workloads: &["*"],
+    source: include_str!("../../../assets/scripts/agent-normalizers/openhands.mjs"),
+}])
 .with_replay_credential_vars(&["LLM_API_KEY"])
 .with_complete_tool_replay(prepare_native_tool_replay)
 .with_native_tool_transport()

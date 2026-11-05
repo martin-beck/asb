@@ -28,6 +28,11 @@ let replayMaterializedIdentifierSequence = 0;
 const agentWireExtension = process.env.ASB_TAPE_AGENT_WIRE_EXTENSION
   ? await import(pathToFileURL(process.env.ASB_TAPE_AGENT_WIRE_EXTENSION).href)
   : null;
+// Adapter-owned normalizers are distinct from wire extensions. They receive
+// decoded requests and can change only recognized incidental rendering.
+const agentNormalizer = process.env.ASB_TAPE_AGENT_NORMALIZER
+  ? await import(pathToFileURL(process.env.ASB_TAPE_AGENT_NORMALIZER).href)
+  : null;
 
 function usage(message) {
   if (message) console.error(`llmtape: ${message}`);
@@ -350,16 +355,6 @@ function normalizeObjectRenderingAddress(value) {
   return value.replace(/(<[^<>\n]+ object at )0x[0-9a-f]+>/gi, "$1<asb-address>>");
 }
 
-// Hermes creates a one-shot verification script under its private temp root.
-// Its random basename is a run-local artifact path, not tool-result content.
-// Keep the rule confined to that exact Hermes filename convention; other temp
-// paths, filenames, extensions, and all surrounding output remain strict.
-function normalizeHermesVerificationScriptPath(value) {
-  return value.replace(
-    /\/opt\/asb-private\/agent-state\/tmp\/hermes-verify-[A-Za-z0-9]+\.py/g,
-    "<asb-hermes-verification-script>",
-  );
-}
 
 function normalizePytestCallableAddress(value) {
   // pytest's call-runtest hook prints this complete callable repr in its
@@ -408,39 +403,6 @@ function normalizeRecordedResponse(body) {
 function normalizeCassetteBody(body, url = "") {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
-  // CodeBuddy conditionally emits transport tuning fields on its first
-  // OpenAI-compatible request. They are not prompt or tool semantics, and a
-  // fresh replay process may omit them entirely. Keep the model, messages,
-  // tools, and every explicit tool result strict while removing only this
-  // client-local envelope variance from the cassette key.
-  try {
-    const parsed = JSON.parse(body);
-    const isWorkBuddy = Array.isArray(parsed.messages)
-      && parsed.messages.some((message) => JSON.stringify(message?.content || "").includes("You are CodeBuddy Code."));
-    if (isWorkBuddy) {
-      for (const field of [
-        "cache_retention",
-        "extra_vars",
-        "max_tokens",
-        "reasoning_effort",
-        "reasoning_summary",
-        "temperature",
-        "verbosity",
-      ]) delete parsed[field];
-      for (const message of parsed.messages) {
-        if (typeof message?.content === "string") {
-          message.content = message.content.replace(
-            /(<codebuddy_background_info>[\s\S]*?model named ).*?(\. The exact model ID is ).*?(?=\.(?:\n|$))/i,
-            "$1<asb-workbuddy-model>$2<asb-workbuddy-model>",
-          );
-        }
-      }
-      body = JSON.stringify(parsed);
-    }
-  } catch {
-    // The regular canonicalizer below retains malformed request bodies as
-    // strict byte strings.
-  }
   const workspace = process.env.ASB_TAPE_WORKSPACE;
   const callIdentifiers = new Map();
   const normalized = normalizeFunctionRenderingAddress(normalizePytestElapsed(
@@ -459,45 +421,10 @@ function normalizeCassetteBody(body, url = "") {
     // Generated replay protocol IDs contain a local clock; literal timestamps
     // in prompts, tool arguments and tool results remain replay-significant.
     .replace(/(asb-replay-\d+-)1[0-9]{12,}(?=-\d+)/g, "$1<asb-timestamp>")
-    // WorkBuddy derives a memory-project slug from the absolute workspace;
-    // canonicalize that generated slug when record and replay roots differ.
-    .replace(/srv-data-projects-[A-Za-z0-9_.-]+-(?:sweep-(?:record|replay)-[A-Za-z0-9_.-]+|workspaces(?:-replay)?-[A-Za-z0-9_.-]+)/g, "<asb-project-workspace>")
-    .replace(/srv-data-projects-[A-Za-z0-9_.-]+-results-asb-executions-[A-Za-z0-9-]+-batch-\d+-workspace/g, "<asb-project-workspace>")
-    // Codex includes a diagnostic token count in shell-tool output. It is
-    // derived from the rendered transcript and can change during replay; it
-    // is not provider request semantics.
-    .replace(/Original token count: \d+/g, "Original token count: <asb-token-count>")
-    .replace(/original token count: \d+/g, "original token count: <asb-token-count>")
-    .replace(/Total output lines: \d+/g, "Total output lines: <asb-line-count>")
-    .replace(/codex-arg[A-Za-z0-9_-]+/g, "codex-arg<asb-random>")
-    // OpenHands persists a generated conversation directory and its generated
-    // immediate subagent directory in later provider history. These IDs are
-    // created afresh for every agent process, so scope normalization to this
-    // exact private runtime hierarchy and retain every other path component.
-    .replace(/(\/openhands\/conversations\/)[0-9a-f]{8,}(?:\/subagents\/[0-9a-f]{8,})?/gi, "$1<asb-openhands-conversation>")
-    // OpenHands renders a separate generated terminal-output filename below
-    // its private conversation observation directory. Its digest is created
-    // for each process and is not tool result content.
-    .replace(/(\/openhands\/conversations\/<asb-openhands-conversation>\/observations\/terminal_output_)[0-9a-f]{8,}(\.txt\b)/gi, "$1<asb-openhands-terminal>$2")
     // Pytest decorates its terminal summary with ANSI color resets. Preserve
     // every status/count and trailing content, but replace only the elapsed
     // renderer in a complete colored pytest summary.
     .replace(/((?:\d+ (?:passed|failed|skipped|deselected|errors?)(?:, )?)+(?:\\u001b\[(?:0|3[12])m)* in )\d+(?:\.\d+)?s(?=\\u001b\[0m)/g, "$1<asb-pytest-elapsed>")
-    // Codex's shell transport prefixes each captured command result with a
-    // generated chunk identifier and wall-clock duration.  The duration is a
-    // client-side rendering observation, not request semantics: the same
-    // recorded command necessarily takes a different amount of time while an
-    // offline replay is being driven.  Scope the replacement to this complete
-    // fixed Codex envelopes so a prompt or arbitrary tool result merely
-    // mentioning a wall time remains cassette-significant.  An asynchronous
-    // shell result also includes a process-local session number; retain its
-    // status text and every other byte of the result.
-    .replace(/(Chunk ID: [^\n]*?(?:\r?\n|\\n)Wall time: )\d+(?:\.\d+)? seconds(?=(?:\r?\n|\\n)Process exited with code \d+)/g, "$1<asb-wall-time> seconds")
-    .replace(/(Chunk ID: [^\n]*?(?:\r?\n|\\n)Wall time: )\d+(?:\.\d+)? seconds((?:\r?\n|\\n)Process running with session ID )\d+/g, "$1<asb-wall-time> seconds$2<asb-session>")
-    // Codex also prepends a stopwatch to its MCP result renderer. The
-    // following structured Metadata payload is the actual sealed tool result;
-    // retain it byte-for-byte while removing only the local render duration.
-    .replace(/(Tool result: )\d+(?:\.\d+)? seconds(?=(?:\r?\n|\\n)Metadata:)/g, "$1<asb-tool-time> seconds")
     // Normalize generated call identifiers, but retain the relationship
     // between distinct IDs in one request/response. OpenCode can receive
     // multiple tool calls in a streamed response; collapsing every ID into
@@ -513,12 +440,19 @@ function normalizeCassetteBody(body, url = "") {
     // the already-significant artifact size. Keep the package and byte count
     // strict while removing only transport timing from tool history.
     .replace(/(\b\d+(?:\.\d+)?\/\d+(?:\.\d+)? (?:kB|MB|GB) )\d+(?:\.\d+)? (?:kB|MB|GB)\/s eta \d+:\d+:\d+/g, "$1<asb-transfer-rate> eta <asb-transfer-eta>")));
+  let normalizerInvoked = false;
   try {
     const parsed = JSON.parse(normalized);
     // The tape core passes opaque request data to an optional adapter-owned
     // extension. It neither identifies the adapter nor interprets its fields.
     const extensionValue = agentWireExtension?.normalizeRequest?.({ url, body: parsed });
-    const canonical = extensionValue === undefined ? parsed : extensionValue;
+    const extensionCanonical = extensionValue === undefined ? parsed : extensionValue;
+    normalizerInvoked = Boolean(agentNormalizer?.normalizeRequest);
+    const normalizerValue = agentNormalizer?.normalizeRequest?.({ url, body: extensionCanonical });
+    if (normalizerValue !== undefined && (!normalizerValue || typeof normalizerValue !== "object" || Array.isArray(normalizerValue))) {
+      throw new Error("adapter normalizer must return an object or undefined");
+    }
+    const canonical = normalizerValue === undefined ? extensionCanonical : normalizerValue;
     // `normalizeRequestBody` adds this transport policy before forwarding a
     // Codex request upstream.  It is intentionally absent from the cassette
     // key: old cassettes predate the policy, and a caller cannot opt out while
@@ -563,47 +497,6 @@ function normalizeCassetteBody(body, url = "") {
       return structuredContentBlockIdentifiers.get(identifier);
     };
     const sort = (value, key = "", path = []) => {
-      // Claude Code embeds a fresh device identifier in metadata.user_id on
-      // every process. It is client telemetry, not provider input, and must
-      // not make an otherwise identical recording unreplayable. Keep this
-      // exception path-scoped so same-named fields in prompts and tool input
-      // remain request-significant.
-      if (path.length === 2 && path[0] === "metadata" && path[1] === "user_id" && key === "user_id") {
-        return "<asb-user-id>";
-      }
-      // Codex sends process-local turn/session telemetry in client_metadata.
-      // It is neither a prompt nor tool input; normalize only this fixed,
-      // provider-defined metadata vocabulary so arbitrary client metadata
-      // remains request-significant.
-      if (path.length === 2 && path[0] === "client_metadata" && [
-        "root_turn_id",
-        "session_id",
-        "thread_id",
-        "turn_id",
-        "x-codex-installation-id",
-        "x-codex-turn-metadata",
-        "x-codex-window-id",
-      ].includes(path[1]) && key === path[1]) {
-        return "<asb-codex-client-metadata>";
-      }
-      // Codex returns an opaque encrypted continuation token with each tool
-      // turn. The next client request reflects that token, but its encoding
-      // (including JSON type) is intentionally process-local. It carries no
-      // benchmark instruction or tool result, so normalize only this exact
-      // Responses input-item field; every neighboring input field remains
-      // cassette-significant.
-      if (path.length === 3 && path[0] === "input" && /^\d+$/.test(path[1])
-          && path[2] === "encrypted_content" && key === "encrypted_content") {
-        return "<asb-codex-encrypted-content>";
-      }
-      // The same Responses input-item vocabulary carries Codex's generated
-      // tool-call identity. It is an opaque continuation reference, not a
-      // workload-supplied call ID. Scope this to input items so user JSON and
-      // nested tool arguments named call_id remain cassette-significant.
-      if (path.length === 3 && path[0] === "input" && /^\d+$/.test(path[1])
-          && path[2] === "call_id" && key === "call_id") {
-        return "<asb-codex-input-call-id>";
-      }
       // OpenAI-compatible agents can generate a fresh opaque identifier for
       // an otherwise identical tool turn.  Normalize only the protocol's
       // explicit tool-call identity fields, retaining their relationship
@@ -651,44 +544,9 @@ function normalizeCassetteBody(body, url = "") {
           && key === "id") {
         return canonicalContentBlockIdentifier(value);
       }
-      // WorkBuddy carries a process-local conversation request identifier in
-      // each OpenAI-compatible history item.  It is not a model-visible
-      // instruction or result and naturally changes for every replay.
-      if (typeof value === "string"
-          && path.length === 3
-          && path[0] === "messages"
-          && /^\d+$/.test(path[1])
-          && path[2] === "conversationRequestId"
-          && key === "conversationRequestId") {
-        return "<asb-workbuddy-conversation-request>";
-      }
-      // WorkBuddy also creates a per-process history message identifier. It
-      // addresses client telemetry only; the role, content, and tool history
-      // next to it remain cassette-significant.
-      if (typeof value === "string"
-          && path.length === 3
-          && path[0] === "messages"
-          && /^\d+$/.test(path[1])
-          && ["messageId", "requestModelId", "requestModelName"].includes(path[2])
-          && key === path[2]) {
-        return `<asb-workbuddy-${path[2]}>`;
-      }
       if (typeof value === "string") {
-        // Codex wraps an MCP response in a client-generated duration line.
-        // `input[*].output` is the Responses wire field reserved for tool
-        // results, so this cannot normalize a user prompt or tool argument.
-        if (path.length === 3 && path[0] === "input" && /^\d+$/.test(path[1])
-            && path[2] === "output" && key === "output") {
-          value = value
-            .replace(/^(Tool (?:result|time): )\d+(?:\.\d+)? seconds(?=\r?\n)/, "$1<asb-tool-time> seconds")
-            .replace(/^(Wall time: )\d+(?:\.\d+)? seconds(?=\r?\nOutput:)/, "$1<asb-wall-time> seconds");
-          value = normalizeUnittestElapsed(value);
-          value = normalizeUnifiedDiffHeaderMtime(value);
-          value = normalizeSympyTestRandomSeed(value);
-        }
         value = normalizeFunctionRenderingAddress(value);
         value = normalizeObjectRenderingAddress(value);
-        value = normalizeHermesVerificationScriptPath(value);
         value = normalizeToolSearchOrdering(value);
         value = normalizeLsDiagnosticOrdering(value);
         const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
@@ -720,7 +578,11 @@ function normalizeCassetteBody(body, url = "") {
     };
     return JSON.stringify(sort(canonical))
       .replace(/\.\.\/[^"\\]*AGENTS\.md(?:\\n)?/g, "");
-  } catch {
+  } catch (error) {
+    // An adapter-selected script is part of the matching contract.  Never
+    // silently fall back to a different key if it rejected its bounded input
+    // or returned malformed data; doing so would hide an unsafe replay drift.
+    if (normalizerInvoked) throw error;
     return normalized;
   }
 }

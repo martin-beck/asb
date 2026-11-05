@@ -729,6 +729,7 @@ impl<'a> ReadyAttempt<'a> {
                             tape::AgentContext {
                                 workspace: &workspace,
                                 agent: Some(&config.agent),
+                                workload: Some(&config.workload),
                                 recorder: if *mode == tape::Mode::Replay {
                                     Some(
                                         options

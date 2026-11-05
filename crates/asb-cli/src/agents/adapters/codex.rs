@@ -1,6 +1,6 @@
 use super::{
     AgentArtifacts, CollectionContext, CommandContext, CommandSpec, McpTapeContext,
-    PreparationContext, PromptDelivery, StaticAdapter,
+    PreparationContext, PromptDelivery, StaticAdapter, TapeNormalizationScript,
 };
 use crate::{Error, install::Recipe};
 
@@ -22,6 +22,11 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_tape_wire_extension(include_str!(
     "../../../assets/scripts/codex-native-wire.mjs"
 ))
+.with_tape_normalization_scripts(&[TapeNormalizationScript {
+    id: "codex-runtime-envelopes",
+    workloads: &["*"],
+    source: include_str!("../../../assets/scripts/agent-normalizers/codex.mjs"),
+}])
 .with_tool_replay(prepare_tool_replay)
 .with_mcp_servers()
 .with_mcp_relay()

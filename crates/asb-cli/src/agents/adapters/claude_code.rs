@@ -1,6 +1,6 @@
 use super::{
     AgentArtifacts, CollectionContext, CommandContext, CommandSpec, PreparationContext,
-    StaticAdapter,
+    StaticAdapter, TapeNormalizationScript,
 };
 use crate::Error;
 use crate::install::Recipe;
@@ -21,6 +21,11 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_estimated_disk_mib(1024)
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
+.with_tape_normalization_scripts(&[TapeNormalizationScript {
+    id: "claude-code-device-telemetry",
+    workloads: &["*"],
+    source: include_str!("../../../assets/scripts/agent-normalizers/claude-code.mjs"),
+}])
 .with_complete_tool_replay(prepare_tool_replay)
 .with_native_tool_transport()
 .with_guest_replay_evidence(extract_guest_replay_evidence)
