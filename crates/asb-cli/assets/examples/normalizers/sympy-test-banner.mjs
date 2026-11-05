@@ -2,7 +2,7 @@
 // intended SWE-bench family and SymPy task IDs. The seed can affect test
 // behavior; replacing its printed value does not make a run deterministic.
 export function normalizeToolResult({ text, tool }) {
-  if (tool?.name !== "bash" || typeof tool.arguments?.command !== "string"
+  if (!['bash', 'shell_command'].includes(tool?.name) || typeof tool.arguments?.command !== "string"
       || !tool.arguments.command.includes("sympy.test(")) return text;
   const starts = [...text.matchAll(/^=+ test process starts =+\r?$/gm)];
   const finishes = [...text.matchAll(/^=+ tests finished: .+\r?$/gm)];
