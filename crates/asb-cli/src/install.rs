@@ -1530,7 +1530,8 @@ pub(crate) fn workload_list_at(
         writeln!(output, "  (none)").map_err(super::io_error)?;
     } else {
         for name in names {
-            writeln!(output, "  {name}").map_err(super::io_error)?;
+            writeln!(output, "  {}", crate::workloads::display_name(&name))
+                .map_err(super::io_error)?;
         }
     }
     writeln!(output, "Configured workload trial sets:").map_err(super::io_error)?;
