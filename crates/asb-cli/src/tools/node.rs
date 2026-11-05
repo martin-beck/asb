@@ -21,10 +21,12 @@ pub(super) static ADAPTER: StaticTool = StaticTool::new(
 .with_guest_assets(guest_assets);
 
 fn host_usable(context: &crate::install::OperationContext) -> crate::install::InstallResult<bool> {
-    if ["npm", "npx"]
-        .iter()
-        .any(|program| super::host_executable(Path::new(program)).is_none())
-    {
+    let local_bin =
+        crate::project::resolve(context.root(), &context.project().tools_dir).join("node/bin");
+    if ["npm", "npx"].iter().any(|program| {
+        super::host_executable(Path::new(program)).is_none()
+            && !crate::executables::is_executable(&local_bin.join(program))
+    }) {
         return Ok(false);
     }
     let Some(program) = super::host_executable(Path::new("node")) else {
