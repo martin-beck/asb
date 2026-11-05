@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
-mod readiness;
+pub(super) mod readiness;
 #[cfg(target_os = "linux")]
 mod symbols;
 
@@ -245,7 +245,7 @@ fn process(
 // capture may reach the owning adapter's full-data validation above.
 // https://github.com/torvalds/linux/blob/v6.12/tools/perf/builtin-stat.c
 // https://github.com/torvalds/linux/blob/v6.12/tools/perf/builtin-record.c
-fn accepted_exit(status: Option<std::process::ExitStatus>, controlled: bool) -> bool {
+pub(super) fn accepted_exit(status: Option<std::process::ExitStatus>, controlled: bool) -> bool {
     status.is_some_and(|status| {
         #[cfg(unix)]
         let interrupt = {
@@ -389,7 +389,7 @@ fn symbol_quality(mut input: impl std::io::Read) -> Result<(u64, u64), String> {
 /// the process environment. The supported project-local perf build can
 /// dereference host-home resources during `perf script` initialization and
 /// crashes if its ambient home is replaced with an empty private directory.
-fn configure_offline_decoder_environment(command: &mut Command, home: &std::path::Path) {
+pub(super) fn configure_offline_decoder_environment(command: &mut Command, home: &std::path::Path) {
     command
         .env_remove("LD_PRELOAD")
         .env("DEBUGINFOD_URLS", "")
@@ -500,7 +500,7 @@ fn perf_access_denied(stderr: &[u8]) -> bool {
         || stderr.contains("operation not permitted")
 }
 
-fn reserve_recording_artifact(path: &std::path::Path) -> Result<(), String> {
+pub(super) fn reserve_recording_artifact(path: &std::path::Path) -> Result<(), String> {
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -519,7 +519,7 @@ struct PerfState {
 }
 
 #[cfg(target_os = "linux")]
-fn validate_agent_target(
+pub(super) fn validate_agent_target(
     pid: u32,
     identity: Option<measurements::ProcessIdentity>,
 ) -> Result<(), String> {

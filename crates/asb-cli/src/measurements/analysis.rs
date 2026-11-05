@@ -7,6 +7,7 @@ mod hardware;
 mod kernel;
 mod observations;
 mod rules;
+mod sampling;
 #[cfg(test)]
 mod tests;
 
@@ -46,6 +47,7 @@ struct Report {
     findings: Vec<Finding>,
     hardware: Vec<hardware::PmuAnalysis>,
     kernel: Vec<kernel::Diagnostic>,
+    sampling: Vec<sampling::SamplingAnalysis>,
 }
 
 fn analyze(timing: Option<&super::ComponentTiming>) -> Report {
@@ -61,6 +63,7 @@ fn analyze(timing: Option<&super::ComponentTiming>) -> Report {
         findings,
         hardware: Vec::new(),
         kernel: Vec::new(),
+        sampling: Vec::new(),
     }
 }
 
@@ -75,6 +78,9 @@ pub(super) fn publish(dir: &Path, timing: Option<&super::ComponentTiming>) -> Re
         "bpftrace-futex-wait",
         "bpftrace-lock-contention",
         "kernel-pressure-summary",
+        "arm-spe",
+        "arm-spe-plan",
+        "arm-spe-quality",
     ] {
         use std::io::Read;
         let mut bytes = Vec::new();
@@ -90,6 +96,7 @@ pub(super) fn publish(dir: &Path, timing: Option<&super::ComponentTiming>) -> Re
     let mut report = analyze(timing);
     report.hardware = hardware::analyze(&documents);
     report.kernel = kernel::analyze(&documents);
+    report.sampling = sampling::analyze(&documents);
     super::write_json(&dir.join("bottlenecks.json"), &report)
 }
 
@@ -120,5 +127,6 @@ pub(crate) fn from_documents(
     let mut report = analyze(timing.as_ref());
     report.hardware = hardware::analyze(documents);
     report.kernel = kernel::analyze(documents);
+    report.sampling = sampling::analyze(documents);
     serde_json::to_value(report).expect("analysis contains only finite values")
 }

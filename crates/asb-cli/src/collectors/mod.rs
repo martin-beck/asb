@@ -285,6 +285,10 @@ pub(crate) trait CollectorAdapter: Sync {
     fn estimated_disk_mib(&self) -> u64 {
         128
     }
+    /// Explicit `all` still includes expensive or privileged opt-in adapters.
+    fn default_enabled(&self) -> bool {
+        true
+    }
     /// Concise human-readable description for command-line discovery.
     fn description(&self) -> &'static str {
         "collector"
@@ -790,6 +794,7 @@ mod tests {
             ),
             ("arm-platform", None, None, false),
             ("arm-pmu", None, None, false),
+            ("arm-spe", None, None, true),
             ("system", None, None, false),
             ("mpstat", Some("ASB_MEASURE_MPSTAT"), Some("mpstat"), true),
             ("iostat", Some("ASB_MEASURE_IOSTAT"), Some("iostat"), true),
@@ -824,6 +829,7 @@ mod tests {
                 "kernel-pressure" => &["cpu-accounting"],
                 "arm-platform" => &["system"],
                 "arm-pmu" => &["arm-platform", "perf"],
+                "arm-spe" => &["arm-platform", "perf"],
                 "flamegraph" => &["perf"],
                 "agentsysperf:l1-resource" => {
                     &["agent-memory", "agent-workers", "cpu-accounting", "perf"]

@@ -15,6 +15,9 @@ pub(super) struct BpftraceCollector;
 pub(super) static ADAPTER: BpftraceCollector = BpftraceCollector;
 
 impl CollectorAdapter for BpftraceCollector {
+    fn default_enabled(&self) -> bool {
+        false
+    }
     #[cfg(any(target_os = "linux", test))]
     fn host_settings(&self) -> &'static [(&'static str, &'static str, &'static str)] {
         &[(
