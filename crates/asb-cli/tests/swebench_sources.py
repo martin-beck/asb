@@ -187,6 +187,32 @@ class SourceContracts(unittest.TestCase):
             yaml_loader=json.loads, expected_sha256=digest,journal=journal)
         return invoke, artifacts, client, removed, calls
 
+    def test_failed_buildx_diagnosis_distinguishes_unavailable_from_working(self):
+        with patch.object(sources.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
+            self.assertFalse(sources.buildx_unavailable(["docker"]))
+            self.assertEqual(run.call_args.args[0], ["docker", "buildx", "version"])
+        for outcome in [SimpleNamespace(returncode=1), FileNotFoundError(), subprocess.TimeoutExpired("docker", 60)]:
+            with self.subTest(outcome=outcome), patch.object(sources.subprocess, "run") as run:
+                if isinstance(outcome, Exception):
+                    run.side_effect = outcome
+                else:
+                    run.return_value = outcome
+                self.assertTrue(sources.buildx_unavailable(["docker"]))
+
+    def test_failed_build_reports_actionable_missing_buildx(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            invoke, _, _, _, _ = self.build_fixture(Path(temporary), code=1)
+            with patch.object(sources, "buildx_unavailable", return_value=True):
+                with self.assertRaisesRegex(sources.CatalogError, "install the Docker Buildx CLI plugin"):
+                    invoke()
+
+    def test_other_failed_build_retains_original_diagnostic(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            invoke, _, _, _, _ = self.build_fixture(Path(temporary), code=7)
+            with patch.object(sources, "buildx_unavailable", return_value=False):
+                with self.assertRaisesRegex(sources.CatalogError, r"official source image build failed \(exit 7\)"):
+                    invoke()
+
     def test_build_context_contains_only_original_dockerfile_and_records_provenance(self):
         with tempfile.TemporaryDirectory() as temporary:
             invoke, artifacts, client, removed, calls = self.build_fixture(Path(temporary))

@@ -508,7 +508,21 @@ pub(super) fn state(
     let config = crate::runner::replica::configuration(&isolated, replica)?;
     let workspace = PathBuf::from(&config.workspace);
     let runtime = crate::runner::replica::runtime_path(&workspace);
-    let mut expected = BTreeSet::from([workspace, PathBuf::from(&config.log_file)]);
+    // The runner intentionally excludes a settled workspace from the receipt
+    // before it deletes that workspace. Failed or retained attempts must still
+    // bind it, even when compact retention was requested.
+    let compacted = config.retention.compact_completed_attempts
+        && outcome.summary["process_success"] == true
+        && outcome.summary["workload_success"] != false
+        && outcome.summary.get("failure_kind") == Some(&Value::Null)
+        && matches!(
+            outcome.summary["workload_resource_disposition"].as_str(),
+            Some("not-required" | "not-created" | "removed")
+        );
+    let mut expected = BTreeSet::from([PathBuf::from(&config.log_file)]);
+    if !compacted {
+        expected.insert(workspace);
+    }
     if std::fs::symlink_metadata(&runtime).is_ok() {
         expected.insert(runtime);
     }
@@ -741,6 +755,47 @@ mod tests {
                     .is_err(),
                 "{case}"
             );
+        }
+    }
+
+    #[test]
+    fn compacted_success_seals_without_workspace_but_failure_cannot_omit_it() {
+        for success in [true, false] {
+            let mut fixture = Fixture::new(success);
+            fixture
+                .entry
+                .configuration
+                .retention
+                .compact_completed_attempts = true;
+            let replica = Identity { index: 1, total: 2 };
+            let path = record(&fixture, replica);
+            let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            value["outputs"].as_array_mut().unwrap().remove(0);
+            value["workload_resource_disposition"] = json!("removed");
+            value["summary"]["workload_resource_disposition"] = json!("removed");
+            value["summary"]["failure_kind"] = if success {
+                Value::Null
+            } else {
+                json!("workload_check_failed")
+            };
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            let observer = Observer {
+                inputs: &fixture.inputs,
+                index: 0,
+                directory: &fixture.directory,
+                entry: &fixture.entry,
+                publication: Mutex::new(()),
+            };
+            assert_eq!(observer.completed(replica, &path).is_ok(), success);
+            assert_eq!(fixture.inputs.has_replica(0, 1).unwrap(), success);
+            if success {
+                let workspace = fixture.directory.join("workspace-concurrency-1");
+                std::fs::remove_dir_all(workspace).unwrap();
+                fixture
+                    .inputs
+                    .verify_replica(0, replica, &fixture.directory, &fixture.entry)
+                    .unwrap();
+            }
         }
     }
 

@@ -120,6 +120,17 @@ def remove_owned_image(client, tag, attempt, expected_labels=None):
     return "removed"
 
 
+def buildx_unavailable(command):
+    """Diagnose a failed build without assuming every build failure is Buildx."""
+    try:
+        result = subprocess.run(command + ["buildx", "version"], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                timeout=60, check=False)
+        return result.returncode != 0
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+
+
 def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
                 archive=None, command=None, executor=run_harness, yaml_loader=None,
                 expected_sha256=SOURCE_SHA256, journal=None):
@@ -155,6 +166,8 @@ def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
         with (artifacts / "source-build.log").open("xb") as log:
             code = executor(arguments, artifacts, log, SOURCE_BUILD_TIMEOUT_SECONDS, cancelled=cancelled)
         if code:
+            if buildx_unavailable(command):
+                raise CatalogError("Docker Buildx is unavailable or could not be verified for the Docker command used by ASB; install the Docker Buildx CLI plugin for that user, verify `docker buildx version`, and retry the benchmark. Inspect source-build.log for details.")
             raise CatalogError(f"official source image build failed (exit {code}); inspect source-build.log")
         if journal is not None:
             from asb_resources import owned_resource
