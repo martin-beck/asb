@@ -634,21 +634,40 @@ fn bind_provider_tool_outputs(
                 .map_err(|_| "Codex native sidecar request is invalid".to_owned())?;
             let request: serde_json::Value = serde_json::from_slice(&request)
                 .map_err(|_| "Codex native sidecar request is invalid".to_owned())?;
-            pending = Some((
-                request
-                    .get("session_id")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
-                request
-                    .get("tool_use_id")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| "Codex native sidecar has no tool identity".to_owned())?
-                    .to_owned(),
-            ));
+            pending = Some(request);
         } else if row.get("event").and_then(serde_json::Value::as_str) == Some("output") {
-            let (session, hook_id) = pending
+            let request = pending
                 .take()
                 .ok_or_else(|| "Codex native sidecar output has no request".to_owned())?;
+            let broker = request.get("ordinal").is_some();
+            let identity = if broker {
+                let encoded = row
+                    .get("output_b64")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or("Codex native broker outcome is missing")?;
+                let bytes =
+                    decode_base64(encoded).map_err(|_| "Codex native broker outcome is invalid")?;
+                let outcome: serde_json::Value = serde_json::from_slice(&bytes)
+                    .map_err(|_| "Codex native broker outcome is invalid")?;
+                if outcome.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+                    return Err("Codex native broker outcome is invalid".into());
+                }
+                outcome
+                    .get("value")
+                    .cloned()
+                    .ok_or("Codex native broker identity is missing")?
+            } else {
+                request
+            };
+            let session = identity
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let hook_id = identity
+                .get("tool_use_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("Codex native sidecar has no tool identity")?
+                .to_owned();
             let key = if let Some(session) = session {
                 (session, hook_id.clone())
             } else {
@@ -670,11 +689,15 @@ fn bind_provider_tool_outputs(
                 .ok_or_else(|| {
                     "Codex provider capture has no matching native tool result".to_owned()
                 })?;
-            let output = serde_json::to_vec(
-                &String::from_utf8(output)
-                    .map_err(|_| "Codex provider tool result is not UTF-8".to_owned())?,
-            )
-            .map_err(|_| "cannot encode Codex provider tool result".to_owned())?;
+            let text = String::from_utf8(output)
+                .map_err(|_| "Codex provider tool result is not UTF-8".to_owned())?;
+            let result = if broker {
+                serde_json::json!({"ok":true,"value":text})
+            } else {
+                serde_json::json!(text)
+            };
+            let output = serde_json::to_vec(&result)
+                .map_err(|_| "cannot encode Codex provider tool result".to_owned())?;
             row["output_b64"] = serde_json::Value::String(encode_base64(&output));
             row["response_sha256"] = serde_json::Value::String(crate::cassette::digest(&output));
         }
@@ -682,22 +705,22 @@ fn bind_provider_tool_outputs(
     if pending.is_some() || outputs.values().any(|queue| !queue.is_empty()) {
         return Err("Codex native/provider tool result inventory does not match".into());
     }
-    if rows
+    let final_event = rows
         .last()
         .and_then(|row| row.get("event"))
-        .and_then(serde_json::Value::as_str)
-        != Some("workspace_effect")
-    {
+        .and_then(serde_json::Value::as_str);
+    if final_event == Some("workspace_effect") {
+        let prefix = rows[..rows.len() - 1]
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "cannot encode Codex native sidecar".to_owned())?
+            .join("\n");
+        rows.last_mut().expect("checked sidecar effect")["sha256"] =
+            serde_json::Value::String(crate::cassette::digest(format!("{prefix}\n").as_bytes()));
+    } else if final_event != Some("exit") {
         return Err("Codex native sidecar has no workspace effect".into());
     }
-    let prefix = rows[..rows.len() - 1]
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| "cannot encode Codex native sidecar".to_owned())?
-        .join("\n");
-    rows.last_mut().expect("checked sidecar effect")["sha256"] =
-        serde_json::Value::String(crate::cassette::digest(format!("{prefix}\n").as_bytes()));
     let encoded = rows
         .into_iter()
         .map(|row| serde_json::to_string(&row))
@@ -1902,6 +1925,43 @@ mod tests {
             decode_base64(tagged_rows[3]["output_b64"].as_str().unwrap()).unwrap(),
             br#""B""#
         );
+        let broker_request = encode_base64(
+            br#"{"ordinal":0,"request":{"tool":"Bash","input":{}},"snapshot_sequence":2}"#,
+        );
+        let broker_outcome =
+            encode_base64(br#"{"ok":true,"value":{"session_id":"a","tool_use_id":"same"}}"#);
+        let broker_request_b = encode_base64(
+            br#"{"ordinal":1,"request":{"tool":"Bash","input":{}},"snapshot_sequence":3}"#,
+        );
+        let broker_outcome_b =
+            encode_base64(br#"{"ok":true,"value":{"session_id":"b","tool_use_id":"same"}}"#);
+        let pending = [
+            serde_json::json!({"event":"write","request_b64":broker_request}),
+            serde_json::json!({"event":"output","output_b64":broker_outcome}),
+            serde_json::json!({"event":"write","request_b64":broker_request_b}),
+            serde_json::json!({"event":"output","output_b64":broker_outcome_b}),
+            serde_json::json!({"event":"exit"}),
+        ]
+        .into_iter()
+        .map(|row| row.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n";
+        let rows =
+            String::from_utf8(bind_provider_tool_outputs(pending.as_bytes(), &capture).unwrap())
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>();
+        let output = |index: usize| {
+            serde_json::from_slice::<serde_json::Value>(
+                &decode_base64(rows[index]["output_b64"].as_str().unwrap()).unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(output(1), serde_json::json!({"ok":true,"value":"A"}));
+        assert_eq!(output(3), serde_json::json!({"ok":true,"value":"B"}));
+        assert_eq!(rows.last().unwrap()["event"], "exit");
         std::fs::remove_dir_all(root).unwrap();
     }
 
