@@ -1472,6 +1472,7 @@ mod tests {
                 "codex",
                 "pi",
                 "opencode",
+                "workbuddy",
                 "qwen-code",
                 "openhands",
                 "openjiuwen",
