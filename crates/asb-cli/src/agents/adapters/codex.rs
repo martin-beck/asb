@@ -486,10 +486,7 @@ fn bind_provider_tool_outputs(
     }
     let mut histories = std::collections::BTreeMap::<String, History>::new();
     let mut outputs =
-        std::collections::BTreeMap::<String, std::collections::VecDeque<Vec<u8>>>::new();
-    // Hook IDs alone cannot distinguish two conversations that happen to use
-    // the same provider call ID. Never bind such outputs by arrival order.
-    let mut owners = std::collections::BTreeMap::<String, String>::new();
+        std::collections::BTreeMap::<(String, String), std::collections::VecDeque<Vec<u8>>>::new();
     for line in capture.lines() {
         let row: serde_json::Value = serde_json::from_str(line)
             .map_err(|_| "Codex provider capture is invalid".to_owned())?;
@@ -583,15 +580,8 @@ fn bind_provider_tool_outputs(
                     // Responses-compatible exec command. The native sidecar
                     // owns only that causal stream.
                     "exec_command" => {
-                        if owners.get(id).is_some_and(|owner| owner != &conversation) {
-                            return Err(
-                                "Codex provider call identity is ambiguous across conversations"
-                                    .into(),
-                            );
-                        }
-                        owners.insert(id.clone(), conversation.clone());
                         outputs
-                            .entry(id.clone())
+                            .entry((conversation.clone(), id.clone()))
                             .or_default()
                             .push_back(output.clone());
                     }
@@ -610,7 +600,7 @@ fn bind_provider_tool_outputs(
             // retain the historical conservative one-result-per-hook route.
             for (id, output) in appended {
                 outputs
-                    .entry(id.clone())
+                    .entry((conversation.clone(), id.clone()))
                     .or_default()
                     .push_back(output.clone());
             }
@@ -644,19 +634,38 @@ fn bind_provider_tool_outputs(
                 .map_err(|_| "Codex native sidecar request is invalid".to_owned())?;
             let request: serde_json::Value = serde_json::from_slice(&request)
                 .map_err(|_| "Codex native sidecar request is invalid".to_owned())?;
-            pending = Some(
+            pending = Some((
+                request
+                    .get("session_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
                 request
                     .get("tool_use_id")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| "Codex native sidecar has no tool identity".to_owned())?
                     .to_owned(),
-            );
+            ));
         } else if row.get("event").and_then(serde_json::Value::as_str) == Some("output") {
-            let hook_id = pending
+            let (session, hook_id) = pending
                 .take()
                 .ok_or_else(|| "Codex native sidecar output has no request".to_owned())?;
+            let key = if let Some(session) = session {
+                (session, hook_id.clone())
+            } else {
+                let matching = outputs
+                    .keys()
+                    .filter(|(_, id)| id == &hook_id)
+                    .collect::<Vec<_>>();
+                if matching.is_empty() {
+                    return Err("Codex provider capture has no matching native tool result".into());
+                }
+                if matching.len() != 1 {
+                    return Err("Codex provider call identity is missing or ambiguous".into());
+                }
+                matching[0].clone()
+            };
             let output = outputs
-                .get_mut(&hook_id)
+                .get_mut(&key)
                 .and_then(|queue| queue.pop_front())
                 .ok_or_else(|| {
                     "Codex provider capture has no matching native tool result".to_owned()
@@ -1790,9 +1799,53 @@ mod tests {
             ),
         )
         .unwrap();
+        let ambiguous = [
+            serde_json::json!({"event":"write","request_b64":request("same")}),
+            serde_json::json!({"event":"output"}),
+            serde_json::json!({"event":"workspace_effect"}),
+        ]
+        .into_iter()
+        .map(|row| row.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n";
         assert_eq!(
-            bind_provider_tool_outputs(sidecar.as_bytes(), &capture).unwrap_err(),
-            "Codex provider call identity is ambiguous across conversations"
+            bind_provider_tool_outputs(ambiguous.as_bytes(), &capture).unwrap_err(),
+            "Codex provider call identity is missing or ambiguous"
+        );
+        let tagged = |session: &str| {
+            encode_base64(
+                serde_json::json!({"session_id":session,"tool_use_id":"same"})
+                    .to_string()
+                    .as_bytes(),
+            )
+        };
+        let tagged_sidecar = [
+            serde_json::json!({"event":"write","request_b64":tagged("a")}),
+            serde_json::json!({"event":"output"}),
+            serde_json::json!({"event":"write","request_b64":tagged("b")}),
+            serde_json::json!({"event":"output"}),
+            serde_json::json!({"event":"workspace_effect"}),
+        ]
+        .into_iter()
+        .map(|row| row.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n";
+        let tagged_rows = String::from_utf8(
+            bind_provider_tool_outputs(tagged_sidecar.as_bytes(), &capture).unwrap(),
+        )
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+        assert_eq!(
+            decode_base64(tagged_rows[1]["output_b64"].as_str().unwrap()).unwrap(),
+            br#""A""#
+        );
+        assert_eq!(
+            decode_base64(tagged_rows[3]["output_b64"].as_str().unwrap()).unwrap(),
+            br#""B""#
         );
         std::fs::remove_dir_all(root).unwrap();
     }

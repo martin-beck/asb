@@ -93,7 +93,7 @@ def _request(value):
     tool_input = value.get("tool_input")
     if not isinstance(name, str) or not name:
         raise RuntimeError("Codex native hook did not provide a tool name")
-    return _encode({"schema_version": 1, "kind": "codex-local-tool", "tool_name": name, "tool_use_id": _tool_id(value), "input": tool_input})
+    return _encode({"schema_version": 1, "kind": "codex-local-tool", "tool_name": name, "session_id": value.get("session_id"), "tool_use_id": _tool_id(value), "input": tool_input})
 
 
 def _tool_id(value):
@@ -193,6 +193,8 @@ def _replay_pre(value):
         # within each run but are not part of the tool's operation or input.
         recorded.pop("tool_use_id", None)
         current.pop("tool_use_id", None)
+        recorded.pop("session_id", None)
+        current.pop("session_id", None)
         if recorded != current:
             raise RuntimeError("Codex native tool request differs from its recording")
         state["pending"][identifier] = index
