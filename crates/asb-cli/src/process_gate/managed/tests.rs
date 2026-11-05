@@ -842,8 +842,12 @@ fn protocol_fixture_exit_without_quiescence_is_never_a_clean_completion() {
     let admission = Admission::new(route.validate_gate(&mut command).unwrap()).unwrap();
     let mut gate = admission.spawn().unwrap();
     gate.resume().unwrap();
+    let gate_pid = gate.id();
     let error = gate.wait().unwrap_err().to_string();
     assert!(error.contains("without a quiescence receipt"), "{error}");
+    assert!(error.contains("role=command"), "{error}");
+    assert!(error.contains(&format!("gate_pid={gate_pid}")), "{error}");
+    assert!(error.contains("exit=ExitStatus"), "{error}");
     assert!(gate.observed.unwrap().success());
     assert!(gate.stop().unwrap_err().to_string().contains("unconfirmed"));
     assert!(
