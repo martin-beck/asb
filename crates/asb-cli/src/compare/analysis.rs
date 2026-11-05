@@ -176,7 +176,7 @@ pub(super) fn html(documents: &BTreeMap<String, Value>) -> String {
         .into_iter()
         .flatten()
     {
-        html.push_str(&format!("<details><summary>Agent execution phase alignment — {}</summary><p>SPE samples use an explicitly selected raw monotonic clock. Missing or incompatible identity, clock or execution bounds leave alignment unavailable.</p><pre>{}</pre></details>",
+        html.push_str(&format!("<details><summary>Agent execution phase alignment — {}</summary><p>SPE samples and verified Arm counter bounds use the capture’s recorded timer conversion. Missing or incompatible identity, clock or execution bounds leave alignment unavailable.</p><pre>{}</pre></details>",
             escape(alignment["status"].as_str().unwrap_or("unavailable")),
             escape(&serde_json::to_string_pretty(alignment).expect("phase alignment is JSON"))));
     }
@@ -271,11 +271,11 @@ mod tests {
             ("arm-spe".into(), serde_json::json!({"status":"completed"})),
             (
                 "arm-spe-quality".into(),
-                serde_json::json!({"schema_version":1,"status":"observed","scope":"agent-process-tree","clock":"CLOCK_MONOTONIC_RAW","root":root,"raw_record_quality":{"aux_records":1},"first_sample_ns":1_500_000_000_u64,"last_sample_ns":2_000_000_000_u64,"phase_alignment":{"status":"forged-saved-conclusion"}}),
+                serde_json::json!({"schema_version":1,"status":"observed","scope":"agent-process-tree","clock":"PERF_TIME_CONV","root":root,"raw_record_quality":{"aux_records":1,"time_conversion":{"time_shift":0,"time_mult":1,"time_zero":0,"time_cycles":0,"time_mask":0,"cap_user_time_zero":1,"cap_user_time_short":0}},"first_sample_ns":1_500_000_000_u64,"last_sample_ns":2_000_000_000_u64,"phase_alignment":{"status":"forged-saved-conclusion"}}),
             ),
             (
                 "execution-window".into(),
-                serde_json::json!({"schema_version":1,"status":"observed","scope":"verified-native-agent-principal-lifetime","clock":"CLOCK_MONOTONIC","clock_domain":"a".repeat(64),"root":root,"raw_clock":{"clock":"CLOCK_MONOTONIC_RAW","status":"observed","release_bound_ns":1_000_000_000_u64,"exit_bound_ns":3_000_000_000_u64}}),
+                serde_json::json!({"schema_version":1,"status":"observed","scope":"verified-native-agent-principal-lifetime","clock":"CLOCK_MONOTONIC","clock_domain":"a".repeat(64),"root":root,"arm_counter":{"clock":"CNTVCT_EL0","status":"observed","release_bound_ticks":1_000_000_000_u64,"exit_bound_ticks":3_000_000_000_u64}}),
             ),
         ]);
         let saved = documents.clone();
@@ -289,7 +289,7 @@ mod tests {
             0.5
         );
         assert!(html(&documents).contains("Agent execution phase alignment"));
-        assert!(html(&documents).contains("CLOCK_MONOTONIC_RAW"));
+        assert!(html(&documents).contains("PERF_TIME_CONV"));
         for (key, value) in saved {
             assert_eq!(documents[&key], value);
         }

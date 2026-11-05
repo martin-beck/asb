@@ -7,6 +7,7 @@
 
 use crate::collectors;
 pub(crate) mod analysis;
+mod arm_clock;
 mod cohort;
 mod execution_window;
 pub(crate) mod phase_alignment;
@@ -771,7 +772,13 @@ impl Session {
     /// actual principal. No direct/container/ASB guardian fallback exists.
     pub(crate) fn native_execution_sampler(&self) -> Option<execution_window::Sampler> {
         self.measurement_guardian?;
-        execution_window::Sampler::new(self.execution_window.clone(), self.process_identity?)
+        execution_window::Sampler::new(
+            self.execution_window.clone(),
+            self.process_identity?,
+            self.collectors
+                .iter()
+                .any(|collector| collector.name == "arm-spe"),
+        )
     }
 
     /// Project-local tool root selected by the resolved execution plan.

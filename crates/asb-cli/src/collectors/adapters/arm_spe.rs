@@ -81,8 +81,6 @@ fn select_pmu(pmus: &[super::arm_platform::Pmu]) -> Result<String, String> {
 fn args(pmu: &str, pid: u32, options: &Options) -> Vec<String> {
     vec![
         "record".into(),
-        "--clockid".into(),
-        "monotonic_raw".into(),
         "-e".into(),
         format!("{pmu}/ts_enable=1,load_filter=1,store_filter=1/"),
         "-c".into(),
@@ -236,7 +234,7 @@ impl CollectorAdapter for ArmSpe {
         "memory_latency_weight_sum_cycles":decoded.memory_latency_weight_sum,
         "memory_latency_known_samples":decoded.memory_latency_known_samples,
             "first_sample_ns":decoded.first_sample_ns,"last_sample_ns":decoded.last_sample_ns,
-        "clock":"CLOCK_MONOTONIC_RAW",
+        "clock":"PERF_TIME_CONV",
             "timestamp_precision_ns":1000,
             "series_origin":"first observed sample; one-second bins; final bin can be partial; absent bins are not invented zeroes",
             "limitations":"No reported loss/truncation flags, complete task metadata and a successful decoder are required. This cannot rule out sampling bias or unreported hardware loss. Counts are sampled observations, not full event counts or retired instructions. Memory weights are sampled operation latency in cycles, not isolated DRAM service time. Synthesized event populations overlap and must not be added. Ambiguous task reuse is rejected."
@@ -252,7 +250,7 @@ impl CollectorAdapter for ArmSpe {
                 }
             }
             quality_document["series_origin"] = serde_json::json!(
-                "verified native principal pre-release raw-clock bound; one-second bins anchored at first sample; absent bins are not invented zeroes"
+                "verified native principal pre-release counter-clock bound; one-second bins anchored at first sample; absent bins are not invented zeroes"
             );
         }
         quality_document["phase_alignment"] =

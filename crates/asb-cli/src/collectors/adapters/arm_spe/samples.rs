@@ -180,6 +180,7 @@ mod tests {
                 },
             )]),
             aux_records: 1,
+            time_conversion: None,
         }
     }
     #[test]

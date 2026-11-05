@@ -1698,13 +1698,13 @@ Ordinary CI runs only the unprivileged policy tests and JavaScript syntax check;
 it starts no collector, service, provider, download or benchmark.
 
 
-For optional native SPE clock qualification, run the existing delegated pressure
+For optional native SPE timer-conversion qualification, run the existing delegated pressure
 fixture with `--require-phase-alignment --require-cohort-analysis`. Use a fresh
 synthetic-client project with `arm-spe` selected, a frozen executable, completed
-local tape and available matching perf. It checks both replicas' raw-clock
+local tape and available matching perf. It checks both replicas' counter-clock
 sample bounds and graph offsets, matching actual agent identities, offline
 regeneration and HTML disclosure. This test does not run in CI, change persistent
 host settings or contact an online provider. Deterministic tests under
 `measurements::phase_alignment`, `measurements::execution_window`, and
-`compare::analysis` cover missing clocks, identity mismatch, incomplete or failed
+`compare::analysis` cover missing clock/conversion evidence, identity mismatch, incomplete or failed
 capture, out-of-envelope samples and precise integer subtraction offline.
