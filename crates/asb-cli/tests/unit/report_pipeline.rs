@@ -1941,3 +1941,32 @@ fn comparison_regenerates_cohort_overlap_from_verified_windows_without_reusing_s
         invalid
     );
 }
+
+#[test]
+fn comparison_preserves_arm_capability_metadata_without_creating_activity_metrics() {
+    let fixture = Fixture::new();
+    let manifest = fixture.seed("", 1);
+    let platform = json!({"schema_version":1,"architecture":"aarch64","status":"discovered","scope":"host_context",
+        "cpu_identity":{"schema_version":1,"online_cpus":[0],"midr_by_cpu":{"0":0x481fd010u64},"unavailable_cpus":[]},
+        "pmus":[{"name":"armv8_pmuv3_0","domain":"cpu","cpus":"0","events":{"description":"<script>not-markup</script>"}}]});
+    fixture.write(
+        "sweep-results/000-0/measurements/arm-platform.json",
+        platform.to_string(),
+    );
+    run(manifest.to_str().unwrap(), &mut Vec::new()).unwrap();
+    let report = fixture.0.join("results/sweep-comparison");
+    let summary: Value =
+        serde_json::from_slice(&fs::read(report.join("comparison.json")).unwrap()).unwrap();
+    assert_eq!(summary["benchmarks"][0]["arm_platform"], platform);
+    assert!(
+        !summary["benchmarks"][0]["metrics"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|key| key.contains("midr"))
+    );
+    let html = fs::read_to_string(report.join("report.html")).unwrap();
+    assert!(html.contains("Arm CPU and PMU capabilities"));
+    assert!(html.contains("&lt;script&gt;not-markup&lt;/script&gt;"));
+    assert!(!html.contains("<script>not-markup</script>"));
+}

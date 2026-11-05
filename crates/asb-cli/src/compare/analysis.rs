@@ -150,6 +150,10 @@ pub(super) fn html(documents: &BTreeMap<String, Value>) -> String {
             escape(pmu.get("limitations").and_then(Value::as_str).unwrap_or(""))
         ));
     }
+    if let Some(platform) = documents.get("arm-platform") {
+        let metadata = serde_json::to_string_pretty(platform).expect("platform metadata is JSON");
+        html.push_str(&format!("<details><summary>Arm CPU and PMU capabilities</summary><p>Capability inventory only. Shared uncore activity is not collected or attributed to agents.</p><pre>{}</pre></details>",escape(&metadata)));
+    }
     html.push_str("</details>");
     html
 }

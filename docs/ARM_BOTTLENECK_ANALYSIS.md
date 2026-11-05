@@ -385,3 +385,12 @@ their scoped generic counter and SPE results remain available where validated.
 This first profile does not implement Neoverse N2/V1/V2/V3 slot formulas, apply
 silicon errata workarounds, or claim native N1 hardware qualification from a
 Kunpeng run. Deterministic fixtures check the N1 formulas and domain rejection.
+
+
+Comparison JSON preserves the full captured Arm platform inventory separately
+from scalar measurements. HTML exposes that inventory as escaped capability
+metadata beside the CPU methodology status, including per-CPU identities and
+PMU definitions. Those static fields never become agent activity graphs.
+Ratios whose reported event runtimes cannot be compared as exactly representable
+integral nanoseconds remain unavailable; large/fractional f64 runtimes cannot
+silently establish group coherence after rounding.
