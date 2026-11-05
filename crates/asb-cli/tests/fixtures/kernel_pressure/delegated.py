@@ -26,6 +26,8 @@ parser.add_argument("--require-windows", action="store_true",
                     help="require same-domain verified agent lifetime overlap")
 parser.add_argument("--require-cohort-analysis", action="store_true",
                     help="also validate regenerated overlap/rate evidence and report graphs")
+parser.add_argument("--replicas", type=int, choices=range(1, 65), default=2,
+                    help="expected observed replica population")
 args = parser.parse_args()
 if args.require_cohort_analysis:
     args.require_windows = True
@@ -90,8 +92,8 @@ observed = [p for row in observations for pids in row["leaves"].values() for p i
 if not observed or any(p in observed for p in [runner.pid, noise.pid, os.getpid()]):
     raise SystemExit("Agent cgroup scope was absent or included fixture/ASB/noise")
 reports = list(project.glob("results/pressure-runs/run-*/**/kernel-pressure.json"))
-if len(reports) != 2:
-    raise SystemExit("Expected exactly two retained pressure result documents")
+if len(reports) != args.replicas:
+    raise SystemExit("Expected one retained pressure document per requested replica")
 windows = []
 for path in reports:
     result = json.loads(path.read_text())
@@ -122,7 +124,7 @@ for path in reports:
         if observed_collector["status"] != "completed" or not observed_collector["metrics"] or not observed_collector["series"]:
             raise SystemExit("Collector did not publish validated series: " + collector)
 if args.require_windows:
-    if len(windows) != 2 or len({w["clock_domain"] for w in windows}) != 1:
+    if len(windows) != args.replicas or len({w["clock_domain"] for w in windows}) != 1:
         raise SystemExit("Replica lifetime clocks are not comparable")
     overlap = min(w["end_bound_ns"] for w in windows) - max(w["start_bound_ns"] for w in windows)
     if overlap <= 0:
@@ -135,13 +137,13 @@ if args.require_cohort_analysis:
     if len(cohorts) != 1 or cohorts[0]["status"] != "observed":
         raise SystemExit("Comparison did not produce exactly one observed cohort")
     cohort = cohorts[0]
-    if cohort["peak_live_principals_lower_bound"] != 2:
-        raise SystemExit("Comparison did not observe two simultaneous live principals")
+    if cohort["peak_live_principals_lower_bound"] != args.replicas:
+        raise SystemExit("Comparison did not observe all requested simultaneous live principals")
     expected_overlap = overlap / 1_000_000
     if abs(cohort["all_principals_overlap_lower_bound_ms"] - expected_overlap) > 1e-6:
         raise SystemExit("Comparison overlap does not match retained native observations")
     phase_span = max(w["exit_bound_ns"] for w in windows) - min(w["release_bound_ns"] for w in windows)
-    if phase_span <= 0 or abs(cohort["completed_agent_phases_per_second_lower_bound"] - 2e9 / phase_span) > 1e-9:
+    if phase_span <= 0 or abs(cohort["completed_agent_phases_per_second_lower_bound"] - args.replicas * 1e9 / phase_span) > 1e-9:
         raise SystemExit("Comparison rate does not match the observed phase envelope")
     summary = json.loads((report / "comparison.json").read_text())
     if summary["cohort_analysis"] != evidence:

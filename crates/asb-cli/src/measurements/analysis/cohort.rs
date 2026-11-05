@@ -1,11 +1,12 @@
 //! Common-clock cohort observations. Dispatch membership alone proves no overlap.
+mod scaling;
 use crate::collectors::{ReportGraph, ReportRow};
 use serde::Serialize;
 #[cfg(test)]
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 struct Context {
     agent: String,
     provider: String,
@@ -56,6 +57,7 @@ pub(crate) struct Report {
     clock: &'static str,
     rows_without_cohort: usize,
     cohorts: Vec<Cohort>,
+    scaling: Vec<scaling::Group>,
     limitations: &'static str,
 }
 
@@ -69,7 +71,7 @@ pub(crate) fn analyze(rows: &[ReportRow<'_>]) -> Report {
             missing += 1;
         }
     }
-    let cohorts = groups
+    let cohorts: Vec<Cohort> = groups
         .into_iter()
         .map(|(id, rows)| {
             let first = rows[0];
@@ -101,6 +103,7 @@ pub(crate) fn analyze(rows: &[ReportRow<'_>]) -> Report {
         schema_version: 1,
         clock: "CLOCK_MONOTONIC",
         rows_without_cohort: missing,
+        scaling: scaling::derive(&cohorts),
         cohorts,
         limitations: "Generation-verified native principal lifetimes include sleeping/stopped time and do not prove simultaneous CPU residency or a causal bottleneck. Interior windows exclude unsampled tails and descendants after root exit. Overlap and peak are lower bounds. Release-to-owned-exit envelopes include observation overhead, so phase completion rates are lower bounds, not end-to-end task throughput or a scaling speedup. Compare only complete admitted memberships in one boot/time-namespace clock domain. Missing or incompatible evidence is unavailable, never zero.",
     }
@@ -252,7 +255,7 @@ fn fill(result: &mut Cohort, rows: &[&ReportRow<'_>]) -> Result<(), &'static str
 
 impl Report {
     pub(crate) fn graphs(&self) -> Vec<ReportGraph> {
-        self.cohorts.iter().filter(|c| c.status == "observed").take(16).enumerate().map(|(index, c)| {
+        let mut graphs = self.cohorts.iter().filter(|c| c.status == "observed").take(16).enumerate().map(|(index, c)| {
             let first = c.windows.iter().map(|w| w.release_ns).min().unwrap_or(0);
             let last = c.windows.iter().map(|w| w.exit_ns).max().unwrap_or(first);
             let duration = (last - first) as f64;
@@ -269,7 +272,9 @@ impl Report {
             }
             svg.push_str(&format!("<text x=\"515\" y=\"{}\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"12\">Time since earliest observed release bound (s)</text></svg>", height - 12));
             ReportGraph { filename: format!("cohort-lifetimes-{:04}.svg", index + 1), svg }
-        }).collect()
+        }).collect::<Vec<_>>();
+        graphs.extend(scaling::graphs(&self.scaling));
+        graphs
     }
 }
 
@@ -278,12 +283,18 @@ mod tests {
     use super::*;
     use crate::measurements::ExecutionCohort;
     use serde_json::json;
-    fn docs(pid: u64, release: u64, start: u64, end: u64, exit: u64) -> BTreeMap<String, Value> {
+    pub(super) fn docs(
+        pid: u64,
+        release: u64,
+        start: u64,
+        end: u64,
+        exit: u64,
+    ) -> BTreeMap<String, Value> {
         let root = json!({"pid":pid,"start_time_ticks":1});
         [("execution-window".into(), json!({"schema_version":1,"status":"observed","clock":"CLOCK_MONOTONIC","clock_domain":"a".repeat(64),"scope":"verified-native-agent-principal-lifetime","root":root,"live_observations":3,"release_bound_ns":release*1_000_000_000,"start_bound_ns":start*1_000_000_000,"end_bound_ns":end*1_000_000_000,"exit_bound_ns":exit*1_000_000_000})),
          ("measurement-target".into(),json!({"schema_version":1,"scope":"agent-process-tree","source":"owned-stopped-native-principal","root":root,"excluded_guardian":{"pid":900,"start_time_ticks":1},"excluded_controller_pid":901}))].into()
     }
-    fn row<'a>(
+    pub(super) fn row<'a>(
         slot: usize,
         cohort: &'a ExecutionCohort,
         documents: &'a BTreeMap<String, Value>,
@@ -304,7 +315,7 @@ mod tests {
             documents,
         }
     }
-    fn membership(slots: Vec<usize>, selected: usize) -> ExecutionCohort {
+    pub(super) fn membership(slots: Vec<usize>, selected: usize) -> ExecutionCohort {
         ExecutionCohort {
             id: "a-123".into(),
             selected_replicas: selected,

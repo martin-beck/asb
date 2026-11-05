@@ -347,3 +347,13 @@ with numbered time axes in seconds and the ordinary report enlargement controls.
 The cohort table always describes full admitted membership; plot filtering does
 not recompute a different cohort. Historical receipts without enclosing phase
 bounds remain unavailable for this combined analysis, rather than being backfilled.
+
+
+When at least two actual admitted widths have observed cohorts in the same
+configuration-name and clock-domain group, comparison also emits descriptive
+phase-rate scatter plots and a `scaling` record. Every repeated cohort remains
+its own point. The graph uses actual admitted width, not configured concurrency
+or a guessed CPU utilization, and never computes a speedup from two lower bounds.
+Identical names/boot do not establish identical inputs, budgets, instruments,
+host contention or provider behavior; the report discloses these limits rather
+than labeling the points a controlled scalability experiment.

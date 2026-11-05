@@ -162,7 +162,7 @@ pub(super) fn cohort_html(report: &crate::measurements::analysis::cohort::Report
 }
 
 pub(super) fn graph_section(name: &str) -> Option<crate::collectors::GraphSection> {
-    if name.starts_with("cohort-lifetimes-") {
+    if name.starts_with("cohort-lifetimes-") || name.starts_with("cohort-scaling-") {
         Some(crate::collectors::GraphSection {
             title: "Observed agent lifetime overlap",
             description: "Conservative live-principal intervals in a common clock domain. Includes sleep; does not establish simultaneous CPU execution. Each plot represents its full admitted cohort.",
