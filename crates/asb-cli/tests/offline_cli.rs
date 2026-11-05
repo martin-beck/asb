@@ -1121,7 +1121,7 @@ fn ollama_discovery_and_codex_run_use_the_selected_local_endpoint() {
 const fs = require('fs');
 const cfg = fs.readFileSync(process.env.CODEX_HOME + '/config.toml', 'utf8');
 const endpoint = cfg.match(/base_url = "([^"]+)"/)[1];
-if (!cfg.includes('model_provider = "asb_provider"') || !cfg.includes('web_search = "disabled"')) process.exit(11);
+if (!cfg.includes('model_provider = "asb_provider"') || cfg.includes('web_search = "disabled"')) process.exit(11);
 fs.writeFileSync('src/parser.py', "def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n");
 const body = JSON.stringify({model:'qwen3:0.6b',input:'offline test',tools:[{type:'function',name:'read_file'}]});
 fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'application/json'},body}).then(r => { if (!r.ok) process.exit(12); console.log('local-ollama-agent'); }).catch(() => process.exit(13));
@@ -1131,7 +1131,15 @@ fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'applicati
         std::fs::Permissions::from_mode(0o755),
     )
     .unwrap();
+    let reset_workload = || {
+        project.write(
+            "workspace/src/parser.py",
+            "def parse_path(value: str) -> list[str]:\n    return value.split('/')\n",
+        )
+    };
+    reset_workload();
     let run = project.command_with_env(&["run", "benchmark.toml"], &[("OLLAMA_HOST", &endpoint)]);
+    reset_workload();
     let record = project.command_with_env(
         &[
             "run",
@@ -1142,6 +1150,7 @@ fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'applicati
         ],
         &[("OLLAMA_HOST", &endpoint)],
     );
+    reset_workload();
     let replay = project.command_with_env(
         &[
             "run",
@@ -1157,6 +1166,13 @@ fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'applicati
     expect_success(&run);
     expect_success(&record);
     expect_success(&replay);
+    for result in [&run, &record, &replay] {
+        assert!(
+            stdout(result).contains("success_rate=1.000"),
+            "{}",
+            stdout(result)
+        );
+    }
     assert!(
         std::fs::read_to_string(project.0.join("run.log"))
             .unwrap()
