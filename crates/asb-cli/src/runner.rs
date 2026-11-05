@@ -12,6 +12,8 @@ use disposition::RunStatus;
 use disposition::{FailureKind, RunDisposition, RunFacts, RunFailure};
 mod native;
 mod phases;
+#[cfg(target_os = "linux")]
+mod proc_executable;
 mod progress;
 pub(crate) mod recording;
 pub(crate) mod repeated;
@@ -1741,14 +1743,13 @@ fn principal_identity(
 ) -> Result<(measurements::ProcessIdentity, std::path::PathBuf), Error> {
     let identity = measurements::ProcessIdentity::read(pid)
         .ok_or_else(|| Error::Run("stopped agent identity disappeared".into()))?;
-    let executable = std::fs::read_link(format!("/proc/{pid}/exe")).map_err(crate::io_error)?;
+    let executable = proc_executable::read(&identity).map_err(crate::io_error)?;
     Ok((identity, executable))
 }
 
 #[cfg(target_os = "linux")]
 fn wait_for_agent_exec(
     child: &mut OwnedChild,
-    principal: u32,
     identity: (measurements::ProcessIdentity, std::path::PathBuf),
 ) -> Result<(), Error> {
     let (identity, launcher) = identity;
@@ -1757,7 +1758,7 @@ fn wait_for_agent_exec(
         if !identity.matches() {
             break;
         }
-        match std::fs::read_link(format!("/proc/{principal}/exe")) {
+        match proc_executable::read(&identity) {
             Ok(current) if current != launcher => break,
             Ok(_) => (),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
@@ -1831,7 +1832,7 @@ pub(crate) fn run_guest_process(
     on_spawn(principal)?;
     #[cfg(target_os = "linux")]
     if let Some(identity) = identity {
-        wait_for_agent_exec(&mut child, principal, identity)?;
+        wait_for_agent_exec(&mut child, identity)?;
     }
     if let Some(prompt) = stdin_prompt {
         let Some(mut stdin) = child.take_stdin() else {
