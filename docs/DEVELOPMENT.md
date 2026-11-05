@@ -1,5 +1,12 @@
 # Development
 
+The offline `pi_native_integration.mjs` fixture sends one native tool's
+subprocess request to a private loopback HTTP server, then replays its recorded
+result four times. The server counter must stay at one and a tool-execution
+sentinel must remain absent on replay. This exercises the Pi dispatch and
+broker seam with a synthetic client and marker service; it does not qualify
+an installed agent, real snapshot effects, a full cassette, or SWE-bench.
+
 Linux guests for Python agents stage a project-local portable Python and the
 installed agent packages before execution. The host prepares the pinned Python
 runtime through `uv` when needed; the guest can then install neither Python
