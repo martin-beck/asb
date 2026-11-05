@@ -39,6 +39,8 @@ def supervisor(root, label, phase, uid, gid, node, binary, fixture, delegated):
         if service.stdout.readline()!='READY\n':
             service.wait(timeout=30)
             raise RuntimeError(f'snapshot supervisor failed; inspect {base}/supervisor.log')
+        if phase=='replay' and ((base/'storage/streams').exists() or not (root/'snapshots.tar').is_file()):
+            raise RuntimeError('replay did not release extracted streams while preserving its archive')
         env=dict(os.environ,ASB_CLAUDE_FIXTURE_DIR=str(fixture),ASB_CLAUDE_BINARY=str(binary),
                  ASB_CLAUDE_FIXED_WORKSPACE=str(target),ASB_CLAUDE_PHASE=phase,
                  ASB_CLAUDE_EVENTS=str(root/'cassette.json'),ASB_CLAUDE_EXTERNAL_MARKER=str(base/'marker'),

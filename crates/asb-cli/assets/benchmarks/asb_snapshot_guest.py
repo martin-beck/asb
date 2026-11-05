@@ -96,6 +96,10 @@ def main(argv=None):
                     raise ValueError('snapshot archive does not match the configured roots')
             mounted=workspace.restore_baseline(store/'snapshot-00000001')
             service = SnapshotReplay(boundaries, SnapshotApplier(store, mounted, [args.rsync]))
+            # The verified input archive remains available. Once all streams
+            # have been received and validated, their extracted copies are
+            # regenerable and need not consume space for the whole replay.
+            shutil.rmtree(root/'streams')
         roots = [args.target] + args.extra_root
         for index, target in enumerate(roots):
             source = mounted/str(index) if args.extra_root else mounted

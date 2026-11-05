@@ -84,10 +84,11 @@ class SnapshotServiceTest(unittest.TestCase):
             with patch.object(asb_snapshot_guest,'SnapshotWorkspace',Workspace), \
                  patch.object(asb_snapshot_guest,'unpack_streams'), \
                  patch.object(asb_snapshot_guest,'receive_snapshot_streams',side_effect=receive), \
+                 patch.object(asb_snapshot_guest.shutil,'rmtree') as cleanup, \
                  patch.object(asb_snapshot_guest.subprocess,'run') as run:
                 with self.assertRaisesRegex(ValueError,'does not match the configured roots'):
                     asb_snapshot_guest.main(args)
-            run.assert_not_called();self.assertEqual(closed,[True])
+            run.assert_not_called();cleanup.assert_not_called();self.assertEqual(closed,[True])
 
     def test_guest_unmounts_first_root_if_second_mount_fails(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
@@ -313,6 +314,7 @@ class SnapshotServiceTest(unittest.TestCase):
                      patch.object(asb_snapshot_guest,'receive_snapshot_streams',return_value=[('first',2),('second',3)]), \
                      patch.object(asb_snapshot_guest,'SnapshotApplier',return_value=lambda _:None), \
                      patch.object(asb_snapshot_guest,'SnapshotReplay',side_effect=replay), \
+                     patch.object(asb_snapshot_guest.shutil,'rmtree'), \
                      patch.object(asb_snapshot_guest.subprocess,'run'), \
                      patch.object(asb_snapshot_guest.sys,'stdin',Input()):
                     with self.assertRaisesRegex(RuntimeError,'unconsumed or failed'):
@@ -339,6 +341,7 @@ class SnapshotServiceTest(unittest.TestCase):
                  patch.object(asb_snapshot_guest,'unpack_streams'), \
                  patch.object(asb_snapshot_guest,'receive_snapshot_streams',return_value=[]), \
                  patch.object(asb_snapshot_guest,'SnapshotApplier',return_value=lambda _:None), \
+                 patch.object(asb_snapshot_guest.shutil,'rmtree'), \
                  patch.object(asb_snapshot_guest.subprocess,'run'), \
                  patch.object(asb_snapshot_guest.sys,'stdin',io.StringIO('STOP\n')), \
                  patch.object(asb_snapshot_guest.sys,'stdout',output):
