@@ -1,6 +1,9 @@
 //! Pinned x86 VM recipe primitives. Not yet connected to benchmark dispatch.
 
+use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::io::{self, Read};
 use std::path::Path;
 use std::process::Command;
 
@@ -17,6 +20,32 @@ pub const X86_IMAGE_URL: &str =
     "https://cloud-images.ubuntu.com/noble/20261017/noble-server-cloudimg-amd64.img";
 pub const X86_IMAGE_SHA256: &str =
     "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94";
+
+/// Verify the base image by streaming it; no image-sized allocation is needed.
+pub fn verify_x86_image(path: &Path) -> io::Result<()> {
+    verify_digest(path, X86_IMAGE_SHA256)
+}
+
+fn verify_digest(path: &Path, expected: &str) -> io::Result<()> {
+    let mut file = File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    let actual = format!("{:x}", hash.finalize());
+    if actual != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "VM base image checksum does not match the pinned recipe; obtain the pinned image again",
+        ));
+    }
+    Ok(())
+}
 
 /// Paths supplied by the caller; no host username or project location is embedded.
 pub struct VmPaths<'a> {
@@ -109,6 +138,42 @@ mod tests {
             X86_IMAGE_SHA256
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit())
+        );
+    }
+
+    #[test]
+    fn image_digest_validation_accepts_exact_bytes_and_rejects_changes() {
+        let directory = std::env::current_dir()
+            .unwrap()
+            .join("target/vm-recipe-fixtures");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("image-digest-{}", std::process::id()));
+        std::fs::write(&path, b"abc").unwrap();
+        assert!(
+            verify_digest(
+                &path,
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            verify_x86_image(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        std::fs::write(&path, b"abd").unwrap();
+        assert_eq!(
+            verify_digest(
+                &path,
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            )
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::InvalidData
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            verify_x86_image(&path).unwrap_err().kind(),
+            io::ErrorKind::NotFound
         );
     }
 
