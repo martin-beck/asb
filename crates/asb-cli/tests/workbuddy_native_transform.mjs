@@ -11,7 +11,7 @@ const calls=[];
 const context={Symbol};
 context[Symbol.for('asb.workbuddy.nativeDispatch.v1')]=async (call, invoke)=>{calls.push(call);return invoke()};
 const manager=runInNewContext(transformed+'; new Manager()',context);
-const result=await manager.executeToolWithHooks({name:'Bash'},args=>args,{command:'echo ok'},{context:{id:'session'}},{toolCall:{callId:'call'}});
+const result=await manager.executeToolWithHooks({name:'Bash'},args=>args,{command:'echo ok'},{context:{id:'session'}},{toolCall:{callId:'call'}},'parsed');
 assert.equal(result.command,'echo ok');
 assert.equal(calls[0].name,'Bash');
 assert.equal(calls[0].session,'session');

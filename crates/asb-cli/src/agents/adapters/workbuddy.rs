@@ -75,8 +75,17 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_estimated_disk_mib(768)
 .with_tool_replay(prepare_tool_replay)
+.with_native_tool_transport()
+.with_guest_service(start_native_service)
+.with_deferred_native_recording(finalize_native_recording)
+.with_native_snapshot_check(verify_native_snapshot)
 .with_collection(collect_artifacts)
 .with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "workbuddy",
+        filename: "native-tool-pending.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
     super::super::ArtifactSpec {
         namespace: "tool-replay",
         filename: "local-tools.jsonl",
@@ -207,6 +216,9 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         .env("CODEBUDDY_MODEL", context.model)
         .env("CODEBUDDY_CONFIG_DIR", &directory)
         .env("CODEBUDDY_API_KEY_HELPER_DISABLED", "1");
+    if native_snapshot(context.tape.map(|tape| tape.mode)) {
+        context.command.env("CODEBUDDY_IS_SANDBOX", "1");
+    }
     super::node_output::prepare(context, "workbuddy", OUTPUT_ENTRY)
 }
 
@@ -214,6 +226,9 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
+    if native_snapshot(Some(tape.mode)) {
+        return Ok(());
+    }
     let launch = super::super::tool_replay_mcp::with_metadata_trace(
         super::super::tool_replay_mcp::launch(context, tape)?,
         &context
@@ -278,6 +293,18 @@ fn collect_artifacts(
     context: &super::super::CollectionContext<'_>,
 ) -> super::super::AgentArtifacts {
     let mut artifacts = super::super::AgentArtifacts::default();
+    if let Some(bytes) = context
+        .frozen
+        .bytes("native-tool-pending.jsonl")
+        .filter(|bytes| !bytes.is_empty())
+    {
+        artifacts
+            .sealed_artifacts
+            .push(super::super::SealedArtifact {
+                kind: "native-tool-deferred".into(),
+                bytes: bytes.to_vec(),
+            });
+    }
     if let Some(bytes) = context.frozen.bytes("workbuddy-mcp-metadata.jsonl") {
         artifacts
             .sealed_artifacts
@@ -287,6 +314,72 @@ fn collect_artifacts(
             });
     }
     artifacts
+}
+
+fn native_snapshot(mode: Option<crate::tape::Mode>) -> bool {
+    match mode {
+        Some(crate::tape::Mode::Record) => std::env::var_os("ASB_FS_MARKER_SOCKET").is_some(),
+        Some(crate::tape::Mode::Replay) => std::env::var_os("ASB_FS_REPLAY_SOCKET").is_some(),
+        None => false,
+    }
+}
+
+fn start_native_service(
+    command: &mut std::process::Command,
+    executable: &str,
+    run_dir: &std::path::Path,
+    mode: Option<crate::tape::Mode>,
+    native_tool: Option<&std::path::Path>,
+    snapshot_sha256: Option<&str>,
+) -> Result<Option<super::super::auxiliary::AuxiliaryPlan>, Error> {
+    let Some((mode, marker, snapshot)) =
+        super::super::native_guest::selection(mode, snapshot_sha256)?
+    else {
+        return Ok(None);
+    };
+    let executable = std::fs::canonicalize(executable)
+        .map_err(|_| Error::Run("WorkBuddy executable is unavailable".into()))?;
+    let bundle = executable
+        .ancestors()
+        .map(|path| path.join("dist/codebuddy-headless.js"))
+        .find(|path| path.is_file())
+        .ok_or_else(|| Error::Run("WorkBuddy headless bundle is unavailable".into()))?;
+    let assets = [
+        (
+            "workbuddy-native-bootstrap.mjs",
+            include_str!("../../../assets/scripts/workbuddy-native-bootstrap.mjs"),
+        ),
+        (
+            "workbuddy-native-transform.mjs",
+            include_str!("../../../assets/scripts/workbuddy-native-transform.mjs"),
+        ),
+    ];
+    super::super::native_guest::start(
+        command,
+        super::super::native_guest::Settings {
+            agent: "workbuddy",
+            bundle: &bundle,
+            run_dir,
+            mode,
+            marker,
+            native_tool,
+            snapshot: &snapshot,
+            assets: &assets,
+        },
+    )
+    .map(Some)
+}
+
+fn finalize_native_recording(pending: &[u8], digest: &str) -> Result<Vec<u8>, Error> {
+    super::super::native_guest::finalize("workbuddy", pending, digest)
+}
+
+fn verify_native_snapshot(
+    native: &[u8],
+    snapshot: &mut std::fs::File,
+    digest: &str,
+) -> Result<(), Error> {
+    super::pi::snapshot::verify_for("workbuddy", native, snapshot, digest)
 }
 
 fn configure(directory: &std::path::Path, model: &str, base_url: &str) -> Result<(), Error> {
@@ -312,6 +405,27 @@ fn configure(directory: &std::path::Path, model: &str, base_url: &str) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_pending_recording_is_collected_for_cassette_publication() {
+        let frozen = crate::agents::FrozenArtifacts::from_deferred_collection_bytes(
+            &serde_json::to_vec(&serde_json::json!({"schema_version":1,"documents":{},"bytes":{"native-tool-pending.jsonl":[123,125,10]}})).unwrap(),
+        ).unwrap();
+        let artifacts = super::collect_artifacts(&super::super::CollectionContext {
+            frozen: &frozen,
+            provider_capture: None,
+            run_dir: std::path::Path::new("."),
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert!(
+            artifacts
+                .sealed_artifacts
+                .iter()
+                .any(|item| item.kind == "native-tool-deferred" && item.bytes == b"{}\n")
+        );
+    }
     #[test]
     fn failed_result_does_not_grade_intermediate_assistant_output() {
         let output = r#"[{"type":"assistant","content":"intermediate"},{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["failed"]}]"#;
