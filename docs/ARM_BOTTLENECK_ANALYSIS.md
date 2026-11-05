@@ -100,6 +100,34 @@ scaling or CPU utilization is inferred. CPU-specific ratios and Topdown analysis
 remain later work. The complete six-event group was directly tested on node26
 at 100 ms intervals with all six events scheduled at reported 100% running time;
 this is hardware/event qualification, not yet full concurrent ASB qualification.
+The grouped-counter slice merged as PR #1130 after required CI succeeded.
+
+## Offline diagnostic integration
+
+The next engine slice derives IPC, L1D/TLB refills and branch mispredictions per
+1000 instructions, plus backend-stall cycles as a percentage. Each CPU PMU keeps
+its own raw integer counts and definitions. Ratios require the same explicitly
+enabled event group, equal observed runtimes, nonzero denominators, no missing
+or unknown-quality rows and reported 100% running percentages. The percentages
+are rounded by perf: eligibility is not proof of whole-run completeness. Missing
+inputs retain an unavailable reason. These ratios do not implement a Neoverse
+Topdown specification on unsupported CPUs or distinguish kernel/user execution.
+
+Kernel diagnostics are stateless registered rules over existing collector data:
+scoped, complete Perfetto thread states provide runnable-wait share of active
+thread time; BPF profiles provide completed kernel-lock contention and futex
+syscall durations. Lost/unscoped/unfinished scheduler evidence cannot produce a
+ratio. Futex syscall duration includes wake operations and descheduling and must
+not be labelled exact blocked-lock time. The rules do not add overlapping thread
+waits to elapsed wall time or make causal performance claims.
+
+Run finalization writes these findings to `bottlenecks.json`. Comparison recomputes
+them offline from bounded retained source documents rather than accepting saved
+conclusions. `comparison.json` includes the regenerated analysis; HTML details
+show findings, units, limitations and unavailable reasons. Available derived
+metrics use the existing SVG/interactive graph pipeline with explicit units.
+Original result/analysis artifacts are preserved during regeneration. Existing
+per-attempt identities and scope checks remain the source-loading boundary.
 
 No series-wide completion is claimed until all six steps have merged, their
 required CI checks pass, and retained Arm qualification verifies actual output,

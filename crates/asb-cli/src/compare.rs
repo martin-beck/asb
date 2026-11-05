@@ -13,6 +13,7 @@ const MAX_BYTES: u64 = 16 * 1024 * 1024;
 mod coverage;
 mod metric_identity;
 use metric_identity::{GraphNames, flatten_numbers, insert_unique, path_key};
+mod analysis;
 mod model;
 pub(crate) mod outcomes;
 mod planning;
@@ -585,6 +586,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                 )
             },
         );
+        let analysis_details = analysis::html(&benchmark.collector_documents);
         let execution_details = benchmark.execution.as_ref().map_or_else(String::new, |execution| {
             let text = serde_json::to_string_pretty(execution).unwrap_or_else(|_| "{}".into());
             format!("<details><summary>Execution / replay identity</summary><pre class=\"json-details\">{}</pre></details>", escape(&text))
@@ -683,7 +685,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload), escape(trial), escape(&attempt),
             runtime, success, tokens,
             format_args!("{primary_details}{}{}<p>{dispatch_details}</p>", evaluation_details, if benchmark.reconciled { "<p>Reconciled retained local outcome: current artifact consistency checked; no agent rerun or historical attestation.</p>" } else { "" }),
-            format_args!("{execution_details}{component_details}"),
+            format_args!("{execution_details}{component_details}{analysis_details}"),
             host_details,
             metrics_details,
             artifacts,
@@ -1259,6 +1261,12 @@ fn metric_unit(title: &str) -> &'static str {
     let name = title.to_ascii_lowercase();
     if name.ends_with("_pct") {
         "%"
+    } else if name.ends_with("instructions_per_cycle") {
+        "instructions/cycle"
+    } else if name.ends_with("branch_mispredictions_per_ki") {
+        "mispredictions/1000 instructions"
+    } else if name.ends_with("refills_per_ki") {
+        "refills/1000 instructions"
     } else if name.ends_with("_ms") || name.contains("elapsed_ms") {
         "ms"
     } else if name.ends_with("_kib_per_s") {
@@ -1518,6 +1526,27 @@ mod tests {
             r#"{"stdout":"sample 1\nsample 2\n","metrics":{"cpu.user_pct":12.5,"cpu.iowait_pct":3.0}}"#,
         )
         .unwrap();
+        let event_quality = |count| json!({"observed_integer_count":count,"observed_rows":1,"unavailable_rows":0,"unknown_quality_rows":0,"known_event_runtime_ns":1000,"min_running_pct":100,"max_running_pct":100});
+        for (file, document) in [
+            (
+                "arm-pmu",
+                json!({"schema_version":1,"scope":"agent-process-tree","status":"observed","events":{"armv8_pmuv3_0/cpu_cycles/":event_quality(100),"armv8_pmuv3_0/inst_retired/":event_quality(200)}}),
+            ),
+            (
+                "arm-pmu-plan",
+                json!({"schema_version":1,"plan":{"enabled":true,"groups":["{armv8_pmuv3_0/cpu_cycles/,armv8_pmuv3_0/inst_retired/}"]}}),
+            ),
+            (
+                "bottlenecks",
+                json!({"findings":[{"rule":"stale-analysis-claim"}]}),
+            ),
+        ] {
+            std::fs::write(
+                root.join(format!("sweep-results/000-one/measurements/{file}.json")),
+                serde_json::to_vec(&document).unwrap(),
+            )
+            .unwrap();
+        }
         std::fs::write(
             root.join("sweep-results/000-one/measurements/perfetto.json"),
             r#"{"metrics":{"perfetto.scheduler_events":24,"perfetto.tracepoints":4},"series":{"perfetto.scheduler_events_per_s":[3,7]},"series_timestamps":{"perfetto.scheduler_events_per_s":[12000,13000]}}"#,
@@ -1661,6 +1690,24 @@ mod tests {
         assert!(report.contains("Host metadata"));
         assert!(report.contains("Neoverse-N1"));
         assert!(report.contains("Component timings"));
+        assert!(report.contains("Kernel and hardware analysis"));
+        assert!(!report.contains("stale-analysis-claim"));
+        assert_eq!(
+            comparison["benchmarks"][0]["analysis"]["hardware"][0]["metrics"][0]["value"],
+            2.0
+        );
+        let arm_svg = std::fs::read_to_string(root.join(
+            "results/sweep-comparison/metric-analysis.armv8_pmuv3_0.instructions_per_cycle.svg",
+        ))
+        .unwrap();
+        assert!(arm_svg.contains("instructions/cycle"));
+        assert!(
+            std::fs::read_to_string(
+                root.join("sweep-results/000-one/measurements/bottlenecks.json")
+            )
+            .unwrap()
+            .contains("stale-analysis-claim")
+        );
         assert!(report.contains("network_wait_ms"));
         assert!(comparison["benchmarks"][0]["host_metadata"]["architecture"] == "aarch64");
         assert_eq!(

@@ -831,8 +831,9 @@ fn load_attempt(
     {
         metrics.remove("steps");
     }
-    let (series, host_metadata, components, collector_documents) =
+    let (series, host_metadata, components, mut collector_documents) =
         load_collectors(&measurement_dir, measured, &mut metrics)?;
+    super::analysis::regenerate(&mut collector_documents, &mut metrics)?;
     Ok(BenchmarkData {
         execution: run_value
             .get("execution")

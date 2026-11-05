@@ -6,7 +6,7 @@
 //! terminal output.
 
 use crate::collectors;
-mod analysis;
+pub(crate) mod analysis;
 mod cohort;
 mod producer;
 mod snapshot;
