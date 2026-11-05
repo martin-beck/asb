@@ -6,6 +6,7 @@
 //! terminal output.
 
 use crate::collectors;
+mod analysis;
 mod cohort;
 mod producer;
 mod snapshot;
@@ -977,6 +978,10 @@ impl Session {
             observe(adapter.finish(&mut self));
         }
         observe(self.write_component_measurements());
+        observe(analysis::publish(
+            &self.dir,
+            self.component_timing("agent.execute"),
+        ));
         observe(
             serde_json::to_value(&measurement)
                 .map_err(|error| error.to_string())
@@ -2029,6 +2034,11 @@ mod tests {
                 .unwrap();
         assert!(components["components"]["workload.prepare"]["wall_ms"].is_number());
         assert_eq!(components["components"]["run.total"]["wall_ms"], 7_500);
+        let analysis: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("bottlenecks.json")).unwrap()).unwrap();
+        assert_eq!(analysis["engine"], "asb-resource-analysis-v1");
+        assert_eq!(analysis["observations"][0]["unit"], "ms");
+        assert_eq!(analysis["findings"].as_array().unwrap().len(), 3);
         let _ = fs::remove_dir_all(dir);
     }
 

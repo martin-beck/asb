@@ -1,5 +1,15 @@
 # Architecture
 
+Measured attempts publish `bottlenecks.json` through the offline
+`measurements::analysis` engine after collector settlement. Its typed component
+observations distinguish elapsed wall time from accumulated thread time,
+preserve accounting scope/source, and mark missing/invalid values unavailable.
+Stateless registered rules report observed scheduler waiting, block-I/O delay
+and system CPU symptoms without inferring a cause or critical-path duration.
+The additive artifact leaves existing component metrics and grades unchanged.
+See [Arm and kernel analysis delivery](ARM_BOTTLENECK_ANALYSIS.md) for the
+remaining collector, hardware, cohort and report integration sequence.
+
 CLI dispatch carries the invocation directory independently from the process
 working directory. An explicit `--project-dir` supplies that directory to
 setup, installation, discovery, execution, and reporting; relative command

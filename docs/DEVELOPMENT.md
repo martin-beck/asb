@@ -1,5 +1,11 @@
 # Development
 
+`cargo test --locked --offline --lib measurements::analysis` checks the
+deterministic resource-analysis artifact, unavailable/invalid observations and
+concurrent thread-time semantics. The normal measurement-session tests also
+verify publication through actual session finish. These fixtures need no PMU,
+privileged tracing or provider; they do not qualify the planned Arm collectors.
+
 The opt-in, offline `crates/asb-cli/tests/fixtures/fs_snapshot/overlay.py`
 probes one recording and four replay fuse-overlayfs workspaces from the same
 existing Git baseline. Set `ASB_SNAPSHOT_GIT_BASELINE` to that workspace,
