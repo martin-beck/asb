@@ -28,6 +28,9 @@ pub(super) fn selection(
     let Some(marker) = std::env::var_os(variable) else {
         return Ok(None);
     };
+    if marker.is_empty() {
+        return Err(Error::Run("native snapshot marker path is empty".into()));
+    }
     let snapshot = if mode == crate::tape::Mode::Replay {
         let digest = snapshot_sha256.ok_or_else(|| {
             Error::Run("native replay requires the staged snapshot digest".into())
@@ -52,6 +55,9 @@ pub(super) fn broker(
     command: &Command,
     settings: &Settings<'_>,
 ) -> Result<(Command, std::path::PathBuf, std::path::PathBuf), Error> {
+    if settings.marker.is_empty() {
+        return Err(Error::Run("native snapshot marker path is empty".into()));
+    }
     let directory = settings.run_dir.join(settings.agent);
     std::fs::create_dir_all(&directory).map_err(crate::io_error)?;
     for (name, source) in [
@@ -287,6 +293,17 @@ mod tests {
             ..settings
         };
         assert!(broker(&client, &missing).is_err());
+        let empty_marker = Settings {
+            marker: std::ffi::OsString::new(),
+            native_tool: Some(Path::new("/fixture/sidecar")),
+            ..missing
+        };
+        assert!(
+            broker(&client, &empty_marker)
+                .unwrap_err()
+                .to_string()
+                .contains("native snapshot marker path is empty")
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 }
