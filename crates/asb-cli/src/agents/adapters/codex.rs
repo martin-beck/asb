@@ -135,6 +135,14 @@ fn tool_call_count(stdout: &str, _stderr: &str) -> Option<usize> {
                 let item = event.get("item")?;
                 match item.get("type")?.as_str()? {
                     "command_execution" | "file_change" | "mcp_tool_call" | "web_search" => {
+                        if !active_turn {
+                            return None;
+                        }
+                        if item.get("status").is_some_and(|status| {
+                            !matches!(status.as_str(), Some("completed" | "failed"))
+                        }) {
+                            return None;
+                        }
                         let id = item.get("id")?.as_str().filter(|id| !id.is_empty())?;
                         if !calls.insert(id.to_owned()) {
                             return None;
@@ -297,6 +305,10 @@ mod tool_count_tests {
             "{\"type\":\"turn.completed\"}\n"
         );
         assert_eq!(tool_call_count(stream, ""), Some(4));
+        assert_eq!(
+            tool_call_count(&stream.replace("turn.started", "turn.unknown"), ""),
+            None
+        );
         assert_eq!(
             tool_call_count(&stream.replace("turn.completed", "turn.failed"), ""),
             None
