@@ -112,7 +112,6 @@ impl<'a> ConfiguredAttempt<'a> {
         let project_config = &context.project_config;
         let policy = &context.policy;
         let tape_cassette = &context.tape_cassette;
-        let tool_tape_cassette = &context.tool_tape_cassette;
         let mcp_tape_mode = context.mcp_tape_cassette.as_ref().map(|(mode, _)| *mode);
         let json = options.json;
         let _initial_policy = crate::planning::persist(project_root, policy, None, None)?;
@@ -190,16 +189,7 @@ impl<'a> ConfiguredAttempt<'a> {
                 .expect("replay recorder selected")
                 .validate_replay_model(cassette, &config.model)?;
         }
-        if options.tool_mode_explicit
-            && tool_tape_cassette.is_some()
-            && let Some(adapter) = agents::find(&config.agent)
-            && !adapter.supports_tool_replay()
-        {
-            return Err(Error::Input(format!(
-                "agent `{}` does not yet provide an ASB tool interception transport; use --llm-record/--llm-replay or choose an adapter with sealed tool replay",
-                config.agent
-            )));
-        }
+        validate_explicit_tool_transport(config, options)?;
         // This is deliberately retained at admission as a defence-in-depth
         // guard.  Direct runs and complete sweep populations perform the same
         // static validation before capacity, dependency, or collector work.

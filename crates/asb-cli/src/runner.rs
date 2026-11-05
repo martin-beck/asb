@@ -243,6 +243,23 @@ pub(crate) fn run_with_tape(
     run_with_diagnostics(path, options, output, &Mutex::new(BTreeSet::new()))
 }
 
+fn validate_explicit_tool_transport(
+    config: &BenchmarkConfig,
+    options: RunOptions<'_>,
+) -> Result<(), Error> {
+    if options.tool_mode_explicit
+        && options.effective_tool_mode().is_some()
+        && let Some(adapter) = agents::find(&config.agent)
+        && !adapter.supports_tool_replay()
+    {
+        return Err(Error::Input(format!(
+            "agent `{}` does not yet provide an ASB tool interception transport; use --llm-record/--llm-replay or choose an adapter with sealed tool replay",
+            config.agent
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn run_with_diagnostics(
     path: &str,
     options: RunOptions<'_>,
@@ -285,6 +302,7 @@ pub(crate) fn run_with_diagnostics(
     // capacity, starting collectors, or discovering/installing dependencies.
     // Attempt admission repeats this validation for internal call paths.
     validate_mcp_configuration(&config, options.mcp_mode)?;
+    validate_explicit_tool_transport(&config, options)?;
     if options.native_capsule_record.is_some()
         && (options.mode != Some(tape::Mode::Record)
             || config.concurrency != 1
@@ -643,15 +661,21 @@ fn run_dispatched(
     let gate = (options.verify_initial_material && options.preparation_gate.is_none())
         .then(|| batch::Gate::new(config.concurrency, None, Duration::from_secs(1800)))
         .transpose()?;
-    let settlement = (config.concurrency > 1 && options.settlement_barrier.is_none())
-        .then(|| {
-            batch::SettlementBarrier::selected(
-                config.concurrency,
-                &(1..=config.concurrency).collect::<Vec<_>>(),
-                Duration::from_secs(1800),
-            )
-        })
-        .transpose()?;
+    // Reused replicas do not launch or arrive at this new barrier.  Select
+    // exactly the same fresh slots that run_concurrent will actually start.
+    let fresh_slots = (1..=config.concurrency)
+        .filter(|slot| !options.reused.is_some_and(|saved| saved.contains_key(slot)))
+        .collect::<Vec<_>>();
+    let settlement =
+        (config.concurrency > 1 && options.settlement_barrier.is_none() && !fresh_slots.is_empty())
+            .then(|| {
+                batch::SettlementBarrier::selected(
+                    config.concurrency,
+                    &fresh_slots,
+                    Duration::from_secs(1800),
+                )
+            })
+            .transpose()?;
     let options = RunOptions {
         preparation_gate: options.preparation_gate.or(gate.as_ref()),
         settlement_barrier: options.settlement_barrier.or(settlement.as_ref()),
@@ -2860,6 +2884,7 @@ mod tests {
                 tool_mode: Some(crate::tape::Mode::Record),
                 tool_mode_explicit: true,
                 native_capsule_record: Some(capsule.to_str().unwrap()),
+                invocation_dir: Some(&root),
                 ..Default::default()
             },
             &mut Vec::new(),
@@ -2868,7 +2893,8 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("does not yet provide an ASB tool interception transport")
+                .contains("does not yet provide an ASB tool interception transport"),
+            "unexpected rejection: {error}"
         );
         assert!(!capsule.exists());
         std::fs::remove_dir_all(root).unwrap();
