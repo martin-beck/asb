@@ -1818,6 +1818,49 @@ mod tests {
     }
 
     #[test]
+    fn broker_recording_binds_provider_results_before_snapshot_finalization() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-codex-broker-bind-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pending = root.join("pending.jsonl");
+        let script =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/codex_native_hook.mjs");
+        assert!(
+            std::process::Command::new("node")
+                .arg(script)
+                .env("ASB_CODEX_PENDING_FIXTURE", &pending)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let begin = |thread: &str| serde_json::json!({"request":{"body":"{\"input\":[]}"},"response":{"body":format!("data: {}\n",serde_json::json!({"type":"response.output_item.done","item":{"type":"function_call","name":"exec_command","call_id":"same-id"}}))},"agent_record_metadata":{"conversation":thread,"output_call_ids":[]}});
+        let end = |thread: &str, output: &str| serde_json::json!({"request":{"body":serde_json::json!({"input":[{"call_id":"normalized","output":output}]}).to_string()},"response":{"body":""},"agent_record_metadata":{"conversation":thread,"output_call_ids":["same-id"]}});
+        let capture = root.join("capture.jsonl");
+        std::fs::write(
+            &capture,
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                begin("agent-a"),
+                begin("agent-b"),
+                end("agent-b", "B"),
+                end("agent-a", "A")
+            ),
+        )
+        .unwrap();
+        let bound = bind_provider_tool_outputs(&std::fs::read(pending).unwrap(), &capture).unwrap();
+        let completed =
+            super::super::super::native_guest::finalize("codex", &bound, &"f".repeat(64)).unwrap();
+        assert!(
+            std::str::from_utf8(&completed)
+                .unwrap()
+                .contains("workspace_effect")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn provider_correlation_keeps_interleaved_conversations_separate() {
         let root = std::env::temp_dir().join(format!(
             "asb-codex-conversations-{}",

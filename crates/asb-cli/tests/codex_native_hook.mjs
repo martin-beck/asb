@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import {mkdtemp, readdir, rm} from 'node:fs/promises';
+import {mkdtemp, readdir, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createServer} from 'node:net';
 import {NativeToolBroker} from '../assets/scripts/native-tool-broker.mjs';
 import {recordHook} from '../assets/scripts/codex-native-hook.mjs';
+import {encodePendingSidecar} from '../assets/scripts/native-tool-sidecar.mjs';
 
 const directory = await mkdtemp(join(tmpdir(), 'asb-codex-broker-'));
 const socket = join(directory, 'broker.sock'), marker = join(directory, 'marker.sock');
@@ -33,6 +34,7 @@ try {
   await recordHook({...second, hook_event_name:'PostToolUse', tool_response:'two'}, options);
   await recordHook({...first, hook_event_name:'PostToolUse', tool_response:'one'}, options);
   const events = await broker.finish();
+  if (process.env.ASB_CODEX_PENDING_FIXTURE) await writeFile(process.env.ASB_CODEX_PENDING_FIXTURE, encodePendingSidecar(events, '0'.repeat(64), 'codex'));
   assert.equal(events.length, 2);
   assert.deepEqual(events.map(event => event.outcome.value), [
     {session_id:'agent-b',tool_use_id:'same-id'}, {session_id:'agent-a',tool_use_id:'same-id'},
