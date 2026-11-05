@@ -600,7 +600,7 @@ fail explicitly before atomic publication, preserving the existing report and
 all original measurements. There are no extra runtime dependencies.
 
 Native offline export qualification regenerated the retained two-replica Arm
-report into a 41 KiB Zstandard-compressed Parquet file. A separate reader
+report into an approximately 41 kB Zstandard-compressed Parquet file. A separate reader
 verified disjoint replica identities, exact scoped counters, observed cohort
 bounds and the SPE series' final timestamps against their source phase receipts.
 All original measurement JSON hashes remained unchanged. The earlier factor-of-
