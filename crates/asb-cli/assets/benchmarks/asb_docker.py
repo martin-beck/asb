@@ -307,7 +307,7 @@ class DockerSession:
             # the actual daemon version, including newer minimum API versions.
             self.client = BoundedDockerClient(base_url="unix:///unused", version="1.41", timeout=120)
             self.client.api.mount("http+docker://", Adapter("http+unix:///unused", timeout=120))
-            version = self.client.version()["ApiVersion"]
+            version = self.client.api.version(api_version=False)["ApiVersion"]
             self.client.api._version = version
             self.client.ping()
             return self.client
