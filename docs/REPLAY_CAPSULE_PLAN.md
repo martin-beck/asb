@@ -34,9 +34,10 @@ they must not be described as complete native replay.
   configured execution timeout governs the agent process tree. Capacity and
   real I/O failures must be reported accurately, without changing the result an
   agent receives merely to make a recording fit.
-- Preserve ordinary operation when recording is not requested. Missing replay
-  support may be reported as incomplete, but must not reduce the capabilities of
-  the live agent or be presented as a successful full replay.
+- Keep every agent available for development and qualification without a blanket
+  incomplete-support label. Preserve the live agent's capabilities, and report
+  and repair concrete recording or replay failures when they occur. Report only
+  the behavior actually demonstrated by each test.
 
 ## Architecture to implement
 
@@ -92,8 +93,8 @@ Qualify the actual adapters locally: record one selected SWE-bench task with
 one replica per agent, then replay each recording offline with four independent
 replicas. Check complete tape consumption, filesystem effects, official
 workload outcomes, process cleanup, and measurements. Include all supported
-agents, preserve evidence and report any capability that remains untested or
-incomplete. A source workload that was unresolved may replay faithfully, but
+agents, preserve evidence and report concrete failures and the scope of each
+test. A source workload that was unresolved may replay faithfully, but
 it is not a successful task resolution.
 
 ## Current gaps
