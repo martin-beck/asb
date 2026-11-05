@@ -606,3 +606,58 @@ bounds and the SPE series' final timestamps against their source phase receipts.
 All original measurement JSON hashes remained unchanged. The earlier factor-of-
 1000 time-unit defect was detected by that check, repaired in the shared loader,
 and the qualification repeated successfully; CLI success alone was insufficient.
+
+## Final integration qualification
+
+The integrated process-scoped path was repeated on Kunpeng-920 with the same
+frozen binary for nine randomized fixed-work cases (three per profile, two
+replicas each). All eighteen workload grades and work-completion checks passed;
+SPE populations were disjoint and scope receipts excluded ASB, guardians and
+sibling noise. The final repeat includes the timer-alignment and time-unit
+repairs. Median observations were:
+
+| Profile | Agent CPU sum (ms) | Enclosing phase span (ms) | Total CLI wall (s) |
+| --- | ---: | ---: | ---: |
+| light | 4379.758 | 2334.798 | 5.322 |
+| pmu-perf | 4454.186 | 2333.863 | 12.484 |
+| spe | 4769.410 | 2473.999 | 14.538 |
+
+Relative CPU differences were +1.70% and +8.90% for PMU/perf and SPE. These are
+three-observation descriptive differences on a shared host, not causal overhead
+estimates or confidence intervals. PMU/perf includes stack capture; CLI wall
+includes preparation, decoding, grading and reporting. The baseline retains
+CPU accounting/pressure. Earlier observations above remain historical evidence.
+
+The reproducible optional `arm_telemetry/faults.py` qualification then interrupted
+one owned SPE recorder while both agents continued. Both grades and fixed-work
+checksums passed. Only that capture failed, with no numeric SPE observations or
+sampling/phase findings; the other replica retained valid SPE evidence. A second
+case sent SIGINT to the owned ASB process after both agent trees started. ASB
+exited interrupted, and no owned agent or collector process remained after
+cleanup. Both cases retained receipts and raw evidence. Selector tests reject
+host/CPU-wide collection, missing inheritance, malformed PIDs, foreign output
+paths, duplicate outputs and symlink escapes. Evidence tests reject failed
+grades and fabricated zero-valued sampling results.
+
+## Delivery coverage and limits
+
+| Planned area | Delivered integration and evidence |
+| --- | --- |
+| Observation/rule foundation | Typed observations, units, availability and stateless rules in `measurements/analysis`; deterministic publication/regeneration tests. |
+| Arm platform and PMU | Registry adapters, bounded capability inventory, shared inherited perf groups, exact integer/quality normalization and real concurrent Arm captures. |
+| Kernel evidence | Exclusive agent cgroup pressure/accounting plus scoped existing Perfetto/BPF scheduler, futex and kernel-lock inputs; deterministic invalid/lost-scope rejection and native unrelated-noise checks. |
+| CPU methods and SPE | CPU-domain methodology registry, qualified N1 cycle-accounting formulas, explicit unsupported profiles, bounded SPE raw/decode validation and real Arm samples. |
+| Cohort and reporting | Verified principal windows, observed overlap/scaling bounds, recorded-counter phase alignment, offline JSON/HTML/SVG regeneration, optional Parquet and normalized AgentSysPerf inputs. |
+| Qualification | Offline positive/negative tests; native concurrency/noise, actual task churn, repeated fixed-work instrumentation comparison, collector interruption, cancelled-run cleanup and retained report/export checks. |
+
+Unsupported capabilities remain explicit rather than becoming development gates.
+The N1 methodology is cycle accounting, not four additive Topdown slot buckets;
+unknown/mixed CPU methods remain unavailable. Uncore inventory is metadata only.
+SPE samples are implementation-dependent observations, not full cache traffic or
+DRAM service time; ambiguous task-ID reuse and reported loss invalidate that
+capture. PSI unavailable in a kernel configuration stays unavailable. Principal
+lifetime overlap includes sleeping and is not CPU residency or controlled
+speedup. External analyzer diagnoses remain unqualified without the required
+phase/CPU-method evidence. These limits are preserved in machine-readable
+artifacts and reports. Final acceptance additionally requires the exact final
+main revision's required CI checks; an older green run does not substitute.
