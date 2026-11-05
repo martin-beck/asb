@@ -17,7 +17,7 @@ asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [-
 asb run CONFIG [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette FILE] [--json] [--measurements DIR]
 asb sweep SWEEP.toml [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette-root DIR] [--respect-record-timings] [--resume] [--json]
 asb sweep --preset PRESET.toml [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette-root DIR] [--json]
-asb compare BENCHMARK_OR_SWEEP.toml [--report]
+asb compare BENCHMARK_OR_SWEEP.toml [--report] [--parquet]
 ```
 
 Before starting each sweep configuration, ASB prints its filename, agent,
@@ -432,6 +432,13 @@ The same filters hide/show graph bars, complete time-series and their legends,
 and execution-composition rows, including labels and values. Graphs with no
 selected data show an empty-state message. Axes retain their original scale
 for stable comparisons; downloadable SVGs retain the complete unfiltered data.
+
+Add `--parquet` to export `observations.parquet` alongside the report. It contains
+long-form measurements, full retained series, regenerated diagnostics, exact
+integer counters, host context and observed cohort bounds. Each row retains its
+attempt identity, units, scope, availability and evidence. Missing values stay
+null; unrelated collector time origins are not treated as a common clock. The
+HTML links to the file. Export is offline and disabled unless requested.
 
 For a single benchmark, pass the same TOML used by `asb run`. ASB reads the
 latest record from each replica's configured log and the actual measurement
