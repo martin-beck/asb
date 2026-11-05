@@ -6,11 +6,11 @@ use std::collections::BTreeMap;
 
 #[derive(Serialize)]
 pub(super) struct Metric {
-    id: &'static str,
-    unit: &'static str,
-    value: Option<f64>,
-    unavailable_reason: Option<&'static str>,
-    evidence: Vec<String>,
+    pub(super) id: &'static str,
+    pub(super) unit: &'static str,
+    pub(super) value: Option<f64>,
+    pub(super) unavailable_reason: Option<&'static str>,
+    pub(super) evidence: Vec<String>,
 }
 
 #[derive(Serialize)]

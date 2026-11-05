@@ -156,14 +156,14 @@ pub fn available_collectors() -> Vec<String> {
 
 /// Collectors selected when a user does not explicitly choose measurements.
 ///
-/// BPFTrace is intentionally available for explicit selection, but is opt-in:
-/// its programs are still evolving and can require host privileges that a
-/// normal setup should not assume.  `--measure all` continues to mean every
-/// registered collector, including BPFTrace.
+/// Adapters declare whether they belong to the default set. Heavy profiling
+/// and optional privileged collectors remain discoverable and explicitly
+/// selectable. `--measure all` includes every registered collector.
 pub fn default_collectors() -> Vec<String> {
-    available_collectors()
-        .into_iter()
-        .filter(|collector| collector != "bpftrace" && collector != "agentsysperf:l1-resource")
+    collectors::all()
+        .iter()
+        .filter(|collector| collector.default_enabled())
+        .map(|collector| collector.id().to_owned())
         .collect()
 }
 

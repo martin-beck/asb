@@ -7,8 +7,13 @@ pub(super) fn regenerate(
     metrics: &mut BTreeMap<String, f64>,
 ) -> Result<(), Error> {
     let analysis = crate::measurements::analysis::from_documents(documents);
-    if let Some(hardware) = analysis.get("hardware").and_then(Value::as_array) {
-        for pmu in hardware {
+    for family in ["hardware", "sampling"] {
+        for pmu in analysis
+            .get(family)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             let name = pmu.get("pmu").and_then(Value::as_str).unwrap_or("unknown");
             for metric in pmu
                 .get("metrics")
@@ -95,12 +100,13 @@ pub(super) fn html(documents: &BTreeMap<String, Value>) -> String {
         ));
     }
     html.push_str("</ul>");
-    for pmu in analysis
-        .get("hardware")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
+    for pmu in ["hardware", "sampling"].into_iter().flat_map(|family| {
+        analysis
+            .get(family)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+    }) {
         html.push_str(&format!("<h4>{}</h4><table><thead><tr><th>Metric</th><th>Value</th><th>Unit / availability</th></tr></thead><tbody>",escape(pmu.get("pmu").and_then(Value::as_str).unwrap_or("PMU"))));
         for metric in pmu
             .get("metrics")

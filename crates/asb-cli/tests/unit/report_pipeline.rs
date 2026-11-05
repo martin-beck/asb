@@ -125,6 +125,37 @@ fn scoped_pressure_produces_offline_analysis_and_timestamped_report_graphs() {
 }
 
 #[test]
+fn scoped_spe_sampling_is_reported_separately_from_hardware_event_counts() {
+    let fixture = Fixture::new();
+    let manifest = fixture.seed("", 1);
+    fixture.write("sweep-results/000-0/measurements/arm-spe-plan.json", "{}");
+    fixture.write("sweep-results/000-0/measurements/arm-spe.json",json!({"status":"completed","metrics":{"sampled_memory_count":100,"sampled_memory_latency_cycles_mean":20},"series":{"arm-spe.sampled_memory_latency_cycles_mean":[10,30]},"series_timestamps":{"arm-spe.sampled_memory_latency_cycles_mean":[1,3]}}).to_string());
+    fixture.write("sweep-results/000-0/measurements/arm-spe-quality.json",json!({"schema_version":1,"scope":"agent-process-tree","status":"observed","raw_record_quality":{"aux_records":1},"sample_counts":{"memory":100,"l1d_miss":2},"memory_latency_known_samples":100,"memory_latency_weight_sum_cycles":"2000"}).to_string());
+    run(manifest.to_str().unwrap(), &mut Vec::new()).unwrap();
+    let root = fixture.0.join("results/sweep-comparison");
+    let json: Value =
+        serde_json::from_slice(&fs::read(root.join("comparison.json")).unwrap()).unwrap();
+    assert_eq!(
+        json["benchmarks"][0]["analysis"]["sampling"][0]["metrics"][0]["value"],
+        20.0
+    );
+    assert_eq!(
+        json["benchmarks"][0]["metrics"]["analysis.arm_spe.sampled_memory_latency_cycles_mean"],
+        20.0
+    );
+    assert!(
+        fs::read_to_string(root.join("report.html"))
+            .unwrap()
+            .contains("not cache accesses or retired instructions")
+    );
+    assert!(
+        fs::read_to_string(root.join("series-arm-spe.sampled_memory_latency_cycles_mean.svg"))
+            .unwrap()
+            .contains("cycles")
+    );
+}
+
+#[test]
 fn compare_holds_sweep_ownership_before_reading_until_report_is_published() {
     let fixture = Fixture::new();
     let manifest = fixture.seed("", 1);

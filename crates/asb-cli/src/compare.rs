@@ -1267,6 +1267,10 @@ fn metric_unit(title: &str) -> &'static str {
         "mispredictions/1000 instructions"
     } else if name.ends_with("refills_per_ki") {
         "refills/1000 instructions"
+    } else if name.ends_with("_cycles_mean") {
+        "cycles"
+    } else if name.ends_with("_per_1000_memory_samples") {
+        "classifications/1000 sampled memory operations"
     } else if name.ends_with("_ms") || name.contains("elapsed_ms") {
         "ms"
     } else if name.ends_with("_kib_per_s") {

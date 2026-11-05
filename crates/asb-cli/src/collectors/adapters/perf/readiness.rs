@@ -8,14 +8,14 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub(super) struct Readiness {
+pub(in crate::collectors::adapters) struct Readiness {
     dir: PathBuf,
     control: File,
     ack: File,
 }
 
 impl Readiness {
-    pub(super) fn new(parent: &Path, name: &str) -> io::Result<Self> {
+    pub(in crate::collectors::adapters) fn new(parent: &Path, name: &str) -> io::Result<Self> {
         let dir = parent.join(format!(".perf-{name}-control"));
         // perf separates FIFO names on commas, so refuse ambiguous paths.
         if dir.as_os_str().as_bytes().contains(&b',') {
@@ -55,7 +55,7 @@ impl Readiness {
         }
     }
 
-    pub(super) fn argument(&self) -> String {
+    pub(in crate::collectors::adapters) fn argument(&self) -> String {
         format!(
             "fifo:{},{}",
             self.dir.join("control").display(),
@@ -63,7 +63,7 @@ impl Readiness {
         )
     }
 
-    pub(super) fn enable(
+    pub(in crate::collectors::adapters) fn enable(
         &mut self,
         timeout: Duration,
         mut exited: impl FnMut() -> Result<Option<String>, String>,

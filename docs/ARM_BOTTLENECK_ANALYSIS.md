@@ -222,3 +222,64 @@ unavailable PSI fields, and observed Arm core counters. JSON/HTML diagnostics
 and 18 local time-series SVGs were checked. These are synthetic CPU/I/O client
 qualifications, not a live-agent benchmark, full sampling-overhead study or
 qualification of the still-planned SPE adapter.
+
+## Optional process-scoped SPE
+
+Select `arm-spe` explicitly; it is not part of the default collector set. It
+depends on the platform inventory and the ordinary perf tool/capture adapter.
+The separate SPE producer uses the dedicated SPE hardware, leaving the shared
+core-PMU counters and ordinary stack sampling intact. All use the same selected
+agent root and inherit its descendants. SPE requires the stopped agent launch
+gate, one unambiguous advertised SPE domain and timestamp/load/store controls.
+Unsupported hosts, domains or gate layouts are unavailable; there is no
+system-wide fallback or guessed event encoding.
+
+Default sampling period is 1,048,576 operations with a 256 MiB raw capture budget.
+Adapter-owned selections can configure `arm-spe:period=65536:budget-mib=512`.
+Period is bounded to 65,536–1,073,741,824; raw budget to 16–1024 MiB. Unknown,
+duplicate or conflicting options are rejected. Capture uses bounded mmap
+buffers, acknowledged activation and the existing process/capture guardians.
+The maximum-output-size argument includes perf's required size suffix. A budget
+stop without complete root/descendant exit metadata cannot produce valid metrics:
+increase the period or budget and rerun. Existing captures are preserved.
+
+`arm-spe.data` retains the raw recording. Validation checks bounded perf record
+framing, explicit lost-event/sample records, AUX flags/payloads, fork ancestry,
+unambiguous task lifetimes and recorded exits. The bounded offline built-in perf
+decoder must exit successfully without diagnostics; no script extension,
+provider or network symbol lookup is used. Every decoded sample must match a
+recorded task generation, allowing only the decoder's disclosed sub-microsecond
+timestamp rounding. This first decoder rejects any reused task ID, including
+non-overlapping generations, rather than guessing a generation. Missing scope,
+unknown events, ambiguous IDs, incomplete
+captures or invalid decoding retain evidence without publishing numeric results.
+
+`arm-spe-quality.json` retains the requested period, validated task metadata,
+exact sampled counts, observed task identities, sample times and latency-weight
+sum as an exact decimal string. `arm-spe.json` supplies sampled classifications,
+known operation-latency weights in cycles and one-second interval series through
+the normal report pipeline. Zero/unknown weights cannot become zero latency.
+Series start at the first observed sample; absent intervals are not fabricated
+zeroes, and the final bin can be partial. Capture includes the launch transition
+inside the selected agent root; ASB controller, collectors and unrelated tasks
+are outside the inherited tree.
+
+Offline analysis reports classifications per 1000 sampled memory operations
+and known mean operation-latency cycles in a separate sampling family. These
+are not full cache-access counts, cache miss rates, retired instructions, DRAM
+service latency or an architecture-independent efficiency score. Sampling bias
+and unreported loss remain possible despite validated capture metadata.
+The kernel/perf semantics follow the [Linux SPE documentation](https://github.com/torvalds/linux/blob/master/tools/perf/Documentation/perf-arm-spe.txt).
+
+
+An offline two-replica probe on a Kunpeng-920 ARMv8 host exercised real SPE,
+core PMU and cgroup collection with a synthetic Pi-compatible Node client and
+bundled bug-fix grading. Both replicas produced populated validated SPE series
+and passed grading. A sibling CPU/memory noise process, the ASB controller and
+its guardians were excluded by the observed agent cgroup membership and the
+validated task ancestry. This qualifies the exercised native launch/collection
+path; it is not a live Pi/provider or external-workload qualification. The
+host had PSI disabled, so unavailable PSI remained explicit. Retained raw
+record diagnostics included perf's optional `discard` format lookup warning;
+raw AUX loss flags were zero and decoding had no diagnostics. Neither outcome
+proves absence of sampling bias or unreported hardware loss.

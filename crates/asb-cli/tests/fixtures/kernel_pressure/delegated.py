@@ -20,6 +20,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--asb", type=Path, required=True)
 parser.add_argument("--project", type=Path, required=True)
 parser.add_argument("--config", required=True)
+parser.add_argument("--require-series", action="append", default=[],
+                    help="also require populated metrics and time series for this collector")
 args = parser.parse_args()
 binary = args.asb.resolve(strict=True)
 project = args.project.resolve(strict=True)
@@ -97,4 +99,10 @@ for path in reports:
         raise SystemExit("Pressure root is not the verified actual agent principal")
     if target["excluded_guardian"]["pid"] in observed or target["excluded_controller_pid"] in observed:
         raise SystemExit("Agent cgroup included ASB guardian/controller activity")
+    for collector in args.require_series:
+        if not collector or not all(c.isascii() and (c.isalnum() or c == '-') for c in collector):
+            raise SystemExit("Invalid collector identifier for series qualification")
+        observed_collector = json.loads((path.parent / (collector + ".json")).read_text())
+        if observed_collector["status"] != "completed" or not observed_collector["metrics"] or not observed_collector["series"]:
+            raise SystemExit("Collector did not publish validated series: " + collector)
 print("Verified agent leaves exclude ASB, fixture and unrelated CPU/memory load")

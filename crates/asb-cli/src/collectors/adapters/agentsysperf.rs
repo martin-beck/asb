@@ -62,6 +62,9 @@ struct MeasurementRecord {
 }
 
 impl CollectorAdapter for AgentSysPerfCollector {
+    fn default_enabled(&self) -> bool {
+        false
+    }
     fn description(&self) -> &'static str {
         "AgentSysPerf-compatible agent-scoped measurement records"
     }
