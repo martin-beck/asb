@@ -295,6 +295,7 @@ mod tool_count_tests {
     fn counts_completed_native_tools_only_in_a_complete_stream() {
         let stream = concat!(
             "{\"type\":\"thread.started\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"id\":\"notice\",\"type\":\"error\"}}\n",
             "{\"type\":\"turn.started\"}\n",
             "{\"type\":\"item.started\",\"item\":{\"id\":\"1\",\"type\":\"command_execution\"}}\n",
             "{\"type\":\"item.completed\",\"item\":{\"id\":\"1\",\"type\":\"command_execution\",\"aggregated_output\":\"mcp_tool_call\"}}\n",
