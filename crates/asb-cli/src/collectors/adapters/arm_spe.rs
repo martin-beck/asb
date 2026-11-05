@@ -105,6 +105,13 @@ impl CollectorAdapter for ArmSpe {
     fn default_enabled(&self) -> bool {
         false
     }
+    fn graph_section(&self, name: &str) -> Option<crate::collectors::GraphSection> {
+        ["metric-arm-spe.","series-arm-spe.","metric-analysis.arm_spe."].iter().any(|prefix|name.starts_with(prefix))
+            .then_some(crate::collectors::GraphSection{
+                title:"Arm sampled microarchitecture",
+                description:"Process-tree SPE sampled classifications and known operation-latency cycles. These are sampled observations, not full event counts, cache miss rates or isolated DRAM latency.",
+            })
+    }
     fn dependencies(&self) -> &'static [&'static str] {
         &["arm-platform", "perf"]
     }
@@ -192,6 +199,10 @@ impl CollectorAdapter for ArmSpe {
         Ok(())
     }
     fn attach_isolated_pid(&self, session: &mut Session, pid: u32) -> Result<(), String> {
+        let state = session.state::<State>();
+        if !state.borrow().selected || state.borrow().pmu.is_none() {
+            return Ok(());
+        }
         let _ = session.enable_passwordless_sudo_collector("perf");
         self.attach_pid(session, pid)
     }

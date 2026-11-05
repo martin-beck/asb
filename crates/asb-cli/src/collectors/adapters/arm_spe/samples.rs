@@ -141,6 +141,9 @@ pub(super) fn parse(reader: impl Read, quality: &Quality) -> Result<Decoded, Str
     }
     result.memory_latency_weight_sum = memory_weight.to_string();
     for (bin, events) in bins {
+        let end_seconds = (result.last_sample_ns.unwrap() - result.first_sample_ns.unwrap()) as f64
+            / 1_000_000_000.0;
+        let timestamp = (bin as f64 + 1.0).min(end_seconds);
         for (event, (count, weight, known)) in events {
             let key = format!("arm-spe.sampled_{event}_count");
             result
@@ -148,11 +151,7 @@ pub(super) fn parse(reader: impl Read, quality: &Quality) -> Result<Decoded, Str
                 .entry(key.clone())
                 .or_default()
                 .push(count as f64);
-            result
-                .timestamps
-                .entry(key)
-                .or_default()
-                .push(bin as f64 + 1.0);
+            result.timestamps.entry(key).or_default().push(timestamp);
             if event == "memory" && known == count {
                 let key = "arm-spe.sampled_memory_latency_cycles_mean".to_owned();
                 result
@@ -160,11 +159,7 @@ pub(super) fn parse(reader: impl Read, quality: &Quality) -> Result<Decoded, Str
                     .entry(key.clone())
                     .or_default()
                     .push(weight as f64 / count as f64);
-                result
-                    .timestamps
-                    .entry(key)
-                    .or_default()
-                    .push(bin as f64 + 1.0);
+                result.timestamps.entry(key).or_default().push(timestamp);
             }
         }
     }
@@ -194,7 +189,7 @@ mod tests {
         assert_eq!(result.metrics["sampled_memory_latency_cycles_mean"], 14.0);
         assert_eq!(
             result.timestamps["arm-spe.sampled_memory_count"],
-            vec![1.0, 3.0]
+            vec![1.0, 2.1]
         );
         assert_eq!(
             result.series["arm-spe.sampled_memory_latency_cycles_mean"],

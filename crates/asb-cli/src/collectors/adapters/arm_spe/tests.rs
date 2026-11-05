@@ -36,6 +36,17 @@ fn record_selection_never_expands_to_host_or_cpu_wide_scope() {
         ADAPTER.target_scope("local-docker"),
         TargetScope::AgentProcess
     );
+    assert!(
+        ADAPTER
+            .graph_section("series-arm-spe.sampled_memory_count.svg")
+            .is_some()
+    );
+    assert!(
+        ADAPTER
+            .graph_section("metric-analysis.arm_spe.sampled_l1d_misses_per_1000_memory_samples.svg")
+            .is_some()
+    );
+    assert!(ADAPTER.graph_section("metric-perf.cpu_ms.svg").is_none());
 }
 #[test]
 fn pmu_plan_requires_advertised_controls_and_never_guesses_a_domain() {
