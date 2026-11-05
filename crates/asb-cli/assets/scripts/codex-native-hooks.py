@@ -93,7 +93,7 @@ def _request(value):
     tool_input = value.get("tool_input")
     if not isinstance(name, str) or not name:
         raise RuntimeError("Codex native hook did not provide a tool name")
-    return _encode({"schema_version": 1, "kind": "codex-local-tool", "tool_name": name, "tool_use_id": _tool_id(value), "input": tool_input})
+    return _encode({"schema_version": 1, "kind": "codex-local-tool", "tool_name": name, "session_id": value.get("session_id"), "tool_use_id": _tool_id(value), "input": tool_input})
 
 
 def _tool_id(value):
@@ -101,6 +101,13 @@ def _tool_id(value):
     if not isinstance(identifier, str) or not identifier:
         raise RuntimeError("Codex native hook did not provide a tool identity")
     return identifier
+
+
+def _identity(value):
+    session = value.get("session_id")
+    if session is not None and (not isinstance(session, str) or not session):
+        raise RuntimeError("Codex native hook session identity is invalid")
+    return json.dumps([session, _tool_id(value)], separators=(",", ":"))
 
 
 def _initialize(file):
@@ -114,7 +121,7 @@ def _record_pre(value):
     request = _request(value)
     if len(request) > MAX_PAYLOAD_BYTES:
         raise RuntimeError("Codex native tool request exceeds its bound")
-    identifier = _tool_id(value)
+    identifier = _identity(value)
 
     def operation():
         state = _load_state()
@@ -140,7 +147,7 @@ def _record_post(value):
     response = _encode(value.get("tool_response"))
     if len(response) > MAX_PAYLOAD_BYTES:
         raise RuntimeError("Codex native tool response exceeds its bound")
-    identifier = _tool_id(value)
+    identifier = _identity(value)
 
     def operation():
         state = _load_state()
@@ -179,13 +186,23 @@ def _quote(argument):
 
 def _replay_pre(value):
     request = _request(value)
-    identifier = _tool_id(value)
+    identifier = _identity(value)
     def operation():
         state = _load_state()
         if not state["replay"]:
             state["replay"] = [[base64.b64encode(a).decode("ascii"), base64.b64encode(b).decode("ascii")] for a, b in _replay_exchanges()]
         index = state["next"]
-        if index >= len(state["replay"]) or base64.b64decode(state["replay"][index][0]) != request:
+        if index >= len(state["replay"]):
+            raise RuntimeError("Codex native tool request differs from its recording")
+        recorded = json.loads(base64.b64decode(state["replay"][index][0]))
+        current = json.loads(request)
+        # Codex creates fresh tool IDs on replay. They correlate lifecycle hooks
+        # within each run but are not part of the tool's operation or input.
+        recorded.pop("tool_use_id", None)
+        current.pop("tool_use_id", None)
+        recorded.pop("session_id", None)
+        current.pop("session_id", None)
+        if recorded != current:
             raise RuntimeError("Codex native tool request differs from its recording")
         state["pending"][identifier] = index
         state["next"] = index + 1
@@ -233,7 +250,7 @@ def _replay_command_result(value):
 
 
 def _replay_post(value):
-    identifier = _tool_id(value)
+    identifier = _identity(value)
 
     def operation():
         state = _load_state()

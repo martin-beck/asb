@@ -100,6 +100,10 @@ export class NativeToolBroker {
     } catch (error) { if (!socket.destroyed) reply(socket, { ok: false, name: error.name, message: error.message }); }
   }
   listen(path) { return new Promise((resolve, reject) => { this.server.once('error', reject); this.server.listen(path, resolve); }); }
+  isIdle() {
+    return this.pending.size === 0 && (this.mode !== 'replay' ||
+      (this.session.pending.length === 0 && this.session.assigned.size === 0));
+  }
   async finish(encode) {
     if (this.sealing) throw new Error('Native tool broker is already sealing');
     this.sealing = true;

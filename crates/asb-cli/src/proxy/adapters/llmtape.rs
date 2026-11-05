@@ -968,6 +968,7 @@ mod tests {
     #[test]
     fn builtin_observer_survives_exec_without_changing_parent_descriptor() {
         use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::fs::MetadataExt;
         use std::os::unix::net::UnixStream;
         let (mut reader, writer) = UnixStream::pair().unwrap();
         reader
@@ -977,7 +978,14 @@ mod tests {
             unsafe { std::fs::File::from_raw_fd(std::os::fd::IntoRawFd::into_raw_fd(writer)) };
         let file = file.try_clone().unwrap();
         let fd = file.as_raw_fd();
-        let script = format!("require('node:fs').writeSync({fd}, 'observed')");
+        // The runtime may reuse a closed descriptor number for its own files.
+        // Check its identity before treating a successful write as inheritance.
+        let metadata = file.metadata().unwrap();
+        let script = format!(
+            "const f=require('node:fs'), s=f.fstatSync({fd}); if(s.dev!=={} || s.ino!=={}) process.exit(1); f.writeSync({fd}, 'observed')",
+            metadata.dev(),
+            metadata.ino()
+        );
         let status = std::process::Command::new("node")
             .args(["-e", &script])
             .stderr(std::process::Stdio::null())
@@ -3419,6 +3427,145 @@ mod tests {
         std::fs::write(&legacy, format!("{old}\n")).unwrap();
         let replay = Session::start(Mode::Replay, &legacy, None, false, &root).unwrap();
         assert!(request_to(&replay, "/v1/responses", body).contains("200 OK"));
+        replay.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_recording_retains_private_call_id_relationships() {
+        let root = test_root();
+        let cassette = root.join("codex-correlation.jsonl");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 16384];
+            let count = connection.read(&mut request).unwrap();
+            let observed = String::from_utf8_lossy(&request[..count]).into_owned();
+            connection.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+            observed
+        });
+        let session = Session::start_for_agent(
+            Mode::Record,
+            &cassette,
+            Some(&upstream),
+            false,
+            &root,
+            Some("codex"),
+            None,
+        )
+        .unwrap();
+        let body = r#"{"model":"fixture","prompt_cache_key":"conversation-1","input":[{"type":"function_call_output","call_id":"call-a","output":"one"},{"type":"function_call_output","call_id":"call-b","output":"two"}]}"#;
+        assert!(request_to(&session, "/v1/responses", body).contains("200 OK"));
+        session.stop().unwrap();
+        let forwarded = server.join().unwrap();
+        assert!(!forwarded.contains("agent_record_metadata"));
+        assert!(forwarded.contains("call-a") && forwarded.contains("call-b"));
+        let row: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(&cassette).unwrap().trim()).unwrap();
+        assert_eq!(
+            row["agent_record_metadata"],
+            serde_json::json!({"schema_version":1,"conversation":"conversation-1","output_call_ids":["call-a","call-b"],"running_wait_ms":[null,null],"running_session_ids":[null,null]})
+        );
+        let normalized: serde_json::Value =
+            serde_json::from_str(row["request"]["body"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            normalized["input"][0]["call_id"],
+            "<asb-codex-input-call-id>"
+        );
+        assert_eq!(
+            normalized["input"][1]["call_id"],
+            "<asb-codex-input-call-id>"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_replay_maps_running_session_in_streamed_followup_calls() {
+        let root = test_root();
+        let cassette = root.join("codex-running.jsonl");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for index in 0..2 {
+                let (mut connection, _) = listener.accept().unwrap();
+                let mut data = [0u8; 16384];
+                let _ = connection.read(&mut data).unwrap();
+                let args = r#"{"session_id":111,"yield_time_ms":1000}"#;
+                let item = serde_json::json!({"id":"fixture-poll","type":"function_call","name":"write_stdin","call_id":"poll","arguments":args});
+                let events = [
+                    serde_json::json!({"type":"response.function_call_arguments.delta","item_id":"fixture-poll","delta":args}),
+                    serde_json::json!({"type":"response.function_call_arguments.done","item_id":"fixture-poll","arguments":args}),
+                    serde_json::json!({"type":"response.output_item.done","item":item}),
+                    serde_json::json!({"type":"response.completed","response":{"output":[item]}}),
+                ];
+                let body = if index == 0 {
+                    events
+                        .into_iter()
+                        .map(|event| format!("data: {event}\n\n"))
+                        .collect::<String>()
+                } else {
+                    "{}".into()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    if index == 0 {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    },
+                    body.len(),
+                    body
+                );
+                connection.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let session = Session::start_for_agent(
+            Mode::Record,
+            &cassette,
+            Some(&upstream),
+            false,
+            &root,
+            Some("codex"),
+            None,
+        )
+        .unwrap();
+        let running = |id| {
+            format!(
+                "Chunk ID: abc\nWall time: 1.0 seconds\nProcess running with session ID {id}\nOutput:\npartial"
+            )
+        };
+        let body = |id, include_poll| {
+            let mut input = vec![
+                serde_json::json!({"type":"function_call_output","call_id":"call","output":running(id)}),
+            ];
+            if include_poll {
+                input.push(serde_json::json!({"type":"function_call","name":"write_stdin","arguments":serde_json::json!({"session_id":id,"yield_time_ms":1000}).to_string()}));
+            }
+            serde_json::json!({"model":"fixture","input":input}).to_string()
+        };
+        assert!(request_to(&session, "/v1/responses", &body(111, false)).contains("200 OK"));
+        assert!(request_to(&session, "/v1/responses", &body(111, true)).contains("200 OK"));
+        session.stop().unwrap();
+        server.join().unwrap();
+        let replay = Session::start_for_agent(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("codex"),
+            None,
+        )
+        .unwrap();
+        let response = request_to(&replay, "/v1/responses", &body(222, false));
+        assert!(response.contains("200 OK"), "{response}");
+        assert!(
+            response.contains("\\\"session_id\\\":222"),
+            "rewritten response must use the live session"
+        );
+        let response = request_to(&replay, "/v1/responses", &body(222, true));
+        assert!(response.contains("200 OK"), "{response}");
         replay.stop().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -153,7 +153,7 @@ async function replayResponse(response, interaction) {
   // but Claude requires IDs to be unique across turns. Give each replayed
   // response a fresh local ID without changing the cassette evidence.
   const replayToolIds = new Map();
-  const replayBody = body.replace(/<asb-(?:call(?:-\d+)?|tool-call-\d+|content-block-\d+)>/g, (marker) => {
+  let replayBody = body.replace(/<asb-(?:call(?:-\d+)?|tool-call-\d+|content-block-\d+)>/g, (marker) => {
     if (!replayToolIds.has(marker)) {
       const identifier = `asb-replay-${process.pid}-${Date.now()}-${++replayMaterializedIdentifierSequence}`;
       replayToolIds.set(marker, identifier);
@@ -161,6 +161,7 @@ async function replayResponse(response, interaction) {
     }
     return replayToolIds.get(marker);
   });
+  replayBody = agentWireExtension?.rewriteReplayResponse?.({body: replayBody, interaction}) ?? replayBody;
   const contentType = Object.entries(interaction.response.headers || {})
     .find(([name]) => name.toLowerCase() === "content-type")?.[1] || "";
   response.writeHead(interaction.response.status, interaction.response.headers || {});
@@ -622,6 +623,7 @@ const rawInteractions = mode === "replay"
   : [];
 legacyRequestPolicy = mode === 'replay' && rawInteractions.length > 0 &&
   rawInteractions.every(interaction => interaction.asb_request_policy === undefined);
+if (mode === 'replay') agentWireExtension?.configureReplay?.({interactions:rawInteractions});
 if (mode === 'replay' && !legacyRequestPolicy && rawInteractions.some(interaction => interaction.asb_request_policy !== 2)) {
   throw new Error('cassette request policy is inconsistent');
 }
@@ -932,6 +934,16 @@ async function handle(request, response, recording) {
       return;
     }
   }
+  let agentRecordMetadata;
+  if (mode === 'record' && agentWireExtension?.recordMetadata) {
+    let parsed;
+    try {
+      parsed = JSON.parse(body.toString('utf8'));
+    } catch {
+      // Invalid/non-JSON provider bodies remain the provider's concern.
+    }
+    if (parsed !== undefined) agentRecordMetadata = agentWireExtension.recordMetadata({url: requestPath(request.url), body: parsed});
+  }
   const normalizedBody = normalizeRequestBody(request.url || "/", body.toString("utf8"));
   const recordedRequest = {
     method: request.method || "GET",
@@ -1025,6 +1037,11 @@ async function handle(request, response, recording) {
       response.end(JSON.stringify({ error: "request does not match cassette" }));
       return;
     }
+    if (agentWireExtension?.observeReplayExchange) {
+      let parsed;
+      try { parsed = JSON.parse(body.toString('utf8')); } catch { /* Non-JSON bodies remain opaque. */ }
+      if (parsed !== undefined) await agentWireExtension.observeReplayExchange({url:requestPath(request.url),body:parsed,interaction});
+    }
     cursor += 1;
     advanceNativeTools();
     writeProgress();
@@ -1071,6 +1088,7 @@ async function handle(request, response, recording) {
       response_observed_unix_ms: Math.round(performance.timeOrigin + performance.now()),
     },
     ...(nativeToolContext ? { native_tool_context: nativeToolContext } : {}),
+    ...(agentRecordMetadata !== undefined ? { agent_record_metadata: agentRecordMetadata } : {}),
   };
   if (capture) capture.append(recording.token, interaction, isInferenceRequest(recordedRequest));
   else {
