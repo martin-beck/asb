@@ -168,7 +168,8 @@ class SourceContracts(unittest.TestCase):
         def execute(arguments, directory, log, timeout, **options):
             calls.append(arguments)
             self.assertEqual(directory, artifacts)
-            self.assertEqual(timeout, 600)
+            self.assertEqual(timeout, sources.SOURCE_BUILD_TIMEOUT_SECONDS)
+            self.assertGreater(timeout, 600)
             self.assertIs(options["cancelled"], cancelled)
             if journaled:
                 declared = json.loads((artifacts / "resources.json").read_bytes())["resources"]

@@ -23,7 +23,10 @@ const EVALUATION_PROTOCOL_ALLOWANCE: Duration = Duration::from_secs(30);
 const INSPECTION_TIMEOUT: Duration = Duration::from_secs(60);
 const RETAINED_GRADING_TIMEOUT: Duration = Duration::from_secs(1980);
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(180);
-const INITIAL_MATERIAL_TIMEOUT: Duration = Duration::from_secs(600);
+// Initial material may require building an official task image under CPU
+// emulation. Leave time for the source build and its cleanup; this deadline is
+// independent of the selected agent's execution budget.
+const INITIAL_MATERIAL_TIMEOUT: Duration = Duration::from_secs(7_320);
 const WORKLOAD_READY_TIMEOUT: Duration =
     Duration::from_secs(crate::planning::DEFAULT_ENVIRONMENT_PREPARATION_SECONDS);
 const PROGRESS_POLL: Duration = Duration::from_millis(250);
