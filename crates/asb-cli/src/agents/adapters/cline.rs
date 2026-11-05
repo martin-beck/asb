@@ -17,7 +17,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     prepare_adapter,
 )
 .with_estimated_disk_mib(1024)
-.with_complete_tool_replay(prepare_tool_replay)
+.with_tool_replay(prepare_tool_replay)
 .with_native_tool_transport()
 .with_guest_service(start_native_service)
 .with_deferred_native_recording(finalize_native_recording)

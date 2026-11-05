@@ -45,7 +45,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     workloads: &["*"],
     source: include_str!("../../../assets/scripts/agent-normalizers/hermes.mjs"),
 }])
-.with_complete_tool_replay(prepare_native_tool_replay)
+.with_tool_replay(prepare_native_tool_replay)
 .with_native_tool_transport()
 .with_native_workspace_capsule(capture_workspace_capsule, apply_workspace_capsule)
 .with_collection(collect)

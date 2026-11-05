@@ -202,7 +202,7 @@ fn monotonic_ns() -> Option<u64> {
 }
 
 #[cfg(target_os = "linux")]
-fn clock_domain() -> Option<String> {
+pub(super) fn clock_domain() -> Option<String> {
     use std::io::Read;
     let mut boot = String::new();
     std::fs::File::open("/proc/sys/kernel/random/boot_id")
@@ -228,7 +228,7 @@ fn clock_domain_identity(boot: &str, namespace: &str) -> Option<String> {
     ))
 }
 #[cfg(not(target_os = "linux"))]
-fn clock_domain() -> Option<String> {
+pub(super) fn clock_domain() -> Option<String> {
     None
 }
 

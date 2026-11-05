@@ -26,7 +26,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     workloads: &["*"],
     source: include_str!("../../../assets/scripts/agent-normalizers/claude-code.mjs"),
 }])
-.with_complete_tool_replay(prepare_tool_replay)
+.with_tool_replay(prepare_tool_replay)
 .with_native_tool_transport()
 .with_guest_replay_evidence(extract_guest_replay_evidence)
 .with_guest_service(start_native_service)

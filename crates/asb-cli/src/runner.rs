@@ -2919,54 +2919,25 @@ mod tests {
     }
 
     #[test]
-    fn singleton_campaign_preserves_explicit_tool_replay_rejection() {
-        let root = std::env::temp_dir().join(format!(
-            "asb-explicit-tool-campaign-{}",
-            crate::workloads::TaskIdentity::local("explicit-tool-campaign", None).attempt_id
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let executable = root.join(".asb-tools/codex/bin/codex");
-        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        std::fs::write(&executable, "#!/bin/sh\nexit 99\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fn explicit_tool_modes_admit_every_registered_agent() {
+        for adapter in crate::agents::all() {
+            let config: crate::benchmark::BenchmarkConfig = toml::from_str(&format!(
+                "agent='{}'\nworkload='bug-fix'\nprovider='fixture'\nmodel='model'\n",
+                adapter.id()
+            ))
+            .unwrap();
+            for mode in [crate::tape::Mode::Record, crate::tape::Mode::Replay] {
+                super::validate_explicit_tool_transport(
+                    &config,
+                    super::RunOptions {
+                        tool_mode: Some(mode),
+                        tool_mode_explicit: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
         }
-        std::fs::create_dir(root.join(".asb")).unwrap();
-        std::fs::write(
-            root.join(".asb/project.toml"),
-            toml::to_string(&crate::project::ProjectConfig::default()).unwrap(),
-        )
-        .unwrap();
-        let config = root.join("benchmark.toml");
-        std::fs::write(
-            &config,
-            "agent='codex'\nworkload='bug-fix'\nprovider='not-a-provider'\nmodel='model'\nconcurrency=1\n",
-        )
-        .unwrap();
-        let capsule = root.join("capsule");
-        let error = run_with_tape(
-            config.to_str().unwrap(),
-            super::RunOptions {
-                mode: Some(crate::tape::Mode::Record),
-                tool_mode: Some(crate::tape::Mode::Record),
-                tool_mode_explicit: true,
-                native_capsule_record: Some(capsule.to_str().unwrap()),
-                invocation_dir: Some(&root),
-                ..Default::default()
-            },
-            &mut Vec::new(),
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("does not yet provide an ASB tool interception transport"),
-            "unexpected rejection: {error}"
-        );
-        assert!(!capsule.exists());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -62,6 +62,12 @@ fn native_collectors_attach_to_stopped_agent_principal_and_exclude_guardian() {
             }
             if event == LifecycleEvent::AgentExecuteEnd {
                 let observed = session.execution_window_document();
+                if !measurements::Session::execution_window_clock_available() {
+                    assert_eq!(observed["status"], "unavailable", "{observed}");
+                    assert!(observed["start_bound_ns"].is_null());
+                    assert!(observed["end_bound_ns"].is_null());
+                    return Ok(());
+                }
                 assert_eq!(observed["status"], "observed", "{observed}");
                 assert_eq!(
                     observed["root"]["pid"],

@@ -107,8 +107,9 @@ and `--respect-record-timings` replays recorded provider response delays.
 
 Replay rejects a missing cassette, a changed selected request, invalid sidecar,
 or unconsumed local-tool event. It does not silently substitute a live provider
-or an unrecorded declared MCP server. An explicit local-tool request is rejected
-before launch when its adapter has not declared complete interception.
+or an unrecorded declared MCP server. Explicit tool recording and replay use
+the transport declared by the selected agent; errors identify missing or
+unusable recordings when they occur.
 
 ## Direct APIs and native subprocesses
 
@@ -118,12 +119,11 @@ a filesystem/kernel virtualization layer. ASB deliberately does not claim that
 its compact native trace provides this: it retains process-lifecycle evidence
 and preserves runtime measurement, but does not emulate arbitrary native calls.
 
-Consequently, a complete tool replay guarantee is adapter-specific. An adapter
-must either route every benchmark-exposed tool through its own replay extension
-or decline that capability. New agent adapters should first use a documented
-client extension/MCP ingress where one exists; a proposed native capture backend
-must demonstrate bounded capture, per-process scope, exact replay semantics,
-and no loss of the existing measurement target before it is registered.
+Tool behavior and interception depend on the adapter and selected transport.
+Keep agents available for recording and replay, preserve their normal
+capabilities, and repair concrete mismatches as they are found. New adapters
+should use documented client extensions where available and test recording,
+replay, process scope, and measurements against actual agent behavior.
 
 ## Resource contract
 

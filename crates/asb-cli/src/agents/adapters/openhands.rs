@@ -47,7 +47,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     source: include_str!("../../../assets/scripts/agent-normalizers/openhands.mjs"),
 }])
 .with_replay_credential_vars(&["LLM_API_KEY"])
-.with_complete_tool_replay(prepare_native_tool_replay)
+.with_tool_replay(prepare_native_tool_replay)
 .with_native_tool_transport()
 .with_artifact_specs(ARTIFACTS)
 .with_collection(collect)
