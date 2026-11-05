@@ -48,9 +48,9 @@ export const result = await executePreparedToolCall({toolCall:{id:'one',name:'ba
     assert.match(missingMarkerError,/requires the bundle, broker and snapshot marker/);
     assert.equal(existsSync(effect),false,'missing snapshot marker must stop the native tool');
   }
-  async function run(mode,events=[]) {
-    const broker=new NativeToolBroker(mode,events,replayEffects(markerPath,'pi'));await broker.listen(socket);
-    const child=spawn(process.execPath,[entry],{cwd:root,env:{PATH:process.env.PATH||'',NODE_OPTIONS:`--import=${JSON.stringify(bootstrap)}`,ASB_NATIVE_BUNDLE:bundle,ASB_NATIVE_MODE:mode,ASB_NATIVE_SOCKET:socket,ASB_NATIVE_MARKER:markerPath,FIXTURE_EFFECT:effect,FIXTURE_URL:fixtureUrl},stdio:['ignore','ignore','pipe']});
+  async function run(mode,events=[],socketPath=socket) {
+    const broker=new NativeToolBroker(mode,events,replayEffects(markerPath,'pi'));await broker.listen(socketPath);
+    const child=spawn(process.execPath,[entry],{cwd:root,env:{PATH:process.env.PATH||'',NODE_OPTIONS:`--import=${JSON.stringify(bootstrap)}`,ASB_NATIVE_BUNDLE:bundle,ASB_NATIVE_MODE:mode,ASB_NATIVE_SOCKET:socketPath,ASB_NATIVE_MARKER:markerPath,FIXTURE_EFFECT:effect,FIXTURE_URL:fixtureUrl},stdio:['ignore','ignore','pipe']});
     let stderr='';child.stderr.on('data',chunk=>stderr+=chunk);
     const [code]=await once(child,'exit');assert.equal(code,0,stderr);
     return broker.finish();
@@ -61,7 +61,8 @@ export const result = await executePreparedToolCall({toolCall:{id:'one',name:'ba
   assert.equal(decodeSidecar(sidecar,'pi').exchanges.length,1);
   assert.throws(()=>decodeSidecar(sidecar,'continue'),/lifecycle/);
   assert.equal(httpRequests,1,'record must actually contact the fixture service');
-  for(let replica=0;replica<4;replica++) await run('replay',decodeSidecar(sidecar,'pi').exchanges);
+  await Promise.all(Array.from({length:4},(_,replica)=>
+    run('replay',decodeSidecar(sidecar,'pi').exchanges,join(root,`broker-${replica}.sock`))));
   assert.equal(existsSync(effect),false,'replay must not execute the tool');
   assert.equal(httpRequests,1,'replay must not contact the fixture service');
   assert.match(markers[0],/^tool-begin:pi-0:\d+:\d+$/);
