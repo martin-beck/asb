@@ -174,6 +174,14 @@ class IndependentSnapshot:
                 raise ExecutionError('snapshot task reset cannot be confirmed; preserve interrupted evidence')
             self._settle(b'FORENSIC\n')
             self._remove_sidecar()
+        except BaseException as failure:
+            # A failed Docker inspection or forensic export must not leave
+            # the attached custodian client running after this scope exits.
+            try:
+                self.abort()
+            except BaseException as cleanup:
+                failure.add_note(f'snapshot custody cleanup also failed: {type(cleanup).__name__}')
+            raise
         finally:
             # The task reset terminates the in-guest preparer, but the local
             # docker-exec client still needs to be reaped by its owner.

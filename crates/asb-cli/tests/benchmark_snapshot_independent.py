@@ -142,5 +142,14 @@ class IndependentTests(unittest.TestCase):
             owner.close()
         self.sidecar.remove.assert_not_called()
 
+    def test_failed_task_inspection_aborts_both_clients(self):
+        owner=self.start();self.container.reload.side_effect=RuntimeError('inspection failed')
+        with self.assertRaisesRegex(RuntimeError, 'inspection failed'):
+            owner.interrupt()
+        self.assertTrue(self.side.stdin.closed and self.prep.stdin.closed)
+        self.assertEqual(self.side.poll(),0)
+        self.assertEqual(self.prep.poll(),0)
+        self.sidecar.remove.assert_not_called()
+
 
 if __name__=='__main__':unittest.main()
