@@ -12,6 +12,7 @@ pub(crate) mod bpftrace;
 mod cpu_accounting;
 pub(crate) mod flamegraph;
 pub(crate) mod iostat;
+mod kernel_pressure;
 pub(crate) mod mpstat;
 pub(crate) mod perf;
 pub(crate) mod perfetto;
@@ -24,6 +25,7 @@ pub(super) static REGISTRY: &[&dyn CollectorAdapter] = &[
     &agent_memory::ADAPTER,
     &agent_workers::ADAPTER,
     &cpu_accounting::ADAPTER,
+    &kernel_pressure::ADAPTER,
     &agentsysperf::ADAPTER,
     &arm_platform::ADAPTER,
     &arm_pmu::ADAPTER,

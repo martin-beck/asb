@@ -781,6 +781,7 @@ mod tests {
                 true,
             ),
             ("cpu-accounting", None, None, true),
+            ("kernel-pressure", None, None, true),
             (
                 "agentsysperf:l1-resource",
                 None,
@@ -820,6 +821,7 @@ mod tests {
                 "{id}"
             );
             let dependencies: &[&str] = match id {
+                "kernel-pressure" => &["cpu-accounting"],
                 "arm-platform" => &["system"],
                 "arm-pmu" => &["arm-platform", "perf"],
                 "flamegraph" => &["perf"],

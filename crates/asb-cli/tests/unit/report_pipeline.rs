@@ -81,6 +81,50 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn scoped_pressure_produces_offline_analysis_and_timestamped_report_graphs() {
+    let fixture = Fixture::new();
+    let manifest = fixture.seed("", 1);
+    fixture.write("sweep-results/000-0/measurements/kernel-pressure.json", json!({
+        "schema_version":1,"scope":"agent-process-tree","status":"completed",
+        "metrics":{"memory.current_bytes":128,"io.read_bytes_per_s":64},
+        "series":{"kernel-pressure.memory.current_bytes":[100,128],"kernel-pressure.cpu.some_stall_pct":[1,5]},
+        "series_timestamps":{"kernel-pressure.memory.current_bytes":[0.1,0.3],"kernel-pressure.cpu.some_stall_pct":[0.1,0.3]}
+    }).to_string());
+    fixture.write(
+        "sweep-results/000-0/measurements/kernel-pressure-summary.json",
+        json!({
+            "schema_version":1,"scope":"agent-process-tree","scope_source":"exclusive-owned-cgroup",
+            "status":"completed","duration_us":300000,"unavailable":{},
+            "observations":{"cpu.some_stall_pct":5,"memory.some_stall_pct":0,"io.some_stall_pct":2}
+        })
+        .to_string(),
+    );
+    run(manifest.to_str().unwrap(), &mut Vec::new()).unwrap();
+    let root = fixture.0.join("results/sweep-comparison");
+    let json: Value =
+        serde_json::from_slice(&fs::read(root.join("comparison.json")).unwrap()).unwrap();
+    assert_eq!(
+        json["benchmarks"][0]["metrics"]["analysis.pressure.cpu_some_pct"],
+        5.0
+    );
+    let html = fs::read_to_string(root.join("report.html")).unwrap();
+    assert!(html.contains("pressure.cpu_some_pct"));
+    assert!(html.contains("not DRAM latency"));
+    let svg =
+        fs::read_to_string(root.join("series-kernel-pressure.memory.current_bytes.svg")).unwrap();
+    assert!(svg.contains("bytes"));
+    assert!(svg.contains("polyline"));
+    assert_eq!(
+        metric_unit("kernel-pressure.io.read_bytes_per_s"),
+        "bytes/s"
+    );
+    assert_eq!(
+        metric_unit("kernel-pressure.cpu.throttled_ms_per_s"),
+        "ms/s"
+    );
+}
+
+#[test]
 fn compare_holds_sweep_ownership_before_reading_until_report_is_published() {
     let fixture = Fixture::new();
     let manifest = fixture.seed("", 1);
