@@ -42,6 +42,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_step_count(step_count)
 .with_output_usage(output_usage)
 .with_final_response(final_response)
+.with_final_response_failure(provider_failure)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
         namespace: "tool-replay",
@@ -56,6 +57,44 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 ])
 .with_replay_credential_vars(&["ANTHROPIC_AUTH_TOKEN"])
 .with_max_steps();
+
+// Goose can exit successfully after emitting its own provider error as the
+// final assistant message. Surface that failure without copying its URL or
+// arbitrary response body into public diagnostics.
+fn provider_failure(response: Option<&str>) -> Option<String> {
+    let text = response?.trim();
+    if text.starts_with("Ran into this error: Request failed:")
+        && text.ends_with("Please retry if you think this is a transient or recoverable error.")
+    {
+        Some(
+            "Goose provider request failed; inspect the agent log for the HTTP error and retry"
+                .into(),
+        )
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod provider_failure_tests {
+    use super::provider_failure;
+
+    #[test]
+    fn detects_goose_provider_failure_without_exposing_response() {
+        let error = "Ran into this error: Request failed: Resource not found (404) at https://example.invalid/private.\n\nPlease retry if you think this is a transient or recoverable error.";
+        let diagnostic = provider_failure(Some(error)).unwrap();
+        assert!(diagnostic.contains("provider request failed"));
+        assert!(!diagnostic.contains("example.invalid"));
+        assert_eq!(provider_failure(Some("The task is complete.")), None);
+        assert_eq!(
+            provider_failure(Some(
+                "Ran into this error: Request failed: this is task text"
+            )),
+            None
+        );
+        assert_eq!(provider_failure(None), None);
+    }
+}
 
 // Goose JSON mode emits a pretty-printed conversation summary after the run.
 fn final_response(output: &str, _: &Path) -> Option<String> {
