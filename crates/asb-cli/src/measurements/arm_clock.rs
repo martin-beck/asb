@@ -38,7 +38,9 @@ fn probe() -> bool {
     if child == 0 {
         // A denied counter must not create a core dump of inherited memory.
         unsafe {
-            libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+            if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 {
+                libc::_exit(1);
+            }
         }
         let _ = read_counter();
         unsafe {
