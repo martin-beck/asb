@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
 import { once } from 'node:events';
 import { mkdtempSync, appendFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,6 +21,9 @@ if (process.argv[2] === 'child') {
     name, label: name, description: name,
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     execute: async () => {
+      if (name === 'one' && process.env.PROBE_URL) {
+        assert.equal(await (await fetch(process.env.PROBE_URL)).text(), 'recorded fixture');
+      }
       appendFileSync(process.env.PROBE_EFFECT, name + '\n');
       return { content: [{ type: 'text', text: name }], details: {} };
     },
@@ -47,6 +51,12 @@ if (process.argv[2] === 'child') {
   const root = mkdtempSync(join(tmpdir(), 'asb-pi-real-order-'));
   const marker = join(root, 'marker.sock');
   const effect = join(root, 'effects');
+  let requests = 0, upstream;
+  if (process.env.ASB_TEST_PI_HTTP === '1') {
+    upstream = createHttpServer((_request, response) => { requests++; response.end('recorded fixture'); });
+    await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  }
+  const url = upstream ? `http://127.0.0.1:${upstream.address().port}/` : '';
   let held, activeBroker;
   const snapshotOrder = [];
   const markerServer = createServer(client => client.once('data', data => {
@@ -77,8 +87,8 @@ if (process.argv[2] === 'child') {
     await broker.listen(socket);
     const env = { ...process.env, NODE_OPTIONS: `--import=${scripts}/pi-native-bootstrap.mjs`,
       ASB_NATIVE_BUNDLE: bundle, ASB_NATIVE_MODE: mode, ASB_NATIVE_SOCKET: socket,
-      ASB_NATIVE_MARKER: marker, PROBE_EFFECT: effect };
-    const child = spawn('unshare', ['-Urn', process.execPath, process.argv[1], 'child'],
+      ASB_NATIVE_MARKER: marker, PROBE_EFFECT: effect, PROBE_URL: url };
+    const child = spawn('unshare', [upstream && mode === 'record' ? '-Ur' : '-Urn', process.execPath, process.argv[1], 'child'],
       { env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     child.stdout.on('data', chunk => { stdout += chunk; });
@@ -95,6 +105,11 @@ if (process.argv[2] === 'child') {
   }
   try {
     const record = await run('record');
+    if (upstream) {
+      assert.equal(requests, 1, 'recording must reach the fixture HTTP server');
+      await new Promise(resolve => upstream.close(resolve));
+      upstream = null;
+    }
     assert.equal(record.value.turns, 2);
     assert.deepEqual(record.recorded.map(event => event.snapshot_sequence), [3, 2]);
     assert.deepEqual(record.recorded.map(event => event.ordinal), [...snapshotOrder].reverse());
@@ -105,8 +120,10 @@ if (process.argv[2] === 'child') {
       assert.deepEqual(replay.value.completion, record.value.completion);
     }
     assert.equal(readFileSync(effect, 'utf8'), before, 'replay executed a native tool');
+    if (url) assert.equal(requests, 1, 'replay must not repeat the HTTP request');
     console.log('installed Pi core: crossed-order record and four parallel replays passed');
   } finally {
+    if (upstream) await new Promise(resolve => upstream.close(resolve));
     await new Promise(resolve => markerServer.close(resolve));
     rmSync(root, { recursive: true, force: true });
   }

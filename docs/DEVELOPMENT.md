@@ -6,6 +6,14 @@ result four times. The server counter must stay at one and a tool-execution
 sentinel must remain absent on replay. This exercises the Pi dispatch and
 broker seam with a synthetic client and marker service; it does not qualify
 an installed agent, real snapshot effects, a full cassette, or SWE-bench.
+For the installed Pi core's crossed-order probe, set `ASB_TEST_PI_BUNDLE` to
+the pinned `pi-agent-core/dist/agent-loop.js` and run
+`node crates/asb-cli/tests/pi_native_installed_probe.mjs`. Setting
+`ASB_TEST_PI_HTTP=1` additionally lets recording contact one private loopback
+HTTP server, stops that server, and runs four parallel replays in separate
+network namespaces. The native tool invocation counter must remain unchanged.
+This exercises the installed core with synthetic tool definitions and marker
+service; it does not establish actual snapshot or SWE-bench coverage.
 
 Linux guests for Python agents stage a project-local portable Python and the
 installed agent packages before execution. The host prepares the pinned Python
