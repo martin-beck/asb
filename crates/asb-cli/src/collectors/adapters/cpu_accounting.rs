@@ -49,6 +49,16 @@ struct Leaf {
     path: PathBuf,
 }
 
+/// Only an ASB-created leaf containing the stopped agent gate is eligible for
+/// agent-only pressure accounting. Never expose the broader container cgroup.
+pub(super) fn exclusive_leaf(session: &mut Session) -> Option<PathBuf> {
+    let state = session.state::<State>();
+    let state = state.borrow();
+    (!state.isolated)
+        .then(|| state.leaf.as_ref().map(|leaf| leaf.path.clone()))
+        .flatten()
+}
+
 impl Drop for Leaf {
     fn drop(&mut self) {
         // Never delete recursively, kill tasks, or move a surviving process.
@@ -381,6 +391,52 @@ mod tests {
             "user_usec 1\nuser_usec 2\nsystem_usec 3",
         ] {
             assert_eq!(parse_cpu_stat(text), None);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn exclusive_pressure_capture_accepts_both_native_boundary_orders_and_freezes_before_grading() {
+        for begin_before_attach in [true, false] {
+            let dir =
+                crate::fixture_namespace::allocate(&std::env::temp_dir(), "asb-pressure-order-")
+                    .unwrap();
+            let leaf = dir.join("fixture-leaf");
+            fs::create_dir(&leaf).unwrap();
+            fs::write(leaf.join("memory.current"), "10").unwrap();
+            let mut session =
+                Session::start_with_collectors(&dir, &["kernel-pressure".into()], None).unwrap();
+            if begin_before_attach {
+                session.event(LifecycleEvent::AgentExecuteBegin).unwrap();
+            }
+            // Inject only the CPU owner's leaf; kernel-pressure still resolves
+            // its scope through the real ownership API and attachment callbacks.
+            session.state::<State>().borrow_mut().leaf = Some(Leaf { path: leaf.clone() });
+            session.attach_pid(std::process::id()).unwrap();
+            if !begin_before_attach {
+                session.event(LifecycleEvent::AgentExecuteBegin).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            session.event(LifecycleEvent::AgentExecuteEnd).unwrap();
+            fs::write(leaf.join("memory.current"), "999999").unwrap();
+            super::super::kernel_pressure::ADAPTER
+                .finish(&mut session)
+                .unwrap();
+            let report: serde_json::Value =
+                serde_json::from_slice(&fs::read(dir.join("kernel-pressure.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                report["status"], "partial",
+                "begin_before_attach={begin_before_attach}"
+            );
+            assert_eq!(report["metrics"]["memory.current_bytes"], 10.0);
+            assert_eq!(
+                report["series"]["kernel-pressure.memory.current_bytes"][0],
+                10.0
+            );
+            assert_eq!(report["target"]["pid"], std::process::id());
+            drop(session);
+            fs::remove_dir_all(dir).unwrap();
         }
     }
 

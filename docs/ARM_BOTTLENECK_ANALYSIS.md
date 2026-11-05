@@ -145,3 +145,68 @@ required CI checks pass, and retained Arm qualification verifies actual output,
 scope, overhead, analysis and report behavior. Each PR records its own tests and
 remaining delivery work. The CPU-specific methodology follows Arm Telemetry
 Solution; hardware availability is discovered on the measured host.
+
+## Agent-only kernel pressure
+
+Select `kernel-pressure` in the ordinary collector list or setup measures tab.
+It depends on CPU accounting and reuses only its ASB-created exclusive native
+agent cgroup; it never uses `/proc/pressure`, the ASB cgroup or a whole-container
+cgroup as a measurement fallback. Missing delegation yields an explicit
+unavailable record, including for container execution without an exclusive leaf.
+No extra tool installation or privileged host mutation is performed.
+
+Capture begins once both agent execution-begin and gate attachment are observed,
+in either order, and
+stops at execution-end/failure before grading. The sampler reads bounded cgroup
+fields every 100–1000 ms using the configured measurement interval. It retains
+at most 4096 timestamped snapshots, downsampling older points when needed;
+actual elapsed timestamps, counter-reset/read failures and a downsampling flag
+remain in the result. Missing execution-end cannot publish valid measurements.
+
+`kernel-pressure.json` contains raw initial/final unsigned counters, per-field
+unavailable reasons, derived metrics and timestamped interval series for:
+
+- CPU/memory/I/O PSI some/full occupancy and cumulative stall milliseconds;
+- CPU bandwidth throttled duration and period counters;
+- charged current/sampled-peak memory, memory.high/max and OOM/kill events;
+- cgroup block read/write bytes, operation counts and interval rates.
+
+An empty successfully read `io.stat` is a kernel-defined zero-device set; an
+unreadable file is unavailable. Counter decreases or intermediate read failures
+invalidate the affected metric rather than publishing partial totals as complete.
+Sampler maxima are observed maxima, not guaranteed peaks. Memory charges may
+exclude shared pages charged elsewhere. PSI some/full and different resource
+stalls overlap; they cannot be added to thread time or interpreted as an additive
+wall-time breakdown. Accumulated CPU throttling can exceed elapsed wall time.
+
+The bounded `kernel-pressure-summary.json` supplies offline registered pressure,
+throttling and memory-limit diagnostics. Comparison regenerates findings and
+produces the normal JSON, SVG line/bar charts and interactive HTML, with bytes,
+bytes/s, ms/s and percentage units. The summary contains observations rather
+than a second graph metric set. Findings describe symptoms, not proven causes.
+
+Linux must expose the corresponding controllers and enable PSI. On a kernel
+built with `CONFIG_PSI_DEFAULT_DISABLED=y`, PSI requires `psi=1` in that
+measurement environment's boot configuration. Node26 currently uses this
+default-disabled configuration; its absent PSI is a tested unavailable case,
+not permission to substitute global pressure data or change its boot settings.
+
+The opt-in `tests/fixtures/kernel_pressure/delegated.py` qualification runs in a
+disposable delegated systemd service. It separates the ASB/fixture/noise control
+group from an empty agent parent, enables only available CPU/memory/I/O
+controllers there, and launches the public ASB run command. Supply a frozen
+executable and initialized synthetic-client project with a local tape and
+`pressure.toml` at concurrency two. Pass the user's executable PATH to the
+service when Node is user-installed. This fixture changes only its own transient
+cgroup subtree and neither contacts a provider nor runs in ordinary CI.
+
+Retained native qualification passed on x86_64 with PSI active: both synthetic
+replicas graded successfully and each produced 18 populated timestamped series.
+Observed agent memory maxima were about 49/38 MiB while an unrelated 256 MiB
+allocation and CPU load remained in a sibling control group. Scope snapshots
+exclude ASB, the fixture and the noise PIDs. Equivalent AArch64 qualification on
+node26 passed both grades with 12 accounting series per replica, six explicit
+unavailable PSI fields, and observed Arm core counters. JSON/HTML diagnostics
+and 18 local time-series SVGs were checked. These are synthetic CPU/I/O client
+qualifications, not a live-agent benchmark, full sampling-overhead study or
+qualification of the still-planned SPE adapter.

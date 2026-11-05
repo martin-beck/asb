@@ -1271,6 +1271,12 @@ fn metric_unit(title: &str) -> &'static str {
         "ms"
     } else if name.ends_with("_kib_per_s") {
         "KiB/s"
+    } else if name.ends_with("_bytes_per_s") {
+        "bytes/s"
+    } else if name.ends_with("_bytes") {
+        "bytes"
+    } else if name.ends_with("_ms_per_s") {
+        "ms/s"
     } else if name.ends_with("_ops_per_s") {
         "ops/s"
     } else if name.ends_with("_per_s") {

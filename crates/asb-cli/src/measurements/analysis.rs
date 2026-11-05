@@ -74,6 +74,7 @@ pub(super) fn publish(dir: &Path, timing: Option<&super::ComponentTiming>) -> Re
         "perfetto-state-summary",
         "bpftrace-futex-wait",
         "bpftrace-lock-contention",
+        "kernel-pressure-summary",
     ] {
         use std::io::Read;
         let mut bytes = Vec::new();

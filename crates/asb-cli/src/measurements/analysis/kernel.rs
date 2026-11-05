@@ -2,6 +2,7 @@
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
+mod pressure;
 
 #[derive(Serialize)]
 pub(super) struct Diagnostic {
@@ -124,7 +125,17 @@ static FUTEX: BpfTime = BpfTime {
     metric: "bpftrace.futex-wait.futex_wait_total_ns",
     limitations: "The current futex profile measures all observed futex syscall durations, including wake operations and descheduling. This is not exact blocked-lock time or evidence that every futex call waited.",
 };
-static RULES: &[&dyn Rule] = &[&RUNNABLE, &LOCKS, &FUTEX];
+static RULES: &[&dyn Rule] = &[
+    &RUNNABLE,
+    &LOCKS,
+    &FUTEX,
+    &pressure::CPU,
+    &pressure::MEMORY,
+    &pressure::IO,
+    &pressure::THROTTLE,
+    &pressure::OOM,
+    &pressure::MEMORY_HIGH,
+];
 pub(super) fn analyze(documents: &Documents) -> Vec<Diagnostic> {
     RULES.iter().map(|rule| rule.evaluate(documents)).collect()
 }
