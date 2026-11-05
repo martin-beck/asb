@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import {transformWorkBuddyDispatch} from '../assets/scripts/workbuddy-native-transform.mjs';
+import {runInNewContext} from 'node:vm';
+const sample='class Manager { async executeToolWithHooks(eA,el,ec,ed,eu,ep="legacy"){ return el(ec,ed,eu) } }';
+const transformed=transformWorkBuddyDispatch(sample);
+assert.match(transformed,/asb\.workbuddy\.nativeDispatch\.v1/);
+assert.match(transformed,/async __asbOriginalToolDispatch/);
+assert.throws(()=>transformWorkBuddyDispatch('changed'),/unsupported or ambiguous/);
+assert.throws(()=>transformWorkBuddyDispatch(sample+sample),/unsupported or ambiguous/);
+const calls=[];
+const context={Symbol};
+context[Symbol.for('asb.workbuddy.nativeDispatch.v1')]=async (call, invoke)=>{calls.push(call);return invoke()};
+const manager=runInNewContext(transformed+'; new Manager()',context);
+const result=await manager.executeToolWithHooks({name:'Bash'},args=>args,{command:'echo ok'},{context:{id:'session'}},{toolCall:{callId:'call'}});
+assert.equal(result.command,'echo ok');
+assert.equal(calls[0].name,'Bash');
+assert.equal(calls[0].session,'session');
+assert.equal(calls[0].call,'call');
