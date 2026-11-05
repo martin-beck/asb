@@ -1334,7 +1334,7 @@ fn external_workload_choices(directory: &Path) -> Vec<Choice> {
             };
             Choice {
                 key: ChoiceKey::Prompt(label.clone()),
-                label,
+                label: crate::workloads::display_name(&label),
                 availability,
             }
         })
@@ -2822,7 +2822,7 @@ fn workload_choices(root: &Path, directory: &str) -> Vec<Choice> {
     }
     choices.extend(install::external_workload_names().map(|name| Choice {
         key: ChoiceKey::Prompt(name.into()),
-        label: name.into(),
+        label: crate::workloads::display_name(name),
         availability: Availability::Unknown,
     }));
     // A persisted trial set is configuration for its workload, not another
@@ -2852,6 +2852,7 @@ fn workload_choices(root: &Path, directory: &str) -> Vec<Choice> {
         } else {
             workloads::load(name, &directory).is_ok()
         };
+        choice.label = workloads::display_name(name);
         choice.availability = if ready {
             Availability::Available
         } else {
@@ -4220,6 +4221,25 @@ mod tests {
     fn readiness_indicator_uses_text_glyph_not_emoji_glyph() {
         assert_eq!(super::INFO_GLYPH, "ⓘ");
         assert_ne!(super::INFO_GLYPH, "ℹ");
+    }
+
+    #[test]
+    fn architecture_labels_preserve_workload_identity_in_both_wizards() {
+        let root = std::env::temp_dir().join(format!("asb-arch-label-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for choices in [
+            super::external_workload_choices(&root),
+            super::workload_choices(&root, "."),
+        ] {
+            for name in ["swe-bench", "swe-bench-lite", "swe-bench-verified"] {
+                let choice = choices
+                    .iter()
+                    .find(|choice| choice.key.workload() == Some(name))
+                    .unwrap();
+                assert_eq!(choice.label, format!("{name} (x86)"));
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
