@@ -435,12 +435,23 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
                 .env("ANTHROPIC_AUTH_TOKEN", key);
         }
         crate::endpoint::Interface::OpenAiChat => {
+            // Goose resolves OPENAI_BASE_PATH as an absolute path, so a path
+            // in OPENAI_HOST (for example OpenRouter's /api) would be lost.
+            let base = connection.base_url.trim_end_matches('/');
+            let scheme_end = base.find("://").ok_or_else(|| {
+                Error::Input("Goose provider endpoint must include a URL scheme".into())
+            })? + 3;
+            let path_start = base[scheme_end..]
+                .find('/')
+                .map_or(base.len(), |offset| scheme_end + offset);
+            let (origin, prefix) = base.split_at(path_start);
+            let completion_path = format!("{prefix}/chat/completions");
             context
                 .command
                 .env("GOOSE_PROVIDER", "openai")
                 .env("GOOSE_MODEL", context.model)
-                .env("OPENAI_HOST", connection.base_url.trim_end_matches("/v1"))
-                .env("OPENAI_BASE_PATH", "/v1/chat/completions")
+                .env("OPENAI_HOST", origin)
+                .env("OPENAI_BASE_PATH", completion_path)
                 .env("OPENAI_API_KEY", key);
         }
         _ => return Err(context.unsupported_endpoint("goose")),
@@ -970,6 +981,32 @@ mod tests {
         assert_eq!(env["OPENAI_BASE_PATH"], "/v1/chat/completions");
         assert_eq!(env["OPENAI_API_KEY"], "asb-replay");
         assert_eq!(env["GOOSE_DISABLE_SESSION_NAMING"], "true");
+    }
+
+    #[test]
+    fn openrouter_live_endpoint_preserves_api_prefix() {
+        let mut command = Command::new("goose");
+        let connection = crate::endpoint::Connection {
+            interface: crate::endpoint::Interface::OpenAiChat,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            credential: Some("test-key".into()),
+            authentication: crate::endpoint::Authentication::Bearer,
+        };
+        prepare_adapter(&mut PreparationContext {
+            command: &mut command,
+            model: "test-model",
+            connection: &connection,
+            workspace: Path::new("."),
+            runtime_dir: Path::new("."),
+            run_dir: Path::new("."),
+            mcp_servers: &[],
+            mcp_tape: None,
+            tape: None,
+        })
+        .unwrap();
+        let env = environment(&command);
+        assert_eq!(env["OPENAI_HOST"], "https://openrouter.ai");
+        assert_eq!(env["OPENAI_BASE_PATH"], "/api/v1/chat/completions");
     }
 
     #[test]
