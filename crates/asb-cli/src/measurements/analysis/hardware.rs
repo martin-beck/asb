@@ -77,7 +77,7 @@ const RATIOS: &[Ratio] = &[
     },
 ];
 
-fn eligible(value: &Value) -> Option<(u64, f64)> {
+pub(super) fn eligible(value: &Value) -> Option<(u64, f64)> {
     if value.get("unavailable_rows")?.as_u64()? != 0
         || value.get("unknown_quality_rows")?.as_u64()? != 0
         || value.get("observed_rows")?.as_u64()? == 0

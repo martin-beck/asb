@@ -292,6 +292,34 @@ unavailable, without falling back to host `/proc/stat`, load averages or memory
 availability.
 
 
+## Shared normalized counter input
+
+`perf-stat-plan.json` records the generation-bound agent root, excluded ASB
+controller and guardian, explicit event groups, inheritance and absence of
+system-wide collection. Generic and hybrid core counters retain exact `u64`
+counts in `perf-stat-quality.json`, just like the Arm counters. An adapter-owned,
+bounded `perf list --no-desc` probe discovers advertised aliases; it never
+selects uncore events or guesses a raw encoding. Hybrid core and atom groups
+are requested independently.
+
+The shared `bottlenecks.json` counter groups retain raw integers separately
+from counters with complete, reported 100% scheduling and identical integral
+runtime. IPC requires compatible cycles and instructions and a positive cycle
+denominator. Missing optional events stay missing; failure, missing scope,
+unknown quality and incompatible runtime cannot become a ratio. Rounded perf
+percentages do not prove absence of unreported loss, and these are observed
+unscaled counts rather than whole-run estimates or utilization.
+
+All adapters finalize before normalized analysis is published. AgentSysPerf
+then consumes the current in-memory result, preserving it as
+`agentsysperf-normalized-input.json`; publication failure cannot select an old
+artifact or raw scalar fallback. Both qualified agent CPU components are
+required for total CPU time. Its compatibility L3 record supports one PMU
+domain; multiple domains remain separate in normalized JSON and are not
+combined into a misleading single record. Comparison regenerates the same
+normalization offline and exposes group quality and provenance in HTML.
+
+
 ## Observed native agent lifetime windows
 
 Measured native launches now publish `execution-window.json`. A bounded observer

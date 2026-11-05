@@ -2,6 +2,38 @@ use super::*;
 use crate::workloads::summary::update_summary as update_summary_value;
 use serde::ser::{Error as _, SerializeMap};
 
+#[test]
+fn failed_analysis_publication_passes_none_to_consumers_and_finishes_summary() {
+    struct Consumer;
+    impl collectors::CollectorAdapter for Consumer {
+        fn id(&self) -> &'static str {
+            "test-failed-normalization-consumer"
+        }
+        fn after_analysis(
+            &self,
+            session: &mut Session,
+            normalized: Option<&serde_json::Value>,
+        ) -> Result<(), String> {
+            assert!(normalized.is_none());
+            fs::write(session.dir.join("consumer-saw-unavailable"), "unavailable")
+                .map_err(|e| e.to_string())
+        }
+    }
+    static CONSUMER: Consumer = Consumer;
+    let root = crate::fixture_namespace::allocate(
+        &std::env::temp_dir(),
+        "asb-analysis-publication-failure-",
+    )
+    .unwrap();
+    let mut session = Session::start_with_collectors(&root, &[], None).unwrap();
+    session.adapters.push(&CONSUMER);
+    fs::create_dir(root.join("bottlenecks.json")).unwrap();
+    assert!(session.finish(fixture_measurement()).is_err());
+    assert!(root.join("consumer-saw-unavailable").is_file());
+    assert!(root.join("summary.json").is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn perf_interrupt_result_preserves_signal_grade_and_raw_on_invalid_or_unrequested_capture() {

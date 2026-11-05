@@ -469,6 +469,16 @@ pub(crate) trait CollectorAdapter: Sync {
     fn finish(&self, _session: &mut crate::measurements::Session) -> Result<(), String> {
         Ok(())
     }
+    /// Consume the current invocation's normalized evidence only after every
+    /// adapter has finalized. None means analysis publication failed; consumers
+    /// must not read a stale artifact or fall back to unqualified raw scalars.
+    fn after_analysis(
+        &self,
+        _session: &mut crate::measurements::Session,
+        _analysis: Option<&serde_json::Value>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     /// Start collectors that need to observe events before the child exists.
     fn start(&self, _session: &mut crate::measurements::Session) -> Result<(), String> {
         Ok(())

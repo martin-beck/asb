@@ -4,6 +4,7 @@
 //! ownership of measurement semantics; the engine never inspects the host.
 
 pub(crate) mod cohort;
+mod counter_groups;
 mod hardware;
 mod kernel;
 mod observations;
@@ -49,6 +50,7 @@ struct Report {
     hardware: Vec<hardware::PmuAnalysis>,
     kernel: Vec<kernel::Diagnostic>,
     sampling: Vec<sampling::SamplingAnalysis>,
+    counter_groups: Vec<counter_groups::Group>,
 }
 
 fn analyze(timing: Option<&super::ComponentTiming>) -> Report {
@@ -65,12 +67,20 @@ fn analyze(timing: Option<&super::ComponentTiming>) -> Report {
         hardware: Vec::new(),
         kernel: Vec::new(),
         sampling: Vec::new(),
+        counter_groups: Vec::new(),
     }
 }
 
-pub(super) fn publish(dir: &Path, timing: Option<&super::ComponentTiming>) -> Result<(), String> {
+pub(super) fn publish(
+    dir: &Path,
+    timing: Option<&super::ComponentTiming>,
+) -> Result<serde_json::Value, String> {
     let mut documents = std::collections::BTreeMap::new();
     for name in [
+        "perf-stat-plan",
+        "perf-stat-quality",
+        "perf-stat",
+        "measurement-target",
         "arm-platform",
         "arm-pmu",
         "arm-pmu-plan",
@@ -98,8 +108,11 @@ pub(super) fn publish(dir: &Path, timing: Option<&super::ComponentTiming>) -> Re
     let mut report = analyze(timing);
     report.hardware = hardware::analyze(&documents);
     report.kernel = kernel::analyze(&documents);
+    report.counter_groups = counter_groups::analyze(&documents);
     report.sampling = sampling::analyze(&documents);
-    super::write_json(&dir.join("bottlenecks.json"), &report)
+    let value = serde_json::to_value(report).map_err(|error| error.to_string())?;
+    super::write_json(&dir.join("bottlenecks.json"), &value)?;
+    Ok(value)
 }
 
 /// Recompute from the comparison loader's bounded, identity-bound documents.
@@ -129,6 +142,7 @@ pub(crate) fn from_documents(
     let mut report = analyze(timing.as_ref());
     report.hardware = hardware::analyze(documents);
     report.kernel = kernel::analyze(documents);
+    report.counter_groups = counter_groups::analyze(documents);
     report.sampling = sampling::analyze(documents);
     serde_json::to_value(report).expect("analysis contains only finite values")
 }
