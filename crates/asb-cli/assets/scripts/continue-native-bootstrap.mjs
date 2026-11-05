@@ -9,4 +9,4 @@ if (!bundle || !socket || !['record', 'replay'].includes(mode)) throw new Error(
 installDispatchHook(bundle, createNativeDispatcher(mode, socket, {
   isDelegation: call => call.name === 'Subagent',
   ...recordBoundaries(marker),
-}), { headlessSubagent: true });
+}), { headlessSubagent: true, restoreReadState: mode === 'replay' });

@@ -22,6 +22,17 @@ await assert.rejects(dispatch({ tool: { run: async () => { throw failure; } }, a
 assert.throws(() => transformDispatch('no supported dispatch'), /found 0/);
 assert.throws(() => transformDispatch(`${source};${source}`), /found 2/);
 assert.throws(() => transformDispatch(null), /must be text/);
+assert.throws(() => transformDispatch(source, {restoreReadState: true}), /Read state hook/);
+const readSource = 'const seen=new Set;function mark(e){seen.add(e)};const spec={name:"Read",displayName:"Read"};function reference(n){let r=fs.realpathSync(n),o=fs.readFileSync(r);return mark(r),`Content of ${n}`} ;async function dispatch(e,r){return await e.tool.run(e.preprocessResult?.args??e.arguments,r)};({dispatch,seen})';
+const replaySandbox = {Symbol, process: {env: {ASB_CONTINUE_MODE: 'replay'}}, fs: {realpathSync: p => `/canonical/${p}`, readFileSync: () => ''}};
+replaySandbox.globalThis = replaySandbox;
+replaySandbox[Symbol.for('asb.continue.nativeDispatch.v1')] = async () => 'recorded';
+const replay = vm.runInNewContext(transformDispatch(readSource, {restoreReadState: true}), replaySandbox);
+assert.equal(await replay.dispatch({name: 'Read', arguments: {filepath: 'fixture'}, tool: {}}, {}), 'recorded');
+assert.equal(replay.seen.has('/canonical/fixture'), true);
+replaySandbox[Symbol.for('asb.continue.nativeDispatch.v1')] = async () => {throw new Error('failed');};
+await assert.rejects(replay.dispatch({name: 'Read', arguments: {filepath: 'failed'}, tool: {}}, {}), /failed/);
+assert.equal(replay.seen.has('/canonical/failed'), false);
 const guard = 'cE.getInstance().getCurrentSession();let a="";if(!a)throw new Error("No active session found"); a';
 const withSession = { cE: { getInstance: () => ({ getCurrentSession: () => ({ sessionId: 'fixture-session' }) }) } };
 assert.equal(vm.runInNewContext(transformHeadlessSubagent(guard), withSession), 'fixture-session');
