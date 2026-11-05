@@ -5,9 +5,10 @@ after ASB has installed the agent. The task adapter retains the client's HOME
 and provider settings, and defaults Git author and committer dates to the base
 commit timestamp unless explicitly supplied. This stabilizes identical Git
 objects without masking different file contents. The changed client inputs
-have their own replay identity; recordings made with the previous environment
-need a fresh recording. These controls do not make live tool network access or
-agent execution deterministic.
+have their own bundled replay identity; older bundled recordings made with the
+previous environment need a fresh recording. Legacy recordings lacking this
+identity cannot prove that their environment matches. These controls do not
+make live tool network access or agent execution deterministic.
 
 Linux guests for Python agents stage a project-local portable Python and the
 installed agent packages before execution. The host prepares the pinned Python
