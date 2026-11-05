@@ -307,7 +307,7 @@ pub(crate) fn run_with_interactive(
                 if json {
                     Ok(())
                 } else if options.verbose {
-                    super::compare::generate_at(&report_path, &base, stdout).map(|_| ())
+                    super::compare::generate_at(&report_path, &base, stdout, false).map(|_| ())
                 } else {
                     super::compare::run_links_at(&report_path, &base, stdout)
                 }
@@ -388,13 +388,14 @@ pub(crate) fn run_with_interactive(
             )
         }
         Some(CommandLine::Compare(options)) => {
-            super::compare::generate_at(&resolve(&options.path), &base, stdout).and_then(|report| {
-                if options.report {
-                    super::compare::open_report(&report)
-                } else {
-                    Ok(())
-                }
-            })
+            super::compare::generate_at(&resolve(&options.path), &base, stdout, options.parquet)
+                .and_then(|report| {
+                    if options.report {
+                        super::compare::open_report(&report)
+                    } else {
+                        Ok(())
+                    }
+                })
         }
         Some(CommandLine::Provider(options)) => match options.command {
             ProviderCommand::Models(args) => models::list(args.into(), stdout),
@@ -1317,6 +1318,9 @@ struct SweepArgs {
 
 #[derive(Debug, Args)]
 struct CompareArgs {
+    /// Export retained measurements and regenerated analysis as observations.parquet.
+    #[arg(long)]
+    parquet: bool,
     #[arg(value_name = "BENCHMARK_OR_SWEEP", value_hint = clap::ValueHint::FilePath)]
     path: String,
     /// Open the generated HTML report in the default web browser.

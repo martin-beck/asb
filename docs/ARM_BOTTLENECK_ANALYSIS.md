@@ -566,3 +566,35 @@ qualification: ten SPE and twelve pressure series per replica normalized to the
 expected millisecond values, with matching axis metadata and every original
 measurement JSON hash unchanged. This verifies report regeneration rather than
 rerunning an agent or changing its measurements.
+
+
+## Optional columnar observations
+
+`asb compare BENCHMARK_OR_SWEEP.toml --parquet` publishes
+`observations.parquet` atomically with the HTML/JSON/SVG report. No agent,
+provider or collector is started. Automatic comparisons keep their current
+behavior. A subsequent comparison without the flag creates a fresh report
+generation without the optional file; previous report generations stay in the
+publisher's backups.
+
+Schema version 1 is stored in Parquet file metadata. Required UTF-8 columns are
+`row_id`, `agent`, `provider`, `model`, `workload`, `trial`, `family`, `name`,
+`unit`, `scope`, `status`, `details_json`. Nullable columns are `value` (double),
+`timestamp_seconds` (double) and `exact_integer` (UTF-8 decimal integer).
+Row identity preserves configuration, batch and replica; cohort rows instead
+identify the observed cohort. Measured scalars and series retain existing
+collector semantics; analysis-specific rows retain their explicit semantics,
+quality and input references. Raw grouped counters use exact decimal strings,
+never a lossy floating-point conversion. Missing evidence is null, never zero.
+Series retain actual timestamps and null gaps; absent timestamps remain null
+with a sample index in details. Collector-relative axes are not silently joined.
+Context rows retain existing host/Arm inventory, not additional host sampling.
+
+The export projects the same validated, regenerated in-memory report used by
+HTML. It does not trust saved analysis conclusions or revive unqualified external
+findings. `details_json` preserves provenance, limitations, CPU/PMU domain,
+clock references and availability reasons alongside queryable scalar columns.
+Raw capture files remain separate authoritative artifacts. Batches contain at
+most 128 rows, each limited to 256 KiB; oversized metadata or invalid numerics
+fail explicitly before atomic publication, preserving the existing report and
+all original measurements. There are no extra runtime dependencies.

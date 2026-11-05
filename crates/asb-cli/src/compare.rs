@@ -14,6 +14,7 @@ mod coverage;
 mod metric_identity;
 use metric_identity::{GraphNames, flatten_numbers, insert_unique, path_key};
 mod analysis;
+mod columnar;
 mod model;
 pub(crate) mod outcomes;
 mod planning;
@@ -121,7 +122,7 @@ pub(crate) fn run_links_at(
     invocation: &Path,
     output: &mut dyn Write,
 ) -> Result<(), Error> {
-    let (_, links) = generate_at_with_links(path, invocation, &mut std::io::sink())?;
+    let (_, links) = generate_at_with_links(path, invocation, &mut std::io::sink(), false)?;
     write_public_links(links, output)
 }
 
@@ -133,7 +134,7 @@ pub(crate) fn run_in_sweep(
     output: &mut dyn Write,
     _owner: &crate::sweep::lock::OutputLock,
 ) -> Result<(), Error> {
-    generate_owned_with_links(path, Some(output_parent), output).map(|_| ())
+    generate_owned_with_links(path, Some(output_parent), output, false).map(|_| ())
 }
 
 pub(crate) fn run_links_in_sweep(
@@ -142,7 +143,8 @@ pub(crate) fn run_links_in_sweep(
     output: &mut dyn Write,
     _owner: &crate::sweep::lock::OutputLock,
 ) -> Result<(), Error> {
-    let (_, links) = generate_owned_with_links(path, Some(output_parent), &mut std::io::sink())?;
+    let (_, links) =
+        generate_owned_with_links(path, Some(output_parent), &mut std::io::sink(), false)?;
     write_public_links(links, output)
 }
 
@@ -156,29 +158,31 @@ fn write_public_links(links: Vec<(String, String)>, output: &mut dyn Write) -> R
 /// Generate an offline report for either a benchmark or a sweep manifest.
 #[cfg(test)]
 pub(crate) fn generate(path: &str, output: &mut dyn Write) -> Result<PathBuf, Error> {
-    generate_with_links(path, output).map(|(path, _)| path)
+    generate_with_links(path, output, false).map(|(path, _)| path)
 }
 
 pub(crate) fn generate_at(
     path: &str,
     invocation: &Path,
     output: &mut dyn Write,
+    parquet: bool,
 ) -> Result<PathBuf, Error> {
-    generate_at_with_links(path, invocation, output).map(|(report, _)| report)
+    generate_at_with_links(path, invocation, output, parquet).map(|(report, _)| report)
 }
 
 fn generate_at_with_links(
     path: &str,
     invocation: &Path,
     output: &mut dyn Write,
+    parquet: bool,
 ) -> Result<(PathBuf, Vec<(String, String)>), Error> {
     let source = Path::new(path);
     if source.file_name().is_some_and(|name| name == "plan.json") {
-        return generate_with_links(path, output);
+        return generate_with_links(path, output, parquet);
     }
     let anchor = crate::project::configuration_anchor(source, Some(invocation))?;
     if anchor == source {
-        return generate_with_links(path, output);
+        return generate_with_links(path, output, parquet);
     }
     let parent = anchor.parent().unwrap_or_else(|| Path::new("."));
     let stem = anchor
@@ -187,21 +191,23 @@ fn generate_at_with_links(
         .filter(|s| !s.is_empty())
         .unwrap_or("sweep");
     let _owner = crate::sweep::lock::OutputLock::acquire_for_source(parent, stem, source)?;
-    generate_owned_with_links(path, Some(parent), output)
+    generate_owned_with_links(path, Some(parent), output, parquet)
 }
 
 fn generate_with_links(
     path: &str,
     output: &mut dyn Write,
+    parquet: bool,
 ) -> Result<(PathBuf, Vec<(String, String)>), Error> {
     let _owner = crate::sweep::lock::OutputLock::for_comparison(Path::new(path))?;
-    generate_owned_with_links(path, None, output)
+    generate_owned_with_links(path, None, output, parquet)
 }
 
 fn generate_owned_with_links(
     path: &str,
     output_parent: Option<&Path>,
     output: &mut dyn Write,
+    parquet: bool,
 ) -> Result<(PathBuf, Vec<(String, String)>), Error> {
     let loaded = source::load_at(path, output_parent)?;
     let validated = ValidatedReport::validate(loaded)?;
@@ -213,8 +219,14 @@ fn generate_owned_with_links(
         "cohort-analysis.json".into(),
         "report.html".into(),
     ]);
+    if parquet {
+        files.push("observations.parquet".into());
+    }
     let publisher = publication::Publisher::begin(&prepared.data.request.comparison_dir, files)?;
     rendering::render(publisher.stage(), &prepared)?;
+    if parquet {
+        columnar::publish(publisher.stage(), &prepared)?;
+    }
     let published = publisher.commit()?;
     let traces = prepared
         .data
