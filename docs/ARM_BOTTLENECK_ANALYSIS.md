@@ -60,6 +60,27 @@ does not yet qualify the proposed adapters or per-replica attribution.
 
 ## Completion ledger
 
+PR #1128 delivered the component-observation schema, stateless rule registry and
+initial diagnostic artifact, with all 68 measurement tests passing. It merged
+after its required CI succeeded. CPU-specific and cross-collector bottleneck
+analysis remains in the later steps above.
+
+The `arm-platform` collector adds bounded advertised-capability discovery through
+the ordinary collector registry. It writes `arm-platform.json` with CPU/SPE/uncore
+domains, PMU type, CPU masks, event aliases and format descriptions. Select it in
+the measurements list or setup measure selection. It does not start perf or claim
+that advertised events have been successfully measured. Non-AArch64 hosts write
+an explicit unavailable record. Discovery is bounded to 256 PMUs, 256 entries per
+event/format directory, 512 bytes per value and 4096 shared event/format fields.
+
+Native discovery qualification on node26 passed the opt-in
+`native_arm_inventory_matches_exposed_cpu_pmus` test, yielding 64 PMUs (one core
+PMU with 48 aliases, one SPE PMU and 62 uncore PMUs). The AArch64 test binary
+used its matching loader/libraries in a private directory because the host's
+older glibc could not start the cross-built executable directly. No host library
+was replaced. The retained inventory verifies capability discovery only; PMU
+counter scope, SPE decoding and bottleneck attribution require later tests.
+
 No series-wide completion is claimed until all six steps have merged, their
 required CI checks pass, and retained Arm qualification verifies actual output,
 scope, overhead, analysis and report behavior. Each PR records its own tests and
