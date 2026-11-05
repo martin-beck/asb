@@ -593,7 +593,8 @@ impl measurements::Session {
             crate::evidence::Capture::create(&stat_stdout_path)?,
             crate::evidence::Capture::create(&stat_stderr_path)?,
         ];
-        let hardware_events = super::agentsysperf::telemetry_events(self);
+        let hardware_events = super::arm_pmu::events(self)
+            .unwrap_or_else(|| super::agentsysperf::telemetry_events(self));
         let stat_args = stat_args(pid, measurement_interval_ms(), &hardware_events);
         let (mut command, route) = self.collector_command("perf")?;
         command.args(&stat_args);
@@ -671,6 +672,8 @@ struct PerfStat {
 #[derive(Default, serde::Serialize)]
 struct EventQuality {
     observed_value: Option<f64>,
+    /// Exact integer Arm hardware counts, independent of graph rounding.
+    observed_integer_count: Option<u64>,
     value_unit: &'static str,
     observed_rows: u64,
     unavailable_rows: u64,
@@ -778,6 +781,18 @@ fn parse_perf_stat_bounded(mut reader: impl BufRead, max_bytes: u64) -> Result<P
             return Err("perf stat PMU counter overflow; no partial totals published".into());
         }
         quality.observed_value = Some(observed_value);
+        if super::arm_pmu::metric_name(fields[event_index]).is_some() {
+            let integer = raw_value
+                .parse::<u64>()
+                .map_err(|_| "Arm hardware counter is not an exact integer")?;
+            quality.observed_integer_count = Some(
+                quality
+                    .observed_integer_count
+                    .unwrap_or(0)
+                    .checked_add(integer)
+                    .ok_or("Arm hardware counter integer overflow")?,
+            );
+        }
         let name = format!("perf.{name}");
         let timestamp = if event_index == 3 {
             Some(
@@ -849,6 +864,9 @@ pub(crate) fn parse_perf_stat_metrics(output: &str) -> BTreeMap<String, f64> {
 }
 
 fn perf_metric_name(event: &str) -> Option<&'static str> {
+    if event.starts_with("armv8_pmuv3") {
+        return super::arm_pmu::metric_name(event);
+    }
     // On Intel hybrid CPUs `perf stat` expands an architected event into
     // separate `cpu_core/<event>/` and `cpu_atom/<event>/` rows. They remain
     // separate raw-quality observations, while ASB's validated scalar/series
@@ -886,6 +904,30 @@ pub(crate) fn perf_permission_error() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn arm_integer_counts_preserve_precision_and_pmu_quality_identity() {
+        let data = super::parse_perf_stat(std::io::Cursor::new(
+            "0.1,9007199254740993,,armv8_pmuv3_0/cpu_cycles/,100000000,100.00,,\n0.1,17,,armv8_pmuv3_1/cpu_cycles/,100000000,100.00,,\n0.1,<not counted>,,armv8_pmuv3_0/inst_retired/,0,0.00,,\n"
+        )).unwrap();
+        assert_eq!(
+            data.quality["armv8_pmuv3_0/cpu_cycles/"].observed_integer_count,
+            Some(9007199254740993)
+        );
+        assert_eq!(
+            data.quality["armv8_pmuv3_1/cpu_cycles/"].observed_integer_count,
+            Some(17)
+        );
+        assert_eq!(
+            data.quality["armv8_pmuv3_0/inst_retired/"].observed_integer_count,
+            None
+        );
+        assert_eq!(
+            data.quality["armv8_pmuv3_0/inst_retired/"].unavailable_rows,
+            1
+        );
+        let overflow = "0.1,18446744073709551615,,armv8_pmuv3_0/cpu_cycles/,1,100.00,,\n0.2,1,,armv8_pmuv3_0/cpu_cycles/,1,100.00,,\n";
+        assert!(super::parse_perf_stat(std::io::Cursor::new(overflow)).is_err());
+    }
     use super::{record_args, stat_args};
 
     #[test]

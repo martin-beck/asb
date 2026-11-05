@@ -72,6 +72,7 @@ the measurements list or setup measure selection. It does not start perf or clai
 that advertised events have been successfully measured. Non-AArch64 hosts write
 an explicit unavailable record. Discovery is bounded to 256 PMUs, 256 entries per
 event/format directory, 512 bytes per value and 4096 shared event/format fields.
+This slice merged as PR #1129 after its required CI passed.
 
 Native discovery qualification on node26 passed the opt-in
 `native_arm_inventory_matches_exposed_cpu_pmus` test, yielding 64 PMUs (one core
@@ -80,6 +81,25 @@ used its matching loader/libraries in a private directory because the host's
 older glibc could not start the cross-built executable directly. No host library
 was replaced. The retained inventory verifies capability discovery only; PMU
 counter scope, SPE decoding and bottleneck attribution require later tests.
+
+The `arm-pmu` slice requests one event group per discovered CPU PMU through the
+existing `perf-stat` producer. Each group contains advertised cycles, retired
+instructions and available L1D refill, L1D TLB refill, branch-misprediction and
+backend-stall events (at most six). This replaces generic hardware aliases for
+that session, avoiding duplicate AgentSysPerf counter requests and SMMU alias
+expansion. Existing software counters and stack sampling remain available.
+All consumers share one attempt-frozen platform inventory. On non-Arm hosts,
+the Arm adapter reports unavailable without suppressing other perf consumers.
+
+`arm-pmu-plan.json` records requested groups; `arm-pmu.json` projects validated
+per-PMU quality from `perf-stat-quality.json`. Exact unsigned integer counts are
+retained separately from floating-point graph values. Missing/unschedulable
+counters remain absent, and overflow or malformed counters invalidate parsing.
+Quality retains actual event runtime and rounded running percentage; no reverse
+scaling or CPU utilization is inferred. CPU-specific ratios and Topdown analysis
+remain later work. The complete six-event group was directly tested on node26
+at 100 ms intervals with all six events scheduled at reported 100% running time;
+this is hardware/event qualification, not yet full concurrent ASB qualification.
 
 No series-wide completion is claimed until all six steps have merged, their
 required CI checks pass, and retained Arm qualification verifies actual output,

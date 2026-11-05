@@ -788,6 +788,7 @@ mod tests {
                 false,
             ),
             ("arm-platform", None, None, false),
+            ("arm-pmu", None, None, false),
             ("system", None, None, false),
             ("mpstat", Some("ASB_MEASURE_MPSTAT"), Some("mpstat"), true),
             ("iostat", Some("ASB_MEASURE_IOSTAT"), Some("iostat"), true),
@@ -820,6 +821,7 @@ mod tests {
             );
             let dependencies: &[&str] = match id {
                 "arm-platform" => &["system"],
+                "arm-pmu" => &["arm-platform", "perf"],
                 "flamegraph" => &["perf"],
                 "agentsysperf:l1-resource" => {
                     &["agent-memory", "agent-workers", "cpu-accounting", "perf"]

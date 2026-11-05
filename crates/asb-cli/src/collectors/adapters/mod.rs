@@ -7,6 +7,7 @@ mod agent_processes;
 mod agent_workers;
 mod agentsysperf;
 pub(crate) mod arm_platform;
+pub(crate) mod arm_pmu;
 pub(crate) mod bpftrace;
 mod cpu_accounting;
 pub(crate) mod flamegraph;
@@ -25,6 +26,7 @@ pub(super) static REGISTRY: &[&dyn CollectorAdapter] = &[
     &cpu_accounting::ADAPTER,
     &agentsysperf::ADAPTER,
     &arm_platform::ADAPTER,
+    &arm_pmu::ADAPTER,
     &system::ADAPTER,
     &mpstat::ADAPTER,
     &iostat::ADAPTER,
