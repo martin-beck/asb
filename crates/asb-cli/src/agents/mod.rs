@@ -1471,6 +1471,7 @@ mod tests {
             vec![
                 "codex",
                 "pi",
+                "opencode",
                 "qwen-code",
                 "openhands",
                 "openjiuwen",

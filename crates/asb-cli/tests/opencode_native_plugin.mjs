@@ -1,0 +1,46 @@
+import assert from 'node:assert/strict';
+import {mkdtemp, rm, writeFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {NativeToolBroker, brokerRequest} from '../assets/scripts/native-tool-broker.mjs';
+import {createOpenCodeNativePlugin, settlePending} from '../assets/scripts/opencode-native-plugin.mjs';
+
+const dir=await mkdtemp(join(tmpdir(),'asb-opencode-native-'));
+const socket=join(dir,'broker.sock');
+try {
+  const recorder=new NativeToolBroker('record');
+  await recorder.listen(socket);
+  const record=createOpenCodeNativePlugin({mode:'record',socket});
+  const call={tool:'bash',sessionID:'parent',callID:'1'};
+  const child={tool:'read',sessionID:'child',callID:'1'};
+  await record['tool.execute.before'](call,{args:{command:'printf x',timeout:1234}});
+  await record['tool.execute.before'](child,{args:{filePath:'a'}});
+  await record['tool.execute.before']({tool:'task',sessionID:'parent',callID:'2'},{args:{}});
+  await record['tool.execute.after'](child,{title:'read',output:'content',metadata:{}});
+  await record['tool.execute.after'](call,{title:'shell',output:'x',metadata:{exit:0}});
+  await record['tool.execute.before']({tool:'edit',sessionID:'parent',callID:'3'},{args:{filePath:'missing'}});
+  await record.event({event:{type:'message.part.updated',properties:{part:{type:'tool',tool:'edit',sessionID:'parent',callID:'3',state:{status:'error',error:'file missing'}}}}});
+  const events=await recorder.finish();
+  assert.equal(events.length,3);
+  const effects=[];
+  const broker=new NativeToolBroker('replay',events,async event=>effects.push(event.ordinal));
+  await broker.listen(socket);
+  const definitions={bash:{description:'shell',schema:{type:'object',properties:{command:{type:'string'},timeout:{type:'integer'}},required:['command']}},read:{description:'read',schema:{type:'object',properties:{filePath:{type:'string'}}}},edit:{description:'edit',schema:{type:'object',properties:{filePath:{type:'string'}}}},task:{description:'delegate',schema:{type:'object'}}};
+  const replay=createOpenCodeNativePlugin({mode:'replay',socket,definitions});
+  assert.equal(replay.tool.task,undefined);
+  const schema={}; await replay['tool.definition']({toolID:'bash'},schema);
+  assert.deepEqual(schema.jsonSchema,definitions.bash.schema);
+  const shell=replay.tool.bash.execute({command:'printf x',timeout:1234});
+  const read=replay.tool.read.execute({filePath:'a'});
+  assert.deepEqual(await read,{title:'read',output:'content',metadata:{}});
+  assert.deepEqual(await shell,{title:'shell',output:'x',metadata:{exit:0}});
+  await assert.rejects(replay.tool.edit.execute({filePath:'missing'}),/file missing/);
+  await broker.finish();
+  assert.deepEqual(effects,[1,0,2]);
+  const interrupted=new NativeToolBroker('record'); await interrupted.listen(socket);
+  const {token}=await brokerRequest(socket,{op:'start',request:{tool:'edit',input:{filePath:'x'}}});
+  await writeFile(join(dir,'a'.repeat(64)+'.json'),JSON.stringify({token,error:'permission denied'}));
+  await settlePending({directory:dir,socket,mode:'record',broker:interrupted});
+  const settled=await interrupted.finish();
+  assert.equal(settled[0].outcome.message,'permission denied');
+} finally { await rm(dir,{recursive:true,force:true}); }

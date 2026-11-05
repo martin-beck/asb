@@ -55,7 +55,17 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_estimated_disk_mib(1024)
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_tool_replay(prepare_tool_replay)
+.with_native_tool_transport()
+.with_guest_replay_evidence(extract_guest_replay_evidence)
+.with_guest_service(start_native_service)
+.with_deferred_native_recording(finalize_native_recording)
+.with_native_snapshot_check(verify_native_snapshot)
 .with_artifact_specs(&[
+    super::super::ArtifactSpec {
+        namespace: "opencode",
+        filename: "native-tool-pending.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
     super::super::ArtifactSpec {
         namespace: "tool-replay",
         filename: "local-tools.jsonl",
@@ -249,6 +259,24 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     // description before mutating the command, then remove the bridge
     // variable so it is never exposed to OpenCode or the benchmark process.
     let tool_command = tool_replay(context)?;
+    let mut configuration: serde_json::Value = serde_json::from_str(&config(
+        context.model,
+        &connection.base_url,
+        npm,
+        tool_command,
+    )?)
+    .map_err(|_| Error::Run("cannot configure OpenCode provider".into()))?;
+    if native_snapshot(context.tape.map(|tape| tape.mode)) {
+        context.command.arg("--auto");
+        let plugin = context
+            .run_dir
+            .join("opencode/opencode-native-launcher.mjs");
+        configuration["plugin"] = serde_json::json!([plugin]);
+        context.command.env(
+            "ASB_OPENCODE_EVIDENCE",
+            "/opt/asb-private/adapter-model-evidence.json",
+        );
+    }
     context
         .command
         .env_remove("ASB_OPENCODE_TOOL_REPLAY_COMMAND");
@@ -258,10 +286,7 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
             "ASB_AGENT_API_KEY",
             connection.credential.as_deref().unwrap_or("asb-local"),
         )
-        .env(
-            "OPENCODE_CONFIG_CONTENT",
-            config(context.model, &connection.base_url, npm, tool_command)?,
-        );
+        .env("OPENCODE_CONFIG_CONTENT", configuration.to_string());
     // OpenCode's repository-search tool invokes ripgrep.  Fresh workload
     // materialization can give the same files a different directory-entry
     // order, which otherwise changes only the ordering of an identical tool
@@ -287,6 +312,9 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
+    if native_snapshot(Some(tape.mode)) {
+        return Ok(());
+    }
     super::super::tool_replay_mcp::prepare_protocol_artifact(context, tape)?;
     let launch = super::super::tool_replay_mcp::launch(context, tape)?;
     let command = std::iter::once(launch.program)
@@ -306,8 +334,171 @@ fn prepare_tool_replay(
     Ok(())
 }
 
+fn native_snapshot(mode: Option<crate::tape::Mode>) -> bool {
+    match mode {
+        Some(crate::tape::Mode::Record) => std::env::var_os("ASB_FS_MARKER_SOCKET").is_some(),
+        Some(crate::tape::Mode::Replay) => std::env::var_os("ASB_FS_REPLAY_SOCKET").is_some(),
+        None => false,
+    }
+}
+
+fn extract_guest_replay_evidence(track: &std::path::Path) -> Result<Vec<u8>, Error> {
+    use std::io::{BufRead, BufReader};
+    let metadata = std::fs::symlink_metadata(track)
+        .map_err(|_| Error::Run("OpenCode replay model track is unavailable".into()))?;
+    if !metadata.file_type().is_file()
+        || metadata.len() > crate::cassette::Limits::default().max_track_bytes
+    {
+        return Err(Error::Run(
+            "OpenCode replay model track is invalid or too large".into(),
+        ));
+    }
+    let file = std::fs::File::open(track).map_err(crate::io_error)?;
+    let mut definitions = serde_json::Map::new();
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(crate::io_error)?;
+        let row: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|_| Error::Run("OpenCode replay model track is malformed".into()))?;
+        let Some(raw) = row.pointer("/request/body").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Ok(body) = serde_json::from_str::<serde_json::Value>(raw) else {
+            continue;
+        };
+        let Some(tools) = body.get("tools").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for entry in tools {
+            let tool = entry.get("function").unwrap_or(entry);
+            let (Some(name), Some(schema)) = (
+                tool.get("name").and_then(|v| v.as_str()),
+                tool.get("parameters").or_else(|| tool.get("input_schema")),
+            ) else {
+                continue;
+            };
+            definitions.entry(name.to_owned()).or_insert_with(|| {
+                serde_json::json!({
+                    "description": tool.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                    "schema": schema,
+                })
+            });
+        }
+    }
+    serde_json::to_vec(&definitions)
+        .map_err(|_| Error::Run("cannot encode OpenCode tool definitions".into()))
+}
+
+fn start_native_service(
+    command: &mut std::process::Command,
+    executable: &str,
+    run_dir: &std::path::Path,
+    mode: Option<crate::tape::Mode>,
+    native_tool: Option<&std::path::Path>,
+    snapshot_sha256: Option<&str>,
+) -> Result<Option<super::super::auxiliary::AuxiliaryPlan>, Error> {
+    let Some((mode, marker, snapshot)) =
+        super::super::native_guest::selection(mode, snapshot_sha256)?
+    else {
+        return Ok(None);
+    };
+    let bundle = std::fs::canonicalize(executable).map_err(|_| {
+        Error::Run("OpenCode executable is unavailable for native recording".into())
+    })?;
+    let assets = [
+        (
+            "opencode-native-plugin.mjs",
+            include_str!("../../../assets/scripts/opencode-native-plugin.mjs"),
+        ),
+        (
+            "opencode-native-launcher.mjs",
+            include_str!("../../../assets/scripts/opencode-native-launcher.mjs"),
+        ),
+    ];
+    let settings = super::super::native_guest::Settings {
+        agent: "opencode",
+        bundle: &bundle,
+        run_dir,
+        mode,
+        marker: marker.clone(),
+        native_tool,
+        snapshot: &snapshot,
+        assets: &assets,
+    };
+    let (mut service, directory, socket) = super::super::native_guest::broker(command, &settings)?;
+    if mode == crate::tape::Mode::Replay {
+        let sidecar = native_tool
+            .ok_or_else(|| Error::Run("OpenCode native replay sidecar is missing".into()))?;
+        let mut preflight = std::process::Command::new("node");
+        if let Some((_, Some(path))) = command.get_envs().find(|(name, _)| *name == "PATH") {
+            preflight.env("PATH", path);
+        }
+        let status = preflight.arg("--input-type=module")
+            .arg("-e")
+            .arg("import {pathToFileURL} from 'node:url'; const m = await import(pathToFileURL(process.argv[1])); await m.recordedDefinitions(process.argv[2], process.argv[3]);")
+            .arg(directory.join("opencode-native-launcher.mjs"))
+            .arg("/opt/asb-private/adapter-model-evidence.json")
+            .arg(sidecar)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|_| Error::Run("cannot check OpenCode replay tool definitions; verify Node is installed".into()))?;
+        if !status.success() {
+            return Err(Error::Run("OpenCode replay tool definitions are missing or invalid; use a complete recording for this agent".into()));
+        }
+    }
+    let state = directory.join("hook-state");
+    std::fs::create_dir_all(&state).map_err(crate::io_error)?;
+    service
+        .env(
+            "ASB_NATIVE_SETTLEMENT_MODULE",
+            directory.join("opencode-native-plugin.mjs"),
+        )
+        .env("ASB_NATIVE_SETTLEMENT_DIRECTORY", &state)
+        .env("ASB_NATIVE_SETTLEMENT_MARKER", &marker);
+    command
+        .env("ASB_OPENCODE_SOCKET", socket)
+        .env("ASB_OPENCODE_STATE", state)
+        .env("ASB_OPENCODE_MARKER", marker)
+        .env(
+            "ASB_OPENCODE_NATIVE_MODE",
+            if mode == crate::tape::Mode::Replay {
+                "replay"
+            } else {
+                "record"
+            },
+        );
+    if let Some(path) = native_tool {
+        command.env("ASB_OPENCODE_SIDECAR", path);
+    }
+    Ok(Some(super::super::auxiliary::AuxiliaryPlan::new(service)))
+}
+
+fn finalize_native_recording(pending: &[u8], digest: &str) -> Result<Vec<u8>, Error> {
+    super::super::native_guest::finalize("opencode", pending, digest)
+}
+
+fn verify_native_snapshot(
+    native: &[u8],
+    snapshot: &mut std::fs::File,
+    digest: &str,
+) -> Result<(), Error> {
+    super::pi::snapshot::verify_for("opencode", native, snapshot, digest)
+}
+
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
     let mut artifacts = AgentArtifacts::default();
+    if let Some(bytes) = context
+        .frozen
+        .bytes("native-tool-pending.jsonl")
+        .filter(|bytes| !bytes.is_empty())
+    {
+        artifacts
+            .sealed_artifacts
+            .push(super::super::SealedArtifact {
+                kind: "native-tool-deferred".into(),
+                bytes: bytes.to_vec(),
+            });
+    }
     if let Some(bytes) = context.frozen.bytes("tool-protocol.json") {
         if let Err(error) = super::super::tool_replay_mcp::verify_protocol_bytes(bytes) {
             artifacts.errors.push(error.to_string());
@@ -378,6 +569,62 @@ fn config(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn guest_replay_evidence_contains_only_tool_definitions() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-opencode-definitions-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let track = root.join("track.jsonl");
+        let body = serde_json::json!({"messages":[{"content":"private prompt"}],"tools":[{"type":"function","function":{"name":"bash","description":"shell","parameters":{"type":"object"}}}]});
+        std::fs::write(
+            &track,
+            format!(
+                "{}\n",
+                serde_json::json!({"request":{"body":body.to_string()}})
+            ),
+        )
+        .unwrap();
+        let evidence = super::extract_guest_replay_evidence(&track).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&evidence).unwrap();
+        assert_eq!(value["bash"]["schema"]["type"], "object");
+        assert!(
+            !String::from_utf8(evidence)
+                .unwrap()
+                .contains("private prompt")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_pending_recording_is_collected_for_cassette_publication() {
+        let frozen = crate::agents::FrozenArtifacts::from_deferred_collection_bytes(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "documents": {},
+                "bytes": {"native-tool-pending.jsonl": [123, 125, 10]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let artifacts = super::collect(&super::super::CollectionContext {
+            frozen: &frozen,
+            provider_capture: None,
+            run_dir: std::path::Path::new("."),
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert!(
+            artifacts
+                .sealed_artifacts
+                .iter()
+                .any(|item| item.kind == "native-tool-deferred" && item.bytes == b"{}\n")
+        );
+    }
+
     #[test]
     fn final_response_requires_matching_terminal_step() {
         let text = r#"{"type":"text","part":{"messageID":"m1","text":"answer"}}"#;
