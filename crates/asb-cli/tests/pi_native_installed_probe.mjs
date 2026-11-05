@@ -85,7 +85,8 @@ if (process.argv[2] === 'child') {
     if (mode === 'record') activeBroker = broker;
     const socket = join(root, `broker-${id || 'record'}.sock`);
     await broker.listen(socket);
-    const env = { ...process.env, NODE_OPTIONS: `--import=${scripts}/pi-native-bootstrap.mjs`,
+    const env = { PATH:process.env.PATH || '/usr/bin:/bin', HOME:root, ASB_TEST_PI_BUNDLE:bundle,
+      NODE_OPTIONS: `--import=${scripts}/pi-native-bootstrap.mjs`,
       ASB_NATIVE_BUNDLE: bundle, ASB_NATIVE_MODE: mode, ASB_NATIVE_SOCKET: socket,
       ASB_NATIVE_MARKER: marker, PROBE_EFFECT: effect, PROBE_URL: url };
     const child = spawn('unshare', [upstream && mode === 'record' ? '-Ur' : '-Urn', process.execPath, process.argv[1], 'child'],

@@ -44,7 +44,8 @@ if (process.argv[2]==='child') {
   async function run(mode,events=[],id='record') {
     const broker=new NativeToolBroker(mode,events,async()=>{});
     const socket=join(root,`broker-${id}.sock`);await broker.listen(socket);
-    const env={...process.env,NODE_OPTIONS:`--import=${scripts}/pi-native-bootstrap.mjs`,
+    const env={PATH:process.env.PATH||'/usr/bin:/bin',HOME:root,ASB_TEST_PI_BUNDLE:bundle,ASB_TEST_PI_BASH:bash,
+      NODE_OPTIONS:`--import=${scripts}/pi-native-bootstrap.mjs`,
       ASB_NATIVE_BUNDLE:bundle,ASB_NATIVE_MODE:mode,ASB_NATIVE_SOCKET:socket,ASB_NATIVE_MARKER:markerPath,
       PROBE_WORKSPACE:root,PROBE_URL:url,PROBE_EFFECT:effect};
     const child=spawn('unshare',[mode==='record'?'-Ur':'-Urn',process.execPath,process.argv[1],'child'],{env,stdio:['ignore','pipe','pipe']});
