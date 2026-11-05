@@ -68,9 +68,16 @@ try {
   let partial=''; emitter.stdout.on('data',chunk=>partial+=chunk);
   const runningCode = await new Promise((resolve,reject)=>{emitter.on('error',reject);emitter.on('close',resolve);});
   assert.equal(runningCode,0); assert.equal(partial,'partial');
-  await settlePending({mode:'replay',broker:running});
+  await settlePending({mode:'replay',broker:running,socket});
   assert.deepEqual(runningEffects,[0]);
   await running.finish();
+  const ending = new NativeToolBroker('replay', [{ordinal:0,request:{tool:'Bash',input:{command:'background'}},outcome:{ok:true,value:{output:runningOutput,running_wait_ms:1000}}}], async () => {});
+  await ending.listen(socket);
+  await replayHook({session_id:'replay',tool_use_id:'running',tool_name:'Bash',tool_input:{command:'background'},hook_event_name:'PreToolUse'}, {socket});
+  const teardownStart = Date.now();
+  await settlePending({mode:'replay',broker:ending,socket});
+  assert.ok(Date.now()-teardownStart < 800, 'settled agent should not wait for an unobservable background timer');
+  await ending.finish();
   sequence = 1;
   const wrapped = new NativeToolBroker('record');
   await wrapped.listen(socket);

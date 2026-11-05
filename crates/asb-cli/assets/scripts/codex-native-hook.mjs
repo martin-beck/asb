@@ -63,7 +63,13 @@ export async function recordHook(event, {directory, socket, marker}) {
 // Any surviving state represents a background command terminated at teardown.
 export async function settlePending({directory, socket, marker, mode, broker}) {
   if (mode === 'replay') {
-    while (broker.pending.size) await new Promise(resolve => setTimeout(resolve, 25));
+    // Once the owned agent tree has stopped it cannot observe the remaining
+    // delay. Release outstanding background effects without extending teardown;
+    // the shared replay session still applies them in recorded order.
+    await Promise.all([...broker.pending.keys()].map(token => brokerRequest(socket, {op:'release', token}).catch(error => {
+      if (broker.pending.has(token)) throw error;
+    })));
+    while (!broker.isIdle()) await new Promise(resolve => setTimeout(resolve, 25));
     return;
   }
   for (const name of (await readdir(directory)).filter(name => /^[a-f0-9]{64}\.json$/.test(name)).sort()) {
