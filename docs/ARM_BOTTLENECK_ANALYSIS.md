@@ -598,3 +598,11 @@ Raw capture files remain separate authoritative artifacts. Batches contain at
 most 128 rows, each limited to 256 KiB; oversized metadata or invalid numerics
 fail explicitly before atomic publication, preserving the existing report and
 all original measurements. There are no extra runtime dependencies.
+
+Native offline export qualification regenerated the retained two-replica Arm
+report into a 41 KiB Zstandard-compressed Parquet file. A separate reader
+verified disjoint replica identities, exact scoped counters, observed cohort
+bounds and the SPE series' final timestamps against their source phase receipts.
+All original measurement JSON hashes remained unchanged. The earlier factor-of-
+1000 time-unit defect was detected by that check, repaired in the shared loader,
+and the qualification repeated successfully; CLI success alone was insufficient.
