@@ -81,9 +81,10 @@ jobs:
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && vars.ASB_LOCAL_CI_ENABLED == 'true'
     runs-on: [self-hosted, linux, x64, asb-local-ci]
     # Serial execution preserves isolation for real host fixtures; allow the
-    # complete suite to finish rather than cancelling it at the old parallel
-    # suite budget.
-    timeout-minutes: 45
+    # complete suite to finish, including integration binaries after the roughly
+    # 30-minute library suite. The former 45-minute budget cancelled healthy
+    # integration tests; retain a finite budget with room for shared-host load.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
