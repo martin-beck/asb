@@ -287,11 +287,12 @@ main().catch(e => { console.error(e); process.exitCode = 1; });
             "tape.jsonl",
         ],
     );
-    assert!(!full_replay.status.success());
+    // Goose declares both native and private MCP transports. A recording made
+    // through the latter can replay through that hook without a native sidecar.
+    // The native-only sidecar rejection is covered separately in runner::native.
     assert!(
-        String::from_utf8_lossy(&full_replay.stdout).contains("native tool replay requires")
-            || String::from_utf8_lossy(&full_replay.stderr).contains("native tool replay requires"),
-        "full replay: stdout={} stderr={}",
+        full_replay.status.success(),
+        "tool replay: stdout={} stderr={}",
         String::from_utf8_lossy(&full_replay.stdout),
         String::from_utf8_lossy(&full_replay.stderr)
     );
@@ -337,35 +338,37 @@ main().catch(e => { console.error(e); process.exitCode = 1; });
         String::from_utf8_lossy(&override_replay.stderr)
     );
     assert_eq!(*provider.requests.lock().unwrap(), before_replay);
-    let mismatch = run_with_changed_request(
-        &root,
-        &provider.endpoint,
-        &[
-            "run",
-            "benchmark.toml",
-            "--llm-replay",
-            "--cassette",
-            "tape.jsonl",
-            "--verbose",
-        ],
-        true,
-    );
-    assert!(
-        !mismatch.status.success(),
-        "changed replay request must fail"
-    );
-    assert!(
-        String::from_utf8_lossy(&mismatch.stdout).contains("rejected")
-            || String::from_utf8_lossy(&mismatch.stderr).contains("rejected"),
-        "mismatch: stdout={} stderr={}",
-        String::from_utf8_lossy(&mismatch.stdout),
-        String::from_utf8_lossy(&mismatch.stderr)
-    );
-    assert_eq!(
-        *provider.requests.lock().unwrap(),
-        before_replay,
-        "a mismatched request must not fall back to the upstream"
-    );
+    for mode in ["--replay", "--llm-replay"] {
+        let mismatch = run_with_changed_request(
+            &root,
+            &provider.endpoint,
+            &[
+                "run",
+                "benchmark.toml",
+                mode,
+                "--cassette",
+                "tape.jsonl",
+                "--verbose",
+            ],
+            true,
+        );
+        assert!(
+            !mismatch.status.success(),
+            "changed {mode} request must fail"
+        );
+        assert!(
+            String::from_utf8_lossy(&mismatch.stdout).contains("rejected")
+                || String::from_utf8_lossy(&mismatch.stderr).contains("rejected"),
+            "{mode} mismatch: stdout={} stderr={}",
+            String::from_utf8_lossy(&mismatch.stdout),
+            String::from_utf8_lossy(&mismatch.stderr)
+        );
+        assert_eq!(
+            *provider.requests.lock().unwrap(),
+            before_replay,
+            "a mismatched {mode} request must not fall back to the upstream"
+        );
+    }
     let missing = run(
         &root,
         &provider.endpoint,
