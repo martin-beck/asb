@@ -1,5 +1,6 @@
 """Offline failure-path tests for experimental workspace provisioning."""
 from pathlib import Path
+import json
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,39 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class WorkspaceTest(unittest.TestCase):
+    def test_multiple_roots_share_one_snapshot_and_preserve_contents(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory).resolve();source=root/'source';extra=root/'extra'
+            source.mkdir();extra.mkdir()
+            (source/'task').write_text('workspace');(extra/'patch').write_text('temporary')
+            workspace=SnapshotWorkspace(root/'image',root/'mount',1024**3,['mkfs'],['btrfs'],['rsync'])
+            real_run=subprocess.run
+            def run(args,**kwargs):
+                if args[:3] == ['btrfs','subvolume','create']:
+                    Path(args[3]).mkdir()
+                elif args[0] == 'rsync':
+                    return real_run(args,**kwargs)
+                return subprocess.CompletedProcess(args,0)
+            with patch('asb_snapshot_workspace.subprocess.run',side_effect=run), \
+                 patch('builtins.open',unittest.mock.mock_open()), \
+                 patch('asb_snapshot_workspace.fcntl.ioctl',return_value=42), \
+                 patch('asb_snapshot_workspace.os.mknod'):
+                mounted=workspace.prepare(source,[extra])
+                self.assertEqual((mounted/'0'/'task').read_text(),'workspace')
+                self.assertEqual((mounted/'1'/'patch').read_text(),'temporary')
+                self.assertEqual(json.loads((mounted/'.asb-snapshot-roots.json').read_text()),
+                                 [str(source),str(extra)])
+                workspace.close()
+
+    def test_multiple_roots_reject_overlap_before_allocating_storage(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory).resolve();source=root/'source';nested=source/'nested'
+            nested.mkdir(parents=True)
+            workspace=SnapshotWorkspace(root/'image',root/'mount',1024,['mkfs'],['btrfs'],['rsync'])
+            with self.assertRaisesRegex(ValueError,'must not overlap'):
+                workspace.prepare(source,[nested])
+            self.assertFalse((root/'image').exists())
+
     def test_automatic_image_capacity_tracks_available_project_storage(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);source=root/'source';source.mkdir()

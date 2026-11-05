@@ -44,8 +44,23 @@ filesystem or production record/replay.
 The probe uses the experimental `asb_snapshot_service.py` marker socket to
 capture a baseline, tool-end snapshots, and a final snapshot. Its separate
 marker journal records start/end ordering and supplied process and thread IDs.
-This service is not wired into the guest driver or cassette replay; snapshots
-made during overlapping mutations are not yet qualified for replay.
+The experimental guest driver can use this service for cassette replay;
+snapshots made during overlapping mutations are not yet qualified for replay.
+
+The experimental guest supervisor also accepts repeatable `--extra-root`
+arguments. It places the workspace and those directories in a single Btrfs
+subvolume and binds each at its original guest path, so a tool boundary
+captures their effects together. The archive records the ordered paths and
+replay rejects a different layout. This is an opt-in filesystem experiment,
+not automatic full-filesystem capture: special files, active sockets, other
+paths, overlapping tool mutations and full agent replay remain unqualified.
+Do not mark a cassette complete based on this facility alone.
+The offline `crates/asb-cli/tests/fixtures/fs_snapshot/multiroot.py` probe
+records a workspace and a separate temporary directory, then checks four
+concurrent replays in private mount namespaces. Run it as root in a private
+mount namespace with `ASB_MULTIROOT_FIXTURE_DIR` set to a new disposable
+project-local directory. It needs Btrfs, rsync, loop devices and the optional
+QEMU storage tools used by the guest supervisor. It preserves its evidence.
 
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without

@@ -1,5 +1,6 @@
 """Experimental guest-owned snapshot supervisor for a disposable task container."""
 import argparse
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -64,6 +65,7 @@ def main(argv=None):
     parser.add_argument('--qemu-storage')
     parser.add_argument('--apply-final',action='store_true')
     parser.add_argument('--replay-archive')
+    parser.add_argument('--extra-root', action='append', default=[])
     args=parser.parse_args(argv)
     if bool(args.qemu_img) != bool(args.qemu_storage):
         parser.error('qemu-img and qemu-storage must be supplied together')
@@ -72,20 +74,33 @@ def main(argv=None):
                                 [args.mkfs],[args.btrfs],[args.rsync],
                                 [args.qemu_img] if args.qemu_img else None,
                                 [args.qemu_storage] if args.qemu_storage else None)
-    bound=False;server=None;worker=None;service=None
+    bound=[];server=None;worker=None;service=None
     try:
-        mounted=workspace.prepare(args.target)
-        subprocess.run(['mount','--bind',str(mounted),args.target],check=True,timeout=60)
-        bound=True
+        mounted=(workspace.prepare(args.target,args.extra_root) if args.extra_root
+                 else workspace.prepare(args.target))
         store = root/'filesystem/snapshots'
         if args.replay_archive:
             unpack_streams(args.replay_archive, root/'streams')
             boundaries = receive_snapshot_streams(root/'streams', store, [args.btrfs])
+            if args.extra_root:
+                baseline = store/'snapshot-00000001'
+                try:
+                    recorded = json.loads((baseline/'.asb-snapshot-roots.json').read_text(encoding='utf-8'))
+                except (OSError, ValueError) as error:
+                    raise ValueError('snapshot archive does not describe its captured roots') from error
+                if (recorded != [str(Path(item).resolve()) for item in [args.target]+args.extra_root]
+                        or not all((baseline/str(i)).is_dir() for i in range(len(recorded)))):
+                    raise ValueError('snapshot archive does not match the configured roots')
             subprocess.run([args.rsync, '-aHAX', '--inplace', '--checksum', '--delete',
                             str(store/'snapshot-00000001')+'/', str(mounted)+'/'],
                            check=True, timeout=300)
             service = SnapshotReplay(boundaries, SnapshotApplier(store, mounted, [args.rsync]))
-        else:
+        roots = [args.target] + args.extra_root
+        for index, target in enumerate(roots):
+            source = mounted/str(index) if args.extra_root else mounted
+            subprocess.run(['mount','--bind',str(source),target],check=True,timeout=60)
+            bound.append((source,target))
+        if not args.replay_archive:
             service=SnapshotService(mounted,store,[args.btrfs])
         server=MarkerServer(args.socket,service)
         worker=threading.Thread(target=server.serve_forever,daemon=True);worker.start()
@@ -116,13 +131,12 @@ def main(argv=None):
             service.invalidate()
             try:service.finish()
             except RuntimeError:pass
-        if bound:
-            unmount_when_idle(args.target)
         try:
-            if bound and args.apply_final:
-                subprocess.run([args.rsync,'-aHAX','--inplace','--checksum','--delete',
-                                str(workspace.mountpoint/'workspace')+'/',args.target+'/'],
-                               check=True,timeout=300)
+            for source,target in reversed(bound):
+                unmount_when_idle(target)
+                if args.apply_final:
+                    subprocess.run([args.rsync,'-aHAX','--inplace','--checksum','--delete',
+                                    str(source)+'/',target+'/'],check=True,timeout=300)
         finally:
             workspace.close()
 

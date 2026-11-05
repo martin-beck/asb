@@ -58,10 +58,19 @@ class SnapshotWorkspace:
                 raise RuntimeError(f'qcow2 snapshot export failed; inspect {logfile}')
             time.sleep(.05)
 
-    def prepare(self, source):
+    def prepare(self, source, extra_sources=()):
         source = Path(source)
         if not source.is_dir():
             raise ValueError('snapshot workspace source is unavailable')
+        extras = [Path(item) for item in extra_sources]
+        roots = [source] + extras
+        if extras:
+            resolved = [item.resolve() for item in roots]
+            if any(not item.is_absolute() or item.is_symlink() or not item.is_dir() for item in roots):
+                raise ValueError('snapshot roots must be existing absolute directories')
+            if any(a == b or a in b.parents or b in a.parents
+                   for i, a in enumerate(resolved) for b in resolved[i+1:]):
+                raise ValueError('snapshot roots must not overlap')
         try:
             size = self.size
             if size is None:
@@ -118,8 +127,19 @@ class SnapshotWorkspace:
             workspace = self.mountpoint/'workspace'
             subprocess.run(self.btrfs + ['subvolume', 'create', str(workspace)], check=True,
                            stdout=subprocess.DEVNULL, timeout=60)
-            subprocess.run(self.rsync + ['-aHAX', str(source)+'/', str(workspace)+'/'], check=True,
-                           stdout=subprocess.DEVNULL, timeout=300)
+            if extras:
+                # One Btrfs subvolume gives every tool boundary a single,
+                # ordered snapshot of all configured guest roots.
+                for index, root in enumerate(roots):
+                    destination = workspace / str(index)
+                    destination.mkdir()
+                    subprocess.run(self.rsync + ['-aHAX', str(root)+'/', str(destination)+'/'],
+                                   check=True, stdout=subprocess.DEVNULL, timeout=300)
+                (workspace/'.asb-snapshot-roots.json').write_text(
+                    json.dumps([str(item.resolve()) for item in roots]), encoding='utf-8')
+            else:
+                subprocess.run(self.rsync + ['-aHAX', str(source)+'/', str(workspace)+'/'], check=True,
+                               stdout=subprocess.DEVNULL, timeout=300)
             return workspace
         except BaseException as error:
             try:
