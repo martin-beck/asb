@@ -903,9 +903,10 @@ if (normalizeRequest(altered).system[0].text === a.system[0].text) throw Error('
         );
         assert!(cmd.get_envs().any(|(name, value)| {
             name == "ASB_CLAUDE_ID_MAP_URL"
-                && value == Some(std::ffi::OsStr::new(
-                    "http://127.0.0.1:4321/.asb/claude-task-map",
-                ))
+                && value
+                    == Some(std::ffi::OsStr::new(
+                        "http://127.0.0.1:4321/.asb/claude-task-map",
+                    ))
         }));
         assert!(
             cmd.get_envs()
