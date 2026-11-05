@@ -18,24 +18,25 @@ pub(crate) struct Admission<'a> {
     keeper: OwnedReaper,
     command: &'a mut Command,
     observation_only: bool,
+    role: &'static str,
 }
 
 impl<'a> Admission<'a> {
     pub(crate) fn new(validated: crate::launch::ValidatedGate<'a>) -> io::Result<Self> {
-        Self::prepare(validated, false)
+        Self::prepare(validated, false, "command")
     }
 
     pub(crate) fn with_principal_control(
         validated: crate::launch::ValidatedGate<'a>,
     ) -> io::Result<Self> {
-        Self::prepare(validated, true)
+        Self::prepare(validated, true, "controlled-principal")
     }
 
     /// Request a second, actual-principal gate for agent-only collectors.
     pub(crate) fn with_measured_principal(
         validated: crate::launch::ValidatedGate<'a>,
     ) -> io::Result<Self> {
-        let mut admission = Self::prepare(validated, true)?;
+        let mut admission = Self::prepare(validated, true, "measured-principal")?;
         admission.command.env(super::MEASURE_PRINCIPAL, "1");
         admission
             .control
@@ -50,7 +51,7 @@ impl<'a> Admission<'a> {
     pub(crate) fn with_principal_observation(
         validated: crate::launch::ValidatedGate<'a>,
     ) -> io::Result<Self> {
-        let mut admission = Self::prepare(validated, true)?;
+        let mut admission = Self::prepare(validated, true, "observed-principal")?;
         admission.observation_only = true;
         Ok(admission)
     }
@@ -59,12 +60,17 @@ impl<'a> Admission<'a> {
     pub(crate) fn with_workload_controller(
         validated: crate::launch::ValidatedGate<'a>,
     ) -> io::Result<Self> {
-        let admission = Self::with_principal_observation(validated)?;
+        let mut admission = Self::with_principal_observation(validated)?;
+        admission.role = "workload-controller";
         admission.command.env(super::WORKLOAD_CLEANUP, "1");
         Ok(admission)
     }
 
-    fn prepare(validated: crate::launch::ValidatedGate<'a>, controlled: bool) -> io::Result<Self> {
+    fn prepare(
+        validated: crate::launch::ValidatedGate<'a>,
+        controlled: bool,
+        role: &'static str,
+    ) -> io::Result<Self> {
         let command = validated.into_command();
         command.env_remove(super::MEASURE_PRINCIPAL);
         command.env_remove(super::WORKLOAD_CLEANUP);
@@ -91,6 +97,7 @@ impl<'a> Admission<'a> {
             keeper,
             command,
             observation_only: false,
+            role,
         })
     }
 
@@ -102,6 +109,7 @@ impl<'a> Admission<'a> {
             keeper,
             control,
             observation_only,
+            role,
             ..
         } = self;
         drop(writer);
@@ -119,6 +127,7 @@ impl<'a> Admission<'a> {
             startup_deadline: Instant::now() + STARTUP,
             control,
             observation_only,
+            role,
             #[cfg(test)]
             readiness_delay: None,
         })
@@ -135,6 +144,7 @@ pub(crate) struct ManagedGate {
     startup_deadline: Instant,
     control: Option<super::control::Parent>,
     observation_only: bool,
+    role: &'static str,
     #[cfg(test)]
     readiness_delay: Option<Duration>,
 }
@@ -346,9 +356,10 @@ impl ManagedGate {
             if let Some(control) = self.control.as_mut() {
                 control.observe(id, true);
             }
-            let code = self.receiver.quiescent.ok_or_else(|| io::Error::other(
-                "native gate exited without a quiescence receipt; descendant cleanup is unconfirmed"
-            ))?;
+            let code = self.receiver.quiescent.ok_or_else(|| io::Error::other(format!(
+                "native gate exited without a quiescence receipt; descendant cleanup is unconfirmed; role={} gate_pid={} exit={status:?}",
+                self.role, self.id()
+            )))?;
             if status.code() != Some(i32::from(code)) {
                 return Err(io::Error::other(
                     "native gate exit disagrees with quiescence receipt",
@@ -527,11 +538,15 @@ impl ManagedGate {
 
 impl Drop for ManagedGate {
     fn drop(&mut self) {
+        let pid = self.child.as_ref().map(Child::id);
         if self.child.is_some()
             && self.complete.is_none()
             && let Err(error) = self.stop()
         {
-            eprintln!("asb process gate cleanup: {error}");
+            eprintln!(
+                "asb process gate cleanup: role={} gate_pid={pid:?} admitted={} observed_exit={:?}: {error}",
+                self.role, self.admitted, self.observed
+            );
         }
     }
 }
