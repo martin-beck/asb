@@ -1,5 +1,15 @@
 # Development
 
+SWE-bench clients execute in the conda environment named by the pinned SDK,
+after ASB has installed the agent. The task adapter retains the client's HOME
+and provider settings, and defaults Git author and committer dates to the base
+commit timestamp unless explicitly supplied. This stabilizes identical Git
+objects without masking different file contents. The changed client inputs
+have their own bundled replay identity; older bundled recordings made with the
+previous environment need a fresh recording. Legacy recordings lacking this
+identity cannot prove that their environment matches. These controls do not
+make live tool network access or agent execution deterministic.
+
 The offline `pi_native_integration.mjs` fixture sends one native tool's
 subprocess request to a private loopback HTTP server, then replays its recorded
 result four times. The server counter must stay at one and a tool-execution

@@ -416,6 +416,32 @@ class GuestBootstrapTests(unittest.TestCase):
                     on_preparation_failure=lambda:order.append("notify-peers"))
         self.assertEqual(order,["notify-peers","relay-close"])
 
+    def test_workload_environment_hook_runs_after_bootstrap_before_client(self):
+        with tempfile.TemporaryDirectory() as directory:
+            order=[]
+            def prepare(*_args):
+                order.append('bootstrap')
+                return {}, {'PATH':'/base', 'HOME':'/private', 'API_KEY':'fixture'}
+            def environment(values, budget):
+                order.append('workload-environment')
+                self.assertIsNone(budget)
+                self.assertEqual(values['API_KEY'], 'fixture')
+                return dict(values, PATH='/task/bin:/base')
+            def execute(_argv, **options):
+                order.append('client')
+                self.assertEqual(options['environment']['PATH'], '/task/bin:/base')
+                self.assertEqual(options['environment']['HOME'], '/private')
+                return {'stdout':b'', 'stderr':b'', 'exit_code':1}
+            def unavailable(*_args, **_kwargs):
+                raise ExecutionError('result unavailable')
+            task=SimpleNamespace(artifacts=Path(directory), agent_timeout=15,
+                checked=unavailable, agent_environment=environment,
+                workspace=SimpleNamespace(container=Container(), execute=execute,
+                    quiesce_unconfirmed_agent=lambda:None))
+            with patch('asb_guest.prepare_agent',side_effect=prepare):
+                execute_agent(task,{},None,None,None)
+            self.assertEqual(order, ['bootstrap','workload-environment','client'])
+
     def test_owned_service_handoff_uses_guest_metadata_without_reset_or_duplicate_end(self):
         import os
         with tempfile.TemporaryDirectory() as directory:
