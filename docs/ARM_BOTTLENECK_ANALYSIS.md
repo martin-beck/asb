@@ -461,3 +461,40 @@ complete clock-aligned phase coverage nor a qualified external CPU methodology;
 this is an optional analysis limitation, not a benchmark execution gate.
 ASB's own regenerated counter, kernel-pressure and SPE observations remain
 available with their individual definitions, scope and quality.
+
+## Fixed-work instrumentation qualification
+
+The opt-in `arm_telemetry/overhead.py` fixture now supplies a separate fixed-work
+client. It uses three child processes, each performing 250 million dependent
+integer updates, plus 128 one-MiB read/write-and-verify pairs per replica. Every
+replica must return identical completion checksums and a valid grade. Three
+randomized rounds of each profile use the same frozen ASB binary, native gated
+launch, two replicas, accounting/pressure baseline and unrelated negative-control
+load configuration. Each attempt receives a fresh project and transient delegated scope.
+
+The native Kunpeng campaign completed nine cases/eighteen replicas with one
+identical work checksum across all profiles. Every case verified both live
+principals, exclusive agent cgroup membership and exclusion of ASB/guardians/
+noise. PMU profiles required qualified process-bound groups; SPE profiles also
+required disjoint observed task populations and populated loss-checked output.
+The light profile still contains accounting and pressure sampling. `pmu-perf`
+also contains ordinary perf stack recording; it is not a counter-only mode.
+
+Observed medians in this synthetic campaign were:
+
+| Profile | Sum of two agents' CPU (ms) | Cohort phase span upper bound (ms) | ASB CLI wall (s) |
+| --- | ---: | ---: | ---: |
+| light | 4326.158 | 2290.476 | 5.222 |
+| pmu-perf | 4429.565 | 2251.756 | 12.584 |
+| spe | 4763.213 | 2499.993 | 14.287 |
+
+Agent CPU changed descriptively by +2.39% and +10.10% relative to the light
+median. Observed phase spans changed by -1.69% and +9.15%; the former is not
+proof of a speedup. CLI wall includes preparation, grading, decoding and reports,
+so it must not be presented as agent-execution overhead. The outer service time
+is recorded separately and includes fixture/systemd setup. Three observations
+per profile, shared-host contention and synthetic work do not establish causal
+production overhead or a confidence interval. `overhead.json` retains every
+observation, profile order, input fingerprints, medians, ranges and these limits.
+This qualifies this fixed-work instrumentation comparison, not a real Pi client,
+LLM-provider behavior, every CPU or a maximum acceptable collector overhead.

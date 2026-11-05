@@ -25,7 +25,7 @@ PROFILES = {
 }
 LIMITATIONS = ("Synthetic fixed-work client and local LLM replay, not real-agent/model performance. "
                "Profiles share the gated accounting/pressure baseline. PMU also enables perf stack recording; "
-               "it is not counter-only. Unrelated negative-control noise is identical in every case. "
+               "it is not counter-only. Unrelated negative-control noise configuration is identical in every case. "
                "Randomized repeated observations do not establish causal overhead, production impact or a confidence interval. "
                "Agent phase and total CLI durations are different quantities; grading/decoding/reporting contribute only to the latter.")
 
