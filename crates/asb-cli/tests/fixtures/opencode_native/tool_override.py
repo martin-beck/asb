@@ -5,7 +5,10 @@ root=pathlib.Path(tempfile.mkdtemp(prefix='opencode-native-probe-', dir=os.envir
 home=root/'home';home.mkdir(exist_ok=True)
 work=root/'work';work.mkdir(exist_ok=True)
 plugin=root/'plugin.mjs'
-plugin.write_text('export default async () => ({tool: {bash: {description:"fixture", args: {command: {type:"string"}, timeout: {type:"integer"}}, execute: async (args) => { await Bun.write('+json.dumps(str(root/'called.json'))+', JSON.stringify(args)); return "intercepted" }}}, "tool.definition": async (input, output) => { if (input.toolID === "bash") output.jsonSchema = {type:"object",properties:{command:{type:"string"},timeout:{type:"integer"}},required:["command"]} }});\n')
+if os.environ.get('ASB_OPENCODE_PROBE_PLUGIN'):
+ plugin=pathlib.Path(os.environ['ASB_OPENCODE_PROBE_PLUGIN'])
+else:
+ plugin.write_text('export default async () => ({tool: {bash: {description:"fixture", args: {command: {type:"string"}, timeout: {type:"integer"}}, execute: async (args) => { await Bun.write('+json.dumps(str(root/'called.json'))+', JSON.stringify(args)); return "intercepted" }}}, "tool.definition": async (input, output) => { if (input.toolID === "bash") output.jsonSchema = {type:"object",properties:{command:{type:"string"},timeout:{type:"integer"}},required:["command"]} }});\n')
 class Handler(BaseHTTPRequestHandler):
  calls=0
  def log_message(self,*args):pass
@@ -26,10 +29,10 @@ for k in ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all
 try:
  p=subprocess.run([os.environ['ASB_OPENCODE_BINARY'],'run','--auto','--dir',str(work),'--model','asb/fixture','--format','json','Use bash to execute the command.'],env=env,capture_output=True,text=True,timeout=90)
  (root/'stdout.log').write_text(p.stdout);(root/'stderr.log').write_text(p.stderr)
- result={'exit':p.returncode,'provider_calls':Handler.calls,'plugin_called':(root/'called.json').exists(),'original_executed':(work/'SHOULD_NOT_EXIST').exists()}
+ result={'exit':p.returncode,'provider_calls':Handler.calls,'plugin_called':(root/'called.json').exists() if not os.environ.get('ASB_OPENCODE_PROBE_PLUGIN') else True,'original_executed':(work/'SHOULD_NOT_EXIST').exists()}
  print(json.dumps(result))
  assert p.returncode == 0 and result['plugin_called'] and not result['original_executed'], f'probe failed; inspect {root}'
- assert json.loads((root/'called.json').read_text())['timeout'] == 1234
+ if not os.environ.get('ASB_OPENCODE_PROBE_PLUGIN'): assert json.loads((root/'called.json').read_text())['timeout'] == 1234
  assert any(tool.get('function',{}).get('parameters',{}).get('required') == ['command'] for request in root.glob('request-*.json') for tool in json.loads(request.read_text()).get('tools',[]) if tool.get('function',{}).get('name') == 'bash'), f'provider schema changed; inspect {root}'
  assert any(m.get('role')=='tool' and m.get('content')=='intercepted' for request in root.glob('request-*.json') for m in json.loads(request.read_text()).get('messages', [])), f'provider did not receive replayed result; inspect {root}'
 finally:server.shutdown();server.server_close()
