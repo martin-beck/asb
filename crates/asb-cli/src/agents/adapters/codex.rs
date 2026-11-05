@@ -1431,7 +1431,7 @@ mod tests {
         let state = root.join("state.json");
         let marker = root.join("unexpected-native-execution");
         let pre = format!(
-            r#"{{"tool_name":"Bash","tool_use_id":"call-1","tool_input":{{"command":"touch {}"}}}}"#,
+            r#"{{"tool_name":"Bash","session_id":"record-session","tool_use_id":"call-1","tool_input":{{"command":"touch {}"}}}}"#,
             marker.display()
         );
         assert!(
@@ -1459,7 +1459,8 @@ mod tests {
         let capture = serde_json::json!({
             "request": {"body": serde_json::json!({
                 "input": [{"call_id": "call-1", "output": "Chunk ID: recorded\nWall time: 0.2164 seconds\nProcess exited with code 0\nOriginal token count: 7\nOutput:\nfixture"}]
-            }).to_string()}
+            }).to_string()},
+            "agent_record_metadata":{"conversation":"record-session","output_call_ids":["call-1"]}
         });
         // Provider request snapshots can retain the same already-completed
         // call in later turns. Equal historical rows represent one exchange.
@@ -1479,7 +1480,9 @@ mod tests {
             true
         );
         std::fs::remove_file(&state).unwrap();
-        let replay_pre = pre.replace("call-1", "fresh-replay-id");
+        let replay_pre = pre
+            .replace("call-1", "fresh-replay-id")
+            .replace("record-session", "replay-session");
         let replay = invoke_native_hook(
             &script,
             "replay",
