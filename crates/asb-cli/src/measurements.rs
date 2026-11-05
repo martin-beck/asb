@@ -752,7 +752,7 @@ impl Session {
         self.execution_window.borrow().document()
     }
 
-    /// Native caller requests this only after releasing the generation-bound
+    /// Native caller requests this immediately before releasing the generation-bound
     /// actual principal. No direct/container/ASB guardian fallback exists.
     pub(crate) fn native_execution_sampler(&self) -> Option<execution_window::Sampler> {
         self.measurement_guardian?;

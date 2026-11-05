@@ -144,6 +144,7 @@ mod tests {
                 workload: "fixture-workload",
                 trial: "fixture-trial",
                 configured_concurrency: 1,
+                replica_index: None,
                 execution_cohort: None,
                 metrics: &metrics,
                 components: None,

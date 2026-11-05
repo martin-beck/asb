@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 pub(crate) struct Window {
     root: Option<ProcessIdentity>,
     domain: Option<String>,
+    release_before: Option<u64>,
+    exit_after: Option<u64>,
     first_after: Option<u64>,
     last_before: Option<u64>,
     last_after: Option<u64>,
@@ -26,6 +28,8 @@ struct Receipt<'a> {
     clock: &'static str,
     clock_domain: &'a Option<String>,
     root: &'a Option<ProcessIdentity>,
+    release_bound_ns: Option<u64>,
+    exit_bound_ns: Option<u64>,
     start_bound_ns: Option<u64>,
     end_bound_ns: Option<u64>,
     live_observations: u64,
@@ -61,6 +65,14 @@ impl Window {
             && self.root.is_some()
             && self.domain.is_some()
             && self
+                .release_before
+                .zip(self.first_after)
+                .is_some_and(|(release, first)| release <= first)
+            && self
+                .last_before
+                .zip(self.exit_after)
+                .is_some_and(|(last, exit)| last <= exit)
+            && self
                 .first_after
                 .zip(self.last_before)
                 .is_some_and(|(start, end)| end > start);
@@ -71,6 +83,8 @@ impl Window {
             clock: "CLOCK_MONOTONIC",
             clock_domain: &self.domain,
             root: &self.root,
+            release_bound_ns: observed.then_some(self.release_before).flatten(),
+            exit_bound_ns: observed.then_some(self.exit_after).flatten(),
             start_bound_ns: observed.then_some(self.first_after).flatten(),
             end_bound_ns: observed.then_some(self.last_before).flatten(),
             live_observations: self.samples,
@@ -105,6 +119,7 @@ impl Sampler {
         }
         window.root = Some(root);
         window.domain = Some(domain);
+        window.release_before = monotonic_ns();
         drop(window);
         Some(Self {
             shared,
@@ -112,6 +127,10 @@ impl Sampler {
             next: Instant::now(),
             closed: false,
         })
+    }
+
+    pub(crate) fn exit_observer(&self) -> ExitObserver {
+        ExitObserver(self.shared.clone())
     }
 
     pub(crate) fn observe(&mut self) {
@@ -135,6 +154,19 @@ impl Sampler {
         }
     }
 }
+/// Bound to the same window; called on owned exit before pipe draining.
+pub(crate) struct ExitObserver(Rc<RefCell<Window>>);
+impl ExitObserver {
+    pub(crate) fn observe(&mut self) {
+        let now = monotonic_ns();
+        let mut window = self.0.borrow_mut();
+        if window.exit_after.is_some() || now.is_none() {
+            window.invalidate();
+        }
+        window.exit_after = now;
+    }
+}
+
 impl Drop for Sampler {
     fn drop(&mut self) {
         let mut window = self.shared.borrow_mut();
@@ -203,6 +235,8 @@ mod tests {
     use super::*;
     fn window() -> Window {
         Window {
+            release_before: Some(1),
+            exit_after: Some(200),
             root: Some(ProcessIdentity {
                 pid: 42,
                 start_time_ticks: 1,
@@ -219,6 +253,8 @@ mod tests {
         w.end();
         let r = w.receipt();
         assert_eq!(r.status, "observed");
+        assert_eq!(r.release_bound_ns, Some(1));
+        assert_eq!(r.exit_bound_ns, Some(200));
         assert_eq!(r.start_bound_ns, Some(15));
         assert_eq!(r.end_bound_ns, Some(100));
     }
@@ -245,6 +281,24 @@ mod tests {
             assert!(r.start_bound_ns.is_none() && r.end_bound_ns.is_none());
         }
     }
+    #[test]
+    fn enclosing_phase_bounds_require_pre_release_and_observed_owned_exit() {
+        for variant in 0..4 {
+            let mut w = window();
+            w.record(10, 15);
+            w.record(100, 110);
+            w.end();
+            match variant {
+                0 => w.release_before = None,
+                1 => w.exit_after = None,
+                2 => w.release_before = Some(20),
+                _ => w.exit_after = Some(90),
+            }
+            assert_eq!(w.receipt().status, "unavailable");
+            assert!(w.receipt().release_bound_ns.is_none() && w.receipt().exit_bound_ns.is_none());
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn live_clock_domain_is_stable_and_sampler_rejects_unowned_rebinding() {

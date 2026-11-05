@@ -208,7 +208,11 @@ fn generate_owned_with_links(
     let prepared = PreparedReport::prepare(validated)?;
     let mut files = prepared.graph_names();
     files.extend(rendering::agent_report_files(&prepared));
-    files.extend(["comparison.json".into(), "report.html".into()]);
+    files.extend([
+        "comparison.json".into(),
+        "cohort-analysis.json".into(),
+        "report.html".into(),
+    ]);
     let publisher = publication::Publisher::begin(&prepared.data.request.comparison_dir, files)?;
     rendering::render(publisher.stage(), &prepared)?;
     let published = publisher.commit()?;
@@ -495,6 +499,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         html.push_str(&format!("<p class=\"scheduling\">Sweep scheduling: up to {} distinct configurations; {} active attempt slots, including replicas. Concurrent tasks share host resources.</p>", scheduling.jobs, scheduling.max_active_attempts));
     }
     html.push_str("<header class=\"hero\"><p class=\"eyebrow\">ASB BENCHMARK REPORT</p><h1>Benchmark comparison</h1><p>Explore recorded benchmark results and measurements. Use the filters to focus the report without rerunning anything.</p></header>");
+    html.push_str(&analysis::cohort_html(&prepared.cohort_analysis));
     html.push_str("<section class=\"explain\"><strong>Agent aggregate reports</strong><p>Compare agents across every collected scalar without the individual benchmark rows: <a href=\"agent-summary-report.html\">mean, median, and p95</a> · <a href=\"agent-distribution-report.html\">sorted value distributions</a> · <a href=\"agent-histogram-report.html\">histograms</a>.</p></section>");
     if let Some(intent) = prepared
         .data
@@ -695,7 +700,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     html.push_str("</tbody></table></div></section>");
     let mut sections = std::collections::BTreeMap::<(&str, &str), Vec<&String>>::new();
     for graph in &graphs {
-        if let Some(section) = crate::collectors::graph_section(graph) {
+        if let Some(section) = analysis::graph_section(graph) {
             sections
                 .entry((section.title, section.description))
                 .or_default()
@@ -712,7 +717,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     html.push_str("<section><div class=\"section-title\"><h2>Charts</h2><p class=\"muted\">SVG files are linked below and remain available for download.</p></div><div class=\"charts\">");
     for graph in graphs
         .iter()
-        .filter(|graph| crate::collectors::graph_section(graph).is_none())
+        .filter(|graph| analysis::graph_section(graph).is_none())
     {
         html.push_str(&chart_figure(stage, graph)?);
     }

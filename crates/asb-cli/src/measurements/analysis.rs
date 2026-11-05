@@ -3,6 +3,7 @@
 //! Rules describe observations, not causal proof. Collector adapters retain
 //! ownership of measurement semantics; the engine never inspects the host.
 
+pub(crate) mod cohort;
 mod hardware;
 mod kernel;
 mod observations;

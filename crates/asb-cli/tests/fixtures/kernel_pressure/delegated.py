@@ -24,7 +24,11 @@ parser.add_argument("--require-series", action="append", default=[],
                     help="also require populated metrics and time series for this collector")
 parser.add_argument("--require-windows", action="store_true",
                     help="require same-domain verified agent lifetime overlap")
+parser.add_argument("--require-cohort-analysis", action="store_true",
+                    help="also validate regenerated overlap/rate evidence and report graphs")
 args = parser.parse_args()
+if args.require_cohort_analysis:
+    args.require_windows = True
 binary = args.asb.resolve(strict=True)
 project = args.project.resolve(strict=True)
 membership = Path("/proc/self/cgroup").read_text().strip().split("::", 1)[1]
@@ -124,4 +128,27 @@ if args.require_windows:
     if overlap <= 0:
         raise SystemExit("No observed live principal overlap")
     print("Verified native agent lifetime overlap_ms=" + str(overlap / 1_000_000))
+if args.require_cohort_analysis:
+    report = project / "results/pressure-comparison"
+    evidence = json.loads((report / "cohort-analysis.json").read_text())
+    cohorts = evidence["cohorts"]
+    if len(cohorts) != 1 or cohorts[0]["status"] != "observed":
+        raise SystemExit("Comparison did not produce exactly one observed cohort")
+    cohort = cohorts[0]
+    if cohort["peak_live_principals_lower_bound"] != 2:
+        raise SystemExit("Comparison did not observe two simultaneous live principals")
+    expected_overlap = overlap / 1_000_000
+    if abs(cohort["all_principals_overlap_lower_bound_ms"] - expected_overlap) > 1e-6:
+        raise SystemExit("Comparison overlap does not match retained native observations")
+    phase_span = max(w["exit_bound_ns"] for w in windows) - min(w["release_bound_ns"] for w in windows)
+    if phase_span <= 0 or abs(cohort["completed_agent_phases_per_second_lower_bound"] - 2e9 / phase_span) > 1e-9:
+        raise SystemExit("Comparison rate does not match the observed phase envelope")
+    summary = json.loads((report / "comparison.json").read_text())
+    if summary["cohort_analysis"] != evidence:
+        raise SystemExit("Comparison JSON disagrees with separate cohort evidence")
+    html = (report / "report.html").read_text()
+    if (not (report / "cohort-lifetimes-0001.svg").is_file()
+            or "cohort-lifetimes-0001.svg" not in html or "cohort-analysis.json" not in html):
+        raise SystemExit("Cohort report is missing its graph or evidence link")
+    print("Verified offline cohort overlap, phase-rate bounds, JSON and HTML/SVG")
 print("Verified agent leaves exclude ASB, fixture and unrelated CPU/memory load")

@@ -316,3 +316,34 @@ an ASB controller or container management process.
 The clock policy follows the Linux manuals for
 [CLOCK_MONOTONIC](https://man7.org/linux/man-pages/man2/clock_gettime.2.html) and
 [time namespaces](https://man7.org/linux/man-pages/man7/time_namespaces.7.html).
+
+
+## Cohort overlap and phase completion bounds
+
+`asb compare` now regenerates `cohort-analysis.json`, includes the same data in
+`comparison.json`, and renders an HTML table plus up to sixteen lifetime plots.
+It checks actual replica indices and admitted membership, workload/agent/model/
+provider compatibility, distinct principal generations, matching target receipts
+and a common boot/time-namespace clock. Missing members or incompatible evidence
+make a cohort explicitly unavailable. Sparse admitted memberships remain sparse;
+selected concurrency is never substituted for observed concurrency.
+
+Each verified principal interior lifetime contributes to a lower bound on peak
+live principals, time with multiple principals alive, and all-principal overlap.
+Sleeping and stopped time count as alive; these are not CPU-residency claims.
+A second pair of monotonic observations encloses the measured phase: before
+releasing the stopped principal, and immediately after its owned process tree
+has exited, before pipe draining. The earliest release to latest observed exit
+is an upper bound on the cohort's agent-phase span. Completed agent phases
+divided by that span is therefore a lower-bound phase completion rate, not
+resolved-task throughput, end-to-end latency, provider service rate or a speedup.
+Neither missing overlap nor missing clocks is turned into a zero measurement.
+A real zero overlap is reported only when comparable validated intervals show it.
+
+All computation is offline over retained source artifacts. Previously saved
+cohort conclusions are ignored; source results are preserved. The timeline SVGs
+show the verified interior as a solid bar and enclosing phase as a dashed line,
+with numbered time axes in seconds and the ordinary report enlargement controls.
+The cohort table always describes full admitted membership; plot filtering does
+not recompute a different cohort. Historical receipts without enclosing phase
+bounds remain unavailable for this combined analysis, rather than being backfilled.

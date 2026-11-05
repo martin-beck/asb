@@ -137,6 +137,41 @@ pub(super) fn html(documents: &BTreeMap<String, Value>) -> String {
     html
 }
 
+pub(super) fn cohort_html(report: &crate::measurements::analysis::cohort::Report) -> String {
+    let report = serde_json::to_value(report).expect("cohort observations contain finite values");
+    let mut html = String::from(
+        "<section class=\"explain\"><h2>Observed cohort execution</h2><p>Principal lifetime overlap is a lower bound and includes sleeping. It does not prove simultaneous CPU execution. Phase completion rate uses an enclosing agent-phase duration; it is not task throughput or a speedup.</p><a href=\"cohort-analysis.json\">Download cohort evidence</a><div class=\"table-wrap\"><table><thead><tr><th>Configuration</th><th>Admitted</th><th>Peak live (minimum)</th><th>Overlap (minimum ms)</th><th>Phase span (maximum ms)</th><th>Phase completion rate (minimum /s)</th><th>Availability</th></tr></thead><tbody>",
+    );
+    if report["cohorts"]
+        .as_array()
+        .is_none_or(|cohorts| cohorts.is_empty())
+    {
+        html.push_str("<tr><td colspan=\"7\">No retained cohort membership; observed overlap is unavailable.</td></tr>");
+    }
+    for c in report["cohorts"].as_array().into_iter().flatten() {
+        let text = |v: &Value| escape(v.as_str().unwrap_or("unknown"));
+        let number = |key: &str| {
+            c[key]
+                .as_f64()
+                .map_or_else(|| "unavailable".into(), |v| format!("{v:.3}"))
+        };
+        html.push_str(&format!("<tr><td><strong>{}</strong><br>{} / {}<br>{}:{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{} {}</td></tr>", text(&c["context"]["agent"]), text(&c["context"]["provider"]), text(&c["context"]["model"]), text(&c["context"]["workload"]), text(&c["context"]["trial"]), c["admitted_replicas"], number("peak_live_principals_lower_bound"), number("multiple_principals_overlap_lower_bound_ms"), number("agent_phase_span_upper_bound_ms"), number("completed_agent_phases_per_second_lower_bound"), text(&c["status"]), c["unavailable_reason"].as_str().map(escape).unwrap_or_default()));
+    }
+    html.push_str("</tbody></table></div></section>");
+    html
+}
+
+pub(super) fn graph_section(name: &str) -> Option<crate::collectors::GraphSection> {
+    if name.starts_with("cohort-lifetimes-") {
+        Some(crate::collectors::GraphSection {
+            title: "Observed agent lifetime overlap",
+            description: "Conservative live-principal intervals in a common clock domain. Includes sleep; does not establish simultaneous CPU execution. Each plot represents its full admitted cohort.",
+        })
+    } else {
+        crate::collectors::graph_section(name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

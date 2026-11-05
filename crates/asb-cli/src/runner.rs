@@ -1344,6 +1344,10 @@ fn run_measured_agent_with_launch_progress(
         }
         started = Instant::now();
     }
+    let mut sampler = session
+        .as_deref()
+        .and_then(measurements::Session::native_execution_sampler);
+    let mut exit_observer = sampler.as_ref().map(|sampler| sampler.exit_observer());
     #[cfg(unix)]
     let resumed = if gated {
         #[cfg(target_os = "linux")]
@@ -1365,9 +1369,6 @@ fn run_measured_agent_with_launch_progress(
             format!("could not resume measured agent process: {error}"),
         ));
     }
-    let mut sampler = session
-        .as_deref()
-        .and_then(measurements::Session::native_execution_sampler);
     let mut observe_live = || {
         if let Some(sampler) = sampler.as_mut() {
             sampler.observe();
@@ -1388,6 +1389,9 @@ fn run_measured_agent_with_launch_progress(
         Some(&mut observe_live),
         &mut || {
             execution_finished = Some(Instant::now());
+            if let Some(observer) = exit_observer.as_mut() {
+                observer.observe();
+            }
             Ok(())
         },
     );
