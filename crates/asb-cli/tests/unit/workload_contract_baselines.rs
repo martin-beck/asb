@@ -141,7 +141,9 @@ fn five_official_protocol_fingerprints_match_pre_binding_baselines() {
             p.id
         ))
         .unwrap();
-        let policy = crate::planning::resolve(&config).unwrap();
+        let mut policy = crate::planning::resolve(&config).unwrap();
+        // This golden checks the historical policy, including its old budget.
+        policy.default_budgets.environment_preparation_seconds = Some(900);
         let caps = crate::planning::EffectiveBudgets {
             environment_preparation_seconds: Some(900),
             execution_seconds: Some(600.0),
@@ -149,7 +151,10 @@ fn five_official_protocol_fingerprints_match_pre_binding_baselines() {
             task_default_execution_seconds: Some(600.0),
             ..Default::default()
         };
-        let actual = crate::planning::protocol_fingerprint(&config, &policy, caps, 2).unwrap();
+        let descriptor = super::super::descriptor(p.id).unwrap();
+        let actual =
+            crate::planning::historical_protocol_fingerprint(Some(&descriptor), &policy, caps, 2)
+                .unwrap();
         let golden = if cfg!(target_arch = "x86_64") {
             p.x86
         } else {

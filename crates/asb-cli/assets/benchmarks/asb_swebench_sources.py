@@ -16,6 +16,9 @@ SOURCE_SHA256 = "ff31aa1f8d2bb78f16559524264a99b868b7218ca82b390dc750bbc59538aa2
 SOURCE_ARCHIVE = "swe-bench-tasks-" + SOURCE_REVISION + ".tar.gz"
 MAX_ARCHIVE_BYTES = 64 * 1024**2
 MAX_EXPANDED_BYTES = 256 * 1024**2
+# Source image preparation is separate from the agent execution deadline. The
+# upstream environment can take substantially longer under CPU emulation.
+SOURCE_BUILD_TIMEOUT_SECONDS = 7200
 REQUIRED = {"task.yaml", "Dockerfile", "eval.sh", "gold.patch", "test.patch",
             "tests.json", "problem_statement.md"}
 
@@ -138,7 +141,7 @@ def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
                "revision": SOURCE_REVISION, "archive_sha256": expected_sha256,
                "dockerfile_sha256": hashlib.sha256(dockerfile).hexdigest(),
                "task_id": row["instance_id"], "tag": tag, "status": "building",
-               "limits": {"timeout_seconds": 600, "memory_bytes": 8 * 1024**3, "cpus": 2}}
+               "limits": {"timeout_seconds": SOURCE_BUILD_TIMEOUT_SECONDS, "memory_bytes": 8 * 1024**3, "cpus": 2}}
     path = artifacts / "source-image.json"
     atomic_write(path, encoded(receipt))
     arguments = command + ["buildx", "build", "--builder", "default", "--load",
@@ -150,7 +153,7 @@ def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
         "--file", str(context / "Dockerfile"), "--progress=plain", str(context)]
     try:
         with (artifacts / "source-build.log").open("xb") as log:
-            code = executor(arguments, artifacts, log, 600, cancelled=cancelled)
+            code = executor(arguments, artifacts, log, SOURCE_BUILD_TIMEOUT_SECONDS, cancelled=cancelled)
         if code:
             raise CatalogError(f"official source image build failed (exit {code}); inspect source-build.log")
         if journal is not None:
