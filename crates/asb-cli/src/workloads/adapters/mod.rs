@@ -66,6 +66,10 @@ pub(crate) struct SourceBundle {
 }
 
 pub(super) trait WorkloadAdapter: Sync {
+    /// Override the default task-environment preparation budget when needed.
+    fn preparation_default_seconds(&self) -> Option<u64> {
+        None
+    }
     /// Conservative per-attempt workspace storage estimate.
     fn estimated_disk_mib(&self) -> u64 {
         1024

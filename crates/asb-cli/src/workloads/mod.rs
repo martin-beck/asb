@@ -9,6 +9,10 @@ pub(crate) fn estimated_disk_mib(name: &str) -> u64 {
     adapters::find(name).map_or(1024, |adapter| adapter.estimated_disk_mib())
 }
 
+pub(crate) fn preparation_default_seconds(name: &str) -> Option<u64> {
+    adapters::find(name).and_then(|adapter| adapter.preparation_default_seconds())
+}
+
 mod adapters;
 pub(crate) mod contracts;
 mod evaluation;
