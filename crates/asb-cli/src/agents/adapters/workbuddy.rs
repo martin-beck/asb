@@ -1,4 +1,7 @@
-use super::{CommandContext, CommandSpec, PreparationContext, PromptDelivery, StaticAdapter};
+use super::{
+    CommandContext, CommandSpec, PreparationContext, PromptDelivery, StaticAdapter,
+    TapeNormalizationScript,
+};
 use crate::{Error, install::Recipe};
 
 pub(super) const OUTPUT_ENTRY: &str = "entry === 'codebuddy' || entry === 'cbc'";
@@ -90,7 +93,12 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_output_usage(output_usage)
 .with_final_response(final_response)
 .with_step_count(step_count)
-.with_tape_wire_extension(TAPE_WIRE_EXTENSION);
+.with_tape_wire_extension(TAPE_WIRE_EXTENSION)
+.with_tape_normalization_scripts(&[TapeNormalizationScript {
+    id: "workbuddy-process-history",
+    workloads: &["*"],
+    source: include_str!("../../../assets/scripts/agent-normalizers/workbuddy.mjs"),
+}]);
 
 fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
     // Use CodeBuddy's own active-agent history counter from its final result.

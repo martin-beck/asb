@@ -28,6 +28,45 @@ static START_LOCK: Mutex<()> = Mutex::new(());
 
 const NAME: &str = "llmtape";
 
+/// Materialize the explicitly selected, adapter-owned modules as one bounded
+/// entry point.  The generated entry point applies them in declaration order
+/// and verifies each result; llmtape itself still sees only one opaque module.
+fn materialize_normalizers(
+    scratch: &Path,
+    scripts: &[crate::agents::TapeNormalizationScript],
+) -> Result<Option<PathBuf>, Error> {
+    if scripts.is_empty() {
+        return Ok(None);
+    }
+    let mut entry = String::new();
+    for (index, script) in scripts.iter().enumerate() {
+        let filename = format!("agent-normalizer-{index}.mjs");
+        let path = scratch.join(&filename);
+        std::fs::write(&path, script.source).map_err(|error| {
+            Error::Run(format!(
+                "cannot materialize adapter replay normalizer {}: {error}",
+                script.id
+            ))
+        })?;
+        entry.push_str(&format!("import * as script{index} from './{filename}';\n"));
+    }
+    entry.push_str("\nexport function normalizeRequest(request) {\n  let body = request?.body;\n");
+    for (index, script) in scripts.iter().enumerate() {
+        entry.push_str(&format!(
+            "  const value{index} = script{index}.normalizeRequest?.({{ ...request, body }});\n  if (value{index} !== undefined && (!value{index} || typeof value{index} !== 'object' || Array.isArray(value{index}))) throw new Error('adapter replay normalizer {} must return an object or undefined');\n  if (value{index} !== undefined) body = value{index};\n",
+            script.id
+        ));
+    }
+    entry.push_str("  return body;\n}\n");
+    let path = scratch.join("agent-normalizer.mjs");
+    std::fs::write(&path, entry).map_err(|error| {
+        Error::Run(format!(
+            "cannot materialize adapter replay normalizer entry: {error}"
+        ))
+    })?;
+    Ok(Some(path))
+}
+
 struct Settings {
     mode: Mode,
     cassette: PathBuf,
@@ -37,6 +76,7 @@ struct Settings {
     /// Opaque adapter-owned request extension; llmtape materializes and
     /// invokes it without interpreting its wire protocol.
     wire_extension: Option<&'static str>,
+    normalization_scripts: Vec<crate::agents::TapeNormalizationScript>,
     perfetto_observer: Option<std::fs::File>,
     perfetto_trace_id: Option<String>,
     perfetto_report: Option<PathBuf>,
@@ -123,6 +163,7 @@ impl ProxyAdapter for LlmtapeAdapter {
             workspace: request.workspace.to_path_buf(),
             invocation_dir: request.invocation_dir.to_path_buf(),
             wire_extension: request.wire_extension,
+            normalization_scripts: request.normalization_scripts.clone(),
             perfetto_observer: request
                 .perfetto_observer
                 .as_ref()
@@ -187,6 +228,8 @@ impl ProxyAdapter for LlmtapeAdapter {
                 Ok::<_, Error>(path)
             })
             .transpose()?;
+        let normalization_script =
+            materialize_normalizers(&scratch.path, &request.normalization_scripts)?;
         // Every replay has its own copy and progress file. Sharing the source
         // directly would race on the proxy's cassette progress sidecar.
         let replay_cassette = scratch.path.join("cassette.jsonl");
@@ -218,11 +261,15 @@ impl ProxyAdapter for LlmtapeAdapter {
         command.env_remove("ASB_TAPE_CAPTURE_NONCE");
         command.env_remove("ASB_TAPE_MISMATCH_EVIDENCE");
         command.env_remove("ASB_TAPE_AGENT_WIRE_EXTENSION");
+        command.env_remove("ASB_TAPE_AGENT_NORMALIZER");
         command.env_remove("ASB_TAPE_PERFETTO_OBSERVER_FD");
         command.env_remove("ASB_TAPE_PERFETTO_TRACE_ID");
         command.env_remove("ASB_TAPE_PERFETTO_REQUEST_REPORT");
         if let Some(path) = wire_extension {
             command.env("ASB_TAPE_AGENT_WIRE_EXTENSION", path);
+        }
+        if let Some(path) = normalization_script {
+            command.env("ASB_TAPE_AGENT_NORMALIZER", path);
         }
         // An external ASB_LLM_TAPE override is an independently supplied
         // executable.  It must never receive the private observer capability
@@ -970,6 +1017,7 @@ mod tests {
             crate::tape::AgentContext {
                 workspace: &root,
                 agent: None,
+                workload: None,
                 recorder: None,
                 invocation_dir: &root,
                 perfetto_observer: Some(std::fs::File::from(std::os::fd::OwnedFd::from(writer))),
@@ -1003,6 +1051,7 @@ mod tests {
             workspace: std::path::Path::new("/fixture/workspace"),
             invocation_dir: std::path::Path::new("/fixture/nested"),
             wire_extension: None,
+            normalization_scripts: Vec::new(),
             perfetto_observer: None,
             perfetto_trace_id: None,
             perfetto_report: None,
@@ -3577,6 +3626,133 @@ mod tests {
         // directly rather than changing ASB_LLM_TAPE in a parallel test.
         let command = ProxyExecutable::Override("custom-tape".into()).command();
         assert_eq!(command.get_program(), "custom-tape");
+    }
+
+    #[test]
+    fn selected_normalizers_compose_and_reject_invalid_output() {
+        let root = test_root();
+        let scripts = [
+            crate::agents::TapeNormalizationScript {
+                id: "first",
+                workloads: &["fixture"],
+                source: "export function normalizeRequest(request) { return { ...request.body, first: true }; }",
+            },
+            crate::agents::TapeNormalizationScript {
+                id: "second",
+                workloads: &["fixture"],
+                source: "export function normalizeRequest(request) { return { ...request.body, second: request.body.first }; }",
+            },
+        ];
+        let entry = super::materialize_normalizers(&root, &scripts)
+            .unwrap()
+            .unwrap();
+        let source = format!(
+            "import {{ normalizeRequest }} from '{}'; console.log(JSON.stringify(normalizeRequest({{ body: {{}} }})));",
+            entry.display()
+        );
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval", &source])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+            serde_json::json!({ "first": true, "second": true })
+        );
+        let invalid = [crate::agents::TapeNormalizationScript {
+            id: "invalid",
+            workloads: &["fixture"],
+            source: "export function normalizeRequest() { return null; }",
+        }];
+        let invalid_entry = super::materialize_normalizers(&root, &invalid)
+            .unwrap()
+            .unwrap();
+        let invalid_source = format!(
+            "import {{ normalizeRequest }} from '{}'; normalizeRequest({{ body: {{}} }});",
+            invalid_entry.display()
+        );
+        let invalid = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval", &invalid_source])
+            .output()
+            .unwrap();
+        assert!(!invalid.status.success());
+        assert!(String::from_utf8_lossy(&invalid.stderr).contains("invalid must return"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_normalizer_is_selected_by_agent_and_preserves_semantic_input() {
+        let root = test_root();
+        let scripts = crate::agents::tape_normalization_scripts("codex", "swe-bench");
+        assert_eq!(scripts.len(), 1);
+        let entry = super::materialize_normalizers(&root, &scripts)
+            .unwrap()
+            .unwrap();
+        let source = format!(
+            "import {{ normalizeRequest }} from '{}'; console.log(JSON.stringify(normalizeRequest({{ body: {{ input: [{{ call_id: 'local-id', output: 'Tool result: 1.2 seconds\\nMetadata: fixed' }}], client_metadata: {{ session_id: 'ephemeral' }}, prompt: 'keep this' }} }})));",
+            entry.display()
+        );
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval", &source])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            value.pointer("/input/0/call_id").unwrap(),
+            "<asb-codex-input-call-id>"
+        );
+        assert_eq!(
+            value.pointer("/input/0/output").unwrap(),
+            "Tool result: <asb-tool-time> seconds\nMetadata: fixed"
+        );
+        assert_eq!(
+            value.pointer("/client_metadata/session_id").unwrap(),
+            "<asb-codex-client-metadata>"
+        );
+        assert_eq!(value["prompt"], "keep this");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn agent_and_workload_selection_reaches_the_running_proxy() {
+        let root = test_root();
+        let cassette = root.join("codex-selected-normalizer.jsonl");
+        let recorded = r#"{"model":"m","client_metadata":{"session_id":"recorded"},"input":[{"role":"user","content":"strict prompt"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/responses", "body": recorded},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = Session::start_for_agent_at(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            crate::tape::AgentContext {
+                workspace: &root,
+                agent: Some("codex"),
+                workload: Some("swe-bench"),
+                recorder: None,
+                invocation_dir: &root,
+                perfetto_observer: None,
+                perfetto_trace_id: None,
+                perfetto_report: None,
+            },
+        )
+        .unwrap();
+        let replayed = recorded.replace("recorded", "replayed");
+        assert!(request_to(&session, "/v1/responses", &replayed).contains("200 OK"));
+        session.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

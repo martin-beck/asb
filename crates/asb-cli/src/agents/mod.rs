@@ -215,6 +215,14 @@ pub(crate) trait AgentAdapter: Sync {
     fn tape_wire_extension(&self) -> Option<&'static str> {
         None
     }
+    /// Optional adapter-owned replay normalizer.  Unlike a wire extension it
+    /// receives only the already decoded provider request and must preserve
+    /// every semantic field it does not explicitly recognize.  The shared
+    /// tape transport materializes this source as a separate module and never
+    /// interprets its agent-specific protocol rules.
+    fn tape_normalization_scripts(&self, _workload: &str) -> Vec<TapeNormalizationScript> {
+        Vec::new()
+    }
     /// Whether this adapter can route every benchmark-exposed local tool
     /// through ASB's sealed recorder.  Callers must reject a requested tool
     /// replay rather than silently allowing a client-owned tool to escape.
@@ -568,6 +576,33 @@ type ResponseFailureHook = fn(Option<&str>) -> Option<String>;
 type WorkspaceCapsuleCaptureHook = fn(&Path) -> Result<Vec<u8>, Error>;
 type WorkspaceCapsuleApplyHook = fn(&Path, &[u8]) -> Result<(), Error>;
 
+/// A narrowly-scoped cassette normalizer owned by an agent adapter.
+///
+/// `workloads` is an explicit allow-list, with `"*"` meaning that the
+/// agent's protocol emits the incidental value for every workload.  Keeping
+/// this selection data next to the adapter prevents the tape core from
+/// guessing from request contents or benchmark names.
+#[derive(Clone, Copy)]
+pub(crate) struct TapeNormalizationScript {
+    pub(crate) id: &'static str,
+    pub(crate) workloads: &'static [&'static str],
+    pub(crate) source: &'static str,
+}
+
+impl TapeNormalizationScript {
+    fn applies_to(self, workload: &str) -> bool {
+        let mut index = 0;
+        while index < self.workloads.len() {
+            let candidate = self.workloads[index];
+            if candidate == "*" || candidate == workload {
+                return true;
+            }
+            index += 1;
+        }
+        false
+    }
+}
+
 /// Trait-object implementation whose behavior is supplied by individual files.
 pub(super) struct StaticAdapter {
     bridge_entry: Option<BridgeHook>,
@@ -605,6 +640,7 @@ pub(super) struct StaticAdapter {
     response_failure: Option<ResponseFailureHook>,
     replay_credential_vars: &'static [&'static str],
     tape_wire_extension: Option<&'static str>,
+    tape_normalization_scripts: &'static [TapeNormalizationScript],
     state_environment_vars: &'static [&'static str],
     forwarded_invocation_environment_vars: &'static [&'static str],
     preferred_executables: Option<PreferredExecutablesHook>,
@@ -661,6 +697,7 @@ impl StaticAdapter {
             response_failure: None,
             replay_credential_vars: &[],
             tape_wire_extension: None,
+            tape_normalization_scripts: &[],
             state_environment_vars: &[],
             forwarded_invocation_environment_vars: &[],
             preferred_executables: None,
@@ -862,6 +899,17 @@ impl StaticAdapter {
         self
     }
 
+    /// Select adapter-owned normalizers only for explicitly listed workloads.
+    /// The tape layer materializes these sources but does not interpret their
+    /// agent or workload semantics.
+    pub(super) const fn with_tape_normalization_scripts(
+        mut self,
+        scripts: &'static [TapeNormalizationScript],
+    ) -> Self {
+        self.tape_normalization_scripts = scripts;
+        self
+    }
+
     pub(super) const fn with_state_environment_vars(
         mut self,
         vars: &'static [&'static str],
@@ -957,6 +1005,13 @@ impl AgentAdapter for StaticAdapter {
     }
     fn tape_wire_extension(&self) -> Option<&'static str> {
         self.tape_wire_extension
+    }
+    fn tape_normalization_scripts(&self, workload: &str) -> Vec<TapeNormalizationScript> {
+        self.tape_normalization_scripts
+            .iter()
+            .copied()
+            .filter(|script| script.applies_to(workload))
+            .collect()
     }
     fn supports_tool_replay(&self) -> bool {
         self.complete_tool_replay
@@ -1129,6 +1184,14 @@ pub(crate) fn tape_wire_extension(id: &str) -> Option<&'static str> {
     find(id).and_then(AgentAdapter::tape_wire_extension)
 }
 
+/// Return an adapter-owned replay normalizer without exposing its protocol
+/// semantics to the shared tape runner.
+pub(crate) fn tape_normalization_scripts(id: &str, workload: &str) -> Vec<TapeNormalizationScript> {
+    find(id)
+        .map(|adapter| adapter.tape_normalization_scripts(workload))
+        .unwrap_or_default()
+}
+
 /// Read explicit usage fields only; never infer token counts from text.
 pub(super) fn usage_fields(value: &serde_json::Value) -> crate::measurements::TokenUsage {
     let number = |keys: &[&str]| {
@@ -1229,6 +1292,23 @@ pub(crate) fn goose_archive_spec() -> crate::install::archive::ArchiveSpec {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn normalizer_selection_requires_the_matching_agent_and_workload() {
+        let scripts = [super::TapeNormalizationScript {
+            id: "fixture",
+            workloads: &["swe-bench"],
+            source: "export function normalizeRequest(request) { return request.body; }",
+        }];
+        assert!(scripts[0].applies_to("swe-bench"));
+        assert!(!scripts[0].applies_to("terminal-bench-1.0"));
+        assert!(
+            super::tape_normalization_scripts("codex", "swe-bench")
+                .iter()
+                .any(|script| script.id == "codex-runtime-envelopes")
+        );
+        assert!(super::tape_normalization_scripts("not-an-agent", "swe-bench").is_empty());
+    }
+
     #[test]
     fn final_result_counter_uses_the_latest_native_value_without_summing() {
         for (output, expected) in [

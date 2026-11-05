@@ -21,6 +21,9 @@ pub struct Session(proxy::Chain);
 pub(crate) struct AgentContext<'a> {
     pub workspace: &'a Path,
     pub agent: Option<&'a str>,
+    /// The configured workload selects only its adapter's explicitly declared
+    /// cassette normalizers. It is not inferred from request data.
+    pub workload: Option<&'a str>,
     pub recorder: Option<&'a str>,
     pub invocation_dir: &'a Path,
     /// Collector-owned observation endpoint for ASB's embedded proxy only.
@@ -69,6 +72,7 @@ impl Session {
             AgentContext {
                 workspace,
                 agent,
+                workload: None,
                 recorder,
                 invocation_dir: Path::new("."),
                 perfetto_observer: None,
@@ -88,6 +92,27 @@ impl Session {
         if mode == Mode::Replay {
             require_replay_cassette(cassette)?;
         }
+        let normalization_scripts = match context.agent.zip(context.workload) {
+            Some((agent, workload)) => crate::agents::tape_normalization_scripts(agent, workload),
+            None => {
+                // `Session::start` is a test-only legacy helper whose fixtures
+                // predate adapter ownership. Keep those unit fixtures useful
+                // by exercising every registered module; production paths
+                // always provide both identities above and never take this
+                // branch.
+                #[cfg(test)]
+                {
+                    crate::agents::all()
+                        .iter()
+                        .flat_map(|adapter| adapter.tape_normalization_scripts("fixture"))
+                        .collect()
+                }
+                #[cfg(not(test))]
+                {
+                    Vec::new()
+                }
+            }
+        };
         let settings = proxy::RecordingRequest {
             recorder: context.recorder,
             mode,
@@ -96,6 +121,7 @@ impl Session {
             workspace: context.workspace,
             invocation_dir: context.invocation_dir,
             wire_extension: context.agent.and_then(crate::agents::tape_wire_extension),
+            normalization_scripts,
             perfetto_observer: context.perfetto_observer,
             perfetto_trace_id: context.perfetto_trace_id,
             perfetto_report: context.perfetto_report,
