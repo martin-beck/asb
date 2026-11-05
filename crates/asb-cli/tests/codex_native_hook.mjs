@@ -61,13 +61,13 @@ try {
   await replay.finish();
   const runningEffects = [];
   const runningOutput = 'Chunk ID: <asb-chunk>\nWall time: <asb-wall-time> seconds\nProcess running with session ID <asb-session>\nOriginal token count: <asb-token-count>\nOutput:\npartial';
-  const running = new NativeToolBroker('replay', [{ordinal:0,request:{tool:'Bash',input:{command:'background'}},outcome:{ok:true,value:{output:runningOutput,running_wait_ms:150}}}], async event => runningEffects.push(event.ordinal));
+  const running = new NativeToolBroker('replay', [{ordinal:0,request:{tool:'Bash',input:{command:'background'}},outcome:{ok:true,value:{output:runningOutput,running_wait_ms:150,followups:[{output:'Chunk ID: <asb-chunk>\nWall time: <asb-wall-time> seconds\nProcess exited with code 7\nOutput:\nlater',running_wait_ms:null}]}}}], async event => runningEffects.push(event.ordinal));
   await running.listen(socket);
   const runningSetup = await replayHook({session_id:'replay',tool_use_id:'running',tool_name:'Bash',tool_input:{command:'background'},hook_event_name:'PreToolUse'}, {socket});
   const emitter = spawn('/bin/sh',['-c',runningSetup.hookSpecificOutput.updatedInput.command],{stdio:['ignore','pipe','pipe']});
   let partial=''; emitter.stdout.on('data',chunk=>partial+=chunk);
   const runningCode = await new Promise((resolve,reject)=>{emitter.on('error',reject);emitter.on('close',resolve);});
-  assert.equal(runningCode,0); assert.equal(partial,'partial');
+  assert.equal(runningCode,7); assert.equal(partial,'partiallater');
   await settlePending({mode:'replay',broker:running,socket});
   assert.deepEqual(runningEffects,[0]);
   await running.finish();

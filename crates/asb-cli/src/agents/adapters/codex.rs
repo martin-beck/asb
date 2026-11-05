@@ -605,14 +605,15 @@ fn bind_provider_tool_outputs(
     #[derive(Default)]
     struct History {
         prior: Vec<(String, Vec<u8>)>,
-        calls: Vec<(String, Option<String>)>,
+        calls: Vec<(String, Option<String>, Option<String>)>,
         streamed: bool,
     }
     let mut histories = std::collections::BTreeMap::<String, History>::new();
     let mut outputs = std::collections::BTreeMap::<
         (String, String),
-        std::collections::VecDeque<(Vec<u8>, Option<u64>)>,
+        std::collections::VecDeque<(Vec<u8>, Option<u64>, Option<String>)>,
     >::new();
+    let mut polls = std::collections::BTreeMap::<(String, String), Vec<serde_json::Value>>::new();
     for line in capture.lines() {
         let row: serde_json::Value = serde_json::from_str(line)
             .map_err(|_| "Codex provider capture is invalid".to_owned())?;
@@ -641,6 +642,12 @@ fn bind_provider_tool_outputs(
             .and_then(serde_json::Value::as_array);
         if waits.is_some_and(|waits| Some(waits.len()) != raw_ids.map(Vec::len)) {
             return Err("Codex provider timing metadata does not match the request".into());
+        }
+        let sessions = metadata
+            .and_then(|value| value.get("running_session_ids"))
+            .and_then(serde_json::Value::as_array);
+        if sessions.is_some_and(|values| Some(values.len()) != raw_ids.map(Vec::len)) {
+            return Err("Codex provider process metadata does not match the request".into());
         }
         let mut current = body
             .get("input")
@@ -682,7 +689,7 @@ fn bind_provider_tool_outputs(
             return Err("Codex provider call/result sequence diverges".into());
         }
         if history.streamed {
-            let identified = history.calls.iter().all(|(_, id)| id.is_some());
+            let identified = history.calls.iter().all(|(_, id, _)| id.is_some());
             if raw_ids.is_some() && !identified && !history.calls.is_empty() {
                 return Err("Codex provider call identity is unavailable".into());
             }
@@ -690,7 +697,7 @@ fn bind_provider_tool_outputs(
                 let unique = history
                     .calls
                     .iter()
-                    .filter_map(|(_, id)| id.as_deref())
+                    .filter_map(|(_, id, _)| id.as_deref())
                     .collect::<std::collections::BTreeSet<_>>();
                 if unique.len() != history.calls.len() {
                     return Err("Codex provider call identities are duplicated".into());
@@ -701,12 +708,20 @@ fn bind_provider_tool_outputs(
                 let position = if identified {
                     pending
                         .iter()
-                        .position(|(_, call_id)| call_id.as_deref() == Some(id.as_str()))
+                        .position(|(_, call_id, _)| call_id.as_deref() == Some(id.as_str()))
                         .ok_or("Codex provider call/result identities differ")?
                 } else {
                     0
                 };
-                let (name, _) = pending.remove(position);
+                let (name, _, process) = pending.remove(position);
+                let position = history.prior.len() + index;
+                let wait = waits
+                    .and_then(|values| values.get(position))
+                    .and_then(serde_json::Value::as_u64);
+                let session = sessions
+                    .and_then(|values| values.get(position))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
                 match name.as_str() {
                     // Codex presents its native Bash lifecycle hook as the
                     // Responses-compatible exec command. The native sidecar
@@ -715,16 +730,20 @@ fn bind_provider_tool_outputs(
                         outputs
                             .entry((conversation.clone(), id.clone()))
                             .or_default()
-                            .push_back((
-                                output.clone(),
-                                waits
-                                    .and_then(|waits| waits.get(history.prior.len() + index))
-                                    .and_then(serde_json::Value::as_u64),
-                            ));
+                            .push_back((output.clone(), wait, session));
                     }
                     // This provider operation resumes an already-owned
                     // process; it has no PreToolUse native shell boundary.
-                    "write_stdin" => (),
+                    "write_stdin" => {
+                        if let Some(process) = process {
+                            let text = String::from_utf8(output.clone())
+                                .map_err(|_| "Codex provider tool result is not UTF-8")?;
+                            polls
+                                .entry((conversation.clone(), process))
+                                .or_default()
+                                .push(serde_json::json!({"output":text,"running_wait_ms":wait}));
+                        }
+                    }
                     _ => {
                         return Err(
                             "Codex provider call is not replayable through the native hook".into(),
@@ -744,6 +763,10 @@ fn bind_provider_tool_outputs(
                         waits
                             .and_then(|waits| waits.get(history.prior.len() + index))
                             .and_then(serde_json::Value::as_u64),
+                        sessions
+                            .and_then(|values| values.get(history.prior.len() + index))
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned),
                     ));
             }
         }
@@ -825,7 +848,7 @@ fn bind_provider_tool_outputs(
                 }
                 matching[0].clone()
             };
-            let (output, running_wait_ms) = outputs
+            let (output, running_wait_ms, process) = outputs
                 .get_mut(&key)
                 .and_then(|queue| queue.pop_front())
                 .ok_or_else(|| {
@@ -842,7 +865,10 @@ fn bind_provider_tool_outputs(
                 {
                     return Err("Codex running tool result has no recorded response timing".into());
                 }
-                serde_json::json!({"ok":true,"value":{"output":text,"running_wait_ms":running_wait_ms}})
+                let followups = process
+                    .and_then(|id| polls.remove(&(key.0.clone(), id)))
+                    .unwrap_or_default();
+                serde_json::json!({"ok":true,"value":{"output":text,"running_wait_ms":running_wait_ms,"followups":followups}})
             } else {
                 serde_json::json!(text)
             };
@@ -887,7 +913,7 @@ fn bind_provider_tool_outputs(
 /// without interpreting generic tape data.
 fn provider_function_calls(
     row: &serde_json::Value,
-) -> Result<(Vec<(String, Option<String>)>, bool), String> {
+) -> Result<(Vec<(String, Option<String>, Option<String>)>, bool), String> {
     let Some(body) = row
         .pointer("/response/body")
         .and_then(serde_json::Value::as_str)
@@ -925,6 +951,16 @@ fn provider_function_calls(
                 item.get("call_id")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned),
+                item.get("arguments")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                    .and_then(|value| {
+                        value.get("session_id").map(|id| {
+                            id.as_str()
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| id.to_string())
+                        })
+                    }),
             ));
         }
     }
@@ -1183,7 +1219,7 @@ mod tests {
         });
         assert_eq!(
             provider_function_calls(&row).unwrap(),
-            (vec![("exec_command".into(), None)], true)
+            (vec![("exec_command".into(), None, None)], true)
         );
     }
 
@@ -1919,6 +1955,79 @@ mod tests {
     }
 
     #[test]
+    fn provider_correlation_attaches_running_process_followup_to_its_owner() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-codex-followup-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let response = |name: &str, id: &str, args: serde_json::Value| {
+            format!(
+                "data: {}\n",
+                serde_json::json!({"type":"response.output_item.done","item":{"type":"function_call","name":name,"call_id":id,"arguments":args.to_string()}})
+            )
+        };
+        let row = |input: serde_json::Value,
+                   response: String,
+                   ids: serde_json::Value,
+                   waits: serde_json::Value,
+                   sessions: serde_json::Value| serde_json::json!({"request":{"body":serde_json::json!({"input":input}).to_string()},"response":{"body":response},"agent_record_metadata":{"conversation":"thread","output_call_ids":ids,"running_wait_ms":waits,"running_session_ids":sessions}});
+        let running = "Chunk ID: <asb-chunk>\nWall time: <asb-wall-time> seconds\nProcess running with session ID <asb-session>\nOutput:\npartial";
+        let result = "Chunk ID: <asb-chunk>\nWall time: <asb-wall-time> seconds\nProcess exited with code 0\nOutput:\nlater";
+        let a = row(
+            serde_json::json!([]),
+            response("exec_command", "first", serde_json::json!({})),
+            serde_json::json!([]),
+            serde_json::json!([]),
+            serde_json::json!([]),
+        );
+        let b = row(
+            serde_json::json!([{"call_id":"normalized","output":running}]),
+            response(
+                "write_stdin",
+                "second",
+                serde_json::json!({"session_id":42}),
+            ),
+            serde_json::json!(["first"]),
+            serde_json::json!([1250]),
+            serde_json::json!(["42"]),
+        );
+        let c = row(
+            serde_json::json!([{"call_id":"normalized","output":running},{"call_id":"normalized","output":result}]),
+            String::new(),
+            serde_json::json!(["first", "second"]),
+            serde_json::json!([1250, null]),
+            serde_json::json!(["42", null]),
+        );
+        let capture = root.join("capture.jsonl");
+        std::fs::write(&capture, format!("{a}\n{b}\n{c}\n")).unwrap();
+        let request = encode_base64(br#"{"ordinal":0,"request":{"tool":"Bash","input":{}}}"#);
+        let outcome =
+            encode_base64(br#"{"ok":true,"value":{"session_id":"thread","tool_use_id":"first"}}"#);
+        let pending = [
+            serde_json::json!({"event":"write","request_b64":request}),
+            serde_json::json!({"event":"output","output_b64":outcome}),
+            serde_json::json!({"event":"exit"}),
+        ]
+        .into_iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n";
+        let bound =
+            String::from_utf8(bind_provider_tool_outputs(pending.as_bytes(), &capture).unwrap())
+                .unwrap();
+        let output: serde_json::Value =
+            serde_json::from_str(bound.lines().nth(1).unwrap()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&decode_base64(output["output_b64"].as_str().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(value["value"]["running_wait_ms"], 1250);
+        assert_eq!(value["value"]["followups"][0]["output"], result);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn provider_correlation_matches_parallel_results_by_original_identity() {
         let root = std::env::temp_dir().join(format!(
             "asb-codex-parallel-{}",
@@ -2151,11 +2260,11 @@ mod tests {
         };
         assert_eq!(
             output(1),
-            serde_json::json!({"ok":true,"value":{"output":"A","running_wait_ms":null}})
+            serde_json::json!({"ok":true,"value":{"output":"A","running_wait_ms":null,"followups":[]}})
         );
         assert_eq!(
             output(3),
-            serde_json::json!({"ok":true,"value":{"output":"B","running_wait_ms":null}})
+            serde_json::json!({"ok":true,"value":{"output":"B","running_wait_ms":null,"followups":[]}})
         );
         assert_eq!(rows.last().unwrap()["event"], "exit");
         std::fs::remove_dir_all(root).unwrap();
@@ -2177,7 +2286,7 @@ mod tests {
                 .pointer("/agent_record_metadata/conversation")
                 .and_then(serde_json::Value::as_str)
                 .expect("recorded conversation identity");
-            for (name, id) in calls {
+            for (name, id, _) in calls {
                 if name != "exec_command" {
                     continue;
                 }

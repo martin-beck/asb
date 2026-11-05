@@ -107,18 +107,19 @@ export async function replayHook(event, {socket}) {
     const {value} = await brokerRequest(socket, {op:'release', token});
     if (JSON.stringify(value) !== JSON.stringify(outcome.value)) throw new Error('Codex native replay result changed after reservation');
   }
-  const argument = Buffer.from(result.output, 'utf8').toString('base64');
+  const argument = Buffer.from(JSON.stringify(result), 'utf8').toString('base64');
   const command = `${quote(process.execPath)} ${quote(fileURLToPath(import.meta.url))} emit ${quote(argument)} ${quote(String(result.running_wait_ms ?? 0))}`;
   return {hookSpecificOutput: {hookEventName:'PreToolUse', permissionDecision:'allow', updatedInput:{...event.tool_input, command}}};
 }
 
-export async function emitRecorded(value, waitMs = 0) {
+export async function emitRecorded(value, waitMs = 0, followups = []) {
   const match = value.match(/^Chunk ID: [^\r\n]+\r?\nWall time: (?:\d+(?:\.\d+)?|<asb-wall-time>) seconds\r?\nProcess exited with code (-?\d+)\r?\n(?:Original token count: (?:\d+|<asb-token-count>)\r?\n)?Output:\r?\n([\s\S]*)$/);
   if (!match) {
     const running = value.match(/^Chunk ID: [^\r\n]+\r?\nWall time: (?:\d+(?:\.\d+)?|<asb-wall-time>) seconds\r?\nProcess running with session ID [^\r\n]+\r?\n(?:Original token count: (?:\d+|<asb-token-count>)\r?\n)?Output:\r?\n([\s\S]*)$/);
     if (!running || !Number.isSafeInteger(waitMs) || waitMs <= 0) throw new Error('Codex native replay result has an unsupported shell envelope');
     process.stdout.write(running[1]);
     await new Promise(resolve => setTimeout(resolve, waitMs));
+    for (const followup of followups) await emitRecorded(followup.output, followup.running_wait_ms ?? 0);
     return;
   }
   const code = Number(match[1]);
@@ -145,7 +146,9 @@ export async function main() {
 
 if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === 'emit') {
   const value = Buffer.from(process.argv[3] ?? '', 'base64').toString('utf8');
-  emitRecorded(value, Number(process.argv[4] ?? 0)).catch(error => {console.error(error.message);process.exitCode=1;});
+  let result; try { result=JSON.parse(value); } catch { result={output:value}; }
+  if (typeof result === 'string') result={output:result};
+  emitRecorded(result.output, Number(process.argv[4] ?? 0), result.followups ?? []).catch(error => {console.error(error.message);process.exitCode=1;});
 } else if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === 'hook') {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });
 } else if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === 'finish') {
