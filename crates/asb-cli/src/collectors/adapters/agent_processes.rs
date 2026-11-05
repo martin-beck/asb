@@ -1,4 +1,4 @@
-//! Sample only the selected agent entry point, not every descendant or host task.
+//! Memory observes the verified agent tree; worker census matches its entry point.
 use crate::collectors::{CollectorAdapter, GraphSection, LifecycleEvent};
 use crate::measurements::{self, Session};
 use std::collections::BTreeSet;
@@ -17,6 +17,8 @@ struct State<const MEMORY: bool> {
     memory: bool,
     workers: bool,
     identity: Option<Identity>,
+    root: Option<measurements::ProcessIdentity>,
+    scope_failure: Option<&'static str>,
     sampler: Option<Sampler>,
     totals: Totals,
     isolated: bool,
@@ -50,6 +52,25 @@ struct Totals {
     peak_rss_kib: u64,
     samples: u64,
     incomplete: bool,
+    excluded_images: Vec<ProcessImage>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ProcessImage(u64, u64);
+impl ProcessImage {
+    fn read(pid: u32) -> Option<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = fs::metadata(format!("/proc/{pid}/exe")).ok()?;
+            Some(Self(metadata.dev(), metadata.ino()))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = pid;
+            None
+        }
+    }
 }
 
 struct Sampler {
@@ -84,6 +105,18 @@ impl Drop for Sampler {
     }
 }
 
+/// A tree-memory target must be below this controller and distinct from its
+/// guardian. Executable names are irrelevant to this generation-bound scope.
+fn memory_root(
+    root: Option<measurements::ProcessIdentity>,
+    guardian: Option<measurements::ProcessIdentity>,
+) -> Option<measurements::ProcessIdentity> {
+    let controller = measurements::ProcessIdentity::read(std::process::id())?;
+    root.filter(|root| {
+        root.matches() && *root != controller && Some(*root) != guardian && root.in_tree(controller)
+    })
+}
+
 impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
     fn description(&self) -> &'static str {
         if MEMORY {
@@ -110,11 +143,15 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
         let state = state.borrow();
         serde_json::to_value(NamespaceSample {
             schema_version: 1,
-            identity_available: state.identity.is_some(),
+            identity_available: if MEMORY {
+                state.root.is_some()
+            } else {
+                state.identity.is_some()
+            },
             distinct_processes: state.totals.seen.len() as u64,
             peak_rss_kib: state.totals.peak_rss_kib,
             samples: state.totals.samples,
-            incomplete: state.totals.incomplete,
+            incomplete: state.totals.incomplete || state.scope_failure.is_some(),
             sampling_interval_ms: measurements::measurement_interval_ms(),
         })
         .map_err(|_| "cannot encode agent-process observations".into())
@@ -214,26 +251,69 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
     fn attach_pid(&self, session: &mut Session, pid: u32) -> Result<(), String> {
         let root = session
             .measurement_target()
-            .or_else(|| measurements::ProcessIdentity::read(pid));
+            .filter(|root| root.pid == pid && root.matches());
+        let guardian = session.measurement_guardian();
         let state = session.state::<State<MEMORY>>();
         let mut state = state.borrow_mut();
-        if state.selected
-            && state.sampler.is_none()
-            && cfg!(target_os = "linux")
-            && let Some(root) = root
-            && let Some(identity) = state.identity.clone()
+        if !state.selected || !cfg!(target_os = "linux") || state.scope_failure.is_some() {
+            return Ok(());
+        }
+        if MEMORY && memory_root(root, guardian).is_none() {
+            state.scope_failure = Some(
+                "Agent memory requires the live generation-bound agent root below ASB, excluding ASB, its ancestors and the owned guardian.",
+            );
+            if let Some(sampler) = state.sampler.take() {
+                state.totals = sampler.finish();
+            }
+            return Ok(());
+        }
+        if state.sampler.is_some() {
+            if state.root != root {
+                state.scope_failure = Some(
+                    "Agent process root changed after sampler attachment; no mixed-scope metrics are published.",
+                );
+                if let Some(sampler) = state.sampler.take() {
+                    state.totals = sampler.finish();
+                }
+            }
+            return Ok(());
+        }
+        if let Some(root) = root
+            && (MEMORY || state.identity.is_some())
         {
+            let identity = state.identity.clone();
+            let excluded_images = if MEMORY {
+                let parent = root.parent();
+                let Some(images) = parent.and_then(|parent| {
+                    Some(vec![
+                        ProcessImage::read(parent.pid)?,
+                        ProcessImage::read(std::process::id())?,
+                    ])
+                }) else {
+                    state.scope_failure = Some(
+                        "Cannot establish the owning ASB process images; agent memory remains unavailable.",
+                    );
+                    return Ok(());
+                };
+                images
+            } else {
+                Vec::new()
+            };
             let (control, receiver) = mpsc::channel();
             let interval = Duration::from_millis(measurements::measurement_interval_ms());
+            state.root = Some(root);
             state.sampler = Some(Sampler {
                 control,
                 thread: Some(thread::spawn(move || {
-                    let mut totals = Totals::default();
+                    let mut totals = Totals {
+                        excluded_images,
+                        ..Totals::default()
+                    };
                     loop {
                         if !root.matches() {
                             return totals;
                         }
-                        totals.sample(root, &identity, MEMORY);
+                        totals.sample(root, identity.as_ref(), MEMORY);
                         match receiver.recv_timeout(interval) {
                             Err(mpsc::RecvTimeoutError::Timeout) => (),
                             Ok(Control::Admit(process)) => {
@@ -305,17 +385,27 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
                     state.totals.seen.len() as u64,
                     state.totals.samples,
                     state.totals.peak_rss_kib,
-                    state.totals.incomplete,
-                    state.identity.is_some(),
+                    state.totals.incomplete || state.scope_failure.is_some(),
+                    if MEMORY {
+                        state.root.is_some()
+                    } else {
+                        state.identity.is_some()
+                    },
                 ),
             };
-        let available = samples > 0 && seen > 0;
+        let available = identity_available && samples > 0 && seen > 0;
         let reason = if !cfg!(target_os = "linux") {
             Some("Agent process sampling requires Linux /proc.")
+        } else if state.scope_failure.is_some() {
+            state.scope_failure
         } else if state.isolated && state.imported.is_none() {
             Some("Isolated execution did not return the requested agent-process observations.")
         } else if !identity_available {
-            Some("Cannot resolve the selected agent executable.")
+            Some(if MEMORY {
+                "No verified agent process root was attached."
+            } else {
+                "Cannot resolve the selected agent executable."
+            })
         } else if !available {
             Some(
                 "No matching agent process was observed; the run may be shorter than the sampling interval or use a different launcher entry point.",
@@ -338,12 +428,12 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
             &session.dir.join(format!("{}.json", self.id())),
             &serde_json::json!({
                 "schema_version": 1, "collector": self.id(),
-                "status": if incomplete { "incomplete" } else if available { "observed" } else { "unavailable" },
+                "status": if state.scope_failure.is_some() { "unavailable" } else if incomplete { "incomplete" } else if available { "observed" } else { "unavailable" },
                 "reason": reason,
                 "source": if state.isolated { "execution-namespace-linux-proc-sampling" } else { "linux-proc-sampling" }, "scope": if MEMORY { "selected-agent-process-tree" } else { "selected-agent-entry-point-only" },
                 "sampling_interval_ms": state.imported.as_ref().map_or_else(measurements::measurement_interval_ms, |sample| sample.sampling_interval_ms),
                 "samples": samples,
-                "limitations": if MEMORY { "Sampled lower bound over the verified selected-agent process tree: short-lived processes can be missed. RSS includes shared pages per matching process, not unique physical memory. ASB's outer gate and unrelated host tasks are excluded." } else { "Sampled lower bound: short-lived processes can be missed. New process identities require an observed exec; fork-without-exec workers are unclassified because inherited agent identity cannot distinguish them from pending tool launches. Workers are additional OS processes with the same executable or script entry point, not logical subagents within one process. Tools and the ASB gate are excluded. RSS includes shared pages per matching process, not unique physical memory. Different wrapper entry points are not inferred." },
+                "limitations": if MEMORY { "Sampled lower bound over the verified selected-agent process tree: short-lived processes can be missed. RSS includes shared pages per matching process, not unique physical memory. Sampling waits for a non-ASB application image; known ASB controller/parent images and unrelated host tasks are excluded." } else { "Sampled lower bound: short-lived processes can be missed. New process identities require an observed exec; fork-without-exec workers are unclassified because inherited agent identity cannot distinguish them from pending tool launches. Workers are additional OS processes with the same executable or script entry point, not logical subagents within one process. Tools and the ASB gate are excluded. RSS includes shared pages per matching process, not unique physical memory. Different wrapper entry points are not inferred." },
                 "metrics": metrics
             }),
         )
@@ -512,11 +602,20 @@ impl Totals {
     fn sample(
         &mut self,
         root: measurements::ProcessIdentity,
-        identity: &Identity,
+        identity: Option<&Identity>,
         process_tree_memory: bool,
     ) {
         if !root.matches() {
             self.admitted.clear();
+            return;
+        }
+        if process_tree_memory
+            && (self.excluded_images.is_empty()
+                || ProcessImage::read(root.pid)
+                    .is_none_or(|image| self.excluded_images.contains(&image)))
+        {
+            // The gated principal initially still has its ASB parent's image.
+            // Observe RSS only after the actual application image is visible.
             return;
         }
         let mut rss = 0u64;
@@ -530,7 +629,14 @@ impl Totals {
             }
             let proc = PathBuf::from(format!("/proc/{pid}"));
             let key = (pid, generation.start_time_ticks);
-            if !process_tree_memory && !self.matches_process(&proc, key, identity) {
+            if process_tree_memory
+                && ProcessImage::read(pid).is_none_or(|image| self.excluded_images.contains(&image))
+            {
+                continue;
+            }
+            if !process_tree_memory
+                && !identity.is_some_and(|identity| self.matches_process(&proc, key, identity))
+            {
                 continue;
             }
             let Some((start, resident)) = process_memory(&proc) else {
@@ -544,7 +650,8 @@ impl Totals {
             };
             if generation.start_time_ticks != start
                 || !generation.in_tree(root)
-                || (!process_tree_memory && !self.matches_process(&proc, key, identity))
+                || (!process_tree_memory
+                    && !identity.is_some_and(|identity| self.matches_process(&proc, key, identity)))
             {
                 continue;
             }
@@ -680,28 +787,45 @@ mod tests {
         let root = measurements::ProcessIdentity::read(pid).unwrap();
         let proc = PathBuf::from(format!("/proc/{pid}"));
         let mut totals = Totals::default();
+        let mut memory = Totals {
+            excluded_images: vec![ProcessImage::read(std::process::id()).unwrap()],
+            ..Totals::default()
+        };
         let before = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             assert!(
                 inherited.matches_sample(&proc, false),
                 "fixture must expose matching inherited identity"
             );
             for _ in 0..5 {
-                totals.sample(root, &inherited, false);
+                totals.sample(root, Some(&inherited), false);
             }
             assert!(totals.seen.is_empty());
             assert!(totals.admitted.is_empty());
             assert_eq!(totals.peak_rss_kib, 0);
+            memory.sample(root, None, true);
+            assert!(
+                memory.seen.is_empty(),
+                "pre-exec ASB image must not enter agent memory"
+            );
+            assert_eq!(memory.peak_rss_kib, 0);
         }));
         release_writer.write_all(&[1]).unwrap();
         let mut child = spawning.join().unwrap().unwrap();
         let after = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            totals.sample(root, &inherited, false);
+            totals.sample(root, Some(&inherited), false);
             assert!(
                 totals.seen.is_empty(),
                 "tool exec must not retain inherited admission"
             );
+            memory.sample(root, None, true);
+            assert_eq!(
+                memory.seen.len(),
+                1,
+                "actual post-exec agent image must qualify without entry-point resolution"
+            );
+            assert!(memory.peak_rss_kib > 0);
             let actual = Identity::resolve("/bin/cat", &[]).unwrap();
-            totals.sample(root, &actual, false);
+            totals.sample(root, Some(&actual), false);
             assert_eq!(
                 totals.seen.len(),
                 1,
@@ -729,10 +853,13 @@ mod tests {
         let mut sibling = spawn();
         let root = measurements::ProcessIdentity::read(agent.id()).unwrap();
         let unrelated = Identity::resolve("/bin/false", &[]).unwrap();
-        let mut totals = Totals::default();
+        let mut totals = Totals {
+            excluded_images: vec![ProcessImage::read(std::process::id()).unwrap()],
+            ..Totals::default()
+        };
 
         let assertions = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            totals.sample(root, &unrelated, true);
+            totals.sample(root, Some(&unrelated), true);
             assert_eq!(totals.samples, 1);
             assert_eq!(totals.seen.len(), 1);
             assert!(totals.seen.contains(&(root.pid, root.start_time_ticks)));
@@ -749,6 +876,113 @@ mod tests {
             child.wait().unwrap();
         }
         assertions.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    struct FixtureChild(std::process::Child);
+    #[cfg(target_os = "linux")]
+    impl Drop for FixtureChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn opaque_launcher_keeps_owned_tree_memory_without_guessing_worker_identity() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+        let root = crate::fixture_namespace::allocate(&std::env::temp_dir(), "asb-opaque-memory-")
+            .unwrap();
+        let script = root.join("opaque-agent");
+        fs::write(&script, "#!/usr/bin/env sh\nexec /bin/cat\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut command = Command::new(&script);
+        command.stdin(Stdio::piped()).stdout(Stdio::null());
+        let target = crate::launch::TargetLaunch::direct(&command);
+        assert!(target.path.is_none(), "no explicit PATH proof");
+        let child = FixtureChild(command.spawn().unwrap());
+        let selected = vec!["agent-memory".into(), "agent-workers".into()];
+        let mut capture =
+            Session::start_in_execution_namespace(&root.join("capture"), &selected).unwrap();
+        capture.agent_launch_prepared(&target);
+        assert!(capture.state::<State<true>>().borrow().identity.is_none());
+        assert!(capture.state::<State<false>>().borrow().identity.is_none());
+        capture.attach_pid(child.0.id()).unwrap();
+        AgentProcesses::<true>.finish(&mut capture).unwrap();
+        AgentProcesses::<false>.finish(&mut capture).unwrap();
+        let read = |name| {
+            serde_json::from_slice::<serde_json::Value>(
+                &fs::read(root.join("capture").join(name)).unwrap(),
+            )
+            .unwrap()
+        };
+        let memory = read("agent-memory.json");
+        assert_eq!(memory["status"], "observed");
+        assert!(memory["metrics"]["peak_rss_mib"].as_f64().unwrap() > 0.0);
+        let worker = read("agent-workers.json");
+        assert_eq!(worker["status"], "unavailable");
+        assert!(worker["metrics"].as_object().unwrap().is_empty());
+        let exported = capture.export_execution_namespace_state().unwrap();
+        assert_eq!(exported["agent-memory"]["identity_available"], true);
+        assert_eq!(exported["agent-memory"]["distinct_processes"], 1);
+        assert_eq!(exported["agent-workers"]["identity_available"], false);
+        drop(capture);
+        drop(child);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn memory_rejects_asb_ancestors_guardians_and_root_rebinding() {
+        use std::process::{Command, Stdio};
+        let spawn = || {
+            FixtureChild(
+                Command::new("/bin/cat")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            )
+        };
+        let first = spawn();
+        let second = spawn();
+        let controller = measurements::ProcessIdentity::read(std::process::id()).unwrap();
+        let root_identity = measurements::ProcessIdentity::read(first.0.id()).unwrap();
+        assert!(memory_root(Some(controller), None).is_none());
+        assert!(memory_root(controller.parent(), None).is_none());
+        assert!(memory_root(Some(root_identity), Some(root_identity)).is_none());
+        assert_eq!(memory_root(Some(root_identity), None), Some(root_identity));
+        for (name, rebind) in [("self", false), ("rebind", true)] {
+            let root = crate::fixture_namespace::allocate(
+                &std::env::temp_dir(),
+                &format!("asb-memory-{name}-"),
+            )
+            .unwrap();
+            let mut capture =
+                Session::start_with_collectors(&root, &["agent-memory".into()], None).unwrap();
+            if rebind {
+                capture.attach_pid(first.0.id()).unwrap();
+                capture.attach_pid(second.0.id()).unwrap();
+                capture.attach_pid(first.0.id()).unwrap();
+            } else {
+                capture.attach_pid(controller.pid).unwrap();
+            }
+            assert!(capture.state::<State<true>>().borrow().sampler.is_none());
+            AgentProcesses::<true>.finish(&mut capture).unwrap();
+            let result: serde_json::Value =
+                serde_json::from_slice(&fs::read(root.join("agent-memory.json")).unwrap()).unwrap();
+            assert_eq!(result["status"], "unavailable");
+            assert!(result["metrics"].as_object().unwrap().is_empty());
+            assert!(result["reason"].as_str().unwrap().contains(if rebind {
+                "root changed"
+            } else {
+                "excluding ASB"
+            }));
+            drop(capture);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -1057,11 +1291,11 @@ mod tests {
         totals
             .declared
             .insert((generation.pid, generation.start_time_ticks));
-        totals.sample(generation, &identity, false);
+        totals.sample(generation, Some(&identity), false);
         assert_eq!(totals.samples, 1);
         for _ in 0..20 {
             thread::sleep(Duration::from_millis(100));
-            totals.sample(generation, &identity, false);
+            totals.sample(generation, Some(&identity), false);
         }
         assert_eq!(
             totals.samples, 21,
@@ -1078,7 +1312,7 @@ mod tests {
                 .unwrap(),
         );
         let other_generation = measurements::ProcessIdentity::read(other.0.id()).unwrap();
-        totals.sample(other_generation, &identity, false);
+        totals.sample(other_generation, Some(&identity), false);
         assert_eq!(
             totals.samples, 21,
             "same interpreter is not sufficient for initial admission"
@@ -1086,7 +1320,7 @@ mod tests {
         assert_eq!(totals.seen.len(), 1);
         agent.0.kill().unwrap();
         agent.0.wait().unwrap();
-        totals.sample(generation, &identity, false);
+        totals.sample(generation, Some(&identity), false);
         assert_eq!(
             totals.samples, 21,
             "an exited PID lifetime cannot add observations"
