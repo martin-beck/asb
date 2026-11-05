@@ -106,6 +106,27 @@ impl Plan {
             expected
                 .validate()
                 .map_err(|error| invalid(&error.to_string()))?;
+            if expected.normalization_sha256.as_deref()
+                != self
+                    .normalization_policy
+                    .as_ref()
+                    .map(|policy| policy.sha256.as_str())
+            {
+                return Err(invalid(
+                    "selected normalizer policy differs from the recording; record a new cassette",
+                ));
+            }
+        }
+        if let Some(policy) = &self.normalization_policy {
+            policy.validate().map_err(|error| invalid(&error))?;
+            if self.mode == ExecutionMode::Live {
+                return Err(invalid("normalization policy requires recording or replay"));
+            }
+            if self.mode == ExecutionMode::Replay && self.replay_compatibility.is_none() {
+                return Err(invalid(
+                    "legacy recordings have no normalizer policy identity; record a new cassette",
+                ));
+            }
         }
         let configuration =
             serde_json::to_vec(&self.configuration).map_err(|error| invalid(&error.to_string()))?;

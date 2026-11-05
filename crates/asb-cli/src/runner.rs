@@ -1,7 +1,9 @@
 //! Live execution of one configured benchmark.
 mod attempt;
 mod batch;
-pub(crate) use batch::{dataset_fingerprint, replay_protocol_fingerprint};
+pub(crate) use batch::{
+    dataset_fingerprint, replay_protocol_fingerprint, replay_protocol_with_normalizer_digest,
+};
 pub(crate) mod campaign;
 mod compaction;
 mod completion;
@@ -163,6 +165,8 @@ pub(crate) struct RunOptions<'a> {
     pub recording: Option<&'a recording::Recorder>,
     /// Opaque, recorder-owned provider capture selected before dispatch.
     pub provider_capture_path: Option<&'a Path>,
+    /// Campaign-owned source snapshot, shared by every admitted replica.
+    pub custom_normalization: Option<&'a crate::proxy::CustomNormalization>,
     pub repeat: Option<u64>,
     /// Per-execution agent turn budget. This is enforced only by adapters
     /// which explicitly declare support; unsupported adapters fail closed.
@@ -371,7 +375,12 @@ pub(crate) fn run_with_diagnostics(
     let requires_artifact_campaign = options.mode == Some(tape::Mode::Record)
         || options.mcp_mode.is_some()
         || options.native_capsule_record.is_some()
-        || options.native_capsule_replay.is_some();
+        || options.native_capsule_replay.is_some()
+        || (options.mode == Some(tape::Mode::Replay)
+            && !project::load_for_invocation(config_path, options.invocation_dir)?
+                .1
+                .replay
+                .is_empty());
     if let Some(repeat) = options.repeat.or((bundled_replay
         || options.track.is_some()
         || options.replay_seed.is_some()
@@ -779,6 +788,7 @@ fn run_concurrent(
                                 prompt_sha256: "a".repeat(64),
                                 material_sha256: "b".repeat(64),
                                 protocol_sha256: None,
+                                normalization_sha256: None,
                             });
                         }
                         let mode = cassette.as_ref().map(|(mode, _)| *mode);

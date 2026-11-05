@@ -18,9 +18,43 @@ pub(crate) struct RecordingRequest<'a> {
     pub invocation_dir: &'a std::path::Path,
     pub wire_extension: Option<&'static str>,
     pub normalization_scripts: Vec<crate::agents::TapeNormalizationScript>,
+    pub custom_normalization: Option<CustomNormalization>,
     pub perfetto_observer: Option<std::fs::File>,
     pub perfetto_trace_id: Option<String>,
     pub perfetto_report: Option<std::path::PathBuf>,
+}
+
+/// Frozen by the run owner before being handed to the selected recorder.
+#[derive(Clone, Debug)]
+pub(crate) struct CustomNormalization {
+    pub policy: crate::project::replay_normalization::FrozenPolicy,
+    pub agent: String,
+    pub workload: String,
+    pub family: Option<String>,
+    pub task: String,
+}
+
+impl CustomNormalization {
+    pub fn validate_attempt(
+        &self,
+        agent: &str,
+        task: &crate::workloads::TaskIdentity,
+        family: Option<&str>,
+    ) -> Result<(), Error> {
+        self.policy.validate_sources().map_err(Error::Input)?;
+        if self.policy.normalizers.is_empty()
+            || self.agent != agent
+            || self.workload != task.workload
+            || self.task != task.task_id
+            || self.family.as_deref() != family
+        {
+            return Err(Error::Input(
+                "frozen normalization policy differs from the prepared agent or workload task"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// An adapter starts one hop using its own optional typed configuration.
@@ -31,6 +65,9 @@ pub(crate) trait ProxyAdapter: Sync {
     }
     /// This adapter can operate during replay without any online backend.
     fn supports_offline_replay(&self) -> bool {
+        false
+    }
+    fn supports_custom_normalization(&self) -> bool {
         false
     }
     fn recording_settings(&self, _: &RecordingRequest<'_>) -> Result<Box<dyn Any>, Error> {
@@ -163,6 +200,12 @@ fn start_recording_chain_with(
     registry: &[&dyn ProxyAdapter],
 ) -> Result<Chain, Error> {
     let adapter = resolve_recorder(registry, request.recorder)?;
+    if request.custom_normalization.is_some() && !adapter.supports_custom_normalization() {
+        return Err(Error::Input(format!(
+            "recording proxy `{}` does not support project replay normalizers",
+            adapter.name()
+        )));
+    }
     validate_recording_chain(names, adapter.name(), request.mode, registry)?;
     let mut configurations = HashMap::new();
     configurations.insert(
@@ -446,6 +489,42 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    #[test]
+    fn frozen_policy_rejects_different_prepared_task_or_agent() {
+        use crate::project::replay_normalization::{FrozenNormalizer, FrozenPolicy};
+        let source = b"export function normalizeToolResult({text}) { return text; }";
+        let custom = CustomNormalization {
+            policy: FrozenPolicy::from_normalizers(vec![FrozenNormalizer {
+                id: "fixture".into(),
+                source: source.to_vec(),
+                sha256: crate::cassette::digest(source),
+                selectors: crate::project::replay_normalization::ProfileSelectors {
+                    workloads: Some(vec!["suite".into()]),
+                    ..Default::default()
+                },
+            }])
+            .unwrap(),
+            agent: "pi".into(),
+            workload: "suite".into(),
+            family: Some("family".into()),
+            task: "case".into(),
+        };
+        let task = crate::workloads::TaskIdentity::local("suite", Some("case"));
+        assert!(custom.validate_attempt("pi", &task, Some("family")).is_ok());
+        assert!(
+            custom
+                .validate_attempt("codex", &task, Some("family"))
+                .is_err()
+        );
+        assert!(custom.validate_attempt("pi", &task, None).is_err());
+        let changed = crate::workloads::TaskIdentity::local("suite", Some("other"));
+        assert!(
+            custom
+                .validate_attempt("pi", &changed, Some("family"))
+                .is_err()
+        );
+    }
+
     struct RecordingFixture(&'static str);
     impl ProxyAdapter for RecordingFixture {
         fn name(&self) -> &'static str {
@@ -539,6 +618,7 @@ mod tests {
             invocation_dir: std::path::Path::new("."),
             wire_extension: None,
             normalization_scripts: Vec::new(),
+            custom_normalization: None,
             perfetto_observer: None,
             perfetto_trace_id: None,
             perfetto_report: None,
@@ -672,6 +752,7 @@ mod tests {
             invocation_dir: std::path::Path::new("."),
             wire_extension: None,
             normalization_scripts: Vec::new(),
+            custom_normalization: None,
             perfetto_observer: None,
             perfetto_trace_id: None,
             perfetto_report: None,

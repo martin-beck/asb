@@ -14,6 +14,7 @@ struct Context<'a> {
     tape_cassette: Option<(tape::Mode, PathBuf)>,
     tool_tape_cassette: Option<(tape::Mode, PathBuf)>,
     mcp_tape_cassette: Option<(tape::Mode, PathBuf)>,
+    normalization_artifact: Option<Vec<u8>>,
     network: Option<project::NetworkProjectGuard>,
 }
 
@@ -92,6 +93,15 @@ impl<'a> ConfiguredAttempt<'a> {
             &project_root,
             options.invocation_dir.unwrap_or_else(|| Path::new(".")),
         );
+        let normalization_artifact = if options.mode == Some(tape::Mode::Record) {
+            options
+                .custom_normalization
+                .map(|custom| custom.policy.cassette_artifact().map_err(Error::Input))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
         let context = Context {
             config_path: config_path.into(),
             publication_config,
@@ -104,6 +114,7 @@ impl<'a> ConfiguredAttempt<'a> {
             tape_cassette,
             tool_tape_cassette,
             mcp_tape_cassette,
+            normalization_artifact,
             network: Some(network),
         };
         let config = &context.config;
@@ -223,6 +234,10 @@ impl<'a> ConfiguredAttempt<'a> {
             },
         )?;
 
+        if context.options.custom_normalization.is_some() {
+            require_normalizer_decoder(selected_offer.as_ref().map(|offer| offer.interface))?;
+        }
+
         Ok(Self {
             context,
             measurements: measurement_session,
@@ -238,6 +253,17 @@ impl<'a> ConfiguredAttempt<'a> {
         warnings: &Mutex<BTreeSet<String>>,
     ) -> Result<(), Error> {
         ProviderAttempt::start(self, arrival, output, warnings)?.run(arrival, output, warnings)
+    }
+}
+
+fn require_normalizer_decoder(interface: Option<crate::endpoint::Interface>) -> Result<(), Error> {
+    match interface {
+        Some(crate::endpoint::Interface::OpenAiResponses
+        | crate::endpoint::Interface::OpenAiChat
+        | crate::endpoint::Interface::AnthropicMessages) => Ok(()),
+        _ => Err(Error::Input(
+            "the selected API interface has no replay normalizer tool-result decoder; choose a supported interface or remove the matching normalizer profile".into(),
+        )),
     }
 }
 
@@ -590,6 +616,19 @@ impl<'a> ReadyAttempt<'a> {
             )?;
             let module = workload_session.module_descriptor();
             let metric_policy = workload_session.metric_policy();
+            if let Some(custom) = options.custom_normalization {
+                if options.mode.is_none() || options.preparation_gate.is_none() {
+                    return Err(Error::Input(
+                        "a frozen normalizer policy requires an admitted record or replay campaign"
+                            .into(),
+                    ));
+                }
+                custom.validate_attempt(
+                    &config.agent,
+                    &workload_session.invocation().identity,
+                    module.as_ref().map(|module| module.family.as_str()),
+                )?;
+            }
             if !metric_policy.valid()
                 || (module.is_none()
                     && metric_policy != workloads::outcome::MetricPolicy::default())
@@ -651,10 +690,13 @@ impl<'a> ReadyAttempt<'a> {
                             workload_session.invocation().input.instructions.as_bytes(),
                         ),
                         material_sha256,
-                        protocol_sha256: Some(batch::replay_protocol_fingerprint(
-                            module.as_ref(),
-                            &metric_policy,
+                        protocol_sha256: Some(batch::replay_protocol_with_normalizers(
+                            &batch::replay_protocol_fingerprint(module.as_ref(), &metric_policy)?,
+                            options.custom_normalization.map(|custom| &custom.policy),
                         )?),
+                        normalization_sha256: options
+                            .custom_normalization
+                            .map(|custom| custom.policy.sha256.clone()),
                     })
                 })();
                 identity.and_then(|identity| arrival.ready(identity))?;
@@ -730,6 +772,8 @@ impl<'a> ReadyAttempt<'a> {
                                 workspace: &workspace,
                                 agent: Some(&config.agent),
                                 workload: Some(&config.workload),
+                                task: Some(&workload_session.invocation().identity.task_id),
+                                custom_normalization: options.custom_normalization.cloned(),
                                 recorder: if *mode == tape::Mode::Replay {
                                     Some(
                                         options
@@ -1447,7 +1491,13 @@ impl ResultFacts {
             .as_ref()
             .and_then(|metadata| metadata.native_tool_sidecar.clone())
             .or(adapter_artifacts.native_tool_sidecar.clone());
-        let sealed_artifacts = adapter_artifacts.sealed_artifacts.clone();
+        let mut sealed_artifacts = adapter_artifacts.sealed_artifacts.clone();
+        if let Some(bytes) = &context.normalization_artifact {
+            sealed_artifacts.push(agents::SealedArtifact {
+                kind: "normalization-policy".into(),
+                bytes: bytes.clone(),
+            });
+        }
         let mut stderr = bounded(&child.stderr);
         if let Some(error) = provider_cleanup_error.as_ref() {
             stderr.push_str("\nASB provider cleanup error: ");
@@ -1816,6 +1866,19 @@ impl Publication<'_, '_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn normalizer_decoder_requires_a_supported_negotiated_interface() {
+        use crate::endpoint::Interface;
+        for interface in [
+            Interface::OpenAiResponses,
+            Interface::OpenAiChat,
+            Interface::AnthropicMessages,
+        ] {
+            assert!(super::require_normalizer_decoder(Some(interface)).is_ok());
+        }
+        assert!(super::require_normalizer_decoder(Some(Interface::Gemini)).is_err());
+        assert!(super::require_normalizer_decoder(None).is_err());
+    }
     use super::{sealed_step_count, validate_mcp_relay_capability, validate_mcp_server_capability};
     use crate::benchmark::{BenchmarkConfig, McpServerConfig};
 

@@ -545,6 +545,7 @@ fn manifest(count: u64) -> Manifest {
             prompt_sha256: digest(b"prompt"),
             material_sha256: digest(b"initial material"),
             protocol_sha256: None,
+            normalization_sha256: None,
         },
         concurrency: 1,
         tracks: (1..=count)
@@ -769,6 +770,68 @@ fn auxiliary_artifact_stream_checks_checksum_and_limits_chunk_size() {
             .copy_artifact_to(1, "local-tools", &mut Vec::new())
             .is_err()
     );
+}
+
+#[test]
+fn normalizer_policy_artifact_survives_cassette_publication_as_evidence() {
+    use crate::project::replay_normalization::{NormalizationSelection, ReplayConfig};
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.0.join("policy.mjs"),
+        "export function normalizeToolResult({text}) { return text; }",
+    )
+    .unwrap();
+    let config: ReplayConfig =
+        toml::from_str("[[normalizers]]\nid='fixture'\nmodule='policy.mjs'\nworkloads=['suite']")
+            .unwrap();
+    let selection = NormalizationSelection {
+        agent: "pi",
+        workload: "suite",
+        family: None,
+        task: "case",
+    };
+    let policy = config.freeze(&fixture.0, &selection).unwrap();
+    let artifact = policy.cassette_artifact().unwrap().unwrap();
+    let destination = fixture.0.join("policy.zip");
+    let mut original_manifest = manifest(0);
+    original_manifest.compatibility.normalization_sha256 = Some(policy.sha256.clone());
+    let mut journal =
+        RecordingJournal::create(&destination, original_manifest, 1, Limits::default()).unwrap();
+    journal.begin(1, 1).unwrap();
+    let mut provider = b"{}\n".as_slice();
+    let mut artifact_source = artifact.as_slice();
+    journal
+        .commit_with_artifacts(
+            manifest(1).tracks.remove(0),
+            &mut provider,
+            vec![ArtifactInput {
+                artifact: Artifact {
+                    kind: "normalization-policy".into(),
+                    bytes: artifact.len() as u64,
+                    sha256: digest(&artifact),
+                },
+                source: &mut artifact_source,
+            }],
+        )
+        .unwrap();
+    journal.finalize().unwrap();
+    let mut archive = Archive::open(&destination, Limits::default()).unwrap();
+    assert_eq!(
+        archive
+            .manifest()
+            .compatibility
+            .normalization_sha256
+            .as_deref(),
+        Some(policy.sha256.as_str())
+    );
+    let mut restored = Vec::new();
+    archive
+        .copy_artifact_to(1, "normalization-policy", &mut restored)
+        .unwrap();
+    assert_eq!(restored, artifact);
+    let evidence: serde_json::Value = serde_json::from_slice(&restored).unwrap();
+    assert_eq!(evidence["scope"], "normalization-source-inspection-only");
+    assert_eq!(evidence["policy"]["sha256"], policy.sha256);
 }
 
 #[test]
@@ -1265,6 +1328,27 @@ fn protocol_identity_preserves_old_manifest_encoding_but_rejects_semantic_drift(
     assert!(current.require_match(&changed).is_err());
     changed.protocol_sha256 = Some("invalid".into());
     assert!(changed.validate().is_err());
+}
+
+#[test]
+fn normalization_identity_rejects_legacy_or_changed_policy() {
+    let old = manifest(1).compatibility;
+    let encoded = serde_json::to_vec(&old).unwrap();
+    assert!(!String::from_utf8_lossy(&encoded).contains("normalization_sha256"));
+    let mut current = old.clone();
+    current.normalization_sha256 = Some(digest(b"policy one"));
+    current.validate().unwrap();
+    assert!(current.require_match(&old).is_err());
+    let mut changed = current.clone();
+    changed.normalization_sha256 = Some(digest(b"policy two"));
+    assert!(current.require_match(&changed).is_err());
+    changed.normalization_sha256 = Some("invalid".into());
+    assert!(changed.validate().is_err());
+    let encoded = serde_json::to_vec(&current).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Compatibility>(&encoded).unwrap(),
+        current
+    );
 }
 
 #[test]

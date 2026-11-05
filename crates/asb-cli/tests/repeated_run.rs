@@ -615,6 +615,163 @@ fn llm_only_record_and_replay_do_not_require_tool_capture() {
 }
 
 #[test]
+fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
+    let project = sweep_tests::registered_project(1);
+    let executable = project.0.join("tools/pi/bin/pi");
+    let agent = fs::read_to_string(&executable).unwrap().replace(
+        "'messages':[]}",
+        "'messages':[{'role':'user','content':'solve'}, {'role':'tool','content':f'seed={replica}'}]}",
+    );
+    assert!(agent.contains("f'seed={replica}'"));
+    fixture_writer::write_file(&project.0, &executable, agent).unwrap();
+    let module = "export function normalizeToolResult({text}) { return text.replace(/seed=\\d+/, 'seed=<seed>'); }";
+    fs::write(project.0.join("normalizer.mjs"), module).unwrap();
+    let config_path = project.0.join(".asb/project.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str("\n[[replay.normalizers]]\nid='fixture-seed'\nmodule='normalizer.mjs'\nagents=['pi']\nworkloads=['bug-fix']\ntasks=['bug-fix']\n");
+    fs::write(config_path, config).unwrap();
+    let provider = RecordingProvider::new();
+    let recorded = record_to_with_mode(
+        &project,
+        &provider,
+        None,
+        Some("policy.zip"),
+        "--llm-record",
+    );
+    assert!(
+        recorded.status.success(),
+        "record stdout={} stderr={}",
+        String::from_utf8_lossy(&recorded.stdout),
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    let mut archive = asb_cli::cassette::Archive::open(
+        &project.0.join("policy.zip"),
+        asb_cli::cassette::Limits::default(),
+    )
+    .unwrap();
+    let policy_digest = archive
+        .manifest()
+        .compatibility
+        .normalization_sha256
+        .clone()
+        .expect("policy identity recorded");
+    let artifact: Value =
+        serde_json::from_slice(&archive.read_artifact(1, "normalization-policy").unwrap()).unwrap();
+    assert_eq!(artifact["policy"]["sha256"], policy_digest);
+    assert_eq!(artifact["profiles"][0]["source"], module);
+    drop(provider);
+    let benchmark = project.0.join("benchmark.toml");
+    fs::write(
+        &benchmark,
+        fs::read_to_string(&benchmark)
+            .unwrap()
+            .replace("concurrency=1", "concurrency=4"),
+    )
+    .unwrap();
+    fs::write(project.0.join("expected-concurrency"), "4").unwrap();
+    let replayed = replay_using_mode(&project, Some("policy.zip"), &[], true, "--llm-replay");
+    assert!(
+        replayed.status.success(),
+        "replay stdout={} stderr={}",
+        String::from_utf8_lossy(&replayed.stdout),
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    let summaries: Vec<_> = records(&replayed.stdout)
+        .into_iter()
+        .filter(|row| row["execution"]["replica"].is_u64())
+        .collect();
+    assert_eq!(summaries.len(), 4, "every replica must complete");
+    let plan_path = campaign_plan(&replayed);
+    let plan: Value = serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
+    assert_eq!(plan["normalization_policy"]["sha256"], policy_digest);
+    let completion_dir = plan_path.parent().unwrap().join("batch-1/.asb-completions");
+    let completions = fs::read_dir(completion_dir)
+        .unwrap()
+        .map(|entry| {
+            serde_json::from_slice::<Value>(&fs::read(entry.unwrap().path()).unwrap()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completions.len(), 4);
+    let mut evidence_paths = Vec::new();
+    for completion in completions {
+        let path = completion["proxy_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|path| path.ends_with(".normalization.json"))
+            .expect("normalizer observations must be bound into completion evidence");
+        let evidence: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(evidence["policy_sha256"], policy_digest);
+        assert_eq!(evidence["profiles"][0]["changed"], 1);
+        evidence_paths.push(PathBuf::from(path));
+    }
+    let compared = compare_campaign(&project, &plan_path);
+    assert!(
+        compared.status.success(),
+        "comparison stderr={}",
+        String::from_utf8_lossy(&compared.stderr)
+    );
+    let original_evidence = fs::read(&evidence_paths[0]).unwrap();
+    let mut malformed: Value = serde_json::from_slice(&original_evidence).unwrap();
+    malformed["profiles"][0]["changed"] = json!(999);
+    fs::write(&evidence_paths[0], serde_json::to_vec(&malformed).unwrap()).unwrap();
+    let refused = compare_campaign(&project, &plan_path);
+    assert!(
+        !refused.status.success(),
+        "invalid normalization counts cannot be reported"
+    );
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("normalization change count"));
+    fs::write(&evidence_paths[0], original_evidence).unwrap();
+    let report_dir = plan_path.parent().unwrap().join("comparison");
+    let report: Value =
+        serde_json::from_slice(&fs::read(report_dir.join("comparison.json")).unwrap()).unwrap();
+    for row in report["benchmarks"].as_array().unwrap() {
+        assert_eq!(
+            row["normalization_observation"]["policy_sha256"],
+            policy_digest
+        );
+        assert_eq!(
+            row["normalization_observation"]["profiles"][0]["changed"],
+            1
+        );
+    }
+    assert!(
+        fs::read_to_string(report_dir.join("report.html"))
+            .unwrap()
+            .contains("Observed replay normalization")
+    );
+    assert_eq!(
+        summaries
+            .iter()
+            .map(|row| row["execution"]["replica"].as_u64().unwrap())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([1, 2, 3, 4])
+    );
+    let attempts_before = fs::read(project.0.join("attempts.jsonl")).unwrap();
+    fs::write(
+        project.0.join("normalizer.mjs"),
+        format!("{module}\n// changed after recording\n"),
+    )
+    .unwrap();
+    let changed = replay_using_mode(&project, Some("policy.zip"), &[], true, "--llm-replay");
+    assert!(
+        !changed.status.success(),
+        "changed source cannot replay an existing policy"
+    );
+    assert!(
+        String::from_utf8_lossy(&changed.stderr).contains("normalizer policy differs"),
+        "{}",
+        String::from_utf8_lossy(&changed.stderr)
+    );
+    assert_eq!(
+        fs::read(project.0.join("attempts.jsonl")).unwrap(),
+        attempts_before,
+        "rejected policy must not launch an agent"
+    );
+}
+
+#[test]
 fn default_record_and_replay_pair_while_existing_legacy_default_keeps_precedence() {
     let project = Project::new();
     project.config(1);

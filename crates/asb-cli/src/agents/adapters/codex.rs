@@ -29,6 +29,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_tape_normalization_scripts(&[TapeNormalizationScript {
     id: "codex-runtime-envelopes",
     workloads: &["*"],
+    tasks: &[],
     source: include_str!("../../../assets/scripts/agent-normalizers/codex.mjs"),
 }])
 .with_tool_replay(prepare_tool_replay)

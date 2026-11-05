@@ -180,7 +180,7 @@ fn legacy_name(project: &Project) -> String {
     format!("benchmark-{component}-bug-fix-fixture")
 }
 
-fn registered_project(concurrency: usize) -> Project {
+pub(super) fn registered_project(concurrency: usize) -> Project {
     use std::os::unix::fs::PermissionsExt;
     let project = Project::new();
     project.config(concurrency);
@@ -1958,5 +1958,93 @@ fn llm_only_sweep_records_without_native_track_and_replays_offline() {
         replayed.status.success(),
         "{}",
         String::from_utf8_lossy(&replayed.stderr)
+    );
+}
+
+#[test]
+fn profile_enabled_sweep_records_seals_and_replays_offline() {
+    let project = registered_project(1);
+    fs::write(
+        project.0.join("normalizer.mjs"),
+        "export function normalizeToolResult({text}) { return text; }",
+    )
+    .unwrap();
+    let path = project.0.join(".asb/project.toml");
+    let mut config = fs::read_to_string(&path).unwrap();
+    config.push_str("\n[[replay.normalizers]]\nid='sweep-profile'\nmodule='normalizer.mjs'\nagents=['pi']\nworkloads=['bug-fix']\ntasks=['bug-fix']\n");
+    fs::write(path, config).unwrap();
+    let provider = RecordingProvider::new();
+    let recorded = sweep(&project, Some(&provider), &["--llm-record"]);
+    assert!(
+        recorded.status.success(),
+        "record stdout={} stderr={}",
+        String::from_utf8_lossy(&recorded.stdout),
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    let plan: Value = serde_json::from_slice(&fs::read(campaign_plan(&recorded)).unwrap()).unwrap();
+    let digest = plan["normalization_policy"]["sha256"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let seal: Value = serde_json::from_slice(
+        &fs::read(project.0.join("sweep-results/.checkpoint/inputs.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(seal["status"], "stable");
+    assert!(seal["roots"].as_array().unwrap().iter().any(|root| {
+        root["name"]
+            .as_str()
+            .is_some_and(|name| name.ends_with("-normalization"))
+    }));
+    let previous_attempts = fs::read(project.0.join("attempts.jsonl")).unwrap();
+    let unchanged = sweep(&project, Some(&provider), &["--llm-record", "--resume"]);
+    assert!(
+        unchanged.status.success(),
+        "unchanged resume stderr={}",
+        String::from_utf8_lossy(&unchanged.stderr)
+    );
+    assert_eq!(
+        fs::read(project.0.join("attempts.jsonl")).unwrap(),
+        previous_attempts
+    );
+    fs::write(
+        project.0.join("normalizer.mjs"),
+        "export function normalizeToolResult({text}) { return text + '!'; }",
+    )
+    .unwrap();
+    let changed = sweep(&project, Some(&provider), &["--llm-record", "--resume"]);
+    assert!(
+        !changed.status.success(),
+        "a changed normalizer must invalidate completed-only resume"
+    );
+    assert!(
+        String::from_utf8_lossy(&changed.stderr).contains("normalizer policy changed"),
+        "{}",
+        String::from_utf8_lossy(&changed.stderr)
+    );
+    assert_eq!(
+        fs::read(project.0.join("attempts.jsonl")).unwrap(),
+        previous_attempts
+    );
+    fs::write(
+        project.0.join("normalizer.mjs"),
+        "export function normalizeToolResult({text}) { return text; }",
+    )
+    .unwrap();
+    drop(provider);
+    let replayed = sweep(&project, None, &["--llm-replay"]);
+    assert!(
+        replayed.status.success(),
+        "replay stdout={} stderr={}",
+        String::from_utf8_lossy(&replayed.stdout),
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    let report: Value = serde_json::from_slice(
+        &fs::read(project.0.join("results/sweep-comparison/comparison.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        report["benchmarks"][0]["planned_normalization_policy"]["sha256"],
+        digest
     );
 }

@@ -2,6 +2,8 @@
 // that documented runtime hierarchy is canonicalized; other strings stay
 // unchanged.
 export function normalizeRequest(request) {
+  // Restrict this historical recursive rule to the legacy matching contract.
+  if (request?.profileActive) return request.body;
   const visit = (value) => {
     if (typeof value === "string") return value
       .replace(/(\/openhands\/conversations\/)[0-9a-f]{8,}(?:\/subagents\/[0-9a-f]{8,})?/gi, "$1<asb-openhands-conversation>")

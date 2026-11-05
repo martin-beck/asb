@@ -161,6 +161,9 @@ pub(crate) enum MeasurementStorage {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Plan {
+    /// Content-free identity of the frozen, explicitly configured policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalization_policy: Option<crate::project::replay_normalization::PolicyDescriptor>,
     /// Expected source identity, not adapter-observed prepared material.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_compatibility: Option<crate::cassette::Compatibility>,
@@ -214,7 +217,12 @@ impl Plan {
                 "recording capacity selection differs from campaign".into(),
             ));
         }
-        crate::cassette::RecordingReservation::for_plan(
+        let reserve = if self.normalization_policy.is_some() {
+            crate::cassette::RecordingReservation::for_plan_with_normalization
+        } else {
+            crate::cassette::RecordingReservation::for_plan
+        };
+        reserve(
             crate::cassette::CompatibilityShape {
                 agent: &config.agent,
                 provider: &config.provider,

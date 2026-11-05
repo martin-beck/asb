@@ -106,6 +106,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_tape_normalization_scripts(&[TapeNormalizationScript {
     id: "workbuddy-process-history",
     workloads: &["*"],
+    tasks: &[],
     source: include_str!("../../../assets/scripts/agent-normalizers/workbuddy.mjs"),
 }]);
 

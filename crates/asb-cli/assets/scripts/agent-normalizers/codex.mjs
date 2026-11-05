@@ -47,7 +47,11 @@ export function normalizeRequest(request) {
           .replace(/(Chunk ID: [^\n]*?\r?\nWall time: )\d+(?:\.\d+)? seconds(?=\r?\nProcess exited with code \d+)/g, "$1<asb-wall-time> seconds")
           .replace(/(Chunk ID: [^\n]*?\r?\nWall time: )\d+(?:\.\d+)? seconds(\r?\nProcess running with session ID )\d+/g, "$1<asb-wall-time> seconds$2<asb-session>")
           .replace(/(Tool result: )\d+(?:\.\d+)? seconds(?=\r?\nMetadata:)/g, "$1<asb-tool-time> seconds");
-        result[key] = normalizeSympySeed(normalizeDiffMtime(normalizeUnittestElapsed(result[key])));
+        // Older cassettes used these broad workload rules. New explicit
+        // profiles own workload-specific text normalization instead.
+        if (!request.profileActive) {
+          result[key] = normalizeSympySeed(normalizeDiffMtime(normalizeUnittestElapsed(result[key])));
+        }
       } else {
         result[key] = visit(raw, next);
       }

@@ -12,6 +12,9 @@ import { quiesceNetworkRequests, networkFetch } from "./network-fetch.mjs";
 import { CaptureSession, completedSseResponse, responseDelivery } from "./capture-session.mjs";
 import { normalizeOpenAiSseWorkspacePaths, normalizeWorkspacePaths, replaceExactWorkspace } from "./tape-normalization.mjs";
 import { RequestTracing } from "./request-tracing.mjs";
+import { normalizeToolResultsAsync } from "./tool-result-normalization.mjs";
+import { NormalizerSupervisor } from "./normalizer-supervisor.mjs";
+import { normalizeLegacyRaw, normalizeLegacyValue, normalizeLegacyStable } from "./legacy-workload-normalizers.mjs";
 
 const MAX_BODY = 16 * 1024 * 1024;
 const MAX_DELAY_MS = 60 * 60 * 1000;
@@ -33,6 +36,81 @@ const agentWireExtension = process.env.ASB_TAPE_AGENT_WIRE_EXTENSION
 const agentNormalizer = process.env.ASB_TAPE_AGENT_NORMALIZER
   ? await import(pathToFileURL(process.env.ASB_TAPE_AGENT_NORMALIZER).href)
   : null;
+// The parent supplies frozen project policy explicitly; cassette contents are
+// never treated as executable modules. Ordinary ASB sessions clear this env.
+const customPolicyPath = process.env.ASB_TAPE_CUSTOM_NORMALIZERS;
+delete process.env.ASB_TAPE_CUSTOM_NORMALIZERS;
+const normalizationEvidencePath = process.env.ASB_TAPE_NORMALIZATION_EVIDENCE;
+delete process.env.ASB_TAPE_NORMALIZATION_EVIDENCE;
+if (normalizationEvidencePath && !isAbsolute(normalizationEvidencePath)) {
+  throw new Error("invalid private normalization evidence destination");
+}
+const customPolicy = customPolicyPath ? JSON.parse(readFileSync(customPolicyPath, "utf8")) : null;
+const readyFile = process.env.ASB_TAPE_READY_FILE;
+if (customPolicy && !/^[0-9a-f]{64}$/.test(customPolicy.sha256 || "")) {
+  throw new Error("invalid frozen normalizer policy identity");
+}
+const customSupervisor = customPolicy ? new NormalizerSupervisor(customPolicy.profiles) : null;
+if (customSupervisor) {
+  try { await customSupervisor.ready; }
+  catch (error) {
+    // Worker errors can contain arbitrary data. Publish only a known failure
+    // class and a configured profile ID into the private readiness channel.
+    const reasons = ["timed out during initialization", "has invalid syntax", "could not be initialized"];
+    const match = customPolicy.profiles.flatMap(({ id }) => reasons.map((reason) => ({ id, reason })))
+      .find(({ id, reason }) => error?.message === `normalizer ${id}: ${reason}`);
+    if (readyFile && isAbsolute(readyFile)) {
+      try {
+        const temporary = `${readyFile}.tmp`;
+        writeFileSync(temporary, JSON.stringify({ schema_version: 1, pid: process.pid,
+          error: { kind: "normalizer_startup", profile: match?.id ?? null, reason: match?.reason ?? "worker failed" } }),
+          { encoding: "utf8", mode: 0o600, flag: "wx" });
+        renameSync(temporary, readyFile);
+      } catch { /* normal startup failure remains visible if publication fails */ }
+    }
+    throw error;
+  }
+}
+let normalizationFailed = false;
+
+function normalizationEvidence(includeChanges = false) {
+  if (!customSupervisor) return undefined;
+  return {
+    policy_sha256: customPolicy.sha256,
+    // These are visits to result blocks, including repeated history in later
+    // requests. They must not be interpreted as distinct tool executions.
+    count_scope: "result-block-visits-including-repeated-history",
+    failed: normalizationFailed,
+    profiles: customSupervisor.diagnostics(),
+    ...(includeChanges ? { changed_result_digests: customSupervisor.changedResultDigests() } : {}),
+  };
+}
+
+async function normalizeCustomToolResults(body, url) {
+  if (!customSupervisor || !body) return body;
+  let parsed;
+  try { parsed = typeof body === "string" ? JSON.parse(body) : body; }
+  catch { return body; }
+  try {
+    const associationBody = structuredClone(parsed);
+    const extension = agentWireExtension?.normalizeRequest?.({ url, body: parsed });
+    const envelope = extension === undefined ? parsed : extension;
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
+      throw new Error("adapter wire extension must return an object or undefined");
+    }
+    const agent = agentNormalizer?.normalizeRequest?.({ url, body: envelope, profileActive: true });
+    if (agent !== undefined && (!agent || typeof agent !== "object" || Array.isArray(agent))) {
+      throw new Error("adapter normalizer must return an object or undefined");
+    }
+    const normalized = await normalizeToolResultsAsync(agent === undefined ? envelope : agent, (context) =>
+      customSupervisor.normalize({ ...context, workload: customPolicy.workload }), { associationBody });
+    return JSON.stringify(normalized);
+  } catch (error) {
+    normalizationFailed = true;
+    await customSupervisor.close();
+    throw error;
+  }
+}
 
 function usage(message) {
   if (message) console.error(`llmtape: ${message}`);
@@ -60,7 +138,6 @@ const mode = args.shift();
 let legacyRequestPolicy = false;
 if (mode !== "record" && mode !== "replay") usage("mode must be record or replay");
 const port = Number(option(args, "--port"));
-const readyFile = process.env.ASB_TAPE_READY_FILE;
 if (!Number.isInteger(port) || port < (readyFile ? 0 : 1) || port > 65535) usage("--port must be a valid TCP port");
 const cassette = mode === "record" ? option(args, "--out") : option(args, "--cassette");
 const upstream = mode === "record" ? option(args, "--upstream") : undefined;
@@ -237,123 +314,6 @@ function normalizeRequestBody(url, body) {
   }
 }
 
-// Result workspaces are intentionally different for record and replay.  Keep
-// absolute project paths out of cassette keys while forwarding the normalized
-// request body unchanged to the live provider during recording.
-function normalizeToolSearchOrdering(value) {
-  // OpenCode's built-in repository search can return identical match blocks in
-  // filesystem enumeration order. Fresh workload materialization is allowed
-  // to change that order, but not the observed paths or lines. Restrict the
-  // canonicalization to its fully formed /testbed match report so prompts,
-  // commands, and arbitrary tool output remain cassette-significant.
-  const header = value.match(/^(Found \d+ matches\n)/);
-  if (!header) return value;
-  const body = value.slice(header[0].length);
-  const trailingNewline = body.endsWith("\n");
-  const blocks = body.split(/\n{2,}(?=\/testbed\/)/).map((block) => block.replace(/\n+$/, ""));
-  if (blocks.length < 2 || blocks.some((block) => !block.startsWith("/testbed/"))) {
-    return value;
-  }
-  return header[0] + blocks.sort((left, right) => left.localeCompare(right)).join("\n\n")
-    + (trailingNewline ? "\n" : "");
-}
-
-function normalizeLsDiagnosticOrdering(value) {
-  // A single `ls` invocation can write directory entries to stdout while a
-  // missing operand diagnostic goes to stderr. OpenCode captures both streams
-  // in one tool result, but their relative scheduling is not stable. Retain
-  // every diagnostic and every listing line; only place these fixed `ls`
-  // diagnostics before the corresponding stdout rendering for comparison.
-  const lines = value.split("\n");
-  const diagnostics = lines.filter((line) => /^ls: cannot access '.+': /.test(line));
-  if (diagnostics.length === 0) return value;
-  const ordinary = lines.filter((line) => !/^ls: cannot access '.+': /.test(line));
-  return [...diagnostics.sort(), ...ordinary].join("\n");
-}
-
-function normalizePytestElapsed(value) {
-  // JSON encodes an earlier line feed as the two characters `\\n`, so a
-  // word-boundary-only matcher misses a summary in a structured tool value.
-  // Retain every count/category; only elapsed rendering is volatile.
-  return value.replace(/(^|\\n|\r?\n)((?:\d+ (?:failed|passed|skipped|deselected|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1$2<asb-elapsed>");
-}
-
-function normalizeUnittestElapsed(value) {
-  // Python unittest renders a distinct, complete summary. The elapsed value is
-  // scheduler-dependent, but the test count and result text remain meaningful
-  // replay inputs. This is applied only to structured tool-result output below,
-  // never to prompts, arguments, or arbitrary request strings.
-  return value.replace(/(^|\\n|\r?\n)(Ran \d+ tests? in )\d+(?:\.\d+)?s\b(?=(?:\\n|\r?\n){2}(?:OK|FAILED(?: \([^\r\n]*\))?)(?:\\n|\r?\n|$))/g, "$1$2<asb-elapsed>");
-}
-
-function normalizeUnifiedDiffHeaderMtime(value) {
-  // `diff -u` renders a filesystem mtime after a tab in its two file-header
-  // lines. Fresh benchmark workspaces legitimately receive different mtimes;
-  // the path, header kind, hunk ranges, and every diff line remain strict.
-  // Limit this to a complete ISO-like unified-diff header in structured tool
-  // output so dates in prompts, commands, source text, or ordinary output are
-  // never treated as incidental.
-  return value.replace(
-    /(^|\\n|\r?\n)((?:---|\+\+\+) [^\r\n\t]+\t)\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)? [+-]\d{4}\b/g,
-    "$1$2<asb-diff-mtime>",
-  );
-}
-
-function normalizeSympyTestRandomSeed(value) {
-  // SymPy's test-process banner prints a freshly generated random seed.  The
-  // seed is run-local presentation data, but the rest of the summary remains
-  // a meaningful replay input.  Require one complete banner and exactly one
-  // well-formed seed line so arbitrary seed values, truncated output, and
-  // multiple test runs in one result remain strict.
-  const starts = [...value.matchAll(/^=+ test process starts =+\r?$/gm)];
-  const finishes = [...value.matchAll(/^=+ tests finished: .+\r?$/gm)];
-  const seeds = [...value.matchAll(/^(random seed:[ \t]*)\d+(?=\r?$)/gm)];
-  if (starts.length !== 1 || finishes.length !== 1 || seeds.length !== 1
-      || starts[0].index >= seeds[0].index || seeds[0].index >= finishes[0].index) {
-    return value;
-  }
-  return value.replace(/^(random seed:[ \t]*)\d+(?=\r?$)/m, "$1<asb-seed>");
-}
-
-// Python renders a callable's process-local address in its fixed repr.  This
-// is terminal presentation noise, not a tool result change.  Keep the exact
-// existing callable-rendering rule in one helper so it applies both before
-// parsing a request and after structured request strings have been decoded.
-function normalizeFunctionRenderingAddress(value) {
-  // Callable names can include a nested `<locals>` segment, so stop only at
-  // the fixed ` at 0x...>` suffix rather than at the first closing bracket.
-  return value.replace(/((?:<|\\u003c)function [^\n]*? at )0x[0-9a-f]+(>|\\u003e)/gi, "$1<asb-address>$2");
-}
-
-// Python object reprs have the same process-local address volatility, but are
-// a distinct rendering form from callables.  Keep this intentionally narrow:
-// only a complete one-line `<qualified.name object at 0x...>` representation
-// is normalized; surrounding output and the object's rendered class remain
-// significant.
-function normalizeObjectRenderingAddress(value) {
-  return value.replace(/(<[^<>\n]+ object at )0x[0-9a-f]+>/gi, "$1<asb-address>>");
-}
-
-
-function normalizePytestCallableAddress(value) {
-  // pytest's call-runtest hook prints this complete callable repr in its
-  // diagnostic output. The pointer is ASLR/process-local rendering; retain
-  // the variable, callable identity, and all adjacent output.
-  return value.replace(
-    /(\bfunc = <function call_runtest_hook\.<locals>\.<lambda> at )0x[0-9a-f]+>/gi,
-    "$1<asb-pytest-callable-address>>",
-  );
-}
-
-function normalizePytestTestMapsAddress(value) {
-  // This exact pytest diagnostic renderer names its TestMaps fixture instance.
-  // Only CPython's process-local object address varies; the fixture and every
-  // adjacent diagnostic field remain part of the cassette key.
-  return value.replace(
-    /(\bself = <astropy\.wcs\.tests\.test_wcs\.TestMaps object at )0x[0-9a-f]+>/gi,
-    "$1<asb-pytest-testmaps-address>>",
-  );
-}
 
 // Preserve provider response content exactly, apart from workspace paths that
 // must point into the replay replica. Request canonicalization is only for
@@ -383,51 +343,19 @@ function normalizeCassetteBody(body, url = "") {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
   const workspace = process.env.ASB_TAPE_WORKSPACE;
-  const callIdentifiers = new Map();
-  const normalized = normalizeFunctionRenderingAddress(normalizePytestElapsed(
-    normalizeWorkspacePaths(normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(body, workspace), workspace)
-      .replaceAll(workspace || "\u0000", "<asb-workspace>"))
-    // Preserve distinct call IDs before the generic UUID normalizer below.
-    // OpenCode uses `call-<uuid>` while some OpenAI-compatible clients use
-    // `call_<uuid>`; both forms are provider-generated rather than prompt
-    // semantics, but their relationship within a turn is significant.
-    .replace(/"(call[-_][A-Za-z0-9_-]+)"(?=\s*[,}\]])/g, (_, identifier) => {
-      if (!callIdentifiers.has(identifier)) {
-        callIdentifiers.set(identifier, `<asb-call-${callIdentifiers.size + 1}>`);
-      }
-      return `"${callIdentifiers.get(identifier)}"`;
-    })
-    // Generated replay protocol IDs contain a local clock; literal timestamps
-    // in prompts, tool arguments and tool results remain replay-significant.
-    .replace(/(asb-replay-\d+-)1[0-9]{12,}(?=-\d+)/g, "$1<asb-timestamp>")
-    // Pytest decorates its terminal summary with ANSI color resets. Preserve
-    // every status/count and trailing content, but replace only the elapsed
-    // renderer in a complete colored pytest summary.
-    .replace(/((?:\d+ (?:passed|failed|skipped|deselected|errors?)(?:, )?)+(?:\\u001b\[(?:0|3[12])m)* in )\d+(?:\.\d+)?s(?=\\u001b\[0m)/g, "$1<asb-pytest-elapsed>")
-    // Normalize generated call identifiers, but retain the relationship
-    // between distinct IDs in one request/response. OpenCode can receive
-    // multiple tool calls in a streamed response; collapsing every ID into
-    // one marker makes its later tool-result turn ambiguous and diverge from
-    // the recording. Never replace the JSON field name `call_id` itself.
-    // Restore the malformed key emitted by older recordings before replacing
-    // value markers.
-    .replace(/"call_<asb-call>":/g, '"call_id":')
-    .replace(/\bmsg_resp_[A-Za-z0-9_-]+/g, "msg_resp_<asb-response>")
-    .replace(/Chunk ID: [0-9a-f]+/gi, "Chunk ID: <asb-chunk>")
-    .replace(/((?:\b\d+ (?:failed|passed|skipped|deselected|errors?),? )+in )\d+(?:\.\d+)?s\b/g, "$1<asb-elapsed>")
-    // pip's download progress embeds live transfer throughput and ETA after
-    // the already-significant artifact size. Keep the package and byte count
-    // strict while removing only transport timing from tool history.
-    .replace(/(\b\d+(?:\.\d+)?\/\d+(?:\.\d+)? (?:kB|MB|GB) )\d+(?:\.\d+)? (?:kB|MB|GB)\/s eta \d+:\d+:\d+/g, "$1<asb-transfer-rate> eta <asb-transfer-eta>")));
+  const normalized = customSupervisor ? body : normalizeLegacyRaw(body, workspace, normalizeSseWorkspaceFragments);
   let normalizerInvoked = false;
   try {
     const parsed = JSON.parse(normalized);
     // The tape core passes opaque request data to an optional adapter-owned
     // extension. It neither identifies the adapter nor interprets its fields.
-    const extensionValue = agentWireExtension?.normalizeRequest?.({ url, body: parsed });
+    // Profile-enabled requests already had the agent envelope applied before
+    // tool-result normalization. Saved policy requests are canonical and
+    // must not have that transformation run again during replay matching.
+    const extensionValue = customSupervisor ? undefined : agentWireExtension?.normalizeRequest?.({ url, body: parsed });
     const extensionCanonical = extensionValue === undefined ? parsed : extensionValue;
     normalizerInvoked = Boolean(agentNormalizer?.normalizeRequest);
-    const normalizerValue = agentNormalizer?.normalizeRequest?.({ url, body: extensionCanonical });
+    const normalizerValue = customSupervisor ? undefined : agentNormalizer?.normalizeRequest?.({ url, body: extensionCanonical });
     if (normalizerValue !== undefined && (!normalizerValue || typeof normalizerValue !== "object" || Array.isArray(normalizerValue))) {
       throw new Error("adapter normalizer must return an object or undefined");
     }
@@ -514,40 +442,15 @@ function normalizeCassetteBody(body, url = "") {
           && key === "id") {
         return canonicalContentBlockIdentifier(value);
       }
-      if (typeof value === "string") {
-        value = normalizeFunctionRenderingAddress(value);
-        value = normalizeObjectRenderingAddress(value);
-        value = normalizeToolSearchOrdering(value);
-        value = normalizeLsDiagnosticOrdering(value);
-        const hadParentGuidance = value.includes("../") && value.includes("AGENTS.md");
-        const cleaned = value.replace(/\n?\.\.\/.*AGENTS\.md\n?/gm, "");
-        const withoutGuidance = hadParentGuidance ? cleaned.replace(/\n+$/g, "") : cleaned;
-        if (withoutGuidance.includes("Output:\n")) {
-          return withoutGuidance.replace(/(Output:\n)([\s\S]*?)(?=\nfatal:|$)/g, (match, prefix, listing) => {
-            const marker = "<asb-workspace>\n";
-            const markerIndex = listing.indexOf(marker);
-            if (markerIndex >= 0) {
-              const header = listing.slice(0, markerIndex);
-              const lines = listing.slice(markerIndex + marker.length).split("\n");
-              if (lines.every((line) => line === "" || line.startsWith("external-workload/"))) {
-                return prefix + header + marker + "<asb-workspace-listing>\n";
-              }
-            }
-            return match;
-          });
-        }
-        return normalizePytestTestMapsAddress(normalizePytestCallableAddress(
-          normalizePytestElapsed(withoutGuidance),
-        ));
-      }
+      if (typeof value === "string") return customSupervisor ? value : normalizeLegacyValue(value);
       if (Array.isArray(value)) return value.map((item, index) => sort(item, String(index), [...path, String(index)]));
       if (value && typeof value === "object") {
         return Object.fromEntries(Object.keys(value).sort().map((child) => [child, sort(value[child], child, [...path, child])]));
       }
       return value;
     };
-    return JSON.stringify(sort(canonical))
-      .replace(/\.\.\/[^"\\]*AGENTS\.md(?:\\n)?/g, "");
+    const stable = JSON.stringify(sort(canonical));
+    return customSupervisor ? stable : normalizeLegacyStable(stable);
   } catch (error) {
     // An adapter-selected script is part of the matching contract.  Never
     // silently fall back to a different key if it rejected its bounded input
@@ -628,12 +531,21 @@ if (mode === 'replay' && !legacyRequestPolicy && rawInteractions.some(interactio
   throw new Error('cassette request policy is inconsistent');
 }
 const interactions = rawInteractions.map((interaction) => {
-        if (interaction.request) {
-          interaction.request.url = requestPath(interaction.request.url);
-          interaction.request.body = normalizeCassetteBody(interaction.request.body, interaction.request.url);
-        }
-        return interaction;
-      });
+    if (interaction.request) {
+      interaction.request.url = requestPath(interaction.request.url);
+      // Recordings already contain the policy's comparison copy. Never apply
+      // a policy twice or silently apply one to a legacy unmarked recording.
+      const recordedPolicy = interaction.request.custom_normalization_sha256;
+      if (recordedPolicy !== undefined && (!customPolicy || recordedPolicy !== customPolicy.sha256)) {
+        throw new Error("recorded normalizer policy differs from the selected policy; record a new cassette");
+      }
+      if (customPolicy && recordedPolicy === undefined && interaction.request.body) {
+        throw new Error("recording has no normalizer policy identity; record a new cassette");
+      }
+      interaction.request.body = normalizeCassetteBody(interaction.request.body, interaction.request.url);
+    }
+    return interaction;
+});
 let cursor = 0;
 let replayOrderWaiters = 0;
 // Optional probes advance the recorded cursor when omitted. Keep their exact
@@ -666,6 +578,7 @@ function writeProgress() {
       total: interactions.length,
       rejected,
       unrequested_optional_probes: deferredProbes.length,
+      ...(customSupervisor ? { normalization: normalizationEvidence() } : {}),
       ...(firstMismatch ? { first_mismatch: firstMismatch } : {}),
     }));
   }
@@ -784,6 +697,7 @@ function retainMismatchEvidence(expected, actual, mismatch) {
   const evidence = JSON.stringify({
     schema_version: 1,
     mismatch,
+    ...(customSupervisor ? { normalization: normalizationEvidence(true) } : {}),
     expected: diagnosticRequest(expected),
     actual: diagnosticRequest(actual),
   });
@@ -953,7 +867,9 @@ async function handle(request, response, recording) {
     // recorder and makes separate-directory replay path-stable.
     url: requestPath(request.url),
     headers: redactHeaders(Object.fromEntries(Object.entries(request.headers))),
-    body: body.length ? normalizeCassetteBody(normalizedBody, request.url || "/") : null,
+    body: body.length ? normalizeCassetteBody(await normalizeCustomToolResults(normalizedBody, request.url || "/"), request.url || "/") : null,
+    ...(customSupervisor && body.length ? { custom_normalization_sha256: customPolicy.sha256 } : {}),
+    ...(customSupervisor && body.length ? { normalization_evidence: normalizationEvidence() } : {}),
   };
 
   if (mode === "replay") {
@@ -1201,6 +1117,11 @@ async function shutdown() {
       server.closeAllConnections();
       await quiesceNetworkRequests();
     }
+    if (normalizationEvidencePath && customSupervisor) {
+      writeFileSync(normalizationEvidencePath, JSON.stringify({ schema_version: 1, ...normalizationEvidence(true) }),
+        { encoding: "utf8", mode: 0o600, flag: "wx" });
+    }
+    await customSupervisor?.close();
     process.exit(0);
   } catch {
     try { capture?.close(); } catch { /* sticky uncertainty: never report cleanup success */ }

@@ -106,6 +106,7 @@ pub(in crate::sweep::checkpoint) fn fixture_concurrency(
                     )
                     .unwrap(),
                 ),
+                normalization_sha256: None,
             };
             let cohort = json!({"id":format!("abc-{configuration:x}-{:x}", slot.batch),"selected_replicas":concurrency,"admitted_slots":(1..=concurrency).collect::<Vec<_>>()});
             let execution = layout.plan.execution(slot);

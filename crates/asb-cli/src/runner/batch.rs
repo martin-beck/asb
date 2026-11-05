@@ -34,6 +34,35 @@ pub(crate) fn replay_protocol_fingerprint(
         .map_err(|error| Error::Run(error.to_string()))
 }
 
+/// Bind an explicitly selected normalization policy to the existing replay
+/// protocol identity. The legacy digest remains byte-for-byte unchanged when
+/// there is no selected policy, so old cassettes keep their existing contract.
+pub(crate) fn replay_protocol_with_normalizers(
+    legacy_digest: &str,
+    policy: Option<&crate::project::replay_normalization::FrozenPolicy>,
+) -> Result<String, Error> {
+    let digest = policy
+        .filter(|policy| !policy.normalizers.is_empty())
+        .map(|policy| policy.sha256.as_str());
+    replay_protocol_with_normalizer_digest(legacy_digest, digest)
+}
+
+pub(crate) fn replay_protocol_with_normalizer_digest(
+    legacy_digest: &str,
+    normalizer_digest: Option<&str>,
+) -> Result<String, Error> {
+    let Some(normalizer_digest) = normalizer_digest else {
+        return Ok(legacy_digest.to_owned());
+    };
+    serde_json::to_vec(&serde_json::json!({
+        "contract": "asb-replay-normalization-policy-v1",
+        "protocol_sha256": legacy_digest,
+        "normalization_sha256": normalizer_digest,
+    }))
+    .map(|bytes| crate::cassette::digest(&bytes))
+    .map_err(|error| Error::Run(error.to_string()))
+}
+
 pub(crate) struct Gate {
     state: Mutex<State>,
     changed: Condvar,
@@ -629,6 +658,39 @@ fn unavailable() -> Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn normalization_policy_changes_protocol_identity_but_absence_is_legacy() {
+        use crate::project::replay_normalization::{FrozenNormalizer, FrozenPolicy};
+        let legacy = crate::cassette::digest(b"legacy protocol");
+        let empty = FrozenPolicy {
+            normalizers: Vec::new(),
+            sha256: "a".repeat(64),
+        };
+        assert_eq!(
+            super::replay_protocol_with_normalizers(&legacy, None).unwrap(),
+            legacy
+        );
+        assert_eq!(
+            super::replay_protocol_with_normalizers(&legacy, Some(&empty)).unwrap(),
+            legacy
+        );
+        let mut policy = FrozenPolicy {
+            normalizers: vec![FrozenNormalizer {
+                id: "one".into(),
+                source: b"one".to_vec(),
+                sha256: "b".repeat(64),
+                selectors: Default::default(),
+            }],
+            sha256: "c".repeat(64),
+        };
+        let bound = super::replay_protocol_with_normalizers(&legacy, Some(&policy)).unwrap();
+        assert_ne!(bound, legacy);
+        policy.sha256 = "d".repeat(64);
+        assert_ne!(
+            super::replay_protocol_with_normalizers(&legacy, Some(&policy)).unwrap(),
+            bound
+        );
+    }
     use super::*;
     #[test]
     fn swe_client_environment_changes_only_swe_replay_identity() {
@@ -893,6 +955,7 @@ mod tests {
             prompt_sha256: "a".repeat(64),
             material_sha256: "b".repeat(64),
             protocol_sha256: None,
+            normalization_sha256: None,
         }
     }
 

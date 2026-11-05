@@ -224,7 +224,11 @@ pub(crate) trait AgentAdapter: Sync {
     /// every semantic field it does not explicitly recognize.  The shared
     /// tape transport materializes this source as a separate module and never
     /// interprets its agent-specific protocol rules.
-    fn tape_normalization_scripts(&self, _workload: &str) -> Vec<TapeNormalizationScript> {
+    fn tape_normalization_scripts(
+        &self,
+        _workload: &str,
+        _task: Option<&str>,
+    ) -> Vec<TapeNormalizationScript> {
         Vec::new()
     }
     /// Whether this adapter declares a tool recording or replay transport.
@@ -602,20 +606,18 @@ type WorkspaceCapsuleApplyHook = fn(&Path, &[u8]) -> Result<(), Error>;
 pub(crate) struct TapeNormalizationScript {
     pub(crate) id: &'static str,
     pub(crate) workloads: &'static [&'static str],
+    /// Exact task IDs. An empty list means this agent rule applies to every
+    /// task in the selected workload; unknown tasks never match a nonempty list.
+    pub(crate) tasks: &'static [&'static str],
     pub(crate) source: &'static str,
 }
 
 impl TapeNormalizationScript {
-    fn applies_to(self, workload: &str) -> bool {
-        let mut index = 0;
-        while index < self.workloads.len() {
-            let candidate = self.workloads[index];
-            if candidate == "*" || candidate == workload {
-                return true;
-            }
-            index += 1;
-        }
-        false
+    fn applies_to(self, workload: &str, task: Option<&str>) -> bool {
+        self.workloads
+            .iter()
+            .any(|candidate| *candidate == "*" || *candidate == workload)
+            && (self.tasks.is_empty() || task.is_some_and(|id| self.tasks.contains(&id)))
     }
 }
 
@@ -1021,11 +1023,15 @@ impl AgentAdapter for StaticAdapter {
     fn tape_wire_extension(&self) -> Option<&'static str> {
         self.tape_wire_extension
     }
-    fn tape_normalization_scripts(&self, workload: &str) -> Vec<TapeNormalizationScript> {
+    fn tape_normalization_scripts(
+        &self,
+        workload: &str,
+        task: Option<&str>,
+    ) -> Vec<TapeNormalizationScript> {
         self.tape_normalization_scripts
             .iter()
             .copied()
-            .filter(|script| script.applies_to(workload))
+            .filter(|script| script.applies_to(workload, task))
             .collect()
     }
     fn supports_tool_replay(&self) -> bool {
@@ -1215,9 +1221,13 @@ pub(crate) fn tape_wire_extension(id: &str) -> Option<&'static str> {
 
 /// Return an adapter-owned replay normalizer without exposing its protocol
 /// semantics to the shared tape runner.
-pub(crate) fn tape_normalization_scripts(id: &str, workload: &str) -> Vec<TapeNormalizationScript> {
+pub(crate) fn tape_normalization_scripts(
+    id: &str,
+    workload: &str,
+    task: Option<&str>,
+) -> Vec<TapeNormalizationScript> {
     find(id)
-        .map(|adapter| adapter.tape_normalization_scripts(workload))
+        .map(|adapter| adapter.tape_normalization_scripts(workload, task))
         .unwrap_or_default()
 }
 
@@ -1326,16 +1336,22 @@ mod tests {
         let scripts = [super::TapeNormalizationScript {
             id: "fixture",
             workloads: &["swe-bench"],
+            tasks: &["sympy__sympy-22236"],
             source: "export function normalizeRequest(request) { return request.body; }",
         }];
-        assert!(scripts[0].applies_to("swe-bench"));
-        assert!(!scripts[0].applies_to("terminal-bench-1.0"));
+        assert!(scripts[0].applies_to("swe-bench", Some("sympy__sympy-22236")));
+        assert!(!scripts[0].applies_to("swe-bench", Some("other")));
+        assert!(!scripts[0].applies_to("swe-bench", None));
+        assert!(!scripts[0].applies_to("terminal-bench-1.0", Some("sympy__sympy-22236")));
         assert!(
-            super::tape_normalization_scripts("codex", "swe-bench")
+            super::tape_normalization_scripts("codex", "swe-bench", Some("fixture"))
                 .iter()
                 .any(|script| script.id == "codex-runtime-envelopes")
         );
-        assert!(super::tape_normalization_scripts("not-an-agent", "swe-bench").is_empty());
+        assert!(
+            super::tape_normalization_scripts("not-an-agent", "swe-bench", Some("fixture"))
+                .is_empty()
+        );
     }
 
     #[test]

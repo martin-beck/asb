@@ -587,6 +587,7 @@ fn native_launch_waits_for_siblings_and_refuses_an_unverifiable_sibling_gate() {
             prompt_sha256: "a".repeat(64),
             material_sha256: "b".repeat(64),
             protocol_sha256: None,
+            normalization_sha256: None,
         }
     }
     fn run(
@@ -1152,6 +1153,7 @@ fn recording_identity(result: &RunResult<'_>) -> crate::cassette::Compatibility 
         prompt_sha256: "a".repeat(64),
         material_sha256: "b".repeat(64),
         protocol_sha256: Some("c".repeat(64)),
+        normalization_sha256: None,
     }
 }
 
@@ -2000,6 +2002,7 @@ fn early_provider_teardown_notifies_material_peers_before_waiting_for_cleanup() 
                 prompt_sha256: "a".repeat(64),
                 material_sha256: "b".repeat(64),
                 protocol_sha256: None,
+                normalization_sha256: None,
             };
             assert!(
                 peer.ready(identity)
@@ -2095,6 +2098,7 @@ fn runner_phase_completion_preparation_abort_precedes_owned_workload_cleanup() {
                         prompt_sha256: "a".repeat(64),
                         material_sha256: "b".repeat(64),
                         protocol_sha256: None,
+                        normalization_sha256: None,
                     })
                     .unwrap_err()
                     .to_string();

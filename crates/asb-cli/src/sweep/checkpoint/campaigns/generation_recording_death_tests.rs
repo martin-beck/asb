@@ -46,6 +46,7 @@ fn identity() -> Compatibility {
         prompt_sha256: crate::cassette::digest(b"prompt"),
         material_sha256: crate::cassette::digest(b"material"),
         protocol_sha256: None,
+        normalization_sha256: None,
     }
 }
 

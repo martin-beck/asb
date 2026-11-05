@@ -33,6 +33,8 @@ pub(super) struct CompatibilityWire<'a, D> {
     material_sha256: D,
     #[serde(skip_serializing_if = "Option::is_none")]
     protocol_sha256: Option<D>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    normalization_sha256: Option<D>,
 }
 
 impl CompatibilityShape<'_> {
@@ -61,6 +63,7 @@ impl CompatibilityShape<'_> {
             prompt_sha256: DigestWidth,
             material_sha256: DigestWidth,
             protocol_sha256: Some(DigestWidth),
+            normalization_sha256: Some(DigestWidth),
         })
     }
 }
@@ -85,6 +88,7 @@ impl Serialize for Compatibility {
             prompt_sha256: self.prompt_sha256.as_str(),
             material_sha256: self.material_sha256.as_str(),
             protocol_sha256: self.protocol_sha256.as_deref(),
+            normalization_sha256: self.normalization_sha256.as_deref(),
         }
         .serialize(serializer)
     }

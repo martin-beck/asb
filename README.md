@@ -544,6 +544,8 @@ not start cli2key or connect to any live provider. Add
 `--respect-record-timings` to `run --llmreplay` or `sweep --llmreplay` to reproduce
 the bounded response delays recorded in each cassette entry. Cassettes are local test
 artifacts and should not be committed when they contain provider responses.
+For opt-in, agent- and workload-specific tool-output matching, see
+[Replay tool-result normalizers](docs/REPLAY_NORMALIZERS.md).
 
 LLM-only replay does not capture or isolate native tool commands: a shell command
 can run again and contact an external service even though provider responses

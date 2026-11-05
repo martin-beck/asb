@@ -387,8 +387,14 @@ impl Recorder {
                         workload: &compatibility.workload,
                         task: &compatibility.task,
                     };
+                    let normalized = compatibility.normalization_sha256.is_some();
                     let actual = if let Some(union) = &self.union {
-                        crate::cassette::RecordingReservation::for_origin_plan(
+                        let reserve = if normalized {
+                            crate::cassette::RecordingReservation::for_origin_plan_with_normalization
+                        } else {
+                            crate::cassette::RecordingReservation::for_origin_plan
+                        };
+                        reserve(
                             shape,
                             &union.physical_id,
                             &self.destination,
@@ -397,7 +403,12 @@ impl Recorder {
                             Limits::default(),
                         )
                     } else {
-                        crate::cassette::RecordingReservation::for_plan(
+                        let reserve = if normalized {
+                            crate::cassette::RecordingReservation::for_plan_with_normalization
+                        } else {
+                            crate::cassette::RecordingReservation::for_plan
+                        };
+                        reserve(
                             shape,
                             &self.campaign,
                             &self.destination,
@@ -1141,6 +1152,7 @@ mod tests {
             prompt_sha256: crate::cassette::digest(b"prompt"),
             material_sha256: crate::cassette::digest(b"material"),
             protocol_sha256: None,
+            normalization_sha256: None,
         };
         for mutation in 0..4 {
             let destination = root.join(format!("{mutation}.zip"));
