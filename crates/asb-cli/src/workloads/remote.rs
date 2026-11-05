@@ -30,6 +30,12 @@ const PROGRESS_POLL: Duration = Duration::from_millis(250);
 const PROGRESS_TRANSCRIPT_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_PRIVATE_REPLAY_INPUT: u64 = 64 * 1024 * 1024;
 
+fn preparation_seconds(workload: &str, configured: Option<u64>) -> u64 {
+    configured
+        .or_else(|| super::preparation_default_seconds(workload))
+        .unwrap_or(WORKLOAD_READY_TIMEOUT.as_secs())
+}
+
 /// Resolve experimental snapshot tools from the project first, then PATH.
 fn snapshot_auxiliary_tools(
     enabled: bool,
@@ -927,15 +933,11 @@ pub(crate) fn launch(
     crate::project::apply_network_proxy(&mut command, project_root)
         .map_err(|error| error.to_string())?;
     let mut controller = Controller::spawn(&mut command)?;
+    let preparation_seconds =
+        preparation_seconds(workload, context.budgets.environment_preparation_seconds);
     let prepared = (|| -> Result<_, String> {
-        let ready = controller.receive(
-            Instant::now()
-                + context
-                    .budgets
-                    .environment_preparation_seconds
-                    .map(Duration::from_secs)
-                    .unwrap_or(WORKLOAD_READY_TIMEOUT),
-        )?;
+        let ready =
+            controller.receive(Instant::now() + Duration::from_secs(preparation_seconds))?;
         let ready = ReadyTask::decode(&ready, workload, task, &dataset)?;
         let initial_material = if context.verify_initial_material {
             Ok(request_initial_material(&mut controller)?)
@@ -967,10 +969,7 @@ pub(crate) fn launch(
             .budgets
             .evaluation_seconds
             .unwrap_or(EVALUATION_TIMEOUT_SECONDS),
-        preparation_seconds: context
-            .budgets
-            .environment_preparation_seconds
-            .unwrap_or(WORKLOAD_READY_TIMEOUT.as_secs()),
+        preparation_seconds,
         task_default_execution_seconds: agent_timeout,
         process_lifetime: super::adapters::find(workload)
             .ok_or("workload adapter disappeared before execution")?
@@ -1663,6 +1662,19 @@ mod execution_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn controller_uses_workload_preparation_default_and_explicit_override() {
+        assert_eq!(super::preparation_seconds("swe-bench", None), 7_320);
+        assert_eq!(
+            super::preparation_seconds("swe-bench-verified", None),
+            7_320
+        );
+        assert_eq!(super::preparation_seconds("swe-bench", Some(120)), 120);
+        assert_eq!(
+            super::preparation_seconds("unknown", None),
+            super::WORKLOAD_READY_TIMEOUT.as_secs()
+        );
+    }
     #[test]
     fn real_claude_replay_evidence_opt_in() {
         let Some(track) = std::env::var_os("ASB_TEST_CLAUDE_TRACK") else {
