@@ -362,7 +362,7 @@ fn bind_provider_tool_outputs(
     let mut prior = Vec::<(String, Vec<u8>)>::new();
     let mut prior_calls = Vec::<String>::new();
     let mut streamed_calls = false;
-    let mut outputs = std::collections::VecDeque::<Vec<u8>>::new();
+    let mut outputs = std::collections::VecDeque::<(String, Vec<u8>)>::new();
     for line in capture.lines() {
         let row: serde_json::Value = serde_json::from_str(line)
             .map_err(|_| "Codex provider capture is invalid".to_owned())?;
@@ -399,12 +399,12 @@ fn bind_provider_tool_outputs(
             return Err("Codex provider call/result sequence diverges".into());
         }
         if streamed_calls {
-            for (name, (_, output)) in prior_calls.iter().zip(appended) {
+            for (name, (id, output)) in prior_calls.iter().zip(appended) {
                 match name.as_str() {
                     // Codex presents its native Bash lifecycle hook as the
                     // Responses-compatible exec command. The native sidecar
                     // owns only that causal stream.
-                    "exec_command" => outputs.push_back(output.clone()),
+                    "exec_command" => outputs.push_back((id.clone(), output.clone())),
                     // This provider operation resumes an already-owned
                     // process; it has no PreToolUse native shell boundary.
                     "write_stdin" => (),
@@ -418,7 +418,7 @@ fn bind_provider_tool_outputs(
         } else {
             // Fixture/legacy captures without a streamed Responses envelope
             // retain the historical conservative one-result-per-hook route.
-            outputs.extend(appended.iter().map(|(_, output)| output.clone()));
+            outputs.extend(appended.iter().cloned());
         }
         prior = current;
         let calls = provider_function_calls(&row)?;
@@ -454,12 +454,15 @@ fn bind_provider_tool_outputs(
                     .to_owned(),
             );
         } else if row.get("event").and_then(serde_json::Value::as_str) == Some("output") {
-            pending
+            let hook_id = pending
                 .take()
                 .ok_or_else(|| "Codex native sidecar output has no request".to_owned())?;
-            let output = outputs.pop_front().ok_or_else(|| {
+            let (provider_id, output) = outputs.pop_front().ok_or_else(|| {
                 "Codex provider capture has no matching native tool result".to_owned()
             })?;
+            if hook_id != provider_id {
+                return Err("Codex native hook and provider tool identities differ".into());
+            }
             let output = serde_json::to_vec(
                 &String::from_utf8(output)
                     .map_err(|_| "Codex provider tool result is not UTF-8".to_owned())?,
@@ -1392,6 +1395,15 @@ mod tests {
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .collect::<Vec<_>>();
         assert_ne!(rows[1]["output_b64"], rows[3]["output_b64"]);
+        let mismatched = serde_json::json!({"request":{"body":serde_json::json!({"input":[
+            {"call_id":"different","output":"first"},
+            {"call_id":"call-1","output":"second"}
+        ]}).to_string()}});
+        std::fs::write(&capture, format!("{mismatched}\n")).unwrap();
+        assert_eq!(
+            bind_provider_tool_outputs(sidecar.as_bytes(), &capture).unwrap_err(),
+            "Codex native hook and provider tool identities differ"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1431,12 +1443,12 @@ mod tests {
         let capture = root.join("capture.jsonl");
         let first = row(serde_json::json!([]), response("exec_command"));
         let second = row(
-            serde_json::json!([{"call_id":"same","output":"native"}]),
+            serde_json::json!([{"call_id":"call-1","output":"native"}]),
             response("write_stdin"),
         );
         let third = row(
             serde_json::json!([
-                {"call_id":"same","output":"native"},
+                {"call_id":"call-1","output":"native"},
                 {"call_id":"same","output":"stream"}
             ]),
             String::new(),
