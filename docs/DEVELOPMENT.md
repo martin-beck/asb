@@ -55,6 +55,11 @@ replay rejects a different layout. This is an opt-in filesystem experiment,
 not automatic full-filesystem capture: special files, active sockets, other
 paths, overlapping tool mutations and full agent replay remain unqualified.
 Do not mark a cassette complete based on this facility alone.
+For targeted ASB run experiments, `ASB_EXPERIMENTAL_SNAPSHOT_ROOTS` can be set
+to a JSON array of extra guest paths, such as `["/tmp"]`, during both record
+and replay. This is experimental: copying an already-live socket does not
+preserve its listener, and an overlay or bind mount does not by itself solve
+the socket's lifecycle and identity semantics. Use only disposable task guests.
 The offline `crates/asb-cli/tests/fixtures/fs_snapshot/multiroot.py` probe
 records a workspace and a separate temporary directory, then checks four
 concurrent replays in private mount namespaces. Run it as root in a private

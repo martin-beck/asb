@@ -27,6 +27,19 @@ MAX_EXPORTED_ARTIFACTS = 8
 MAX_EXPORTED_ARTIFACT_BYTES = 16 * 1024 * 1024
 
 
+def experimental_snapshot_roots(configured):
+    if configured is None:
+        return []
+    try:
+        roots = json.loads(configured)
+    except (TypeError, ValueError) as error:
+        raise ExecutionError('experimental snapshot roots must be a JSON array of guest paths') from error
+    if (not isinstance(roots, list) or
+            any(not isinstance(path, str) or not path.startswith('/') or '\x00' in path for path in roots)):
+        raise ExecutionError('experimental snapshot roots must be a JSON array of guest paths')
+    return roots
+
+
 class _ArchiveChunks:
     """Read Docker's chunk iterator incrementally with a total wire bound."""
     def __init__(self, chunks, limit):
@@ -507,7 +520,8 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
         if replay:
             # The staging step has verified these exact bytes while copying.
             guest['snapshot_archive_sha256'] = next(item['sha256'] for item in request['private_inputs'] if item['target'] == 'workspace-snapshots.tar')
-        supervisor=GuestSnapshot(task,auxiliary,owner,docker_command(),deadline,replay=replay)
+        extra_roots = experimental_snapshot_roots(os.environ.get('ASB_EXPERIMENTAL_SNAPSHOT_ROOTS'))
+        supervisor=GuestSnapshot(task,auxiliary,owner,docker_command(),deadline,replay=replay,extra_roots=extra_roots)
         resources.push(lambda exc_type, exc, traceback: settle_on_exit(supervisor, exc_type, exc, traceback))
         environment['ASB_FS_REPLAY_SOCKET' if replay else 'ASB_FS_MARKER_SOCKET']='/opt/asb-private/snapshot.sock'
         guest['snapshot_private_mount'] = True

@@ -896,6 +896,9 @@ pub(crate) fn launch(
             "0"
         },
     );
+    if let Some(roots) = std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT_ROOTS") {
+        command.env("ASB_EXPERIMENTAL_SNAPSHOT_ROOTS", roots);
+    }
     command.arg(tool.join(helper));
     if let Some(operation) = operation {
         command.arg(operation);

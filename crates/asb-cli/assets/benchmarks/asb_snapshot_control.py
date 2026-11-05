@@ -21,7 +21,7 @@ def settle_on_exit(supervisor, exc_type, exc, traceback):
 
 
 class GuestSnapshot:
-    def __init__(self, task, tools, owner, docker_command, deadline, replay=False):
+    def __init__(self, task, tools, owner, docker_command, deadline, replay=False, extra_roots=()):
         self.task=task;self.docker_command=list(docker_command);self.process=None
         self.replay=replay
         self.log=(task.artifacts/'snapshot-supervisor.log').open('wb')
@@ -40,6 +40,8 @@ class GuestSnapshot:
             args += ['--qemu-img',tools['qemu-img'],'--qemu-storage',tools['qemu-storage-daemon']]
         if replay:
             args += ['--replay-archive','/asb-snapshot-storage/workspace-snapshots.tar']
+        for root in extra_roots:
+            args += ['--extra-root',root]
         self.process=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log)
         try:
             with selectors.DefaultSelector() as selector:
