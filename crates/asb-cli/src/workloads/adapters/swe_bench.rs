@@ -27,6 +27,10 @@ pub(super) static ADAPTER: SweBenchAdapter = SweBenchAdapter {
 };
 
 impl WorkloadAdapter for SweBenchAdapter {
+    fn preparation_default_seconds(&self) -> Option<u64> {
+        // Leave a cleanup margin after the official source-image build budget.
+        Some(7_320)
+    }
     fn estimated_disk_mib(&self) -> u64 {
         8192
     }
