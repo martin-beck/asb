@@ -1332,6 +1332,14 @@ checks real EOF, SIGTERM and interruption during official evaluation; normal
 completion still removes resources, while interrupted attempts retain them.
 These are retention/teardown checks, not recovered grading or retry receipts.
 
+The workload-controller gate permits interrupted controller cleanup to finish
+under retained supervision even when the caller's wait budget expires. The
+offline gate tests cover both timely and delayed cleanup, while
+`benchmark_swebench_signal.py` checks repeated SIGINT/SIGTERM during cleanup.
+The ignored `cancelled_controller_stops_its_real_owned_container` test checks
+an owned Docker container: set `ASB_CANCEL_TEST_IMAGE` to a locally cached
+image with `sh`, then run that ignored Rust test. It removes only its fixture.
+
 `benchmark_live_inspection.py` qualifies public `workload recover --inspect-grade`
 against retained original SDK fixture reports without running Docker, an agent,
 provider or evaluator. Set `ASB_TEST_BENCHMARK_ASB`, `ASB_TEST_SWECATALOG_ROOT`

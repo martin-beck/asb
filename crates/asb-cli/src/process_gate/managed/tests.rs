@@ -30,6 +30,161 @@ fn command(gate: &Path, program: &str, args: &[String]) -> (Command, crate::laun
 struct ReleaseOnDrop(std::path::PathBuf);
 
 #[test]
+fn cancelled_controller_can_finish_owned_resource_cleanup() {
+    let scope = test_support::Scope::new();
+    let root = root();
+    let ready = root.join("ready");
+    let cleaned = root.join("cleaned");
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    let script = format!(
+        "import os,signal,time\nfrom pathlib import Path\nassert 'ASB_GATE_WORKLOAD_CLEANUP' not in os.environ\ndef cleanup(*_):\n time.sleep(1.2)\n Path({:?}).write_text('stopped')\n raise SystemExit(0)\nsignal.signal(signal.SIGTERM,cleanup)\nPath({:?}).write_text('ready')\nwhile True: time.sleep(.05)\n",
+        cleaned.to_str().unwrap(),
+        ready.to_str().unwrap()
+    );
+    let (mut command, route) = command(&binary, "/usr/bin/python3", &["-c".into(), script]);
+    let mut gate = Admission::with_workload_controller(route.validate_gate(&mut command).unwrap())
+        .unwrap()
+        .spawn()
+        .unwrap();
+    gate.resume().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = gate.stop().unwrap();
+    assert!(
+        cleaned.exists(),
+        "controller was killed before its owned-resource cleanup finished"
+    );
+    drop(gate);
+    scope.wait_finished();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cancelled_controller_cleanup_outlives_callers_wait_budget() {
+    let scope = test_support::Scope::new();
+    let root = root();
+    let ready = root.join("ready");
+    let cleaned = root.join("cleaned");
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    let script = format!(
+        "import signal,time\nfrom pathlib import Path\ndef cleanup(*_):\n time.sleep(7)\n Path({:?}).write_text('stopped')\n raise SystemExit(0)\nsignal.signal(signal.SIGTERM,cleanup)\nPath({:?}).write_text('ready')\nwhile True: time.sleep(.05)\n",
+        cleaned.to_str().unwrap(),
+        ready.to_str().unwrap()
+    );
+    let (mut command, route) = command(&binary, "/usr/bin/python3", &["-c".into(), script]);
+    let mut gate = Admission::with_workload_controller(route.validate_gate(&mut command).unwrap())
+        .unwrap()
+        .spawn()
+        .unwrap();
+    gate.resume().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        gate.stop().is_err(),
+        "cleanup exceeding the caller's budget must not claim completion"
+    );
+    drop(gate);
+    scope.wait_finished();
+    assert!(
+        cleaned.exists(),
+        "retained gate did not let controller cleanup finish"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "requires Docker and ASB_CANCEL_TEST_IMAGE referring to a locally cached image"]
+fn cancelled_controller_stops_its_real_owned_container() {
+    use std::process::Command as StdCommand;
+    let scope = test_support::Scope::new();
+    let root = root();
+    let name = format!("asb-cancel-test-{}", std::process::id());
+    struct Container(String);
+    impl Drop for Container {
+        fn drop(&mut self) {
+            let _ = StdCommand::new("docker")
+                .args(["rm", "-f", &self.0])
+                .output();
+        }
+    }
+    let image = std::env::var("ASB_CANCEL_TEST_IMAGE").expect("cached test image");
+    let created = StdCommand::new("docker")
+        .args([
+            "run",
+            "-d",
+            "--pull=never",
+            "--name",
+            &name,
+            "--label",
+            "asb.test=cancel-cleanup",
+            &image,
+            "sh",
+            "-c",
+            "trap 'sleep 1; exit 0' TERM; while :; do sleep 0.1; done",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "could not start test container");
+    let _container = Container(name.clone());
+    let ready = root.join("ready");
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+    let script = format!(
+        "import signal,subprocess,time\nfrom pathlib import Path\ndef cleanup(*_):\n subprocess.run(['docker','stop','--time','2',{:?}],check=True,stdout=subprocess.DEVNULL)\n raise SystemExit(0)\nsignal.signal(signal.SIGTERM,cleanup)\nPath({:?}).write_text('ready')\nwhile True: time.sleep(.05)\n",
+        name,
+        ready.to_str().unwrap()
+    );
+    let (mut command, route) = command(&binary, "/usr/bin/python3", &["-c".into(), script]);
+    let mut gate = Admission::with_workload_controller(route.validate_gate(&mut command).unwrap())
+        .unwrap()
+        .spawn()
+        .unwrap();
+    gate.resume().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = gate.stop().unwrap();
+    let inspected = StdCommand::new("docker")
+        .args(["inspect", "--format", "{{.State.Running}}", &name])
+        .output()
+        .unwrap();
+    assert!(inspected.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&inspected.stdout).trim(),
+        "false",
+        "owned container was left running"
+    );
+    drop(gate);
+    scope.wait_finished();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn delayed_readiness_checks_operation_deadline_before_continue() {
     let root = root();
     let marker = root.join("must-not-execute");

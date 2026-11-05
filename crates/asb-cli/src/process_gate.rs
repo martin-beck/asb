@@ -21,6 +21,8 @@ use sha2::{Digest, Sha256};
 const TRACE_READY_FD: &str = "ASB_NATIVE_TRACE_READY_FD";
 #[cfg(target_os = "linux")]
 const MEASURE_PRINCIPAL: &str = "ASB_GATE_MEASURE_PRINCIPAL";
+#[cfg(target_os = "linux")]
+const WORKLOAD_CLEANUP: &str = "ASB_GATE_WORKLOAD_CLEANUP";
 
 #[cfg(target_os = "linux")]
 const INSTALL_LOCK_FDS: &str = "ASB_GATE_INSTALL_LOCK_FDS";
@@ -245,6 +247,16 @@ pub(crate) fn run_gate(args: &[OsString]) -> std::process::ExitCode {
         std::env::remove_var(MEASURE_PRINCIPAL)
     };
     #[cfg(target_os = "linux")]
+    let workload_cleanup = match std::env::var(WORKLOAD_CLEANUP) {
+        Ok(value) if value == "1" => true,
+        Err(std::env::VarError::NotPresent) => false,
+        _ => return std::process::ExitCode::from(2),
+    };
+    #[cfg(target_os = "linux")]
+    unsafe {
+        std::env::remove_var(WORKLOAD_CLEANUP)
+    };
+    #[cfg(target_os = "linux")]
     let mut receipt = match receipt::Sender::from_environment() {
         Ok(receipt) => receipt,
         Err(error) => {
@@ -361,7 +373,9 @@ pub(crate) fn run_gate(args: &[OsString]) -> std::process::ExitCode {
     #[cfg(target_os = "linux")]
     {
         let mut reported = false;
-        while let Err(error) = if trace.is_some() {
+        while let Err(error) = if workload_cleanup && status.is_err() {
+            descendants.quiesce_cancelled_workload(trace.is_some())
+        } else if trace.is_some() {
             descendants.quiesce_traced()
         } else {
             descendants.quiesce()

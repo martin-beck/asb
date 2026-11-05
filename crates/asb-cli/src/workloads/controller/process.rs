@@ -18,7 +18,7 @@ impl Process {
         let validated = route
             .validate_gate(&mut command.command)
             .map_err(|error| error.to_string())?;
-        let admission = crate::process_gate::Admission::with_principal_observation(validated)
+        let admission = crate::process_gate::Admission::with_workload_controller(validated)
             .map_err(|error| error.to_string())?;
         admission
             .spawn()

@@ -54,7 +54,7 @@ impl DescendantScope {
     /// submission. A short TERM grace is followed by KILL; repeated sweeps
     /// retain and reap double-forked helpers as their parents exit.
     pub(crate) fn quiesce(&mut self) -> io::Result<()> {
-        self.quiesce_with_trace(false, None)
+        self.quiesce_with_trace(false, None, Duration::from_millis(500))
     }
 
     /// Keep one separately owned service alive while reaping agent descendants.
@@ -66,7 +66,7 @@ impl DescendantScope {
                 "owned auxiliary service exited before agent cleanup",
             ));
         }
-        self.quiesce_with_trace(false, Some(service.id()))?;
+        self.quiesce_with_trace(false, Some(service.id()), Duration::from_millis(500))?;
         if service.try_wait()?.is_some() {
             return Err(io::Error::other(
                 "owned auxiliary service exited during agent cleanup",
@@ -77,10 +77,24 @@ impl DescendantScope {
 
     /// Only the native gate owns lifecycle-traced tasks on its calling thread.
     pub(super) fn quiesce_traced(&mut self) -> io::Result<()> {
-        self.quiesce_with_trace(true, None)
+        self.quiesce_with_trace(true, None, Duration::from_millis(500))
     }
 
-    fn quiesce_with_trace(&mut self, traced: bool, service: Option<u32>) -> io::Result<()> {
+    /// A workload controller may need to settle its guest snapshot and stop
+    /// the owned container before exiting. Keep the gate in custody while it
+    /// does so, even if its caller's shorter wait budget has elapsed.
+    pub(super) fn quiesce_cancelled_workload(&mut self, traced: bool) -> io::Result<()> {
+        // Snapshot settlement permits 600 seconds before owned-container
+        // cleanup starts; reserve additional time for that cleanup itself.
+        self.quiesce_with_trace(traced, None, Duration::from_secs(660))
+    }
+
+    fn quiesce_with_trace(
+        &mut self,
+        traced: bool,
+        service: Option<u32>,
+        grace: Duration,
+    ) -> io::Result<()> {
         self.attempted = true;
         if self.owner != std::process::id() {
             return Err(io::Error::other(
@@ -117,7 +131,7 @@ impl DescendantScope {
             if traced && let Err(error) = resume_consumed_trace_stops(&children) {
                 first_error.get_or_insert(error);
             }
-            if started.elapsed() >= Duration::from_secs(5) {
+            if started.elapsed() >= grace.saturating_add(Duration::from_millis(4500)) {
                 return Err(first_error.unwrap_or_else(|| {
                     io::Error::other("agent descendants did not stop within the cleanup deadline")
                 }));
@@ -125,7 +139,7 @@ impl DescendantScope {
             for pid in children {
                 // One inaccessible child must not starve separately owned
                 // siblings, nor restart the shared five-second budget.
-                if started.elapsed() >= Duration::from_secs(5) {
+                if started.elapsed() >= grace.saturating_add(Duration::from_millis(4500)) {
                     return Err(first_error.unwrap_or_else(|| {
                         io::Error::other(
                             "agent descendants did not stop within the cleanup deadline",
@@ -137,7 +151,7 @@ impl DescendantScope {
                         io::Error::other("agent descendant churn exceeded its cleanup bound")
                     }));
                 }
-                let signal = if started.elapsed() >= Duration::from_millis(500) {
+                let signal = if started.elapsed() >= grace {
                     Some(libc::SIGKILL)
                 } else if terminated.insert(pid) {
                     Some(libc::SIGTERM)

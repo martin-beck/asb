@@ -34,6 +34,16 @@ MAX_PATCH_BYTES = 4 * 1024 * 1024
 HARNESS_REVISION = "02e7a74ffd0b707aab73d203fe87bdc7c76afc8e"
 
 
+def install_session_cancel_handlers():
+    """Begin cancellation once; later terminal signals must not interrupt cleanup."""
+    def interrupted(_signal, _frame):
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise InterruptedError("ASB task session was cancelled")
+    signal.signal(signal.SIGINT, interrupted)
+    signal.signal(signal.SIGTERM, interrupted)
+
+
 def sdk_identity(distribution=None):
     """Record actual installed code identity rather than claiming the recipe pin."""
     distribution = distribution or importlib.metadata.distribution("swebench")
@@ -884,9 +894,7 @@ def main(argv=None):
         from asb_docker import DockerSession
         from asb_swebench_task import SweBenchTask
         from asb_task_server import serve
-        def interrupted(_signal, _frame):
-            raise InterruptedError("ASB task session was cancelled")
-        signal.signal(signal.SIGTERM, interrupted)
+        install_session_cancel_handlers()
         with DockerSession() as client:
             return serve(SweBenchTask(client, arguments.catalog, arguments.task, arguments.artifacts,
                                       tool_mode=os.environ.get("ASB_WORKLOAD_TOOL_MODE", "none"),
