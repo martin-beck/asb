@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, unlinkSync, rmSync, openSync, closeSync } from 'node:fs';
 import { createServer } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
 import { once } from 'node:events';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -15,8 +16,13 @@ const actualRoot = mkdtempSync(join(tmpdir(), 'asb-pi-native-'));
 const directory = process.platform === 'linux' ? openSync(actualRoot,'r') : null;
 const root = directory === null ? actualRoot : `/proc/${process.pid}/fd/${directory}`;
 try {
+  let httpRequests=0;
+  const upstream=createHttpServer((_request,response)=>{httpRequests++;response.end('done');});
+  await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));
+  const fixtureUrl=`http://127.0.0.1:${upstream.address().port}/`;
   const bundle=join(root,'agent-loop.mjs'), entry=join(root,'client.mjs'), effect=join(root,'effect'), markerPath=join(root,'marker.sock'), socket=join(root,'broker.sock');
   writeFileSync(bundle,`import {writeFileSync} from 'node:fs';
+import {execFileSync} from 'node:child_process';
 async function executePreparedToolCall(prepared, signal, emit) {
     const updateEvents = [];
     try {
@@ -27,7 +33,7 @@ async function executePreparedToolCall(prepared, signal, emit) {
         return { result, isError: false };
     } catch(error) { throw error; }
 }
-export const result = await executePreparedToolCall({toolCall:{id:'one',name:'bash'},args:{command:'fixture'},tool:{execute:async()=>{writeFileSync(process.env.FIXTURE_EFFECT,'live');return {content:[{type:'text',text:'done'}],details:undefined}}}},null,()=>{});
+export const result = await executePreparedToolCall({toolCall:{id:'one',name:'bash'},args:{command:'fixture'},tool:{execute:async()=>{const text=execFileSync(process.execPath,['-e','fetch(process.env.FIXTURE_URL).then(r=>r.text()).then(t=>process.stdout.write(t))'],{encoding:'utf8'});writeFileSync(process.env.FIXTURE_EFFECT,'live');return {content:[{type:'text',text}],details:undefined}}}},null,()=>{});
 `);
   writeFileSync(entry,`import {result} from './agent-loop.mjs'; if(result.result.content[0].text!=='done'||result.result.details!==undefined)process.exit(3);`);
   const markers=[];
@@ -42,9 +48,9 @@ export const result = await executePreparedToolCall({toolCall:{id:'one',name:'ba
     assert.match(missingMarkerError,/requires the bundle, broker and snapshot marker/);
     assert.equal(existsSync(effect),false,'missing snapshot marker must stop the native tool');
   }
-  async function run(mode,events=[]) {
-    const broker=new NativeToolBroker(mode,events,replayEffects(markerPath,'pi'));await broker.listen(socket);
-    const child=spawn(process.execPath,[entry],{cwd:root,env:{PATH:process.env.PATH||'',NODE_OPTIONS:`--import=${JSON.stringify(bootstrap)}`,ASB_NATIVE_BUNDLE:bundle,ASB_NATIVE_MODE:mode,ASB_NATIVE_SOCKET:socket,ASB_NATIVE_MARKER:markerPath,FIXTURE_EFFECT:effect},stdio:['ignore','ignore','pipe']});
+  async function run(mode,events=[],socketPath=socket) {
+    const broker=new NativeToolBroker(mode,events,replayEffects(markerPath,'pi'));await broker.listen(socketPath);
+    const child=spawn(process.execPath,[entry],{cwd:root,env:{PATH:process.env.PATH||'',NODE_OPTIONS:`--import=${JSON.stringify(bootstrap)}`,ASB_NATIVE_BUNDLE:bundle,ASB_NATIVE_MODE:mode,ASB_NATIVE_SOCKET:socketPath,ASB_NATIVE_MARKER:markerPath,FIXTURE_EFFECT:effect,FIXTURE_URL:fixtureUrl},stdio:['ignore','ignore','pipe']});
     let stderr='';child.stderr.on('data',chunk=>stderr+=chunk);
     const [code]=await once(child,'exit');assert.equal(code,0,stderr);
     return broker.finish();
@@ -54,8 +60,12 @@ export const result = await executePreparedToolCall({toolCall:{id:'one',name:'ba
   const sidecar=encodeSidecar(events,hash(readFileSync(bundle)),hash('snapshot'),'pi');
   assert.equal(decodeSidecar(sidecar,'pi').exchanges.length,1);
   assert.throws(()=>decodeSidecar(sidecar,'continue'),/lifecycle/);
-  await run('replay',decodeSidecar(sidecar,'pi').exchanges);
+  assert.equal(httpRequests,1,'record must actually contact the fixture service');
+  await new Promise(resolve=>upstream.close(resolve));
+  await Promise.all(Array.from({length:4},(_,replica)=>
+    run('replay',decodeSidecar(sidecar,'pi').exchanges,join(root,`broker-${replica}.sock`))));
   assert.equal(existsSync(effect),false,'replay must not execute the tool');
+  assert.equal(httpRequests,1,'replay must not contact the fixture service');
   assert.match(markers[0],/^tool-begin:pi-0:\d+:\d+$/);
   assert.match(markers[1],/^tool-end:pi-0:\d+:\d+$/);
   assert.equal(markers[2],'tool-end:pi-0');
