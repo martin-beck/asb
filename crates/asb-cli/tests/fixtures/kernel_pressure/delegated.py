@@ -69,10 +69,13 @@ thread = threading.Thread(target=observe)
 thread.start()
 runner = None
 status = None
+runner_started = runner_ended = None
 try:
     env = dict(os.environ, ASB_CGROUP_PARENT=str(agents))
+    runner_started = time.monotonic_ns()
     runner = subprocess.Popen([str(binary), "run", args.config, "--llm-replay", "--cassette", "tape.jsonl"], cwd=project, env=env)
     status = runner.wait(timeout=120)
+    runner_ended = time.monotonic_ns()
 finally:
     if runner is not None and runner.poll() is None:
         runner.terminate()
@@ -83,6 +86,7 @@ finally:
     noise.wait(timeout=10)
     receipt = {"runner_pid": runner.pid if runner else None, "noise_pid": noise.pid,
                "fixture_pid": os.getpid(), "controllers": selected, "exit": status,
+               "runner_wall_ns": runner_ended - runner_started if runner_ended is not None else None,
                "observations": observations, "psi_enabled": Path("/proc/pressure/cpu").exists()}
     with (project / "qualification-scope.json").open("x") as output:
         json.dump(receipt, output)

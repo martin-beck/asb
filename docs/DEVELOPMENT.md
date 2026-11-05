@@ -1665,3 +1665,34 @@ reaping, unrelated sentinel survival, poll/deadline handoff and unwinding.
 This bounds the caller, not a kernel-stuck process's actual exit. Other built-in
 collector startup/normal-stop paths retain their existing lifecycle policies;
 this change does not claim they all have bounded cleanup.
+
+The opt-in `tests/fixtures/arm_telemetry/overhead.py` fixture compares fixed work
+across three instrumentation profiles. Run it on Linux with an already frozen
+ASB executable, Node 22+, project-local perf, delegated systemd scopes and an
+existing disposable scope-fixture project containing builtin workloads:
+
+```sh
+python3 crates/asb-cli/tests/fixtures/arm_telemetry/overhead.py \
+  --asb /absolute/path/to/frozen/asb \
+  --base-project /absolute/path/to/scope-fixture \
+  --node /absolute/path/to/node --output /absolute/path/to/new-campaign
+```
+
+It prints the exact `sudo -n systemd-run` commands before launching fresh
+transient scopes. It changes only those scopes, enables no persistent settings
+and never contacts an inference provider. Each case stages a clearly marked
+synthetic Pi-compatible client and local tape; the installed Pi client and
+previous results are never replaced. Profiles use the same gated accounting/
+pressure baseline, then add Arm PMU with perf (including stack recording), then
+SPE. The client performs three fixed-count integer workloads and 128 fixed-size
+read/write pairs; it does not spin until a wall-clock deadline. Three randomized
+rounds are required. Exact work-completion checksums, root/cgroup receipts,
+cohort bounds, CPU accounting and actual CLI/service durations remain separate.
+
+`overhead.json` retains order, source/binary hashes, every observation, medians,
+ranges and descriptive changes relative to the light baseline. These are not
+causal overhead estimates, confidence intervals or real-agent/model scores.
+Failed cases and partial campaigns remain intact. RuntimeMaxSec bounds abandoned
+services; interruption attempts to stop only the uniquely named owned scope.
+Ordinary CI runs only the unprivileged policy tests and JavaScript syntax check;
+it starts no collector, service, provider, download or benchmark.
