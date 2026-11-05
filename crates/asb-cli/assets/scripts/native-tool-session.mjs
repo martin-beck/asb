@@ -65,9 +65,19 @@ export class ReplaySession {
       throw new Error('Native tool replay events are incomplete');
     }
     for (const event of this.byDispatch) if (!event.outcome.ok && Object.hasOwn(event.outcome, 'thrown')) decodeThrown(event.outcome.thrown);
+    const sequenced = this.events.filter(event => Object.hasOwn(event, 'snapshot_sequence'));
+    if (sequenced.length && (sequenced.length !== this.events.length ||
+        sequenced.some(event => !Number.isSafeInteger(event.snapshot_sequence) || event.snapshot_sequence < 2))) {
+      throw new Error('Native tool replay snapshot order is incomplete');
+    }
+    this.byEffect = sequenced.length ? [...this.events].sort((a,b) => a.snapshot_sequence - b.snapshot_sequence) : this.events;
+    if (sequenced.length && this.byEffect.some((event,index) => event.snapshot_sequence !== index + 2)) {
+      throw new Error('Native tool replay snapshot order is incomplete');
+    }
     this.applyEffects = applyEffects;
     this.nextDispatch = 0;
     this.nextCompletion = 0;
+    this.nextEffect = 0;
     this.pending = [];
     this.assigned = new Map();
     this.draining = false;
@@ -89,7 +99,7 @@ export class ReplaySession {
     // observed even when no caller requests this early view.
     assignment.catch(() => {});
     const outcome = new Promise((resolve, reject) => {
-      item = { key, resolve, reject, assign, rejectAssignment, released: false };
+      item = { key, resolve, reject, assign, rejectAssignment, released: false, applied: false };
       this.pending.push(item);
     });
     this.drain().catch(error => this.abort(error));
@@ -120,13 +130,20 @@ export class ReplaySession {
         }
         const event = this.events[this.nextCompletion];
         const item = event && this.assigned.get(event.ordinal);
-        if (!item || !item.released) break;
-        await this.applyEffects(clone(event));
-        this.assigned.delete(event.ordinal);
-        this.nextCompletion++;
-        if (event.outcome.ok) item.resolve(clone(event.outcome.value));
-        else if (Object.hasOwn(event.outcome, 'thrown')) item.reject(decodeThrown(event.outcome.thrown));
-        else { const error = new Error(event.outcome.message); error.name = event.outcome.name; item.reject(error); }
+        if (item?.applied) {
+          this.assigned.delete(event.ordinal);
+          this.nextCompletion++;
+          if (event.outcome.ok) item.resolve(clone(event.outcome.value));
+          else if (Object.hasOwn(event.outcome, 'thrown')) item.reject(decodeThrown(event.outcome.thrown));
+          else { const error = new Error(event.outcome.message); error.name = event.outcome.name; item.reject(error); }
+          continue;
+        }
+        const effect = this.byEffect[this.nextEffect];
+        const target = effect && this.assigned.get(effect.ordinal);
+        if (!target || !target.released) break;
+        await this.applyEffects(clone(effect));
+        target.applied = true;
+        this.nextEffect++;
       }
     } finally { this.draining = false; }
   }
@@ -137,7 +154,7 @@ export class ReplaySession {
     this.assigned.clear();
   }
   finish() {
-    if (this.closed || this.pending.length || this.assigned.size || this.nextCompletion !== this.events.length) {
+    if (this.closed || this.pending.length || this.assigned.size || this.nextCompletion !== this.events.length || this.nextEffect !== this.events.length) {
       throw new Error('Native tool replay left tool calls incomplete');
     }
     this.closed = true;

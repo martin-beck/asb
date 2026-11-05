@@ -10,6 +10,8 @@ import { createNativeDispatcher } from '../assets/scripts/continue-native-dispat
 import { sealBroker, sealPendingBroker, replayBroker } from '../assets/scripts/native-tool-custody.mjs';
 import { createHash } from 'node:crypto';
 import { recordBoundaries, replayEffects, snapshotBoundary } from '../assets/scripts/native-snapshot-boundary.mjs';
+import { encodeSidecar, decodeSidecar } from '../assets/scripts/native-tool-sidecar.mjs';
+import { ReplaySession } from '../assets/scripts/native-tool-session.mjs';
 
 const root = mkdtempSync(join(tmpdir(), 'asb-continue-broker-'));
 const socket = join(root, 'broker.sock');
@@ -232,8 +234,7 @@ try {
   assert.equal((await brokerRequest(socket, {op: 'release', token: firstCall.token})).value, 'first');
   assert.equal((await lateOutcome).value, 'later');
   await duplicateBroker.finish();
-  // Broker messages may arrive in a different order than the snapshot
-  // service completed them. Preserve the snapshot order for replay.
+  // Preserve both the observed result order and the different snapshot order.
   const orderedRecord = new NativeToolBroker('record');
   await orderedRecord.listen(socket);
   const earlier = await brokerRequest(socket, {op:'start', request:{tool:'earlier'}});
@@ -241,12 +242,28 @@ try {
   await brokerRequest(socket, {op:'finish', token:later.token, snapshot_sequence:3, outcome:{ok:true,value:'later'}});
   await brokerRequest(socket, {op:'finish', token:earlier.token, snapshot_sequence:2, outcome:{ok:true,value:'earlier'}});
   const orderedEvents = JSON.parse(await orderedRecord.finish(events => JSON.stringify(events)));
-  assert.deepEqual(orderedEvents.map(event => event.ordinal), [0,1]);
-  const orderedReplay = new NativeToolBroker('replay', orderedEvents);
+  assert.deepEqual(orderedEvents.map(event => event.ordinal), [1,0]);
+  assert.deepEqual(orderedEvents.map(event => event.snapshot_sequence), [3,2]);
+  const sequencedSidecar = encodeSidecar(orderedEvents, 'a'.repeat(64), 'b'.repeat(64), 'pi');
+  const decodedEvents = decodeSidecar(sequencedSidecar, 'pi').exchanges;
+  assert.deepEqual(decodedEvents, orderedEvents);
+  const appliedOrder = [], resultOrder = [];
+  const orderedReplay = new NativeToolBroker('replay', decodedEvents, async event => { appliedOrder.push(event.ordinal); });
   await orderedReplay.listen(socket);
-  assert.equal((await brokerRequest(socket, {op:'invoke', request:{tool:'earlier'}})).value, 'earlier');
-  assert.equal((await brokerRequest(socket, {op:'invoke', request:{tool:'later'}})).value, 'later');
+  const firstResult = brokerRequest(socket, {op:'invoke', request:{tool:'earlier'}}).then(result => {resultOrder.push(result.value);});
+  const secondResult = brokerRequest(socket, {op:'invoke', request:{tool:'later'}}).then(result => {resultOrder.push(result.value);});
+  await Promise.all([firstResult,secondResult]);
+  assert.deepEqual(appliedOrder, [0,1]);
+  assert.deepEqual([...resultOrder].sort(), ['earlier','later']);
   await orderedReplay.finish();
+  const directEffects = [], directResults = [];
+  const directReplay = new ReplaySession(decodedEvents, async event => { directEffects.push(event.ordinal); });
+  const directFirst = directReplay.invoke({tool:'earlier'}).then(value => {directResults.push(value);});
+  const directSecond = directReplay.invoke({tool:'later'}).then(value => {directResults.push(value);});
+  await Promise.all([directFirst,directSecond]);
+  assert.deepEqual(directEffects, [0,1]);
+  assert.deepEqual(directResults, ['later','earlier']);
+  directReplay.finish();
   const partialOrder = new NativeToolBroker('record');
   await partialOrder.listen(socket);
   const withSequence = await brokerRequest(socket, {op:'start', request:{tool:'one'}});

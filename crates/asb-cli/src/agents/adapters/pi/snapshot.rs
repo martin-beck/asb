@@ -40,10 +40,10 @@ pub(super) fn verify(native: &[u8], snapshot: &mut File, digest: &str) -> Result
     let mut ordinals = BTreeSet::new();
     for request in requests {
         let value: serde_json::Value = serde_json::from_slice(request).map_err(|_| invalid())?;
-        if value
-            .as_object()
-            .is_none_or(|obj| obj.len() != 2 || !obj.contains_key("request"))
-        {
+        if value.as_object().is_none_or(|obj| {
+            !obj.contains_key("request")
+                || !(obj.len() == 2 || (obj.len() == 3 && obj.contains_key("snapshot_sequence")))
+        }) {
             return Err(invalid());
         }
         let ordinal = value
@@ -53,11 +53,29 @@ pub(super) fn verify(native: &[u8], snapshot: &mut File, digest: &str) -> Result
         if !ordinals.insert(ordinal) {
             return Err(invalid());
         }
-        expected.push(format!("pi-{ordinal}"));
+        let sequence = value
+            .get("snapshot_sequence")
+            .map(|item| item.as_u64().ok_or_else(invalid))
+            .transpose()?;
+        expected.push((sequence, format!("pi-{ordinal}")));
     }
     if ordinals.iter().copied().ne(0..ordinals.len() as u64) {
         return Err(invalid());
     }
+    if expected.iter().any(|(sequence, _)| sequence.is_some()) {
+        if expected.iter().any(|(sequence, _)| sequence.is_none()) {
+            return Err(invalid());
+        }
+        expected.sort_by_key(|(sequence, _)| *sequence);
+        if expected
+            .iter()
+            .enumerate()
+            .any(|(index, (sequence, _))| *sequence != Some(index as u64 + 2))
+        {
+            return Err(invalid());
+        }
+    }
+    let expected: Vec<String> = expected.into_iter().map(|(_, alias)| alias).collect();
 
     snapshot.seek(SeekFrom::Start(0)).map_err(|_| invalid())?;
     let mut archive = tar::Archive::new(snapshot);
@@ -183,19 +201,20 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn native() -> Vec<u8> {
+    fn native(sequenced: bool) -> Vec<u8> {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/continue_native_sidecar_emit.mjs");
-        let output = std::process::Command::new("node")
-            .arg(fixture)
-            .args(["--pi", "--pending"])
-            .output()
-            .unwrap();
+        let mut command = std::process::Command::new("node");
+        command.arg(fixture).args(["--pi", "--pending"]);
+        if sequenced {
+            command.arg("--sequence");
+        }
+        let output = command.output().unwrap();
         assert!(output.status.success());
         crate::agents::native_guest::finalize("pi", &output.stdout, &"a".repeat(64)).unwrap()
     }
 
-    fn archive(path: &std::path::Path, wrong: bool) {
+    fn archive(path: &std::path::Path, wrong: bool, sequenced: bool) {
         let file = File::create(path).unwrap();
         let mut tar = tar::Builder::new(file);
         let mut add = |name: &str, bytes: &[u8]| {
@@ -205,13 +224,16 @@ mod tests {
             header.set_cksum();
             tar.append_data(&mut header, name, bytes).unwrap();
         };
-        let alias = if wrong { "pi-0" } else { "pi-1" };
+        let first = if sequenced || wrong { "pi-0" } else { "pi-1" };
+        let second = if sequenced { "pi-1" } else { "pi-0" };
         let boundaries = format!(
-            "{{\"sequence\":1,\"kind\":\"baseline\",\"alias\":null,\"snapshot\":\"snapshot-00000001\"}}\n{{\"sequence\":2,\"kind\":\"tool-end\",\"alias\":\"{alias}\",\"snapshot\":\"snapshot-00000002\"}}\n{{\"sequence\":3,\"kind\":\"tool-end\",\"alias\":\"pi-0\",\"snapshot\":\"snapshot-00000003\"}}\n{{\"sequence\":4,\"kind\":\"final\",\"alias\":null,\"snapshot\":\"snapshot-00000004\"}}\n"
+            "{{\"sequence\":1,\"kind\":\"baseline\",\"alias\":null,\"snapshot\":\"snapshot-00000001\"}}\n{{\"sequence\":2,\"kind\":\"tool-end\",\"alias\":\"{first}\",\"snapshot\":\"snapshot-00000002\"}}\n{{\"sequence\":3,\"kind\":\"tool-end\",\"alias\":\"{second}\",\"snapshot\":\"snapshot-00000003\"}}\n{{\"sequence\":4,\"kind\":\"final\",\"alias\":null,\"snapshot\":\"snapshot-00000004\"}}\n"
         );
-        let markers = b"{\"sequence\":1,\"kind\":\"begin\",\"alias\":\"pi-0\",\"snapshot_sequence\":1}\n{\"sequence\":2,\"kind\":\"begin\",\"alias\":\"pi-1\",\"snapshot_sequence\":1}\n{\"sequence\":3,\"kind\":\"end\",\"alias\":\"pi-1\",\"snapshot_sequence\":2}\n{\"sequence\":4,\"kind\":\"end\",\"alias\":\"pi-0\",\"snapshot_sequence\":3}\n";
+        let markers = format!(
+            "{{\"sequence\":1,\"kind\":\"begin\",\"alias\":\"pi-0\",\"snapshot_sequence\":1}}\n{{\"sequence\":2,\"kind\":\"begin\",\"alias\":\"pi-1\",\"snapshot_sequence\":1}}\n{{\"sequence\":3,\"kind\":\"end\",\"alias\":\"{first}\",\"snapshot_sequence\":2}}\n{{\"sequence\":4,\"kind\":\"end\",\"alias\":\"{second}\",\"snapshot_sequence\":3}}\n"
+        );
         add("boundaries.jsonl", boundaries.as_bytes());
-        add("markers.jsonl", markers);
+        add("markers.jsonl", markers.as_bytes());
         for i in 1..=4 {
             add(&format!("snapshot-{i:08}.btrfs"), b"fixture");
         }
@@ -226,17 +248,54 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let good = root.join("good.tar");
         let bad = root.join("bad.tar");
-        archive(&good, false);
-        archive(&bad, true);
-        let native = native();
+        archive(&good, false, false);
+        archive(&bad, true, false);
+        let legacy_native = native(false);
         assert!(
             crate::agents::find("pi")
                 .unwrap()
-                .verify_native_snapshot(&native, &mut File::open(&good).unwrap(), &"a".repeat(64))
+                .verify_native_snapshot(
+                    &legacy_native,
+                    &mut File::open(&good).unwrap(),
+                    &"a".repeat(64)
+                )
                 .is_ok()
         );
-        assert!(verify(&native, &mut File::open(&bad).unwrap(), &"a".repeat(64)).is_err());
-        assert!(verify(&native, &mut File::open(&good).unwrap(), &"b".repeat(64)).is_err());
+        assert!(
+            verify(
+                &legacy_native,
+                &mut File::open(&bad).unwrap(),
+                &"a".repeat(64)
+            )
+            .is_err()
+        );
+        assert!(
+            verify(
+                &legacy_native,
+                &mut File::open(&good).unwrap(),
+                &"b".repeat(64)
+            )
+            .is_err()
+        );
+        let sequenced = root.join("sequenced.tar");
+        archive(&sequenced, false, true);
+        let ordered_native = native(true);
+        assert!(
+            verify(
+                &ordered_native,
+                &mut File::open(&sequenced).unwrap(),
+                &"a".repeat(64)
+            )
+            .is_ok()
+        );
+        assert!(
+            verify(
+                &ordered_native,
+                &mut File::open(&good).unwrap(),
+                &"a".repeat(64)
+            )
+            .is_err()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

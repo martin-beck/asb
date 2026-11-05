@@ -109,8 +109,9 @@ export class NativeToolBroker {
         const preview = this.session.preview();
         if (this.snapshotSequences.size) {
           if (this.snapshotSequences.size !== preview.length || preview.some(event => !this.snapshotSequences.has(event.ordinal))) throw new Error('Native tool snapshot completion order is incomplete');
-          preview.sort((a, b) => this.snapshotSequences.get(a.ordinal) - this.snapshotSequences.get(b.ordinal));
-          if (preview.some((event, index) => this.snapshotSequences.get(event.ordinal) !== index + 2)) throw new Error('Native tool snapshot completion order is incomplete');
+          const sequences = [...this.snapshotSequences.values()].sort((a, b) => a - b);
+          if (sequences.some((sequence, index) => sequence !== index + 2)) throw new Error('Native tool snapshot completion order is incomplete');
+          for (const event of preview) event.snapshot_sequence = this.snapshotSequences.get(event.ordinal);
         }
         if (encode) encoded = encode(preview);
         this.session.finish();
