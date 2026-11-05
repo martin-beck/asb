@@ -17,3 +17,27 @@ test("only a complete SymPy banner from a matching shell command loses its seed"
   const changed = text.replace("1 passed", "1 failed");
   assert.notEqual(normalizeToolResult({ text: changed, tool }), normalized);
 });
+
+test('tailed SymPy metadata and elapsed summaries preserve substantive differences', () => {
+  const tool = {name:'bash', arguments:{command:'cd /testbed && python bin/test sympy/example.py 2>&1 | tail -40'}};
+  const metadata = 'architecture:       64-bit\ncache:              yes\nground types:       python \nnumpy:              None\nrandom seed:        12345\nhash randomization: off\n';
+  const header = 'executable:         /opt/miniconda3/envs/testbed/bin/python  (3.9.20-final-0) [CPython]\n';
+  const body = 'failure: expected value\n';
+  const short = '= tests finished: 997 passed, 26 skipped, 11 expected to fail, in 9.99 seconds ===\n';
+  const long = ' tests finished: 997 passed, 26 skipped, 11 expected to fail, in 11.10 seconds ===\n';
+  for (const prefix of ['', header]) {
+    const recorded = prefix + metadata + body + short;
+    const replayed = prefix + metadata.replace('12345', '98765') + body + long;
+    const canonical = normalizeToolResult({text: recorded, tool});
+    assert.equal(normalizeToolResult({text: replayed, tool}), canonical);
+    assert.equal(normalizeToolResult({text: canonical, tool}), canonical);
+    assert.notEqual(normalizeToolResult({text: replayed.replace('997 passed', '996 passed'), tool}), canonical);
+    assert.notEqual(normalizeToolResult({text: replayed.replace('expected value', 'different failure'), tool}), canonical);
+    if (prefix) assert.notEqual(normalizeToolResult({text: replayed.replace('testbed/bin/python', 'other/bin/python'), tool}), canonical);
+    const clipped = replayed.replace('cache:              yes\n', '');
+    assert.match(normalizeToolResult({text: clipped, tool}), /random seed:        98765/);
+  }
+  const outputOnly = body + short;
+  assert.equal(normalizeToolResult({text: outputOnly, tool}), normalizeToolResult({text: body + long, tool}));
+  assert.equal(normalizeToolResult({text: outputOnly, tool:{name:'bash',arguments:{command:'cat result'}}}), outputOnly);
+});
