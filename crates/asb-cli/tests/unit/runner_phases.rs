@@ -1141,7 +1141,7 @@ fn recording_association_binds_actual_attempt_and_preserves_uncertain_raw_captur
 }
 
 #[test]
-fn recording_streams_snapshot_artifact_but_keeps_track_incomplete() {
+fn recording_streams_snapshot_artifact_and_keeps_completed_capture_selectable() {
     let fixture = Fixture::new();
     let campaign = fixture.0.canonicalize().unwrap().join("campaign-snapshot");
     std::fs::create_dir_all(campaign.join("batch-1")).unwrap();
@@ -1195,14 +1195,15 @@ fn recording_streams_snapshot_artifact_but_keeps_track_incomplete() {
         .unwrap();
     let publication = recorder.finalize(true).unwrap().unwrap();
     assert!(
-        publication
+        !publication
             .warnings
             .iter()
             .any(|warning| warning.contains("incomplete track"))
     );
     let mut archive =
         crate::cassette::Archive::open(&destination, crate::cassette::Limits::default()).unwrap();
-    assert!(!archive.manifest().tracks[0].complete);
+    assert!(archive.manifest().tracks[0].complete);
+    assert!(archive.manifest().tracks[0].automatically_selectable());
     let mut restored = Vec::new();
     archive
         .copy_artifact_to(1, "workspace-snapshots", &mut restored)
