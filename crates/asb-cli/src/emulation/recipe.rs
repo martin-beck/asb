@@ -69,16 +69,39 @@ fn create_overlay(
     verify_digest(&base, digest)?;
     std::fs::create_dir(vm_dir)?;
     let disk = vm_dir.canonicalize()?.join("disk.qcow2");
-    let status = Command::new(qemu_img)
+    let result = Command::new(qemu_img)
         .args(["create", "-f", "qcow2", "-F", "qcow2", "-b"])
         .arg(&base)
         .arg(&disk)
         .arg("250G")
-        .status()?;
-    if !status.success() {
-        return Err(io::Error::other(format!(
-            "qemu-img failed to create VM disk: {status}"
-        )));
+        .status()
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(io::Error::other(format!(
+                    "qemu-img failed to create VM disk: {status}"
+                )))
+            }
+        });
+    if let Err(error) = result {
+        match std::fs::remove_file(&disk) {
+            Ok(()) => {}
+            Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => {}
+            Err(cleanup) => {
+                return Err(io::Error::other(format!(
+                    "{error}; could not remove partial disk {}: {cleanup}",
+                    disk.display()
+                )));
+            }
+        }
+        if let Err(cleanup) = std::fs::remove_dir(vm_dir) {
+            return Err(io::Error::other(format!(
+                "{error}; could not remove VM directory {}: {cleanup}",
+                vm_dir.display()
+            )));
+        }
+        return Err(error);
     }
     Ok(disk)
 }
@@ -267,6 +290,20 @@ mod tests {
             io::ErrorKind::InvalidData
         );
         assert!(!rejected.exists());
+        let missing = parent.join("missing-command");
+        assert_eq!(
+            create_overlay(OsStr::new("/no/such/qemu-img"), &base, &missing, &digest)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(!missing.exists());
+        #[cfg(unix)]
+        {
+            let failed = parent.join("failed-command");
+            assert!(create_overlay(OsStr::new("/bin/false"), &base, &failed, &digest).is_err());
+            assert!(!failed.exists());
+        }
         std::fs::remove_dir_all(parent).unwrap();
     }
 
