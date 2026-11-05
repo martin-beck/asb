@@ -14,6 +14,12 @@ HTTP server, stops that server, and runs four parallel replays in separate
 network namespaces. The native tool invocation counter must remain unchanged.
 This exercises the installed core with synthetic tool definitions and marker
 service; it does not establish actual snapshot or SWE-bench coverage.
+The separate `pi_native_installed_shell_http.mjs` probe also requires
+`ASB_TEST_PI_BASH` naming the pinned coding agent's `dist/core/tools/bash.js`.
+It uses Pi's real Bash tool to run curl once, stops the loopback server, and
+checks four isolated native replays reproduce the result without rerunning
+the shell. Its marker service is synthetic; it does not validate filesystem
+snapshot application, a full cassette or an official workload.
 
 Linux guests for Python agents stage a project-local portable Python and the
 installed agent packages before execution. The host prepares the pinned Python
