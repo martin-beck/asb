@@ -658,10 +658,17 @@ mod tests {
         let bundle = root.join("index.js");
         let cli = root.join("cn.mjs");
         std::fs::write(root.join("package.json"), "{\"type\":\"module\"}").unwrap();
-        std::fs::write(&bundle, r#"import {writeFileSync} from 'node:fs';
+        let input = root.join("fixture-input.txt");
+        std::fs::write(&input, "fixture input").unwrap();
+        std::fs::write(&bundle, r#"import * as f from 'node:fs';
+const reads=new Set();
+function remember(e){reads.add(e)}
+function read(s){let full=f.realpathSync(s),content=f.readFileSync(full,'utf8');return remember(full),`Content of ${full}: ${content}`}
 function guard(){cE.getInstance().getCurrentSession();let a="";if(!a)throw new Error("No active session found");return a}
 async function dispatch(e,r){return await e.tool.run(e.preprocessResult?.args??e.arguments,r)}
-await dispatch({name:'Read',arguments:{path:'fixture'},tool:{run:async()=>{writeFileSync(process.env.FIXTURE_EFFECT,'called');return 'ok'}}},{});
+const tool={name:"Read",displayName:"Read",run:async args=>{f.writeFileSync(process.env.FIXTURE_EFFECT,'called');return read(args.filepath)}};
+await dispatch({name:'Read',arguments:{filepath:process.env.FIXTURE_INPUT},tool},{});
+if(!reads.has(f.realpathSync(process.env.FIXTURE_INPUT)))throw Error('Read state was not restored');
 "#).unwrap();
         std::fs::write(&cli, "import './index.js';\n").unwrap();
         let marker = root.join("marker.sock");
@@ -679,7 +686,10 @@ await dispatch({name:'Read',arguments:{path:'fixture'},tool:{run:async()=>{write
         let run = root.join("run");
         let effect = root.join("effect");
         let mut command = std::process::Command::new("node");
-        command.arg(&cli).env("FIXTURE_EFFECT", &effect);
+        command
+            .arg(&cli)
+            .env("FIXTURE_EFFECT", &effect)
+            .env("FIXTURE_INPUT", &input);
         let mut service = super::start_recording_service_with_marker(
             &mut command,
             cli.to_str().unwrap(),
@@ -711,7 +721,10 @@ await dispatch({name:'Read',arguments:{path:'fixture'},tool:{run:async()=>{write
         let sidecar = root.join("native.jsonl");
         std::fs::write(&sidecar, completed).unwrap();
         let mut replay_command = std::process::Command::new("node");
-        replay_command.arg(&cli).env("FIXTURE_EFFECT", &effect);
+        replay_command
+            .arg(&cli)
+            .env("FIXTURE_EFFECT", &effect)
+            .env("FIXTURE_INPUT", &input);
         let mut replay_service = super::start_recording_service_with_marker(
             &mut replay_command,
             cli.to_str().unwrap(),
