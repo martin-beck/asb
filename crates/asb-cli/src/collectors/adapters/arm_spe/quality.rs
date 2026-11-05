@@ -14,6 +14,7 @@ pub(super) struct Lifetime {
 pub(super) struct Quality {
     pub tasks: BTreeMap<u32, Lifetime>,
     pub aux_records: u64,
+    pub time_conversion: Option<crate::measurements::phase_alignment::TimeConversion>,
 }
 
 fn word(bytes: &[u8], offset: usize) -> Result<u64, String> {
@@ -61,6 +62,7 @@ pub(super) fn inspect(
     let mut forks = BTreeMap::new();
     let mut exits = BTreeMap::new();
     let mut aux_records = 0;
+    let mut time_conversion = None;
     let mut records = 0;
     while offset < end {
         if forks.len() + exits.len() > 200_000 {
@@ -129,6 +131,29 @@ pub(super) fn inspect(
                     .filter(|v| *v <= end)
                     .ok_or("SPE AUX payload is truncated")?;
             }
+            79 => {
+                if body.len() != 24 && body.len() != 48 {
+                    return Err("Unsupported perf time conversion record layout".into());
+                }
+                if body.len() == 48 {
+                    let candidate = crate::measurements::phase_alignment::TimeConversion {
+                        time_shift: word(&body, 0)?,
+                        time_mult: word(&body, 8)?,
+                        time_zero: word(&body, 16)?,
+                        time_cycles: word(&body, 24)?,
+                        time_mask: word(&body, 32)?,
+                        cap_user_time_zero: body[40],
+                        cap_user_time_short: body[41],
+                    };
+                    if time_conversion
+                        .as_ref()
+                        .is_some_and(|old| old != &candidate)
+                    {
+                        return Err("Conflicting perf time conversion records".into());
+                    }
+                    time_conversion = Some(candidate);
+                }
+            }
             72 | 81 => {
                 return Err(
                     "SPE auxiliary decode errors or compressed records are unsupported".into(),
@@ -188,7 +213,11 @@ pub(super) fn inspect(
             return Err("SPE exit metadata contains an unrelated task".into());
         }
     }
-    Ok(Quality { tasks, aux_records })
+    Ok(Quality {
+        tasks,
+        aux_records,
+        time_conversion,
+    })
 }
 
 #[cfg(test)]
@@ -229,6 +258,45 @@ mod tests {
         header[48..56].copy_from_slice(&(data.len() as u64).to_le_bytes());
         [header, data].concat()
     }
+    #[test]
+    fn timer_conversion_retains_exact_fields_and_rejects_conflicting_records() {
+        let mut body = vec![0u8; 48];
+        for (offset, value) in [
+            (0, 21u64),
+            (8, 20_971_520),
+            (16, u64::MAX - 4),
+            (24, 1000),
+            (32, 65_535),
+        ] {
+            body[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        body[40] = 1;
+        body[41] = 1;
+        let quality = inspect(std::io::Cursor::new(file(record(79, &body))), 42, 4096).unwrap();
+        let tc = quality.time_conversion.unwrap();
+        assert_eq!(tc.time_shift, 21);
+        assert_eq!(tc.time_zero, u64::MAX - 4);
+        assert_eq!(tc.time_cycles, 1000);
+        assert_eq!(tc.cap_user_time_short, 1);
+        let mut conflict = body.clone();
+        conflict[0] = 22;
+        assert!(
+            inspect(
+                std::io::Cursor::new(file([record(79, &body), record(79, &conflict)].concat())),
+                42,
+                4096
+            )
+            .is_err()
+        );
+        assert!(inspect(std::io::Cursor::new(file(record(79, &[0; 32]))), 42, 4096).is_err());
+        assert!(
+            inspect(std::io::Cursor::new(file(record(79, &[0; 24]))), 42, 4096)
+                .unwrap()
+                .time_conversion
+                .is_none()
+        );
+    }
+
     #[test]
     fn raw_records_prove_root_and_descendant_lifetimes() {
         let quality = inspect(std::io::Cursor::new(file(vec![])), 42, 4096).unwrap();

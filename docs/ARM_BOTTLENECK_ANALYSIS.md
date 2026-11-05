@@ -498,3 +498,51 @@ production overhead or a confidence interval. `overhead.json` retains every
 observation, profile order, input fingerprints, medians, ranges and these limits.
 This qualifies this fixed-work instrumentation comparison, not a real Pi client,
 LLM-provider behavior, every CPU or a maximum acceptable collector overhead.
+
+
+## SPE execution alignment with recorded timer conversion
+
+The SPE producer retains its working default perf clock. Explicit POSIX-clock
+selection changed task metadata without making it compatible with synthesized
+SPE sample timestamps on the qualification host. The decoder follows the raw
+capture's `PERF_RECORD_TIME_CONV` conversion; it is not sufficient to label that
+clock adjusted or raw monotonic and subtract a sampled offset.
+
+When SPE is active on native AArch64 Linux, execution-window receipts additionally
+retain architectural virtual timer (`CNTVCT_EL0`) pre-release and owned-exit
+bounds. A disposable, non-dumpable child probes register access once before any
+read in the runner; denied access stays unavailable. Other collectors and
+architectures do not request this probe. Existing monotonic lifetime/cohort
+bounds are unchanged. The clock reads are timestamp metadata, not host activity.
+
+A shared pure alignment module applies the exact recorded perf timer conversion
+to those counter bounds, including unsigned time-zero arithmetic. It requires a
+completed native window, matching PID and process generation, a known boot/time-
+namespace domain and validated SPE. Unsupported scales, missing capabilities,
+ambiguous counter wrap, absent conversion records and samples outside the
+converted principal envelope leave alignment unavailable. Only perf script's
+999 ns timestamp rounding may straddle the start. Descendants may outlive the
+principal; they remain in SPE's task population but cannot receive principal-
+envelope alignment here. Existing valid SPE metrics remain available regardless.
+
+Qualified SPE series use seconds from the pre-release bound while retaining
+one-second bins anchored at the first sample. Raw timestamps and conversion
+fields remain in `arm-spe-quality.json`. Unavailable alignment keeps the original
+first-sample-relative series with an explicit origin. The offline engine
+recomputes alignment from raw source fields and `execution-window.json`, never
+saved conclusions. Comparison JSON and HTML disclose offsets or an unavailable
+reason. These are execution-envelope offsets, not LLM/tool phase classifications
+or CPU residency. Old captures without matching clock evidence stay unaligned.
+The conversion follows [Linux perf's implementation](https://github.com/torvalds/linux/blob/master/tools/perf/util/tsc.c).
+
+Native qualification on Kunpeng-920 exercised two concurrent fixed-work clients
+with a completed offline tape. Both passed grading, retained disjoint SPE task
+populations, and produced execution-aligned series, regenerated JSON and HTML.
+Their first-sample offsets were approximately 12.8 ms and 6.4 ms inside enclosing
+principal phases of about 2.25 s and 2.20 s. A second two-replica qualification
+denied only `prctl(PR_SET_DUMPABLE)` in a disposable process-tree seccomp filter:
+the timer probe declined access, alignment stayed unavailable, and both grades
+and valid scoped SPE metrics remained available. The filter changed no host
+policy or other process. ASB, guardians and sibling CPU/memory noise were
+excluded in both cases. These are synthetic collector qualifications, not actual
+Pi/model performance results or evidence of CPU residency/causal bottlenecks.

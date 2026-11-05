@@ -171,6 +171,15 @@ pub(super) fn html(documents: &BTreeMap<String, Value>) -> String {
             escape(pmu.get("limitations").and_then(Value::as_str).unwrap_or(""))
         ));
     }
+    for alignment in analysis["phase_alignments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        html.push_str(&format!("<details><summary>Agent execution phase alignment — {}</summary><p>SPE samples and verified Arm counter bounds use the capture’s recorded timer conversion. Missing or incompatible identity, clock or execution bounds leave alignment unavailable.</p><pre>{}</pre></details>",
+            escape(alignment["status"].as_str().unwrap_or("unavailable")),
+            escape(&serde_json::to_string_pretty(alignment).expect("phase alignment is JSON"))));
+    }
     if let Some(platform) = documents.get("arm-platform") {
         let metadata = serde_json::to_string_pretty(platform).expect("platform metadata is JSON");
         html.push_str(&format!("<details><summary>Arm CPU and PMU capabilities</summary><p>Capability inventory only. Shared uncore activity is not collected or attributed to agents.</p><pre>{}</pre></details>",escape(&metadata)));
@@ -254,6 +263,49 @@ mod tests {
                 .is_empty()
         );
     }
+    #[test]
+    fn phase_alignment_regenerates_from_sources_and_rejects_failed_capture() {
+        let root = serde_json::json!({"pid":42,"start_time_ticks":7});
+        let mut documents = BTreeMap::from([
+            ("arm-spe-plan".into(), serde_json::json!({})),
+            ("arm-spe".into(), serde_json::json!({"status":"completed"})),
+            (
+                "arm-spe-quality".into(),
+                serde_json::json!({"schema_version":1,"status":"observed","scope":"agent-process-tree","clock":"PERF_TIME_CONV","root":root,"raw_record_quality":{"aux_records":1,"time_conversion":{"time_shift":0,"time_mult":1,"time_zero":0,"time_cycles":0,"time_mask":0,"cap_user_time_zero":1,"cap_user_time_short":0}},"first_sample_ns":1_500_000_000_u64,"last_sample_ns":2_000_000_000_u64,"phase_alignment":{"status":"forged-saved-conclusion"}}),
+            ),
+            (
+                "execution-window".into(),
+                serde_json::json!({"schema_version":1,"status":"observed","scope":"verified-native-agent-principal-lifetime","clock":"CLOCK_MONOTONIC","clock_domain":"a".repeat(64),"root":root,"arm_counter":{"clock":"CNTVCT_EL0","status":"observed","release_bound_ticks":1_000_000_000_u64,"exit_bound_ticks":3_000_000_000_u64}}),
+            ),
+        ]);
+        let saved = documents.clone();
+        regenerate(&mut documents, &mut BTreeMap::new()).unwrap();
+        assert_eq!(
+            documents["bottlenecks"]["phase_alignments"][0]["status"],
+            "observed"
+        );
+        assert_eq!(
+            documents["bottlenecks"]["phase_alignments"][0]["first_sample_offset_seconds"],
+            0.5
+        );
+        assert!(html(&documents).contains("Agent execution phase alignment"));
+        assert!(html(&documents).contains("PERF_TIME_CONV"));
+        for (key, value) in saved {
+            assert_eq!(documents[&key], value);
+        }
+        documents.get_mut("arm-spe").unwrap()["status"] = serde_json::json!("failed");
+        regenerate(&mut documents, &mut BTreeMap::new()).unwrap();
+        assert_eq!(
+            documents["bottlenecks"]["phase_alignments"][0]["status"],
+            "unavailable"
+        );
+        assert!(
+            documents["bottlenecks"]["phase_alignments"][0]["first_sample_offset_seconds"]
+                .is_null()
+        );
+        assert!(html(&documents).contains("alignment — unavailable"));
+    }
+
     #[test]
     fn regeneration_discards_saved_findings_and_preserves_original_documents() {
         let stale = json!({"findings":[{"rule":"invented","assessment":"observed"}]});

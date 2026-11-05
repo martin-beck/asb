@@ -26,9 +26,15 @@ parser.add_argument("--require-windows", action="store_true",
                     help="require same-domain verified agent lifetime overlap")
 parser.add_argument("--require-cohort-analysis", action="store_true",
                     help="also validate regenerated overlap/rate evidence and report graphs")
+parser.add_argument("--require-phase-alignment", action="store_true",
+                    help="require counter-clock SPE alignment with the actual agent execution envelope")
 parser.add_argument("--replicas", type=int, choices=range(1, 65), default=2,
                     help="expected observed replica population")
 args = parser.parse_args()
+if args.require_phase_alignment:
+    args.require_windows = True
+    if "arm-spe" not in args.require_series:
+        args.require_series.append("arm-spe")
 if args.require_cohort_analysis:
     args.require_windows = True
 binary = args.asb.resolve(strict=True)
@@ -121,6 +127,35 @@ for path in reports:
                 or window["start_bound_ns"] >= window["end_bound_ns"]):
             raise SystemExit("Missing valid verified native lifetime window: " + str(path))
         windows.append(window)
+    if args.require_phase_alignment:
+        quality = json.loads((path.parent / "arm-spe-quality.json").read_text())
+        spe = json.loads((path.parent / "arm-spe.json").read_text())
+        alignment = quality["phase_alignment"]
+        regenerated = json.loads((path.parent / "bottlenecks.json").read_text())["phase_alignments"]
+        raw = window["arm_counter"]
+        tc = quality["raw_record_quality"]["time_conversion"]
+        def converted(ticks):
+            if tc["cap_user_time_short"]:
+                ticks = tc["time_cycles"] + ((ticks - tc["time_cycles"]) & tc["time_mask"])
+            shift = tc["time_shift"]
+            return (tc["time_zero"] + (ticks >> shift) * tc["time_mult"]
+                    + (((ticks & ((1 << shift) - 1)) * tc["time_mult"]) >> shift)) % (1 << 64)
+        release_ns = converted(raw["release_bound_ticks"])
+        exit_ns = converted(raw["exit_bound_ticks"])
+        if (quality["clock"] != "PERF_TIME_CONV" or quality["root"] != target["root"]
+                or raw["status"] != "observed" or raw["clock"] != "CNTVCT_EL0"
+                or alignment["status"] != "observed" or regenerated != [alignment]
+                or quality["first_sample_ns"] + 999 < release_ns
+                or quality["last_sample_ns"] > exit_ns):
+            raise SystemExit("SPE alignment lacks compatible actual agent identity/clock bounds")
+        expected = max(0, quality["first_sample_ns"] - release_ns) / 1e9
+        if abs(alignment["first_sample_offset_seconds"] - expected) > 1e-12:
+            raise SystemExit("SPE phase offset differs from its raw timestamp receipt")
+        timestamps = spe["series_timestamps"]
+        if not timestamps or any(t < expected or t > alignment["principal_phase_upper_seconds"]
+                                 for times in timestamps.values() for t in times):
+            raise SystemExit("SPE graph timestamps are outside the aligned agent envelope")
+        print("Verified counter-clock SPE alignment and graph timestamps for agent " + str(target["root"]["pid"]))
     for collector in args.require_series:
         if not collector or not all(c.isascii() and (c.isalnum() or c == '-') for c in collector):
             raise SystemExit("Invalid collector identifier for series qualification")
@@ -157,4 +192,14 @@ if args.require_cohort_analysis:
             or "cohort-lifetimes-0001.svg" not in html or "cohort-analysis.json" not in html):
         raise SystemExit("Cohort report is missing its graph or evidence link")
     print("Verified offline cohort overlap, phase-rate bounds, JSON and HTML/SVG")
+if args.require_phase_alignment:
+    report = project / "results/pressure-comparison"
+    comparison = json.loads((report / "comparison.json").read_text())
+    alignments = [benchmark["analysis"]["phase_alignments"][0] for benchmark in comparison["benchmarks"]]
+    if len(alignments) != args.replicas or any(a["status"] != "observed" for a in alignments):
+        raise SystemExit("Comparison did not regenerate all counter-clock phase alignments")
+    html = (report / "report.html").read_text()
+    if "Agent execution phase alignment" not in html or "PERF_TIME_CONV" not in html:
+        raise SystemExit("Comparison HTML omitted phase alignment evidence")
+    print("Verified regenerated phase alignment in comparison JSON and HTML")
 print("Verified agent leaves exclude ASB, fixture and unrelated CPU/memory load")

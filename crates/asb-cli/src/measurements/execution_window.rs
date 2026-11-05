@@ -11,6 +11,8 @@ pub(crate) struct Window {
     root: Option<ProcessIdentity>,
     domain: Option<String>,
     release_before: Option<u64>,
+    counter_release_before: Option<u64>,
+    counter_exit_after: Option<u64>,
     exit_after: Option<u64>,
     first_after: Option<u64>,
     last_before: Option<u64>,
@@ -27,6 +29,7 @@ struct Receipt<'a> {
     scope: &'static str,
     clock: &'static str,
     clock_domain: &'a Option<String>,
+    arm_counter: CounterClock,
     root: &'a Option<ProcessIdentity>,
     release_bound_ns: Option<u64>,
     exit_bound_ns: Option<u64>,
@@ -36,6 +39,14 @@ struct Receipt<'a> {
     sampling_interval_ms: u64,
     unavailable_reason: Option<&'static str>,
     limitations: &'static str,
+}
+
+#[derive(Serialize)]
+struct CounterClock {
+    clock: &'static str,
+    status: &'static str,
+    release_bound_ticks: Option<u64>,
+    exit_bound_ticks: Option<u64>,
 }
 
 impl Window {
@@ -82,6 +93,16 @@ impl Window {
             scope: "verified-native-agent-principal-lifetime",
             clock: "CLOCK_MONOTONIC",
             clock_domain: &self.domain,
+            arm_counter: {
+                let counter_observed = observed && self.counter_release_before.zip(self.counter_exit_after)
+                    .is_some_and(|(start, end)| end > start);
+                CounterClock {
+                    clock: "CNTVCT_EL0",
+                    status: if counter_observed { "observed" } else { "unavailable" },
+                    release_bound_ticks: counter_observed.then_some(self.counter_release_before).flatten(),
+                    exit_bound_ticks: counter_observed.then_some(self.counter_exit_after).flatten(),
+                }
+            },
             root: &self.root,
             release_bound_ns: observed.then_some(self.release_before).flatten(),
             exit_bound_ns: observed.then_some(self.exit_after).flatten(),
@@ -108,7 +129,11 @@ pub(crate) struct Sampler {
     closed: bool,
 }
 impl Sampler {
-    pub(super) fn new(shared: Rc<RefCell<Window>>, root: ProcessIdentity) -> Option<Self> {
+    pub(super) fn new(
+        shared: Rc<RefCell<Window>>,
+        root: ProcessIdentity,
+        counter_enabled: bool,
+    ) -> Option<Self> {
         if root.pid == std::process::id() || !root.matches() {
             return None;
         }
@@ -119,6 +144,7 @@ impl Sampler {
         }
         window.root = Some(root);
         window.domain = Some(domain);
+        window.counter_release_before = counter_enabled.then(super::arm_clock::ticks).flatten();
         window.release_before = monotonic_ns();
         drop(window);
         Some(Self {
@@ -159,11 +185,17 @@ pub(crate) struct ExitObserver(Rc<RefCell<Window>>);
 impl ExitObserver {
     pub(crate) fn observe(&mut self) {
         let now = monotonic_ns();
+        let raw_now = self
+            .0
+            .borrow()
+            .counter_release_before
+            .and_then(|_| super::arm_clock::ticks());
         let mut window = self.0.borrow_mut();
         if window.exit_after.is_some() || now.is_none() {
             window.invalidate();
         }
         window.exit_after = now;
+        window.counter_exit_after = raw_now;
     }
 }
 
@@ -178,13 +210,13 @@ impl Drop for Sampler {
 
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)] // Audited clock_gettime FFI, with a valid stack timespec.
-fn monotonic_ns() -> Option<u64> {
+fn clock_ns(clock: libc::clockid_t) -> Option<u64> {
     let mut value = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
     // SAFETY: clock_gettime writes only to this valid timespec.
-    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) } != 0 {
+    if unsafe { libc::clock_gettime(clock, &mut value) } != 0 {
         return None;
     }
     u64::try_from(value.tv_sec)
@@ -195,6 +227,10 @@ fn monotonic_ns() -> Option<u64> {
                 .ok()
                 .filter(|n| *n < 1_000_000_000)?,
         )
+}
+#[cfg(target_os = "linux")]
+fn monotonic_ns() -> Option<u64> {
+    clock_ns(libc::CLOCK_MONOTONIC)
 }
 #[cfg(not(target_os = "linux"))]
 fn monotonic_ns() -> Option<u64> {
@@ -301,6 +337,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn arm_counter_is_optional_and_requires_complete_ordered_enclosure() {
+        let mut w = window();
+        w.record(10, 15);
+        w.record(100, 110);
+        w.end();
+        assert_eq!(w.receipt().status, "observed");
+        assert_eq!(w.receipt().arm_counter.status, "unavailable");
+        w.counter_release_before = Some(3);
+        w.counter_exit_after = Some(203);
+        assert_eq!(w.receipt().arm_counter.release_bound_ticks, Some(3));
+        assert_eq!(w.receipt().arm_counter.exit_bound_ticks, Some(203));
+        w.counter_exit_after = Some(2);
+        assert_eq!(w.receipt().status, "observed");
+        assert_eq!(w.receipt().arm_counter.status, "unavailable");
+        assert!(w.receipt().arm_counter.release_bound_ticks.is_none());
+        w.counter_exit_after = Some(203);
+        w.invalidate();
+        assert_eq!(w.receipt().arm_counter.status, "unavailable");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn live_clock_domain_is_stable_and_sampler_rejects_unowned_rebinding() {
@@ -310,7 +367,8 @@ mod tests {
         assert!(
             Sampler::new(
                 shared.clone(),
-                ProcessIdentity::read(std::process::id()).unwrap()
+                ProcessIdentity::read(std::process::id()).unwrap(),
+                false
             )
             .is_none()
         );
@@ -322,16 +380,16 @@ mod tests {
         let assertions = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match domain {
                 Some(_) => {
-                    let mut sampler = Sampler::new(shared.clone(), root).unwrap();
+                    let mut sampler = Sampler::new(shared.clone(), root, false).unwrap();
                     sampler.observe();
                     assert_eq!(shared.borrow().samples, 1);
-                    assert!(Sampler::new(shared.clone(), root).is_none());
+                    assert!(Sampler::new(shared.clone(), root, false).is_none());
                     // Immediate polls are throttled independently of terminal output.
                     sampler.observe();
                     assert_eq!(shared.borrow().samples, 1);
                 }
                 None => {
-                    assert!(Sampler::new(shared.clone(), root).is_none());
+                    assert!(Sampler::new(shared.clone(), root, false).is_none());
                     assert_eq!(shared.borrow().samples, 0);
                     assert_eq!(shared.borrow().receipt().status, "unavailable");
                     assert!(shared.borrow().receipt().clock_domain.is_none());
