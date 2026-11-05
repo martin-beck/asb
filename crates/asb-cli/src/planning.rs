@@ -422,6 +422,16 @@ pub(crate) fn protocol_fingerprint_with_dispatch(
 
 /// Pure historical verification must not discover Docker, collectors or host
 /// capabilities. Their saved policy is checked here, never re-resolved.
+#[cfg(test)]
+pub(crate) fn historical_protocol_fingerprint(
+    module: Option<&workloads::contracts::ModuleDescriptor>,
+    policy: &ResolvedPlan,
+    effective: EffectiveBudgets,
+    replica_concurrency: usize,
+) -> Result<ExecutionPlanFingerprint, Error> {
+    protocol_fingerprint_core(module, policy, effective, replica_concurrency, None, None)
+}
+
 fn protocol_fingerprint_core(
     module: Option<&workloads::contracts::ModuleDescriptor>,
     policy: &ResolvedPlan,
@@ -859,7 +869,10 @@ pub(crate) fn resolve_for_run(
             }
         } else {
             PhaseBudgets {
-                environment_preparation_seconds: Some(DEFAULT_ENVIRONMENT_PREPARATION_SECONDS),
+                environment_preparation_seconds: Some(
+                    workloads::preparation_default_seconds(&config.workload)
+                        .unwrap_or(DEFAULT_ENVIRONMENT_PREPARATION_SECONDS),
+                ),
                 evaluation_seconds: Some(DEFAULT_EVALUATION_SECONDS),
                 ..Default::default()
             }
@@ -876,6 +889,25 @@ pub(crate) fn resolve_for_run(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn swe_bench_preparation_has_a_separate_longer_default() {
+        for workload in ["swe-bench", "swe-bench-lite", "swe-bench-verified"] {
+            let config: crate::benchmark::BenchmarkConfig = toml::from_str(&format!(
+                "agent='pi'\nprovider='openrouter'\nmodel='fixture'\nworkload='{workload}'\n"
+            ))
+            .unwrap();
+            let plan = super::resolve(&config).unwrap();
+            assert_eq!(
+                plan.default_budgets.environment_preparation_seconds,
+                Some(7_320)
+            );
+            assert_eq!(plan.budgets.execution_seconds, None);
+        }
+        assert_eq!(
+            crate::workloads::preparation_default_seconds("nonexistent"),
+            None
+        );
+    }
     use super::*;
     #[test]
     fn historical_admission_hash_is_passive_and_does_not_authorize_old_launch_policy() {
