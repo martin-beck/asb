@@ -148,6 +148,12 @@ impl AuxiliaryService {
                     let text = String::from_utf8_lossy(&diagnostic);
                     let reason = if text.contains("payload exceeds supported bounds") {
                         "native tool exchanges exceed the current recording size limit"
+                    } else if text
+                        .contains("Claude WebFetch proxy has unconsumed recorded responses")
+                    {
+                        "Claude WebFetch replay left recorded responses unconsumed"
+                    } else if text.contains("Native tool replay left tool calls incomplete") {
+                        "native tool replay left recorded calls incomplete"
                     } else if text.contains("unfinished") {
                         "native tool calls were left unfinished"
                     } else if text.contains("exchange count is invalid") {
@@ -238,6 +244,31 @@ mod tests {
         let error = service.settle().unwrap_err().to_string();
         assert!(error.contains("size limit"));
         assert!(!error.contains("private-value"));
+    }
+    #[test]
+    fn replay_settlement_reports_classified_failure_without_private_output() {
+        for (diagnostic, expected) in [
+            (
+                "Claude WebFetch proxy has unconsumed recorded responses",
+                "WebFetch replay left recorded responses unconsumed",
+            ),
+            (
+                "Native tool replay left tool calls incomplete",
+                "native tool replay left recorded calls incomplete",
+            ),
+        ] {
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args([
+                "-c",
+                "printf 'READY\\n'; read line; printf '%s private-value\\n' \"$1\" >&2; exit 1",
+                "fixture",
+                diagnostic,
+            ]);
+            let mut service = AuxiliaryService::start(&mut command).unwrap();
+            let error = service.settle().unwrap_err().to_string();
+            assert!(error.contains(expected));
+            assert!(!error.contains("private-value"));
+        }
     }
     #[test]
     fn service_startup_classifies_mismatch_without_exposing_output() {
