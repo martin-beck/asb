@@ -249,7 +249,9 @@ unambiguous task lifetimes and recorded exits. The bounded offline built-in perf
 decoder must exit successfully without diagnostics; no script extension,
 provider or network symbol lookup is used. Every decoded sample must match a
 recorded task generation, allowing only the decoder's disclosed sub-microsecond
-timestamp rounding. Missing scope, unknown events, ambiguous IDs, incomplete
+timestamp rounding. This first decoder rejects any reused task ID, including
+non-overlapping generations, rather than guessing a generation. Missing scope,
+unknown events, ambiguous IDs, incomplete
 captures or invalid decoding retain evidence without publishing numeric results.
 
 `arm-spe-quality.json` retains the requested period, validated task metadata,
@@ -268,3 +270,16 @@ are not full cache-access counts, cache miss rates, retired instructions, DRAM
 service latency or an architecture-independent efficiency score. Sampling bias
 and unreported loss remain possible despite validated capture metadata.
 The kernel/perf semantics follow the [Linux SPE documentation](https://github.com/torvalds/linux/blob/master/tools/perf/Documentation/perf-arm-spe.txt).
+
+
+An offline two-replica probe on a Kunpeng-920 ARMv8 host exercised real SPE,
+core PMU and cgroup collection with a synthetic Pi-compatible Node client and
+bundled bug-fix grading. Both replicas produced populated validated SPE series
+and passed grading. A sibling CPU/memory noise process, the ASB controller and
+its guardians were excluded by the observed agent cgroup membership and the
+validated task ancestry. This qualifies the exercised native launch/collection
+path; it is not a live Pi/provider or external-workload qualification. The
+host had PSI disabled, so unavailable PSI remained explicit. Retained raw
+record diagnostics included perf's optional `discard` format lookup warning;
+raw AUX loss flags were zero and decoding had no diagnostics. Neither outcome
+proves absence of sampling bias or unreported hardware loss.
