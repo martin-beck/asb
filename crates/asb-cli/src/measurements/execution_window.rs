@@ -203,7 +203,6 @@ fn monotonic_ns() -> Option<u64> {
 
 #[cfg(target_os = "linux")]
 fn clock_domain() -> Option<String> {
-    use sha2::{Digest, Sha256};
     use std::io::Read;
     let mut boot = String::new();
     std::fs::File::open("/proc/sys/kernel/random/boot_id")
@@ -211,12 +210,15 @@ fn clock_domain() -> Option<String> {
         .take(65)
         .read_to_string(&mut boot)
         .ok()?;
-    let boot = boot.trim();
+    let namespace = std::fs::read_link("/proc/self/ns/time").ok()?;
+    clock_domain_identity(boot.trim(), namespace.to_str()?)
+}
+#[cfg(any(target_os = "linux", test))]
+fn clock_domain_identity(boot: &str, namespace: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
     if boot.len() != 36 || !boot.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
         return None;
     }
-    let namespace = std::fs::read_link("/proc/self/ns/time").ok()?;
-    let namespace = namespace.to_str()?;
     if namespace.len() > 64 || !namespace.starts_with("time:[") || !namespace.ends_with(']') {
         return None;
     }
@@ -303,7 +305,7 @@ mod tests {
     #[test]
     fn live_clock_domain_is_stable_and_sampler_rejects_unowned_rebinding() {
         assert_eq!(clock_domain(), clock_domain());
-        assert!(clock_domain().is_some());
+        let domain = clock_domain();
         let shared = Rc::new(RefCell::new(Window::default()));
         assert!(
             Sampler::new(
@@ -317,14 +319,58 @@ mod tests {
             .spawn()
             .unwrap();
         let root = ProcessIdentity::read(child.id()).unwrap();
-        let mut sampler = Sampler::new(shared.clone(), root).unwrap();
-        sampler.observe();
-        assert_eq!(shared.borrow().samples, 1);
-        assert!(Sampler::new(shared.clone(), root).is_none());
-        // Immediate polls are throttled independently of terminal output.
-        sampler.observe();
-        assert_eq!(shared.borrow().samples, 1);
+        let assertions = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match domain {
+                Some(_) => {
+                    let mut sampler = Sampler::new(shared.clone(), root).unwrap();
+                    sampler.observe();
+                    assert_eq!(shared.borrow().samples, 1);
+                    assert!(Sampler::new(shared.clone(), root).is_none());
+                    // Immediate polls are throttled independently of terminal output.
+                    sampler.observe();
+                    assert_eq!(shared.borrow().samples, 1);
+                }
+                None => {
+                    assert!(Sampler::new(shared.clone(), root).is_none());
+                    assert_eq!(shared.borrow().samples, 0);
+                    assert_eq!(shared.borrow().receipt().status, "unavailable");
+                    assert!(shared.borrow().receipt().clock_domain.is_none());
+                }
+            }
+        }));
         child.kill().unwrap();
         child.wait().unwrap();
+        assertions.unwrap();
+    }
+
+    #[test]
+    fn clock_identity_requires_bounded_boot_and_time_namespace_evidence() {
+        let boot = "01234567-89ab-cdef-0123-456789abcdef";
+        let domain = clock_domain_identity(boot, "time:[12345]").unwrap();
+        assert_eq!(
+            Some(domain.clone()),
+            clock_domain_identity(boot, "time:[12345]")
+        );
+        assert_ne!(
+            Some(domain.clone()),
+            clock_domain_identity(boot, "time:[54321]")
+        );
+        assert_ne!(
+            Some(domain),
+            clock_domain_identity("11234567-89ab-cdef-0123-456789abcdef", "time:[12345]")
+        );
+        for (boot, namespace) in [
+            ("", "time:[12345]"),
+            ("not-a-boot-id", "time:[12345]"),
+            (boot, ""),
+            (boot, "pid:[12345]"),
+            (boot, "time:[12345"),
+            (
+                boot,
+                "time:[12345678901234567890123456789012345678901234567890123456789012345]",
+            ),
+        ] {
+            assert!(clock_domain_identity(boot, namespace).is_none());
+        }
     }
 }
