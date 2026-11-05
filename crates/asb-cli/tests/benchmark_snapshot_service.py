@@ -72,7 +72,7 @@ class SnapshotServiceTest(unittest.TestCase):
             service=SimpleNamespace(invalidate=lambda:calls.append('invalidated'),finish=lambda:calls.append('finished'))
             server=SimpleNamespace(serve_forever=lambda:None,shutdown=lambda:calls.append('shutdown'),
                                    interrupt_clients=lambda:calls.append('interrupted'),server_close=lambda:calls.append('closed'))
-            args=SimpleNamespace(root=str(root),replay_archive=None,rsync='rsync',btrfs='btrfs',
+            args=SimpleNamespace(root=str(root),replay_archive=None,rsync='rsync',btrfs='btrfs',verify_mount=False,
                                  socket=str(root/'socket'),output=str(root/'output'))
             with patch.object(asb_snapshot_handoff,'SnapshotService',return_value=service), \
                  patch.object(asb_snapshot_handoff,'MarkerServer',return_value=server), \
@@ -83,6 +83,41 @@ class SnapshotServiceTest(unittest.TestCase):
                     asb_snapshot_handoff.custody(args)
             self.assertIn('invalidated',calls)
             self.assertNotIn('finished',calls)
+            exported.assert_not_called()
+
+    def test_handoff_identity_must_be_accepted_before_service_starts(self):
+        args=SimpleNamespace(root='/unused',verify_mount=True)
+        with patch.object(asb_snapshot_handoff.os,'stat',return_value=SimpleNamespace(st_ino=123)), \
+             patch.object(asb_snapshot_handoff,'SnapshotService') as service, \
+             patch.object(asb_snapshot_handoff.sys,'stdin',io.StringIO('REJECT\n')), \
+             patch.object(asb_snapshot_handoff.sys,'stdout',io.StringIO()) as output:
+            with self.assertRaisesRegex(RuntimeError,'identity was not accepted'):
+                asb_snapshot_handoff.custody(args)
+        self.assertEqual(output.getvalue(),'MOUNT:123\n')
+        service.assert_not_called()
+
+    def test_handoff_forensic_evidence_is_explicitly_incomplete(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);state=root/'snapshot';state.mkdir();calls=[]
+            def finish():raise RuntimeError('invalidated')
+            service=SimpleNamespace(invalidate=lambda:calls.append('invalidated'),finish=finish)
+            server=SimpleNamespace(serve_forever=lambda:None,shutdown=lambda:None,
+                                   interrupt_clients=lambda:None,server_close=lambda:None)
+            args=SimpleNamespace(root=str(state),replay_archive=None,rsync='rsync',btrfs='btrfs',
+                                 verify_mount=False,socket=str(root/'socket'),output=str(root/'output'))
+            def run(argv,**kwargs):
+                if 'stdout' in kwargs and hasattr(kwargs['stdout'],'write'):kwargs['stdout'].write(b'fixture')
+            with patch.object(asb_snapshot_handoff,'SnapshotService',return_value=service), \
+                 patch.object(asb_snapshot_handoff,'MarkerServer',return_value=server), \
+                 patch.object(asb_snapshot_handoff.subprocess,'run',side_effect=run), \
+                 patch.object(asb_snapshot_handoff,'export_snapshot_streams') as exported, \
+                 patch.object(asb_snapshot_handoff.sys,'stdin',io.StringIO('FORENSIC\n')), \
+                 patch.object(asb_snapshot_handoff.sys,'stdout',io.StringIO()) as output:
+                asb_snapshot_handoff.custody(args)
+            self.assertIn('invalidated',calls)
+            self.assertEqual((root/'forensic-interrupted.btrfs').read_bytes(),b'fixture')
+            self.assertIs(json.loads((root/'forensic-interrupted.json').read_text())['complete'],False)
+            self.assertIn('FORENSIC_SAVED_INCOMPLETE',output.getvalue())
             exported.assert_not_called()
 
     def test_direct_export_keeps_order_and_parent_and_retains_failed_stream(self):

@@ -19,6 +19,11 @@ fn snapshot_boundary_service_preserves_marker_and_lifecycle_order() {
 }
 
 #[test]
+fn independent_snapshot_custody_preserves_ownership_and_failure_boundaries() {
+    python_protocol("benchmark_snapshot_independent.py");
+}
+
+#[test]
 fn snapshot_workspace_failure_paths_release_resources() {
     python_protocol("benchmark_snapshot_workspace.py");
 }

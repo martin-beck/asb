@@ -64,6 +64,13 @@ def prepare(args):
 def custody(args):
     root = Path(args.root)/'filesystem'
     mounted, store = root/'workspace', root/'snapshots'
+    if args.verify_mount:
+        # The task's procfs names its init as PID 1 even though this
+        # custodian is in a separate PID namespace. The controller compares
+        # this inode with the task's pinned mount namespace before START.
+        print('MOUNT:'+str(os.stat('/proc/1/ns/mnt').st_ino), flush=True)
+        if sys.stdin.readline() != 'START\n':
+            raise RuntimeError('snapshot custody identity was not accepted')
     if args.replay_archive:
         service = SnapshotReplay(load_replay_boundaries(store), SnapshotApplier(store, mounted, [args.rsync]))
     else:
@@ -77,19 +84,43 @@ def custody(args):
         action = sys.stdin.readline()
         server.shutdown()
         try:
-            if action != 'STOP\n':
+            if action == 'FORENSIC\n':
+                service.invalidate()
+                try:
+                    service.finish()
+                except RuntimeError:
+                    pass
+                forensic = root/'forensic-interrupted'
+                subprocess.run([args.btrfs, 'subvolume', 'snapshot', '-r', str(mounted), str(forensic)],
+                               check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=120)
+                evidence = Path(args.root).parent/'forensic-interrupted.btrfs'
+                with evidence.open('xb') as output:
+                    subprocess.run([sys.executable, str(Path(__file__).with_name('asb_snapshot_send.py')),
+                                    str(forensic)], check=True, stdin=subprocess.DEVNULL, stdout=output,
+                                   stderr=subprocess.DEVNULL, timeout=300)
+                    output.flush()
+                    os.fsync(output.fileno())
+                metadata = Path(args.root).parent/'forensic-interrupted.json'
+                with metadata.open('x', encoding='utf-8') as output:
+                    json.dump({'schema_version': 1, 'complete': False,
+                               'scope': 'interrupted-forensic-snapshot'}, output)
+                    output.flush()
+                    os.fsync(output.fileno())
+                settled = True
+            elif action != 'STOP\n':
                 service.invalidate()
                 raise RuntimeError('snapshot custodian stopped without complete settlement')
-            service.finish()
-            settled = True
+            else:
+                service.finish()
+                settled = True
         finally:
             server.interrupt_clients()
             server.server_close()
             worker.join()
             Path(args.socket).unlink(missing_ok=True)
-        if not args.replay_archive:
+        if action == 'STOP\n' and not args.replay_archive:
             export_snapshot_streams(store, args.output, [args.btrfs], direct_send=True)
-        print('SAVED', flush=True)
+        print('FORENSIC_SAVED_INCOMPLETE' if action == 'FORENSIC\n' else 'SAVED', flush=True)
     finally:
         if not settled:
             service.invalidate()
@@ -109,6 +140,7 @@ def main():
     parser.add_argument('--qemu-img')
     parser.add_argument('--qemu-storage')
     parser.add_argument('--apply-final', action='store_true')
+    parser.add_argument('--verify-mount', action='store_true')
     parser.add_argument('--replay-archive')
     parser.add_argument('--extra-root', action='append', default=[])
     args = parser.parse_args()

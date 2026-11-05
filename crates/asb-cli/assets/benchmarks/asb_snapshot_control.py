@@ -12,7 +12,10 @@ from asb_staging import upload
 def settle_on_exit(supervisor, exc_type, exc, traceback):
     """Preserve the execution failure when snapshot cleanup also fails."""
     try:
-        supervisor.close()
+        if exc is not None and hasattr(supervisor, 'interrupt'):
+            supervisor.interrupt()
+        else:
+            supervisor.close()
     except BaseException as cleanup:
         if exc is None:
             raise

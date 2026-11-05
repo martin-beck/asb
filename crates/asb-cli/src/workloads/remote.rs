@@ -902,6 +902,11 @@ pub(crate) fn launch(
     if let Some(root) = std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT_STORAGE_ROOT") {
         command.env("ASB_EXPERIMENTAL_SNAPSHOT_STORAGE_ROOT", root);
     }
+    if std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT_CUSTODY").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        command.env("ASB_EXPERIMENTAL_SNAPSHOT_CUSTODY", "1");
+    }
     command.arg(tool.join(helper));
     if let Some(operation) = operation {
         command.arg(operation);
