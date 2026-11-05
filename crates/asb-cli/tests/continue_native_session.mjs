@@ -49,3 +49,47 @@ const waitingA = effectFailure.invoke({ tool: 'Read', args: { path: 'one' } });
 const waitingB = effectFailure.invoke({ tool: 'Fetch', args: { url: 'fixture' } });
 await assert.rejects(waitingA, /effect failed/);
 await assert.rejects(waitingB, /effect failed/);
+
+// Hooks that occur in separate processes must reserve on entry and release at
+// completion, including when a child finishes before its parent.
+const twoStageEffects = [];
+const twoStage = new ReplaySession([
+  {ordinal: 1, request: {tool: 'child'}, outcome: {ok: true, value: 'child result'}},
+  {ordinal: 0, request: {tool: 'parent'}, outcome: {ok: true, value: 'parent result'}},
+], async event => { twoStageEffects.push(event.ordinal); });
+const parentReservation = twoStage.reserve({tool: 'parent'});
+const childReservation = twoStage.reserve({tool: 'child'});
+assert.throws(() => twoStage.finish(), /incomplete/);
+assert.deepEqual(twoStageEffects, []);
+assert.deepEqual(await parentReservation.assignment, {ok: true, value: 'parent result'});
+assert.deepEqual(await childReservation.assignment, {ok: true, value: 'child result'});
+assert.deepEqual(twoStageEffects, [], 'inspection must not apply effects');
+assert.equal(await childReservation.release(), 'child result');
+assert.deepEqual(twoStageEffects, [1]);
+assert.equal(await parentReservation.release(), 'parent result');
+assert.deepEqual(twoStageEffects, [1, 0]);
+assert.throws(() => parentReservation.release(), /unavailable/);
+twoStage.finish();
+assert.throws(() => twoStage.reserve({tool: 'parent'}), /closed/);
+const missingReservation = new ReplaySession([{ordinal: 0, request: {tool: 'known'}, outcome: {ok: true, value: null}}]);
+assert.throws(() => missingReservation.reserve({tool: 'unknown'}), /no matching/);
+missingReservation.abort();
+const failedReservation = new ReplaySession([
+  {ordinal: 0, request: {tool: 'write'}, outcome: {ok: true, value: 'unused'}},
+], async () => { throw new Error('snapshot failed'); });
+const failedHandle = failedReservation.reserve({tool: 'write'});
+await assert.rejects(failedHandle.release(), /snapshot failed/);
+assert.throws(() => failedReservation.finish(), /incomplete/);
+
+// An out-of-order duplicate must not wait forever for a single later event.
+const duplicates = new ReplaySession([
+  {ordinal: 0, request: {tool: 'first'}, outcome: {ok: true, value: 0}},
+  {ordinal: 1, request: {tool: 'later'}, outcome: {ok: true, value: 1}},
+]);
+const later = duplicates.reserve({tool: 'later'});
+assert.throws(() => duplicates.reserve({tool: 'later'}), /no matching/);
+const firstReservation = duplicates.reserve({tool: 'first'});
+const lateResult = later.release();
+assert.equal(await firstReservation.release(), 0);
+assert.equal(await lateResult, 1);
+duplicates.finish();

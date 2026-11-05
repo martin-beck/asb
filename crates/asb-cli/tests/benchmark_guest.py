@@ -18,6 +18,7 @@ from asb_execution import ExecutionError
 from asb_guest import (execute_agent, export_agent_artifacts, stage_npm_package_tree, stage_private_inputs, stage_auxiliary_tools, prepare_agent, propagate_guest_timeout,
                        stage_public_cache, stage_bootstrap, PreparationBudget)
 from asb_runtime import elf as inspect_elf
+from asb_guest import experimental_snapshot_roots
 
 
 def elf(interpreter=False):
@@ -68,6 +69,13 @@ class ArchiveContainer:
 
 
 class GuestBootstrapTests(unittest.TestCase):
+    def test_experimental_snapshot_roots_reject_invalid_configuration(self):
+        self.assertEqual(experimental_snapshot_roots(None),[])
+        self.assertEqual(experimental_snapshot_roots('["/tmp"]'),['/tmp'])
+        for value in ('invalid','{}','["relative"]','[null]','["/a\\u0000b"]'):
+            with self.subTest(value=value), self.assertRaises(ExecutionError):
+                experimental_snapshot_roots(value)
+
     def test_preinstalled_native_agent_does_not_run_guest_install(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);(root/'.asb').mkdir();(root/'.asb/project.toml').write_text('')
@@ -143,10 +151,12 @@ class GuestBootstrapTests(unittest.TestCase):
                  patch('asb_guest.stage_bootstrap',return_value=([],[])), \
                  patch('asb_guest.stage_auxiliary_tools',return_value=tools), \
                  patch('asb_docker.docker_command',return_value=['docker']), \
-                 patch('asb_snapshot_control.GuestSnapshot') as supervisor:
+                 patch('asb_snapshot_control.GuestSnapshot') as supervisor, \
+                 patch.dict(os.environ,{'ASB_EXPERIMENTAL_SNAPSHOT_ROOTS':'["/tmp"]'}):
                 guest,_=prepare_agent(task,request,None,resources=resources)
             self.assertTrue(guest['snapshot_private_mount'])
             self.assertEqual(supervisor.call_args.args[1],tools)
+            self.assertEqual(supervisor.call_args.kwargs['extra_roots'],['/tmp'])
 
     def test_snapshot_replay_forwards_the_verified_archive_digest(self):
         with tempfile.TemporaryDirectory() as directory:

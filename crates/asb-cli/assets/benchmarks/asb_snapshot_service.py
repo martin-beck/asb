@@ -219,8 +219,41 @@ class SnapshotApplier:
         after = self.store / f'snapshot-{sequence:08d}'
         if not before.is_dir() or not after.is_dir():
             raise ValueError('snapshot replay image is unavailable')
-        plan = plan_tree_transitions(regular_files(before), regular_files(after), regular_files(self.workspace),
-                                     directories(before), directories(after), directories(self.workspace))
+        before_files, after_files = regular_files(before), regular_files(after)
+        replica_files = regular_files(self.workspace)
+        before_dirs, after_dirs = directories(before), directories(after)
+        replica_dirs = directories(self.workspace)
+        # A native file-writing tool may have already created the exact file
+        # represented by this boundary. Account for those additions while
+        # retaining the ordinary before-state and topology checks for every
+        # other path. Never silently accept a different or unrelated file.
+        extra_dirs = replica_dirs.keys() - before_dirs.keys()
+        extra_files = replica_files.keys() - before_files.keys()
+        if not extra_dirs <= (after_dirs.keys() - before_dirs.keys()):
+            raise ValueError('replica contains unexpected directories before snapshot replay')
+        if not extra_files <= (after_files.keys() - before_files.keys()):
+            raise ValueError('replica contains unexpected files before snapshot replay')
+        for path in extra_files:
+            with (after/path).open('rb') as recorded, (self.workspace/path).open('rb') as actual:
+                while True:
+                    left, right = recorded.read(1024*1024), actual.read(1024*1024)
+                    if left != right:
+                        raise ValueError('replica created file differs from its recorded snapshot')
+                    if not left:
+                        break
+        # Preserve hard-link relationships for additions and existing files;
+        # equal bytes alone are insufficient when a link was created or split.
+        for path in extra_files:
+            for other in replica_files:
+                if other == path or other not in after_files:
+                    continue
+                if ((replica_files[path] == replica_files[other]) !=
+                        (after_files[path] == after_files[other])):
+                    raise ValueError('replica created file has different hard-link topology')
+        plan = plan_tree_transitions(before_files, after_files,
+                                     {key:value for key,value in replica_files.items() if key not in extra_files},
+                                     before_dirs, after_dirs,
+                                     {key:value for key,value in replica_dirs.items() if key not in extra_dirs})
         apply_tree_transitions(self.workspace, plan)
         try:
             subprocess.run(self.command + ['-aHAX', '--inplace', '--checksum', '--delete',

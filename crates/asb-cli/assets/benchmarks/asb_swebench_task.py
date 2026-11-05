@@ -1,5 +1,6 @@
 """SWE-bench-owned preparation and submission capture, using generic execution."""
 import hashlib
+import os
 import re
 import time
 from pathlib import Path
@@ -14,6 +15,25 @@ from asb_resources import ResourceJournal
 
 SUBMISSION_GIT_DIR = "/opt/asb-swebench-baseline.git"
 SUBMISSION_WORKTREE = "/testbed"
+
+
+def snapshot_storage_path(artifacts, attempt, tool_mode):
+    """Allocate optional replay scratch and retain its location with the attempt."""
+    configured = os.environ.get('ASB_EXPERIMENTAL_SNAPSHOT_STORAGE_ROOT') if tool_mode == 'replay' else None
+    if configured is None:
+        storage = artifacts/'snapshot-storage'
+    else:
+        root = Path(configured)
+        if not root.is_absolute() or not root.is_dir():
+            raise ExecutionError('experimental snapshot storage root must be an existing absolute directory')
+        storage = root/attempt
+    storage.mkdir(mode=0o700)
+    if configured is not None:
+        atomic_write(artifacts/'snapshot-storage-location.json',encoded({
+            'schema_version':1,'attempt':attempt,'path':str(storage),
+            'scope':'experimental-retained-replay-scratch',
+        }))
+    return storage
 
 
 def reflog_digest(entries):
@@ -60,8 +80,7 @@ class SweBenchTask:
                 atomic_write(self.artifacts / "source-image.json", encoded(source))
             snapshot_storage = None
             if self.snapshot:
-                snapshot_storage = self.artifacts/'snapshot-storage'
-                snapshot_storage.mkdir(mode=0o700)
+                snapshot_storage = snapshot_storage_path(self.artifacts,self.attempt,self.tool_mode)
             self.workspace = ManagedDockerWorkspace(self.client, image, self.attempt, CONTAINER_WORKDIR,
                                                     journal=self.journal, snapshot=self.snapshot,
                                                     snapshot_storage=snapshot_storage)

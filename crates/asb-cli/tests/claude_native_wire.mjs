@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import {controlRequest, normalizeRequest} from '../assets/scripts/claude-native-wire.mjs';
+const body=value=>Buffer.from(JSON.stringify(value));
+const pair={live_id:'a123',recorded_id:'a456',live_path:'/tmp/live/tasks/a123.output',recorded_path:'/tmp/record/tasks/a456.output'};
+assert.equal(controlRequest({method:'POST',url:'/.asb/claude-task-map',mode:'replay',body:body(pair)}),true);
+const block=(id,path,duration,content='keep')=>`prefix\n<task-notification>\n<task-id>${id}</task-id>\n<output-file>${path}</output-file>\n<usage><duration_ms>${duration}</duration_ms></usage>\n${content}\n</task-notification>`;
+const normalize=text=>normalizeRequest({body:{messages:[{role:'user',content:[{type:'text',text}]}]}}).messages[0].content[0].text;
+assert.equal(normalize(block(pair.live_id,pair.live_path,3)),normalize(block(pair.recorded_id,pair.recorded_path,9)));
+assert.notEqual(normalize(block(pair.live_id,pair.live_path,3,'changed')),normalize(block(pair.recorded_id,pair.recorded_path,9)));
+assert.equal(normalize(block('a999','/tmp/no/tasks/a999.output',3)),block('a999','/tmp/no/tasks/a999.output',3));
+assert.equal(normalize('a123 /tmp/live/tasks/a123.output'),'a123 /tmp/live/tasks/a123.output');
+assert.equal(controlRequest({method:'POST',url:'/.asb/claude-task-map',mode:'record',body:body(pair)}),false);
+assert.equal(controlRequest({method:'POST',url:'/.asb/claude-task-map',mode:'replay',body:body({...pair,live_path:'/tmp/unrelated'})}),false);
+assert.throws(()=>controlRequest({method:'POST',url:'/.asb/claude-task-map',mode:'replay',body:body({...pair,live_id:'a789',live_path:'/tmp/live/tasks/a789.output'})}),/one-to-one/);
+assert.throws(()=>controlRequest({method:'POST',url:'/.asb/claude-task-map',mode:'replay',body:body({...pair,live_path:'/tmp/other/tasks/a123.output'})}),/output path changed/);
+assert.equal(normalize(block(pair.live_id,pair.live_path,3)),normalize(block(pair.recorded_id,pair.recorded_path,9)));
+console.log('Claude task identifiers: scoped mapping and negative cases passed');

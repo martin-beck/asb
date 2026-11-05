@@ -73,16 +73,36 @@ export class ReplaySession {
     this.draining = false;
     this.closed = false;
   }
-  invoke(request) {
-    if (this.closed) return Promise.reject(new Error('Native tool replay session is closed'));
+  // Reserve dispatch order now, but apply recorded effects only when the
+  // adapter signals that its corresponding native completion hook has fired.
+  reserve(request) {
+    if (this.closed) throw new Error('Native tool replay session is closed');
     const key = canonical(request);
-    if (!this.byDispatch.slice(this.nextDispatch).some(event => canonical(event.request) === key)) {
-      return Promise.reject(new Error('Native tool replay has no matching remaining tool request'));
+    const available = this.byDispatch.slice(this.nextDispatch).filter(event => canonical(event.request) === key).length;
+    const queued = this.pending.filter(item => item.key === key).length;
+    if (queued >= available) {
+      throw new Error('Native tool replay has no matching remaining tool request');
     }
-    return new Promise((resolve, reject) => {
-      this.pending.push({ key, resolve, reject });
-      this.drain().catch(error => this.abort(error));
+    let item, assign, rejectAssignment;
+    const assignment = new Promise((resolve, reject) => { assign = resolve; rejectAssignment = reject; });
+    // One-step consumers do not inspect assignments; cancellation is still
+    // observed even when no caller requests this early view.
+    assignment.catch(() => {});
+    const outcome = new Promise((resolve, reject) => {
+      item = { key, resolve, reject, assign, rejectAssignment, released: false };
+      this.pending.push(item);
     });
+    this.drain().catch(error => this.abort(error));
+    return { outcome, assignment, release: () => {
+      if (this.closed || item.released) throw new Error('Native tool replay reservation is unavailable');
+      item.released = true;
+      this.drain().catch(error => this.abort(error));
+      return outcome;
+    }};
+  }
+  invoke(request) {
+    try { return this.reserve(request).release(); }
+    catch (error) { return Promise.reject(error); }
   }
   async drain() {
     if (this.draining || this.closed) return;
@@ -93,12 +113,14 @@ export class ReplaySession {
           const expected = this.byDispatch[this.nextDispatch];
           const index = this.pending.findIndex(item => item.key === canonical(expected.request));
           if (index < 0) break;
-          this.assigned.set(expected.ordinal, this.pending.splice(index, 1)[0]);
+          const item = this.pending.splice(index, 1)[0];
+          this.assigned.set(expected.ordinal, item);
           this.nextDispatch++;
+          item.assign(clone(expected.outcome));
         }
         const event = this.events[this.nextCompletion];
         const item = event && this.assigned.get(event.ordinal);
-        if (!item) break;
+        if (!item || !item.released) break;
         await this.applyEffects(clone(event));
         this.assigned.delete(event.ordinal);
         this.nextCompletion++;
@@ -110,7 +132,7 @@ export class ReplaySession {
   }
   abort(error = new Error('Native tool replay was cancelled')) {
     this.closed = true;
-    for (const item of [...this.pending, ...this.assigned.values()]) item.reject(error);
+    for (const item of [...this.pending, ...this.assigned.values()]) { item.rejectAssignment(error); item.reject(error); }
     this.pending.length = 0;
     this.assigned.clear();
   }

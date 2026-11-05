@@ -44,8 +44,66 @@ filesystem or production record/replay.
 The probe uses the experimental `asb_snapshot_service.py` marker socket to
 capture a baseline, tool-end snapshots, and a final snapshot. Its separate
 marker journal records start/end ordering and supplied process and thread IDs.
-This service is not wired into the guest driver or cassette replay; snapshots
-made during overlapping mutations are not yet qualified for replay.
+The experimental guest driver can use this service for cassette replay;
+snapshots made during overlapping mutations are not yet qualified for replay.
+
+The experimental guest supervisor also accepts repeatable `--extra-root`
+arguments. It places the workspace and those directories in a single Btrfs
+subvolume and binds each at its original guest path, so a tool boundary
+captures their effects together. The archive records the ordered paths and
+replay rejects a different layout. Replay creates its writable workspace as a
+Btrfs snapshot of the received baseline, sharing unchanged data instead of
+copying the prepared workspace and then overwriting it. Snapshot streams are
+received directly from the retained archive, avoiding a second extracted copy.
+This is an opt-in filesystem experiment,
+not automatic full-filesystem capture: special files, active sockets, other
+paths, overlapping tool mutations and full agent replay remain unqualified.
+Do not mark a cassette complete based on this facility alone.
+For targeted ASB run experiments, `ASB_EXPERIMENTAL_SNAPSHOT_ROOTS` can be set
+to a JSON array of extra guest paths, such as `["/tmp"]`, during both record
+and replay. This is experimental: copying an already-live socket does not
+preserve its listener, and an overlay or bind mount does not by itself solve
+the socket's lifecycle and identity semantics. Use only disposable task guests.
+For SWE-bench replay experiments, an existing absolute directory can be supplied
+as `ASB_EXPERIMENTAL_SNAPSHOT_STORAGE_ROOT` to place each attempt's snapshot
+scratch there. The attempt stores a location record under the project; scratch
+is retained rather than silently deleted. The setting does not affect recording
+or the ordinary default location.
+The offline `crates/asb-cli/tests/fixtures/fs_snapshot/multiroot.py` probe
+records a workspace and a separate temporary directory, then checks four
+concurrent replays in private mount namespaces. Run it as root in a private
+mount namespace with `ASB_MULTIROOT_FIXTURE_DIR` set to a new disposable
+project-local directory. It needs Btrfs, rsync, loop devices and the optional
+QEMU storage tools used by the guest supervisor. It preserves its evidence.
+
+The opt-in `crates/asb-cli/tests/fixtures/claude_native/edit.mjs` probe uses
+an installed Claude Code binary and a synthetic loopback provider to record
+and replay Read, Edit and Write calls. Set `ASB_CLAUDE_BINARY` to the binary
+and `ASB_CLAUDE_FIXTURE_DIR` to an existing disposable project directory. It
+checks recorded tool results and the final file contents; it does not exercise
+snapshot restoration, an external workload, or a complete cassette. The
+experimental replay lets Claude perform native Edit and Write in the isolated guest
+before applying the recorded snapshot boundary and reporting its result.
+`edit_c4.py` uses the same inputs plus passwordless sudo and Linux mount and
+network namespaces to replay one recording in four separate loopback-only
+replicas. `edit_snapshot_c4.py` additionally uses the real multi-root Btrfs
+supervisor: Claude records a Bash write to the second root, reads that file,
+then reads, edits and writes the workspace. Four replays restore both roots from the
+same recording, compare the tool results and verify that an external counter
+shows the recorded Bash command was not rerun. It retains root-owned fixture
+evidence. These are synthetic loopback-provider tests, not SWE-bench or
+complete filesystem and agent qualification.
+Set `ASB_CLAUDE_TEST_DELEGATE=1` when running either `edit_c4.py` or
+`edit_snapshot_c4.py` to record a native Agent call and its child's Read, then
+replay one LLM tape and native cassette in four isolated replicas. The mock
+provider is stopped during replay, and each tape must consume every recorded
+request without rejection. The snapshot variant uses real Btrfs boundaries,
+but the child's own `/tmp` files remain outside its captured roots. This
+probes one asynchronous child, not every delegation pattern or a SWE-bench run.
+`webfetch_failure.mjs` uses the same Claude binary and fixture directory to
+record a synthetic WebFetch summary output-limit failure, reconstruct its
+recorded page and verify four matching native replays. Its provider is a local
+fixture and the test does not exercise a complete ASB cassette.
 
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without

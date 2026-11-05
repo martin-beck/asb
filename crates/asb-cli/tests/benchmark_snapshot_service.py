@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
 import io
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -27,6 +28,134 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_archive_streams_directly_to_receive_and_preserves_input(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);archive=root/'input.tar';received=[]
+            boundaries=b'{"sequence":1,"snapshot":"snapshot-00000001"}\n{"sequence":2,"snapshot":"snapshot-00000002"}\n'
+            with tarfile.open(archive,'w') as output:
+                for name,data in [('boundaries.jsonl',boundaries),('markers.jsonl',b'fixture\n'),
+                                  ('snapshot-00000001.btrfs',b'first'),('snapshot-00000002.btrfs',b'second')]:
+                    info=tarfile.TarInfo(name);info.size=len(data);output.addfile(info,io.BytesIO(data))
+            class Sink(io.BytesIO):
+                def close(self):received.append(self.getvalue());super().close()
+            def spawn(*_args,**_kwargs):
+                return SimpleNamespace(stdin=Sink(),wait=lambda **_:0)
+            with patch.object(asb_snapshot_guest.subprocess,'Popen',side_effect=spawn), \
+                 patch.object(asb_snapshot_guest,'load_replay_boundaries',return_value=[('fixture',2)]):
+                result=asb_snapshot_guest.receive_archive(archive,root/'received',['btrfs'])
+            self.assertEqual(result,[('fixture',2)]);self.assertEqual(received,[b'first',b'second'])
+            self.assertEqual((root/'received'/'boundaries.jsonl').read_bytes(),boundaries)
+            self.assertTrue(archive.is_file())
+
+    def test_archive_rejects_unlisted_snapshot_before_receive(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);archive=root/'input.tar'
+            boundaries=b'{"sequence":1,"snapshot":"snapshot-00000001"}\n{"sequence":2,"snapshot":"snapshot-00000002"}\n'
+            with tarfile.open(archive,'w') as output:
+                for name,data in [('boundaries.jsonl',boundaries),('markers.jsonl',b''),
+                                  ('snapshot-00000001.btrfs',b'first'),('snapshot-00000003.btrfs',b'wrong')]:
+                    info=tarfile.TarInfo(name);info.size=len(data);output.addfile(info,io.BytesIO(data))
+            with patch.object(asb_snapshot_guest.subprocess,'Popen') as spawn:
+                with self.assertRaisesRegex(ValueError,'does not match its journal'):
+                    asb_snapshot_guest.receive_archive(archive,root/'received',['btrfs'])
+            spawn.assert_not_called();self.assertFalse((root/'received').exists());self.assertTrue(archive.is_file())
+
+    def test_archive_receive_failure_retains_input_and_partial_output(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);archive=root/'input.tar'
+            boundaries=b'{"sequence":1,"snapshot":"snapshot-00000001"}\n{"sequence":2,"snapshot":"snapshot-00000002"}\n'
+            with tarfile.open(archive,'w') as output:
+                for name,data in [('boundaries.jsonl',boundaries),('markers.jsonl',b''),
+                                  ('snapshot-00000001.btrfs',b'first'),('snapshot-00000002.btrfs',b'second')]:
+                    info=tarfile.TarInfo(name);info.size=len(data);output.addfile(info,io.BytesIO(data))
+            with patch.object(asb_snapshot_guest.subprocess,'Popen',return_value=SimpleNamespace(stdin=io.BytesIO(),wait=lambda **_:1)):
+                with self.assertRaisesRegex(RuntimeError,'retained partial output'):
+                    asb_snapshot_guest.receive_archive(archive,root/'received',['btrfs'])
+            self.assertTrue(archive.is_file());self.assertTrue((root/'received').is_dir())
+
+    def test_guest_binds_all_roots_and_unmounts_in_reverse_order(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory).resolve();mounted=root/'mounted';mounted.mkdir()
+            (mounted/'0').mkdir();(mounted/'1').mkdir()
+            target=root/'task';extra=root/'temporary';target.mkdir();extra.mkdir()
+            socket_path=root/'marker.sock';calls=[];closed=[]
+            class Workspace:
+                def __init__(self,*_args):self.mountpoint=root
+                def prepare(self, source, extras):
+                    self.assertions=(source,extras);return mounted
+                def close(self):closed.append(True)
+            def run(args,**_kwargs):calls.append(args)
+            def unmount(target):calls.append(['umount',target])
+            service=SimpleNamespace(finish=lambda:None,invalidate=lambda:None)
+            args=['--target',str(target),'--extra-root',str(extra),'--root',str(root/'storage'),
+                  '--socket',str(socket_path),'--output',str(root/'out'),'--btrfs','btrfs',
+                  '--mkfs','mkfs','--rsync','rsync','--apply-final']
+            with patch.object(asb_snapshot_guest,'SnapshotWorkspace',Workspace), \
+                 patch.object(asb_snapshot_guest,'SnapshotService',return_value=service), \
+                 patch.object(asb_snapshot_guest,'export_snapshot_streams'), \
+                 patch.object(asb_snapshot_guest,'unmount_when_idle',side_effect=unmount), \
+                 patch.object(asb_snapshot_guest.subprocess,'run',side_effect=run), \
+                 patch.object(asb_snapshot_guest.sys,'stdin',io.StringIO('STOP\n')), \
+                 patch.object(asb_snapshot_guest.sys,'stdout',io.StringIO()):
+                asb_snapshot_guest.main(args)
+            self.assertEqual(calls[0],['mount','--bind',str(mounted/'0'),str(target)])
+            self.assertEqual(calls[1],['mount','--bind',str(mounted/'1'),str(extra)])
+            self.assertEqual([x for x in calls if x[0]=='umount'],
+                             [['umount',str(extra)],['umount',str(target)]])
+            self.assertEqual([x[-1] for x in calls if x[0]=='rsync'],[str(extra)+'/',str(target)+'/'])
+            self.assertEqual(closed,[True]);self.assertFalse(socket_path.exists())
+
+    def test_guest_rejects_recording_without_matching_root_manifest(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory).resolve();mounted=root/'mounted';mounted.mkdir()
+            baseline=root/'storage/filesystem/snapshots/snapshot-00000001'
+            baseline.mkdir(parents=True);(baseline/'0').mkdir();(baseline/'1').mkdir()
+            (baseline/'.asb-snapshot-roots.json').write_text(json.dumps(['/wrong','/tmp']))
+            closed=[]
+            class Workspace:
+                def __init__(self,*_args):self.mountpoint=root
+                def prepare(self,*_args,**_kwargs):return mounted
+                def close(self):closed.append(True)
+            args=['--target',str(root/'task'),'--extra-root',str(root/'temporary'),
+                  '--root',str(root/'storage'),'--socket',str(root/'marker'),
+                  '--output',str(root/'out'),'--btrfs','btrfs','--mkfs','mkfs',
+                  '--rsync','rsync','--replay-archive',str(root/'archive')]
+            # The supervisor owns creation of its storage directory.
+            (root/'storage').rename(root/'prepared')
+            def receive(_source,destination,_command):
+                import shutil
+                shutil.copytree(root/'prepared/filesystem/snapshots',destination)
+                return []
+            with patch.object(asb_snapshot_guest,'SnapshotWorkspace',Workspace), \
+                 patch.object(asb_snapshot_guest,'receive_archive',side_effect=receive), \
+                 patch.object(asb_snapshot_guest.subprocess,'run') as run:
+                with self.assertRaisesRegex(ValueError,'does not match the configured roots'):
+                    asb_snapshot_guest.main(args)
+            run.assert_not_called();self.assertEqual(closed,[True])
+
+    def test_guest_unmounts_first_root_if_second_mount_fails(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory).resolve();mounted=root/'mounted';mounted.mkdir()
+            target=root/'task';extra=root/'temporary';target.mkdir();extra.mkdir()
+            closed=[];unmounted=[]
+            class Workspace:
+                def __init__(self,*_args):pass
+                def prepare(self,*_args):return mounted
+                def close(self):closed.append(True)
+            calls=[]
+            def mount(args,**_kwargs):
+                calls.append(args)
+                if len(calls)==2:raise subprocess.CalledProcessError(1,args)
+            args=['--target',str(target),'--extra-root',str(extra),'--root',str(root/'storage'),
+                  '--socket',str(root/'marker'),'--output',str(root/'out'),'--btrfs','btrfs',
+                  '--mkfs','mkfs','--rsync','rsync']
+            with patch.object(asb_snapshot_guest,'SnapshotWorkspace',Workspace), \
+                 patch.object(asb_snapshot_guest,'unmount_when_idle',side_effect=unmounted.append), \
+                 patch.object(asb_snapshot_guest.subprocess,'run',side_effect=mount):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    asb_snapshot_guest.main(args)
+            self.assertEqual(unmounted,[str(target)]);self.assertEqual(closed,[True])
+
     def test_unmount_waits_for_transient_busy_without_forcing(self):
         busy=subprocess.CalledProcessError(32, ['umount','/task'], stderr='umount: /task: target is busy.\n')
         with patch.object(asb_snapshot_guest.subprocess, 'run', side_effect=[busy, None]) as run, \
@@ -89,6 +218,21 @@ class SnapshotServiceTest(unittest.TestCase):
             args=popen.call_args.args[0]
             self.assertEqual(args[args.index('--qemu-img')+1],'/qemu-img')
             self.assertEqual(args[args.index('--qemu-storage')+1],'/qemu-storage')
+            supervisor.log.close()
+
+    def test_guest_supervisor_forwards_extra_roots(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);container=SimpleNamespace(id='fixture-container')
+            task=SimpleNamespace(artifacts=root,workspace=SimpleNamespace(container=container))
+            process=SimpleNamespace(stdout=io.BytesIO(b'READY\n'))
+            tools={'btrfs':'/btrfs','mkfs.btrfs':'/mkfs','rsync':'/rsync'}
+            with patch('asb_snapshot_control.upload'), \
+                 patch('asb_snapshot_control.selectors.DefaultSelector') as selectors, \
+                 patch('asb_snapshot_control.subprocess.Popen',return_value=process) as popen:
+                selectors.return_value.__enter__.return_value.select.return_value=[True]
+                supervisor=GuestSnapshot(task,tools,(0,0),['docker'],time.monotonic()+5,extra_roots=['/tmp','/var/tmp'])
+            args=popen.call_args.args[0]
+            self.assertEqual([args[i+1] for i,value in enumerate(args) if value=='--extra-root'],['/tmp','/var/tmp'])
             supervisor.log.close()
 
     def test_replay_waits_without_tool_deadline_and_wakes_on_predecessor(self):
@@ -190,7 +334,8 @@ class SnapshotServiceTest(unittest.TestCase):
             path=root/'marker.sock';waiting=threading.Event();closed=[];clients=[]
             class Workspace:
                 def __init__(self,*args):self.mountpoint=workspace
-                def prepare(self,_source):return workspace
+                def prepare(self,_source,*_args,**_kwargs):return workspace
+                def restore_baseline(self,_baseline):return workspace
                 def close(self):closed.append(True)
             def replay(boundaries,apply):
                 service=SnapshotReplay(boundaries,apply);wait=service.changed.wait
@@ -208,8 +353,7 @@ class SnapshotServiceTest(unittest.TestCase):
                   '--rsync','rsync','--size','1024','--replay-archive',str(root/'archive')]
             try:
                 with patch.object(asb_snapshot_guest,'SnapshotWorkspace',Workspace), \
-                     patch.object(asb_snapshot_guest,'unpack_streams'), \
-                     patch.object(asb_snapshot_guest,'receive_snapshot_streams',return_value=[('first',2),('second',3)]), \
+                     patch.object(asb_snapshot_guest,'receive_archive',return_value=[('first',2),('second',3)]), \
                      patch.object(asb_snapshot_guest,'SnapshotApplier',return_value=lambda _:None), \
                      patch.object(asb_snapshot_guest,'SnapshotReplay',side_effect=replay), \
                      patch.object(asb_snapshot_guest.subprocess,'run'), \
@@ -227,15 +371,15 @@ class SnapshotServiceTest(unittest.TestCase):
             path=root/'marker.sock';closed=[];sizes=[]
             class Workspace:
                 def __init__(self,*args):self.mountpoint=workspace;sizes.append(args[2])
-                def prepare(self,_source):return workspace
+                def prepare(self,_source,*_args,**_kwargs):return workspace
+                def restore_baseline(self,_baseline):return workspace
                 def close(self):closed.append(True)
             args=['--target',str(workspace),'--root',str(root/'storage'),'--socket',str(path),
                   '--output',str(root/'out'),'--btrfs','btrfs','--mkfs','mkfs',
                   '--rsync','rsync','--replay-archive',str(root/'archive')]
             output=io.StringIO()
             with patch.object(asb_snapshot_guest,'SnapshotWorkspace',Workspace), \
-                 patch.object(asb_snapshot_guest,'unpack_streams'), \
-                 patch.object(asb_snapshot_guest,'receive_snapshot_streams',return_value=[]), \
+                 patch.object(asb_snapshot_guest,'receive_archive',return_value=[]), \
                  patch.object(asb_snapshot_guest,'SnapshotApplier',return_value=lambda _:None), \
                  patch.object(asb_snapshot_guest.subprocess,'run'), \
                  patch.object(asb_snapshot_guest.sys,'stdin',io.StringIO('STOP\n')), \
@@ -282,6 +426,31 @@ class SnapshotServiceTest(unittest.TestCase):
                 SnapshotApplier(store,workspace,['rsync'])(2)
             self.assertGreaterEqual(run.call_count,3)
             self.assertTrue(all('timeout' not in call.kwargs for call in run.call_args_list))
+
+    def test_snapshot_replay_accepts_only_matching_preapplied_file_additions(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);store=root/'store';store.mkdir();workspace=root/'workspace';workspace.mkdir()
+            before=store/'snapshot-00000001';after=store/'snapshot-00000002';before.mkdir();after.mkdir()
+            (after/'created').write_text('recorded');(workspace/'created').write_text('recorded')
+            with patch('asb_snapshot_service.subprocess.run') as run:
+                SnapshotApplier(store,workspace,['rsync'])(2)
+            run.assert_called_once()
+            (workspace/'created').write_text('different')
+            with self.assertRaisesRegex(ValueError,'differs from its recorded snapshot'):
+                SnapshotApplier(store,workspace,['rsync'])(2)
+            (workspace/'unrelated').write_text('extra')
+            with self.assertRaisesRegex(ValueError,'unexpected files'):
+                SnapshotApplier(store,workspace,['rsync'])(2)
+
+    def test_snapshot_replay_rejects_preapplied_file_with_wrong_hardlinks(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);store=root/'store';store.mkdir();workspace=root/'workspace';workspace.mkdir()
+            before=store/'snapshot-00000001';after=store/'snapshot-00000002';before.mkdir();after.mkdir()
+            (before/'existing').write_text('recorded');(after/'existing').write_text('recorded')
+            os.link(after/'existing',after/'created')
+            (workspace/'existing').write_text('recorded');(workspace/'created').write_text('recorded')
+            with self.assertRaisesRegex(ValueError,'different hard-link topology'):
+                SnapshotApplier(store,workspace,['rsync'])(2)
 
     def test_snapshot_settlement_points_to_retained_guest_failure(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:

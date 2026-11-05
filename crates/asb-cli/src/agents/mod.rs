@@ -130,6 +130,11 @@ pub(crate) trait AgentAdapter: Sync {
     fn guest_private_assets(&self) -> &'static [GuestPrivateAsset] {
         &[]
     }
+    /// Optional adapter-owned compact evidence derived from a selected model
+    /// replay track, for clients whose native tools make model subrequests.
+    fn guest_replay_evidence(&self, _track: &Path) -> Result<Option<Vec<u8>>, Error> {
+        Ok(None)
+    }
     /// Supported wire interfaces, in preference order.
     fn supported_endpoints(&self) -> &'static [Support];
     fn command(&self, context: &CommandContext<'_>) -> CommandSpec;
@@ -532,6 +537,7 @@ type GuestServiceHook = fn(
     Option<&str>,
 ) -> Result<Option<auxiliary::AuxiliaryPlan>, Error>;
 type DeferredNativeHook = fn(&[u8], &str) -> Result<Vec<u8>, Error>;
+type GuestReplayEvidenceHook = fn(&Path) -> Result<Vec<u8>, Error>;
 type ToolReplayHook = for<'a> fn(&mut PreparationContext<'a>, TapeContext<'a>) -> Result<(), Error>;
 type CollectionHook = for<'a> fn(&CollectionContext<'a>) -> AgentArtifacts;
 /// An adapter-selected extension which may attach its own bounded replay
@@ -592,6 +598,7 @@ pub(super) struct StaticAdapter {
     forwarded_invocation_environment_vars: &'static [&'static str],
     preferred_executables: Option<PreferredExecutablesHook>,
     guest_private_assets: &'static [GuestPrivateAsset],
+    guest_replay_evidence: Option<GuestReplayEvidenceHook>,
     execution_identity: ExecutionIdentity,
 }
 impl StaticAdapter {
@@ -646,6 +653,7 @@ impl StaticAdapter {
             forwarded_invocation_environment_vars: &[],
             preferred_executables: None,
             guest_private_assets: &[],
+            guest_replay_evidence: None,
             execution_identity: ExecutionIdentity::WorkloadDefault,
         }
     }
@@ -730,6 +738,14 @@ impl StaticAdapter {
         hook: PreferredExecutablesHook,
     ) -> Self {
         self.preferred_executables = Some(hook);
+        self
+    }
+
+    pub(super) const fn with_guest_replay_evidence(
+        mut self,
+        hook: GuestReplayEvidenceHook,
+    ) -> Self {
+        self.guest_replay_evidence = Some(hook);
         self
     }
 
@@ -862,6 +878,11 @@ impl AgentAdapter for StaticAdapter {
     }
     fn guest_private_assets(&self) -> &'static [GuestPrivateAsset] {
         self.guest_private_assets
+    }
+    fn guest_replay_evidence(&self, track: &Path) -> Result<Option<Vec<u8>>, Error> {
+        self.guest_replay_evidence
+            .map(|hook| hook(track))
+            .transpose()
     }
     fn state_environment_vars(&self) -> &'static [&'static str] {
         self.state_environment_vars
@@ -1344,6 +1365,7 @@ mod tests {
                 "pi",
                 "openhands",
                 "openjiuwen",
+                "claude-code",
                 "goose",
                 "hermes",
                 "cline",
