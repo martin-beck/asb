@@ -20,6 +20,7 @@ const dispatch = createNativeDispatcher(mode, socket, {
     return result;
   },
   ...recordBoundaries(marker, 'pi'),
+  snapshotOrder: true,
 });
 globalThis[Symbol.for('asb.pi.nativeDispatch.v1')] = (prepared, invoke) => dispatch(prepared, null, invoke);
 registerHooks({load(url, context, nextLoad) {

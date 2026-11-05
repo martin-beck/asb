@@ -31,7 +31,7 @@ export const result = await executePreparedToolCall({toolCall:{id:'one',name:'ba
 `);
   writeFileSync(entry,`import {result} from './agent-loop.mjs'; if(result.result.content[0].text!=='done'||result.result.details!==undefined)process.exit(3);`);
   const markers=[];
-  const marker=createServer(client=>client.once('data',data=>{markers.push(data.toString().trim());client.end('1\n');}));
+  const marker=createServer(client=>client.once('data',data=>{const message=data.toString().trim();markers.push(message);client.end(message.startsWith('tool-end:')?'2\n':'1\n');}));
   await new Promise(resolve=>marker.listen(markerPath,resolve));
   const bootstrap=fileURLToPath(new URL('../assets/scripts/pi-native-bootstrap.mjs',import.meta.url));
   for (const mode of ['record','replay']) {

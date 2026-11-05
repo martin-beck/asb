@@ -27,7 +27,7 @@ export function snapshotBoundary(path, mode, action, ordinal, agent = 'continue'
       if (response.includes('\n')) {
         const line = response.slice(0, response.indexOf('\n')).trim();
         socket.end();
-        if (/^\d+$/.test(line)) resolve();
+        if (/^\d+$/.test(line) && Number.isSafeInteger(Number(line))) resolve(Number(line));
         else reject(new Error('Native tool snapshot boundary was rejected'));
       }
     });

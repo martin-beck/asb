@@ -9,9 +9,10 @@ export function createNativeDispatcher(mode, socket, {
   decodeResult = value => value,
   begin = async () => {},
   end = async () => {},
+  snapshotOrder = false,
 } = {}) {
   if (!['record', 'replay'].includes(mode) || typeof socket !== 'string' || !socket ||
-      typeof isDelegation !== 'function' || typeof toRequest !== 'function' || typeof encodeResult !== 'function' || typeof decodeResult !== 'function' || typeof begin !== 'function' || typeof end !== 'function') {
+      typeof isDelegation !== 'function' || typeof toRequest !== 'function' || typeof encodeResult !== 'function' || typeof decodeResult !== 'function' || typeof begin !== 'function' || typeof end !== 'function' || typeof snapshotOrder !== 'boolean') {
     throw new TypeError('native dispatcher configuration is invalid');
   }
   return async (call, context, invoke) => {
@@ -23,11 +24,19 @@ export function createNativeDispatcher(mode, socket, {
     // A failed boundary leaves workspace effects unaccounted for. Invalidate
     // the exchange and release its pending token before propagating failure.
     const boundary = async action => {
-      try { await action(request, token); }
+      try { return await action(request, token); }
       catch (error) {
         await brokerRequest(socket, { op: 'invalidate', token });
         throw error;
       }
+    };
+    const finishBoundary = async () => {
+      const sequence = await boundary(end);
+      if (snapshotOrder && (!Number.isSafeInteger(sequence) || sequence < 2)) {
+        await brokerRequest(socket, { op: 'invalidate', token });
+        throw new Error('Native tool snapshot completion sequence is invalid');
+      }
+      return sequence;
     };
     await boundary(begin);
     let value;
@@ -40,11 +49,11 @@ export function createNativeDispatcher(mode, socket, {
         await brokerRequest(socket, { op: 'invalidate', token }).catch(() => {});
         throw error;
       }
-      await boundary(end);
-      await brokerRequest(socket, { op: 'finish', token, outcome });
+      const sequence = await finishBoundary();
+      await brokerRequest(socket, { op: 'finish', token, outcome, ...(snapshotOrder ? { snapshot_sequence: sequence } : {}) });
       throw error;
     }
-    await boundary(end);
+    const sequence = await finishBoundary();
     let outcome;
     try {
       outcome = JSON.parse(JSON.stringify({ ok: true, value: encodeResult(value) }));
@@ -55,7 +64,7 @@ export function createNativeDispatcher(mode, socket, {
       await brokerRequest(socket, { op: 'invalidate', token }).catch(() => {});
       throw error;
     }
-    await brokerRequest(socket, { op: 'finish', token, outcome });
+    await brokerRequest(socket, { op: 'finish', token, outcome, ...(snapshotOrder ? { snapshot_sequence: sequence } : {}) });
     return value;
   };
 }
