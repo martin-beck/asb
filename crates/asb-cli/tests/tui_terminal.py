@@ -55,7 +55,7 @@ class Screen:
         return text.decode() in "\n".join("".join(row) for row in self.rows)
 
 
-def session(binary, root, arguments, keys, path="/usr/bin:/bin", checkpoints=()):
+def session(binary, root, arguments, keys, path="", checkpoints=()):
     pid, master = pty.fork()
     if pid == 0:
         os.chdir(root)
@@ -253,6 +253,11 @@ def main():
         perf.write_text("#!/bin/sh\nexit 99\n")
         perf.chmod(0o755)
 
+        # Positive navigation must not inherit host collectors: their default
+        # selection can prepare project-local dependencies and consume queued
+        # navigation keys during installation. The empty child PATH keeps
+        # these cases independent of installed host tools. Install/error cases
+        # below instead pass an explicit PATH of inert tool fixtures.
         # Real search/select/step/concurrency events, including backwards nav.
         code, transcript = session(binary, root, ["setup", "tui"],
             b"pi \t\x1b[Z\tlocal \t \tbug-fix \t\t\x1b[B \t")
@@ -266,6 +271,7 @@ def main():
         assert config["agent"] == "pi" and config["provider"] == "local"
         assert config["workload"] == "bug-fix" and config["concurrency"] == 2
         assert not (root / "invoked-agent").exists()
+        assert not (root / ".asb/install.log").exists(), "navigation must not install dependencies"
 
         # End reaches the real public maximum; publication must retain numeric
         # 64, and single-selection must replace the default rather than add it.
@@ -279,6 +285,7 @@ def main():
         config64 = tomllib.loads((root / manifest64["configs"][0]).read_text())
         assert config64["concurrency"] == 64 and isinstance(config64["concurrency"], int)
         assert not (root / "invoked-agent").exists()
+        assert not (root / ".asb/install.log").exists(), "navigation must not install dependencies"
 
         # Reach the real final publication event with a configuration which
         # would exceed run's 64KiB reader. No sweep/config/private staging is

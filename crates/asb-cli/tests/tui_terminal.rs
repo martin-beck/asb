@@ -13,6 +13,8 @@ fn offline_tui_terminal_navigation_restores_terminal_and_generates_configuration
         ))
         .arg(env!("CARGO_BIN_EXE_asb"))
         .isolated_env()
+        // Locate the Python harness here; its PTY children use their own
+        // tool-free or explicitly stubbed PATH, never the host collectors.
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
