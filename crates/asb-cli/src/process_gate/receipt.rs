@@ -53,7 +53,7 @@ impl Sender {
         frame[12..].copy_from_slice(&std::process::id().to_le_bytes());
         // Two tiny frames on an initially empty nonblocking socket. Failure is
         // explicit; never wait indefinitely for a departed/blocked caller.
-        if self.0.write(&frame)? == FRAME {
+        if write_retry(&mut self.0, &frame)? == FRAME {
             Ok(())
         } else {
             Err(io::Error::other("incomplete gate receipt write"))
@@ -97,7 +97,7 @@ impl Receiver {
     pub(super) fn poll(&mut self, expected_pid: u32) -> io::Result<()> {
         let mut buffer = [0; FRAME * 2 + 1];
         loop {
-            match self.socket.read(&mut buffer) {
+            match read_retry(&mut self.socket, &mut buffer) {
                 Ok(0) => break, // EOF is never a quiescence proof.
                 Ok(count) => {
                     if self.bytes.len() + count > FRAME * 2 {
@@ -106,7 +106,6 @@ impl Receiver {
                     self.bytes.extend_from_slice(&buffer[..count]);
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => break,
                 Err(error) => return Err(error),
             }
         }
@@ -131,9 +130,61 @@ impl Receiver {
     }
 }
 
+fn read_retry(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
+    loop {
+        match reader.read(buffer) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
+}
+
+fn write_retry(writer: &mut impl Write, buffer: &[u8]) -> io::Result<usize> {
+    loop {
+        match writer.write(buffer) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interrupted_receipt_io_retries_without_inventing_a_receipt() {
+        struct InterruptedOnce<T>(bool, T);
+        impl<T: Read> Read for InterruptedOnce<T> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if !self.0 {
+                    self.0 = true;
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                self.1.read(buffer)
+            }
+        }
+        impl<T: Write> Write for InterruptedOnce<T> {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                if !self.0 {
+                    self.0 = true;
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                self.1.write(buffer)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.1.flush()
+            }
+        }
+        let expected = frame(42, 2, 0);
+        let mut writer = InterruptedOnce(false, Vec::new());
+        assert_eq!(write_retry(&mut writer, &expected).unwrap(), FRAME);
+        let mut reader = InterruptedOnce(false, writer.1.as_slice());
+        let mut observed = [0; FRAME];
+        assert_eq!(read_retry(&mut reader, &mut observed).unwrap(), FRAME);
+        assert_eq!(observed, expected);
+        assert_eq!(read_retry(&mut reader, &mut observed).unwrap(), 0);
+    }
 
     fn frame(pid: u32, kind: u8, code: u8) -> [u8; FRAME] {
         let mut frame = [0; FRAME];
