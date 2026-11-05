@@ -2,6 +2,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
+use std::process::Command;
 
 /// A benchmark runs natively unless an emulated backend is explicitly chosen.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -78,6 +79,21 @@ pub fn x86_qemu_arguments(
     ])
 }
 
+/// Construct a foreground VM command while leaving process ownership and I/O
+/// with the execution backend. The caller decides when to spawn and stop it.
+pub fn x86_qemu_command(
+    executable: &OsStr,
+    paths: &VmPaths<'_>,
+    ssh_port: u16,
+) -> Result<Command, &'static str> {
+    if executable.is_empty() {
+        return Err("QEMU executable must not be empty");
+    }
+    let mut command = Command::new(executable);
+    command.args(x86_qemu_arguments(paths, ssh_port)?);
+    Ok(command)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +129,47 @@ mod tests {
         assert!(args.contains(&OsString::from("q35,accel=tcg")));
         assert!(!args.contains(&OsString::from("-daemonize")));
         assert!(!args.contains(&OsString::from("-pidfile")));
+    }
+
+    #[test]
+    fn qemu_command_preserves_executable_and_arguments_without_spawning() {
+        let paths = VmPaths {
+            disk: Path::new("/project with spaces/disk"),
+            seed: Path::new("/project with spaces/seed"),
+            console: Path::new("/project with spaces/log"),
+        };
+        let command =
+            x86_qemu_command(OsStr::new("/opt/qemu system/bin/qemu"), &paths, 22371).unwrap();
+        assert_eq!(
+            command.get_program(),
+            OsStr::new("/opt/qemu system/bin/qemu")
+        );
+        assert!(
+            command
+                .get_args()
+                .any(|arg| arg
+                    == OsStr::new("file=/project with spaces/disk,if=virtio,format=qcow2"))
+        );
+        assert!(x86_qemu_command(OsStr::new(""), &paths, 22371).is_err());
+        assert!(x86_qemu_command(OsStr::new("qemu"), &paths, 0).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn caller_can_spawn_and_reap_the_foreground_command() {
+        let paths = VmPaths {
+            disk: Path::new("/p/disk"),
+            seed: Path::new("/p/seed"),
+            console: Path::new("/p/log"),
+        };
+        let mut command = x86_qemu_command(OsStr::new("/bin/true"), &paths, 22371).unwrap();
+        let status = command.spawn().unwrap().wait().unwrap();
+        assert!(status.success());
+        let mut missing = x86_qemu_command(OsStr::new("/no/such/qemu"), &paths, 22371).unwrap();
+        assert_eq!(
+            missing.spawn().unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[test]
