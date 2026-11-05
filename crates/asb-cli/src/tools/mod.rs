@@ -553,5 +553,6 @@ mod tests {
         }
         assert!(!runtimes.contains(&"cli2key"));
         assert_eq!(find("btrfs").unwrap().helper_executables(), &["mkfs.btrfs"]);
+        assert_eq!(find("node").unwrap().helper_executables(), &["npm", "npx"]);
     }
 }
