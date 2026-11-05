@@ -85,6 +85,14 @@ The current manual qualification also installs packages inside the guest; their
 versions and the full provisioning/transfer lifecycle are not yet pinned or
 implemented as an ASB recipe. The candidate is not qualified by boot alone.
 
+The node26 QEMU TCG guest exposes x86_64 without AVX2. ASB's pinned Perfetto
+v58.2 x86_64 `tracebox` exits with a CPU-feature error in that guest, and the
+packaged trace processor also fails there. A VM recipe must provide and probe
+guest-compatible collector binaries rather than assume that matching the x86_64
+architecture is sufficient. A v58.2 build with
+`enable_perfetto_x64_cpu_opt=false` is being qualified separately; its build
+alone does not establish that tracing or trace processing works in the guest.
+
 The draft includes independently tested recipe primitives in
 `crates/asb-cli/src/emulation/recipe.rs`: native is the default selection, and
 the x86 recipe constructs foreground QEMU arguments without shell interpolation,
