@@ -2935,6 +2935,38 @@ mod tests {
     }
 
     #[test]
+    fn mismatch_evidence_keeps_numeric_output_limits_but_redacts_credentials() {
+        let root = test_root();
+        let cassette = root.join("limits.jsonl");
+        let recorded = r#"{"model":"m","max_tokens":10,"access_token":"fixture-secret"}"#;
+        let line = serde_json::json!({
+            "request":{"method":"POST","url":"/v1/chat/completions","body":recorded},
+            "response":{"status":200,"headers":{"content-type":"application/json"},"body":"{}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let changed = r#"{"model":"m","max_tokens":11,"access_token":"fixture-secret"}"#;
+        assert!(request(&session, changed).contains("409 Conflict"));
+        assert!(session.stop().is_err());
+        let path = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().ends_with(".mismatch.json"))
+            })
+            .unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["expected"]["body"]["max_tokens"], 10);
+        assert_eq!(value["actual"]["body"]["max_tokens"], 11);
+        assert_eq!(value["actual"]["body"]["access_token"], "[redacted]");
+        assert!(!text.contains("fixture-secret"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_preserves_distinct_tool_call_ids_in_a_response() {
         let root = test_root();
         let cassette = root.join("tool-calls.jsonl");

@@ -898,6 +898,11 @@ function requestMismatch(expected, actual, sequence) {
 }
 
 function redactMismatchValue(value, key = "") {
+  // Numeric generation limits are not credentials and are useful when a
+  // replay differs only in the model's configured output budget.
+  if (["max_tokens", "max_completion_tokens"].includes(key) && Number.isSafeInteger(value) && value >= 0) {
+    return value;
+  }
   if (/token|secret|password|authorization|credential|api[_-]?key/i.test(key)) {
     return "[redacted]";
   }
