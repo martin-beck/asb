@@ -3,8 +3,9 @@ import {mkdtemp, readdir, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createServer} from 'node:net';
+import {spawnSync} from 'node:child_process';
 import {NativeToolBroker} from '../assets/scripts/native-tool-broker.mjs';
-import {recordHook} from '../assets/scripts/codex-native-hook.mjs';
+import {recordHook, replayHook} from '../assets/scripts/codex-native-hook.mjs';
 import {encodePendingSidecar} from '../assets/scripts/native-tool-sidecar.mjs';
 
 const directory = await mkdtemp(join(tmpdir(), 'asb-codex-broker-'));
@@ -43,6 +44,17 @@ try {
   assert.equal(markers.length, 4);
   assert.equal((await readdir(directory)).filter(name => name.endsWith('.json')).length, 0);
   await assert.rejects(recordHook({...first, session_id:'', hook_event_name:'PreToolUse'}, options), /identity/);
+  const effects = [];
+  const recorded = 'Chunk ID: original\nWall time: 0.12 seconds\nProcess exited with code 7\nOutput:\nrecorded output';
+  const replay = new NativeToolBroker('replay', [{ordinal:0, request:{tool:'Bash',input:{command:'must-not-run'}}, outcome:{ok:true,value:recorded}}], async event => effects.push(event.ordinal));
+  await replay.listen(socket);
+  const setup = await replayHook({session_id:'fresh-session',tool_use_id:'fresh-call',tool_name:'Bash',tool_input:{command:'must-not-run'},hook_event_name:'PreToolUse'}, {socket});
+  assert.deepEqual(effects, [0]);
+  const emitted = spawnSync('/bin/sh', ['-c', setup.hookSpecificOutput.updatedInput.command], {encoding:'utf8'});
+  assert.equal(emitted.status, 7);
+  assert.equal(emitted.stdout, 'recorded output');
+  assert.equal(emitted.stderr, '');
+  await replay.finish();
 } finally {
   await new Promise(resolve => server.close(resolve));
   await rm(directory, {recursive:true,force:true});
