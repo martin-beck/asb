@@ -1,5 +1,21 @@
 # Development
 
+The opt-in `crates/asb-cli/tests/fixtures/pi_native/swe_snapshot_c4.py`
+qualifies one original `sympy__sympy-22236` task through ASB's experimental Pi
+native snapshot cassette. In a disposable x86-64 VM, initialize a project,
+install Pi and the official `swe-bench` workload, and make the task image,
+Docker, Node, Btrfs, rsync and QEMU storage tools available. Set
+`ASB_TEST_SWECATALOG_ROOT` to that project, `ASB_TEST_BENCHMARK_ASB` to the
+ASB binary, and run the script with the installed SWE-bench Python. It records
+one local HTTP tool call and applies the upstream reference patch using a
+synthetic provider, then stops both fixture services and replays the cassette
+in four concurrent isolated workloads. It requires each official grade and
+cleanup to succeed. This is not an AI-solving or performance claim, nor does
+it qualify arbitrary native commands, effects, workloads or agents. Evidence
+is retained inside the project. `ASB_TEST_RESUME_RECORDING` may point to a
+retained successful fixture directory to replay it without rerunning the
+agent; this cannot independently recheck its original HTTP request counter.
+
 The opt-in `tests/fixtures/pi_native/snapshot_http_c4.py` runs the installed
 pinned Pi core and native Bash tool with the real Btrfs snapshot supervisor.
 In a disposable VM, set `ASB_PI_FIXTURE_DIR` to an existing writable directory,

@@ -547,6 +547,14 @@ artifacts and should not be committed when they contain provider responses.
 For opt-in, agent- and workload-specific tool-output matching, see
 [Replay tool-result normalizers](docs/REPLAY_NORMALIZERS.md).
 
+LLM-only replay does not capture or isolate native tool commands: a shell command
+can run again and contact an external service even though provider responses
+come from the cassette. A successful workload grade alone does not prove the
+recorded conversation was completely replayed. Pi's experimental snapshot
+mode has a targeted offline tool-effects qualification; it is not a general
+guarantee for arbitrary commands or older cassettes. See the
+[native replay plan](docs/PI_NATIVE_TOOL_REPLAY_PLAN.md) for its boundaries.
+
 ```sh
 asb run benchmark.toml --record --repeat 5 --cassette trials.asb.zip
 asb run benchmark.toml --replay --repeat 10 --cassette trials.asb.zip --seed 42
