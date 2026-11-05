@@ -66,6 +66,9 @@ pub(crate) struct SourceBundle {
 }
 
 pub(super) trait WorkloadAdapter: Sync {
+    fn task_architecture(&self) -> Option<&'static str> {
+        None
+    }
     /// Override the default task-environment preparation budget when needed.
     fn preparation_default_seconds(&self) -> Option<u64> {
         None
