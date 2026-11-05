@@ -681,8 +681,29 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
         .filter(|row| row["execution"]["replica"].is_u64())
         .collect();
     assert_eq!(summaries.len(), 4, "every replica must complete");
-    let plan: Value = serde_json::from_slice(&fs::read(campaign_plan(&replayed)).unwrap()).unwrap();
+    let plan_path = campaign_plan(&replayed);
+    let plan: Value = serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
     assert_eq!(plan["normalization_policy"]["sha256"], policy_digest);
+    let completion_dir = plan_path.parent().unwrap().join("batch-1/.asb-completions");
+    let completions = fs::read_dir(completion_dir)
+        .unwrap()
+        .map(|entry| {
+            serde_json::from_slice::<Value>(&fs::read(entry.unwrap().path()).unwrap()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completions.len(), 4);
+    for completion in completions {
+        let path = completion["proxy_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|path| path.ends_with(".normalization.json"))
+            .expect("normalizer observations must be bound into completion evidence");
+        let evidence: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(evidence["policy_sha256"], policy_digest);
+        assert_eq!(evidence["profiles"][0]["changed"], 1);
+    }
     assert_eq!(
         summaries
             .iter()

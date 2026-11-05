@@ -96,6 +96,7 @@ struct RunningLlmtape {
     url: String,
     progress: Option<PathBuf>,
     mismatch_evidence: Option<PathBuf>,
+    normalization_evidence: Option<PathBuf>,
     cassette: PathBuf,
     mode: Mode,
     cleanup_confirmed: bool,
@@ -298,6 +299,10 @@ impl ProxyAdapter for LlmtapeAdapter {
                 Ok::<_, Error>(path)
             })
             .transpose()?;
+        let normalization_evidence = custom_policy
+            .as_ref()
+            .map(|_| scratch.normalization_destination())
+            .transpose()?;
         let port = if builtin { 0 } else { free_port()? };
         let ready_file = scratch.path.join("ready.json");
         let mut command = executable.command();
@@ -446,6 +451,7 @@ impl ProxyAdapter for LlmtapeAdapter {
                 .then(|| replay_cassette.with_extension("jsonl.progress.json")),
             mismatch_evidence: (request.mode == Mode::Replay)
                 .then(|| scratch.path.join("mismatch.json")),
+            normalization_evidence,
             cassette: cassette.clone(),
             mode: request.mode,
             cleanup_confirmed: false,
@@ -571,11 +577,15 @@ fn read_ready_port(path: &Path, child_id: u32) -> Result<Option<u16>, Error> {
 
 impl ProxySession for RunningLlmtape {
     fn output_files(&self) -> Vec<PathBuf> {
+        let mut outputs = self
+            .normalization_evidence
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         if self.mode == Mode::Record {
-            vec![self.cassette.clone()]
-        } else {
-            Vec::new()
+            outputs.push(self.cassette.clone());
         }
+        outputs
     }
     fn cleanup_confirmed(&self) -> bool {
         self.cleanup_confirmed
@@ -627,7 +637,15 @@ impl ProxySession for RunningLlmtape {
                 self._scratch.path.display()
             )));
         }
-        normalization_retention?;
+        let retained_normalization = normalization_retention?;
+        if self.normalization_evidence.is_some()
+            && retained_normalization != self.normalization_evidence
+        {
+            return Err(Error::Run(
+                "normalizer observations were not retained; inspect the private tape session"
+                    .into(),
+            ));
+        }
         if self.mode == Mode::Replay {
             let progress = self
                 .progress
@@ -930,6 +948,16 @@ struct Scratch {
 }
 
 impl Scratch {
+    fn normalization_destination(&self) -> Result<PathBuf, Error> {
+        let name = self
+            .path
+            .file_name()
+            .ok_or_else(|| Error::Run("cannot derive normalization evidence name".into()))?;
+        Ok(self
+            .path
+            .with_file_name(format!("{}.normalization.json", name.to_string_lossy())))
+    }
+
     /// Preserve content-free profile observations next to the owning private
     /// session directory, independently of optional measurement collectors.
     fn retain_normalization_evidence(&mut self) -> Result<Option<PathBuf>, Error> {
@@ -937,13 +965,7 @@ impl Scratch {
         if !evidence.exists() {
             return Ok(None);
         }
-        let name = self
-            .path
-            .file_name()
-            .ok_or_else(|| Error::Run("cannot derive normalization evidence name".into()))?;
-        let destination = self
-            .path
-            .with_file_name(format!("{}.normalization.json", name.to_string_lossy()));
+        let destination = self.normalization_destination()?;
         std::fs::hard_link(&evidence, &destination).map_err(|error| {
             Error::Run(format!(
                 "cannot retain normalization evidence at {}: {error}",
@@ -1193,6 +1215,7 @@ mod tests {
                 url: String::new(),
                 progress: None,
                 mismatch_evidence: None,
+                normalization_evidence: None,
                 cassette: root.join("tape"),
                 mode: Mode::Record,
                 cleanup_confirmed: false,
@@ -1223,6 +1246,7 @@ mod tests {
                 url: String::new(),
                 progress: None,
                 mismatch_evidence: Some(evidence),
+                normalization_evidence: None,
                 cassette: root.join("tape"),
                 mode: Mode::Replay,
                 cleanup_confirmed: true,
