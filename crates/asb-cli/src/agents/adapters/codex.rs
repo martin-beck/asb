@@ -1768,4 +1768,36 @@ mod tests {
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    #[ignore = "requires a local Codex provider capture with correlation metadata"]
+    fn local_provider_capture_correlates_all_native_calls() {
+        let path = std::path::PathBuf::from(
+            std::env::var_os("ASB_TEST_CODEX_CAPTURE").expect("set ASB_TEST_CODEX_CAPTURE"),
+        );
+        let capture = std::fs::read_to_string(&path).unwrap();
+        let mut sidecar = Vec::new();
+        let mut count = 0;
+        for line in capture.lines() {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            let (calls, _) = provider_function_calls(&row).unwrap();
+            for (name, id) in calls {
+                if name != "exec_command" {
+                    continue;
+                }
+                let id = id.expect("provider call identity");
+                let request =
+                    encode_base64(serde_json::json!({"tool_use_id":id}).to_string().as_bytes());
+                sidecar
+                    .push(serde_json::json!({"event":"write","request_b64":request}).to_string());
+                sidecar.push(serde_json::json!({"event":"output"}).to_string());
+                count += 1;
+            }
+        }
+        assert!(count > 0);
+        sidecar.push(serde_json::json!({"event":"workspace_effect"}).to_string());
+        let bound =
+            bind_provider_tool_outputs((sidecar.join("\n") + "\n").as_bytes(), &path).unwrap();
+        assert!(!bound.is_empty());
+    }
 }
