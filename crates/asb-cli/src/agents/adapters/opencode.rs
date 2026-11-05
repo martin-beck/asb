@@ -61,6 +61,11 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_native_snapshot_check(verify_native_snapshot)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
+        namespace: "opencode",
+        filename: "native-tool-pending.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
         namespace: "tool-replay",
         filename: "local-tools.jsonl",
         format: super::super::ArtifactFormat::JsonLines,
@@ -402,6 +407,18 @@ fn verify_native_snapshot(
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
     let mut artifacts = AgentArtifacts::default();
+    if let Some(bytes) = context
+        .frozen
+        .bytes("native-tool-pending.jsonl")
+        .filter(|bytes| !bytes.is_empty())
+    {
+        artifacts
+            .sealed_artifacts
+            .push(super::super::SealedArtifact {
+                kind: "native-tool-deferred".into(),
+                bytes: bytes.to_vec(),
+            });
+    }
     if let Some(bytes) = context.frozen.bytes("tool-protocol.json") {
         if let Err(error) = super::super::tool_replay_mcp::verify_protocol_bytes(bytes) {
             artifacts.errors.push(error.to_string());
@@ -472,6 +489,34 @@ fn config(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_pending_recording_is_collected_for_cassette_publication() {
+        let frozen = crate::agents::FrozenArtifacts::from_deferred_collection_bytes(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "documents": {},
+                "bytes": {"native-tool-pending.jsonl": [123, 125, 10]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let artifacts = super::collect(&super::super::CollectionContext {
+            frozen: &frozen,
+            provider_capture: None,
+            run_dir: std::path::Path::new("."),
+            interface: None,
+            anthropic_input_includes_cache: false,
+            mcp_servers: &[],
+            mcp_tape: None,
+        });
+        assert!(
+            artifacts
+                .sealed_artifacts
+                .iter()
+                .any(|item| item.kind == "native-tool-deferred" && item.bytes == b"{}\n")
+        );
+    }
+
     #[test]
     fn final_response_requires_matching_terminal_step() {
         let text = r#"{"type":"text","part":{"messageID":"m1","text":"answer"}}"#;
