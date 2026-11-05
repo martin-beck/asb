@@ -18,8 +18,9 @@ derived findings include input references, rule versions, scope and limitations.
    synchronization observations, process-generation and namespace attribution.
    Reuse existing CPU-accounting, BPF and Perfetto capture rather than starting
    duplicate collectors. Disclose unavailable classification and capture loss.
-4. Hardware analysis: CPU-specific Arm Topdown formulas, optional SPE decoding,
-   HiSilicon/other discovered uncore events and shared host capture ownership.
+4. Hardware analysis: CPU-specific Arm Topdown formulas and optional scoped SPE decoding.
+   HiSilicon/other discovered uncore events remain capability metadata only:
+   shared counters cannot isolate agent activity and must not become agent measurements.
    Unsupported CPUs/events produce explicit unavailable observations; no guessed
    encodings, simulated hardware counts or per-agent uncore apportionment.
 5. Cohort and reporting integration: actual overlap and scaling, phase alignment,
@@ -49,6 +50,16 @@ Agents, tool descendants, container totals, shared services and host context
 retain separate scopes. PID reuse, incomplete namespaces and capture loss cannot
 silently widen scope. All collectors attach before release of the existing gate.
 Heavy processing and grading remain behind the execution settlement barrier.
+
+Agent activity excludes ASB, collector processes, graders, unrelated services and
+other benchmark replicas. The perf producer validates the selected live process
+generation and rejects ASB itself or an ancestor whose inherited tree includes
+ASB before starting capture. Arm counters use that same producer, selected PID
+and descendant inheritance, never system-wide or CPU-wide attachment. Platform
+inventory is host capability metadata, not a measurement of system processes.
+Future SPE, pressure and BPF adapters must prove equivalent process-tree/cgroup
+scope; unavailable isolation produces unavailable data, never a host-wide fallback.
+An advertised SPE/uncore PMU alone does not establish scoped measurement support.
 
 ## Qualification target
 
