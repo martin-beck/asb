@@ -154,7 +154,7 @@ def load_replay_boundaries(store):
     return expected
 
 
-def export_snapshot_streams(store, destination, command):
+def export_snapshot_streams(store, destination, command, direct_send=False):
     """Export one baseline and incremental Btrfs streams to files."""
     store, destination = Path(store), Path(destination)
     load_replay_boundaries(store)
@@ -165,9 +165,10 @@ def export_snapshot_streams(store, destination, command):
         for entry in entries:
             snapshot = store / entry['snapshot']
             stream = destination / (entry['snapshot'] + '.btrfs')
-            args = list(command) + ['send']
+            args = ([sys.executable, str(Path(__file__).with_name('asb_snapshot_send.py'))]
+                    if direct_send else list(command) + ['send'])
             if previous is not None:
-                args += ['-p', str(previous)]
+                args += ['--parent' if direct_send else '-p', str(previous)]
             with stream.open('xb') as output:
                 subprocess.run(args + [str(snapshot)], check=True, stdin=subprocess.DEVNULL,
                                stdout=output, stderr=subprocess.DEVNULL, timeout=300)

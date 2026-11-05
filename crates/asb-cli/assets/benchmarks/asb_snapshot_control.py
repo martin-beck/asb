@@ -21,12 +21,12 @@ def settle_on_exit(supervisor, exc_type, exc, traceback):
 
 
 class GuestSnapshot:
-    def __init__(self, task, tools, owner, docker_command, deadline, replay=False, extra_roots=()):
+    def __init__(self, task, tools, owner, docker_command, deadline, replay=False, extra_roots=(), direct_send=False):
         self.task=task;self.docker_command=list(docker_command);self.process=None
         self.replay=replay
         self.log=(task.artifacts/'snapshot-supervisor.log').open('wb')
         files=[]
-        for name in ('asb_snapshot_guest.py','asb_snapshot_service.py',
+        for name in ('asb_snapshot_guest.py','asb_snapshot_service.py','asb_snapshot_send.py',
                      'asb_snapshot_workspace.py','asb_snapshot_topology.py'):
             files.append((name,(Path(__file__).parent/name).read_bytes(),0o600))
         upload(task.workspace.container,'/opt/asb-private',files,temporary_dir=task.artifacts,owner=owner)
@@ -40,6 +40,8 @@ class GuestSnapshot:
             args += ['--qemu-img',tools['qemu-img'],'--qemu-storage',tools['qemu-storage-daemon']]
         if replay:
             args += ['--replay-archive','/asb-snapshot-storage/workspace-snapshots.tar']
+        if direct_send:
+            args += ['--direct-send']
         for root in extra_roots:
             args += ['--extra-root',root]
         self.process=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log)

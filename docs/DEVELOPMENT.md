@@ -55,6 +55,12 @@ replay rejects a different layout. Replay creates its writable workspace as a
 Btrfs snapshot of the received baseline, sharing unchanged data instead of
 copying the prepared workspace and then overwriting it. Snapshot streams are
 received directly from the retained archive, avoiding a second extracted copy.
+The experimental guest supervisor also accepts `--direct-send` to run Btrfs
+send in a bounded helper using the Linux ioctl interface. This is intended for
+future separate-PID custody where the guest's `/proc/self` is unavailable; the
+ordinary supervisor retains its existing `btrfs send` path. The direct helper
+currently supports 64-bit Linux x86_64 and aarch64; failed or timed-out sends
+retain partial output and do not publish snapshot journals.
 This is an opt-in filesystem experiment,
 not automatic full-filesystem capture: special files, active sockets, other
 paths, overlapping tool mutations and full agent replay remain unqualified.

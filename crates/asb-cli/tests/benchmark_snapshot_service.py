@@ -5,6 +5,7 @@ import io
 import os
 from pathlib import Path
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ ROOT=Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT/'crates/asb-cli/assets/benchmarks'))
 from asb_snapshot_service import MarkerServer,SnapshotService,SnapshotReplay,SnapshotApplier
 import asb_snapshot_service
+import asb_snapshot_send
 from asb_snapshot_guest import unpack_streams
 import asb_snapshot_guest
 from asb_snapshot_control import GuestSnapshot, settle_on_exit
@@ -28,6 +30,59 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_direct_export_keeps_order_and_parent_and_retains_failed_stream(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);store=root/'store';store.mkdir()
+            for name in ('snapshot-00000001','snapshot-00000002'):(store/name).mkdir()
+            (store/'boundaries.jsonl').write_text('\n'.join(json.dumps(x) for x in [
+                {'sequence':1,'snapshot':'snapshot-00000001','kind':'baseline','alias':None},
+                {'sequence':2,'snapshot':'snapshot-00000002','kind':'final','alias':None}])+'\n')
+            (store/'markers.jsonl').write_text('')
+            calls=[]
+            def run(args, **kwargs):
+                calls.append((args,kwargs['timeout']))
+                kwargs['stdout'].write(b'partial')
+                if len(calls)==2:raise subprocess.TimeoutExpired(args,kwargs['timeout'])
+            with patch.object(asb_snapshot_service.subprocess,'run',side_effect=run):
+                with self.assertRaisesRegex(RuntimeError,'retained partial output'):
+                    asb_snapshot_service.export_snapshot_streams(store,root/'out',['btrfs'],direct_send=True)
+            self.assertEqual(len(calls),2)
+            self.assertTrue(calls[0][0][1].endswith('asb_snapshot_send.py'))
+            self.assertEqual(calls[1][0][-3:],['--parent',str(store/'snapshot-00000001'),str(store/'snapshot-00000002')])
+            self.assertEqual([call[1] for call in calls],[300,300])
+            self.assertEqual((root/'out/snapshot-00000002.btrfs').read_bytes(),b'partial')
+            self.assertFalse((root/'out/boundaries.jsonl').exists())
+
+    def test_direct_send_uses_parent_tree_identity_and_closes_descriptors(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory); parent=root/'parent'; child=root/'child'
+            parent.mkdir(); child.mkdir(); calls=[]
+            def ioctl(fd, request, value, *rest):
+                calls.append((fd,request,value,rest))
+                if request == asb_snapshot_send._GET_SUBVOL_INFO:
+                    struct.pack_into('=Q',value,0,42)
+                return 0
+            with patch.object(asb_snapshot_send.platform,'machine',return_value='x86_64'), \
+                 patch.object(asb_snapshot_send.fcntl,'ioctl',side_effect=ioctl):
+                asb_snapshot_send.send(child,9,parent)
+            self.assertEqual([item[1] for item in calls],
+                             [asb_snapshot_send._GET_SUBVOL_INFO,asb_snapshot_send._SEND])
+            self.assertEqual(struct.unpack(asb_snapshot_send._SEND_ARGS,calls[1][2])[:5],(9,0,0,42,0))
+            for fd,_,_,_ in calls:
+                with self.assertRaises(OSError):os.fstat(fd)
+
+    def test_direct_send_rejects_unknown_abi_and_invalid_parent(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);parent=root/'parent';child=root/'child'
+            parent.mkdir();child.mkdir()
+            with patch.object(asb_snapshot_send.platform,'machine',return_value='unknown'):
+                with self.assertRaisesRegex(RuntimeError,'requires 64-bit Linux'):
+                    asb_snapshot_send.send(child,9,parent)
+            with patch.object(asb_snapshot_send.platform,'machine',return_value='x86_64'), \
+                 patch.object(asb_snapshot_send.fcntl,'ioctl',return_value=0):
+                with self.assertRaisesRegex(RuntimeError,'no subvolume identity'):
+                    asb_snapshot_send.send(child,9,parent)
+
     def test_archive_streams_directly_to_receive_and_preserves_input(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);archive=root/'input.tar';received=[]
