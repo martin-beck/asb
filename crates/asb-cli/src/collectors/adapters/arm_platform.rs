@@ -29,15 +29,12 @@ impl CollectorAdapter for ArmPlatform {
         &["system"]
     }
     fn start(&self, session: &mut Session) -> Result<(), String> {
-        let report = inventory(
-            Path::new("/sys/bus/event_source/devices"),
-            std::env::consts::ARCH,
-        );
+        let report = resolved_inventory(session);
         measurements::write_json(&session.dir.join("arm-platform.json"), &report)
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct Pmu {
     pub name: String,
     pub domain: &'static str,
@@ -48,7 +45,7 @@ pub(crate) struct Pmu {
     pub formats: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct Inventory {
     schema_version: u32,
     architecture: String,
@@ -57,6 +54,27 @@ pub(crate) struct Inventory {
     scope: &'static str,
     pub pmus: Vec<Pmu>,
     limitations: &'static str,
+}
+
+#[derive(Default)]
+struct State {
+    inventory: Option<Inventory>,
+}
+
+/// Freeze one inventory per attempt; adapters and capability output consume the
+/// same selected definitions even if host metadata changes during preparation.
+pub(super) fn resolved_inventory(session: &mut Session) -> Inventory {
+    let state = session.state::<State>();
+    let mut state = state.borrow_mut();
+    state
+        .inventory
+        .get_or_insert_with(|| {
+            inventory(
+                Path::new("/sys/bus/event_source/devices"),
+                std::env::consts::ARCH,
+            )
+        })
+        .clone()
 }
 
 fn text(path: &Path) -> Result<String, String> {
