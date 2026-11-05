@@ -1470,6 +1470,7 @@ mod tests {
             true
         );
         std::fs::remove_file(&state).unwrap();
+        let replay_pre = pre.replace("call-1", "fresh-replay-id");
         let replay = invoke_native_hook(
             &script,
             "replay",
@@ -1477,7 +1478,7 @@ mod tests {
             &progress,
             &state,
             "pre",
-            Some(&pre),
+            Some(&replay_pre),
         );
         assert!(replay.status.success());
         let value: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
@@ -1516,7 +1517,7 @@ mod tests {
             &state,
             "post",
             Some(
-                r#"{"tool_name":"Bash","tool_use_id":"call-1","tool_response":"ignored-emitter-output"}"#,
+                r#"{"tool_name":"Bash","tool_use_id":"fresh-replay-id","tool_response":"ignored-emitter-output"}"#,
             ),
         );
         assert!(replay_post.status.success());

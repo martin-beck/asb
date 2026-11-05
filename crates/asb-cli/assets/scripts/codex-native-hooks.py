@@ -185,7 +185,15 @@ def _replay_pre(value):
         if not state["replay"]:
             state["replay"] = [[base64.b64encode(a).decode("ascii"), base64.b64encode(b).decode("ascii")] for a, b in _replay_exchanges()]
         index = state["next"]
-        if index >= len(state["replay"]) or base64.b64decode(state["replay"][index][0]) != request:
+        if index >= len(state["replay"]):
+            raise RuntimeError("Codex native tool request differs from its recording")
+        recorded = json.loads(base64.b64decode(state["replay"][index][0]))
+        current = json.loads(request)
+        # Codex creates fresh tool IDs on replay. They correlate lifecycle hooks
+        # within each run but are not part of the tool's operation or input.
+        recorded.pop("tool_use_id", None)
+        current.pop("tool_use_id", None)
+        if recorded != current:
             raise RuntimeError("Codex native tool request differs from its recording")
         state["pending"][identifier] = index
         state["next"] = index + 1
