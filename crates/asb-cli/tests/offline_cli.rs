@@ -3003,6 +3003,14 @@ fn offline_replay_writes_ordered_lifecycle_events_for_all_executed_phases() {
         .iter()
         .map(|record| record["event"].clone())
         .collect::<Vec<_>>();
+    // Linux measures the owned stopped principal: startup and attachment
+    // precede the execution clock. Direct launches retain the spawn-attempt
+    // boundary because they cannot hold an executable behind that gate.
+    let launch_order = if cfg!(target_os = "linux") {
+        ["agent_started", "agent_execute_begin"]
+    } else {
+        ["agent_execute_begin", "agent_started"]
+    };
     let expected = vec![
         serde_json::json!({"kind":"run_started"}),
         serde_json::json!({"kind":"phase_begin","phase":"provider_discovery"}),
@@ -3017,8 +3025,8 @@ fn offline_replay_writes_ordered_lifecycle_events_for_all_executed_phases() {
         serde_json::json!({"kind":"phase_end","phase":"agent_preparation"}),
         serde_json::json!({"kind":"measurements_ready"}),
         serde_json::json!({"kind":"agent_spawn"}),
-        serde_json::json!({"kind":"agent_execute_begin"}),
-        serde_json::json!({"kind":"agent_started"}),
+        serde_json::json!({"kind":launch_order[0]}),
+        serde_json::json!({"kind":launch_order[1]}),
         serde_json::json!({"kind":"agent_execute_end"}),
         serde_json::json!({"kind":"agent_exited"}),
         serde_json::json!({"kind":"phase_begin","phase":"workload_evaluation"}),
@@ -3028,8 +3036,24 @@ fn offline_replay_writes_ordered_lifecycle_events_for_all_executed_phases() {
         serde_json::json!({"kind":"run_finishing"}),
     ];
     assert_eq!(events, expected);
+    #[cfg(target_os = "linux")]
+    {
+        let target: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(project.0.join("measurements/measurement-target.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(target["source"], "owned-stopped-native-principal");
+        assert_eq!(target["scope"], "agent-process-tree");
+        assert_ne!(target["root"]["pid"], target["excluded_guardian"]["pid"]);
+        assert_ne!(target["root"]["pid"], target["excluded_controller_pid"]);
+    }
+    let mut previous = 0;
+
     for (index, record) in records.as_array().unwrap().iter().enumerate() {
         assert_eq!(record["sequence"].as_u64(), Some(index as u64));
+        let timestamp = record["elapsed_us"].as_u64().unwrap();
+        assert!(timestamp >= previous);
+        previous = timestamp;
     }
 }
 
