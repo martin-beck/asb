@@ -71,3 +71,16 @@ archives exceeded the audit download bound and were not inspected; data-only
 catalogs and dynamically supplied workloads also remain unqualified. A future
 trial-level architecture declaration needs source-backed metadata and must avoid
 turning an inner QEMU guest's architecture into a false host requirement.
+
+## Candidate x86 guest image
+
+The node26 qualification uses the Ubuntu Noble daily image dated `20261017`:
+`https://cloud-images.ubuntu.com/noble/20261017/noble-server-cloudimg-amd64.img`.
+Its SHA-256 is `04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94`.
+This dated URL and digest identify the tested base image; a floating `current`
+alias must not silently replace it. The qualification uses QEMU system TCG,
+virtio storage and network, and 8 GiB guest memory. Docker Buildx must support
+`build --resource`; the tested guest uses Buildx 0.36.1 and BuildKit 0.26.2.
+The current manual qualification also installs packages inside the guest; their
+versions and the full provisioning/transfer lifecycle are not yet pinned or
+implemented as an ASB recipe. The candidate is not qualified by boot alone.
