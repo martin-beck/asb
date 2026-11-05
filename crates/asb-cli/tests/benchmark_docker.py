@@ -17,6 +17,25 @@ SPEC.loader.exec_module(RUNTIME)
 
 
 class ConnectionTests(unittest.TestCase):
+    def test_docker_negotiates_on_unversioned_endpoint_before_ping(self):
+        try:
+            import docker
+        except ImportError:
+            self.skipTest("Docker SDK is not installed")
+        requests = []
+        def get(client, url, **_kwargs):
+            requests.append(url)
+            response = SimpleNamespace(status_code=200, json=lambda: {"ApiVersion": "1.52"})
+            response.raise_for_status = lambda: None
+            return response
+        transport = SimpleNamespace(close=lambda: None)
+        with patch.object(RUNTIME, "StdioConnections", return_value=transport), \
+             patch.object(docker.APIClient, "_get", get), \
+             patch.object(docker.APIClient, "ping", return_value=True):
+            with RUNTIME.DockerSession() as client:
+                self.assertEqual(client.api._version, "1.52")
+        self.assertEqual(requests, ["http+docker://localhost/version"])
+
     def test_blocked_inflight_spawn_cannot_extend_close_budget_or_lose_its_eventual_child(self):
         transport = RUNTIME.StdioConnections([sys.executable,"-c","import sys;sys.stdin.buffer.read()"])
         unrelated = subprocess.Popen([sys.executable,"-c","import time;time.sleep(30)"])
