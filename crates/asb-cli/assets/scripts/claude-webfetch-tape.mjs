@@ -66,12 +66,22 @@ export function planWebFetchReplay(exchanges, tapeEntries) {
       continue;
     }
     if (!failedSummary && result.code !== 200) throw new Error('Claude WebFetch recorded status is unsupported');
-    const matches = [];
+    const matches = [], converted = [];
     for (let index = 0; index < summaries.length; index++) {
       if (consumed.has(index)) continue;
-      try { matches.push({index, page: extractWebFetchPage(summaries[index], input.prompt, failedSummary ? null : result.bytes)}); }
+      try {
+        const page = extractWebFetchPage(summaries[index], input.prompt, null);
+        const candidate = {index, page};
+        if (failedSummary || Buffer.byteLength(page, 'utf8') === result.bytes) matches.push(candidate);
+        else if (Buffer.byteLength(page, 'utf8') < result.bytes) converted.push(candidate);
+      }
       catch { /* A different recorded model call is not this fetch. */ }
     }
+    // Claude can convert an HTML response to shorter text before its summary
+    // request. The native byte count describes the original response, not the
+    // text. Only use that text when the prompt identifies one candidate in
+    // total; a competing same-prompt response cannot be safely attributed.
+    if (!failedSummary && matches.length === 0 && converted.length === 1) matches.push(converted[0]);
     // Claude may retry a failed summary with the identical page. Those
     // repeated requests are interchangeable only when the page bytes match.
     if (matches.length !== 1 && !(failedSummary && matches.length > 1 &&
