@@ -55,6 +55,10 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_estimated_disk_mib(1024)
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_tool_replay(prepare_tool_replay)
+.with_native_tool_transport()
+.with_guest_service(start_native_service)
+.with_deferred_native_recording(finalize_native_recording)
+.with_native_snapshot_check(verify_native_snapshot)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
         namespace: "tool-replay",
@@ -249,6 +253,22 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     // description before mutating the command, then remove the bridge
     // variable so it is never exposed to OpenCode or the benchmark process.
     let tool_command = tool_replay(context)?;
+    let mut configuration: serde_json::Value = serde_json::from_str(&config(
+        context.model,
+        &connection.base_url,
+        npm,
+        tool_command,
+    )?)
+    .map_err(|_| Error::Run("cannot configure OpenCode provider".into()))?;
+    if native_snapshot(context.tape.map(|tape| tape.mode)) {
+        let plugin = context
+            .run_dir
+            .join("opencode/opencode-native-launcher.mjs");
+        configuration["plugin"] = serde_json::json!([plugin]);
+        if let Some(tape) = context.tape {
+            context.command.env("ASB_OPENCODE_CASSETTE", tape.cassette);
+        }
+    }
     context
         .command
         .env_remove("ASB_OPENCODE_TOOL_REPLAY_COMMAND");
@@ -258,10 +278,7 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
             "ASB_AGENT_API_KEY",
             connection.credential.as_deref().unwrap_or("asb-local"),
         )
-        .env(
-            "OPENCODE_CONFIG_CONTENT",
-            config(context.model, &connection.base_url, npm, tool_command)?,
-        );
+        .env("OPENCODE_CONFIG_CONTENT", configuration.to_string());
     // OpenCode's repository-search tool invokes ripgrep.  Fresh workload
     // materialization can give the same files a different directory-entry
     // order, which otherwise changes only the ordering of an identical tool
@@ -287,6 +304,9 @@ fn prepare_tool_replay(
     context: &mut PreparationContext<'_>,
     tape: super::super::TapeContext<'_>,
 ) -> Result<(), Error> {
+    if native_snapshot(Some(tape.mode)) {
+        return Ok(());
+    }
     super::super::tool_replay_mcp::prepare_protocol_artifact(context, tape)?;
     let launch = super::super::tool_replay_mcp::launch(context, tape)?;
     let command = std::iter::once(launch.program)
@@ -304,6 +324,80 @@ fn prepare_tool_replay(
             .map_err(|_| Error::Run("cannot encode OpenCode local-tool command".into()))?,
     );
     Ok(())
+}
+
+fn native_snapshot(mode: Option<crate::tape::Mode>) -> bool {
+    match mode {
+        Some(crate::tape::Mode::Record) => std::env::var_os("ASB_FS_MARKER_SOCKET").is_some(),
+        Some(crate::tape::Mode::Replay) => std::env::var_os("ASB_FS_REPLAY_SOCKET").is_some(),
+        None => false,
+    }
+}
+
+fn start_native_service(
+    command: &mut std::process::Command,
+    executable: &str,
+    run_dir: &std::path::Path,
+    mode: Option<crate::tape::Mode>,
+    native_tool: Option<&std::path::Path>,
+    snapshot_sha256: Option<&str>,
+) -> Result<Option<super::super::auxiliary::AuxiliaryPlan>, Error> {
+    let Some((mode, marker, snapshot)) =
+        super::super::native_guest::selection(mode, snapshot_sha256)?
+    else {
+        return Ok(None);
+    };
+    let bundle = std::fs::canonicalize(executable).map_err(|_| {
+        Error::Run("OpenCode executable is unavailable for native recording".into())
+    })?;
+    let assets = [
+        (
+            "opencode-native-plugin.mjs",
+            include_str!("../../../assets/scripts/opencode-native-plugin.mjs"),
+        ),
+        (
+            "opencode-native-launcher.mjs",
+            include_str!("../../../assets/scripts/opencode-native-launcher.mjs"),
+        ),
+    ];
+    let settings = super::super::native_guest::Settings {
+        agent: "opencode",
+        bundle: &bundle,
+        run_dir,
+        mode,
+        marker: marker.clone(),
+        native_tool,
+        snapshot: &snapshot,
+        assets: &assets,
+    };
+    let (service, _, socket) = super::super::native_guest::broker(command, &settings)?;
+    command
+        .env("ASB_OPENCODE_SOCKET", socket)
+        .env("ASB_OPENCODE_MARKER", marker)
+        .env(
+            "ASB_OPENCODE_NATIVE_MODE",
+            if mode == crate::tape::Mode::Replay {
+                "replay"
+            } else {
+                "record"
+            },
+        );
+    if let Some(path) = native_tool {
+        command.env("ASB_OPENCODE_SIDECAR", path);
+    }
+    Ok(Some(super::super::auxiliary::AuxiliaryPlan::new(service)))
+}
+
+fn finalize_native_recording(pending: &[u8], digest: &str) -> Result<Vec<u8>, Error> {
+    super::super::native_guest::finalize("opencode", pending, digest)
+}
+
+fn verify_native_snapshot(
+    native: &[u8],
+    snapshot: &mut std::fs::File,
+    digest: &str,
+) -> Result<(), Error> {
+    super::pi::snapshot::verify_for("opencode", native, snapshot, digest)
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
