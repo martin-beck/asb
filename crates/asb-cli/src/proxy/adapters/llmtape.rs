@@ -3373,6 +3373,57 @@ mod tests {
     }
 
     #[test]
+    fn recording_preserves_parallel_calls_and_provider_tool_descriptors() {
+        let root = test_root();
+        let cassette = root.join("capabilities.jsonl");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 16384];
+            let count = connection.read(&mut request).unwrap();
+            let observed = String::from_utf8_lossy(&request[..count]).into_owned();
+            connection.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+            observed
+        });
+        let session =
+            Session::start(Mode::Record, &cassette, Some(&upstream), false, &root).unwrap();
+        let body = r#"{"model":"fixture","client_metadata":{"x-codex-installation-id":"fixture"},"parallel_tool_calls":true,"tools":[{"type":"web_search"},{"type":"image_generation"},{"type":"function","name":"fixture"}]}"#;
+        assert!(request_to(&session, "/v1/responses", body).contains("200 OK"));
+        session.stop().unwrap();
+        let observed = server.join().unwrap();
+        let body = observed.split_once("\r\n\r\n").unwrap().1;
+        let value: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(value["parallel_tool_calls"], true);
+        assert_eq!(value["tools"][0]["type"], "web_search");
+        assert_eq!(value["tools"][1]["type"], "image_generation");
+        assert_eq!(value["tools"][2]["name"], "fixture");
+        let replay = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(request_to(&replay, "/v1/responses", body).contains("200 OK"));
+        replay.stop().unwrap();
+        let replay = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let changed = body.replace("web_search", "different_tool");
+        assert!(request_to(&replay, "/v1/responses", &changed).contains("409 Conflict"));
+        assert!(replay.stop().is_err());
+        let replay = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        let changed = body.replace(
+            "\"parallel_tool_calls\":true",
+            "\"parallel_tool_calls\":false",
+        );
+        assert!(request_to(&replay, "/v1/responses", &changed).contains("409 Conflict"));
+        assert!(replay.stop().is_err());
+        // Historical tapes did not retain this setting in their comparison key.
+        let legacy = root.join("legacy-capabilities.jsonl");
+        let old_body = body.replace("\"parallel_tool_calls\":true,", "");
+        let old = serde_json::json!({"request":{"method":"POST","url":"/v1/responses","body":old_body},"response":{"status":200,"headers":{"content-type":"application/json"},"body":"{}"}});
+        std::fs::write(&legacy, format!("{old}\n")).unwrap();
+        let replay = Session::start(Mode::Replay, &legacy, None, false, &root).unwrap();
+        assert!(request_to(&replay, "/v1/responses", body).contains("200 OK"));
+        replay.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_tool_attribution_is_recorded_without_forwarding_the_header() {
         let root = test_root();
         let cassette = root.join("native-attribution.jsonl");

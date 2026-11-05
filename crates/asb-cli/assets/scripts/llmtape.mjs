@@ -54,6 +54,10 @@ function option(args, name, required = true) {
 
 const args = process.argv.slice(2);
 const mode = args.shift();
+// Older recordings deliberately omitted Codex's parallel-call setting from
+// matching. Preserve their historical replay behavior; new recordings retain
+// that field and compare it strictly.
+let legacyRequestPolicy = false;
 if (mode !== "record" && mode !== "replay") usage("mode must be record or replay");
 const port = Number(option(args, "--port"));
 const readyFile = process.env.ASB_TAPE_READY_FILE;
@@ -212,20 +216,6 @@ function normalizeRequestBody(url, body) {
         changed = true;
       }
     }
-    // Codex may launch several MCP calls concurrently even though it feeds
-    // their completed results back to the Responses conversation in model-call
-    // order. A sealed local-tool tape records the actual operations, so ask
-    // the Responses provider for one Codex tool call at a time while a tape
-    // proxy is active. This is a protocol option, not a prompt mutation, and
-    // it is scoped to Codex's fixed client metadata envelope.
-    if (url.includes("/responses")
-        && parsed.client_metadata
-        && typeof parsed.client_metadata === "object"
-        && Object.hasOwn(parsed.client_metadata, "x-codex-installation-id")
-        && parsed.parallel_tool_calls !== false) {
-      parsed.parallel_tool_calls = false;
-      changed = true;
-    }
     if (url.includes("/messages") && parsed.temperature === undefined) {
       // Keep record/replay agent trajectories stable when a CLI leaves the
       // provider's sampling default unspecified.
@@ -233,19 +223,7 @@ function normalizeRequestBody(url, body) {
       changed = true;
     }
     if (!Array.isArray(parsed.tools)) return changed ? JSON.stringify(parsed) : body;
-    parsed.tools = parsed.tools
-      .filter((tool) => {
-        // The local bridge supports function tools.  Cline's Responses
-        // adapter may add native web/image tools that the bridge cannot
-        // execute; omit those optional tools while retaining agent tools.
-        if (url.includes("/responses") && tool &&
-            (tool.type === "web_search" || tool.type === "image_generation")) {
-          changed = true;
-          return false;
-        }
-        return true;
-      })
-      .map((tool) => {
+    parsed.tools = parsed.tools.map((tool) => {
       if (tool && tool.type === "web_search_20250305" && !tool.input_schema) {
         changed = true;
         return { ...tool, input_schema: { type: "object", properties: {} } };
@@ -453,17 +431,8 @@ function normalizeCassetteBody(body, url = "") {
       throw new Error("adapter normalizer must return an object or undefined");
     }
     const canonical = normalizerValue === undefined ? extensionCanonical : normalizerValue;
-    // `normalizeRequestBody` adds this transport policy before forwarding a
-    // Codex request upstream.  It is intentionally absent from the cassette
-    // key: old cassettes predate the policy, and a caller cannot opt out while
-    // a sealed local-tool tape is active.  The model, prompt, and every tool
-    // result remain part of the key.
-    if (url.includes("/responses")
-        && canonical
-        && typeof canonical === "object"
-        && canonical.client_metadata
-        && typeof canonical.client_metadata === "object"
-        && Object.hasOwn(canonical.client_metadata, "x-codex-installation-id")) {
+    if (legacyRequestPolicy && url.includes('/responses') && canonical?.client_metadata &&
+        Object.hasOwn(canonical.client_metadata, 'x-codex-installation-id')) {
       delete canonical.parallel_tool_calls;
     }
     const structuredToolCallIdentifiers = new Map();
@@ -645,19 +614,24 @@ function requestKey(request) {
   return JSON.stringify([request.method, request.url, normalizeCassetteBody(request.body, request.url)]);
 }
 
-const interactions = mode === "replay"
+const rawInteractions = mode === "replay"
   ? readFileSync(cassette, "utf8")
       .split(/\r?\n/)
       .filter(Boolean)
-      .map((line) => {
-        const interaction = JSON.parse(line);
+      .map((line) => JSON.parse(line))
+  : [];
+legacyRequestPolicy = mode === 'replay' && rawInteractions.length > 0 &&
+  rawInteractions.every(interaction => interaction.asb_request_policy === undefined);
+if (mode === 'replay' && !legacyRequestPolicy && rawInteractions.some(interaction => interaction.asb_request_policy !== 2)) {
+  throw new Error('cassette request policy is inconsistent');
+}
+const interactions = rawInteractions.map((interaction) => {
         if (interaction.request) {
           interaction.request.url = requestPath(interaction.request.url);
           interaction.request.body = normalizeCassetteBody(interaction.request.body, interaction.request.url);
         }
         return interaction;
-      })
-  : [];
+      });
 let cursor = 0;
 let replayOrderWaiters = 0;
 // Optional probes advance the recorded cursor when omitted. Keep their exact
@@ -1088,6 +1062,7 @@ async function handle(request, response, recording) {
   };
   const delayMs = Math.min(Math.max(0, Math.round(performance.now() - startedAt)), MAX_DELAY_MS);
   const interaction = {
+    asb_request_policy: 2,
     request: recordedRequest,
     response: recordedResponse,
     delay_ms: delayMs,
