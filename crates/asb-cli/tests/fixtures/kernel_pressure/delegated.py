@@ -92,4 +92,9 @@ for path in reports:
         raise SystemExit("Pressure target was absent from the observed agent leaves")
     if receipt["psi_enabled"] and "cpu.some_stall_pct" not in result["metrics"]:
         raise SystemExit("Enabled PSI did not produce agent CPU pressure observations")
+    target = json.loads((path.parent / "measurement-target.json").read_text())
+    if target["source"] != "owned-stopped-native-principal" or target["root"]["pid"] != result["target"]["pid"]:
+        raise SystemExit("Pressure root is not the verified actual agent principal")
+    if target["excluded_guardian"]["pid"] in observed or target["excluded_controller_pid"] in observed:
+        raise SystemExit("Agent cgroup included ASB guardian/controller activity")
 print("Verified agent leaves exclude ASB, fixture and unrelated CPU/memory load")

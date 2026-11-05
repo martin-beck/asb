@@ -8,6 +8,22 @@ struct Fixture(PathBuf);
 
 #[cfg(target_os = "linux")]
 #[test]
+fn native_principal_attachment_rejects_unowned_or_changed_guardian_bindings() {
+    let fixture = Fixture::new();
+    let mut session = Session::start_with_collectors(&fixture.0, &[], None).unwrap();
+    let current = ProcessIdentity::read(std::process::id()).unwrap();
+    assert!(session.attach_native_principal(current, current).is_err());
+    let stale = ProcessIdentity {
+        start_time_ticks: current.start_time_ticks + 1,
+        ..current
+    };
+    assert!(session.attach_native_principal(current, stale).is_err());
+    assert!(session.measurement_target().is_none());
+    assert!(session.measurement_guardian().is_none());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn capture_creation_failure_precedes_any_sampler_or_lifecycle_child() {
     let fixture = Fixture::new();
     let mut session = Session::start_with_collectors(&fixture.0, &[], None).unwrap();

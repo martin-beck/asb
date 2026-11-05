@@ -146,6 +146,13 @@ impl OwnedChild {
             )),
         }
     }
+    #[cfg(target_os = "linux")]
+    pub fn resume_measured_principal(&mut self, pid: u32) -> io::Result<()> {
+        match self {
+            Self::Gated(gate) => gate.resume_measured_principal(pid),
+            Self::Direct(_) => Err(io::Error::other("measured principal requires gate custody")),
+        }
+    }
 
     pub fn spawn_direct(command: &mut Command) -> io::Result<Self> {
         DirectChild::spawn(command).map(Self::Direct)
