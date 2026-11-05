@@ -21,6 +21,7 @@ sys.path.insert(0,str(ROOT/'crates/asb-cli/assets/benchmarks'))
 from asb_snapshot_service import MarkerServer,SnapshotService,SnapshotReplay,SnapshotApplier
 import asb_snapshot_service
 import asb_snapshot_send
+import asb_snapshot_handoff
 from asb_snapshot_guest import unpack_streams
 import asb_snapshot_guest
 from asb_snapshot_control import GuestSnapshot, settle_on_exit
@@ -30,6 +31,60 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_handoff_preparer_restores_only_after_explicit_cleanup(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);target=root/'target';target.mkdir();calls=[]
+            workspace=SimpleNamespace(prepare=lambda *a,**k: root/'mounted', close=lambda:calls.append('closed'))
+            args=SimpleNamespace(root=str(root/'state'),size=None,mkfs='mkfs',btrfs='btrfs',rsync='rsync',
+                                 qemu_img=None,qemu_storage=None,target=str(target),extra_root=[],
+                                 replay_archive=None,apply_final=True)
+            with patch.object(asb_snapshot_handoff,'SnapshotWorkspace',return_value=workspace), \
+                 patch.object(asb_snapshot_handoff.subprocess,'run',side_effect=lambda args,**k:calls.append(args)), \
+                 patch.object(asb_snapshot_handoff,'unmount_when_idle',side_effect=lambda target:calls.append('unmounted')), \
+                 patch.object(asb_snapshot_handoff.sys,'stdin',io.StringIO('CLEANUP\n')), \
+                 patch.object(asb_snapshot_handoff.sys,'stdout',io.StringIO()):
+                asb_snapshot_handoff.prepare(args)
+            self.assertEqual(calls[0][:2],['mount','--bind'])
+            self.assertEqual(calls[1],'unmounted')
+            self.assertEqual(calls[2][0],'rsync')
+            self.assertEqual(calls[3],'closed')
+
+    def test_handoff_preparer_eof_never_applies_or_publishes_completion(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);target=root/'target';target.mkdir();calls=[]
+            workspace=SimpleNamespace(prepare=lambda *a,**k: root/'mounted', close=lambda:calls.append('closed'))
+            args=SimpleNamespace(root=str(root/'state'),size=None,mkfs='mkfs',btrfs='btrfs',rsync='rsync',
+                                 qemu_img=None,qemu_storage=None,target=str(target),extra_root=[],
+                                 replay_archive=None,apply_final=True)
+            with patch.object(asb_snapshot_handoff,'SnapshotWorkspace',return_value=workspace), \
+                 patch.object(asb_snapshot_handoff.subprocess,'run',side_effect=lambda args,**k:calls.append(args)), \
+                 patch.object(asb_snapshot_handoff,'unmount_when_idle',side_effect=lambda target:calls.append('unmounted')), \
+                 patch.object(asb_snapshot_handoff.sys,'stdin',io.StringIO('')), \
+                 patch.object(asb_snapshot_handoff.sys,'stdout',io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError,'control ended unexpectedly'):
+                    asb_snapshot_handoff.prepare(args)
+            self.assertEqual(calls[0][:2],['mount','--bind'])
+            self.assertEqual(calls[1:],['unmounted','closed'])
+
+    def test_handoff_custody_eof_invalidates_without_export(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);calls=[]
+            service=SimpleNamespace(invalidate=lambda:calls.append('invalidated'),finish=lambda:calls.append('finished'))
+            server=SimpleNamespace(serve_forever=lambda:None,shutdown=lambda:calls.append('shutdown'),
+                                   interrupt_clients=lambda:calls.append('interrupted'),server_close=lambda:calls.append('closed'))
+            args=SimpleNamespace(root=str(root),replay_archive=None,rsync='rsync',btrfs='btrfs',
+                                 socket=str(root/'socket'),output=str(root/'output'))
+            with patch.object(asb_snapshot_handoff,'SnapshotService',return_value=service), \
+                 patch.object(asb_snapshot_handoff,'MarkerServer',return_value=server), \
+                 patch.object(asb_snapshot_handoff,'export_snapshot_streams') as exported, \
+                 patch.object(asb_snapshot_handoff.sys,'stdin',io.StringIO('')), \
+                 patch.object(asb_snapshot_handoff.sys,'stdout',io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError,'without complete settlement'):
+                    asb_snapshot_handoff.custody(args)
+            self.assertIn('invalidated',calls)
+            self.assertNotIn('finished',calls)
+            exported.assert_not_called()
+
     def test_direct_export_keeps_order_and_parent_and_retains_failed_stream(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);store=root/'store';store.mkdir()

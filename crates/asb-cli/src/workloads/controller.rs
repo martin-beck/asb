@@ -203,6 +203,10 @@ pub(crate) fn publish_support(root: &std::path::Path) -> Result<(), crate::Error
             include_str!("../../assets/benchmarks/asb_snapshot_send.py"),
         ),
         (
+            "asb_snapshot_handoff.py",
+            include_str!("../../assets/benchmarks/asb_snapshot_handoff.py"),
+        ),
+        (
             "asb_snapshot_workspace.py",
             include_str!("../../assets/benchmarks/asb_snapshot_workspace.py"),
         ),

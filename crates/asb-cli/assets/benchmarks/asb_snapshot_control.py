@@ -26,7 +26,7 @@ class GuestSnapshot:
         self.replay=replay
         self.log=(task.artifacts/'snapshot-supervisor.log').open('wb')
         files=[]
-        for name in ('asb_snapshot_guest.py','asb_snapshot_service.py','asb_snapshot_send.py',
+        for name in ('asb_snapshot_guest.py','asb_snapshot_service.py','asb_snapshot_send.py','asb_snapshot_handoff.py',
                      'asb_snapshot_workspace.py','asb_snapshot_topology.py'):
             files.append((name,(Path(__file__).parent/name).read_bytes(),0o600))
         upload(task.workspace.container,'/opt/asb-private',files,temporary_dir=task.artifacts,owner=owner)
