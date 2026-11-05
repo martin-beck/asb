@@ -23,6 +23,11 @@ assert.deepEqual(planWebFetchReplay(input, tape), [
 assert.throws(() => planWebFetchReplay(input, []), /missing or ambiguous/);
 assert.throws(() => planWebFetchReplay(input, [...tape, ...tape]), /missing or ambiguous/);
 assert.throws(() => planWebFetchReplay([web(1, 'https://example.test/ok', 'fixture prompt', 200, 4)], tape), /missing or ambiguous/);
+// A converted HTML response has a smaller summary body than the original
+// response's recorded byte count. Only a unique prompt match is attributable.
+const converted = web(1, 'https://example.test/ok', 'fixture prompt', 200, Buffer.byteLength(page) + 100);
+assert.deepEqual(planWebFetchReplay([converted], tape), [{ordinal: 1, url: 'https://example.test/ok', status: 200, page}]);
+assert.throws(() => planWebFetchReplay([converted], [...tape, ...tape]), /missing or ambiguous/);
 assert.throws(() => planWebFetchReplay([web(1, 'file:///fixture', 'fixture prompt', 200, Buffer.byteLength(page))], tape), /does not match/);
 assert.throws(() => planWebFetchReplay([web(1, 'https://example.test/ok', 'fixture prompt', 500, 0)], tape), /unsupported/);
 const failed = {ordinal: 2, request: {tool: 'WebFetch', input: {url: 'https://example.test/failed', prompt: 'fixture prompt'}},
