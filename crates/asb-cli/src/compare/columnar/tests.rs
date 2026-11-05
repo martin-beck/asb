@@ -40,6 +40,7 @@ fn optional_export_uses_regenerated_evidence_and_preserves_report_on_failure() {
         r#"{"findings":[{"rule":"forged-old-analysis"}]}"#,
     )
     .unwrap();
+    fs::write(measured.join("agentsysperf-analysis.json"),r#"{"status":"unqualified","interpretation_status":"unqualified","findings":[{"analyzer":"unqualified-remedy","confidence":1.0}]}"#).unwrap();
     let source = root.join("sweep.toml");
     let path = source.to_str().unwrap();
     generate_with_links(path, &mut Vec::new(), false).unwrap();

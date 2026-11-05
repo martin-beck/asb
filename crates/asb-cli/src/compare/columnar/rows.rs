@@ -66,11 +66,23 @@ pub(super) fn observations(export: &mut Export, benchmark: &BenchmarkData) -> Re
     for (name, value) in &benchmark.metrics {
         export.push(record(
             benchmark,
-            "measurement",
+            if name.starts_with("host.") {
+                "context-value"
+            } else {
+                "measurement"
+            },
             name,
             metric_unit(name),
-            "collector-defined",
-            "observed",
+            if name.starts_with("host.") {
+                "retained-host-metadata"
+            } else {
+                "collector-defined"
+            },
+            if name.starts_with("host.") {
+                "retained"
+            } else {
+                "observed"
+            },
             (&context, Some(*value)),
         )?)?;
     }
