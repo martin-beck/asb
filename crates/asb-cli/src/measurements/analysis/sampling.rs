@@ -114,5 +114,18 @@ mod tests {
         let mut input = docs();
         input.get_mut("arm-spe-quality").unwrap()["memory_latency_known_samples"] = Value::from(99);
         assert!(serde_json::to_value(analyze(&input)).unwrap()[0]["metrics"][3]["value"].is_null());
+        for weight in [
+            "0",
+            "not-an-integer",
+            "340282366920938463463374607431768211455",
+        ] {
+            let mut invalid = docs();
+            invalid.get_mut("arm-spe-quality").unwrap()["memory_latency_weight_sum_cycles"] =
+                Value::from(weight);
+            assert!(
+                serde_json::to_value(analyze(&invalid)).unwrap()[0]["metrics"][3]["value"]
+                    .is_null()
+            );
+        }
     }
 }
