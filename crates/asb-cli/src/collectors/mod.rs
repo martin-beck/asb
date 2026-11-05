@@ -147,6 +147,7 @@ pub(crate) struct ReportRow<'a> {
     pub workload: &'a str,
     pub trial: &'a str,
     pub configured_concurrency: usize,
+    pub replica_index: Option<usize>,
     pub execution_cohort: Option<&'a crate::measurements::ExecutionCohort>,
     pub metrics: &'a BTreeMap<String, f64>,
     pub components: Option<&'a serde_json::Value>,

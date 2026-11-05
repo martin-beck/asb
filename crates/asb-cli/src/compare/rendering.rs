@@ -248,6 +248,7 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         })).collect::<Vec<_>>();
     let summary = json!({
         "schema_version": 2,
+        "cohort_analysis": prepared.cohort_analysis,
         "campaign": prepared.data.request.campaign,
         "success_rate_definition": "resolved task attempts / all selected task attempts, including failures; not process exit rate or pass@k; smoke checks excluded",
         "resolution_groups": resolution_groups,
@@ -265,6 +266,12 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         "benchmarks": benchmark_rows,
         "graphs": graphs,
     });
+    fs::write(
+        comparison_dir.join("cohort-analysis.json"),
+        serde_json::to_vec_pretty(&prepared.cohort_analysis)
+            .map_err(|e| Error::Run(e.to_string()))?,
+    )
+    .map_err(crate::io_error)?;
     let summary_path = comparison_dir.join("comparison.json");
     let mut file = fs::File::create(&summary_path).map_err(|error| {
         Error::Run(format!("cannot create {}: {error}", summary_path.display()))

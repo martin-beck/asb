@@ -1873,3 +1873,71 @@ fn real_headless_browser_qualifies_generated_report_interactions() {
         output.chars().take(2000).collect::<String>()
     );
 }
+
+#[test]
+fn comparison_regenerates_cohort_overlap_from_verified_windows_without_reusing_saved_conclusions() {
+    let fixture = Fixture::new();
+    let manifest = fixture.seed("", 1);
+    fixture.write(
+        "0.toml",
+        "agent='fixture'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\nconcurrency=2\n",
+    );
+    for slot in 1..=2 {
+        let base = format!("sweep-results/000-0/measurements-concurrency-{slot}");
+        let root = json!({"pid":40+slot,"start_time_ticks":1});
+        fixture.write(&format!("{base}/run.json"),json!({"status":"completed","elapsed_ms":10000,"replica_index":slot,"execution_cohort":{"id":"a-123","selected_replicas":2,"admitted_slots":[1,2]}}).to_string());
+        fixture.write(&format!("{base}/measurement-target.json"),json!({"schema_version":1,"scope":"agent-process-tree","source":"owned-stopped-native-principal","root":root,"excluded_guardian":{"pid":900,"start_time_ticks":1},"excluded_controller_pid":901}).to_string());
+        fixture.write(&format!("{base}/execution-window.json"),json!({"schema_version":1,"status":"observed","scope":"verified-native-agent-principal-lifetime","clock":"CLOCK_MONOTONIC","clock_domain":"a".repeat(64),"root":root,"live_observations":3,"release_bound_ns":1000000000u64,"start_bound_ns":2000000000u64+slot*1000000000,"end_bound_ns":8000000000u64,"exit_bound_ns":11000000000u64}).to_string());
+        fixture.write(
+            &format!("{base}/cohort-analysis.json"),
+            "{\"peak_live_principals_lower_bound\":999}",
+        );
+    }
+    run(manifest.to_str().unwrap(), &mut Vec::new()).unwrap();
+    let report = fixture.0.join("results/sweep-comparison");
+    let evidence: Value =
+        serde_json::from_slice(&fs::read(report.join("cohort-analysis.json")).unwrap()).unwrap();
+    assert_eq!(evidence["cohorts"][0]["status"], "observed");
+    assert_eq!(
+        evidence["cohorts"][0]["peak_live_principals_lower_bound"],
+        2
+    );
+    assert_eq!(
+        evidence["cohorts"][0]["multiple_principals_overlap_lower_bound_ms"],
+        4000.0
+    );
+    assert_eq!(
+        evidence["cohorts"][0]["completed_agent_phases_per_second_lower_bound"],
+        0.2
+    );
+    let summary: Value =
+        serde_json::from_slice(&fs::read(report.join("comparison.json")).unwrap()).unwrap();
+    assert_eq!(summary["cohort_analysis"], evidence);
+    let html = fs::read_to_string(report.join("report.html")).unwrap();
+    assert!(
+        html.contains("cohort-analysis.json") && html.contains("Observed agent lifetime overlap")
+    );
+    assert!(html.contains("cohort-lifetimes-0001.svg") && html.contains("chart-expand"));
+    let svg = fs::read_to_string(report.join("cohort-lifetimes-0001.svg")).unwrap();
+    assert!(svg.contains("Replica 1") && svg.contains("Replica 2") && svg.contains("(s)</text>"));
+    let window = fixture
+        .0
+        .join("sweep-results/000-0/measurements-concurrency-2/execution-window.json");
+    let mut invalid: Value = serde_json::from_slice(&fs::read(&window).unwrap()).unwrap();
+    invalid["clock_domain"] = json!("b".repeat(64));
+    fs::write(&window, invalid.to_string()).unwrap();
+    run(manifest.to_str().unwrap(), &mut Vec::new()).unwrap();
+    let evidence: Value =
+        serde_json::from_slice(&fs::read(report.join("cohort-analysis.json")).unwrap()).unwrap();
+    assert_eq!(evidence["cohorts"][0]["status"], "unavailable");
+    assert_eq!(
+        evidence["cohorts"][0]["unavailable_reason"],
+        "different_clock_domains"
+    );
+    assert!(evidence["cohorts"][0]["multiple_principals_overlap_lower_bound_ms"].is_null());
+    assert!(!report.join("cohort-lifetimes-0001.svg").exists());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(window).unwrap()).unwrap(),
+        invalid
+    );
+}

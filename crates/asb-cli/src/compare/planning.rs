@@ -19,6 +19,7 @@ pub(super) struct PreparedReport {
     pub resolution: BTreeMap<String, crate::workloads::ResolutionSummary>,
     pub metric_groups: BTreeMap<String, crate::workloads::outcome::MetricSummary>,
     pub dimensions: BTreeMap<&'static str, Vec<String>>,
+    pub cohort_analysis: crate::measurements::analysis::cohort::Report,
     pub dispatch_groups: BTreeMap<String, usize>,
 }
 impl PreparedReport {
@@ -143,13 +144,16 @@ impl PreparedReport {
                     })
                     .unwrap_or("default"),
                 configured_concurrency: row.configured_concurrency,
+                replica_index: row.replica_index,
                 execution_cohort: row.execution_cohort.as_ref(),
                 metrics: &row.metrics,
                 components: row.components.as_ref(),
                 documents: &row.collector_documents,
             })
             .collect::<Vec<_>>();
-        let collector_graphs = crate::collectors::report_graphs(&report_rows);
+        let cohort_analysis = crate::measurements::analysis::cohort::analyze(&report_rows);
+        let mut collector_graphs = crate::collectors::report_graphs(&report_rows);
+        collector_graphs.extend(cohort_analysis.graphs());
         let mut filenames = graphs
             .iter()
             .map(|graph| graph.filename.clone())
@@ -181,6 +185,7 @@ impl PreparedReport {
             resolution,
             dimensions,
             dispatch_groups,
+            cohort_analysis,
         })
     }
     pub(super) fn graph_names(&self) -> Vec<String> {
