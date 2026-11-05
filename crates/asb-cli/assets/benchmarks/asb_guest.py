@@ -623,6 +623,11 @@ def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=N
 
 def _execute_agent(task, request, before_resume, on_output, cancelled, resources, relays, on_ended, preparation_budget):
     guest,environment = prepare_agent(task,request,cancelled,resources,relays,preparation_budget)
+    # The workload may select an already-prepared runtime for the client.
+    # Do this after installation so its Python and tools remain independent.
+    prepare_environment = getattr(task, "agent_environment", None)
+    if prepare_environment is not None:
+        environment = prepare_environment(environment, preparation_budget)
     if preparation_budget is not None:
         preparation_budget.remaining()
         request = dict(request, preparation_deadline=preparation_budget.deadline,
