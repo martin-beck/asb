@@ -33,6 +33,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_native_tool_transport()
 .with_collection(collect)
 .with_step_count(step_count)
+.with_tool_call_count(tool_call_count)
 .with_output_usage(output_usage)
 .with_final_response(no_stdout_final_response)
 .with_artifact_specs(&[
@@ -104,6 +105,49 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
         .try_into()
         .ok()?;
     (steps > 0).then_some(steps)
+}
+
+// Codex's JSON mode emits one completed item per executed native tool. Count
+// only the documented tool item types in a complete stream; never derive
+// calls from command text, nested output, or started/updated events.
+fn tool_call_count(stdout: &str, _stderr: &str) -> Option<usize> {
+    let mut seen_thread = false;
+    let mut active_turn = false;
+    let mut completed_turn = false;
+    let mut calls = std::collections::HashSet::new();
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let event: serde_json::Value = serde_json::from_str(line).ok()?;
+        match event.get("type")?.as_str()? {
+            "thread.started" => seen_thread = true,
+            "turn.started" => {
+                active_turn = true;
+                completed_turn = false;
+            }
+            "turn.completed" => {
+                if !active_turn {
+                    return None;
+                }
+                active_turn = false;
+                completed_turn = true;
+            }
+            "turn.failed" => return None,
+            "item.completed" => {
+                let item = event.get("item")?;
+                match item.get("type")?.as_str()? {
+                    "command_execution" | "file_change" | "mcp_tool_call" | "web_search" => {
+                        let id = item.get("id")?.as_str().filter(|id| !id.is_empty())?;
+                        if !calls.insert(id.to_owned()) {
+                            return None;
+                        }
+                    }
+                    "agent_message" | "reasoning" | "todo_list" | "error" => {}
+                    _ => return None,
+                }
+            }
+            _ => {}
+        }
+    }
+    (seen_thread && completed_turn && !active_turn).then_some(calls.len())
 }
 
 fn output_usage(stdout: &str, stderr: &str, _: bool) -> crate::measurements::TokenUsage {
@@ -219,6 +263,59 @@ mod token_attribution_tests {
         assert_eq!(
             (usage.input_tokens, usage.output_tokens, usage.total_tokens),
             (None, None, None)
+        );
+    }
+}
+
+#[cfg(test)]
+mod tool_count_tests {
+    use super::tool_call_count;
+
+    #[test]
+    #[ignore = "requires a locally captured Codex JSON stream and expected count"]
+    fn local_codex_stream_reports_observed_count() {
+        let path = std::env::var_os("ASB_TEST_CODEX_STREAM").expect("set ASB_TEST_CODEX_STREAM");
+        let expected: usize = std::env::var("ASB_TEST_CODEX_TOOL_COUNT")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let stream = std::fs::read_to_string(path).unwrap();
+        assert_eq!(tool_call_count(&stream, ""), Some(expected));
+    }
+
+    #[test]
+    fn counts_completed_native_tools_only_in_a_complete_stream() {
+        let stream = concat!(
+            "{\"type\":\"thread.started\"}\n",
+            "{\"type\":\"turn.started\"}\n",
+            "{\"type\":\"item.started\",\"item\":{\"id\":\"1\",\"type\":\"command_execution\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"id\":\"1\",\"type\":\"command_execution\",\"aggregated_output\":\"mcp_tool_call\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"id\":\"2\",\"type\":\"file_change\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"id\":\"3\",\"type\":\"mcp_tool_call\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"id\":\"4\",\"type\":\"web_search\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"id\":\"5\",\"type\":\"agent_message\"}}\n",
+            "{\"type\":\"turn.completed\"}\n"
+        );
+        assert_eq!(tool_call_count(stream, ""), Some(4));
+        assert_eq!(
+            tool_call_count(&stream.replace("turn.completed", "turn.failed"), ""),
+            None
+        );
+        assert_eq!(
+            tool_call_count(&stream.replace("file_change", "unknown_tool"), ""),
+            None
+        );
+        assert_eq!(
+            tool_call_count(&stream.replace("\"id\":\"2\"", "\"id\":\"1\""), ""),
+            None
+        );
+        assert_eq!(tool_call_count("{\"type\":\"turn.completed\"}\n", ""), None);
+        assert_eq!(
+            tool_call_count(
+                "{\"type\":\"thread.started\"}\n{\"type\":\"turn.started\"}\n{\"type\":\"turn.completed\"}\n",
+                ""
+            ),
+            Some(0)
         );
     }
 }
