@@ -311,6 +311,14 @@ pub(crate) trait AgentAdapter: Sync {
     fn guest_step_count(&self, _run_dir: &Path) -> Option<u64> {
         None
     }
+    /// Read adapter-owned usage before an isolated guest is removed.
+    fn guest_token_usage(
+        &self,
+        _run_dir: &Path,
+        _input_includes_cache: bool,
+    ) -> Option<crate::measurements::TokenUsage> {
+        None
+    }
     /// A terminal client/protocol failure that a zero process exit can hide.
     fn execution_failure(&self, _stdout: &str, _stderr: &str) -> Option<String> {
         None
@@ -581,6 +589,7 @@ type ProcessHook = fn(&str) -> Result<crate::launch::ProcessLaunch, Error>;
 type StepCountHook = fn(&str, &str) -> Option<u64>;
 type ToolCallCountHook = fn(&str, &str) -> Option<usize>;
 type GuestStepCountHook = fn(&Path) -> Option<u64>;
+type GuestTokenUsageHook = fn(&Path, bool) -> Option<crate::measurements::TokenUsage>;
 type FailureHook = fn(&str, &str) -> Option<String>;
 type PreferredExecutablesHook = fn(&Path) -> Vec<PathBuf>;
 type ResponseFailureHook = fn(Option<&str>) -> Option<String>;
@@ -645,6 +654,7 @@ pub(super) struct StaticAdapter {
     step_count: Option<StepCountHook>,
     tool_call_count: Option<ToolCallCountHook>,
     guest_step_count: Option<GuestStepCountHook>,
+    guest_token_usage: Option<GuestTokenUsageHook>,
     failure: Option<FailureHook>,
     response_failure: Option<ResponseFailureHook>,
     replay_credential_vars: &'static [&'static str],
@@ -702,6 +712,7 @@ impl StaticAdapter {
             step_count: None,
             tool_call_count: None,
             guest_step_count: None,
+            guest_token_usage: None,
             failure: None,
             response_failure: None,
             replay_credential_vars: &[],
@@ -850,6 +861,10 @@ impl StaticAdapter {
     }
     pub(super) const fn with_guest_step_count(mut self, hook: GuestStepCountHook) -> Self {
         self.guest_step_count = Some(hook);
+        self
+    }
+    pub(super) const fn with_guest_token_usage(mut self, hook: GuestTokenUsageHook) -> Self {
+        self.guest_token_usage = Some(hook);
         self
     }
 
@@ -1156,6 +1171,14 @@ impl AgentAdapter for StaticAdapter {
     }
     fn guest_step_count(&self, run_dir: &Path) -> Option<u64> {
         self.guest_step_count.and_then(|hook| hook(run_dir))
+    }
+    fn guest_token_usage(
+        &self,
+        run_dir: &Path,
+        input_includes_cache: bool,
+    ) -> Option<crate::measurements::TokenUsage> {
+        self.guest_token_usage
+            .and_then(|hook| hook(run_dir, input_includes_cache))
     }
     fn execution_failure(&self, stdout: &str, stderr: &str) -> Option<String> {
         self.failure.and_then(|hook| hook(stdout, stderr))
