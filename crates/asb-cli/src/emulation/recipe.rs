@@ -22,7 +22,6 @@ pub struct VmPaths<'a> {
     pub disk: &'a Path,
     pub seed: &'a Path,
     pub console: &'a Path,
-    pub pidfile: &'a Path,
 }
 
 fn qemu_path(path: &Path) -> Result<&OsStr, &'static str> {
@@ -51,7 +50,6 @@ pub fn x86_qemu_arguments(
     let disk = option_path("file=", paths.disk, ",if=virtio,format=qcow2")?;
     let seed = option_path("file=", paths.seed, ",if=virtio,format=raw,readonly=on")?;
     let console = option_path("file:", paths.console, "")?;
-    let pidfile = qemu_path(paths.pidfile)?.to_owned();
     Ok(vec![
         "-machine".into(),
         "q35,accel=tcg".into(),
@@ -77,9 +75,6 @@ pub fn x86_qemu_arguments(
         console,
         "-monitor".into(),
         "none".into(),
-        "-daemonize".into(),
-        "-pidfile".into(),
-        pidfile,
     ])
 }
 
@@ -107,7 +102,6 @@ mod tests {
             disk: Path::new("/project with spaces/disk.qcow2"),
             seed: Path::new("/p/seed.img"),
             console: Path::new("/p/console.log"),
-            pidfile: Path::new("/p/qemu.pid"),
         };
         let args = x86_qemu_arguments(&paths, 22371).unwrap();
         assert!(args.contains(&OsString::from(
@@ -117,6 +111,8 @@ mod tests {
             "user,id=n0,hostfwd=tcp:127.0.0.1:22371-:22"
         )));
         assert!(args.contains(&OsString::from("q35,accel=tcg")));
+        assert!(!args.contains(&OsString::from("-daemonize")));
+        assert!(!args.contains(&OsString::from("-pidfile")));
     }
 
     #[test]
@@ -125,7 +121,6 @@ mod tests {
             disk: Path::new("/p/disk"),
             seed: Path::new("/p/seed"),
             console: Path::new("/p/log"),
-            pidfile: Path::new("/p/pid"),
         };
         assert!(x86_qemu_arguments(&paths, 0).is_err());
         let invalid = VmPaths {

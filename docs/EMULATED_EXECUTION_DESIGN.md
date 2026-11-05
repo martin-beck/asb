@@ -87,6 +87,7 @@ implemented as an ASB recipe. The candidate is not qualified by boot alone.
 
 The draft includes independently tested recipe primitives in
 `crates/asb-cli/src/emulation/recipe.rs`: native is the default selection, and
-the x86 recipe constructs QEMU arguments without shell interpolation. They
+the x86 recipe constructs foreground QEMU arguments without shell interpolation,
+so a future backend can retain the VM process. They
 are not yet connected to the ASB library or CLI. Image acquisition, guest
 provisioning, execution, transport and qualification are still required.
