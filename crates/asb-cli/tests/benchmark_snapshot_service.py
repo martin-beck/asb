@@ -439,6 +439,33 @@ class SnapshotServiceTest(unittest.TestCase):
         self.assertEqual(service.marker('end','second'),4)
         service.finish()
 
+    def test_oversubscribed_socket_markers_release_both_clients(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            waiting=threading.Event()
+            service=SnapshotReplay([('first',2),('second',3)],lambda _:None)
+            wait=service.changed.wait
+            def observed_wait(timeout=None):
+                waiting.set()
+                return wait(timeout)
+            path=Path(directory)/'marker.sock';server=MarkerServer(path,service)
+            worker=threading.Thread(target=server.serve_forever,daemon=True);worker.start()
+            clients=[socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) for _ in range(2)]
+            try:
+                for client in clients:client.settimeout(2);client.connect(str(path))
+                with patch.object(service.changed,'wait',side_effect=observed_wait):
+                    clients[0].sendall(b'tool-end:second\n')
+                    self.assertTrue(waiting.wait(2))
+                    clients[1].sendall(b'tool-end:second\n')
+                    self.assertEqual(clients[1].recv(32),b'')
+                    self.assertEqual(clients[0].recv(32),b'')
+                with self.assertRaisesRegex(RuntimeError,'unconsumed or failed'):
+                    service.finish()
+            finally:
+                service.invalidate()
+                for client in clients:client.close()
+                server.shutdown();server.server_close();worker.join(timeout=2)
+                self.assertFalse(worker.is_alive())
+
     def test_finish_waits_for_active_boundary_application(self):
         applying=threading.Event();release=threading.Event();finished=threading.Event()
         def apply(_sequence):
