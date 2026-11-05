@@ -48,6 +48,9 @@ fn start_capture(session: &mut Session) {
 }
 
 impl CollectorAdapter for KernelPressure {
+    fn series_timestamp_unit(&self) -> crate::collectors::TimeUnit {
+        crate::collectors::TimeUnit::Seconds
+    }
     fn id(&self) -> &'static str {
         "kernel-pressure"
     }

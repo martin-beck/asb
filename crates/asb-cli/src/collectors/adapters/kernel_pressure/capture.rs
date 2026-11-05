@@ -438,6 +438,7 @@ pub(super) fn report(
         .unwrap();
     report["series"] = serde_json::json!(series);
     report["series_timestamps"] = serde_json::json!(timestamps);
+    report["series_timestamp_unit"] = serde_json::json!("seconds");
     report["clock"] =
         serde_json::json!("monotonic-elapsed-seconds-since-agent-pressure-attachment");
     report["series_downsampled"] = serde_json::json!(capture.is_some_and(|c| c.downsampled));

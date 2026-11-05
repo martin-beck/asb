@@ -12,6 +12,7 @@ impl TimeSeries {
         timestamps: Option<&Value>,
         path: &Path,
         metric: &str,
+        unit: crate::collectors::TimeUnit,
     ) -> Result<Self, Error> {
         let invalid = |reason: &str| {
             Error::Input(format!(
@@ -49,9 +50,9 @@ impl TimeSeries {
                     .map(|value| {
                         value
                             .as_f64()
-                            .filter(|value| value.is_finite() && *value >= 0.0)
+                            .and_then(|value| unit.milliseconds(value))
                             .ok_or_else(|| {
-                                invalid("timestamps must be finite nonnegative milliseconds")
+                                invalid("timestamps must be finite nonnegative values convertible to milliseconds")
                             })
                     })
                     .collect::<Result<Vec<_>, _>>()?;

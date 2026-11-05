@@ -546,3 +546,23 @@ and valid scoped SPE metrics remained available. The filter changed no host
 policy or other process. ASB, guardians and sibling CPU/memory noise were
 excluded in both cases. These are synthetic collector qualifications, not actual
 Pi/model performance results or evidence of CPU residency/causal bottlenecks.
+
+
+## Explicit time-series units
+
+Collector results now declare `series_timestamp_unit` as `seconds` or
+`milliseconds`. The shared comparison loader normalizes timestamps once to
+milliseconds, matching its HTML/SVG and `comparison.json` axis contract. SPE and
+kernel-pressure retain their existing seconds-based capture records and declare
+that unit through their adapters. Their historical files without the field use
+the same adapter-owned seconds default; existing collectors retain their
+millisecond default. Unknown units and conversion overflow are rejected, rather
+than producing a plausible but incorrect graph. Raw evidence stays unchanged.
+This repairs a factor-of-1000 error in SPE and pressure time-series axes and in
+consumers that correctly interpreted the reporting pipeline's millisecond unit.
+
+The repair was checked by offline regeneration of the retained two-replica Arm
+qualification: ten SPE and twelve pressure series per replica normalized to the
+expected millisecond values, with matching axis metadata and every original
+measurement JSON hash unchanged. This verifies report regeneration rather than
+rerunning an agent or changing its measurements.

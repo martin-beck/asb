@@ -388,6 +388,7 @@ fn series(values: Value, timestamps: Option<Value>) -> TimeSeries {
         timestamps.as_ref(),
         Path::new("fixture.json"),
         "metric",
+        crate::collectors::TimeUnit::Milliseconds,
     )
     .unwrap()
 }
@@ -574,6 +575,7 @@ fn paired_samples_preserve_null_positions_reject_bad_timestamps_and_never_bridge
             times.as_ref(),
             Path::new("owned.json"),
             "my.metric",
+            crate::collectors::TimeUnit::Milliseconds,
         )
         .unwrap_err()
         .to_string();

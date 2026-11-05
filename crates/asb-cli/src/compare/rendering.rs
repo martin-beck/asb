@@ -243,6 +243,7 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             "analysis": benchmark.collector_documents.get("bottlenecks"),
             "series": benchmark.series.iter().map(|(name, series)| (name, &series.values)).collect::<BTreeMap<_, _>>(),
             "series_timestamps": benchmark.series.iter().filter_map(|(name, series)| series.timestamps_ms.as_ref().map(|timestamps| (name, timestamps))).collect::<BTreeMap<_, _>>(),
+            "series_timestamp_unit":"milliseconds",
             "series_rendering": benchmark.series.iter().map(|(name,series)|(name,series.rendering_metadata())).collect::<BTreeMap<_,_>>(),
             "status": benchmark.status,
             "artifacts": benchmark.artifacts,
