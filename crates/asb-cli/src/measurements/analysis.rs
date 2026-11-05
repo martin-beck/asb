@@ -3,6 +3,8 @@
 //! Rules describe observations, not causal proof. Collector adapters retain
 //! ownership of measurement semantics; the engine never inspects the host.
 
+mod hardware;
+mod kernel;
 mod observations;
 mod rules;
 #[cfg(test)]
@@ -42,6 +44,8 @@ struct Report {
     engine: &'static str,
     observations: Vec<Observation>,
     findings: Vec<Finding>,
+    hardware: Vec<hardware::PmuAnalysis>,
+    kernel: Vec<kernel::Diagnostic>,
 }
 
 fn analyze(timing: Option<&super::ComponentTiming>) -> Report {
@@ -55,9 +59,65 @@ fn analyze(timing: Option<&super::ComponentTiming>) -> Report {
         engine: "asb-resource-analysis-v1",
         observations,
         findings,
+        hardware: Vec::new(),
+        kernel: Vec::new(),
     }
 }
 
 pub(super) fn publish(dir: &Path, timing: Option<&super::ComponentTiming>) -> Result<(), String> {
-    super::write_json(&dir.join("bottlenecks.json"), &analyze(timing))
+    let mut documents = std::collections::BTreeMap::new();
+    for name in [
+        "arm-pmu",
+        "arm-pmu-plan",
+        "perfetto",
+        "perfetto-tracepoints",
+        "perfetto-state-summary",
+        "bpftrace-futex-wait",
+        "bpftrace-lock-contention",
+    ] {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        let value = std::fs::File::open(dir.join(format!("{name}.json")))
+            .ok()
+            .and_then(|file| file.take(1024 * 1024 + 1).read_to_end(&mut bytes).ok())
+            .filter(|_| bytes.len() <= 1024 * 1024)
+            .and_then(|_| serde_json::from_slice(&bytes).ok());
+        if let Some(value) = value {
+            documents.insert(name.to_owned(), value);
+        }
+    }
+    let mut report = analyze(timing);
+    report.hardware = hardware::analyze(&documents);
+    report.kernel = kernel::analyze(&documents);
+    super::write_json(&dir.join("bottlenecks.json"), &report)
+}
+
+/// Recompute from the comparison loader's bounded, identity-bound documents.
+/// Historical analysis output is never trusted as an input to new findings.
+pub(crate) fn from_documents(
+    documents: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> serde_json::Value {
+    let component = documents
+        .get("components")
+        .and_then(|d| d.pointer("/components/agent.execute"));
+    let timing = component.and_then(|c| {
+        Some(super::ComponentTiming {
+            wall_ms: c.get("wall_ms")?.as_u64()? as u128,
+            cpu_user_ms: c.get("cpu_user_ms").and_then(serde_json::Value::as_f64),
+            cpu_system_ms: c.get("cpu_system_ms").and_then(serde_json::Value::as_f64),
+            cpu_accounting_source: c
+                .get("cpu_accounting_source")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            io_wait_ms: c.get("io_wait_ms").and_then(serde_json::Value::as_f64),
+            scheduler_wait_ms: c
+                .get("scheduler_wait_ms")
+                .and_then(serde_json::Value::as_f64),
+            network_wait_ms: None,
+        })
+    });
+    let mut report = analyze(timing.as_ref());
+    report.hardware = hardware::analyze(documents);
+    report.kernel = kernel::analyze(documents);
+    serde_json::to_value(report).expect("analysis contains only finite values")
 }
