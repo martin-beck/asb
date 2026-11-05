@@ -7,7 +7,7 @@ import { transformPiDispatch } from './pi-native-transform.mjs';
 import { installFetchDiagnostic } from './pi-fetch-diagnostic.mjs';
 
 const { ASB_NATIVE_BUNDLE: bundle, ASB_NATIVE_MODE: mode, ASB_NATIVE_SOCKET: socket, ASB_NATIVE_MARKER: marker } = process.env;
-if (!bundle || !socket || !['record','replay'].includes(mode)) throw new Error('Pi native bootstrap configuration is incomplete');
+if (!bundle || !socket || !marker || !['record','replay'].includes(mode)) throw new Error('Pi native bootstrap requires the bundle, broker and snapshot marker');
 installFetchDiagnostic();
 const expected = pathToFileURL(realpathSync(bundle)).href;
 const dispatch = createNativeDispatcher(mode, socket, {
