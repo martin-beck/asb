@@ -40,3 +40,23 @@ fn native_dispatch_prototype_handles_loader_ordering_and_child_transport() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires ASB_TEST_PI_BUNDLE and unprivileged Linux network namespaces"]
+fn installed_pi_preserves_snapshot_and_result_order_offline() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let bundle = std::env::var_os("ASB_TEST_PI_BUNDLE").expect("installed Pi bundle is required");
+    let output = std::process::Command::new("node")
+        .arg(root.join("tests/pi_native_installed_probe.mjs"))
+        .current_dir(root)
+        .isolated_env()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("ASB_TEST_PI_BUNDLE", bundle)
+        .output()
+        .expect("Node is required for the installed Pi probe");
+    assert!(
+        output.status.success(),
+        "installed Pi probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
