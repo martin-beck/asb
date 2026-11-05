@@ -22,6 +22,7 @@ from asb_snapshot_service import MarkerServer,SnapshotService,SnapshotReplay,Sna
 import asb_snapshot_service
 import asb_snapshot_send
 import asb_snapshot_handoff
+from asb_snapshot_workspace import replay_roots
 from asb_snapshot_guest import unpack_streams
 import asb_snapshot_guest
 from asb_snapshot_control import GuestSnapshot, settle_on_exit
@@ -31,6 +32,49 @@ SCRATCH.mkdir(parents=True,exist_ok=True)
 
 
 class SnapshotServiceTest(unittest.TestCase):
+    def test_replay_infers_recorded_roots_and_rejects_changed_layout(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory).resolve();baseline=root/'baseline';baseline.mkdir()
+            target=root/'task';extra=root/'temporary';target.mkdir();extra.mkdir()
+            self.assertEqual(replay_roots(baseline,str(target),[]),[str(target)])
+            with self.assertRaisesRegex(ValueError,'does not describe'):
+                replay_roots(baseline,str(target),[str(extra)])
+            (baseline/'0').mkdir();(baseline/'1').mkdir()
+            (baseline/'.asb-snapshot-roots.json').write_text(json.dumps([str(target),str(extra)]))
+            self.assertEqual(replay_roots(baseline,str(target),[]),[str(target),str(extra)])
+            self.assertEqual(replay_roots(baseline,str(target),[str(extra)]),[str(target),str(extra)])
+            with self.assertRaisesRegex(ValueError,'does not match'):
+                replay_roots(baseline,str(extra),[])
+            with self.assertRaisesRegex(ValueError,'does not match'):
+                replay_roots(baseline,str(target),[str(root)])
+            (baseline/'1').rmdir()
+            with self.assertRaisesRegex(ValueError,'does not match'):
+                replay_roots(baseline,str(target),[])
+
+    def test_handoff_replay_binds_inferred_roots(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory).resolve();target=root/'task';extra=root/'temporary'
+            target.mkdir();extra.mkdir();mounted=root/'mounted';mounted.mkdir()
+            (mounted/'0').mkdir();(mounted/'1').mkdir();calls=[]
+            workspace=SimpleNamespace(prepare=lambda *a,**k: mounted,
+                restore_baseline=lambda _baseline:mounted, close=lambda:None)
+            def receive(_archive,store,_command):
+                baseline=store/'snapshot-00000001';baseline.mkdir(parents=True)
+                (baseline/'0').mkdir();(baseline/'1').mkdir()
+                (baseline/'.asb-snapshot-roots.json').write_text(json.dumps([str(target),str(extra)]))
+            args=SimpleNamespace(root=str(root/'state'),size=None,mkfs='mkfs',btrfs='btrfs',rsync='rsync',
+                qemu_img=None,qemu_storage=None,target=str(target),extra_root=[],
+                replay_archive=str(root/'archive'),apply_final=False)
+            with patch.object(asb_snapshot_handoff,'SnapshotWorkspace',return_value=workspace), \
+                 patch.object(asb_snapshot_handoff,'receive_archive',side_effect=receive), \
+                 patch.object(asb_snapshot_handoff.subprocess,'run',side_effect=lambda args,**k:calls.append(args)), \
+                 patch.object(asb_snapshot_handoff,'unmount_when_idle'), \
+                 patch.object(asb_snapshot_handoff.sys,'stdin',io.StringIO('CLEANUP\n')), \
+                 patch.object(asb_snapshot_handoff.sys,'stdout',io.StringIO()):
+                asb_snapshot_handoff.prepare(args)
+            self.assertEqual(calls,[['mount','--bind',str(mounted/'0'),str(target)],
+                                    ['mount','--bind',str(mounted/'1'),str(extra)]])
+
     def test_handoff_preparer_restores_only_after_explicit_cleanup(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);target=root/'target';target.mkdir();calls=[]

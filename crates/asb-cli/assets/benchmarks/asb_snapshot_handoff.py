@@ -16,7 +16,7 @@ from asb_snapshot_guest import receive_archive, unmount_when_idle
 from asb_snapshot_service import (MarkerServer, SnapshotApplier, SnapshotReplay,
                                   SnapshotService, export_snapshot_streams,
                                   load_replay_boundaries)
-from asb_snapshot_workspace import SnapshotWorkspace
+from asb_snapshot_workspace import SnapshotWorkspace, replay_roots
 
 
 def prepare(args):
@@ -35,14 +35,10 @@ def prepare(args):
             store = root/'filesystem/snapshots'
             receive_archive(args.replay_archive, store, [args.btrfs])
             baseline = store/'snapshot-00000001'
-            if args.extra_root:
-                recorded = json.loads((baseline/'.asb-snapshot-roots.json').read_text(encoding='utf-8'))
-                if (recorded != [str(Path(item).resolve()) for item in roots]
-                        or not all((baseline/str(i)).is_dir() for i in range(len(recorded)))):
-                    raise ValueError('snapshot archive does not match the configured roots')
+            roots = replay_roots(baseline, args.target, args.extra_root)
             mounted = workspace.restore_baseline(baseline)
         for index, target in enumerate(roots):
-            source = mounted/str(index) if args.extra_root else mounted
+            source = mounted/str(index) if len(roots) > 1 else mounted
             subprocess.run(['mount', '--bind', str(source), target], check=True, timeout=60)
             bound.append((source, target))
         print('PREPARED', flush=True)

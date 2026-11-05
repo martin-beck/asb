@@ -14,7 +14,7 @@ import time
 from asb_snapshot_service import (MarkerServer, SnapshotService, SnapshotReplay,
                                   SnapshotApplier, export_snapshot_streams,
                                   load_replay_boundaries)
-from asb_snapshot_workspace import SnapshotWorkspace
+from asb_snapshot_workspace import SnapshotWorkspace, replay_roots
 
 
 def unmount_when_idle(target, timeout=25):
@@ -140,22 +140,14 @@ def main(argv=None):
             mounted=(workspace.prepare(args.target,args.extra_root) if args.extra_root
                      else workspace.prepare(args.target))
         store = root/'filesystem/snapshots'
+        roots = [args.target] + args.extra_root
         if args.replay_archive:
             boundaries = receive_archive(args.replay_archive, store, [args.btrfs])
-            if args.extra_root:
-                baseline = store/'snapshot-00000001'
-                try:
-                    recorded = json.loads((baseline/'.asb-snapshot-roots.json').read_text(encoding='utf-8'))
-                except (OSError, ValueError) as error:
-                    raise ValueError('snapshot archive does not describe its captured roots') from error
-                if (recorded != [str(Path(item).resolve()) for item in [args.target]+args.extra_root]
-                        or not all((baseline/str(i)).is_dir() for i in range(len(recorded)))):
-                    raise ValueError('snapshot archive does not match the configured roots')
+            roots = replay_roots(store/'snapshot-00000001', args.target, args.extra_root)
             mounted=workspace.restore_baseline(store/'snapshot-00000001')
             service = SnapshotReplay(boundaries, SnapshotApplier(store, mounted, [args.rsync]))
-        roots = [args.target] + args.extra_root
         for index, target in enumerate(roots):
-            source = mounted/str(index) if args.extra_root else mounted
+            source = mounted/str(index) if len(roots) > 1 else mounted
             subprocess.run(['mount','--bind',str(source),target],check=True,timeout=60)
             bound.append((source,target))
         if not args.replay_archive:
