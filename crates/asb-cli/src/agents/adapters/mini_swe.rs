@@ -333,7 +333,11 @@ class AsbTapeEnvironment(LocalEnvironment):
 
     def execute(self, action, cwd="", *, timeout=None):
         command = action.get("command", "")
-        request = {"command": command, "cwd": cwd, "timeout": timeout}
+        # LocalEnvironment uses its configured timeout when the call does not
+        # supply a truthy override. Bind the effective value as well so two
+        # defaulted calls cannot match when their agent configuration differs.
+        request = {"command": command, "cwd": cwd, "timeout": timeout,
+                   "effective_timeout": timeout or self.config.timeout}
         if _MODE == "record":
             if os.environ.get('ASB_FS_MARKER_SOCKET'):
                 # The boundary service owns workspace effects in this mode.
