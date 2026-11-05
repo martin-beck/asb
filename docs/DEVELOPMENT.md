@@ -91,6 +91,10 @@ provider is stopped during replay, and each tape must consume every recorded
 request without rejection. The snapshot variant uses real Btrfs boundaries,
 but the child's own `/tmp` files remain outside its captured roots. This
 probes one asynchronous child, not every delegation pattern or a SWE-bench run.
+`webfetch_failure.mjs` uses the same Claude binary and fixture directory to
+record a synthetic WebFetch summary output-limit failure, reconstruct its
+recorded page and verify four matching native replays. Its provider is a local
+fixture and the test does not exercise a complete ASB cassette.
 
 
 `benchmark_sdk_session.py` tests the private SDK-shell launch protocol without

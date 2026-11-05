@@ -6,7 +6,7 @@ const SUMMARY = 'Provide a concise response based only on the content above.';
 
 export function extractWebFetchPage(message, prompt, expectedBytes) {
   if (typeof message !== 'string' || typeof prompt !== 'string' || !prompt ||
-      !Number.isSafeInteger(expectedBytes) || expectedBytes < 0)
+      (expectedBytes !== null && (!Number.isSafeInteger(expectedBytes) || expectedBytes < 0)))
     throw new TypeError('Claude WebFetch recorded page input is invalid');
   if (!message.startsWith(PREFIX)) throw new Error('Claude WebFetch summary template is unsupported');
   const delimiter = `\n---\n\n${prompt}\n\n${SUMMARY}`;
@@ -14,7 +14,7 @@ export function extractWebFetchPage(message, prompt, expectedBytes) {
   if (end < 0 || message.indexOf(delimiter, end + 1) >= 0)
     throw new Error('Claude WebFetch recorded page boundary is missing or ambiguous');
   const page = message.slice(PREFIX.length, end);
-  if (Buffer.byteLength(page, 'utf8') !== expectedBytes)
+  if (expectedBytes !== null && Buffer.byteLength(page, 'utf8') !== expectedBytes)
     throw new Error('Claude WebFetch recorded page byte count differs');
   return page;
 }
@@ -45,28 +45,38 @@ export function planWebFetchReplay(exchanges, tapeEntries) {
     const ordinal = entry.ordinal, input = entry.request.input, value = entry.outcome?.value;
     if (!Number.isSafeInteger(ordinal) || ordinal < 0 || ordinals.has(ordinal) ||
         typeof input?.url !== 'string' || typeof input.prompt !== 'string' || !input.prompt ||
-        entry.outcome?.ok !== true || value?.kind !== 'success' || typeof value.json !== 'string')
+        entry.outcome?.ok !== true || !['success', 'failure'].includes(value?.kind) || typeof value.json !== 'string')
       throw new Error('Claude WebFetch native exchange is invalid or unsuccessful');
     ordinals.add(ordinal);
     let result;
     try { result = JSON.parse(value.json); } catch { throw new Error('Claude WebFetch native result is malformed'); }
     let url;
     try { url = new URL(input.url); } catch { throw new Error('Claude WebFetch recorded URL is invalid'); }
-    if (!['http:', 'https:'].includes(url.protocol) || result?.url !== input.url ||
-        !Number.isSafeInteger(result.bytes) || result.bytes < 0 || !Number.isSafeInteger(result.code))
+    if (!['http:', 'https:'].includes(url.protocol))
       throw new Error('Claude WebFetch native result does not match the request');
-    if ([301, 302, 303, 307, 308].includes(result.code)) {
+    const failedSummary = value.kind === 'failure' && result.is_interrupt === false &&
+      typeof result.error === 'string' && result.error.startsWith("API Error: Claude's response exceeded the ");
+    if (value.kind === 'failure' && !failedSummary)
+      throw new Error('Claude WebFetch recorded failure is unsupported');
+    if (!failedSummary && (result?.url !== input.url || !Number.isSafeInteger(result.bytes) ||
+        result.bytes < 0 || !Number.isSafeInteger(result.code)))
+      throw new Error('Claude WebFetch native result does not match the request');
+    if (!failedSummary && [301, 302, 303, 307, 308].includes(result.code)) {
       plan.push({ordinal, url: input.url, status: result.code, redirect: true});
       continue;
     }
-    if (result.code !== 200) throw new Error('Claude WebFetch recorded status is unsupported');
+    if (!failedSummary && result.code !== 200) throw new Error('Claude WebFetch recorded status is unsupported');
     const matches = [];
     for (let index = 0; index < summaries.length; index++) {
       if (consumed.has(index)) continue;
-      try { matches.push({index, page: extractWebFetchPage(summaries[index], input.prompt, result.bytes)}); }
+      try { matches.push({index, page: extractWebFetchPage(summaries[index], input.prompt, failedSummary ? null : result.bytes)}); }
       catch { /* A different recorded model call is not this fetch. */ }
     }
-    if (matches.length !== 1) throw new Error('Claude WebFetch page evidence is missing or ambiguous');
+    // Claude may retry a failed summary with the identical page. Those
+    // repeated requests are interchangeable only when the page bytes match.
+    if (matches.length !== 1 && !(failedSummary && matches.length > 1 &&
+        matches.every(match => match.page === matches[0].page)))
+      throw new Error('Claude WebFetch page evidence is missing or ambiguous');
     consumed.add(matches[0].index);
     plan.push({ordinal, url: input.url, status: 200, page: matches[0].page});
   }
