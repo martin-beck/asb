@@ -61,6 +61,7 @@ export const result = await executePreparedToolCall({toolCall:{id:'one',name:'ba
   assert.equal(decodeSidecar(sidecar,'pi').exchanges.length,1);
   assert.throws(()=>decodeSidecar(sidecar,'continue'),/lifecycle/);
   assert.equal(httpRequests,1,'record must actually contact the fixture service');
+  await new Promise(resolve=>upstream.close(resolve));
   await Promise.all(Array.from({length:4},(_,replica)=>
     run('replay',decodeSidecar(sidecar,'pi').exchanges,join(root,`broker-${replica}.sock`))));
   assert.equal(existsSync(effect),false,'replay must not execute the tool');
@@ -69,6 +70,5 @@ export const result = await executePreparedToolCall({toolCall:{id:'one',name:'ba
   assert.match(markers[1],/^tool-end:pi-0:\d+:\d+$/);
   assert.equal(markers[2],'tool-end:pi-0');
   await new Promise(resolve=>marker.close(resolve));
-  await new Promise(resolve=>upstream.close(resolve));
   console.log('Pi native record and replay fixture passed');
 } finally { if(directory!==null)closeSync(directory);rmSync(actualRoot,{recursive:true,force:true}); }
