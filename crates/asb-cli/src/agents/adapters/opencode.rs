@@ -81,6 +81,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_output_usage(output_usage)
 .with_final_response(final_response)
 .with_step_count(step_count)
+.with_tool_call_count(tool_call_count)
 .with_state_environment_vars(&[
     "OPENCODE_CONFIG_CONTENT",
     "OPENCODE_CONFIG",
@@ -99,6 +100,63 @@ fn step_count(stdout: &str, _stderr: &str) -> Option<u64> {
         .try_into()
         .ok()?;
     (steps > 0).then_some(steps)
+}
+
+/// Count distinct finished native tool calls in a complete OpenCode JSON stream.
+fn tool_call_count(stdout: &str, _stderr: &str) -> Option<usize> {
+    let mut calls = std::collections::HashSet::new();
+    let mut finished = false;
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let event: serde_json::Value = serde_json::from_str(line).ok()?;
+        match event.get("type").and_then(|value| value.as_str())? {
+            "tool_use" => {
+                let part = event.get("part")?;
+                let status = part.get("state")?.get("status")?.as_str()?;
+                if !matches!(status, "completed" | "error") {
+                    return None;
+                }
+                let session = part.get("sessionID")?.as_str()?;
+                let call = part.get("callID")?.as_str()?;
+                if session.is_empty() || call.is_empty() {
+                    return None;
+                }
+                calls.insert((session.to_owned(), call.to_owned()));
+            }
+            "step_finish" => {
+                if event.get("part")?.get("reason")?.as_str()? == "stop" {
+                    finished = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    finished.then_some(calls.len())
+}
+
+#[cfg(test)]
+mod native_tool_count_tests {
+    use super::tool_call_count;
+
+    #[test]
+    fn counts_finished_distinct_calls_only_with_terminal_step() {
+        let tool = r#"{"type":"tool_use","part":{"sessionID":"s","callID":"c","state":{"status":"completed"}}}"#;
+        let failed = r#"{"type":"tool_use","part":{"sessionID":"s","callID":"d","state":{"status":"error"}}}"#;
+        let stop = r#"{"type":"step_finish","part":{"reason":"stop"}}"#;
+        assert_eq!(
+            tool_call_count(&format!("{tool}\n{tool}\n{failed}\n{stop}"), ""),
+            Some(2)
+        );
+        assert_eq!(tool_call_count(stop, ""), Some(0));
+        assert_eq!(tool_call_count(tool, ""), None);
+        assert_eq!(tool_call_count(&format!("{tool}\n{{\n{stop}"), ""), None);
+        assert_eq!(
+            tool_call_count(
+                &format!("{}\n{stop}", tool.replace("completed", "running")),
+                ""
+            ),
+            None
+        );
+    }
 }
 
 fn final_response(output: &str, _: &std::path::Path) -> Option<String> {
