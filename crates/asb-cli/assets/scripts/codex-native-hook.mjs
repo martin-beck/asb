@@ -76,7 +76,7 @@ export async function replayHook(event, {socket}) {
 }
 
 export function emitRecorded(value) {
-  const match = value.match(/^Chunk ID: [^\r\n]+\r?\nWall time: \d+(?:\.\d+)? seconds\r?\nProcess exited with code (-?\d+)\r?\n(?:Original token count: \d+\r?\n)?Output:\r?\n([\s\S]*)$/);
+  const match = value.match(/^Chunk ID: [^\r\n]+\r?\nWall time: (?:\d+(?:\.\d+)?|<asb-wall-time>) seconds\r?\nProcess exited with code (-?\d+)\r?\n(?:Original token count: (?:\d+|<asb-token-count>)\r?\n)?Output:\r?\n([\s\S]*)$/);
   if (!match) throw new Error('Codex native replay result has an unsupported shell envelope');
   const code = Number(match[1]);
   if (!Number.isInteger(code) || code < 0 || code > 255) throw new Error('Codex native replay exit status is invalid');

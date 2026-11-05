@@ -54,6 +54,10 @@ try {
   assert.equal(emitted.status, 7);
   assert.equal(emitted.stdout, 'recorded output');
   assert.equal(emitted.stderr, '');
+  const normalized = 'Chunk ID: <asb-chunk>\nWall time: <asb-wall-time> seconds\nProcess exited with code 7\nOriginal token count: <asb-token-count>\nOutput:\nnormalized output';
+  const normalizedEmit = spawnSync(process.execPath, [new URL('../assets/scripts/codex-native-hook.mjs', import.meta.url).pathname, 'emit', Buffer.from(normalized).toString('base64')], {encoding:'utf8'});
+  assert.equal(normalizedEmit.status, 7);
+  assert.equal(normalizedEmit.stdout, 'normalized output');
   await replay.finish();
 } finally {
   await new Promise(resolve => server.close(resolve));
