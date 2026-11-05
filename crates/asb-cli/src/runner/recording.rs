@@ -588,6 +588,18 @@ impl Recorder {
                 result.native_tool_sidecar.as_deref(),
                 snapshot_artifact.as_ref(),
             )?;
+            if let (Some(snapshot), Some(native), Some(metadata)) = (
+                snapshot_file.as_mut(),
+                completed_native
+                    .as_deref()
+                    .or(result.native_tool_sidecar.as_deref()),
+                snapshot_artifact.as_ref(),
+            ) {
+                crate::agents::find(result.agent)
+                    .ok_or_else(|| Error::Run("native recording agent is unavailable".into()))?
+                    .verify_native_snapshot(native, snapshot, &metadata.sha256)?;
+                snapshot.seek(SeekFrom::Start(0)).map_err(io_error)?;
+            }
             let mut native_tool = completed_native
                 .as_deref()
                 .or(result.native_tool_sidecar.as_deref())

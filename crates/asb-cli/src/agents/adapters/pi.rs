@@ -4,6 +4,7 @@ use super::{
 };
 use crate::{Error, install::Recipe};
 use std::path::Path;
+mod snapshot;
 const TOOL_PROGRESS_FILENAME: &str = "pi-progress.json";
 // Pi's Responses client uses its freshly generated session UUID only as a
 // provider-side prompt cache key. It changes across replay launches.
@@ -37,6 +38,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_native_tool_transport()
 .with_guest_service(start_native_service)
 .with_deferred_native_recording(finalize_native_recording)
+.with_native_snapshot_check(snapshot::verify)
 .with_collection(collect)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
