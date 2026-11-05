@@ -560,3 +560,9 @@ millisecond default. Unknown units and conversion overflow are rejected, rather
 than producing a plausible but incorrect graph. Raw evidence stays unchanged.
 This repairs a factor-of-1000 error in SPE and pressure time-series axes and in
 consumers that correctly interpreted the reporting pipeline's millisecond unit.
+
+The repair was checked by offline regeneration of the retained two-replica Arm
+qualification: ten SPE and twelve pressure series per replica normalized to the
+expected millisecond values, with matching axis metadata and every original
+measurement JSON hash unchanged. This verifies report regeneration rather than
+rerunning an agent or changing its measurements.

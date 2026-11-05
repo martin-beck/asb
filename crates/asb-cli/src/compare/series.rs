@@ -52,7 +52,7 @@ impl TimeSeries {
                             .as_f64()
                             .and_then(|value| unit.milliseconds(value))
                             .ok_or_else(|| {
-                                invalid("timestamps must be finite, nonnegative and convertible to milliseconds")
+                                invalid("timestamps must be finite nonnegative values convertible to milliseconds")
                             })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
