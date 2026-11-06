@@ -463,6 +463,41 @@ fn sampled_candidate_child() {
     };
     let root = PathBuf::from(root);
     let config = root.join("benchmark.toml");
+    if std::env::var_os("ASB_SAMPLED_RETRY").is_some() {
+        let ids = vec!["one".to_owned(), "two".to_owned()];
+        let order = asb_cli::cassette::TrialOrder::new(&ids, 1, 7).unwrap();
+        let template = fs::read_to_string(&config).unwrap();
+        let state = asb_cli::cassette::BoundTrialPreparation::prepare_file(
+            &root.join("sample-ledger.json"),
+            &"a".repeat(64),
+            &"b".repeat(64),
+            order.clone(),
+            |trial| {
+                let selected = root.join(format!("candidate-{trial}.toml"));
+                fs::write(
+                    &selected,
+                    template.replace("trial='bug-fix'", &format!("trial='{trial}'")),
+                )
+                .unwrap();
+                let cassette = root.join(format!("candidate-{trial}.asb.zip"));
+                asb_cli::cassette::record_and_replay_candidate(
+                    &selected, &selected, &cassette, &root, None,
+                )
+            },
+        )
+        .expect("failed replay should be replaced by another recorded trial");
+        assert!(state.preparation().complete().unwrap());
+        assert_eq!(state.preparation().successful().len(), 1);
+        asb_cli::cassette::BoundTrialPreparation::prepare_file(
+            &root.join("sample-ledger.json"),
+            &"a".repeat(64),
+            &"b".repeat(64),
+            order,
+            |_| panic!("completed preparation must reuse its verified cassette"),
+        )
+        .unwrap();
+        return;
+    }
     let cassette = root.join("sample-recording.asb.zip");
     let attempt =
         asb_cli::cassette::record_and_replay_candidate(&config, &config, &cassette, &root, None)
@@ -478,22 +513,27 @@ fn sampled_candidate_child() {
 
 #[test]
 fn sampled_candidate_records_once_then_replays_without_provider_calls() {
-    sampled_candidate_fixture(false);
+    sampled_candidate_fixture(false, false);
 }
 
 #[test]
 fn sampled_candidate_reports_replay_mismatch_without_new_provider_calls() {
-    sampled_candidate_fixture(true);
+    sampled_candidate_fixture(true, false);
 }
 
-fn sampled_candidate_fixture(mismatch: bool) {
+#[test]
+fn sampled_preparation_replaces_a_failed_replay_and_reuses_success() {
+    sampled_candidate_fixture(true, true);
+}
+
+fn sampled_candidate_fixture(mismatch: bool, retry: bool) {
     let project = Project::new();
     project.config(1);
     if mismatch {
         let agent = project.0.join("fixture-agent");
         let script = fs::read_to_string(&agent).unwrap().replace(
             "url = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
-            "if (root/'attempts.jsonl').exists(): body['model'] = 'different-on-replay'\nurl = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
+            "if (root/'attempts.jsonl').exists(): body['messages'] = [{'role':'user','content':'different-on-replay'}]\nurl = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
         );
         fs::write(agent, script).unwrap();
     }
@@ -503,7 +543,7 @@ fn sampled_candidate_fixture(mismatch: bool) {
         .replace("provider='fixture'", "provider='openrouter'");
     fs::write(
         project.0.join("workloads/sample.workload.toml"),
-        "workload='bug-fix'\n[[trials]]\nid='bug-fix'\n",
+        "workload='bug-fix'\n[[trials]]\nid='bug-fix'\n[[trials]]\nid='one'\n[[trials]]\nid='two'\n",
     )
     .unwrap();
     fs::write(
@@ -516,6 +556,9 @@ fn sampled_candidate_fixture(mismatch: bool) {
     child.current_dir(&project.0).isolated_env();
     if mismatch {
         child.env("ASB_SAMPLED_MISMATCH", "1");
+    }
+    if retry {
+        child.env("ASB_SAMPLED_RETRY", "1");
     }
     retain_host_rust_toolchain(&mut child);
     let result = child
@@ -539,7 +582,10 @@ fn sampled_candidate_fixture(mismatch: bool) {
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+        if retry { 2 } else { 1 }
+    );
 }
 
 fn record(project: &Project, provider: &RecordingProvider, repeat: Option<&str>) -> Output {
