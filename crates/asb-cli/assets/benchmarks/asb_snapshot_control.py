@@ -1,5 +1,6 @@
 """Experimental controller-owned lifetime for the guest snapshot supervisor."""
 from pathlib import Path
+import json
 import selectors
 import subprocess
 import tarfile
@@ -74,7 +75,16 @@ class GuestSnapshot:
                 logs = [name for name in ('guest-error-stdout.log','guest-error-stderr.log')
                         if (self.task.artifacts/name).is_file()]
                 if logs:
-                    raise ExecutionError('snapshot workspace did not settle after guest failure; inspect '+', '.join(logs)+' and snapshot-supervisor.log')
+                    reason = 'guest failure'
+                    try:
+                        execution = self.task.artifacts/'execution.json'
+                        with execution.open('rb') as source:
+                            data = source.read(65537)
+                        if len(data) <= 65536 and json.loads(data).get('timed_out') is True:
+                            reason = 'agent execution timeout'
+                    except (OSError, ValueError, AttributeError):
+                        pass
+                    raise ExecutionError('snapshot workspace did not settle after '+reason+'; inspect '+', '.join(logs)+' and snapshot-supervisor.log')
                 raise ExecutionError('snapshot workspace did not settle; inspect snapshot-supervisor.log')
             if self.replay:
                 return
