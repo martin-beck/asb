@@ -7,12 +7,39 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A benchmark runs natively unless an emulated backend is explicitly chosen.
+/// Execution backend chosen for a benchmark.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Backend {
     #[default]
     Native,
     EmulatedX86,
+}
+
+/// Select native execution when the workload has no known architecture restriction
+/// or supports the host. Otherwise select an available matching VM recipe.
+/// An unsupported restriction must not silently run as if it were native.
+pub fn automatic_backend(host: &str, supported: &[&str]) -> Result<Backend, &'static str> {
+    fn canonical(architecture: &str) -> &str {
+        match architecture {
+            "amd64" => "x86_64",
+            "arm64" => "aarch64",
+            other => other,
+        }
+    }
+    if host.is_empty() || supported.iter().any(|arch| arch.is_empty()) {
+        return Err("architecture identifiers must not be empty");
+    }
+    if supported.is_empty()
+        || supported
+            .iter()
+            .any(|arch| canonical(arch) == canonical(host))
+    {
+        return Ok(Backend::Native);
+    }
+    if supported.iter().any(|arch| canonical(arch) == "x86_64") {
+        return Ok(Backend::EmulatedX86);
+    }
+    Err("no VM recipe is available for the workload's supported architectures")
 }
 
 /// Immutable base-image identity used by the current x86 qualification recipe.
@@ -198,6 +225,23 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit())
         );
+    }
+
+    #[test]
+    fn automatic_selection_prefers_native_and_uses_vm_only_for_known_mismatch() {
+        assert_eq!(automatic_backend("aarch64", &[]), Ok(Backend::Native));
+        assert_eq!(
+            automatic_backend("arm64", &["aarch64", "amd64"]),
+            Ok(Backend::Native)
+        );
+        assert_eq!(automatic_backend("amd64", &["x86_64"]), Ok(Backend::Native));
+        assert_eq!(
+            automatic_backend("aarch64", &["amd64"]),
+            Ok(Backend::EmulatedX86)
+        );
+        assert!(automatic_backend("x86_64", &["aarch64"]).is_err());
+        assert!(automatic_backend("", &["x86_64"]).is_err());
+        assert!(automatic_backend("aarch64", &[""]).is_err());
     }
 
     #[test]

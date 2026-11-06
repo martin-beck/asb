@@ -1,7 +1,12 @@
 # Optional emulated benchmark execution
 
-Native execution remains the default. An explicitly selected VM backend should
-run the entire ASB invocation in a guest of the requested architecture, so that
+Native execution is selected when the host supports the workload's declared
+architecture, or when no restriction is known. When a workload or selected
+trial declares that the host architecture is unsupported, ASB should select a
+compatible VM backend automatically. If no matching recipe exists, it should
+explain the unsupported architecture instead of silently running natively.
+An explicit backend choice can also select a VM. The VM backend should run the
+entire ASB invocation in a guest of the requested architecture, so that
 the agent, workload, provider proxy, record/replay and collectors see the same
 guest environment. The existing workload-specific execution adapters must not
 need emulator branches. This document is a design, not an implemented feature.
@@ -38,8 +43,10 @@ Qualification requires deterministic tests of backend selection, guest command
 construction, credentials and paths, termination and failed transport, plus a
 real cross-architecture VM test covering one live run, record and offline replay,
 all selected collectors and result/report retrieval. A separate sweep test must
-verify concurrency and per-benchmark output isolation. Default native execution
-must remain unchanged and tested.
+verify concurrency and per-benchmark output isolation. Automatic selection must
+test compatible hosts, unknown restrictions, incompatible hosts, architecture
+aliases and unavailable recipes; it must disclose emulation and its performance
+implications to the user.
 
 ## Pinned-source architecture audit
 
@@ -94,7 +101,8 @@ architecture is sufficient. A v58.2 build with
 alone does not establish that tracing or trace processing works in the guest.
 
 The draft includes independently tested recipe primitives in
-`crates/asb-cli/src/emulation/recipe.rs`: native is the default selection, and
+`crates/asb-cli/src/emulation/recipe.rs`: architecture-based selection is a
+standalone, tested primitive and
 the x86 recipe constructs foreground QEMU arguments without shell interpolation,
 so a future backend can retain the VM process. It also verifies the base-image
 digest before creating a writable qcow2 overlay in a new VM directory. They
