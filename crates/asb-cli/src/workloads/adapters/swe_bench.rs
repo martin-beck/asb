@@ -27,6 +27,9 @@ pub(super) static ADAPTER: SweBenchAdapter = SweBenchAdapter {
 };
 
 impl WorkloadAdapter for SweBenchAdapter {
+    fn supports_native_snapshot_recording(&self) -> bool {
+        true
+    }
     fn supports_architecture(&self, host: &str) -> bool {
         matches!(host, "x86_64" | "aarch64")
     }

@@ -155,6 +155,9 @@ pub(crate) trait AgentAdapter: Sync {
     ) -> Result<Option<auxiliary::AuxiliaryPlan>, Error> {
         Ok(None)
     }
+    fn prefers_native_snapshot_recording(&self) -> bool {
+        false
+    }
     fn supports_native_tool_transport(&self) -> bool {
         false
     }
@@ -646,6 +649,7 @@ pub(super) struct StaticAdapter {
     mcp_servers: bool,
     mcp_relay: bool,
     native_tool_transport: bool,
+    native_snapshot_recording_preferred: bool,
     snapshot_replay_settlement: bool,
     snapshot_replay_receipt: Option<SnapshotReplayReceiptHook>,
     guest_service: Option<GuestServiceHook>,
@@ -704,6 +708,7 @@ impl StaticAdapter {
             mcp_servers: false,
             mcp_relay: false,
             native_tool_transport: false,
+            native_snapshot_recording_preferred: false,
             snapshot_replay_settlement: false,
             snapshot_replay_receipt: None,
             guest_service: None,
@@ -801,6 +806,11 @@ impl StaticAdapter {
     }
 
     /// Declares an adapter-owned, tested consumer for a sealed native sidecar.
+    pub(super) const fn with_preferred_native_snapshot_recording(mut self) -> Self {
+        self.native_snapshot_recording_preferred = true;
+        self
+    }
+
     pub(super) const fn with_native_tool_transport(mut self) -> Self {
         self.native_tool_transport = true;
         self
@@ -1073,6 +1083,9 @@ impl AgentAdapter for StaticAdapter {
     }
     fn supports_mcp_relay(&self) -> bool {
         self.mcp_relay
+    }
+    fn prefers_native_snapshot_recording(&self) -> bool {
+        self.native_snapshot_recording_preferred
     }
     fn supports_native_tool_transport(&self) -> bool {
         self.native_tool_transport
