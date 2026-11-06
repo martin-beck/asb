@@ -154,7 +154,7 @@ class SweBenchTask:
         finally:
             self.preparing_repository = False
 
-    def checked(self, argv, output_limit=256 * 1024, environment=None, timeout=None):
+    def checked(self, argv, output_limit=256 * 1024, environment=None, timeout=None, description=None):
         if timeout is None:
             # Staging and submission helpers run outside repository setup but
             # still precede or follow the agent's separately timed execution.
@@ -165,6 +165,9 @@ class SweBenchTask:
         if self.preparing_repository:
             options["preparation_timeout"] = _REPOSITORY_GATE_PREPARATION_SECONDS
         result = self.workspace.execute(argv, **options)
+        if result["output_truncated"] and not result["timed_out"] and not result["cancelled"] and result["exit_code"] == 0:
+            label = description or "repository operation"
+            raise ExecutionError(f"{label} output exceeded the {output_limit} byte limit; the attempt was preserved")
         if result["timed_out"] or result["cancelled"] or result["exit_code"] != 0 or result["output_truncated"]:
             # Command output can contain agent-controlled data. Keep diagnostics
             # structured and do not echo it into human/measurement records.
@@ -240,7 +243,8 @@ class SweBenchTask:
         if paths:
             self.checked([*git, "add", "--intent-to-add", "--", *paths])
         patch = self.checked([*git, "-c", "core.fsmonitor=false", "diff", "--binary", "--no-ext-diff",
-                              "--no-textconv", self.row["base_commit"], "--"], MAX_PATCH_BYTES)
+                              "--no-textconv", self.row["base_commit"], "--"], MAX_PATCH_BYTES,
+                             description="submission patch generation")
         path = self.artifacts / "candidate.patch"
         atomic_write(path, patch)
         submission = {"task": self.invocation["identity"], "base_commit": self.row["base_commit"],

@@ -26,6 +26,29 @@ class LocalWorkspace:
 
 
 class SubmissionRecoveryTests(unittest.TestCase):
+    def test_large_submission_patch_is_captured_and_limit_is_explained(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); worktree = root / 'worktree'; worktree.mkdir()
+            def git(*args):
+                return subprocess.run(['git', *args], cwd=worktree, check=True, capture_output=True).stdout
+            git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid')
+            (worktree/'large.txt').write_text('before\n'); git('add','large.txt'); git('commit','-qm','base')
+            base = git('rev-parse','HEAD').decode().strip()
+            backup = root/'baseline.git'; shutil.copytree(worktree/'.git', backup)
+            (worktree/'large.txt').write_text('large line for patch\n' * 250000)
+            artifacts = root/'artifacts'; artifacts.mkdir()
+            task = task_module.SweBenchTask(None,root/'catalog','fixture',artifacts)
+            task.workspace = LocalWorkspace(worktree); task.workspace.image_identity = {'fixture':True}
+            task.invocation = {'identity':{'task_id':'fixture'}}; task.row = {'base_commit':base}
+            with patch.object(task_module,'SUBMISSION_GIT_DIR',str(backup)), patch.object(task_module,'SUBMISSION_WORKTREE',str(worktree)):
+                submission = task.capture_submission()
+                self.assertGreater(submission['patch_bytes'], 4*1024*1024)
+                self.assertEqual((artifacts/'candidate.patch').stat().st_size, submission['patch_bytes'])
+                self.assertEqual(len(asb_swebench.read_limited(artifacts/'candidate.patch', asb_swebench.MAX_PATCH_BYTES)), submission['patch_bytes'])
+                with patch.object(task_module,'MAX_PATCH_BYTES',1024):
+                    with self.assertRaisesRegex(task_module.ExecutionError, 'submission patch generation output exceeded the 1024 byte limit'):
+                        task.capture_submission()
+
     def test_repository_gate_has_separate_preparation_and_execution_budgets(self):
         task = task_module.SweBenchTask(None, 'catalog', 'fixture', 'artifacts')
         task.workspace = MagicMock()
