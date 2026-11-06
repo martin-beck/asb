@@ -798,7 +798,7 @@ mod tests {
         let html =
             fs::read_to_string(fixture.root.join("results/sweep-comparison/report.html")).unwrap();
         assert_eq!(
-            html.matches("broker consumed its recorded tool stream")
+            html.matches("agent adapter consumed its recorded native tool stream")
                 .count(),
             1
         );
