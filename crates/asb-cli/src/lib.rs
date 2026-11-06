@@ -94,6 +94,10 @@ use std::process::ExitCode;
 /// Run the process CLI.
 #[must_use]
 pub fn entry(args: Vec<OsString>) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    if args.first().is_some_and(|arg| arg == "__asb-proc-exe") {
+        return collectors::adapters::agent_processes::proc_exe_entry(&args[1..]);
+    }
     if args.first().is_some_and(|arg| arg == "__asb-owned-fd-exec") {
         #[cfg(unix)]
         return owned_fd_exec::entry(&args[1..]);
