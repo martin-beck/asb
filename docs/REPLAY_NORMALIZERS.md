@@ -55,6 +55,8 @@ bounded error before launching the agent; module exception text is not printed.
 The repository also provides opt-in examples for Python unittest and pytest
 summary timings, unified-diff header times, OpenCode search ordering, shell
 `ls` diagnostics, Python representation addresses, and pip transfer progress.
+The unittest example also recognizes Django's `python tests/runtests.py`
+runner, so the same profile can be reused across matching Django tasks.
 Select those examples only for the relevant agents, workloads and tasks; each
 requires an associated matching tool or shell command. Canonicalizing output
 does not make tool execution deterministic or establish that a benchmark passed.
