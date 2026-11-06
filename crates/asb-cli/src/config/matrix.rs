@@ -39,6 +39,26 @@ pub(super) fn setup_at(
     {
         required(Some(value.clone()))?;
     }
+    if !options.trial_count.is_empty() && !options.trial.is_empty() {
+        return Err(Error::Input(
+            "--trial-count cannot be combined with --trial".into(),
+        ));
+    }
+    for value in &options.trial_count {
+        let count = value
+            .split_once('=')
+            .map_or(value.as_str(), |(_, count)| count);
+        if count
+            .parse::<usize>()
+            .ok()
+            .filter(|count| *count > 0)
+            .is_none()
+        {
+            return Err(Error::Input(format!(
+                "--trial-count `{value}` must specify a positive integer"
+            )));
+        }
+    }
     let requested_repeats = repeated(&options);
     // An explicit incompatible pair is a user input error. An `all` expansion,
     // however, denotes every runnable combination and therefore omits static
@@ -121,11 +141,6 @@ pub(super) fn setup_at(
                 )));
             }
         }
-    }
-    if !options.trial_count.is_empty() && !options.trial.is_empty() {
-        return Err(Error::Input(
-            "--trial-count cannot be combined with --trial".into(),
-        ));
     }
     let mut sampled_trials = Vec::new();
     let mut configs = Population::default();

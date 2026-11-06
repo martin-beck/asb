@@ -18,6 +18,11 @@ toward the target. If a replay fails, preparation takes the next unused trial
 from the same workload, records and verifies that trial. It stops with an
 actionable exhaustion error if the catalog cannot supply enough successful
 trials; it must not pretend a failed or incomplete recording qualified.
+Replay integrity and an agent's task grade are different observations: an
+unresolved workload can still have a faithful replay. Qualification must use
+typed replay/recording and cleanup evidence, rather than treating a false
+workload grade as proof that the tape failed or treating a zero exit as proof
+that every recorded interaction was consumed.
 
 Preparation must persist the selected candidates, attempts, immutable cassette
 references and final successful mapping under a sweep-owned lock. It must retain
