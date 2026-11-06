@@ -214,6 +214,7 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     let benchmark_rows = benchmark_data.iter().map(|benchmark| json!({
             "id": benchmark.id,
             "execution": benchmark.execution,
+            "native_replay_consumed": benchmark.native_replay_consumed,
             "planned_normalization_policy": benchmark.planned_normalization_policy,
             "normalization_observation": benchmark.normalization_observation,
             "name": benchmark.label,

@@ -77,6 +77,7 @@ impl Recorded {
         for field in [
             "execution",
             "recording",
+            "native_replay_consumed",
             "execution_plan_fingerprint",
             "module",
             "benchmark_outcome",
@@ -774,6 +775,60 @@ mod tests {
             )?;
             read_json(&self.root.join("results/sweep-comparison/comparison.json"))
         }
+    }
+
+    #[test]
+    fn pi_native_consumption_evidence_is_reported_without_inventing_coverage() {
+        let fixture = Fixture::new("swe-bench", 2);
+        let mut observed = fixture.record(1, json!(true), true, true);
+        observed["summary"]["native_replay_consumed"] = json!(true);
+        fixture.publish(1, &observed);
+        fixture.publish(2, &fixture.record(2, json!(true), true, true));
+        let measured_dir = fixture.directory().join("measurements-concurrency-1");
+        fs::create_dir(&measured_dir).unwrap();
+        fs::write(
+            measured_dir.join("run.json"),
+            observed["summary"].to_string(),
+        )
+        .unwrap();
+        let report = fixture.compare().unwrap();
+        let rows = report["benchmarks"].as_array().unwrap();
+        assert_eq!(rows[0]["native_replay_consumed"], true);
+        assert!(rows[1]["native_replay_consumed"].is_null());
+        let html =
+            fs::read_to_string(fixture.root.join("results/sweep-comparison/report.html")).unwrap();
+        assert_eq!(
+            html.matches("broker consumed its recorded tool stream")
+                .count(),
+            1
+        );
+        assert!(html.contains("does not establish coverage of all processes"));
+        let mut different = observed["summary"].clone();
+        different["native_replay_consumed"] = json!(false);
+        fs::write(measured_dir.join("run.json"), different.to_string()).unwrap();
+        assert!(fixture.compare().is_err());
+    }
+
+    #[test]
+    fn conflicting_native_consumption_evidence_is_rejected() {
+        let record = super::Recorded {
+            path: PathBuf::from("outcome.json"),
+            summary: json!({"native_replay_consumed":true}),
+            workload_cleanup: true,
+            proxy_cleanup: true,
+            source: "task-outcome",
+        };
+        assert!(
+            record
+                .check_measurement(&json!({"native_replay_consumed":true}))
+                .is_ok()
+        );
+        assert!(record.check_measurement(&json!({})).is_err());
+        assert!(
+            record
+                .check_measurement(&json!({"native_replay_consumed":false}))
+                .is_err()
+        );
     }
 
     #[test]

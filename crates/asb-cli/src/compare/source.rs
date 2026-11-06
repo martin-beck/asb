@@ -581,6 +581,7 @@ fn load_attempt(
             |selection| selection.evaluation_kind.clone(),
         );
         return Ok(BenchmarkData {
+            native_replay_consumed: None,
             execution: None,
             planned_normalization_policy: None,
             normalization_observation: None,
@@ -837,6 +838,21 @@ fn load_attempt(
         load_collectors(&measurement_dir, measured, &mut metrics)?;
     super::analysis::regenerate(&mut collector_documents, &mut metrics)?;
     Ok(BenchmarkData {
+        native_replay_consumed: if grade_only_closed
+            || outcome.is_some_and(|record| record.source == "imported-official-grade")
+        {
+            None
+        } else {
+            match run_value.get("native_replay_consumed") {
+                None | Some(Value::Null) => None,
+                Some(Value::Bool(value)) if agent == "pi" => Some(*value),
+                Some(_) => {
+                    return Err(Error::Input(
+                        "invalid native replay consumption evidence".into(),
+                    ));
+                }
+            }
+        },
         planned_normalization_policy: None,
         normalization_observation: None,
         execution: run_value
@@ -1268,6 +1284,7 @@ mod pricing_tests {
         pricing_fixture(|root| {
             std::fs::write(root.join("openrouter-pricing.json"), r#"{"schema_version":1,"provider":"openrouter","models":{"fixture":{"prompt":"0.000002","completion":"0.000004"}}}"#).unwrap();
             let make_row = |provider: &str| BenchmarkData {
+                native_replay_consumed: None,
                 planned_normalization_policy: None,
                 normalization_observation: None,
                 observation: Default::default(),

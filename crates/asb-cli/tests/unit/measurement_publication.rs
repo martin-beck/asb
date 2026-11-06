@@ -303,8 +303,26 @@ fn raw_cleanup_refuses_foreign_replacement_and_discloses_owned_removal_failure()
 }
 
 #[cfg(unix)]
+#[test]
+fn native_consumption_measurement_preserves_unknown_and_observed_states() {
+    let mut measurement = fixture_measurement();
+    assert!(
+        serde_json::to_value(&measurement)
+            .unwrap()
+            .get("native_replay_consumed")
+            .is_none()
+    );
+    measurement.native_replay_consumed = Some(true);
+    assert_eq!(
+        serde_json::to_value(&measurement).unwrap()["native_replay_consumed"],
+        true
+    );
+}
+
+#[cfg(unix)]
 fn fixture_measurement() -> RunMeasurement<'static> {
     RunMeasurement {
+        native_replay_consumed: None,
         planning: None,
         effective_budgets: None,
         execution: None,

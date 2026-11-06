@@ -416,6 +416,7 @@ mod tests {
         use crate::workloads::outcome::*;
         let task = crate::workloads::TaskIdentity::local("bug-fix", Some("case"));
         BenchmarkData {
+            native_replay_consumed: None,
             planned_normalization_policy: None,
             normalization_observation: None,
             execution: None,

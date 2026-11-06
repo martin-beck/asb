@@ -1530,6 +1530,13 @@ impl ResultFacts {
             stderr.push('\n');
         }
         let result = RunResult {
+            native_replay_consumed: (config.agent == "pi" && options.native_snapshot_replay())
+                .then(|| {
+                    guest
+                        .as_ref()
+                        .and_then(|value| value.native_replay_consumed)
+                })
+                .flatten(),
             recording: None,
             execution: options.batch.map(|batch| batch.execution(options.replica)),
             planning: policy.clone(),

@@ -186,6 +186,9 @@ pub fn collector_description(id: &str) -> Option<&'static str> {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunMeasurement<'a> {
+    /// Guest-attested consumption of the selected Pi native tool stream.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) native_replay_consumed: Option<bool>,
     /// Exact runtime identity inputs; independently usable without a run log.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) planning: Option<&'a crate::planning::ResolvedPlan>,
@@ -2123,6 +2126,7 @@ mod tests {
             classes: vec!["filesystem.read".into()],
         }];
         let run = RunMeasurement {
+            native_replay_consumed: None,
             planning: None,
             effective_budgets: None,
             execution: None,
