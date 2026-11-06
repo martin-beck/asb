@@ -335,6 +335,11 @@ pub(crate) fn run_gate(args: &[OsString]) -> std::process::ExitCode {
         } else {
             target_command(program, target_args, arg0, trace.is_some())?
         };
+        if std::env::var_os("ASB_GATE_SEPARATE_PRINCIPAL_GROUP").is_some() {
+            use std::os::unix::process::CommandExt;
+            command.env_remove("ASB_GATE_SEPARATE_PRINCIPAL_GROUP");
+            command.process_group(0);
+        }
         let trace_ready = trace
             .is_some()
             .then(|| prepare_trace_readiness(&mut command))

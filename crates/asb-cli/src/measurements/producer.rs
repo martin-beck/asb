@@ -103,6 +103,9 @@ impl Producer {
     ) -> Result<Self, String> {
         #[cfg(target_os = "linux")]
         {
+            // Privileged launchers may suppress forwarding a targeted SIGINT
+            // when the sender and their child share a process group.
+            command.env("ASB_GATE_SEPARATE_PRINCIPAL_GROUP", "1");
             if policy.stream_bytes == 0
                 || policy.stream_bytes > 256 * 1024 * 1024
                 || policy
@@ -575,6 +578,74 @@ mod tests {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    #[test]
+    fn collector_principal_has_distinct_process_group_and_flushes() {
+        let fixture = Fixture::new();
+        let script = "import os,signal,time\nassert os.getpgrp() != os.getpgid(os.getppid())\nassert 'ASB_GATE_SEPARATE_PRINCIPAL_GROUP' not in os.environ\ndef stop(*_):\n print('FLUSHED',flush=True)\n raise SystemExit(0)\nsignal.signal(signal.SIGINT,stop)\nprint('READY',flush=True)\nwhile True: time.sleep(.01)\n";
+        let mut producer = fixture.spawn(script, None, false);
+        until(|| {
+            std::fs::read(fixture.path.join("stdout"))
+                .is_ok_and(|data| data.windows(5).any(|window| window == b"READY"))
+        });
+        let completion = producer.stop();
+        assert!(completion.capture_complete, "{:?}", completion.error);
+        assert!(completion.interruption_acknowledged);
+        assert!(
+            std::fs::read(fixture.path.join("stdout"))
+                .unwrap()
+                .windows(7)
+                .any(|window| window == b"FLUSHED")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires passwordless sudo and a working local bpftrace"]
+    fn real_sudo_bpftrace_gracefully_flushes_under_process_gate() {
+        let fixture = Fixture::new();
+        let bpftrace = std::env::var_os("ASB_TEST_BPFTRACE").expect("set ASB_TEST_BPFTRACE");
+        let mut launch = crate::launch::ProcessLaunch::new("sudo");
+        launch.arg("-n").arg(bpftrace).arg("-B").arg("line").arg("-e")
+            .arg("BEGIN { printf(\"READY\\n\"); } interval:s:30 { exit(); } END { printf(\"FLUSHED\\n\"); }");
+        let (mut command, route) = super::command(&mut launch).unwrap();
+        let mut producer = Producer::spawn_with_dependency(
+            &mut command,
+            route,
+            Policy {
+                stream_bytes: 1024 * 1024,
+                graceful: Some(Duration::from_secs(5)),
+            },
+            [
+                File::create(fixture.path.join("stdout")).unwrap(),
+                File::create(fixture.path.join("stderr")).unwrap(),
+            ],
+            None,
+        )
+        .unwrap();
+        until(|| {
+            std::fs::read(fixture.path.join("stdout"))
+                .is_ok_and(|data| data.windows(5).any(|window| window == b"READY"))
+        });
+        std::thread::sleep(Duration::from_secs(15));
+        let started = Instant::now();
+        let completion = producer.stop_before(Instant::now() + Duration::from_secs(45));
+        eprintln!(
+            "elapsed={:?} complete={} cleanup={:?} requested={} acknowledged={} error={:?}",
+            started.elapsed(),
+            completion.capture_complete,
+            completion.guardian_cleanup_confirmed,
+            completion.interruption_requested,
+            completion.interruption_acknowledged,
+            completion.error
+        );
+        assert!(completion.capture_complete, "{:?}", completion.error);
+        assert!(
+            std::fs::read(fixture.path.join("stdout"))
+                .unwrap()
+                .windows(7)
+                .any(|window| window == b"FLUSHED")
+        );
     }
 
     #[test]
