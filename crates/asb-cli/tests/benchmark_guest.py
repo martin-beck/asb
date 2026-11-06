@@ -38,17 +38,17 @@ class SnapshotBackendTests(unittest.TestCase):
         from asb_snapshot_backend import BTRFS, SnapshotRequest
         task, transport = object(), object()
         request = SnapshotRequest(task, {'btrfs': 'tool'}, (1, 2), transport, 123,
-                                  replay=True, extra_roots=('/tmp',))
+                                  target='/workspace/task', replay=True, extra_roots=('/tmp',))
         with patch('asb_snapshot_control.GuestSnapshot') as ordinary, \
              patch('asb_snapshot_independent.IndependentSnapshot') as separate:
             self.assertIs(BTRFS.start(request), ordinary.return_value)
             ordinary.assert_called_once_with(task, request.tools, (1, 2), transport, 123,
-                                             replay=True, extra_roots=['/tmp'])
+                                             target='/workspace/task', replay=True, extra_roots=['/tmp'])
             separate.assert_not_called()
             from dataclasses import replace
             self.assertIs(BTRFS.start(replace(request, independent_custody=True)), separate.return_value)
             separate.assert_called_once_with(task, request.tools, (1, 2), transport, 123,
-                                             replay=True, extra_roots=['/tmp'])
+                                             target='/workspace/task', replay=True, extra_roots=['/tmp'])
 
     def test_backend_propagates_startup_failure(self):
         from asb_snapshot_backend import BTRFS, SnapshotRequest
@@ -190,6 +190,21 @@ class GuestBootstrapTests(unittest.TestCase):
             self.assertNotIn('snapshot_private_mount', guest)
             self.assertEqual(json.loads(environment['ASB_AUXILIARY_TOOLS']),
                              {'btrfs':'/opt/asb-private/tools/btrfs/btrfs'})
+
+    def test_requested_snapshot_reports_missing_workload_provisioning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root/'.asb').mkdir(); (root/'.asb/project.toml').write_text('')
+            task = SimpleNamespace(workspace=SimpleNamespace(container=Container(), image_identity={}, execute=lambda *a, **k: {}),
+                                   artifacts=root, checked=lambda _: b'', tool_mode='replay')
+            request = {'project_root':str(root), 'tools_root':str(root), 'binary':'fixture',
+                       'request':{'config':{'agent':'fixture'}}, 'bootstrap':{}, 'auxiliary_tools':{}}
+            with patch.dict(os.environ, {'ASB_EXPERIMENTAL_SNAPSHOT':'1'}), \
+                 patch('asb_guest.bundle', return_value=([],{})), patch('asb_guest.stage_runtime', return_value=(0,0)), \
+                 patch('asb_guest.upload'), patch('asb_guest.stage_private_inputs'), \
+                 patch('asb_guest.stage_bootstrap', return_value=([],['fixture'])), \
+                 patch('asb_guest.stage_auxiliary_tools', return_value={}):
+                with self.assertRaisesRegex(ExecutionError, 'did not provision snapshot storage'):
+                    prepare_agent(task, request, None)
 
     def test_snapshot_guest_requests_private_mount_namespace(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -514,6 +514,11 @@ pub(crate) trait WorkloadSession {
     fn uses_isolated_guest(&self) -> bool {
         false
     }
+    /// A workload session admits snapshot replay only after it has selected a
+    /// concrete workspace backend. This is independent of workload identity.
+    fn prepare_snapshot_replay(&self) -> Result<(), String> {
+        Err("the workload session did not provision a snapshot replay backend".into())
+    }
 }
 
 pub(super) type Evaluator = fn(&str, &Path, &str) -> Result<Evaluation, String>;
@@ -652,9 +657,16 @@ impl WorkloadSession for FileSession {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn native_snapshot_replay_rejects_unsupported_workloads_before_preparation() {
+    fn replay_reports_a_missing_backend_from_the_prepared_session() {
+        let root =
+            crate::fixture_namespace::allocate(&std::env::temp_dir(), "snapshot-workload-session")
+                .unwrap();
+        let catalog = root.join("catalog");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&catalog).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        super::super::populate_builtin_prompts(&catalog).unwrap();
         let project = crate::project::ProjectConfig::default();
-        let root = std::path::Path::new("/nonexistent-snapshot-test");
         let context = super::PreparationContext {
             native_snapshot_record: false,
             tool_mode: Some(crate::tape::Mode::Replay),
@@ -662,20 +674,25 @@ mod tests {
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,
-            workload: "bug-fix",
+            workload: "repository-navigation",
             trial: None,
             trial_set: None,
-            workload_directory: root,
-            workspace: root,
-            project_root: root,
+            workload_directory: &catalog,
+            workspace: &workspace,
+            project_root: &root,
             project_config: &project,
         };
         let error = match super::super::prepare_task(&context) {
-            Ok(_) => panic!("unsupported workload accepted snapshot replay"),
+            Ok(_) => panic!("unprovisioned replay backend was accepted"),
             Err(error) => error,
         };
-        assert!(error.contains("native snapshot replay is not supported"));
+        assert!(
+            error.contains("did not provision a snapshot replay backend"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
+
     #[test]
     fn recorded_settlement_is_strict_without_inventing_legacy_removal() {
         use super::ResourceDisposition as D;

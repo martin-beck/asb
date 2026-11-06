@@ -20,6 +20,7 @@ class SnapshotRequest:
     owner: object
     transport: object
     deadline: float
+    target: str = '/testbed'
     replay: bool = False
     extra_roots: tuple = ()
     independent_custody: bool = False
@@ -39,7 +40,7 @@ class BtrfsSnapshotBackend:
             from asb_snapshot_control import GuestSnapshot
             supervisor = GuestSnapshot
         return supervisor(request.task, request.tools, request.owner,
-                          request.transport, request.deadline,
+                          request.transport, request.deadline, target=request.target,
                           replay=request.replay, extra_roots=list(request.extra_roots))
 
 

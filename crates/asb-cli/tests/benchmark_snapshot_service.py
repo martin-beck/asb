@@ -419,8 +419,9 @@ class SnapshotServiceTest(unittest.TestCase):
                  patch('asb_snapshot_control.selectors.DefaultSelector') as selectors, \
                  patch('asb_snapshot_control.subprocess.Popen',return_value=process) as popen:
                 selectors.return_value.__enter__.return_value.select.return_value=[True]
-                supervisor=GuestSnapshot(task,tools,(0,0),['docker'],time.monotonic()+5,extra_roots=['/tmp','/var/tmp'])
+                supervisor=GuestSnapshot(task,tools,(0,0),['docker'],time.monotonic()+5,extra_roots=['/tmp','/var/tmp'],target='/workspace/task')
             args=popen.call_args.args[0]
+            self.assertEqual(args[args.index('--target')+1], '/workspace/task')
             self.assertEqual([args[i+1] for i,value in enumerate(args) if value=='--extra-root'],['/tmp','/var/tmp'])
             supervisor.log.close()
 

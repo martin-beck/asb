@@ -26,10 +26,12 @@ must not be presented as verified complete replay.
 
 Remaining integration work:
 
-1. Define workload-owned root and transport interfaces with actual startup and
+1. Extend workload-owned root and transport interfaces with actual startup and
    settlement evidence, including a native execution path and explicit separation
-   from VM lifecycle. Remove workload-name dispatch only when the shared path
-   records and replays effects for the selected workload.
+   from VM lifecycle. The guest backend uses the workload's working directory
+   as its primary root and reports missing storage when a workload has not
+   provisioned it. The native file session does not yet start a snapshot
+   backend; snapshot replay reports this actual missing capability.
 2. Bind OpenCode, Claude Code and OpenJiuwen tool sidecars to the settled archive
    and validate marker ordering through each adapter. Preserve original tool
    behavior during recording and reject mismatched or incomplete replay.
