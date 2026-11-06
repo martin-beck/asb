@@ -1,5 +1,10 @@
 # Development
 
+The opt-in [installed-agent snapshot qualification](../crates/asb-cli/tests/fixtures/snapshot_agents/README.md)
+uses a local model fixture to record one official SWE-bench task and replay it
+in two isolated replicas. It checks the grade, cleanup and native tool-stream
+consumption for each replica. It is not run by CI or a live-provider test.
+
 The opt-in `crates/asb-cli/tests/fixtures/pi_native/swe_snapshot_c4.py`
 qualifies one original `sympy__sympy-22236` task through ASB's experimental Pi
 native snapshot cassette. In a disposable x86-64 VM, initialize a project,

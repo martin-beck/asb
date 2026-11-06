@@ -1,0 +1,206 @@
+"""Opt-in full ASB snapshot cassette qualification on one original SWE task.
+
+Uses a synthetic loopback provider and an explicit upstream reference patch;
+this is not an AI-solving or benchmark-performance claim. Run only in a
+disposable project with the official catalog, task image and selected agent installed.
+"""
+import base64
+import http.server
+import io
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tempfile
+import threading
+
+HERE=Path(__file__).resolve().parent
+PROJECT=HERE.parents[2]
+sys.path.insert(0,str(PROJECT/'assets/benchmarks'))
+sys.path.insert(0,str(PROJECT/'tests'))
+
+
+def check_gate_diagnostics(phase, stderr):
+    # A workload cleanup receipt does not establish host-process quiescence.
+    # Retain and fail on the explicit gate warning reported by the SymPy loop.
+    # Absence of the warning alone is not a positive quiescence receipt.
+    if 'asb process gate cleanup:' in stderr:
+        raise RuntimeError(f'{phase} reported unconfirmed host process cleanup; inspect retained stderr')
+
+
+def main():
+    from asb_swebench import read_task
+    import guest_provider_fixture as provider
+    root=Path(os.environ['ASB_TEST_SWECATALOG_ROOT']).resolve(strict=True)
+    binary=Path(os.environ['ASB_TEST_BENCHMARK_ASB']).resolve(strict=True)
+    if not (root/'.asb/project.toml').is_file():raise RuntimeError('fixture requires an initialized ASB project')
+    task=os.environ.get('ASB_SNAPSHOT_TASK','sympy__sympy-14774')
+    agent=os.environ.get('ASB_SNAPSHOT_AGENT','opencode')
+    _,row=read_task(root/'workloads/swe-bench/catalog.json',task)
+    patch=row.get('patch')
+    if not isinstance(patch,str) or not patch:raise RuntimeError('official reference patch is unavailable')
+    resume=os.environ.get('ASB_TEST_RESUME_RECORDING')
+    artifacts=(Path(resume).resolve(strict=True) if resume else
+               Path(tempfile.mkdtemp(prefix='snapshot-agent-swe-',dir=root)))
+    if resume and (artifacts.parent != root or not (artifacts/'record.asb.zip').is_file()):
+        raise RuntimeError('resume requires retained fixture evidence in this project')
+    print('fixture evidence:',artifacts,flush=True)
+    output_dir = Path(tempfile.mkdtemp(prefix='replay-validation-', dir=artifacts)) if resume else artifacts
+    workdir=Path(tempfile.mkdtemp(prefix='snapshot-agent-config-',dir=root/'results'))
+    provider.root=workdir
+    provider.requests=provider.calls=0
+    calls=[]
+    class DataHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self,*_args):pass
+        def do_GET(self):
+            calls.append(1)
+            payload=b'fixture-http'
+            self.send_response(200);self.send_header('Content-Length',str(len(payload)))
+            self.end_headers();self.wfile.write(payload)
+    class CompatibleHandler(provider.Handler):
+        def do_POST(self):
+            path=self.path.partition('?')[0]
+            if path not in ('/v1/chat/completions','/v1/embeddings'):
+                return super().do_POST()
+            raw=self.rfile.read(int(self.headers.get('Content-Length','0')))
+            body=json.loads(raw)
+            if path == '/v1/chat/completions' and body.get('tools'):
+                self.rfile=io.BytesIO(raw)
+                return super().do_POST()
+            self.observe();provider.calls+=1
+            if path == '/v1/embeddings':
+                items=body.get('input',[])
+                if not isinstance(items,list):items=[items]
+                payload=json.dumps({'object':'list','data':[{'object':'embedding','index':i,'embedding':[0.0]*384} for i in range(len(items))],
+                                    'model':'fixture-model','usage':{'prompt_tokens':1,'total_tokens':1}}).encode()
+                self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(payload)));self.end_headers();self.wfile.write(payload)
+                return
+            event={'id':'fixture','object':'chat.completion.chunk','created':1,'model':'fixture-model',
+                   'choices':[{'index':0,'delta':{'role':'assistant','content':'Fixture completed.'},'finish_reason':'stop'}],
+                   'usage':{'prompt_tokens':1,'completion_tokens':1,'total_tokens':2}}
+            self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('Connection','close');self.end_headers()
+            self.wfile.write(('data: '+json.dumps(event)+'\n\ndata: [DONE]\n\n').encode());self.wfile.flush()
+
+    class AnthropicHandler(CompatibleHandler):
+        def do_POST(self):
+            if self.path.partition('?')[0] != '/v1/messages':
+                return super().do_POST()
+            self.observe()
+            body=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))))
+            provider.calls+=1
+            has_result=any(isinstance(message.get('content'),list) and any(
+                block.get('type')=='tool_result' for block in message['content'] if isinstance(block,dict))
+                for message in body.get('messages',[]) if isinstance(message,dict))
+            message={'id':'msg_fixture','type':'message','role':'assistant','model':'fixture-model',
+                     'content':[],'stop_reason':None,'stop_sequence':None,
+                     'usage':{'input_tokens':17,'output_tokens':0}}
+            events=[('message_start',{'type':'message_start','message':message})]
+            tool=next((tool for tool in body.get('tools',[]) if 'command' in tool.get('input_schema',{}).get('properties',{})),None)
+            if not has_result and tool is not None:
+                block={'type':'tool_use','id':'toolu_fixture','name':tool['name'],'input':{}}
+                events += [('content_block_start',{'type':'content_block_start','index':0,'content_block':block}),
+                           ('content_block_delta',{'type':'content_block_delta','index':0,'delta':{'type':'input_json_delta','partial_json':json.dumps({'command':provider.command()})}}),
+                           ('content_block_stop',{'type':'content_block_stop','index':0})]
+                stop='tool_use'
+            else:
+                events += [('content_block_start',{'type':'content_block_start','index':0,'content_block':{'type':'text','text':''}}),
+                           ('content_block_delta',{'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'Fixture completed.'}}),
+                           ('content_block_stop',{'type':'content_block_stop','index':0})]
+                stop='end_turn'
+            events += [('message_delta',{'type':'message_delta','delta':{'stop_reason':stop,'stop_sequence':None},'usage':{'output_tokens':5}}),
+                       ('message_stop',{'type':'message_stop'})]
+            self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('Connection','close');self.end_headers()
+            for name,event in events:
+                self.wfile.write(('event: '+name+'\ndata: '+json.dumps(event)+'\n\n').encode())
+            self.wfile.flush()
+    data=http.server.ThreadingHTTPServer(('0.0.0.0',0),DataHandler)
+    handler=AnthropicHandler if agent in ('openjiuwen','claude-code') else CompatibleHandler
+    llm=http.server.ThreadingHTTPServer(('127.0.0.1',0),handler)
+    for server in [data,llm]:threading.Thread(target=server.serve_forever,daemon=True).start()
+    gateway=subprocess.check_output(['docker','network','inspect','bridge','--format','{{(index .IPAM.Config 0).Gateway}}'],text=True).strip()
+    if not gateway:raise RuntimeError('Docker bridge has no guest gateway')
+    encoded=base64.b64encode(patch.encode()).decode('ascii')
+    apply='import base64,subprocess; subprocess.run(["git","apply","-"],input=base64.b64decode('+repr(encoded)+'),check=True)'
+    (workdir/'command.txt').write_text('curl -fsS --max-time 10 '+shlex.quote(f'http://{gateway}:{data.server_port}/')+
+                                          ' && python -c '+shlex.quote(apply))
+    configs=[]
+    for concurrency in [1,2]:
+        config=workdir/f'c{concurrency}.toml'
+        config.write_text(f"agent='{agent}'\nprovider='openrouter'\nmodel='fixture-model'\n"
+            f"workload='swe-bench'\ntrial='{task}'\nconcurrency={concurrency}\n"
+            "workspace='unused-workspace'\nlog_file='unused.log'\nnative_snapshot_record=true\n"
+            "[measurements]\nenabled=false\ndirectory='unused-measurements'\ncollectors=[]\n")
+        configs.append(config)
+    base=f'http://127.0.0.1:{llm.server_port}/v1'
+    env={'PATH':os.environ['PATH'],'HOME':str(artifacts),'OPENROUTER_API_KEY':'fixture-token',
+         'OPENROUTER_BASE_URL':base,'OPENROUTER_MODELS_URL':base+'/models',
+         'NO_PROXY':'*','no_proxy':'*','NPM_CONFIG_OFFLINE':'true',
+         'ASB_EXPERIMENTAL_SNAPSHOT_ROOTS':'["/tmp"]'}
+    cassette=artifacts/'record.asb.zip'
+    def run(phase,config):
+        args=[str(binary),'run',str(config),'--'+phase,'--repeat','1','--cassette',str(cassette),'--json']
+        if phase=='replay':args+=['--track','1']
+        try:
+            result=subprocess.run(args,cwd=root,env=env,capture_output=True,text=True,timeout=1800)
+        except subprocess.TimeoutExpired as error:
+            (output_dir/f'{phase}.timeout.txt').write_text(str(error))
+            raise
+        (output_dir/f'{phase}.stdout').write_text(result.stdout)
+        (output_dir/f'{phase}.stderr').write_text(result.stderr)
+        check_gate_diagnostics(phase,result.stderr)
+        if result.returncode:raise RuntimeError(f'{phase} failed ({result.returncode}); inspect {output_dir}/{phase}.stderr')
+        lines=[json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        rows=[row for row in lines if isinstance(row.get('task'),dict)]
+        expected=1 if phase=='record' else 2
+        if len(rows)!=expected:raise RuntimeError(f'{phase} emitted {len(rows)} outcomes instead of {expected}')
+        if sorted(row.get('replica_index') for row in rows) != list(range(1,expected+1)):
+            raise RuntimeError(f'{phase} did not report each distinct replica')
+        attempts=[(row.get('benchmark_outcome') or {}).get('lineage',{}).get('execution_attempt') for row in rows]
+        if any(not isinstance(attempt,str) or not attempt for attempt in attempts) or len(set(attempts)) != expected:
+            raise RuntimeError(f'{phase} did not report distinct execution attempts')
+        for row in rows:
+            outcome=row.get('benchmark_outcome') or {}
+            if not (row.get('process_success') is True and row.get('workload_success') is True
+                    and outcome.get('execution_success') is True and outcome.get('cleanup_confirmed') is True):
+                raise RuntimeError(f'{phase} did not fully resolve and clean up; inspect retained output')
+            if phase=='replay' and row.get('native_replay_consumed') is not True:
+                raise RuntimeError('replay lacks native tool stream consumption evidence')
+        if phase=='record':
+            publications=[line['publication'] for line in lines if isinstance(line.get('publication'),dict)]
+            if (len(publications)!=1 or publications[0].get('status')!='published'
+                or publications[0].get('cleanup_complete') is not True or publications[0].get('warnings')):
+                raise RuntimeError('record did not publish a clean complete cassette')
+        return rows
+    try:
+        if resume:
+            record_stderr=artifacts/'record.stderr'
+            if not record_stderr.is_file():
+                raise RuntimeError('resume requires the retained recording stderr for gate diagnostics')
+            check_gate_diagnostics('record',record_stderr.read_text())
+            lines=[json.loads(line) for line in (artifacts/'record.stdout').read_text().splitlines() if line.strip()]
+            outcomes=[line for line in lines if isinstance(line.get('task'),dict)]
+            publications=[line['publication'] for line in lines if isinstance(line.get('publication'),dict)]
+            if (len(outcomes)!=1 or outcomes[0].get('workload_success') is not True
+                or (outcomes[0].get('benchmark_outcome') or {}).get('cleanup_confirmed') is not True
+                or len(publications)!=1 or publications[0].get('cleanup_complete') is not True
+                or publications[0].get('status')!='published'):
+                raise RuntimeError('retained record lacks a successful grade and confirmed publication cleanup')
+            print('resuming the retained successful recording without rerunning the agent',flush=True)
+        else:
+            run('record',configs[0])
+            if len(calls)!=1 or provider.calls<2:raise RuntimeError('record did not contact both local fixture services')
+            print('record succeeded with one local shell HTTP request and official grade',flush=True)
+        data.shutdown();data.server_close();llm.shutdown();llm.server_close()
+        run('replay',configs[1])
+        if len(calls)!=(0 if resume else 1):raise RuntimeError('replay repeated the shell HTTP request')
+        print('two snapshot cassette replays completed with official grades and no fixture service',flush=True)
+    finally:
+        for server in [data,llm]:
+            try:server.server_close()
+            except OSError:pass
+        print('fixture evidence:',artifacts,flush=True)
+
+
+if __name__=='__main__':main()

@@ -941,7 +941,13 @@ def _seal_native_tool_sidecar():
             destination.write(json.dumps(event, separators=(",", ":")) + "\n")
 
 sys.argv = sys.argv[1:]
-runpy.run_path(sys.argv[0], run_name="__main__")
+try:
+    runpy.run_path(sys.argv[0], run_name="__main__")
+except SystemExit as error:
+    # Installed console scripts normally call sys.exit(cli()). A successful
+    # exit must still reach our replay cursor checks and completion receipt.
+    if error.code not in (None, 0):
+        raise
 if _replay_path:
     _recorded_exchanges = sum(1 for event in _native_events if event.get("event") == "write")
     if _native_cursor != _recorded_exchanges:
