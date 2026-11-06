@@ -234,7 +234,8 @@ continuation, not proof that the model would have produced the response to the
 new request. The original cassette is unchanged, and replay does not fall back
 to an online provider. An exhausted cassette, oversized request, unretained
 divergence evidence, unsupported external proxy, or other independent failure
-still fails. Replay-derived usage is not treated as verified on an approximate
+still fails. At most 1,024 request mismatches can be ignored per attempt;
+further mismatches fail rather than discarding their diagnostics. Replay-derived usage is not treated as verified on an approximate
 attempt. The policy is frozen in repeated campaign and sweep plans.
 
 `--ignore-provider-unconsumed` separately allows an otherwise completed replay
