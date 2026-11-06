@@ -1137,7 +1137,8 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
             .expect("normalizer observations must be bound into completion evidence");
         let evidence: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(evidence["policy_sha256"], policy_digest);
-        assert_eq!(evidence["profiles"][0]["changed"], 1);
+        // Replay canonicalizes both the raw recorded request and the live request.
+        assert_eq!(evidence["profiles"][0]["changed"], 2);
         evidence_paths.push(PathBuf::from(path));
     }
     let compared = compare_campaign(&project, &plan_path);
@@ -1167,7 +1168,7 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
         );
         assert_eq!(
             row["normalization_observation"]["profiles"][0]["changed"],
-            1
+            2
         );
     }
     assert!(
