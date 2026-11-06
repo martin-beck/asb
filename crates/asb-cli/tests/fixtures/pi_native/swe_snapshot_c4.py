@@ -102,6 +102,8 @@ def main():
                 raise RuntimeError(f'{phase} did not fully resolve and clean up; inspect retained output')
             if phase=='replay' and row.get('native_replay_consumed') is not True:
                 raise RuntimeError('replay lacks native tool stream consumption evidence')
+            if phase=='replay' and row.get('replay_selection') != {'provider_replay':True,'tools':'native-snapshot','mcp_replay':False}:
+                raise RuntimeError('replay selection does not identify provider and native snapshot replay')
         if phase=='record':
             publications=[line['publication'] for line in lines if isinstance(line.get('publication'),dict)]
             if (len(publications)!=1 or publications[0].get('status')!='published'

@@ -186,6 +186,9 @@ pub fn collector_description(id: &str) -> Option<&'static str> {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunMeasurement<'a> {
+    /// Replay transports selected for this attempt; not a completeness claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) replay_selection: Option<crate::runner::ReplaySelection>,
     /// Guest-attested consumption of the selected native tool stream.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) native_replay_consumed: Option<bool>,
@@ -2126,6 +2129,7 @@ mod tests {
             classes: vec!["filesystem.read".into()],
         }];
         let run = RunMeasurement {
+            replay_selection: None,
             native_replay_consumed: None,
             planning: None,
             effective_budgets: None,

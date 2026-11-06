@@ -581,6 +581,7 @@ fn load_attempt(
             |selection| selection.evaluation_kind.clone(),
         );
         return Ok(BenchmarkData {
+            replay_selection: None,
             native_replay_consumed: None,
             execution: None,
             planned_normalization_policy: None,
@@ -837,7 +838,42 @@ fn load_attempt(
     let (series, host_metadata, components, mut collector_documents) =
         load_collectors(&measurement_dir, measured, &mut metrics)?;
     super::analysis::regenerate(&mut collector_documents, &mut metrics)?;
+    let replay_selection = if grade_only_closed
+        || outcome.is_some_and(|record| record.source == "imported-official-grade")
+    {
+        None
+    } else {
+        run_value
+            .get("replay_selection")
+            .filter(|value| !value.is_null())
+            .map(|value| serde_json::from_value::<crate::runner::ReplaySelection>(value.clone()))
+            .transpose()
+            .map_err(|_| Error::Input("invalid replay selection evidence".into()))?
+    };
+    if replay_selection.is_some_and(|selection| {
+        (!selection.provider_replay
+            && !selection.mcp_replay
+            && selection.tools == crate::runner::ReplayToolSelection::NotSelected)
+            || (selection.tools == crate::runner::ReplayToolSelection::PiAdapterLocal
+                && agent != "pi")
+    }) {
+        return Err(Error::Input(
+            "inconsistent replay selection evidence".into(),
+        ));
+    }
+    if !grade_only_closed
+        && outcome.is_none_or(|record| record.source != "imported-official-grade")
+        && run_value.get("native_replay_consumed") == Some(&Value::Bool(true))
+        && replay_selection.is_some_and(|selection| {
+            selection.tools != crate::runner::ReplayToolSelection::NativeSnapshot
+        })
+    {
+        return Err(Error::Input(
+            "native replay consumption conflicts with selected transport".into(),
+        ));
+    }
     Ok(BenchmarkData {
+        replay_selection,
         native_replay_consumed: if grade_only_closed
             || outcome.is_some_and(|record| record.source == "imported-official-grade")
         {
@@ -845,7 +881,7 @@ fn load_attempt(
         } else {
             match run_value.get("native_replay_consumed") {
                 None | Some(Value::Null) => None,
-                Some(Value::Bool(value)) if agent == "pi" => Some(*value),
+                Some(Value::Bool(value)) => Some(*value),
                 Some(_) => {
                     return Err(Error::Input(
                         "invalid native replay consumption evidence".into(),
@@ -1284,6 +1320,7 @@ mod pricing_tests {
         pricing_fixture(|root| {
             std::fs::write(root.join("openrouter-pricing.json"), r#"{"schema_version":1,"provider":"openrouter","models":{"fixture":{"prompt":"0.000002","completion":"0.000004"}}}"#).unwrap();
             let make_row = |provider: &str| BenchmarkData {
+                replay_selection: None,
                 native_replay_consumed: None,
                 planned_normalization_policy: None,
                 normalization_observation: None,

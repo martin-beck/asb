@@ -77,8 +77,28 @@ fn emit_warning(
     Ok(())
 }
 
+/// Replay choices made for an attempt, not evidence of capture completeness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReplaySelection {
+    pub(crate) provider_replay: bool,
+    pub(crate) tools: ReplayToolSelection,
+    pub(crate) mcp_replay: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ReplayToolSelection {
+    NotSelected,
+    PiAdapterLocal,
+    NativeSnapshot,
+    OtherSelected,
+}
+
 #[derive(Serialize)]
 struct RunResult<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replay_selection: Option<ReplaySelection>,
     /// Guest-attested native tool stream consumption, not total effect coverage.
     #[serde(skip_serializing_if = "Option::is_none")]
     native_replay_consumed: Option<bool>,
@@ -246,6 +266,25 @@ impl RunOptions<'_> {
                 .is_some_and(|input| {
                     input.native_tool.is_some() && input.workspace_snapshots.is_some()
                 })
+    }
+
+    fn replay_selection(&self, agent: &str) -> Option<ReplaySelection> {
+        let provider_replay = self.mode == Some(tape::Mode::Replay);
+        let tool_replay = self.effective_tool_mode() == Some(tape::Mode::Replay);
+        let mcp_replay = self.mcp_mode == Some(tape::Mode::Replay);
+        (provider_replay || tool_replay || mcp_replay).then(|| ReplaySelection {
+            provider_replay,
+            tools: if !tool_replay {
+                ReplayToolSelection::NotSelected
+            } else if self.native_snapshot_replay() {
+                ReplayToolSelection::NativeSnapshot
+            } else if agent == "pi" {
+                ReplayToolSelection::PiAdapterLocal
+            } else {
+                ReplayToolSelection::OtherSelected
+            },
+            mcp_replay,
+        })
     }
 
     fn replay_statistics(&self) -> Option<crate::cassette::Statistics> {
@@ -1648,6 +1687,10 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
         "tool_call_count": result.tool_call_count(),
         "token_usage": result.token_usage,
     });
+    if let Some(selection) = result.replay_selection {
+        summary["replay_selection"] =
+            serde_json::to_value(selection).map_err(|error| Error::Io(error.to_string()))?;
+    }
     if let Some(consumed) = result.native_replay_consumed {
         summary["native_replay_consumed"] = serde_json::Value::Bool(consumed);
     }
@@ -2043,12 +2086,13 @@ mod boundary_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        RunDisposition, RunResult, RunStatus, command_for, isolated_direct_config, render_human,
-        render_json, replica_cassette, resolve_log_path, run_with_tape, write_log,
-        write_trial_start,
+        ReplaySelection, ReplayToolSelection, RunDisposition, RunOptions, RunResult, RunStatus,
+        command_for, isolated_direct_config, render_human, render_json, replica_cassette,
+        resolve_log_path, run_with_tape, write_log, write_trial_start,
     };
     use crate::benchmark::BenchmarkConfig;
     use crate::measurements::TokenUsage;
+    use crate::tape;
 
     #[test]
     fn direct_mcp_recording_rejects_before_execution_preflight() {
@@ -2132,6 +2176,10 @@ mod tests {
             ..Default::default()
         };
         assert!(options.native_snapshot_replay());
+        assert_eq!(
+            options.replay_selection("pi").unwrap().tools,
+            ReplayToolSelection::NativeSnapshot
+        );
         options.replica.index = 2;
         assert!(!options.native_snapshot_replay());
         options.replica.index = 3;
@@ -2147,6 +2195,35 @@ mod tests {
         options.mode = Some(crate::tape::Mode::Record);
         options.tool_mode = Some(crate::tape::Mode::Record);
         assert!(!options.native_snapshot_replay());
+    }
+
+    #[test]
+    fn replay_selection_distinguishes_provider_and_pi_tool_modes() {
+        let mut options = RunOptions {
+            mode: Some(tape::Mode::Replay),
+            tool_mode_explicit: true,
+            ..Default::default()
+        };
+        let provider_only = options.replay_selection("pi").unwrap();
+        assert!(provider_only.provider_replay);
+        assert_eq!(provider_only.tools, ReplayToolSelection::NotSelected);
+        options.tool_mode = Some(tape::Mode::Replay);
+        assert_eq!(
+            options.replay_selection("pi").unwrap().tools,
+            ReplayToolSelection::PiAdapterLocal
+        );
+        assert_eq!(
+            options.replay_selection("other").unwrap().tools,
+            ReplayToolSelection::OtherSelected
+        );
+        options.mode = None;
+        let tool_only = options.replay_selection("pi").unwrap();
+        assert!(!tool_only.provider_replay);
+        assert_eq!(tool_only.tools, ReplayToolSelection::PiAdapterLocal);
+        options.tool_mode = None;
+        assert!(options.replay_selection("pi").is_none());
+        options.mcp_mode = Some(tape::Mode::Replay);
+        assert!(options.replay_selection("pi").unwrap().mcp_replay);
     }
 
     #[test]
@@ -2722,6 +2799,7 @@ mod tests {
             .unwrap();
         session
             .finish(crate::measurements::RunMeasurement {
+                replay_selection: None,
                 native_replay_consumed: None,
                 planning: None,
                 effective_budgets: None,
@@ -3169,6 +3247,7 @@ mod tests {
 
     fn result<'a>() -> RunResult<'a> {
         RunResult {
+            replay_selection: None,
             native_replay_consumed: None,
             observation: Default::default(),
             recording: None,
@@ -3307,6 +3386,25 @@ mod tests {
         assert!(value.get("execution").is_none());
         assert!(value.get("recording").is_none());
         assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 1);
+    }
+
+    #[test]
+    fn json_summary_preserves_selected_replay_modes() {
+        let mut result = result();
+        let mut output = Vec::new();
+        render_json(&result, &mut output).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert!(value.get("replay_selection").is_none());
+        result.replay_selection = Some(ReplaySelection {
+            provider_replay: true,
+            tools: ReplayToolSelection::NotSelected,
+            mcp_replay: false,
+        });
+        output.clear();
+        render_json(&result, &mut output).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["replay_selection"]["provider_replay"], true);
+        assert_eq!(value["replay_selection"]["tools"], "not-selected");
     }
 
     #[test]
