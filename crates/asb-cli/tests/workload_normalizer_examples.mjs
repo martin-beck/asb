@@ -16,7 +16,9 @@ test("recursive grep ordering is normalized only for complete unambiguous result
   assert.equal(grepOrder({text:a,tool}), grepOrder({text:b,tool}));
   assert.notEqual(grepOrder({text:a.replace('foo','changed'),tool}), grepOrder({text:b,tool}));
   const incomplete = a.slice(0, -1);
-  assert.equal(grepOrder({text:incomplete,tool}), incomplete);
+  assert.equal(grepOrder({text:incomplete,tool}), grepOrder({text:b.slice(0, -1),tool}));
+  assert.notEqual(grepOrder({text:incomplete,tool}), grepOrder({text:b,tool}));
+  assert.equal(grepOrder({text:incomplete,tool:{...tool,name:'bash'}}), incomplete);
   const joined = 'sympy/vector/a.py:3: barsympy/vector/z.py:2: foo\n';
   assert.equal(grepOrder({text:joined,tool}), joined);
   const truncated = {...tool, arguments:{command:'grep -rn "_latex" sympy/vector/ | head -2'}};
