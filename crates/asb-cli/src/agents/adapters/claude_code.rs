@@ -13,7 +13,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     Recipe::Npm {
         package: "@anthropic-ai/claude-code@2.1.301",
         executable: "claude",
-        manifest: None,
+        manifest: Some(r#"{"private":true,"allowScripts":{"@anthropic-ai/claude-code":true}}"#),
     },
     &[crate::endpoint::MESSAGES_BOTH],
     command,

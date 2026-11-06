@@ -10,7 +10,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     Recipe::Npm {
         package: "cline@3.0.72",
         executable: "cline",
-        manifest: None,
+        manifest: Some(r#"{"private":true,"allowScripts":{"cline":true,"protobufjs":true}}"#),
     },
     &[crate::endpoint::CHAT, crate::endpoint::RESPONSES],
     command,
