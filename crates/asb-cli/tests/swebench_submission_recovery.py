@@ -35,14 +35,14 @@ class SubmissionRecoveryTests(unittest.TestCase):
             (worktree/'large.txt').write_text('before\n'); git('add','large.txt'); git('commit','-qm','base')
             base = git('rev-parse','HEAD').decode().strip()
             backup = root/'baseline.git'; shutil.copytree(worktree/'.git', backup)
-            (worktree/'large.txt').write_text('large line for patch\n' * 250000)
+            (worktree/'large.txt').write_text('large line for patch\n' * 450000)
             artifacts = root/'artifacts'; artifacts.mkdir()
             task = task_module.SweBenchTask(None,root/'catalog','fixture',artifacts)
             task.workspace = LocalWorkspace(worktree); task.workspace.image_identity = {'fixture':True}
             task.invocation = {'identity':{'task_id':'fixture'}}; task.row = {'base_commit':base}
             with patch.object(task_module,'SUBMISSION_GIT_DIR',str(backup)), patch.object(task_module,'SUBMISSION_WORKTREE',str(worktree)):
                 submission = task.capture_submission()
-                self.assertGreater(submission['patch_bytes'], 4*1024*1024)
+                self.assertGreater(submission['patch_bytes'], 8_634_014)
                 self.assertEqual((artifacts/'candidate.patch').stat().st_size, submission['patch_bytes'])
                 self.assertEqual(len(asb_swebench.read_limited(artifacts/'candidate.patch', asb_swebench.MAX_PATCH_BYTES)), submission['patch_bytes'])
                 with patch.object(task_module,'MAX_PATCH_BYTES',1024):
