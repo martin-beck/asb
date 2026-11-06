@@ -24,11 +24,7 @@ pub fn prepare_sampled_group(
     let text = crate::read_config(template).map_err(|error| Error(error.to_string()))?;
     let base: BenchmarkConfig = toml::from_str(&text)
         .map_err(|error| Error(format!("invalid sampled benchmark template: {error}")))?;
-    let mut hash = Sha256::new();
-    hash.update(b"asb-sampled-configuration-v1\0");
-    hash.update(text.as_bytes());
-    hash.update(max_steps.unwrap_or(0).to_le_bytes());
-    let configuration_sha256 = format!("{:x}", hash.finalize());
+    let configuration_sha256 = configuration_digest(&text, max_steps);
     std::fs::create_dir_all(artifact_root)
         .map_err(|error| Error(format!("cannot create sampled artifact directory: {error}")))?;
     let root = artifact_root.canonicalize().map_err(|error| {
@@ -79,6 +75,51 @@ pub fn prepare_sampled_group(
             )
         },
     )?;
+    verify_winners(&state, &base, &root)?;
+    Ok(state)
+}
+
+/// Reopen a completed sampled group and verify its winners without recording,
+/// creating files, or connecting to a provider.
+pub fn load_sampled_group(
+    ledger: &Path,
+    artifact_root: &Path,
+    template: &Path,
+    sweep_sha256: &str,
+    order: &TrialOrder,
+    max_steps: Option<u64>,
+) -> Result<BoundTrialPreparation, Error> {
+    let text = crate::read_config(template).map_err(|error| Error(error.to_string()))?;
+    let base: BenchmarkConfig = toml::from_str(&text)
+        .map_err(|error| Error(format!("invalid sampled benchmark template: {error}")))?;
+    let root = artifact_root.canonicalize().map_err(|error| {
+        Error(format!(
+            "cannot resolve sampled artifact directory: {error}"
+        ))
+    })?;
+    let state = BoundTrialPreparation::load_completed_file(
+        ledger,
+        sweep_sha256,
+        &configuration_digest(&text, max_steps),
+        order,
+    )?;
+    verify_winners(&state, &base, &root)?;
+    Ok(state)
+}
+
+fn configuration_digest(text: &str, max_steps: Option<u64>) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"asb-sampled-configuration-v1\0");
+    hash.update(text.as_bytes());
+    hash.update(max_steps.unwrap_or(0).to_le_bytes());
+    format!("{:x}", hash.finalize())
+}
+
+fn verify_winners(
+    state: &BoundTrialPreparation,
+    base: &BenchmarkConfig,
+    root: &Path,
+) -> Result<(), Error> {
     // A completed ledger is not sufficient by itself: verify its winning
     // cassette and replay configuration still match before returning it.
     for (trial, expected_digest) in state.preparation().successful() {
@@ -90,7 +131,7 @@ pub fn prepare_sampled_group(
         })?;
         let actual: BenchmarkConfig = toml::from_str(&replay_text)
             .map_err(|error| Error(format!("invalid prepared replay configuration: {error}")))?;
-        if actual != replay_configuration(&base, trial, &directory)? {
+        if actual != replay_configuration(base, trial, &directory)? {
             return Err(Error(
                 "prepared replay configuration changed; preserve the existing evidence".into(),
             ));
@@ -104,7 +145,7 @@ pub fn prepare_sampled_group(
         }
         Archive::open_verified(&path, length, expected_digest, Limits::default())?;
     }
-    Ok(state)
+    Ok(())
 }
 
 fn replay_configuration(

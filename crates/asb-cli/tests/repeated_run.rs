@@ -489,25 +489,23 @@ fn sampled_candidate_child() {
         let original = fs::read(&cassette).unwrap();
         fs::write(&cassette, b"changed cassette").unwrap();
         assert!(
-            asb_cli::cassette::prepare_sampled_group(
+            asb_cli::cassette::load_sampled_group(
                 &root.join("sample-ledger.json"),
                 &root.join("sample-artifacts"),
                 &config,
-                &root,
                 &"a".repeat(64),
-                order.clone(),
+                &order,
                 None,
             )
             .is_err()
         );
         fs::write(&cassette, original).unwrap();
-        asb_cli::cassette::prepare_sampled_group(
+        asb_cli::cassette::load_sampled_group(
             &root.join("sample-ledger.json"),
             &root.join("sample-artifacts"),
             &config,
-            &root,
             &"a".repeat(64),
-            order,
+            &order,
             None,
         )
         .unwrap();

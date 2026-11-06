@@ -16,7 +16,7 @@ mod source;
 mod trial_order;
 
 pub use archive::{Archive, Limits};
-pub use candidate::{prepare_sampled_group, record_and_replay_candidate};
+pub use candidate::{load_sampled_group, prepare_sampled_group, record_and_replay_candidate};
 pub use journal::{
     ArtifactInput, NativeInput, ProofLimits, Publication, RecordingJournal, RecordingReservation,
     TrackEvidence,
