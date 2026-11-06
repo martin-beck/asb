@@ -639,6 +639,29 @@ fn sampled_sweep_fixture(mixed: bool) {
             expected_calls
         );
     }
+    let mut json_prepare = Command::new(env!("CARGO_BIN_EXE_asb"));
+    json_prepare.current_dir(&project.0).isolated_env();
+    retain_host_rust_toolchain(&mut json_prepare);
+    let json_output = json_prepare
+        .env("HOME", &project.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .args(["sweep", "sample-sweep.toml", "--prepare-replay", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        json_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let events = records(&json_output.stdout);
+    assert_eq!(
+        events.last().unwrap()["type"],
+        "sample-preparation-complete"
+    );
+    assert_eq!(
+        provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+        expected_count
+    );
     let ready: Value = serde_json::from_slice(
         &fs::read(
             project

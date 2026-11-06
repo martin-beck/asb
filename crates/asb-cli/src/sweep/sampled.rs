@@ -382,12 +382,21 @@ pub(super) fn prepare(
             "published sampled replay selection could not be verified".into(),
         ));
     }
-    writeln!(
-        output,
-        "Replay preparation complete. Run: asb sweep {} --replay",
-        path.display()
-    )
-    .map_err(crate::io_error)?;
+    if options.json {
+        writeln!(
+            output,
+            "{}",
+            serde_json::json!({"type":"sample-preparation-complete", "sweep":path})
+        )
+        .map_err(crate::io_error)?;
+    } else {
+        writeln!(
+            output,
+            "Replay preparation complete. Run: asb sweep {} --replay",
+            path.display()
+        )
+        .map_err(crate::io_error)?;
+    }
     Ok(())
 }
 
