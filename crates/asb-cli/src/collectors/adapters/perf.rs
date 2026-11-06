@@ -145,6 +145,20 @@ impl CollectorAdapter for PerfCollector {
     fn preflight(&self, context: &mut PreflightContext<'_>) -> Result<(), String> {
         preflight(context)
     }
+    fn preflight_unavailable(
+        &self,
+        selected: &[String],
+        tools: Option<&std::path::Path>,
+    ) -> Option<super::super::PreflightUnavailable> {
+        if !super::super::selected_or_environment("perf", selected) {
+            return None;
+        }
+        super::super::PreflightUnavailable::missing_executable(
+            &measurements::resolve_executable(tools, "perf"),
+            tools,
+            "perf",
+        )
+    }
     fn configure(
         &self,
         session: &mut measurements::Session,

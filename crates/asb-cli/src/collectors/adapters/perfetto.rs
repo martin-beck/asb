@@ -105,6 +105,20 @@ impl CollectorAdapter for PerfettoCollector {
     fn preflight(&self, context: &mut PreflightContext<'_>) -> Result<(), String> {
         preflight(context)
     }
+    fn preflight_unavailable(
+        &self,
+        selected: &[String],
+        tools: Option<&std::path::Path>,
+    ) -> Option<super::super::PreflightUnavailable> {
+        if !super::super::selected_or_environment("perfetto", selected) {
+            return None;
+        }
+        super::super::PreflightUnavailable::missing_executable(
+            &measurements::resolve_executable(tools, "perfetto"),
+            tools,
+            "perfetto",
+        )
+    }
     fn configure(
         &self,
         session: &mut measurements::Session,

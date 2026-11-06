@@ -99,6 +99,88 @@ pub(crate) struct PreflightContext<'a> {
     pub states: &'a mut CollectorStates,
 }
 
+/// A side-effect-free admission result: the adapter has not spawned a
+/// process or acquired any resources, so it can safely be omitted.
+#[derive(Clone)]
+pub(crate) struct PreflightUnavailable {
+    pub reason: String,
+    /// The project tools-tree seal binds this missing executable and its mode.
+    pub sealed_project_tool: bool,
+}
+
+/// Expand only selected dependents of a side-effect-free unavailable result.
+/// No disabled adapter is probed or started, including transitive dependents.
+pub(crate) fn unavailable_preflight(
+    adapters: &[&'static dyn CollectorAdapter],
+    selected: &[String],
+    tools: Option<&Path>,
+) -> Vec<(&'static str, PreflightUnavailable)> {
+    let mut unavailable: Vec<_> = adapters
+        .iter()
+        .filter_map(|adapter| {
+            adapter
+                .preflight_unavailable(selected, tools)
+                .map(|failure| (adapter.id(), failure))
+        })
+        .collect();
+    loop {
+        let mut changed = false;
+        for adapter in adapters {
+            if !selected_or_environment(adapter.id(), selected)
+                || unavailable.iter().any(|(id, _)| *id == adapter.id())
+            {
+                continue;
+            }
+            let missing: Vec<_> = unavailable
+                .iter()
+                .filter(|(id, _)| adapter.dependencies().contains(id))
+                .collect();
+            if !missing.is_empty() {
+                let names = missing
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                unavailable.push((
+                    adapter.id(),
+                    PreflightUnavailable {
+                        reason: format!(
+                            "{} depends on unavailable collector(s): {names}",
+                            adapter.id()
+                        ),
+                        // Dependent runtimes can have additional inputs outside
+                        // the project tools tree; do not claim they are sealed.
+                        sealed_project_tool: false,
+                    },
+                ));
+                changed = true;
+            }
+        }
+        if !changed {
+            return unavailable;
+        }
+    }
+}
+
+impl PreflightUnavailable {
+    pub(crate) fn missing_executable(
+        path: &Path,
+        tools: Option<&Path>,
+        name: &str,
+    ) -> Option<Self> {
+        crate::tools::host_executable(path).is_none().then(|| Self {
+            reason: format!(
+                "{name} is missing or not executable at {}; its measurements are unavailable",
+                path.display()
+            ),
+            sealed_project_tool: tools
+                .and_then(|dir| dir.canonicalize().ok())
+                .zip(path.canonicalize().ok())
+                .is_some_and(|(dir, executable)| executable.starts_with(dir)),
+        })
+    }
+}
+
 /// Per-attempt typed data prepared before launch and retained by its session.
 /// No process-wide cache or on-disk re-read bridges the preparation boundary.
 #[derive(Default)]
@@ -421,6 +503,15 @@ pub(crate) trait CollectorAdapter: Sync {
     }
     fn preflight(&self, _context: &mut PreflightContext<'_>) -> Result<(), String> {
         Ok(())
+    }
+    /// Identify a missing prerequisite before any probe or resource acquisition.
+    /// Other errors must remain fatal until the adapter can prove cleanup.
+    fn preflight_unavailable(
+        &self,
+        _selected: &[String],
+        _tool_dir: Option<&Path>,
+    ) -> Option<PreflightUnavailable> {
+        None
     }
     fn prioritizes_artifact(&self, _name: &str) -> bool {
         false

@@ -467,6 +467,7 @@ pub struct Session {
     measurement_guardian: Option<ProcessIdentity>,
     execution_window: Rc<RefCell<execution_window::Window>>,
     incomplete_collectors: BTreeMap<String, String>,
+    startup_ignored: Vec<String>,
     clock_ticks_per_second: Option<u64>,
 }
 
@@ -548,6 +549,7 @@ impl Session {
         active: &[String],
         tool_dir: Option<&Path>,
         cgroup_parent: Option<&Path>,
+        ignore_collector: bool,
     ) -> Result<Self, String> {
         let adapters = active
             .iter()
@@ -555,7 +557,7 @@ impl Session {
                 collectors::find(name).ok_or_else(|| format!("unknown resolved collector {name}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Self::start_with_adapters(
+        Self::start_with_adapters_policy(
             dir,
             selected,
             tool_dir,
@@ -563,6 +565,7 @@ impl Session {
             adapters,
             false,
             Some(project_root),
+            ignore_collector,
         )
     }
 
@@ -598,8 +601,30 @@ impl Session {
         _namespace_only: bool,
         project_root: Option<&Path>,
     ) -> Result<Self, String> {
+        Self::start_with_adapters_policy(
+            dir,
+            selected,
+            tool_dir,
+            cgroup_parent,
+            adapters,
+            _namespace_only,
+            project_root,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_with_adapters_policy(
+        dir: &Path,
+        selected: &[String],
+        tool_dir: Option<&Path>,
+        cgroup_parent: Option<&Path>,
+        mut adapters: Vec<&'static dyn collectors::CollectorAdapter>,
+        _namespace_only: bool,
+        project_root: Option<&Path>,
+        ignore_collector: bool,
+    ) -> Result<Self, String> {
         let selected = collectors::expand_dependencies(selected);
-        let selected = selected.as_slice();
         fs::create_dir_all(dir).map_err(|e| {
             format!(
                 "cannot create measurements directory {}: {e}; inspect access with `namei -l '{}'`",
@@ -622,10 +647,54 @@ impl Session {
             "another measurement session owns this directory; choose a separate measurements directory",
         )?;
         check_measurement_directory(dir)?;
+        let unavailable = if ignore_collector {
+            collectors::unavailable_preflight(&adapters, &selected, tool_dir)
+        } else {
+            Vec::new()
+        };
+        adapters.retain(|adapter| !unavailable.iter().any(|(name, _)| *name == adapter.id()));
+        let selected: Vec<_> = selected
+            .into_iter()
+            .filter(|selection| {
+                !unavailable.iter().any(|(name, _)| {
+                    collectors::find(name)
+                        .is_some_and(|adapter| adapter.accepts_selection(selection))
+                })
+            })
+            .collect();
+        for (name, failure) in &unavailable {
+            write_unavailable(
+                &dir.join(format!("{name}.json")),
+                name,
+                failure.reason.clone(),
+            )?;
+        }
+        if !unavailable.is_empty() {
+            let events: Vec<_> = unavailable
+                .iter()
+                .map(|(name, failure)| {
+                    serde_json::json!({
+                        "collector": name,
+                        "kind": "collector_error",
+                        "reason": failure.reason,
+                        "ignored": true,
+                        "severity": "warning",
+                    })
+                })
+                .collect();
+            write_json(
+                &dir.join("collector-startup.json"),
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "stage": "before-collector-probe",
+                    "events": events,
+                }),
+            )?;
+        }
         // Privilege and tracefs checks must complete before any agent process
         // is prepared. This prevents a partially measured benchmark run.
         let (sudo_collectors, states) =
-            preflight_collectors(project_root, dir, selected, tool_dir, &adapters)?;
+            preflight_collectors(project_root, dir, &selected, tool_dir, &adapters)?;
         let started_unix_ms = unix_ms();
         let mut session = Self {
             adapters,
@@ -662,15 +731,25 @@ impl Session {
             measurement_guardian: None,
             execution_window: Rc::new(RefCell::new(execution_window::Window::default())),
             incomplete_collectors: BTreeMap::new(),
+            startup_ignored: unavailable
+                .into_iter()
+                .map(|(name, failure)| {
+                    format!("{name} collector was not started: {}", failure.reason)
+                })
+                .collect(),
             clock_ticks_per_second: clock_ticks_per_second(),
         };
         for collector in session.adapters.clone() {
-            collector.configure(&mut session, selected)?;
+            collector.configure(&mut session, &selected)?;
         }
         for collector in session.adapters.clone() {
             collector.start(&mut session)?;
         }
         Ok(session)
+    }
+
+    pub(crate) fn take_startup_ignored(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.startup_ignored)
     }
 
     /// Add a private fixture hook without a production registry/config surface.
