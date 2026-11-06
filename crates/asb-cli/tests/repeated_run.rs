@@ -658,12 +658,30 @@ fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
     let path = project
         .0
         .join(".sample-sweep-sample-preparation/ready.json");
+    let original_ready = fs::read(&path).unwrap();
     fs::write(&path, b"unrelated existing evidence").unwrap();
     let rejected = run();
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("selection differs"));
-    assert_eq!(fs::read(path).unwrap(), b"unrelated existing evidence");
+    assert_eq!(fs::read(&path).unwrap(), b"unrelated existing evidence");
     assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    fs::write(path, original_ready).unwrap();
+    drop(provider);
+    let mut offline = Command::new(env!("CARGO_BIN_EXE_asb"));
+    offline.current_dir(&project.0).isolated_env();
+    retain_host_rust_toolchain(&mut offline);
+    let result = offline
+        .env("HOME", &project.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .args(["sweep", "sample-sweep.toml", "--replay"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "offline replay: stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
 }
 
 fn sampled_candidate_fixture(mismatch: bool, retry: bool) {
