@@ -1,30 +1,23 @@
 # Sampled trial preparation design
 
-Status: implementation in progress. Ordinary sweep replay must remain offline;
-the separate `asb sweep SWEEP.toml --prepare-replay` mode is the only proposed
-mode here that may make fresh live provider calls to build replacement tapes.
+Use `--trial-count` to select distinct trials randomly when creating a sweep:
 
-Current draft: setup writes sampled metadata and the explicit preparation mode
-parses, but sampled sweeps still refuse execution. `prepare_file` now owns a
-locked durable `BoundTrialPreparation`; `record_and_replay_candidate` calls the
-real runner for live recording and offline replay. An offline fixture combines
-them to verify a failed replay, a replacement recording and replay, and reuse of
-the successful ledger without extra provider calls. The next step is to connect
-these pieces to every sweep combination and publish immutable winning
-configuration/cassette mappings only after every requested combination is
-complete. Then resolve that published mapping only for ordinary replay. Do not
-remove the refusal until both paths are implemented and exercised end to end.
+```sh
+asb setup --agent opencode --provider openrouter --model MODEL \
+  --workload swe-bench-lite --trial-count 10 --output sample.toml
+asb sweep sample.toml --prepare-replay
+asb sweep sample.toml --replay
+```
 
-Draft progress: `asb sweep --prepare-replay` now iterates sampled combinations
-and records/replays replacements through the locked group ledger. The CLI fixture
-checks a mismatch, a replacement, and a second preparation without additional
-provider calls. It deliberately reports that selection publication is missing;
-ordinary sampled replay is still refused. A completed group can now be reopened
-read-only and its cassette/configuration identities revalidated without running a
-provider. Remaining work includes publishing a whole-sweep winner mapping,
-resolving it from normal replay, preserving original sweep result/report naming,
-supporting mixed sampled/fixed workloads and `--project-dir`, and verifying the
-complete CLI record/prepare/replay path with the provider stopped.
+Use `--trial-count WORKLOAD=COUNT` to scope a count to a particular workload.
+Preparation makes live provider calls and tests recordings by replaying them;
+ordinary replay only uses previously verified recordings and stays offline.
+Fixed workload entries in a mixed sweep are also recorded and checked, with their
+specified trial retained. Preparation currently runs sequentially and does not
+accept an explicit `--repeat` or parallel scheduling settings; set repeat in the
+sweep configuration or pass it to the subsequent replay instead.
+
+The following notes describe the intended integrity and testing properties.
 
 Setup should accept a numerical trial count for each selected workload. It must
 publish a sweep plus bounded sampling metadata: the workload, catalog identity,
