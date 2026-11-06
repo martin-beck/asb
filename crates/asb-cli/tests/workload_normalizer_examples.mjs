@@ -52,6 +52,12 @@ test("recursive grep ordering is normalized only for complete unambiguous result
   const absoluteB = '/testbed/' + b.replaceAll('\nsympy/', '\n/testbed/sympy/');
   assert.equal(grepOrder({text:absoluteA,tool:absolute}),grepOrder({text:absoluteB,tool:absolute}));
   assert.notEqual(grepOrder({text:absoluteA.replace('foo','different'),tool:absolute}),grepOrder({text:absoluteB,tool:absolute}));
+  const archive = {...tool, arguments:{command:'cd /tmp/sympy_dl && python -m zipfile -e sympy-1.6-py3-none-any.whl s16 && grep -rn "latex_scalars\\|latex_vects" s16/sympy/vector/coordsysrect.py; grep -n "BaseScalar\\|BaseVector" s16/sympy/printing/latex.py | head; grep -rn "mathbf" s16/sympy/vector/tests/test_coordsysrect.py s16/sympy/vector/tests/test_printing.py 2>/dev/null | head -30'}};
+  const archiveA = 'prefix output\ns16/sympy/vector/tests/test_printing.py:2: x\ns16/sympy/vector/tests/test_coordsysrect.py:3: y\nShell cwd was reset to /testbed';
+  const archiveB = 'prefix output\ns16/sympy/vector/tests/test_coordsysrect.py:3: y\ns16/sympy/vector/tests/test_printing.py:2: x\nShell cwd was reset to /testbed';
+  assert.equal(grepOrder({text:archiveA,tool:archive}),grepOrder({text:archiveB,tool:archive}));
+  assert.notEqual(grepOrder({text:archiveA.replace('prefix output','changed prefix'),tool:archive}),grepOrder({text:archiveB,tool:archive}));
+  assert.notEqual(grepOrder({text:archiveA.replace(':2: x',':2: z'),tool:archive}),grepOrder({text:archiveB,tool:archive}));
   const unrelated = {...tool, arguments:{command:'cat log'}};
   assert.equal(grepOrder({text:a,tool:unrelated}), a);
   const multiple = {...tool, arguments:{command:'grep -rn "BaseScalar" sympy/printing/*.py sympy/vector/*.py | head -50'}};
