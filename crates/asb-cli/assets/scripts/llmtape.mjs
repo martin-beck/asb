@@ -591,10 +591,11 @@ function advanceNativeTools() {
 let rejected = 0;
 let firstMismatch = null;
 let ignoredMismatchCount = 0;
+let replayEvidenceFailure = false;
 const progressPath = `${cassette}.progress.json`;
 function writeProgress() {
   if (mode === "replay") {
-    writeFileSync(progressPath, JSON.stringify({
+    try { writeFileSync(progressPath, JSON.stringify({
       schema_version: 2,
       consumed: cursor,
       total: interactions.length,
@@ -603,7 +604,7 @@ function writeProgress() {
       unrequested_optional_probes: deferredProbes.length,
       ...(customSupervisor ? { normalization: normalizationEvidence() } : {}),
       ...(firstMismatch ? { first_mismatch: firstMismatch } : {}),
-    }));
+    })); } catch (error) { replayEvidenceFailure = true; throw error; }
   }
 }
 
@@ -982,6 +983,7 @@ async function handle(request, response, recording) {
       try {
         appendFileSync(ignoredMismatchJournal, `${JSON.stringify(event)}\n`, {encoding: "utf8", mode: 0o600});
       } catch (error) {
+        replayEvidenceFailure = true;
         reject({ sequence: cursor + 1, category: "mismatch_journal_error", path: "$" });
         throw error;
       }
@@ -1160,6 +1162,7 @@ async function shutdown() {
         { encoding: "utf8", mode: 0o600, flag: "wx" });
     }
     await customSupervisor?.close();
+    if (replayEvidenceFailure) throw new Error("replay evidence publication failed");
     process.exit(0);
   } catch {
     try { capture?.close(); } catch { /* sticky uncertainty: never report cleanup success */ }

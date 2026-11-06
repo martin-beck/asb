@@ -11,6 +11,25 @@ import net from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { normalizeWorkspacePaths } from "../assets/scripts/tape-normalization.mjs";
 
+test("ignored mismatch journal write failure makes replay shutdown fail", { timeout: 10000 }, async (t) => {
+  const parent = join(process.cwd(), "target/capture-http-fixtures");
+  fs.mkdirSync(parent, {recursive:true});
+  const root = fs.mkdtempSync(join(parent, "mismatch-journal-"));
+  const cassette = join(root, "cassette.jsonl");
+  const ready = join(root, "ready.json");
+  fs.writeFileSync(cassette, `${JSON.stringify({request:{method:"POST",url:"/v1/responses",body:JSON.stringify({input:"original"})},response:{status:200,headers:{},body:"{}"}})}\n`);
+  const script = fileURLToPath(new URL("../assets/scripts/llmtape.mjs", import.meta.url));
+  const child = spawn(process.execPath, [script,"replay","--port","0","--cassette",cassette], {env:{PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:"1",ASB_TAPE_READY_FILE:ready,ASB_TAPE_IGNORE_PROVIDER_MISMATCH:"1",ASB_TAPE_IGNORED_MISMATCH_JOURNAL:join(root,"missing","journal.jsonl")},stdio:["pipe","ignore","pipe"]});
+  const exited = new Promise((resolve, reject) => {child.once("error",reject);child.once("exit",(code, signal) => resolve({code, signal}));});
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); await exited; fs.rmSync(root,{recursive:true,force:true}); });
+  const deadline = performance.now() + 3000;
+  while (!fs.existsSync(ready)) { assert.ok(performance.now()<deadline, "replay readiness timeout"); await delay(10); }
+  const port = JSON.parse(fs.readFileSync(ready)).port;
+  assert.equal((await request(port,"/v1/responses",JSON.stringify({input:"changed"}))).status,502);
+  child.stdin.end();
+  assert.deepEqual(await exited,{code:2,signal:null});
+});
+
 async function fixture(t, upstreamHandler, options = {}) {
   const parent = join(process.cwd(), "target/capture-http-fixtures");
   fs.mkdirSync(parent, { recursive: true });
