@@ -163,6 +163,7 @@ impl<'a> ConfiguredAttempt<'a> {
                         .then_some(project_config.cgroup_parent.as_deref())
                         .flatten()
                         .map(Path::new),
+                    options.ignore_collector,
                 )
             })
             .transpose()
@@ -445,6 +446,7 @@ impl<'a> ProviderAttempt<'a> {
 }
 
 struct WorkloadMetadata {
+    compatibility_warning: Option<String>,
     workspace: PathBuf,
     workload_baseline: workloads::BaselineEvidence,
     workload_baseline_passed: Option<bool>,
@@ -530,6 +532,7 @@ impl<'a> ReadyAttempt<'a> {
                         project_root,
                         project_config,
                         agent: &config.agent,
+                        offline: options.mode == Some(tape::Mode::Replay),
                     },
                 )?;
                 std::fs::create_dir_all(&workspace).map_err(|error| {
@@ -675,6 +678,7 @@ impl<'a> ReadyAttempt<'a> {
                         None,
                     )
                 };
+            let mut compatibility_warning = None;
             if let Some(arrival) = arrival.as_mut() {
                 let identity = (|| {
                     let task = &workload_session.invocation().identity;
@@ -682,6 +686,27 @@ impl<'a> ReadyAttempt<'a> {
                         .initial_material_sha256()
                         .map_err(Error::Run)?;
                     let dataset_sha256 = batch::dataset_fingerprint(task.dataset.as_ref())?;
+                    let normalization = if options.ignore_compatibility
+                        && options.mode == Some(tape::Mode::Replay)
+                        && options.replay_expected_compatibility.is_some()
+                    {
+                        options
+                            .replay_expected_compatibility
+                            .map(|expected| expected.normalization_sha256.clone())
+                    } else if options.mode == Some(tape::Mode::Replay) {
+                        options
+                            .preparation_gate
+                            .map(|gate| gate.expected_normalization())
+                            .transpose()?
+                            .flatten()
+                    } else {
+                        None
+                    };
+                    let normalization = normalization.unwrap_or_else(|| {
+                        options
+                            .custom_normalization
+                            .map(|custom| custom.policy.sha256.clone())
+                    });
                     Ok(crate::cassette::Compatibility {
                         agent: config.agent.clone(),
                         provider: config.provider.clone(),
@@ -693,20 +718,77 @@ impl<'a> ReadyAttempt<'a> {
                             workload_session.invocation().input.instructions.as_bytes(),
                         ),
                         material_sha256,
-                        protocol_sha256: Some(batch::replay_protocol_with_normalizers(
+                        protocol_sha256: Some(batch::replay_protocol_with_normalizer_digest(
                             &batch::replay_protocol_fingerprint(module.as_ref(), &metric_policy)?,
-                            options.custom_normalization.map(|custom| &custom.policy),
+                            normalization.as_deref(),
                         )?),
-                        normalization_sha256: options
-                            .custom_normalization
-                            .map(|custom| custom.policy.sha256.clone()),
+                        normalization_sha256: normalization,
                     })
                 })();
                 let identity = identity?;
-                match workload_session
+                let legacy = workload_session
                     .legacy_initial_material_sha256()
-                    .map_err(Error::Run)?
+                    .map_err(Error::Run)?;
+                if options.ignore_compatibility
+                    && let Some(expected) = options.replay_expected_compatibility
                 {
+                    if expected.normalization_sha256 != identity.normalization_sha256 {
+                        return Err(Error::Input("cannot override normalization policy identity without proof that the recording contains raw requests".into()));
+                    }
+                    let mut compared = identity.clone();
+                    if let Some(legacy_material) = &legacy {
+                        let mut alternate = identity.clone();
+                        alternate.material_sha256.clone_from(legacy_material);
+                        if &alternate == expected {
+                            compared = alternate;
+                        }
+                    }
+                    let fields = expected.differing_fields(&compared);
+                    if !fields.is_empty() {
+                        compatibility_warning = Some(format!(
+                            "recorded and prepared identities differ in {}; replay is approximate",
+                            fields.join(", ")
+                        ));
+                        let reason = compatibility_warning.as_deref().expect("set above");
+                        if let Some(dir) = options.compatibility_warning_dir {
+                            let path = dir.join(format!(
+                                "compatibility-warning-{}.json",
+                                options.replica.index
+                            ));
+                            repeated::publish(
+                                &path,
+                                &serde_json::json!({
+                                    "schema_version": 1,
+                                    "kind": "replay_compatibility",
+                                    "ignored": true,
+                                    "severity": "warning",
+                                    "reason": reason,
+                                }),
+                            )?;
+                        }
+                        if json {
+                            serde_json::to_writer(
+                                &mut *output,
+                                &serde_json::json!({
+                                    "type": "replay-compatibility-warning",
+                                    "kind": "replay_compatibility",
+                                    "ignored": true,
+                                    "severity": "warning",
+                                    "reason": reason,
+                                }),
+                            )
+                            .map_err(|error| Error::Io(error.to_string()))?;
+                            writeln!(output).map_err(io_error)?;
+                        } else {
+                            emit_warning(
+                                warnings,
+                                output,
+                                format!("Warning: ignored replay compatibility: {reason}"),
+                            )?;
+                        }
+                    }
+                }
+                match legacy {
                     Some(legacy) => arrival.ready_with_legacy(identity, Some(legacy))?,
                     None => arrival.ready(identity)?,
                 }
@@ -780,6 +862,8 @@ impl<'a> ReadyAttempt<'a> {
                             respect_record_timings,
                             tape::AgentContext {
                                 workspace: &workspace,
+                                ignore_provider_mismatch: options.ignore_provider_mismatch,
+                                ignore_provider_unconsumed: options.ignore_provider_unconsumed,
                                 agent: Some(&config.agent),
                                 workload: Some(&config.workload),
                                 task: Some(&workload_session.invocation().identity.task_id),
@@ -821,6 +905,7 @@ impl<'a> ReadyAttempt<'a> {
 
             Ok((
                 WorkloadMetadata {
+                    compatibility_warning,
                     workspace,
                     workload_baseline,
                     workload_baseline_passed,
@@ -943,6 +1028,8 @@ impl<'a> ReadyAttempt<'a> {
                     tape_cassette: tape_cassette
                         .as_ref()
                         .map(|(_, cassette)| cassette.as_path()),
+                    ignore_tool_mismatch: options.ignore_tool_mismatch,
+                    ignore_mcp_mismatch: options.ignore_mcp_mismatch,
                     tool_replay: tool_tape_cassette
                         .as_ref()
                         .is_some_and(|(mode, _)| *mode == tape::Mode::Replay),
@@ -1018,6 +1105,8 @@ impl<'a> ReadyAttempt<'a> {
                         tape_url,
                         tape_mode,
                         max_steps: effective_max_steps,
+                        ignore_tool_mismatch: options.ignore_tool_mismatch,
+                        ignore_mcp_mismatch: options.ignore_mcp_mismatch,
                         tool_tape_mode: tool_tape_cassette.as_ref().map(|(mode, _)| *mode),
                         tool_tape_cassette: tool_tape_cassette
                             .as_ref()
@@ -1123,6 +1212,8 @@ struct ResultFacts {
     agent_failure: Option<String>,
     provider_cleanup_error: Option<String>,
     artifact_evidence: Vec<String>,
+    ignored_tool_mismatches: Vec<agents::tool_replay::IgnoredToolMismatch>,
+    ignored_mcp_mismatches: Vec<agents::mcp_relay::McpIgnoredEvent>,
 }
 
 fn sealed_step_count(guest: Option<u64>, adapter: Option<u64>) -> Option<u64> {
@@ -1208,9 +1299,58 @@ impl<'a> CompletedAttempt<'a> {
             .ok()
             .and_then(Option::as_ref)
             .unwrap_or(&frozen);
+        let mut ignored_mcp_mismatches = Vec::new();
+        if context.options.ignore_mcp_mismatch {
+            match (
+                collection_frozen.bytes(agents::mcp_relay::IGNORED_MCP_FILENAME),
+                context.mcp_tape_cassette.as_ref(),
+            ) {
+                (Some(bytes), Some((tape::Mode::Replay, cassette))) => {
+                    match agents::mcp_relay::settle_ignored_journal(
+                        bytes,
+                        cassette,
+                        &config.mcp_servers,
+                    ) {
+                        Ok(events) => ignored_mcp_mismatches = events,
+                        Err(error) => settled.issues.run_error(error.to_string()),
+                    }
+                }
+                _ => settled
+                    .issues
+                    .run_error("MCP replay divergence evidence is unavailable".into()),
+            }
+        }
+        let mut ignored_tool_mismatches = Vec::new();
+        if context.options.ignore_tool_mismatch {
+            match collection_frozen.bytes(agents::tool_replay_mcp::IGNORED_EVENTS_FILENAME) {
+                Some(bytes) => {
+                    for line in bytes
+                        .split(|byte| *byte == b'\n')
+                        .filter(|line| !line.is_empty())
+                    {
+                        match serde_json::from_slice(line) {
+                            Ok(agents::tool_replay::IgnoredToolMismatch::Fatal) => settled
+                                .issues
+                                .run_error(
+                                "local-tool replay could not safely supply its recorded response"
+                                    .into(),
+                            ),
+                            Ok(event) => ignored_tool_mismatches.push(event),
+                            Err(_) => settled.issues.run_error(
+                                "local-tool replay divergence journal is malformed".into(),
+                            ),
+                        }
+                    }
+                }
+                None => settled
+                    .issues
+                    .run_error("local-tool replay divergence journal is missing".into()),
+            }
+        }
         let mut adapter_artifacts = agents::find(&config.agent)
             .map(|adapter| {
                 adapter.collect(&agents::CollectionContext {
+                    ignore_tool_mismatch: context.options.ignore_tool_mismatch,
                     frozen: collection_frozen,
                     provider_capture,
                     run_dir: &settled.evidence.run_dir,
@@ -1220,6 +1360,7 @@ impl<'a> CompletedAttempt<'a> {
                     mcp_servers: &config.mcp_servers,
                     mcp_tape: context.mcp_tape_cassette.as_ref().map(|(mode, cassette)| {
                         agents::McpTapeContext {
+                            ignore_mcp_mismatch: context.options.ignore_mcp_mismatch,
                             mode: *mode,
                             cassette: Some(cassette),
                         }
@@ -1227,6 +1368,25 @@ impl<'a> CompletedAttempt<'a> {
                 })
             })
             .unwrap_or_default();
+        if context.options.ignore_tool_mismatch {
+            let progress = collection_frozen
+                .document("pi-progress.json")
+                .or_else(|| collection_frozen.document("persistent-progress.json"))
+                .or_else(|| {
+                    collection_frozen.document(agents::tool_replay_mcp::IGNORED_PROGRESS_FILENAME)
+                });
+            match agents::tool_replay_mcp::ignored_persistent_completion(progress, None) {
+                Ok(Some(event)) if !adapter_artifacts.ignored_tool_mismatches.contains(&event) => {
+                    ignored_tool_mismatches.push(event)
+                }
+                Ok(None) if progress.is_none() => settled
+                    .issues
+                    .run_error("local-tool replay progress receipt is missing".into()),
+                Ok(_) => {}
+                Err(error) => settled.issues.run_error(error.to_string()),
+            }
+        }
+        ignored_tool_mismatches.append(&mut adapter_artifacts.ignored_tool_mismatches);
         if let Some(guest) = settled.evidence.guest.as_ref() {
             adapter_artifacts
                 .sealed_artifacts
@@ -1336,6 +1496,8 @@ impl<'a> CompletedAttempt<'a> {
                 agent_failure,
                 provider_cleanup_error,
                 artifact_evidence,
+                ignored_tool_mismatches,
+                ignored_mcp_mismatches,
             },
         })
     }
@@ -1378,8 +1540,11 @@ impl ResultFacts {
             agent_failure,
             provider_cleanup_error,
             artifact_evidence,
+            ignored_tool_mismatches,
+            ignored_mcp_mismatches,
         } = self;
         let WorkloadMetadata {
+            compatibility_warning,
             workspace,
             workload_baseline,
             workload_baseline_passed,
@@ -1395,7 +1560,7 @@ impl ResultFacts {
         let tape_cassette = &context.tape_cassette;
         let FinalizedAttempt {
             workload: workload_session,
-            measurements: measurement_session,
+            measurements: mut measurement_session,
             evidence:
                 ExecutionEvidence {
                     observation,
@@ -1415,18 +1580,27 @@ impl ResultFacts {
             issues,
             resource_disposition: workload_resource_disposition,
         } = finalized;
+        let cassette_usage_verified = cassette_usage_verified
+            && ignored_tool_mismatches.is_empty()
+            && ignored_mcp_mismatches.is_empty();
         let workload_artifacts = workload_session.checkpoint_evidence();
         let workload_success = outcome.success();
         let grading_failure = RunFailure::evaluation(&outcome.evaluation);
         let evaluation = outcome.evaluation;
+        let startup_ignored = measurement_session
+            .as_mut()
+            .map_or_else(Vec::new, |session| session.take_startup_ignored());
         let collector_error = issues.collector_failure();
         let run_error = issues.run_error;
         let output_error = issues.output_error;
         let configured_kind = workload_session.evaluation_kind();
         let evaluation_kind = configured_kind.scored(&workload_baseline);
         let resolution_eligible = evaluation_kind.resolution_eligible();
-        let disposition = RunDisposition::from_facts(RunFacts {
+        let mut disposition = RunDisposition::from_facts(RunFacts {
             evaluation: &evaluation,
+            ignore_evaluation: options.ignore_evaluation,
+            ignore_agent: options.ignore_agent,
+            ignore_collector: options.ignore_collector,
             evaluation_kind,
             process_success,
             agent_failure: agent_failure.as_deref(),
@@ -1438,6 +1612,40 @@ impl ResultFacts {
             workload_cleanup_confirmed,
             proxy_cleanup_confirmed: proxy_evidence.cleanup_confirmed,
         });
+        for reason in startup_ignored {
+            let mut failure = RunFailure::new(FailureKind::CollectorError, reason);
+            failure.ignored = true;
+            failure.severity = "warning";
+            disposition.ignored_failures.push(failure);
+        }
+        for divergence in &proxy_evidence.replay_divergences {
+            disposition.ignored_failures.push(RunFailure::ignored(
+                divergence.kind,
+                divergence.reason.clone(),
+            ));
+        }
+        for event in &ignored_tool_mismatches {
+            disposition.ignored_failures.push(RunFailure::ignored(
+                FailureKind::ToolMismatch,
+                serde_json::to_string(event).expect("bounded replay divergence serializes"),
+            ));
+        }
+        for event in &ignored_mcp_mismatches {
+            disposition.ignored_failures.push(RunFailure::ignored(
+                FailureKind::McpMismatch,
+                serde_json::to_string(event).expect("bounded MCP divergence serializes"),
+            ));
+        }
+        let approximate_replay = !proxy_evidence.replay_divergences.is_empty()
+            || !ignored_tool_mismatches.is_empty()
+            || !ignored_mcp_mismatches.is_empty()
+            || compatibility_warning.is_some();
+        if let Some(reason) = compatibility_warning {
+            let mut failure = RunFailure::new(FailureKind::ReplayCompatibility, reason);
+            failure.ignored = true;
+            failure.severity = "warning";
+            disposition.ignored_failures.push(failure);
+        }
         let success = disposition.success;
         let workload_failure =
             grading_failure
@@ -1568,7 +1776,10 @@ impl ResultFacts {
             stderr.push('\n');
         }
         let result = RunResult {
+            approximate_replay,
             replay_selection: options.replay_selection(&config.agent),
+            provider_replay_consumed: (options.mode == Some(tape::Mode::Replay))
+                .then_some(cassette_usage_verified && proxy_evidence.cleanup_confirmed),
             native_replay_consumed: options
                 .native_snapshot_replay()
                 .then(|| {
@@ -1739,21 +1950,29 @@ impl Publication<'_, '_> {
         if let Some(error) = &recording_error {
             result.disposition.recording_failed(error.to_string());
         }
-        let log_publication =
+        // Replay collector errors can be known only after finalization. Delay
+        // the immutable log in that mode so it contains the complete warnings.
+        let early_log = (!options.ignore_collector).then(|| {
             phases::LogPublication::publish(&context.publication_config, &config.log_file, result)
-                .with_artifact_evidence(&artifact_evidence);
+                .with_artifact_evidence(&artifact_evidence)
+        });
         progress::status(
             options.interactive,
             "tearing down collectors and publishing measurements",
         );
-        let measurement_completion = phases::finish_measurements(measurement_session, result)
-            .with_artifact_evidence(&artifact_evidence);
+        let measurement_completion =
+            phases::finish_measurements(measurement_session, result, options.ignore_collector)
+                .with_artifact_evidence(&artifact_evidence);
+        let log_publication = early_log.unwrap_or_else(|| {
+            phases::LogPublication::publish(&context.publication_config, &config.log_file, result)
+                .with_artifact_evidence(&artifact_evidence)
+        });
         // A compact attempt may release only its ASB-created task workspace.
         // Installed adapters, downloaded workloads, cassettes, logs and
         // collector captures remain project inputs or sealed evidence.
         let compact_workspace = super::compaction::eligible(
             config.retention.compact_completed_attempts,
-            result.disposition.success,
+            result.disposition.success && result.disposition.ignored_failures.is_empty(),
             workload_cleanup_confirmed && proxy_evidence.cleanup_confirmed,
             result.workload_resource_disposition,
         );

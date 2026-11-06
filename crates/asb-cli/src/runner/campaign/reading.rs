@@ -220,8 +220,15 @@ impl Layout {
     /// This alone proves neither slot settlement nor permission to resume.
     pub(crate) fn verify_private_replay(&self) -> Result<(), Error> {
         use sha2::{Digest, Sha256};
+        use std::io::Seek;
         for input in &self.plan.replay_inputs {
-            let mut file = self.replay_file(input)?.take(input.bytes + 1);
+            let mut source = self.replay_file(input)?;
+            if self.plan.requires_raw_replay_requests() {
+                crate::cassette::require_raw_requests(std::io::BufReader::new(&mut source))
+                    .map_err(|error| invalid(&error.to_string()))?;
+                source.rewind().map_err(io_error)?;
+            }
+            let mut file = source.take(input.bytes + 1);
             let mut digest = Sha256::new();
             let mut bytes = 0u64;
             let mut buffer = [0u8; 64 * 1024];

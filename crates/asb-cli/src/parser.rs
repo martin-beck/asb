@@ -252,6 +252,26 @@ pub(crate) fn run_with_interactive(
                 Ok(selection) => selection,
                 Err(error) => return fail(stderr, &error.to_string()),
             };
+            if (options.ignore_provider_mismatch || options.ignore_provider_unconsumed)
+                && tape.llm != Some(tape::Mode::Replay)
+            {
+                return fail(
+                    stderr,
+                    "provider replay ignore options require --replay or --llm-replay",
+                );
+            }
+            if options.ignore_tool_mismatch && tape.tool != Some(tape::Mode::Replay) {
+                return fail(
+                    stderr,
+                    "--ignore-tool-mismatch requires local-tool replay (--replay or --tool-replay)",
+                );
+            }
+            if options.ignore_mcp_mismatch && tape.mcp != Some(tape::Mode::Replay) {
+                return fail(
+                    stderr,
+                    "--ignore-mcp-mismatch requires MCP replay (--replay or --mcp-replay)",
+                );
+            }
             if (options.track.is_some() || options.seed.is_some())
                 && tape.llm != Some(tape::Mode::Replay)
             {
@@ -300,6 +320,14 @@ pub(crate) fn run_with_interactive(
                     native_capsule_record: native_capsule_record.as_deref(),
                     native_capsule_replay: native_capsule_replay.as_deref(),
                     respect_record_timings: options.respect_record_timings,
+                    ignore_evaluation: options.ignore_evaluation,
+                    ignore_agent: options.ignore_agent,
+                    ignore_collector: options.ignore_collector,
+                    ignore_provider_mismatch: options.ignore_provider_mismatch,
+                    ignore_provider_unconsumed: options.ignore_provider_unconsumed,
+                    ignore_tool_mismatch: options.ignore_tool_mismatch,
+                    ignore_mcp_mismatch: options.ignore_mcp_mismatch,
+                    ignore_compatibility: options.ignore_compatibility,
                     interactive: interactive && !options.json,
                     ..Default::default()
                 },
@@ -320,6 +348,26 @@ pub(crate) fn run_with_interactive(
                 Ok(selection) => selection,
                 Err(error) => return fail(stderr, &error.to_string()),
             };
+            if (options.ignore_provider_mismatch || options.ignore_provider_unconsumed)
+                && tape.llm != Some(tape::Mode::Replay)
+            {
+                return fail(
+                    stderr,
+                    "provider replay ignore options require --replay or --llm-replay",
+                );
+            }
+            if options.ignore_tool_mismatch && tape.tool != Some(tape::Mode::Replay) {
+                return fail(
+                    stderr,
+                    "--ignore-tool-mismatch requires local-tool replay (--replay or --tool-replay)",
+                );
+            }
+            if options.ignore_mcp_mismatch && tape.mcp != Some(tape::Mode::Replay) {
+                return fail(
+                    stderr,
+                    "--ignore-mcp-mismatch requires MCP replay (--replay or --mcp-replay)",
+                );
+            }
             if (options.track.is_some() || options.seed.is_some())
                 && tape.llm != Some(tape::Mode::Replay)
             {
@@ -360,6 +408,7 @@ pub(crate) fn run_with_interactive(
                 &path,
                 sweep::Options {
                     invocation_dir: Some(&base),
+                    input_parent: None,
                     repeat: options
                         .repeat
                         .or(generated_preset.as_ref().map(|preset| preset.repeat)),
@@ -375,6 +424,14 @@ pub(crate) fn run_with_interactive(
                     tool_mode_explicit: tape.tool_explicit,
                     mcp_mode: tape.mcp,
                     respect_record_timings: options.respect_record_timings,
+                    ignore_evaluation: options.ignore_evaluation,
+                    ignore_agent: options.ignore_agent,
+                    ignore_collector: options.ignore_collector,
+                    ignore_provider_mismatch: options.ignore_provider_mismatch,
+                    ignore_provider_unconsumed: options.ignore_provider_unconsumed,
+                    ignore_tool_mismatch: options.ignore_tool_mismatch,
+                    ignore_mcp_mismatch: options.ignore_mcp_mismatch,
+                    ignore_compatibility: options.ignore_compatibility,
                     cassette_root: cassette_root.as_deref(),
                     jobs: usize::from(options.jobs),
                     max_active_attempts: options.max_active_attempts.map(usize::from),
@@ -386,6 +443,7 @@ pub(crate) fn run_with_interactive(
                     import_grades: options.import_grades,
                     recover_recording: options.recover_recording,
                     recover_continuation: options.recover_continuation,
+                    prepare_replay: options.prepare_replay,
                 },
                 stdout,
             )
@@ -533,7 +591,7 @@ impl TapeFlags {
             tool_record: args.tool_record,
             tool_replay: args.tool_replay,
             mcp_record: args.mcp_record,
-            mcp_replay: args.mcp_replay,
+            mcp_replay: args.mcp_replay || args.ignore_mcp_mismatch,
         }
     }
 
@@ -548,7 +606,7 @@ impl TapeFlags {
             tool_record: args.tool_record,
             tool_replay: args.tool_replay,
             mcp_record: args.mcp_record,
-            mcp_replay: args.mcp_replay,
+            mcp_replay: args.mcp_replay || args.ignore_mcp_mismatch,
         }
     }
 }
@@ -1191,6 +1249,9 @@ struct SetupArgs {
     /// Repeatable instance ID; optionally WORKLOAD=INSTANCE for scoped trials.
     #[arg(long, value_name = "INSTANCE")]
     trial: Vec<String>,
+    /// Sample this many distinct trials; optionally scope as WORKLOAD=COUNT.
+    #[arg(long, value_name = "COUNT", conflicts_with_all = ["mode", "preset"])]
+    trial_count: Vec<String>,
     /// Repeatable trial-set TOML; includes all enabled trials unless --trial is given.
     #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
     trial_set: Vec<String>,
@@ -1224,6 +1285,7 @@ impl From<SetupArgs> for config::SetupOptions {
             agent: value.agent,
             workload: value.workload,
             trial: value.trial,
+            trial_count: value.trial_count,
             trial_set: value.trial_set,
             provider: value.provider,
             model: value.model,
@@ -1244,6 +1306,30 @@ impl From<SetupArgs> for config::SetupOptions {
     group(ArgGroup::new("replay-direction").args(["replay", "llm_replay", "tool_replay", "mcp_replay"]).multiple(true))
 )]
 struct RunArgs {
+    /// Ignore workload evaluation failure for replay while retaining the actual grade.
+    #[arg(long, requires = "replay-direction")]
+    ignore_evaluation: bool,
+    /// Ignore an agent process failure for replay while retaining its actual status.
+    #[arg(long, requires = "replay-direction")]
+    ignore_agent: bool,
+    /// Ignore collector failures during replay when evidence publication and cleanup succeed.
+    #[arg(long, requires = "replay-direction")]
+    ignore_collector: bool,
+    /// Continue on a provider request mismatch using the next recorded response; replay is approximate.
+    #[arg(long, requires = "replay-direction")]
+    ignore_provider_mismatch: bool,
+    /// Continue after a replay leaves recorded provider requests unconsumed.
+    #[arg(long, requires = "replay-direction")]
+    ignore_provider_unconsumed: bool,
+    /// Continue on a matching-tool request divergence using recorded evidence; replay is approximate.
+    #[arg(long, requires = "replay-direction")]
+    ignore_tool_mismatch: bool,
+    /// Continue on matching-method MCP request divergence; replay is approximate.
+    #[arg(long, requires = "replay-direction")]
+    ignore_mcp_mismatch: bool,
+    /// Continue with an explicitly approximate replay when recorded and prepared identities differ.
+    #[arg(long, requires = "replay-direction")]
+    ignore_compatibility: bool,
     #[arg(value_name = "CONFIG", value_hint = clap::ValueHint::FilePath)]
     path: String,
     /// Sequential batches of fresh isolated executions at configured concurrency.
@@ -1308,11 +1394,38 @@ struct RunArgs {
     group(ArgGroup::new("sweep-input").args(["path", "preset"]).required(true).multiple(false))
 )]
 struct SweepArgs {
+    /// Ignore workload evaluation failure for replay while retaining the actual grade.
+    #[arg(long, requires = "replay-direction")]
+    ignore_evaluation: bool,
+    /// Ignore an agent process failure for replay while retaining its actual status.
+    #[arg(long, requires = "replay-direction")]
+    ignore_agent: bool,
+    /// Ignore collector failures during replay when evidence publication and cleanup succeed.
+    #[arg(long, requires = "replay-direction")]
+    ignore_collector: bool,
+    /// Continue on a provider request mismatch using the next recorded response; replay is approximate.
+    #[arg(long, requires = "replay-direction")]
+    ignore_provider_mismatch: bool,
+    /// Continue after a replay leaves recorded provider requests unconsumed.
+    #[arg(long, requires = "replay-direction")]
+    ignore_provider_unconsumed: bool,
+    /// Continue on a matching-tool request divergence using recorded evidence; replay is approximate.
+    #[arg(long, requires = "replay-direction")]
+    ignore_tool_mismatch: bool,
+    /// Continue on matching-method MCP request divergence; replay is approximate.
+    #[arg(long, requires = "replay-direction")]
+    ignore_mcp_mismatch: bool,
+    /// Continue with an explicitly approximate replay when recorded and prepared identities differ.
+    #[arg(long, requires = "replay-direction")]
+    ignore_compatibility: bool,
     #[arg(value_name = "SWEEP", value_hint = clap::ValueHint::FilePath, group = "sweep-input")]
     path: Option<String>,
     /// Materialize a repository-owned preset in this initialized project, then run its sweep.
     #[arg(long, value_name = "PRESET.toml", group = "sweep-input")]
     preset: Option<String>,
+    /// Record and verify sweep trials, replacing failed sampled trials before publication.
+    #[arg(long, conflicts_with_all = ["preset", "record", "replay", "llm_record", "llm_replay", "tool_record", "tool_replay", "mcp_record", "mcp_replay", "resume", "continue_after_failures", "recover_recording", "recover_continuation", "reconcile_completed", "import_grades", "track", "seed", "cassette_root", "respect_record_timings"])]
+    prepare_replay: bool,
     /// Sequential fresh batches per configuration, at its configured concurrency.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=65533))]
     repeat: Option<u64>,
@@ -1774,6 +1887,23 @@ mod tests {
             vec!["asb", "sweep", "suite.toml", "--continue", "3"],
         ] {
             Cli::try_parse_from(args).expect("continue sweep option parses");
+        }
+    }
+
+    #[test]
+    fn replay_preparation_is_a_separate_mode_from_record_and_replay() {
+        Cli::try_parse_from(["asb", "sweep", "sweep.toml", "--prepare-replay"]).unwrap();
+        for other in [
+            "--record",
+            "--replay",
+            "--llm-replay",
+            "--tool-record",
+            "--resume",
+        ] {
+            assert!(
+                Cli::try_parse_from(["asb", "sweep", "sweep.toml", "--prepare-replay", other])
+                    .is_err()
+            );
         }
     }
 

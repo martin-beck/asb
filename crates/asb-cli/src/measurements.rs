@@ -186,6 +186,8 @@ pub fn collector_description(id: &str) -> Option<&'static str> {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunMeasurement<'a> {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) approximate_replay: bool,
     /// Replay transports selected for this attempt; not a completeness claim.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) replay_selection: Option<crate::runner::ReplaySelection>,
@@ -216,6 +218,8 @@ pub struct RunMeasurement<'a> {
     pub workload_success: Option<bool>,
     pub workload_resource_disposition: Option<crate::workloads::ResourceDisposition>,
     pub workload_artifacts: &'a [PathBuf],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub(crate) ignored_failures: &'a [crate::runner::disposition::RunFailure],
     pub(crate) failure_kind: Option<crate::runner::disposition::FailureKind>,
     pub failure_reason: Option<&'a str>,
     pub success_rate: Option<f64>,
@@ -455,6 +459,8 @@ pub struct Session {
     pub(crate) test_attach_failure: bool,
     #[cfg(test)]
     pub(crate) test_event_failure: Option<collectors::LifecycleEvent>,
+    #[cfg(test)]
+    pub(crate) test_collector_cleanup_unconfirmed: bool,
     pub(crate) trace_id: String,
     sudo_collectors: BTreeSet<String>,
     component_starts: BTreeMap<String, Instant>,
@@ -463,6 +469,7 @@ pub struct Session {
     measurement_guardian: Option<ProcessIdentity>,
     execution_window: Rc<RefCell<execution_window::Window>>,
     incomplete_collectors: BTreeMap<String, String>,
+    startup_ignored: Vec<String>,
     clock_ticks_per_second: Option<u64>,
 }
 
@@ -544,6 +551,7 @@ impl Session {
         active: &[String],
         tool_dir: Option<&Path>,
         cgroup_parent: Option<&Path>,
+        ignore_collector: bool,
     ) -> Result<Self, String> {
         let adapters = active
             .iter()
@@ -551,7 +559,7 @@ impl Session {
                 collectors::find(name).ok_or_else(|| format!("unknown resolved collector {name}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Self::start_with_adapters(
+        Self::start_with_adapters_policy(
             dir,
             selected,
             tool_dir,
@@ -559,6 +567,7 @@ impl Session {
             adapters,
             false,
             Some(project_root),
+            ignore_collector,
         )
     }
 
@@ -594,8 +603,30 @@ impl Session {
         _namespace_only: bool,
         project_root: Option<&Path>,
     ) -> Result<Self, String> {
+        Self::start_with_adapters_policy(
+            dir,
+            selected,
+            tool_dir,
+            cgroup_parent,
+            adapters,
+            _namespace_only,
+            project_root,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_with_adapters_policy(
+        dir: &Path,
+        selected: &[String],
+        tool_dir: Option<&Path>,
+        cgroup_parent: Option<&Path>,
+        mut adapters: Vec<&'static dyn collectors::CollectorAdapter>,
+        _namespace_only: bool,
+        project_root: Option<&Path>,
+        ignore_collector: bool,
+    ) -> Result<Self, String> {
         let selected = collectors::expand_dependencies(selected);
-        let selected = selected.as_slice();
         fs::create_dir_all(dir).map_err(|e| {
             format!(
                 "cannot create measurements directory {}: {e}; inspect access with `namei -l '{}'`",
@@ -618,10 +649,54 @@ impl Session {
             "another measurement session owns this directory; choose a separate measurements directory",
         )?;
         check_measurement_directory(dir)?;
+        let unavailable = if ignore_collector {
+            collectors::unavailable_preflight(&adapters, &selected, tool_dir)
+        } else {
+            Vec::new()
+        };
+        adapters.retain(|adapter| !unavailable.iter().any(|(name, _)| *name == adapter.id()));
+        let selected: Vec<_> = selected
+            .into_iter()
+            .filter(|selection| {
+                !unavailable.iter().any(|(name, _)| {
+                    collectors::find(name)
+                        .is_some_and(|adapter| adapter.accepts_selection(selection))
+                })
+            })
+            .collect();
+        for (name, failure) in &unavailable {
+            write_unavailable(
+                &dir.join(format!("{name}.json")),
+                name,
+                failure.reason.clone(),
+            )?;
+        }
+        if !unavailable.is_empty() {
+            let events: Vec<_> = unavailable
+                .iter()
+                .map(|(name, failure)| {
+                    serde_json::json!({
+                        "collector": name,
+                        "kind": "collector_error",
+                        "reason": failure.reason,
+                        "ignored": true,
+                        "severity": "warning",
+                    })
+                })
+                .collect();
+            write_json(
+                &dir.join("collector-startup.json"),
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "stage": "before-collector-probe",
+                    "events": events,
+                }),
+            )?;
+        }
         // Privilege and tracefs checks must complete before any agent process
         // is prepared. This prevents a partially measured benchmark run.
         let (sudo_collectors, states) =
-            preflight_collectors(project_root, dir, selected, tool_dir, &adapters)?;
+            preflight_collectors(project_root, dir, &selected, tool_dir, &adapters)?;
         let started_unix_ms = unix_ms();
         let mut session = Self {
             adapters,
@@ -644,6 +719,8 @@ impl Session {
             test_attach_failure: false,
             #[cfg(test)]
             test_event_failure: None,
+            #[cfg(test)]
+            test_collector_cleanup_unconfirmed: false,
             trace_id: format!(
                 "{}-{}",
                 std::process::id(),
@@ -656,15 +733,25 @@ impl Session {
             measurement_guardian: None,
             execution_window: Rc::new(RefCell::new(execution_window::Window::default())),
             incomplete_collectors: BTreeMap::new(),
+            startup_ignored: unavailable
+                .into_iter()
+                .map(|(name, failure)| {
+                    format!("{name} collector was not started: {}", failure.reason)
+                })
+                .collect(),
             clock_ticks_per_second: clock_ticks_per_second(),
         };
         for collector in session.adapters.clone() {
-            collector.configure(&mut session, selected)?;
+            collector.configure(&mut session, &selected)?;
         }
         for collector in session.adapters.clone() {
             collector.start(&mut session)?;
         }
         Ok(session)
+    }
+
+    pub(crate) fn take_startup_ignored(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.startup_ignored)
     }
 
     /// Add a private fixture hook without a production registry/config surface.
@@ -1103,6 +1190,89 @@ impl Session {
         } else {
             Err(errors.join("; "))
         }
+    }
+
+    /// Finish optional collectors, retaining their failures in durable run
+    /// evidence. Publication failures and unconfirmed producer cleanup remain
+    /// fatal: an ignored measurement cannot imply safe ownership or a record.
+    pub(crate) fn finish_ignoring_collector_failures<'a>(
+        mut self,
+        measurement: RunMeasurement<'a>,
+    ) -> Result<Vec<String>, String> {
+        let mut errors = Vec::new();
+        if let Err(error) = self.stop_collector_processes(false) {
+            errors.push(error);
+        }
+        let cleanup_unconfirmed = self.stopped_collectors.iter().any(|stopped| {
+            let completion = &stopped.completion;
+            completion.guardian_cleanup_confirmed == Some(false)
+                || (!completion.capture_complete
+                    && completion.guardian_cleanup_confirmed != Some(true))
+        });
+        #[cfg(test)]
+        let cleanup_unconfirmed = cleanup_unconfirmed || self.test_collector_cleanup_unconfirmed;
+        if let Err(error) = self.process_stopped_collectors() {
+            errors.push(error);
+        }
+        let mut observe = |result: Result<(), String>| {
+            if let Err(error) = result {
+                errors.push(error);
+            }
+        };
+        for adapter in self.adapters.clone() {
+            observe(adapter.finish(&mut self));
+        }
+        observe(self.write_component_measurements());
+        observe(write_json(
+            &self.dir.join("execution-window.json"),
+            &self.execution_window_document(),
+        ));
+        let analysis = analysis::publish(&self.dir, self.component_timing("agent.execute"));
+        if let Err(error) = &analysis {
+            observe(Err(error.clone()));
+        }
+        for adapter in self.adapters.clone() {
+            observe(adapter.after_analysis(&mut self, analysis.as_ref().ok()));
+        }
+        self.run_finishing = true;
+        if cleanup_unconfirmed {
+            return Err(format!(
+                "collector cleanup is unconfirmed; {}",
+                errors.join("; ")
+            ));
+        }
+        write_json(
+            &self.dir.join("tool-calls.json"),
+            &ToolCallMeasurements {
+                schema_version: 1,
+                count: measurement.tool_call_count,
+                availability: if measurement.tool_call_count.is_some() {
+                    "observed"
+                } else {
+                    "unavailable"
+                },
+                calls: measurement.tool_calls,
+            },
+        )?;
+        if self.run_started {
+            write_json(&self.dir.join("lifecycle.json"), &self.lifecycle)?;
+        }
+        let mut record = serde_json::to_value(&measurement).map_err(|error| error.to_string())?;
+        if !errors.is_empty() {
+            let events = record
+                .as_object_mut()
+                .ok_or("measurement is not an object")?
+                .entry("ignored_failures")
+                .or_insert_with(|| serde_json::json!([]))
+                .as_array_mut()
+                .ok_or("ignored failures are not an array")?;
+            for error in &errors {
+                events.push(serde_json::json!({"kind":"collector_error", "reason":error, "ignored":true, "severity":"warning"}));
+            }
+        }
+        write_json(&self.dir.join("run.json"), &record)?;
+        crate::workloads::summary::update_summary(&self.dir, record)?;
+        Ok(errors)
     }
 
     fn stop_collector_processes(&mut self, execution_only: bool) -> Result<(), String> {
@@ -2129,6 +2299,8 @@ mod tests {
             classes: vec!["filesystem.read".into()],
         }];
         let run = RunMeasurement {
+            approximate_replay: false,
+            ignored_failures: &[],
             replay_selection: None,
             native_replay_consumed: None,
             planning: None,

@@ -109,6 +109,10 @@ pub(crate) struct GuestRequest {
     #[serde(default)]
     pub tool_replay: bool,
     #[serde(default)]
+    pub ignore_tool_mismatch: bool,
+    #[serde(default)]
+    pub ignore_mcp_mismatch: bool,
+    #[serde(default)]
     pub tool_tape_cassette: Option<PathBuf>,
     /// Transparent relay direction for ordinary declared MCP servers.
     #[serde(default)]
@@ -763,7 +767,18 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
     // Do not replace a benchmark's Python PATH with the agent's interpreter.
     // Agent entry points/wrappers use their own absolute venv interpreter.
     crate::tools::apply_runtime_path(&mut command, &request.project_root, &project.tools_dir)?;
-    let artifact_owner = super::ArtifactOwner::prepare(&request.run_dir, adapter.artifact_specs())?;
+    let mut artifact_specs = adapter.artifact_specs().to_vec();
+    if request.ignore_tool_mismatch {
+        artifact_specs.push(super::tool_replay_mcp::IGNORED_EVENTS_SPEC);
+        artifact_specs.push(super::tool_replay_mcp::IGNORED_PROGRESS_SPEC);
+    }
+    if request.ignore_mcp_mismatch {
+        artifact_specs.push(super::mcp_relay::IGNORED_MCP_SPEC);
+    }
+    let artifact_owner = super::ArtifactOwner::prepare(&request.run_dir, &artifact_specs)?;
+    if request.ignore_mcp_mismatch {
+        super::mcp_relay::initialize_ignored_journal(&request.run_dir)?;
+    }
     adapter.prepare(&mut super::PreparationContext {
         command: &mut command,
         model: &request.config.model,
@@ -773,6 +788,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
         run_dir: &request.run_dir,
         mcp_servers: &request.config.mcp_servers,
         mcp_tape: request.mcp_mode.map(|mode| super::McpTapeContext {
+            ignore_mcp_mismatch: request.ignore_mcp_mismatch,
             mode,
             cassette: request.mcp_tape_cassette.as_deref(),
         }),
@@ -780,6 +796,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
             .tool_tape_cassette
             .as_deref()
             .map(|cassette| super::TapeContext {
+                ignore_tool_mismatch: request.ignore_tool_mismatch,
                 mode: if request.tool_replay {
                     crate::tape::Mode::Replay
                 } else {

@@ -11,6 +11,45 @@ import net from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { normalizeWorkspacePaths } from "../assets/scripts/tape-normalization.mjs";
 
+test("ignored mismatch journal write failure makes replay shutdown fail", { timeout: 10000 }, async (t) => {
+  const parent = join(process.cwd(), "target/capture-http-fixtures");
+  fs.mkdirSync(parent, {recursive:true});
+  const root = fs.mkdtempSync(join(parent, "mismatch-journal-"));
+  const cassette = join(root, "cassette.jsonl");
+  const ready = join(root, "ready.json");
+  fs.writeFileSync(cassette, `${JSON.stringify({request:{method:"POST",url:"/v1/responses",body:JSON.stringify({input:"original"})},response:{status:200,headers:{},body:"{}"}})}\n`);
+  const script = fileURLToPath(new URL("../assets/scripts/llmtape.mjs", import.meta.url));
+  const child = spawn(process.execPath, [script,"replay","--port","0","--cassette",cassette], {env:{PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:"1",ASB_TAPE_READY_FILE:ready,ASB_TAPE_IGNORE_PROVIDER_MISMATCH:"1",ASB_TAPE_IGNORED_MISMATCH_JOURNAL:join(root,"missing","journal.jsonl")},stdio:["pipe","ignore","pipe"]});
+  const exited = new Promise((resolve, reject) => {child.once("error",reject);child.once("exit",(code, signal) => resolve({code, signal}));});
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); await exited; fs.rmSync(root,{recursive:true,force:true}); });
+  const deadline = performance.now() + 3000;
+  while (!fs.existsSync(ready)) { assert.ok(performance.now()<deadline, "replay readiness timeout"); await delay(10); }
+  const port = JSON.parse(fs.readFileSync(ready)).port;
+  assert.equal((await request(port,"/v1/responses",JSON.stringify({input:"changed"}))).status,502);
+  child.stdin.end();
+  assert.deepEqual(await exited,{code:2,signal:null});
+});
+
+test("concurrent ignored provider mismatches consume different recorded exchanges", { timeout: 10000 }, async (t) => {
+  const parent = join(process.cwd(), "target/capture-http-fixtures"); fs.mkdirSync(parent, {recursive:true});
+  const root = fs.mkdtempSync(join(parent, "mismatch-concurrent-"));
+  const cassette = join(root,"cassette.jsonl"), ready = join(root,"ready.json"), journal = join(root,"journal.jsonl"), wire = join(root,"wire.mjs");
+  fs.writeFileSync(wire,'export async function observeReplayExchange() { await new Promise(resolve => setTimeout(resolve,100)); }');
+  const exchange = (id) => JSON.stringify({request:{method:"POST",url:"/v1/responses",body:JSON.stringify({input:`original-${id}`})},response:{status:200,headers:{},body:JSON.stringify({id})}});
+  fs.writeFileSync(cassette,`${exchange(1)}\n${exchange(2)}\n`);
+  const script=fileURLToPath(new URL("../assets/scripts/llmtape.mjs",import.meta.url));
+  const child=spawn(process.execPath,[script,"replay","--port","0","--cassette",cassette],{env:{PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:"1",ASB_TAPE_READY_FILE:ready,ASB_TAPE_IGNORE_PROVIDER_MISMATCH:"1",ASB_TAPE_IGNORED_MISMATCH_JOURNAL:journal,ASB_TAPE_AGENT_WIRE_EXTENSION:wire},stdio:["pipe","ignore","pipe"]});
+  const exited=new Promise((resolve,reject)=>{child.once("error",reject);child.once("exit",(code,signal)=>resolve({code,signal}));});
+  t.after(async()=>{if(child.exitCode===null&&child.signalCode===null) child.kill("SIGKILL");await exited;fs.rmSync(root,{recursive:true,force:true});});
+  const deadline=performance.now()+3000;while(!fs.existsSync(ready)){assert.ok(performance.now()<deadline);await delay(10);}
+  const port=JSON.parse(fs.readFileSync(ready)).port;
+  const replies=await Promise.all([request(port,"/v1/responses",JSON.stringify({input:"changed-a"})),request(port,"/v1/responses",JSON.stringify({input:"changed-b"}))]);
+  assert.deepEqual(replies.map(reply=>JSON.parse(reply.body).id).sort(),[1,2]);
+  const events=fs.readFileSync(journal,"utf8").trim().split("\n").map(line=>JSON.parse(line));
+  assert.deepEqual(events.map(event=>event.sequence),[1,2]);
+  child.stdin.end();assert.deepEqual(await exited,{code:0,signal:null});
+});
+
 async function fixture(t, upstreamHandler, options = {}) {
   const parent = join(process.cwd(), "target/capture-http-fixtures");
   fs.mkdirSync(parent, { recursive: true });
@@ -180,7 +219,7 @@ test("custom policy applies once on replay and rejects changed prompts", { timeo
   const policy = { sha256: "a".repeat(64), workload: { id: "fixture", task_id: "one" }, profiles: [{ id: "seed", source: "export function normalizeToolResult({text}) { return text.replace(/seed=\\d+/, 'seed=<seed>') + '!'; }" }] };
   const oldWorkspace = "/tmp/record/workspace-concurrency-1";
   const newWorkspace = "/tmp/replay/workspace-concurrency-2";
-  const { port, stop, output } = await fixture(t, (_req, res) => res.end(JSON.stringify({ path: `${oldWorkspace}/src`, unrelated: "/tmp/elsewhere" })), { policy, workspace: oldWorkspace });
+  const { port, stop, output } = await fixture(t, (_req, res) => res.end(JSON.stringify({ path: `${oldWorkspace}/src`, unrelated: "/tmp/elsewhere", literal: "<asb-workspace>" })), { policy, workspace: oldWorkspace });
   const recorded = JSON.stringify({ model: "m", messages: [{ role: "user", content: `solve in ${oldWorkspace}` }, { role: "tool", content: "seed=1" }] });
   assert.equal((await request(port, "/v1/chat/completions", recorded)).status, 200);
   await stop();
@@ -216,8 +255,8 @@ test("custom policy applies once on replay and rejects changed prompts", { timeo
   const replayed = JSON.stringify({ model: "m", messages: [{ role: "user", content: `solve in ${newWorkspace}` }, { role: "tool", content: "seed=2" }] });
   const replayResponse = await request(replayPort, "/v1/chat/completions", replayed);
   assert.equal(replayResponse.status, 200);
-  assert.deepEqual(JSON.parse(replayResponse.body), { path: `${newWorkspace}/src`, unrelated: "/tmp/elsewhere" });
-  assert.equal(JSON.parse(fs.readFileSync(cassette, "utf8")).response.body, JSON.stringify({ path: `${oldWorkspace}/src`, unrelated: "/tmp/elsewhere" }));
+  assert.deepEqual(JSON.parse(replayResponse.body), { path: `${newWorkspace}/src`, unrelated: "/tmp/elsewhere", literal: "<asb-workspace>" });
+  assert.equal(JSON.parse(fs.readFileSync(cassette, "utf8")).response.body, JSON.stringify({ path: `${oldWorkspace}/src`, unrelated: "/tmp/elsewhere", literal: "<asb-workspace>" }));
   child.stdin.end();
   assert.deepEqual(await exited, { code: 0, signal: null }, stderr);
   const progress = JSON.parse(fs.readFileSync(`${cassette}.progress.json`));

@@ -1368,9 +1368,11 @@ if (process.argv.includes('--fixture-agent-worker')) {
 const behavior = process.env.ASB_FIXTURE_BEHAVIOR || 'success';
 async function main() {
   if (behavior === 'skip') { console.log('fixture-no-request'); return; }
-  const body = {model:'test-model',input:behavior === 'mismatch' ? 'changed' : 'offline',tools:[{type:'function'}]};
+  const body = {model:'test-model',input:['mismatch', 'mismatch-twice', 'mismatch-many'].includes(behavior) ? 'changed' : 'offline',tools:[{type:'function'}]};
   const send = () => fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   let response = await send();
+  if (behavior === 'mismatch-twice') response = await send();
+  if (behavior === 'mismatch-many') for (let i=1;i<128;i++) response = await send();
   if (behavior === 'extra') response = await send();
   if (!response.ok) { console.error('fixture-rejected', response.status); process.exitCode = 8; return; }
   if (behavior === 'noop') { console.log('No task edits were made.'); return; }
@@ -3476,6 +3478,276 @@ fn no_op_zero_exit_cannot_resolve_a_failing_task() {
 
 #[cfg(unix)]
 #[test]
+fn replay_ignored_failures_are_warned_and_preserve_real_outcomes() {
+    for (behavior, args, success, expected) in [
+        (
+            "noop",
+            vec!["--ignore-evaluation"],
+            true,
+            "workload_check_failed",
+        ),
+        (
+            "invalid-utf8",
+            vec!["--ignore-evaluation"],
+            true,
+            "grader_error",
+        ),
+        ("exit", vec!["--ignore-agent"], true, "agent_failure"),
+        (
+            "exit-unresolved",
+            vec!["--ignore-agent"],
+            false,
+            "agent_failure",
+        ),
+        (
+            "exit-unresolved",
+            vec!["--ignore-agent", "--ignore-evaluation"],
+            true,
+            "agent_failure",
+        ),
+        (
+            "mismatch",
+            vec!["--ignore-agent", "--ignore-evaluation"],
+            false,
+            "agent_failure",
+        ),
+    ] {
+        let project = replay_project(1);
+        let mut options = args;
+        options.push("--json");
+        let result = replay(&project, behavior, &options);
+        assert_eq!(
+            result.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let rows: Vec<serde_json::Value> = String::from_utf8_lossy(&result.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let row = rows
+            .iter()
+            .find(|row| {
+                row.get("ignored_failures")
+                    .is_some_and(|value| value.as_array().is_some_and(|values| !values.is_empty()))
+            })
+            .expect("ignored failure in JSON");
+        assert_eq!(row["ignored_failures"][0]["kind"], expected);
+        assert_eq!(row["ignored_failures"][0]["ignored"], true);
+        assert_eq!(row["ignored_failures"][0]["severity"], "warning");
+        let log: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+        assert_eq!(log["ignored_failures"], row["ignored_failures"]);
+        if behavior == "noop" || behavior == "exit-unresolved" {
+            assert_eq!(log["workload_success"], false);
+            assert_eq!(log["success_rate"], 0.0);
+        }
+    }
+    let project = replay_project(1);
+    let human = replay(&project, "noop", &["--ignore-evaluation"]);
+    assert!(human.status.success());
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("Warning: ignored workload_check_failed")
+    );
+    let rejected = project.command(&["run", "benchmark.toml", "--ignore-evaluation"]);
+    assert!(!rejected.status.success());
+    let missing = project.command(&[
+        "run",
+        "benchmark.toml",
+        "--replay",
+        "--cassette",
+        "missing.jsonl",
+        "--ignore-agent",
+        "--ignore-evaluation",
+    ]);
+    assert!(
+        !missing.status.success(),
+        "missing replay input cannot produce a successful run"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn approximate_replay_serves_a_recorded_response_and_exhaustion_remains_fatal() {
+    let project = replay_project(1);
+    let result = replay(
+        &project,
+        "mismatch",
+        &[
+            "--ignore-provider-mismatch",
+            "--json",
+            "--measurements",
+            "measurement",
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(json["approximate_replay"], true);
+    assert_eq!(json["ignored_failures"][0]["kind"], "provider_mismatch");
+    assert_eq!(json["ignored_failures"][0]["ignored"], true);
+    assert_eq!(json["ignored_failures"][0]["severity"], "warning");
+    assert!(
+        json["ignored_failures"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("approximate replay")
+    );
+    let reason = json["ignored_failures"][0]["reason"].as_str().unwrap();
+    let evidence_path = reason.rsplit_once("evidence: ").unwrap().1;
+    let evidence: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(evidence_path).unwrap()).unwrap();
+    assert_eq!(evidence["mismatch"]["sequence"], 1);
+    assert!(json["token_usage"]["total_tokens"].is_null());
+    let log: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+    assert_eq!(log["approximate_replay"], true);
+    assert_eq!(log["ignored_failures"], json["ignored_failures"]);
+    expect_success(&project.command(&["compare", "benchmark.toml"]));
+    let comparison = project.0.join("results/benchmark-comparison");
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(comparison.join("comparison.json")).unwrap())
+            .unwrap();
+    assert!(
+        report["benchmarks"][0]["status"]
+            .as_str()
+            .unwrap()
+            .contains("approximate replay")
+    );
+    assert!(
+        std::fs::read_to_string(comparison.join("report.html"))
+            .unwrap()
+            .contains("approximate replay")
+    );
+    let human = replay(
+        &replay_project(1),
+        "mismatch",
+        &["--ignore-provider-mismatch"],
+    );
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stdout).contains("Warning: ignored provider_mismatch"));
+    let no_response = replay(&replay_project(1), "extra", &["--ignore-provider-mismatch"]);
+    assert!(!no_response.status.success());
+    assert!(String::from_utf8_lossy(&no_response.stderr).contains("replay rejected"));
+    let rejected = replay(&replay_project(1), "mismatch", &[]);
+    assert!(!rejected.status.success());
+    let partial = replay(
+        &replay_project(1),
+        "skip",
+        &[
+            "--ignore-provider-unconsumed",
+            "--ignore-evaluation",
+            "--json",
+        ],
+    );
+    assert!(
+        partial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&partial.stderr)
+    );
+    let partial: serde_json::Value = serde_json::from_slice(&partial.stdout).unwrap();
+    assert_eq!(partial["approximate_replay"], true);
+    let failures = partial["ignored_failures"].as_array().unwrap();
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure["kind"] == "provider_unconsumed"
+                && failure["ignored"] == true
+                && failure["reason"].as_str().unwrap().contains("0 of 1"))
+    );
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure["kind"] == "workload_check_failed")
+    );
+    let partial_without_evaluation = replay(
+        &replay_project(1),
+        "skip",
+        &["--ignore-provider-unconsumed"],
+    );
+    assert!(
+        !partial_without_evaluation.status.success(),
+        "an independent false grade remains fatal"
+    );
+    let twice_project = replay_project(1);
+    let cassette = std::fs::read_to_string(twice_project.0.join("tape.jsonl")).unwrap();
+    std::fs::write(
+        twice_project.0.join("tape.jsonl"),
+        format!("{cassette}{cassette}"),
+    )
+    .unwrap();
+    let twice = replay(
+        &twice_project,
+        "mismatch-twice",
+        &["--ignore-provider-mismatch", "--json"],
+    );
+    assert!(
+        twice.status.success(),
+        "{}",
+        String::from_utf8_lossy(&twice.stderr)
+    );
+    let twice: serde_json::Value = serde_json::from_slice(&twice.stdout).unwrap();
+    assert_eq!(twice["ignored_failures"].as_array().unwrap().len(), 1);
+    let reason = twice["ignored_failures"][0]["reason"].as_str().unwrap();
+    assert!(reason.contains("served 2 recorded response(s)"));
+    let journal = reason
+        .split_once("journal: ")
+        .unwrap()
+        .1
+        .split_once("; first mismatch evidence:")
+        .unwrap()
+        .0;
+    let events: Vec<serde_json::Value> = std::fs::read_to_string(journal)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["sequence"], 1);
+    assert_eq!(events[1]["sequence"], 2);
+    assert!(events.iter().all(|event| event["ignored"] == true
+        && event["severity"] == "warning"
+        && event["kind"] == "provider_mismatch"));
+    let many_project = replay_project(1);
+    let cassette = std::fs::read_to_string(many_project.0.join("tape.jsonl")).unwrap();
+    std::fs::write(many_project.0.join("tape.jsonl"), cassette.repeat(128)).unwrap();
+    let many = replay(
+        &many_project,
+        "mismatch-many",
+        &["--ignore-provider-mismatch", "--json"],
+    );
+    assert!(
+        many.status.success(),
+        "{}",
+        String::from_utf8_lossy(&many.stderr)
+    );
+    let many: serde_json::Value = serde_json::from_slice(&many.stdout).unwrap();
+    let reason = many["ignored_failures"][0]["reason"].as_str().unwrap();
+    assert!(reason.contains("served 128 recorded response(s)"));
+    let journal = reason
+        .split_once("journal: ")
+        .unwrap()
+        .1
+        .split_once("; first mismatch evidence:")
+        .unwrap()
+        .0;
+    let events = std::fs::read_to_string(journal).unwrap();
+    assert_eq!(events.lines().count(), 128);
+    let rejected = replay_project(1).command(&[
+        "run",
+        "benchmark.toml",
+        "--tool-replay",
+        "--ignore-provider-mismatch",
+    ]);
+    assert!(!rejected.status.success());
+}
+
+#[cfg(unix)]
+#[test]
 fn pre_solved_workspace_is_preserved_but_never_earns_resolution_credit() {
     let project = replay_project(1);
     project.write(
@@ -3907,6 +4179,347 @@ fn cpu_and_io_collectors_use_project_local_pidstat_in_preflight_and_run() {
         calls.lines().filter(|line| line.starts_with("-d ")).count() >= 2,
         "{calls}"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_collector_failure_can_be_ignored_with_durable_evidence() {
+    use std::os::unix::fs::PermissionsExt;
+    for ignored in [false, true] {
+        let project = replay_project(1);
+        project.write(".asb-tools/bpftrace/bin/bpftrace", "#!/bin/sh\nif [ \"$1\" = -B ]; then echo ASB_BPFTRACE_READY; sleep 0.3; exit 7; fi\nexit 0\n");
+        std::fs::set_permissions(
+            project.0.join(".asb-tools/bpftrace/bin/bpftrace"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
+            + "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['bpftrace']\n";
+        project.write("benchmark.toml", &config);
+        let mut args = vec![
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+            "--json",
+        ];
+        if ignored {
+            args.push("--ignore-collector");
+        }
+        let result = project.command_with_env(
+            &args,
+            &[
+                ("ASB_FIXTURE_BEHAVIOR", "bpf-clock"),
+                ("ASB_BPFTRACE_PROFILES", "sched-latency"),
+            ],
+        );
+        assert_eq!(
+            result.status.success(),
+            ignored,
+            "stdout={} stderr={}",
+            stdout(&result),
+            stderr(&result)
+        );
+        if ignored {
+            let row: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+            let events = row["ignored_failures"].as_array().unwrap();
+            assert!(events.iter().any(|event| event["kind"] == "collector_error"
+                && event["ignored"] == true
+                && event["severity"] == "warning"));
+            let log: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+            let measurement_dir = row["measurement_directory"]
+                .as_str()
+                .expect("measurement directory");
+            let measured: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(project.0.join(measurement_dir).join("run.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(log["ignored_failures"], row["ignored_failures"]);
+            assert_eq!(measured["ignored_failures"], row["ignored_failures"]);
+            let collector: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(
+                    project
+                        .0
+                        .join(measurement_dir)
+                        .join("bpftrace-sched-latency.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(collector["status"], "failed");
+            assert!(collector["metrics"].as_object().unwrap().is_empty());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_cannot_ignore_unknown_collector_custody() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = replay_project(1);
+    let marker = project.0.join("pidstat-preflight-done");
+    let script = format!(
+        "#!/bin/sh\nif [ ! -e '{}' ]; then touch '{}'; exit 0; fi\nexit 7\n",
+        marker.display(),
+        marker.display()
+    );
+    project.write(".asb-tools/mpstat/bin/pidstat", &script);
+    std::fs::set_permissions(
+        project.0.join(".asb-tools/mpstat/bin/pidstat"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
+        + "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['mpstat']\n";
+    project.write("benchmark.toml", &config);
+    let result = replay(&project, "bpf-clock", &["--json", "--ignore-collector"]);
+    assert!(!result.status.success());
+    assert!(
+        stderr(&result).contains("collector cleanup is unconfirmed"),
+        "{}",
+        stderr(&result)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_ignore_collector_skips_unexecutable_sysstat_without_spawning_it() {
+    use std::os::unix::fs::PermissionsExt;
+    for collector in ["mpstat", "iostat"] {
+        let project = replay_project(1);
+        let marker = project.0.join("pidstat-ran");
+        let script = format!("#!/bin/sh\ntouch '{}'\nexit 7\n", marker.display());
+        project.write(".asb-tools/mpstat/bin/pidstat", &script);
+        std::fs::set_permissions(
+            project.0.join(".asb-tools/mpstat/bin/pidstat"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
+            + &format!(
+                "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['{collector}']\n"
+            );
+        project.write("benchmark.toml", &config);
+        let output = replay(&project, "success", &["--json", "--ignore-collector"]);
+        expect_success(&output);
+        assert!(
+            !marker.exists(),
+            "preflight must not execute the unavailable tool"
+        );
+        let row: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let events = row["ignored_failures"].as_array().unwrap();
+        assert!(events.iter().any(|event| {
+            event["kind"] == "collector_error"
+                && event["ignored"] == true
+                && event["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains(collector))
+        }));
+        let dir = project
+            .0
+            .join(row["measurement_directory"].as_str().unwrap());
+        let artifact: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(format!("{collector}.json"))).unwrap())
+                .unwrap();
+        assert_eq!(artifact["status"], "unavailable");
+        assert!(artifact["metrics"].as_object().unwrap().is_empty());
+        let startup: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("collector-startup.json")).unwrap())
+                .unwrap();
+        assert_eq!(startup["stage"], "before-collector-probe");
+        assert_eq!(startup["events"][0]["collector"], collector);
+        assert_eq!(startup["events"][0]["ignored"], true);
+        let run: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("run.json")).unwrap()).unwrap();
+        assert_eq!(run["ignored_failures"], row["ignored_failures"]);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_ignore_collector_skips_unexecutable_trace_tools_without_spawning() {
+    use std::os::unix::fs::PermissionsExt;
+    for (collector, binary) in [
+        ("perf", "perf"),
+        ("bpftrace", "bpftrace"),
+        ("perfetto", "tracebox"),
+    ] {
+        let project = replay_project(1);
+        let marker = project.0.join("collector-ran");
+        let script = format!("#!/bin/sh\ntouch '{}'\nexit 7\n", marker.display());
+        let path = format!(".asb-tools/{collector}/bin/{binary}");
+        project.write(&path, &script);
+        std::fs::set_permissions(
+            project.0.join(&path),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
+            + &format!(
+                "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['{collector}']\n"
+            );
+        project.write("benchmark.toml", &config);
+        let output = replay(&project, "success", &["--json", "--ignore-collector"]);
+        expect_success(&output);
+        assert!(!marker.exists());
+        let row: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            row["ignored_failures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["kind"] == "collector_error"
+                    && event["ignored"] == true
+                    && event["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains(collector)))
+        );
+        let dir = project
+            .0
+            .join(row["measurement_directory"].as_str().unwrap());
+        let artifact: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(format!("{collector}.json"))).unwrap())
+                .unwrap();
+        assert_eq!(artifact["status"], "unavailable");
+        assert!(artifact["metrics"].as_object().unwrap().is_empty());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_ignore_collector_skips_dependents_without_running_their_probes() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = replay_project(1);
+    let marker = project.0.join("flamegraph-ran");
+    project.write(".asb-tools/perf/bin/perf", "#!/bin/sh\nexit 7\n");
+    std::fs::set_permissions(
+        project.0.join(".asb-tools/perf/bin/perf"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    for name in ["stackcollapse-perf.pl", "flamegraph.pl"] {
+        let path = format!(".asb-tools/flamegraph/bin/{name}");
+        project.write(
+            &path,
+            &format!("#!/bin/sh\ntouch '{}'\nexit 7\n", marker.display()),
+        );
+        std::fs::set_permissions(
+            project.0.join(&path),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
+        + "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['flamegraph']\n";
+    project.write("benchmark.toml", &config);
+    let output = replay(&project, "success", &["--json", "--ignore-collector"]);
+    expect_success(&output);
+    assert!(!marker.exists());
+    let row: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let events = row["ignored_failures"].as_array().unwrap();
+    assert!(events.iter().any(|event| {
+        event["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("perf"))
+    }));
+    assert!(events.iter().any(|event| {
+        event["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("flamegraph"))
+    }));
+    let dir = project
+        .0
+        .join(row["measurement_directory"].as_str().unwrap());
+    for collector in ["perf", "flamegraph"] {
+        let artifact: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(format!("{collector}.json"))).unwrap())
+                .unwrap();
+        assert_eq!(artifact["status"], "unavailable");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_ignore_collector_does_not_suppress_a_spawned_preflight_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = replay_project(1);
+    let marker = project.0.join("pidstat-ran");
+    let script = format!("#!/bin/sh\ntouch '{}'\nexit 7\n", marker.display());
+    project.write(".asb-tools/mpstat/bin/pidstat", &script);
+    std::fs::set_permissions(
+        project.0.join(".asb-tools/mpstat/bin/pidstat"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
+        + "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['mpstat']\n";
+    project.write("benchmark.toml", &config);
+    let output = replay(&project, "success", &["--json", "--ignore-collector"]);
+    assert!(!output.status.success());
+    assert!(marker.exists());
+    assert!(stderr(&output).contains("pidstat"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ignored_collector_startup_remains_auditable_when_replay_later_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = replay_project(1);
+    project.write(".asb-tools/mpstat/bin/pidstat", "#!/bin/sh\nexit 7\n");
+    std::fs::set_permissions(
+        project.0.join(".asb-tools/mpstat/bin/pidstat"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
+        + "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['mpstat']\n";
+    project.write("benchmark.toml", &config);
+    let output = replay(
+        &project,
+        "mismatch",
+        &[
+            "--json",
+            "--measurements",
+            "measurements",
+            "--ignore-collector",
+        ],
+    );
+    assert!(!output.status.success());
+    let startup: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.0.join("measurements/collector-startup.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(startup["events"][0]["collector"], "mpstat");
+    assert_eq!(startup["events"][0]["ignored"], true);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn collector_ignore_without_a_failure_does_not_invent_a_warning() {
+    let project = replay_project(1);
+    let result = replay(
+        &project,
+        "success",
+        &[
+            "--json",
+            "--measurements",
+            "measurements",
+            "--ignore-collector",
+        ],
+    );
+    expect_success(&result);
+    let row: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert!(row.get("ignored_failures").is_none());
+    let measurement_dir = row["measurement_directory"].as_str().unwrap();
+    let measured: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.0.join(measurement_dir).join("run.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(measured.get("ignored_failures").is_none());
+    let rejected = project.command(&["run", "benchmark.toml", "--ignore-collector"]);
+    assert!(!rejected.status.success());
 }
 
 #[test]

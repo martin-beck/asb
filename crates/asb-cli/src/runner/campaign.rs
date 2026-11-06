@@ -193,6 +193,22 @@ pub(crate) struct Plan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps: Option<u64>,
     pub respect_record_timings: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_evaluation: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_agent: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_collector: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_provider_mismatch: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_provider_unconsumed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_tool_mismatch: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_mcp_mismatch: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_compatibility: bool,
     pub measurement_root: Option<PathBuf>,
     pub replay_inputs: Vec<ReplayInput>,
     pub slots: Vec<Slot>,

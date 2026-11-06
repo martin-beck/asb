@@ -18,6 +18,7 @@ pub(crate) mod plan;
 mod presentation;
 pub(crate) mod recovered;
 mod resume;
+pub(crate) mod sampled;
 pub(crate) mod scheduler;
 mod spool;
 
@@ -37,15 +38,55 @@ pub(crate) const MAX_CONFIGS: usize = 65536;
 #[serde(deny_unknown_fields)]
 pub(crate) struct SweepFile {
     pub configs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sampled_trials: Vec<SampledTrials>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<crate::planning::Resources>,
 }
 
+/// A frozen workload sample and its ordered replacement population.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SampledTrials {
+    pub workload: String,
+    pub count: usize,
+    pub seed: String,
+    pub candidates: Vec<String>,
+}
+
+impl SampledTrials {
+    fn validate(&self) -> Result<(), Error> {
+        if self.workload.is_empty()
+            || self.workload.len() > 4096
+            || self.workload.chars().any(char::is_control)
+            || self.seed.len() != 16
+            || !self
+                .seed
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(Error::Input("invalid sampled workload or seed".into()));
+        }
+        let seed = u64::from_str_radix(&self.seed, 16)
+            .map_err(|_| Error::Input("invalid sampled trial seed".into()))?;
+        let expected = crate::cassette::TrialOrder::new(&self.candidates, self.count, seed)
+            .map_err(|error| Error::Input(error.to_string()))?;
+        if expected.candidates() != self.candidates {
+            return Err(Error::Input(
+                "sampled trial order does not match its seed and catalog".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Options<'a> {
+    pub prepare_replay: bool,
     pub invocation_dir: Option<&'a Path>,
+    pub input_parent: Option<&'a Path>,
     pub repeat: Option<u64>,
     pub max_steps: Option<u64>,
     pub track: Option<crate::cassette::Selector>,
@@ -65,6 +106,14 @@ pub(crate) struct Options<'a> {
     pub tool_mode_explicit: bool,
     pub mcp_mode: Option<crate::tape::Mode>,
     pub respect_record_timings: bool,
+    pub ignore_evaluation: bool,
+    pub ignore_agent: bool,
+    pub ignore_collector: bool,
+    pub ignore_provider_mismatch: bool,
+    pub ignore_provider_unconsumed: bool,
+    pub ignore_tool_mismatch: bool,
+    pub ignore_mcp_mismatch: bool,
+    pub ignore_compatibility: bool,
     pub cassette_root: Option<&'a Path>,
     pub jobs: usize,
     pub max_active_attempts: Option<usize>,
@@ -81,7 +130,9 @@ pub(crate) struct Options<'a> {
 impl Default for Options<'_> {
     fn default() -> Self {
         Self {
+            prepare_replay: false,
             invocation_dir: None,
+            input_parent: None,
             repeat: None,
             max_steps: None,
             track: None,
@@ -95,6 +146,14 @@ impl Default for Options<'_> {
             tool_mode_explicit: false,
             mcp_mode: None,
             respect_record_timings: false,
+            ignore_evaluation: false,
+            ignore_agent: false,
+            ignore_collector: false,
+            ignore_provider_mismatch: false,
+            ignore_provider_unconsumed: false,
+            ignore_tool_mismatch: false,
+            ignore_mcp_mismatch: false,
+            ignore_compatibility: false,
             cassette_root: None,
             jobs: 1,
             max_active_attempts: None,
@@ -150,13 +209,15 @@ pub(crate) fn run_with_options(
         ));
     }
     let sweep_path = Path::new(path);
-    let sweep = read_manifest(sweep_path)?;
+    let mut sweep = read_manifest(sweep_path)?;
+    if options.prepare_replay {
+        return sampled::prepare(sweep_path, &sweep, options, output);
+    }
     let options = Options {
         repeat: options.repeat.or(sweep.repeat),
         ..options
     };
     let Options { json, mode, .. } = options;
-    let parent = sweep_path.parent().unwrap_or_else(|| Path::new("."));
     let output_anchor = crate::project::configuration_anchor(sweep_path, options.invocation_dir)?;
     let output_parent = output_anchor.parent().unwrap_or_else(|| Path::new("."));
     let stem = sweep_path
@@ -166,6 +227,36 @@ pub(crate) fn run_with_options(
         .unwrap_or("sweep");
     // Keep ownership through comparison, including moving older output trees.
     let _output_lock = lock::OutputLock::acquire_for_source(output_parent, stem, sweep_path)?;
+    let prepared_fixed = mode == Some(crate::tape::Mode::Replay)
+        && options.cassette_root.is_none()
+        && sampled::has_preparation(sweep_path, options)?;
+    let resolved = if (!sweep.sampled_trials.is_empty() || prepared_fixed)
+        && mode == Some(crate::tape::Mode::Replay)
+    {
+        if options.cassette_root.is_some() {
+            return Err(Error::Input(
+                "sampled replay uses its verified prepared cassettes; omit --cassette-root".into(),
+            ));
+        }
+        Some(sampled::resolve(sweep_path, &sweep, options)?)
+    } else {
+        None
+    };
+    let options = if let Some(ref selected) = resolved {
+        sweep.configs = selected.references.clone();
+        sweep.sampled_trials.clear();
+        Options {
+            input_parent: Some(&selected.parent),
+            cassette_root: Some(&selected.cassette_root),
+            max_steps: selected.max_steps,
+            ..options
+        }
+    } else {
+        options
+    };
+    let parent = options
+        .input_parent
+        .unwrap_or_else(|| sweep_path.parent().unwrap_or_else(|| Path::new(".")));
     if options.recover_continuation {
         if !options.resume
             || mode.is_some()
@@ -458,6 +549,16 @@ pub(crate) fn parse_manifest(path: &Path, value: toml::Value) -> Result<SweepFil
             sweep.configs.len()
         )));
     }
+    let mut sampled_workloads = BTreeSet::new();
+    for selection in &sweep.sampled_trials {
+        selection.validate()?;
+        if !sampled_workloads.insert(&selection.workload) {
+            return Err(Error::Input(format!(
+                "sweep {label} contains duplicate sampled workload `{}`",
+                selection.workload
+            )));
+        }
+    }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     for reference in &sweep.configs {
         checked_benchmark_reference(parent, reference, &label)?;
@@ -501,11 +602,41 @@ mod tests {
     }
 
     #[test]
+    fn sampled_manifest_validates_its_frozen_order_and_rejects_duplicates() {
+        let catalog = vec!["one".to_owned(), "two".to_owned(), "three".to_owned()];
+        let order = crate::cassette::TrialOrder::new(&catalog, 2, 42).unwrap();
+        let selection = super::SampledTrials {
+            workload: "fixture".into(),
+            count: 2,
+            seed: format!("{:016x}", 42),
+            candidates: order.candidates().to_vec(),
+        };
+        let mut manifest = super::SweepFile {
+            configs: vec!["benchmark.toml".into()],
+            sampled_trials: vec![selection.clone()],
+            repeat: None,
+            resources: None,
+        };
+        let benchmark = temp_file("benchmark.toml", "");
+        let path = benchmark.parent().unwrap().join("sweep.toml");
+        let parse = |manifest: &super::SweepFile| {
+            let value = toml::Value::try_from(manifest).unwrap();
+            super::parse_manifest(&path, value)
+        };
+        assert!(parse(&manifest).is_ok());
+        manifest.sampled_trials[0].candidates.reverse();
+        assert!(parse(&manifest).is_err());
+        manifest.sampled_trials = vec![selection.clone(), selection];
+        assert!(parse(&manifest).is_err());
+    }
+
+    #[test]
     fn manifest_supports_complete_original_populations_and_multi_agent_matrices() {
         for count in [300, 500, 2294, (2294 + 300 + 500 + 80 + 89) * 8] {
             let reference = "original-instance-selection-agent-provider-model-configuration.toml";
             let configs = vec![reference.to_owned(); count];
             let text = toml::to_string(&super::SweepFile {
+                sampled_trials: Vec::new(),
                 resources: None,
                 configs,
                 repeat: None,
@@ -537,6 +668,7 @@ mod tests {
         std::fs::write(
             &path,
             toml::to_string(&super::SweepFile {
+                sampled_trials: Vec::new(),
                 resources: None,
                 configs,
                 repeat: None,

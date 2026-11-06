@@ -347,8 +347,12 @@ pub(crate) fn guest_bootstrap(
     id: &str,
     project_root: &Path,
     tools_root: &Path,
+    offline: bool,
 ) -> Result<GuestBootstrap, Error> {
-    let context = OperationContext::load(project_root).map_err(InstallFailure::into_public)?;
+    let mut context = OperationContext::load(project_root).map_err(InstallFailure::into_public)?;
+    if offline {
+        context = context.offline();
+    }
     guest_bootstrap_in(&context, id, tools_root).map_err(InstallFailure::into_public)
 }
 fn guest_bootstrap_in(
@@ -539,6 +543,12 @@ fn python_guest_package_tree_in(
         .stdin(Stdio::null());
     let mut found = scope.run(find)?;
     if !found.status.success() || found.stdout.is_empty() {
+        if context.is_offline() {
+            return Err(Error::Input(format!(
+                "replay needs portable Python {pinned}; prepare replay while online and retry"
+            ))
+            .into());
+        }
         let mut install = scope.prepare(&uv, Purpose::Configure, "portable Python installation")?;
         install
             .command_mut()
@@ -913,6 +923,7 @@ pub(crate) fn ensure_collector_dependencies(
 /// This is deliberately shared by direct runs and sweeps: record/replay alters
 /// transport only: replay still needs the agent, workload, and collectors,
 /// but its local tape endpoint does not need a live provider runtime.
+#[cfg(test)]
 pub(crate) fn ensure_execution_requirements(
     config: &BenchmarkConfig,
     config_path: &Path,
@@ -920,10 +931,31 @@ pub(crate) fn ensure_execution_requirements(
     invocation_dir: &Path,
     output: &mut dyn std::io::Write,
 ) -> Result<(), Error> {
+    ensure_execution_requirements_with_policy(
+        config,
+        config_path,
+        mode,
+        invocation_dir,
+        output,
+        false,
+    )
+}
+
+pub(crate) fn ensure_execution_requirements_with_policy(
+    config: &BenchmarkConfig,
+    config_path: &Path,
+    mode: Option<crate::tape::Mode>,
+    invocation_dir: &Path,
+    output: &mut dyn std::io::Write,
+    ignore_collector: bool,
+) -> Result<(), Error> {
     let (root, project_config) = project::load_for_invocation(config_path, Some(invocation_dir))?;
     let tools_root = project::resolve(&root, &project_config.tools_dir);
     let workloads_root = project::environment_path("ASB_WORKLOAD_DIR", invocation_dir)
         .unwrap_or_else(|| project::resolve(&root, &project_config.workloads_dir));
+    if mode == Some(crate::tape::Mode::Replay) {
+        return validate_offline_replay_requirements(config, &tools_root, &workloads_root);
+    }
     let context = OperationContext::new_at(&root, &project_config, invocation_dir)
         .map_err(InstallFailure::into_public)?;
     let mut progress = |_percent: u8, _stage: ProgressStage| {};
@@ -969,9 +1001,30 @@ pub(crate) fn ensure_execution_requirements(
             }
         }
         if let Some(measures) = config.measurements.as_ref().filter(|value| value.enabled) {
+            let expanded = crate::collectors::expand_dependencies(&measures.collectors);
+            let unavailable = if ignore_collector && mode == Some(crate::tape::Mode::Replay) {
+                crate::collectors::unavailable_preflight(
+                    crate::collectors::all(),
+                    &expanded,
+                    Some(&tools_root),
+                )
+            } else {
+                Vec::new()
+            };
+            let selected: Vec<_> = measures
+                .collectors
+                .iter()
+                .filter(|selection| {
+                    !unavailable.iter().any(|(name, _)| {
+                        crate::collectors::find(name)
+                            .is_some_and(|adapter| adapter.accepts_selection(selection))
+                    })
+                })
+                .cloned()
+                .collect();
             ensure_collector_dependencies_in(
                 &context,
-                &measures.collectors,
+                &selected,
                 &root,
                 &tools_root,
                 output,
@@ -984,6 +1037,49 @@ pub(crate) fn ensure_execution_requirements(
     let diagnostic = context.report_diagnostics(output);
     result.map_err(InstallFailure::into_public)?;
     diagnostic
+}
+
+/// Check replay inputs without invoking an installer or package manager.
+fn validate_offline_replay_requirements(
+    config: &BenchmarkConfig,
+    tools_root: &Path,
+    workloads_root: &Path,
+) -> Result<(), Error> {
+    let mut required = execution_tool_ids(config, Some(crate::tape::Mode::Replay));
+    if let Some(measures) = config.measurements.as_ref().filter(|value| value.enabled) {
+        required.extend(
+            crate::collectors::dependency_tools(&measures.collectors)
+                .into_iter()
+                .map(str::to_owned),
+        );
+    }
+    required.sort();
+    required.dedup();
+    for id in required {
+        match local_lookup(&id, tools_root) {
+            crate::executables::Lookup::Found(_) => {}
+            crate::executables::Lookup::Missing => {
+                return Err(Error::Input(format!(
+                    "replay requires the locally installed tool `{id}`; prepare replay inputs or run `asb tool install {id}` before replay"
+                )));
+            }
+            crate::executables::Lookup::Unusable(path) => {
+                return Err(Error::Input(format!(
+                    "replay tool `{id}` at {} is not executable; repair or reinstall it before replay",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if external_workload(&config.workload).is_some()
+        && !workload_available(&config.workload, workloads_root)
+    {
+        return Err(Error::Input(format!(
+            "replay workload `{}` is not installed locally; prepare replay inputs or run `asb workload install {}` before replay",
+            config.workload, config.workload
+        )));
+    }
+    Ok(())
 }
 
 /// The project-local installation inputs for one executable benchmark.
@@ -1983,6 +2079,9 @@ pub(crate) fn ensure_runtime_dependency_in(
     let context = &owned_context;
     if runtime_dependency_available_in(context, id, tools_root)? {
         return Ok(());
+    }
+    if context.is_offline() {
+        return Err(Error::Input(format!("replay needs the locally installed runtime `{id}`; prepare replay while online and retry")).into());
     }
     let destination = install_recipe_in(
         context,

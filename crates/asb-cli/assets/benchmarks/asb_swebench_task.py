@@ -105,7 +105,7 @@ class SweBenchTask:
             self.journal = ResourceJournal(self.client, self.artifacts, self.attempt)
             image, source = resolve_image(self.client, spec.image, lambda: build_image(
                 self.client, self.row, self.catalog["dataset"], self.artifacts, self.attempt,
-                cancelled=self.cancelled,journal=self.journal))
+                cancelled=self.cancelled,journal=self.journal), offline=self.tool_mode == "replay")
             self.source_image_tag = source.get("tag")
             if self.source_image_tag is not None:
                 atomic_write(self.artifacts / "source-image.json", encoded(source))
@@ -114,7 +114,7 @@ class SweBenchTask:
                 snapshot_storage = snapshot_storage_path(self.artifacts,self.attempt,self.tool_mode)
             self.workspace = ManagedDockerWorkspace(self.client, image, self.attempt, CONTAINER_WORKDIR,
                                                     journal=self.journal, snapshot=self.snapshot,
-                                                    snapshot_storage=snapshot_storage)
+                                                    snapshot_storage=snapshot_storage, offline=self.tool_mode == "replay")
             self.workspace.__enter__()
             base = self.row["base_commit"]
             self.checked(["git", "cat-file", "-e", base + "^{commit}"])

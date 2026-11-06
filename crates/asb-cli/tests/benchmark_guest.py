@@ -111,6 +111,13 @@ class GuestBootstrapTests(unittest.TestCase):
         with self.assertRaises(ExecutionError):
             PreparationBudget(7201)
 
+    def test_replay_rejects_external_network_before_agent_preparation(self):
+        task = SimpleNamespace(tool_mode='replay')
+        with patch('asb_guest.prepare_agent') as prepare:
+            with self.assertRaisesRegex(ExecutionError, 'replay cannot attach an external task network'):
+                execute_agent(task, {'network':'external'}, None, None, None)
+            prepare.assert_not_called()
+
     def test_snapshot_replay_disconnects_only_owned_routed_networks(self):
         class Network:
             def __init__(self, name): self.name = name

@@ -38,6 +38,7 @@ pub(crate) fn replay_protocol_fingerprint(
 /// Bind an explicitly selected normalization policy to the existing replay
 /// protocol identity. The legacy digest remains byte-for-byte unchanged when
 /// there is no selected policy, so old cassettes keep their existing contract.
+#[cfg(test)]
 pub(crate) fn replay_protocol_with_normalizers(
     legacy_digest: &str,
     policy: Option<&crate::project::replay_normalization::FrozenPolicy>,
@@ -372,6 +373,13 @@ pub(crate) struct Arrival<'a> {
 }
 
 impl Gate {
+    pub(crate) fn expected_normalization(&self) -> Result<Option<Option<String>>, Error> {
+        let state = self.state.lock().map_err(|_| unavailable())?;
+        Ok(state
+            .identity
+            .as_ref()
+            .map(|value| value.normalization_sha256.clone()))
+    }
     pub(crate) fn new(
         total: usize,
         expected: Option<Compatibility>,

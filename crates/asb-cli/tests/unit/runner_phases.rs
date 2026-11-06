@@ -799,6 +799,9 @@ fn durable_truncated_guest_transcript_keeps_its_sealed_terminal_metadata() {
     let grade = workloads::outcome::EvaluationOutcome::binary(true);
     let decision = crate::runner::disposition::RunDisposition::from_facts(
         crate::runner::disposition::RunFacts {
+            ignore_evaluation: false,
+            ignore_agent: false,
+            ignore_collector: false,
             evaluation: &grade,
             evaluation_kind: workloads::KnownEvaluationKind::UpstreamHarness,
             process_success: agent.failure.is_none(),
@@ -1190,6 +1193,7 @@ fn recording_association_binds_actual_attempt_and_preserves_uncertain_raw_captur
         sha256: crate::cassette::digest(b"{}\n"),
     };
     let proxy = crate::proxy::Evidence {
+        replay_divergences: Vec::new(),
         captures: vec![capture.clone()],
         output_files: vec![producer.clone()],
         cleanup_confirmed: false,
@@ -1283,6 +1287,7 @@ fn recording_streams_snapshot_artifact_and_keeps_completed_capture_selectable() 
         sha256: crate::cassette::digest(b"{}\n"),
     };
     let proxy = crate::proxy::Evidence {
+        replay_divergences: Vec::new(),
         captures: vec![capture],
         output_files: vec![producer],
         cleanup_confirmed: true,
@@ -1350,8 +1355,10 @@ fn recording_setup_failure_retains_partial_bytes_with_unknown_outcomes() {
 
 fn result() -> RunResult<'static> {
     RunResult {
+        approximate_replay: false,
         replay_selection: None,
         native_replay_consumed: None,
+        provider_replay_consumed: None,
         observation: Default::default(),
         recording: None,
         execution: None,
@@ -1371,6 +1378,7 @@ fn result() -> RunResult<'static> {
         execution_cohort: None,
         schema_version: 2,
         disposition: RunDisposition {
+            ignored_failures: Vec::new(),
             status: RunStatus::Completed,
             failure: None,
             success: true,
@@ -1429,6 +1437,8 @@ fn postgrade_log_publication_is_independent_and_diagnostics_keep_primary_order()
     for primary in [
         None,
         Some(RunFailure {
+            ignored: false,
+            severity: "error",
             kind: FailureKind::RunError,
             reason: "original proxy failure".into(),
         }),
@@ -1489,9 +1499,12 @@ fn final_measurement_errors_preserve_grade_and_disallow_completion_receipts() {
         let mut result = result();
         if fault == "run-failed" {
             result.disposition = RunDisposition {
+                ignored_failures: Vec::new(),
                 status: RunStatus::Failed,
                 success: false,
                 failure: Some(RunFailure {
+                    ignored: false,
+                    severity: "error",
                     kind: FailureKind::RunError,
                     reason: "fixture operational fault".into(),
                 }),
@@ -1504,7 +1517,7 @@ fn final_measurement_errors_preserve_grade_and_disallow_completion_receipts() {
         } else {
             Some(session)
         };
-        let completed = finish_measurements(selected, &result);
+        let completed = finish_measurements(selected, &mut result, false);
         assert_eq!(completed.confirmed(), matches!(fault, "none" | "disabled"));
         let error = completed.into_error();
         if !matches!(fault, "none" | "disabled") {
@@ -1536,13 +1549,68 @@ fn final_measurement_errors_preserve_grade_and_disallow_completion_receipts() {
 }
 
 #[test]
+fn ignored_collector_marker_is_durable_and_publication_failure_remains_fatal() {
+    for publication_failure in [None, Some("run.json"), Some("tool-calls.json")] {
+        let fixture = Fixture::new();
+        let dir = fixture.0.join("measurements");
+        let mut session = measurements::Session::start_with_collectors(&dir, &[], None).unwrap();
+        session.test_event_failure = Some(LifecycleEvent::RunFinishing);
+        if let Some(path) = publication_failure {
+            std::fs::create_dir(dir.join(path)).unwrap();
+        }
+        let mut result = result();
+        let completion = finish_measurements(Some(session), &mut result, true);
+        if publication_failure.is_some() {
+            assert!(!completion.confirmed());
+            assert!(completion.into_error().is_some());
+        } else {
+            assert!(completion.confirmed());
+            assert!(completion.into_error().is_none());
+            let run: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(dir.join("run.json")).unwrap()).unwrap();
+            let summary: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(dir.join("summary.json")).unwrap()).unwrap();
+            assert_eq!(run["ignored_failures"][0]["kind"], "collector_error");
+            assert_eq!(run["ignored_failures"][0]["ignored"], true);
+            assert_eq!(
+                summary["runs"][0]["ignored_failures"],
+                run["ignored_failures"]
+            );
+            let mut output = Vec::new();
+            render_json(&result, &mut output).unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(json["ignored_failures"], run["ignored_failures"]);
+        }
+    }
+}
+
+#[test]
+fn unconfirmed_collector_cleanup_cannot_be_ignored() {
+    let fixture = Fixture::new();
+    let dir = fixture.0.join("measurements");
+    let mut session = measurements::Session::start_with_collectors(&dir, &[], None).unwrap();
+    session.test_collector_cleanup_unconfirmed = true;
+    let mut result = result();
+    let completion = finish_measurements(Some(session), &mut result, true);
+    assert!(!completion.confirmed());
+    assert!(
+        completion
+            .into_error()
+            .unwrap()
+            .to_string()
+            .contains("cleanup is unconfirmed")
+    );
+    assert!(!dir.join("run.json").exists());
+}
+
+#[test]
 fn unverified_replay_does_not_publish_a_zero_tool_call_metric() {
     let fixture = Fixture::new();
     let dir = fixture.0.join("measurements");
     let session = measurements::Session::start_with_collectors(&dir, &[], None).unwrap();
     let mut result = result();
     result.tool_calls_available = false;
-    assert!(finish_measurements(Some(session), &result).confirmed());
+    assert!(finish_measurements(Some(session), &mut result, false).confirmed());
     let run: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.join("run.json")).unwrap()).unwrap();
     assert!(run.get("tool_call_count").is_none());
@@ -1714,6 +1782,7 @@ fn missing_fixture_grade_reports_settled_agent_and_proxy_evidence() {
         ..Default::default()
     };
     let proxy = crate::proxy::Evidence {
+        replay_divergences: Vec::new(),
         captures: Vec::new(),
         output_files: Vec::new(),
         cleanup_confirmed: false,

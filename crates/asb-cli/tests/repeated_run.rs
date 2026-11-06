@@ -455,6 +455,555 @@ fn campaign_comparison_rejects_intermediate_symlink_aliases() {
 #[path = "support/recording_provider.rs"]
 mod recording_provider;
 use recording_provider::RecordingProvider;
+
+#[test]
+fn sampled_candidate_child() {
+    let Some(root) = std::env::var_os("ASB_SAMPLED_CANDIDATE_TEST_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let config = root.join("benchmark.toml");
+    if std::env::var_os("ASB_SAMPLED_RETRY").is_some() {
+        let ids = vec!["one".to_owned(), "two".to_owned()];
+        let order = asb_cli::cassette::TrialOrder::new(&ids, 1, 7).unwrap();
+        let state = asb_cli::cassette::prepare_sampled_group(
+            &root.join("sample-ledger.json"),
+            &root.join("sample-artifacts"),
+            &config,
+            &root,
+            &"a".repeat(64),
+            order.clone(),
+            None,
+        )
+        .expect("failed replay should be replaced by another recorded trial");
+        assert!(state.preparation().complete().unwrap());
+        assert_eq!(state.preparation().successful().len(), 1);
+        let trial = state.preparation().successful()[0].0;
+        let cassette = root
+            .join("sample-artifacts")
+            .join(format!(
+                "candidate-{}",
+                asb_cli::cassette::digest(trial.as_bytes())
+            ))
+            .join("recording.asb.zip");
+        let original = fs::read(&cassette).unwrap();
+        fs::write(&cassette, b"changed cassette").unwrap();
+        assert!(
+            asb_cli::cassette::load_sampled_group(
+                &root.join("sample-ledger.json"),
+                &root.join("sample-artifacts"),
+                &config,
+                &"a".repeat(64),
+                &order,
+                None,
+                &root,
+            )
+            .is_err()
+        );
+        fs::write(&cassette, original).unwrap();
+        asb_cli::cassette::load_sampled_group(
+            &root.join("sample-ledger.json"),
+            &root.join("sample-artifacts"),
+            &config,
+            &"a".repeat(64),
+            &order,
+            None,
+            &root,
+        )
+        .unwrap();
+        return;
+    }
+    let cassette = root.join("sample-recording.asb.zip");
+    let attempt =
+        asb_cli::cassette::record_and_replay_candidate(&config, &config, &cassette, &root, None)
+            .expect("local fixture recording and offline replay should qualify");
+    assert_eq!(attempt.expected_replicas, 1);
+    assert_eq!(attempt.replicas.len(), 1);
+    assert_eq!(
+        attempt.replicas[0].provider_consumed,
+        Some(std::env::var_os("ASB_SAMPLED_MISMATCH").is_none())
+    );
+    assert_eq!(attempt.replicas[0].cleanup_confirmed, Some(true));
+}
+
+#[test]
+fn sampled_candidate_records_once_then_replays_without_provider_calls() {
+    sampled_candidate_fixture(false, false);
+}
+
+#[test]
+fn sampled_candidate_reports_replay_mismatch_without_new_provider_calls() {
+    sampled_candidate_fixture(true, false);
+}
+
+#[test]
+fn sampled_preparation_replaces_a_failed_replay_and_reuses_success() {
+    sampled_candidate_fixture(true, true);
+}
+
+#[test]
+fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
+    sampled_sweep_fixture(false, 1, false, false);
+}
+
+#[test]
+fn sampled_sweep_preserves_a_fixed_workload() {
+    sampled_sweep_fixture(true, 1, false, false);
+}
+
+#[test]
+fn sampled_sweep_replaces_one_of_multiple_trials() {
+    sampled_sweep_fixture(false, 2, false, false);
+}
+
+#[test]
+fn sampled_sweep_replays_with_configured_normalizer() {
+    sampled_sweep_fixture(false, 1, true, false);
+}
+
+#[test]
+fn fixed_sweep_prepares_and_replays_without_provider() {
+    sampled_sweep_fixture(false, 1, false, true);
+}
+
+fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool, fixed_only: bool) {
+    let project = if normalize {
+        sweep_tests::registered_project(1)
+    } else {
+        let project = Project::new();
+        project.config(1);
+        project
+    };
+    let agent = if normalize {
+        project.0.join("tools/pi/bin/pi")
+    } else {
+        project.0.join("fixture-agent")
+    };
+    if normalize {
+        fs::write(project.0.join("normalizer.mjs"), "export function normalizeToolResult({text}) { return text.replace(/seed=\\d+/, 'seed=<seed>'); }").unwrap();
+        let project_config = project.0.join(".asb/project.toml");
+        let config_text = fs::read_to_string(&project_config).unwrap();
+        fs::write(project_config, format!("{config_text}\n[[replay.normalizers]]\nid='fixture-seed'\nmodule='normalizer.mjs'\nworkloads=['bug-fix']\n")).unwrap();
+    }
+    let mut script = fs::read_to_string(&agent).unwrap();
+    if normalize {
+        script = script.replace(
+            "'messages':[]}",
+            "'messages':[{'role':'tool','content':'seed=17'}]}",
+        );
+    }
+    let altered = if normalize {
+        "if (root/'attempts.jsonl').exists():\n    n = len((root/'attempts.jsonl').read_text().splitlines())\n    body['messages'] = [{'role':'user','content':'different-on-replay'}, {'role':'tool','content':f'seed={18 if n == 1 else 19}'}]\nurl = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')"
+    } else {
+        "if (root/'attempts.jsonl').exists(): body['messages'] = [{'role':'user','content':'different-on-replay'}, {'role':'tool','content':'seed=18'}]\nurl = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')"
+    };
+    let script = if fixed_only {
+        script
+    } else {
+        script.replace(
+            "url = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
+            altered,
+        )
+    };
+    let script = if mixed {
+        script.replace("before = (workspace/'src/parser.py').read_text()", "(workspace/'src').mkdir(exist_ok=True)\nif not (workspace/'src/parser.py').exists(): (workspace/'src/parser.py').write_text('fixture')\nbefore = (workspace/'src/parser.py').read_text()")
+    } else {
+        script
+    };
+    fs::write(agent, script).unwrap();
+    fs::write(
+        project.0.join("workloads/sample.workload.toml"),
+        "workload='bug-fix'\n[[trials]]\nid='one'\n[[trials]]\nid='two'\n[[trials]]\nid='three'\n",
+    )
+    .unwrap();
+    let order =
+        asb_cli::cassette::TrialOrder::new(&["one".into(), "two".into(), "three".into()], count, 7)
+            .unwrap();
+    let config = project.0.join("benchmark.toml");
+    let text = fs::read_to_string(&config)
+        .unwrap()
+        .replace("provider='fixture'", "provider='openrouter'");
+    let mut configs = Vec::new();
+    for (index, trial) in order.initial().iter().enumerate() {
+        let name = if index == 0 {
+            "benchmark.toml".to_owned()
+        } else {
+            format!("benchmark-{index}.toml")
+        };
+        fs::write(
+            project.0.join(&name),
+            format!("{text}\ntrial='{trial}'\ntrial_set='sample.workload.toml'\n"),
+        )
+        .unwrap();
+        configs.push(format!("'{name}'"));
+    }
+    let candidates = order
+        .candidates()
+        .iter()
+        .map(|id| format!("'{id}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    if mixed {
+        let fixed = text.replace("workload='bug-fix'", "workload='repository-navigation'");
+        fs::write(project.0.join("fixed.toml"), &fixed).unwrap();
+        fs::write(project.0.join("fixed-second.toml"), format!("{fixed}\n[measurements]\nenabled=false\ndirectory='other-measures'\ncollectors=[]\n")).unwrap();
+        fs::write(
+            project.0.join("workloads/repository-navigation.txt"),
+            "Find the requested file.",
+        )
+        .unwrap();
+        configs.push("'fixed.toml'".into());
+        configs.push("'fixed-second.toml'".into());
+    }
+    let configs = configs.join(",");
+    let manifest = if fixed_only {
+        format!("configs=[{configs}]\n")
+    } else {
+        format!(
+            "configs=[{configs}]\n[[sampled_trials]]\nworkload='bug-fix'\ncount={count}\nseed='0000000000000007'\ncandidates=[{candidates}]\n"
+        )
+    };
+    fs::write(project.0.join("sample-sweep.toml"), manifest).unwrap();
+    let sweep_dir = if normalize {
+        let nested = project.0.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::rename(
+            project.0.join("benchmark.toml"),
+            nested.join("benchmark.toml"),
+        )
+        .unwrap();
+        fs::rename(
+            project.0.join("sample-sweep.toml"),
+            nested.join("sample-sweep.toml"),
+        )
+        .unwrap();
+        nested
+    } else {
+        project.0.clone()
+    };
+    let sweep_arg = if normalize {
+        "nested/sample-sweep.toml"
+    } else {
+        "sample-sweep.toml"
+    };
+    let provider = RecordingProvider::new();
+    let run = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_asb"));
+        command.current_dir(&project.0).isolated_env();
+        retain_host_rust_toolchain(&mut command);
+        command
+            .env("HOME", &project.0)
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("ASB_WORKLOAD_DIR", "workloads")
+            .env("ASB_PROVIDER_BASE_URL", &provider.endpoint)
+            .env("OPENROUTER_API_KEY", "fixture-only-key")
+            .env("OPENROUTER_BASE_URL", format!("{}/v1", provider.endpoint))
+            .env(
+                "OPENROUTER_MODELS_URL",
+                format!("{}/models", provider.endpoint),
+            )
+            .args(["sweep", sweep_arg, "--prepare-replay"])
+            .output()
+            .unwrap()
+    };
+    let expected_count = count + usize::from(!fixed_only) + 2 * usize::from(mixed);
+    for expected_calls in [expected_count, expected_count] {
+        let result = run();
+        assert!(
+            result.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stdout)
+                .contains(&format!("Prepared {count} replayable trials")),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            expected_calls
+        );
+    }
+    let mut json_prepare = Command::new(env!("CARGO_BIN_EXE_asb"));
+    json_prepare.current_dir(&project.0).isolated_env();
+    retain_host_rust_toolchain(&mut json_prepare);
+    let json_output = json_prepare
+        .env("HOME", &project.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("ASB_WORKLOAD_DIR", "workloads")
+        .args(["sweep", sweep_arg, "--prepare-replay", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        json_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let events = records(&json_output.stdout);
+    assert_eq!(
+        events.last().unwrap()["type"],
+        "sample-preparation-complete"
+    );
+    assert_eq!(
+        provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+        expected_count
+    );
+    let ready: Value = serde_json::from_slice(
+        &fs::read(sweep_dir.join(".sample-sweep-sample-preparation/ready.json")).unwrap(),
+    )
+    .unwrap();
+    let winners = ready["winners"].as_array().unwrap();
+    assert_eq!(winners.len(), count + 2 * usize::from(mixed));
+    if normalize {
+        assert_eq!(
+            winners[0]["normalization_sha256"].as_str().unwrap().len(),
+            64
+        );
+    } else {
+        assert!(winners[0].get("normalization_sha256").is_none());
+    }
+    let actual_trials: Vec<_> = winners[..count]
+        .iter()
+        .map(|winner| winner["trial"].as_str().unwrap())
+        .collect();
+    let expected_trials: Vec<_> = order.candidates()
+        [usize::from(!fixed_only)..count + usize::from(!fixed_only)]
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(actual_trials, expected_trials);
+    assert_eq!(winners[0]["cassette_sha256"].as_str().unwrap().len(), 64);
+    let alias =
+        sweep_dir.join(".sample-sweep-sample-preparation/cassettes/000-replay/recording.asb.zip");
+    let mut archive =
+        asb_cli::cassette::Archive::open(&alias, asb_cli::cassette::Limits::default()).unwrap();
+    assert!(
+        archive
+            .manifest()
+            .compatibility
+            .normalization_sha256
+            .is_none()
+    );
+    if normalize {
+        let raw = archive.read_track(1).unwrap();
+        assert!(String::from_utf8_lossy(&raw).contains("seed=18"));
+        assert!(!String::from_utf8_lossy(&raw).contains("seed=<seed>"));
+    }
+    let length = fs::metadata(&alias).unwrap().len();
+    asb_cli::cassette::Archive::open_verified(
+        &alias,
+        length,
+        winners[0]["cassette_sha256"].as_str().unwrap(),
+        asb_cli::cassette::Limits::default(),
+    )
+    .unwrap();
+    let mut replay = Command::new(env!("CARGO_BIN_EXE_asb"));
+    replay.current_dir(&project.0).isolated_env();
+    retain_host_rust_toolchain(&mut replay);
+    let result = replay
+        .env("HOME", &project.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("ASB_WORKLOAD_DIR", "workloads")
+        .args(["sweep", sweep_arg, "--replay"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success()
+            || (mixed && String::from_utf8_lossy(&result.stderr).contains("2 failed benchmark")),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    if mixed {
+        assert!(
+            String::from_utf8_lossy(&result.stdout)
+                .contains("repository-navigation, trial default")
+        );
+        assert!(
+            project
+                .0
+                .join("results/sample-sweep-comparison/report.html")
+                .is_file()
+        );
+    }
+    assert_eq!(
+        provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+        expected_count
+    );
+    if normalize {
+        assert!(
+            sweep_dir
+                .join("results/sample-sweep-comparison/report.html")
+                .is_file()
+        );
+        let mut compare = Command::new(env!("CARGO_BIN_EXE_asb"));
+        compare
+            .current_dir(project.0.parent().unwrap())
+            .isolated_env();
+        retain_host_rust_toolchain(&mut compare);
+        let compared = compare
+            .env("HOME", &project.0)
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("ASB_WORKLOAD_DIR", "workloads")
+            .arg("--project-dir")
+            .arg(&project.0)
+            .arg("compare")
+            .arg(sweep_dir.join("sample-sweep.toml"))
+            .output()
+            .unwrap();
+        assert!(
+            compared.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compared.stderr)
+        );
+    }
+    if normalize {
+        let normalizer = project.0.join("normalizer.mjs");
+        let original = fs::read(&normalizer).unwrap();
+        fs::write(
+            &normalizer,
+            "export function normalizeToolResult({text}) { return text; }",
+        )
+        .unwrap();
+        let stale = run();
+        assert!(!stale.status.success());
+        assert!(
+            String::from_utf8_lossy(&stale.stderr).contains("normalization policy changed"),
+            "{}",
+            String::from_utf8_lossy(&stale.stderr)
+        );
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            expected_count
+        );
+        let attempts_before = fs::read(project.0.join("attempts.jsonl")).unwrap();
+        let mut stale_replay = Command::new(env!("CARGO_BIN_EXE_asb"));
+        stale_replay.current_dir(&project.0).isolated_env();
+        retain_host_rust_toolchain(&mut stale_replay);
+        let stale_replay = stale_replay
+            .env("HOME", &project.0)
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("ASB_WORKLOAD_DIR", "workloads")
+            .args(["sweep", sweep_arg, "--replay"])
+            .output()
+            .unwrap();
+        assert!(!stale_replay.status.success());
+        assert!(
+            String::from_utf8_lossy(&stale_replay.stderr).contains("normalization policy changed")
+        );
+        assert_eq!(
+            fs::read(project.0.join("attempts.jsonl")).unwrap(),
+            attempts_before
+        );
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            expected_count
+        );
+        fs::write(normalizer, original).unwrap();
+    }
+    let path = sweep_dir.join(".sample-sweep-sample-preparation/ready.json");
+    let original_ready = fs::read(&path).unwrap();
+    fs::write(&path, b"unrelated existing evidence").unwrap();
+    let rejected = run();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("selection differs"));
+    assert_eq!(fs::read(&path).unwrap(), b"unrelated existing evidence");
+    assert_eq!(
+        provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+        expected_count
+    );
+    fs::write(path, original_ready).unwrap();
+    drop(provider);
+    let mut offline = Command::new(env!("CARGO_BIN_EXE_asb"));
+    offline
+        .current_dir(project.0.parent().unwrap())
+        .isolated_env();
+    retain_host_rust_toolchain(&mut offline);
+    let result = offline
+        .env("HOME", &project.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("ASB_WORKLOAD_DIR", "workloads")
+        .arg("--project-dir")
+        .arg(&project.0)
+        .arg("sweep")
+        .arg(sweep_dir.join("sample-sweep.toml"))
+        .arg("--replay")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success()
+            || (mixed && String::from_utf8_lossy(&result.stderr).contains("2 failed benchmark")),
+        "offline replay: stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+fn sampled_candidate_fixture(mismatch: bool, retry: bool) {
+    let project = Project::new();
+    project.config(1);
+    if mismatch {
+        let agent = project.0.join("fixture-agent");
+        let script = fs::read_to_string(&agent).unwrap().replace(
+            "url = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
+            "if (root/'attempts.jsonl').exists(): body['messages'] = [{'role':'user','content':'different-on-replay'}]\nurl = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
+        );
+        fs::write(agent, script).unwrap();
+    }
+    let config = project.0.join("benchmark.toml");
+    let content = fs::read_to_string(&config)
+        .unwrap()
+        .replace("provider='fixture'", "provider='openrouter'");
+    fs::write(
+        project.0.join("workloads/sample.workload.toml"),
+        "workload='bug-fix'\n[[trials]]\nid='bug-fix'\n[[trials]]\nid='one'\n[[trials]]\nid='two'\n",
+    )
+    .unwrap();
+    fs::write(
+        &config,
+        format!("{content}\ntrial='bug-fix'\ntrial_set='sample.workload.toml'\n"),
+    )
+    .unwrap();
+    let provider = RecordingProvider::new();
+    let mut child = Command::new(std::env::current_exe().unwrap());
+    child.current_dir(&project.0).isolated_env();
+    if mismatch {
+        child.env("ASB_SAMPLED_MISMATCH", "1");
+    }
+    if retry {
+        child.env("ASB_SAMPLED_RETRY", "1");
+    }
+    retain_host_rust_toolchain(&mut child);
+    let result = child
+        .env("HOME", &project.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("ASB_SAMPLED_CANDIDATE_TEST_ROOT", &project.0)
+        .env("ASB_RUNTIME_EXECUTABLE", env!("CARGO_BIN_EXE_asb"))
+        .env("ASB_PROVIDER_BASE_URL", &provider.endpoint)
+        .env("OPENROUTER_API_KEY", "fixture-only-key")
+        .env("OPENROUTER_BASE_URL", format!("{}/v1", provider.endpoint))
+        .env(
+            "OPENROUTER_MODELS_URL",
+            format!("{}/models", provider.endpoint),
+        )
+        .args(["--exact", "sampled_candidate_child", "--nocapture"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+        if retry { 2 } else { 1 }
+    );
+}
+
 fn record(project: &Project, provider: &RecordingProvider, repeat: Option<&str>) -> Output {
     record_to(project, provider, repeat, Some("new-recording.jsonl"))
 }
@@ -586,6 +1135,460 @@ fn workload_output_mentioning_provider_error_does_not_fail_successful_agent() {
 }
 
 #[test]
+fn replay_can_ignore_mcp_argument_divergence_with_offline_evidence() {
+    let project = sweep_tests::registered_project(1);
+    let original = project.0.join("tools/pi/bin/pi");
+    let executable = project.0.join("tools/codex/bin/codex");
+    fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    let script = fs::read_to_string(&original).unwrap().replace(
+        "body = {'model':'fixture'",
+        "import subprocess,tomllib\ncfg=tomllib.loads((pathlib.Path(os.environ['CODEX_HOME'])/'config.toml').read_text())\nserver=cfg['mcp_servers']['fixture']\nrequest={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'other' if (root/'other-mcp').exists() else 'fixture','arguments':{'value':'changed' if (root/'change-mcp').exists() else 'original'}}}\nif not (root/'skip-mcp-launch').exists():\n    relay=subprocess.run([server['command'],*server['args']],input='' if (root/'skip-mcp').exists() else json.dumps(request)+'\\n',text=True,capture_output=True,check=True)\n    assert not relay.stdout if (root/'skip-mcp').exists() else 'result' in json.loads(relay.stdout), relay.stdout+' '+relay.stderr\nbody = {'model':'fixture'",
+    );
+    fixture_writer::write_file(&project.0, &executable, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let server = project.0.join("mcp-server");
+    let sentinel = project.0.join("mcp-server-starts");
+    let server_script = format!(
+        "#!/usr/bin/env python3\nimport json,sys,pathlib\np=pathlib.Path({}); p.write_text(str(int(p.read_text())+1) if p.exists() else '1')\nfor line in sys.stdin:\n m=json.loads(line); print(json.dumps({{'jsonrpc':'2.0','id':m['id'],'result':{{'ok':True}}}}),flush=True)\n",
+        serde_json::to_string(sentinel.to_str().unwrap()).unwrap()
+    );
+    fixture_writer::write_file(&project.0, &server, server_script).unwrap();
+    fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
+    let config_path = project.0.join("benchmark.toml");
+    let mut config = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("agent='pi'", "agent='codex'");
+    config.push_str(&format!(
+        "\n[[mcp_servers]]\nid='fixture'\nprogram={}\n",
+        serde_json::to_string(server.to_str().unwrap()).unwrap()
+    ));
+    fs::write(config_path, config).unwrap();
+    let provider = RecordingProvider::new();
+    let record = Command::new(env!("CARGO_BIN_EXE_asb"))
+        .current_dir(&project.0)
+        .isolated_env()
+        .env("HOME", &project.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("ASB_PROVIDER_BASE_URL", &provider.endpoint)
+        .env("OPENROUTER_API_KEY", "fixture-only-key")
+        .env("OPENROUTER_BASE_URL", format!("{}/v1", provider.endpoint))
+        .env(
+            "OPENROUTER_MODELS_URL",
+            format!("{}/models", provider.endpoint),
+        )
+        .args([
+            "run",
+            "benchmark.toml",
+            "--record",
+            "--mcp-record",
+            "--cassette",
+            "mcp.zip",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        record.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&record.stdout),
+        String::from_utf8_lossy(&record.stderr)
+    );
+    drop(provider);
+    let cassette_bytes = fs::read(project.0.join("mcp.zip")).unwrap();
+    fs::write(project.0.join("change-mcp"), "1").unwrap();
+    let strict = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &["--mcp-replay"],
+        true,
+        "--replay",
+    );
+    assert!(!strict.status.success());
+    let ignored = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &["--ignore-mcp-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(
+        ignored.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&ignored.stdout),
+        String::from_utf8_lossy(&ignored.stderr)
+    );
+    let rows = records(&ignored.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["approximate_replay"] == true)
+        .unwrap();
+    assert!(
+        row["ignored_failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|failure| failure["kind"] == "mcp_mismatch" && failure["ignored"] == true)
+    );
+    let human = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &["--ignore-mcp-mismatch"],
+        false,
+        "--replay",
+    );
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(String::from_utf8_lossy(&human.stdout).contains("Warning: ignored mcp_mismatch"));
+    let combined = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &["--ignore-mcp-mismatch", "--ignore-tool-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(
+        combined.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&combined.stdout),
+        String::from_utf8_lossy(&combined.stderr)
+    );
+    assert!(
+        records(&combined.stdout)
+            .iter()
+            .any(|row| row["approximate_replay"] == true && row["ignored_failures"].is_array())
+    );
+    fs::write(project.0.join("new-recording.jsonl"), &cassette_bytes).unwrap();
+    rewrite_bundle(&project, |manifest, _| {
+        manifest.compatibility.model = "another-model".into()
+    });
+    let combined_compatibility = replay_using_mode(
+        &project,
+        Some("new-recording.jsonl"),
+        &["--ignore-mcp-mismatch", "--ignore-compatibility"],
+        true,
+        "--replay",
+    );
+    assert!(
+        combined_compatibility.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&combined_compatibility.stdout),
+        String::from_utf8_lossy(&combined_compatibility.stderr)
+    );
+    let rows = records(&combined_compatibility.stdout);
+    let row = rows.iter().find(|row| row.get("task").is_some()).unwrap();
+    assert_eq!(row["approximate_replay"], true);
+    let failures = row["ignored_failures"].as_array().unwrap();
+    assert!(
+        failures
+            .iter()
+            .any(|event| event["kind"] == "replay_compatibility" && event["ignored"] == true)
+    );
+    assert!(
+        failures
+            .iter()
+            .any(|event| event["kind"] == "mcp_mismatch" && event["ignored"] == true)
+    );
+    fs::write(project.0.join("other-mcp"), "1").unwrap();
+    let different = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &["--ignore-mcp-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(!different.status.success());
+    fs::write(project.0.join("skip-mcp"), "1").unwrap();
+    let skipped = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &["--ignore-mcp-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(
+        skipped.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&skipped.stdout),
+        String::from_utf8_lossy(&skipped.stderr)
+    );
+    let rows = records(&skipped.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["ignored_failures"].is_array())
+        .unwrap();
+    assert!(
+        row["ignored_failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|failure| failure["kind"] == "mcp_mismatch"
+                && failure["reason"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("unconsumed"))
+    );
+    fs::write(project.0.join("skip-mcp-launch"), "1").unwrap();
+    let unlaunched = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &["--ignore-mcp-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(
+        !unlaunched.status.success(),
+        "missing server receipt must not become success"
+    );
+    fs::remove_file(project.0.join("skip-mcp-launch")).unwrap();
+    fs::remove_file(project.0.join("skip-mcp")).unwrap();
+    fs::remove_file(project.0.join("other-mcp")).unwrap();
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("mcp.zip"),
+        input.join("benchmark-codex-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    let options = [
+        "--replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-mcp-mismatch",
+    ];
+    let sweep = sweep_tests::sweep(&project, None, &options);
+    assert!(
+        sweep.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&sweep.stdout),
+        String::from_utf8_lossy(&sweep.stderr)
+    );
+    assert!(
+        records(&sweep.stdout)
+            .iter()
+            .any(|row| row["approximate_replay"] == true && row["ignored_failures"].is_array())
+    );
+    let plan: Value =
+        serde_json::from_slice(&fs::read(project.0.join("sweep-results/plan.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan["ignore_mcp_mismatch"], true);
+    let mut resume = options.to_vec();
+    resume.push("--resume");
+    let resumed = sweep_tests::sweep(&project, None, &resume);
+    assert!(
+        resumed.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(
+        records(&resumed.stdout)
+            .iter()
+            .any(|row| row["reused"] == true && row["approximate_replay"] == true)
+    );
+    let changed_provider = fs::read_to_string(&executable)
+        .unwrap()
+        .replace("'model':'fixture'", "'model':'changed-fixture'");
+    fixture_writer::write_file(&project.0, &executable, changed_provider).unwrap();
+    let all = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &[
+            "--ignore-mcp-mismatch",
+            "--ignore-tool-mismatch",
+            "--ignore-provider-mismatch",
+        ],
+        true,
+        "--replay",
+    );
+    assert!(
+        all.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&all.stdout),
+        String::from_utf8_lossy(&all.stderr)
+    );
+    let rows = records(&all.stdout);
+    let failures = rows
+        .iter()
+        .find_map(|row| row["ignored_failures"].as_array())
+        .unwrap();
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure["kind"] == "mcp_mismatch")
+    );
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure["kind"] == "provider_mismatch")
+    );
+    assert_eq!(fs::read(project.0.join("mcp.zip")).unwrap(), cassette_bytes);
+    assert_eq!(
+        fs::read_to_string(sentinel).unwrap(),
+        "1",
+        "replay must not launch the real MCP server"
+    );
+}
+
+#[test]
+fn replay_can_explicitly_ignore_same_tool_argument_divergence_with_evidence() {
+    let project = sweep_tests::registered_project(1);
+    let executable = project.0.join("tools/pi/bin/pi");
+    let script = fs::read_to_string(&executable).unwrap().replace(
+        "body = {'model':'fixture'",
+        "import subprocess\nspec=json.loads(os.environ['ASB_PI_LOCAL_TOOL_REPLAY'])\nrequest={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'read_file' if (root/'other-tool').exists() else 'write_file','arguments':{'path':'changed.txt' if (root/'change-tool').exists() else 'recorded.txt','content':'original'}}}\nif not (root/'skip-tool').exists():\n    tool=subprocess.run([spec['program'],*spec['args']],input=json.dumps(request)+'\\n',text=True,capture_output=True,check=True)\n    assert 'result' in json.loads(tool.stdout), tool.stdout+' '+tool.stderr\nbody = {'model':'fixture'",
+    );
+    fixture_writer::write_file(&project.0, &executable, script).unwrap();
+    let provider = RecordingProvider::new();
+    let record = record_to_with_mode(&project, &provider, None, Some("tool.zip"), "--record");
+    assert!(
+        record.status.success(),
+        "{}",
+        String::from_utf8_lossy(&record.stderr)
+    );
+    drop(provider);
+    fs::write(project.0.join("change-tool"), "1").unwrap();
+    let strict = replay_using_mode(&project, Some("tool.zip"), &[], true, "--replay");
+    assert!(!strict.status.success());
+    let ignored = replay_using_mode(
+        &project,
+        Some("tool.zip"),
+        &["--ignore-tool-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(
+        ignored.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&ignored.stdout),
+        String::from_utf8_lossy(&ignored.stderr)
+    );
+    let rows = records(&ignored.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["ignored_failures"].is_array())
+        .unwrap();
+    assert_eq!(row["approximate_replay"], true);
+    assert!(
+        row["ignored_failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|failure| failure["kind"] == "tool_mismatch"
+                && failure["ignored"] == true
+                && failure["severity"] == "warning")
+    );
+    let human = replay_using_mode(
+        &project,
+        Some("tool.zip"),
+        &["--ignore-tool-mismatch"],
+        false,
+        "--replay",
+    );
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(String::from_utf8_lossy(&human.stdout).contains("Warning: ignored tool_mismatch"));
+    fs::write(project.0.join("other-tool"), "1").unwrap();
+    let different_tool = replay_using_mode(
+        &project,
+        Some("tool.zip"),
+        &["--ignore-tool-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(
+        !different_tool.status.success(),
+        "a different tool has no safe recorded response"
+    );
+    fs::write(project.0.join("skip-tool"), "1").unwrap();
+    let skipped = replay_using_mode(
+        &project,
+        Some("tool.zip"),
+        &["--ignore-tool-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(
+        skipped.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&skipped.stdout),
+        String::from_utf8_lossy(&skipped.stderr)
+    );
+    let rows = records(&skipped.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["ignored_failures"].is_array())
+        .unwrap();
+    assert_eq!(row["approximate_replay"], true);
+    assert!(
+        row["ignored_failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|failure| failure["kind"] == "tool_mismatch"
+                && failure["reason"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("unconsumed"))
+    );
+    fs::remove_file(project.0.join("skip-tool")).unwrap();
+    fs::remove_file(project.0.join("other-tool")).unwrap();
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("tool.zip"),
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    let options = [
+        "--replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-tool-mismatch",
+    ];
+    let sweep = sweep_tests::sweep(&project, None, &options);
+    assert!(
+        sweep.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&sweep.stdout),
+        String::from_utf8_lossy(&sweep.stderr)
+    );
+    assert!(
+        records(&sweep.stdout)
+            .iter()
+            .any(|row| row["approximate_replay"] == true && row["ignored_failures"].is_array())
+    );
+    let plan: Value =
+        serde_json::from_slice(&fs::read(project.0.join("sweep-results/plan.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan["ignore_tool_mismatch"], true);
+    let mut resume = options.to_vec();
+    resume.push("--resume");
+    let resumed = sweep_tests::sweep(&project, None, &resume);
+    assert!(
+        resumed.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(
+        records(&resumed.stdout)
+            .iter()
+            .any(|row| row["reused"] == true && row["approximate_replay"] == true)
+    );
+}
+
+#[test]
 fn llm_only_record_and_replay_do_not_require_tool_capture() {
     let project = Project::new();
     project.config(1);
@@ -611,6 +1614,223 @@ fn llm_only_record_and_replay_do_not_require_tool_capture() {
         "stdout={} stderr={}",
         String::from_utf8_lossy(&replayed.stdout),
         String::from_utf8_lossy(&replayed.stderr)
+    );
+}
+
+#[test]
+fn recording_does_not_load_or_freeze_replay_normalizer_sources() {
+    let project = sweep_tests::registered_project(1);
+    let path = project.0.join(".asb/project.toml");
+    let mut config = fs::read_to_string(&path).unwrap();
+    config.push_str("\n[[replay.normalizers]]\nid='missing-until-replay'\nmodule='not-installed.mjs'\nworkloads=['bug-fix']\n");
+    fs::write(path, config).unwrap();
+    let provider = RecordingProvider::new();
+    let output = record_to_with_mode(&project, &provider, None, Some("raw.zip"), "--llm-record");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let archive = asb_cli::cassette::Archive::open(
+        &project.0.join("raw.zip"),
+        asb_cli::cassette::Limits::default(),
+    )
+    .unwrap();
+    assert!(
+        archive
+            .manifest()
+            .compatibility
+            .normalization_sha256
+            .is_none()
+    );
+}
+
+#[test]
+fn changed_policy_rejects_legacy_normalized_track_before_agent_launch() {
+    let project = sweep_tests::registered_project(1);
+    let provider = RecordingProvider::new();
+    let recorded = record_to_with_mode(
+        &project,
+        &provider,
+        None,
+        Some("new-recording.jsonl"),
+        "--llm-record",
+    );
+    assert!(
+        recorded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    drop(provider);
+    rewrite_bundle(&project, |manifest, payloads| {
+        for track in &mut manifest.tracks {
+            let payload = payloads.get_mut(&track.id).unwrap();
+            let rows = std::str::from_utf8(payload)
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let mut row: Value = serde_json::from_str(line).unwrap();
+                    row["asb_request_policy"] = json!(2);
+                    format!("{row}\n")
+                })
+                .collect::<String>();
+            *payload = rows.into_bytes();
+            track.bytes = payload.len() as u64;
+            track.sha256 = asb_cli::cassette::digest(payload);
+        }
+    });
+    fs::write(
+        project.0.join("normalizer.mjs"),
+        "export function normalizeToolResult({text}) { return text; }",
+    )
+    .unwrap();
+    let path = project.0.join(".asb/project.toml");
+    let mut config = fs::read_to_string(&path).unwrap();
+    config.push_str(
+        "\n[[replay.normalizers]]\nid='later'\nmodule='normalizer.mjs'\nworkloads=['bug-fix']\n",
+    );
+    fs::write(path, config).unwrap();
+    let attempts_before = fs::read(project.0.join("attempts.jsonl")).unwrap();
+    let replayed = replay_using_mode(
+        &project,
+        Some("new-recording.jsonl"),
+        &[],
+        true,
+        "--llm-replay",
+    );
+    assert!(!replayed.status.success());
+    assert!(
+        String::from_utf8_lossy(&replayed.stderr).contains("does not contain raw requests"),
+        "{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    assert_eq!(
+        fs::read(project.0.join("attempts.jsonl")).unwrap(),
+        attempts_before
+    );
+    let with_override = replay_using_mode(
+        &project,
+        Some("new-recording.jsonl"),
+        &["--ignore-compatibility"],
+        true,
+        "--llm-replay",
+    );
+    assert!(!with_override.status.success());
+    assert!(
+        String::from_utf8_lossy(&with_override.stderr).contains("does not contain raw requests")
+    );
+    assert_eq!(
+        fs::read(project.0.join("attempts.jsonl")).unwrap(),
+        attempts_before
+    );
+}
+
+#[test]
+fn normalizer_added_after_raw_recording_enables_offline_replay() {
+    let project = sweep_tests::registered_project(1);
+    let executable = project.0.join("tools/pi/bin/pi");
+    let agent = fs::read_to_string(&executable).unwrap().replace(
+        "'messages':[]}",
+        "'messages':[{'role':'tool','content':f'seed={replica}'}]}",
+    );
+    fixture_writer::write_file(&project.0, &executable, agent).unwrap();
+    let provider = RecordingProvider::new();
+    let recorded = record_to_with_mode(&project, &provider, None, Some("raw.zip"), "--llm-record");
+    assert!(
+        recorded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    drop(provider);
+    fs::write(project.0.join("normalizer.mjs"), "export function normalizeToolResult({text}) { return text.replace(/seed=\\d+/, 'seed=<seed>'); }").unwrap();
+    let path = project.0.join(".asb/project.toml");
+    let mut config = fs::read_to_string(&path).unwrap();
+    config.push_str("\n[[replay.normalizers]]\nid='added-after-recording'\nmodule='normalizer.mjs'\nworkloads=['bug-fix']\n");
+    fs::write(path, config).unwrap();
+    let mut archive = asb_cli::cassette::Archive::open(
+        &project.0.join("raw.zip"),
+        asb_cli::cassette::Limits::default(),
+    )
+    .unwrap();
+    let track_id = archive.manifest().tracks[0].id;
+    let raw_track = archive.read_track(track_id).unwrap();
+    fs::write(project.0.join("raw-track.jsonl"), &raw_track).unwrap();
+    let legacy_replay =
+        replay_using_mode(&project, Some("raw-track.jsonl"), &[], true, "--llm-replay");
+    assert!(
+        legacy_replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&legacy_replay.stderr)
+    );
+    let old_track = std::str::from_utf8(&raw_track)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut row: Value = serde_json::from_str(line).unwrap();
+            row["asb_request_policy"] = json!(2);
+            format!("{row}\n")
+        })
+        .collect::<String>();
+    fs::write(project.0.join("old-track.jsonl"), old_track).unwrap();
+    let old_replay =
+        replay_using_mode(&project, Some("old-track.jsonl"), &[], true, "--llm-replay");
+    assert!(!old_replay.status.success());
+    assert!(String::from_utf8_lossy(&old_replay.stderr).contains("does not contain raw requests"));
+    let benchmark = project.0.join("benchmark.toml");
+    fs::write(
+        &benchmark,
+        fs::read_to_string(&benchmark)
+            .unwrap()
+            .replace("concurrency=1", "concurrency=4"),
+    )
+    .unwrap();
+    fs::write(project.0.join("expected-concurrency"), "4").unwrap();
+    let replayed = replay_using_mode(&project, Some("raw.zip"), &[], true, "--llm-replay");
+    assert!(
+        replayed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    let with_override = replay_using_mode(
+        &project,
+        Some("raw.zip"),
+        &["--ignore-compatibility"],
+        true,
+        "--llm-replay",
+    );
+    assert!(
+        with_override.status.success(),
+        "{}",
+        String::from_utf8_lossy(&with_override.stderr)
+    );
+    assert_eq!(
+        records(&replayed.stdout)
+            .iter()
+            .filter(|row| row["execution"]["replica"].is_u64())
+            .count(),
+        4
+    );
+    let path = project.0.join(".asb/project.toml");
+    let enabled = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        enabled.replace(
+            "id='added-after-recording'",
+            "id='added-after-recording'\nenabled=false",
+        ),
+    )
+    .unwrap();
+    let disabled = replay_using_mode(&project, Some("raw.zip"), &[], true, "--llm-replay");
+    assert!(
+        !disabled.status.success(),
+        "different seed values must not match when the profile is disabled"
+    );
+    fs::write(&path, enabled).unwrap();
+    let reenabled = replay_using_mode(&project, Some("raw.zip"), &[], true, "--llm-replay");
+    assert!(
+        reenabled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reenabled.stderr)
     );
 }
 
@@ -649,16 +1869,14 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
         asb_cli::cassette::Limits::default(),
     )
     .unwrap();
-    let policy_digest = archive
-        .manifest()
-        .compatibility
-        .normalization_sha256
-        .clone()
-        .expect("policy identity recorded");
-    let artifact: Value =
-        serde_json::from_slice(&archive.read_artifact(1, "normalization-policy").unwrap()).unwrap();
-    assert_eq!(artifact["policy"]["sha256"], policy_digest);
-    assert_eq!(artifact["profiles"][0]["source"], module);
+    assert!(
+        archive
+            .manifest()
+            .compatibility
+            .normalization_sha256
+            .is_none()
+    );
+    assert!(archive.read_artifact(1, "normalization-policy").is_err());
     drop(provider);
     let benchmark = project.0.join("benchmark.toml");
     fs::write(
@@ -683,6 +1901,10 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
     assert_eq!(summaries.len(), 4, "every replica must complete");
     let plan_path = campaign_plan(&replayed);
     let plan: Value = serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
+    let policy_digest = plan["normalization_policy"]["sha256"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert_eq!(plan["normalization_policy"]["sha256"], policy_digest);
     let completion_dir = plan_path.parent().unwrap().join("batch-1/.asb-completions");
     let completions = fs::read_dir(completion_dir)
@@ -703,7 +1925,8 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
             .expect("normalizer observations must be bound into completion evidence");
         let evidence: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(evidence["policy_sha256"], policy_digest);
-        assert_eq!(evidence["profiles"][0]["changed"], 1);
+        // Replay normalizes both the recorded and current request once.
+        assert_eq!(evidence["profiles"][0]["changed"], 2);
         evidence_paths.push(PathBuf::from(path));
     }
     let compared = compare_campaign(&project, &plan_path);
@@ -733,7 +1956,7 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
         );
         assert_eq!(
             row["normalization_observation"]["profiles"][0]["changed"],
-            1
+            2
         );
     }
     assert!(
@@ -756,18 +1979,13 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
     .unwrap();
     let changed = replay_using_mode(&project, Some("policy.zip"), &[], true, "--llm-replay");
     assert!(
-        !changed.status.success(),
-        "changed source cannot replay an existing policy"
-    );
-    assert!(
-        String::from_utf8_lossy(&changed.stderr).contains("normalizer policy differs"),
-        "{}",
+        changed.status.success(),
+        "raw cassette should allow a new replay policy: {}",
         String::from_utf8_lossy(&changed.stderr)
     );
-    assert_eq!(
+    assert_ne!(
         fs::read(project.0.join("attempts.jsonl")).unwrap(),
-        attempts_before,
-        "rejected policy must not launch an agent"
+        attempts_before
     );
 }
 
@@ -1001,6 +2219,169 @@ fn bundled_replay_rejects_each_compatibility_difference_before_client_launch() {
     assert_eq!(
         fs::read_to_string(project.0.join("workspace/preserve-user-file")).unwrap(),
         "untouched user material"
+    );
+}
+
+#[test]
+fn replay_can_explicitly_ignore_recorded_compatibility_but_never_integrity() {
+    let project = Project::new();
+    project.config(1);
+    let provider = RecordingProvider::new();
+    assert!(record(&project, &provider, None).status.success());
+    drop(provider);
+    let identical = replay_bundle(&project, &["--ignore-compatibility"]);
+    assert!(
+        identical.status.success(),
+        "{}",
+        String::from_utf8_lossy(&identical.stderr)
+    );
+    assert!(
+        !records(&identical.stdout)
+            .iter()
+            .any(|event| event["type"] == "replay-compatibility-warning"
+                || event["ignored_failures"].is_array())
+    );
+    rewrite_bundle(&project, |manifest, _| {
+        manifest.compatibility.model = "different-model".into();
+        manifest.compatibility.prompt_sha256 = "e".repeat(64);
+    });
+    let strict = replay_bundle(&project, &[]);
+    assert!(!strict.status.success());
+    let output = replay_bundle(&project, &["--ignore-compatibility", "--repeat", "2"]);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = records(&output.stdout);
+    let events: Vec<_> = rows
+        .iter()
+        .filter(|v| v["type"] == "replay-compatibility-warning")
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| {
+        event["ignored"] == true
+            && event["reason"]
+                .as_str()
+                .unwrap()
+                .contains("model, prompt_sha256")
+    }));
+    let runs: Vec<_> = rows.iter().filter(|v| v.get("task").is_some()).collect();
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().all(
+        |row| row["ignored_failures"][0]["kind"] == "replay_compatibility"
+            && row["ignored_failures"][0]["ignored"] == true
+    ));
+    let plan_path = rows
+        .iter()
+        .find(|row| row["type"] == "execution-plan")
+        .unwrap()["path"]
+        .as_str()
+        .unwrap();
+    let plan: Value = serde_json::from_slice(&fs::read(plan_path).unwrap()).unwrap();
+    assert_eq!(plan["ignore_compatibility"], true);
+    assert_eq!(plan["replay_compatibility"]["model"], "different-model");
+    let human = replay_with_format(
+        &project,
+        Some("new-recording.jsonl"),
+        &["--ignore-compatibility"],
+        false,
+    );
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("Warning: ignored replay compatibility:")
+    );
+    let invalid = Command::new(env!("CARGO_BIN_EXE_asb"))
+        .current_dir(&project.0)
+        .args(["run", "benchmark.toml", "--ignore-compatibility"])
+        .output()
+        .unwrap();
+    assert!(!invalid.status.success());
+    let original_bundle = fs::read(project.0.join("new-recording.jsonl")).unwrap();
+    rewrite_bundle(&project, |manifest, _| {
+        manifest.compatibility.normalization_sha256 = Some("a".repeat(64));
+    });
+    let changed_policy = replay_bundle(&project, &["--ignore-compatibility"]);
+    assert!(
+        changed_policy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&changed_policy.stderr)
+    );
+    fs::write(project.0.join("new-recording.jsonl"), &original_bundle).unwrap();
+    rewrite_bundle(&project, |manifest, payloads| {
+        let payload = payloads.get_mut(&1).unwrap();
+        let mut row: Value =
+            serde_json::from_slice(payload.split(|b| *b == b'\n').next().unwrap()).unwrap();
+        row["request"]["method"] = json!("PATCH");
+        *payload = format!("{row}\n").into_bytes();
+        manifest.tracks[0].bytes = payload.len() as u64;
+        manifest.tracks[0].sha256 = asb_cli::cassette::digest(payload);
+    });
+    let divergence = replay_bundle(&project, &["--ignore-compatibility"]);
+    assert!(!divergence.status.success());
+    assert!(
+        records(&divergence.stdout).iter().any(|event| event["type"]
+            == "replay-compatibility-warning"
+            && event["ignored"] == true)
+    );
+    assert!(
+        records(&divergence.stdout)
+            .iter()
+            .any(|event| event["ignored_failures"][0]["kind"] == "replay_compatibility")
+    );
+    let divergence_plan = campaign_plan(&divergence);
+    let durable: Value = serde_json::from_slice(
+        &fs::read(
+            divergence_plan
+                .parent()
+                .unwrap()
+                .join("batch-1/compatibility-warning-1.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(durable["kind"], "replay_compatibility");
+    assert_eq!(durable["ignored"], true);
+    let both = replay_bundle(
+        &project,
+        &["--ignore-compatibility", "--ignore-provider-mismatch"],
+    );
+    assert!(
+        both.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&both.stdout),
+        String::from_utf8_lossy(&both.stderr)
+    );
+    let combined = records(&both.stdout)
+        .into_iter()
+        .find(|event| event.get("task").is_some())
+        .unwrap();
+    assert_eq!(combined["approximate_replay"], true);
+    let ignored = combined["ignored_failures"].as_array().unwrap();
+    assert!(
+        ignored
+            .iter()
+            .any(|event| event["kind"] == "replay_compatibility" && event["ignored"] == true)
+    );
+    assert!(
+        ignored
+            .iter()
+            .any(|event| event["kind"] == "provider_mismatch" && event["ignored"] == true)
+    );
+    let attempts = fs::read(project.0.join("attempts.jsonl")).unwrap();
+    rewrite_bundle(&project, |_, payloads| {
+        payloads.get_mut(&1).unwrap()[0] ^= 1
+    });
+    let corrupted = replay_bundle(&project, &["--ignore-compatibility"]);
+    assert!(!corrupted.status.success());
+    assert_eq!(
+        fs::read(project.0.join("attempts.jsonl")).unwrap(),
+        attempts
     );
 }
 

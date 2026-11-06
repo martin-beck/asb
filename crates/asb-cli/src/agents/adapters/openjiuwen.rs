@@ -626,6 +626,7 @@ for (const request of invalid) {
         let frozen = owner.freeze();
         assert!(!frozen.error);
         let artifacts = super::collect(&CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &frozen,
             provider_capture: None,
             run_dir: &run,

@@ -19,12 +19,17 @@ pub(crate) enum RunStatus {
 pub(crate) enum FailureKind {
     RunError,
     AgentFailure,
+    ProviderMismatch,
+    ProviderUnconsumed,
+    ToolMismatch,
+    McpMismatch,
     WorkloadCheckFailed,
     GraderError,
     CollectorError,
     OutputError,
     ProviderCleanupError,
     RecordingError,
+    ReplayCompatibility,
 }
 
 impl FailureKind {
@@ -32,27 +37,45 @@ impl FailureKind {
         match self {
             Self::RunError => "run_error",
             Self::AgentFailure => "agent_failure",
+            Self::ProviderMismatch => "provider_mismatch",
+            Self::ProviderUnconsumed => "provider_unconsumed",
+            Self::ToolMismatch => "tool_mismatch",
+            Self::McpMismatch => "mcp_mismatch",
             Self::WorkloadCheckFailed => "workload_check_failed",
             Self::GraderError => "grader_error",
             Self::CollectorError => "collector_error",
             Self::OutputError => "output_error",
             Self::ProviderCleanupError => "provider_cleanup_error",
             Self::RecordingError => "recording_error",
+            Self::ReplayCompatibility => "replay_compatibility",
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct RunFailure {
     pub kind: FailureKind,
     pub reason: String,
+    pub ignored: bool,
+    pub severity: &'static str,
 }
 
 impl RunFailure {
-    fn new(kind: FailureKind, reason: impl Into<String>) -> Self {
+    pub(crate) fn new(kind: FailureKind, reason: impl Into<String>) -> Self {
         Self {
             kind,
             reason: reason.into(),
+            ignored: false,
+            severity: "error",
+        }
+    }
+
+    pub(super) fn ignored(kind: FailureKind, reason: impl Into<String>) -> Self {
+        Self {
+            kind,
+            reason: reason.into(),
+            ignored: true,
+            severity: "warning",
         }
     }
 
@@ -80,6 +103,9 @@ impl RunFailure {
 
 pub(super) struct RunFacts<'a> {
     pub evaluation: &'a EvaluationOutcome,
+    pub ignore_evaluation: bool,
+    pub ignore_agent: bool,
+    pub ignore_collector: bool,
     pub evaluation_kind: crate::workloads::KnownEvaluationKind,
     pub process_success: bool,
     pub agent_failure: Option<&'a str>,
@@ -102,6 +128,7 @@ pub(super) struct RunFacts<'a> {
 pub(super) struct RunDisposition {
     pub status: RunStatus,
     pub failure: Option<RunFailure>,
+    pub ignored_failures: Vec<RunFailure>,
     pub success: bool,
 }
 
@@ -130,48 +157,73 @@ impl RunDisposition {
                     ..
                 }
             );
-        let failure = facts
-            .run_error
-            .map(|reason| RunFailure::new(FailureKind::RunError, reason))
-            .or_else(|| {
-                (!facts.workload_cleanup_confirmed || !facts.proxy_cleanup_confirmed).then(|| {
-                    RunFailure::new(
-                        FailureKind::RunError,
-                        "owned-resource cleanup not confirmed",
-                    )
-                })
-            })
-            .or_else(|| {
-                (!evaluator_authoritative_despite_capture)
-                    .then_some(())
-                    .and_then(|()| {
-                        facts
-                            .agent_failure
-                            .map(|reason| RunFailure::new(FailureKind::AgentFailure, reason))
-                    })
-            })
-            .or_else(|| {
-                (!evaluator_authoritative_despite_capture && !facts.process_success).then(|| {
-                    RunFailure::new(FailureKind::AgentFailure, "agent execution did not succeed")
-                })
-            })
-            .or_else(|| RunFailure::evaluation(facts.evaluation))
-            .or_else(|| {
+        let mut ignored_failures = Vec::new();
+        let mut failures = Vec::new();
+        let mut consider = |failure: Option<RunFailure>, ignored: bool| {
+            if let Some(mut failure) = failure {
+                if ignored {
+                    failure.ignored = true;
+                    failure.severity = "warning";
+                    ignored_failures.push(failure);
+                } else {
+                    failures.push(failure);
+                }
+            }
+        };
+        consider(
+            facts
+                .run_error
+                .map(|reason| RunFailure::new(FailureKind::RunError, reason)),
+            false,
+        );
+        consider(
+            (!facts.workload_cleanup_confirmed || !facts.proxy_cleanup_confirmed).then(|| {
+                RunFailure::new(
+                    FailureKind::RunError,
+                    "owned-resource cleanup not confirmed",
+                )
+            }),
+            false,
+        );
+        if !evaluator_authoritative_despite_capture {
+            consider(
                 facts
-                    .collector_error
-                    .map(|reason| RunFailure::new(FailureKind::CollectorError, reason))
-            })
-            .or_else(|| {
-                facts
-                    .output_error
-                    .map(|reason| RunFailure::new(FailureKind::OutputError, reason))
-            })
-            .or_else(|| {
-                facts
-                    .provider_cleanup_error
-                    .map(|reason| RunFailure::new(FailureKind::ProviderCleanupError, reason))
-            });
-        let success = failure.is_none() && facts.evaluation.completed();
+                    .agent_failure
+                    .map(|reason| RunFailure::new(FailureKind::AgentFailure, reason))
+                    .or_else(|| {
+                        (!facts.process_success).then(|| {
+                            RunFailure::new(
+                                FailureKind::AgentFailure,
+                                "agent execution did not succeed",
+                            )
+                        })
+                    }),
+                facts.ignore_agent,
+            );
+        }
+        let evaluation_failure = RunFailure::evaluation(facts.evaluation);
+        let ignored_evaluation = facts.ignore_evaluation && evaluation_failure.is_some();
+        consider(evaluation_failure, facts.ignore_evaluation);
+        consider(
+            facts
+                .collector_error
+                .map(|reason| RunFailure::new(FailureKind::CollectorError, reason)),
+            facts.ignore_collector,
+        );
+        consider(
+            facts
+                .output_error
+                .map(|reason| RunFailure::new(FailureKind::OutputError, reason)),
+            false,
+        );
+        consider(
+            facts
+                .provider_cleanup_error
+                .map(|reason| RunFailure::new(FailureKind::ProviderCleanupError, reason)),
+            false,
+        );
+        let failure = failures.into_iter().next();
+        let success = failure.is_none() && (facts.evaluation.completed() || ignored_evaluation);
         let status = if failure.is_some() {
             RunStatus::Failed
         } else if matches!(facts.evaluation, EvaluationOutcome::Pending { .. }) {
@@ -190,6 +242,7 @@ impl RunDisposition {
         Self {
             status,
             failure,
+            ignored_failures,
             success,
         }
     }
@@ -200,7 +253,10 @@ impl RunDisposition {
 // success_rate and measurement success remain independently grade-derived.
 impl Serialize for RunDisposition {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut record = serializer.serialize_struct("RunDisposition", 3)?;
+        let mut record = serializer.serialize_struct("RunDisposition", 4)?;
+        if !self.ignored_failures.is_empty() {
+            record.serialize_field("ignored_failures", &self.ignored_failures)?;
+        }
         record.serialize_field("status", &self.status)?;
         record.serialize_field("failure_kind", &self.failure.as_ref().map(|f| f.kind))?;
         record.serialize_field("failure_reason", &self.failure.as_ref().map(|f| &f.reason))?;
@@ -215,6 +271,9 @@ mod tests {
     fn facts(evaluation: &EvaluationOutcome) -> RunFacts<'_> {
         RunFacts {
             evaluation,
+            ignore_evaluation: false,
+            ignore_agent: false,
+            ignore_collector: false,
             evaluation_kind: crate::workloads::KnownEvaluationKind::BundledFixture,
             process_success: true,
             agent_failure: None,
@@ -226,6 +285,63 @@ mod tests {
             workload_cleanup_confirmed: true,
             proxy_cleanup_confirmed: true,
         }
+    }
+
+    #[test]
+    fn ignored_failures_are_independent_and_retain_truthful_grade() {
+        for evaluation in [
+            EvaluationOutcome::binary(false),
+            EvaluationOutcome::Error {
+                reason: "grader unavailable".into(),
+            },
+        ] {
+            let before = evaluation.clone();
+            let mut input = facts(&evaluation);
+            input.ignore_evaluation = true;
+            input.ignore_agent = true;
+            input.process_success = false;
+            input.agent_failure = Some("agent exited 7");
+            let result = RunDisposition::from_facts(input);
+            assert!(result.success);
+            assert_eq!(result.ignored_failures.len(), 2);
+            let value = serde_json::to_value(&result).unwrap();
+            assert_eq!(value["ignored_failures"][0]["ignored"], true);
+            assert_eq!(value["ignored_failures"][0]["kind"], "agent_failure");
+            assert_eq!(evaluation, before);
+
+            let mut input = facts(&evaluation);
+            input.ignore_evaluation = true;
+            input.ignore_agent = true;
+            input.process_success = false;
+            input.collector_error = Some("collector failed");
+            let result = RunDisposition::from_facts(input);
+            assert!(!result.success);
+            assert_eq!(result.failure.unwrap().kind, FailureKind::CollectorError);
+            assert_eq!(result.ignored_failures.len(), 2);
+        }
+        let pending = EvaluationOutcome::Pending {
+            reason: "not yet graded".into(),
+        };
+        let mut input = facts(&pending);
+        input.ignore_evaluation = true;
+        let result = RunDisposition::from_facts(input);
+        assert!(!result.success);
+        assert!(result.ignored_failures.is_empty());
+    }
+
+    #[test]
+    fn ignored_collector_failure_does_not_hide_other_failures() {
+        let grade = EvaluationOutcome::binary(true);
+        let mut input = facts(&grade);
+        input.ignore_collector = true;
+        input.collector_error = Some("fixture collector failed");
+        input.process_success = false;
+        input.agent_failure = Some("agent exited 7");
+        let result = RunDisposition::from_facts(input);
+        assert!(!result.success);
+        assert_eq!(result.failure.unwrap().kind, FailureKind::AgentFailure);
+        assert_eq!(result.ignored_failures.len(), 1);
+        assert_eq!(result.ignored_failures[0].kind, FailureKind::CollectorError);
     }
 
     #[test]

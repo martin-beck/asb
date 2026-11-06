@@ -1,6 +1,6 @@
 //! Live execution of one configured benchmark.
 mod attempt;
-mod batch;
+pub(crate) mod batch;
 pub(crate) use batch::{
     dataset_fingerprint, replay_protocol_fingerprint, replay_protocol_with_normalizer_digest,
 };
@@ -97,11 +97,16 @@ pub(crate) enum ReplayToolSelection {
 
 #[derive(Serialize)]
 struct RunResult<'a> {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    approximate_replay: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     replay_selection: Option<ReplaySelection>,
     /// Guest-attested native tool stream consumption, not total effect coverage.
     #[serde(skip_serializing_if = "Option::is_none")]
     native_replay_consumed: Option<bool>,
+    /// Whether the replay proxy validated and settled the selected tape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_replay_consumed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recording: Option<recording::Evidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -236,6 +241,16 @@ pub(crate) struct RunOptions<'a> {
     /// Verified native workspace capsule restored before an LLM replay.
     pub native_capsule_replay: Option<&'a str>,
     pub respect_record_timings: bool,
+    pub ignore_evaluation: bool,
+    pub ignore_agent: bool,
+    pub ignore_collector: bool,
+    pub ignore_provider_mismatch: bool,
+    pub ignore_provider_unconsumed: bool,
+    pub ignore_tool_mismatch: bool,
+    pub ignore_mcp_mismatch: bool,
+    pub ignore_compatibility: bool,
+    pub(crate) replay_expected_compatibility: Option<&'a crate::cassette::Compatibility>,
+    pub(crate) compatibility_warning_dir: Option<&'a Path>,
     pub replica: replica::Identity,
     pub on_completion: Option<&'a dyn replica::CompletionObserver>,
     pub reused: Option<&'a std::collections::BTreeMap<usize, serde_json::Value>>,
@@ -307,6 +322,16 @@ fn validate_explicit_tool_transport(
     options: RunOptions<'_>,
 ) -> Result<(), Error> {
     validate_native_snapshot_record(config, options.mode, options.effective_tool_mode())?;
+    if options.ignore_tool_mismatch
+        && (options.effective_tool_mode() != Some(tape::Mode::Replay)
+            || options.native_snapshot_replay()
+            || !agents::find(&config.agent)
+                .is_some_and(|adapter| adapter.supports_approximate_local_tool_replay()))
+    {
+        return Err(Error::Input(
+            "--ignore-tool-mismatch requires the agent's semantic local-tool replay; native snapshot replay and unsupported agents cannot use it".into(),
+        ));
+    }
     if options.tool_mode_explicit
         && options.effective_tool_mode().is_some()
         && let Some(adapter) = agents::find(&config.agent)
@@ -746,12 +771,13 @@ fn run_dispatched(
             .lock()
             .map_err(|_| Error::Run("shared runtime preparation failed; retry the sweep".into()))?;
         let mut messages = Vec::new();
-        crate::install::ensure_execution_requirements(
+        crate::install::ensure_execution_requirements_with_policy(
             &config,
             config_path,
             options.mode,
             options.invocation_dir.unwrap_or_else(|| Path::new(".")),
             &mut messages,
+            options.ignore_collector,
         )?;
         if !options.json {
             output.write_all(&messages).map_err(io_error)?;
@@ -1689,6 +1715,8 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
         "workload_baseline": result.workload_baseline,
         "workload_failure": result.workload_failure,
         "adapter_smoke_success": result.adapter_smoke_success,
+        "approximate_replay": result.approximate_replay,
+        "ignored_failures": result.disposition.ignored_failures,
         "failure_kind": result.disposition.failure.as_ref().map(|f| f.kind),
         "failure_reason": result.disposition.failure.as_ref().map(|f| &f.reason),
         "success_rate": result.success_rate,
@@ -1698,12 +1726,21 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
         "tool_call_count": result.tool_call_count(),
         "token_usage": result.token_usage,
     });
+    if result.disposition.ignored_failures.is_empty() {
+        summary
+            .as_object_mut()
+            .expect("summary object")
+            .remove("ignored_failures");
+    }
     if let Some(selection) = result.replay_selection {
         summary["replay_selection"] =
             serde_json::to_value(selection).map_err(|error| Error::Io(error.to_string()))?;
     }
     if let Some(consumed) = result.native_replay_consumed {
         summary["native_replay_consumed"] = serde_json::Value::Bool(consumed);
+    }
+    if let Some(consumed) = result.provider_replay_consumed {
+        summary["provider_replay_consumed"] = serde_json::Value::Bool(consumed);
     }
     if let Some(execution) = &result.execution {
         summary["execution"] =
@@ -1741,6 +1778,15 @@ fn render_human(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Er
         result.workload_evaluation,
     )
     .map_err(io_error)?;
+    for failure in &result.disposition.ignored_failures {
+        writeln!(
+            output,
+            "Warning: ignored {}: {}",
+            failure.kind.as_str(),
+            failure.reason
+        )
+        .map_err(io_error)?;
+    }
     Ok(())
 }
 
@@ -2833,6 +2879,8 @@ mod tests {
             .unwrap();
         session
             .finish(crate::measurements::RunMeasurement {
+                approximate_replay: false,
+                ignored_failures: &[],
                 replay_selection: None,
                 native_replay_consumed: None,
                 planning: None,
@@ -3193,6 +3241,7 @@ mod tests {
                 true,
                 &evidence,
                 &crate::proxy::Evidence {
+                    replay_divergences: Vec::new(),
                     captures: Vec::new(),
                     output_files: Vec::new(),
                     cleanup_confirmed: true,
@@ -3266,6 +3315,7 @@ mod tests {
                     true,
                     &[],
                     &crate::proxy::Evidence {
+                        replay_divergences: Vec::new(),
                         captures: Vec::new(),
                         output_files: Vec::new(),
                         cleanup_confirmed: true
@@ -3283,6 +3333,7 @@ mod tests {
         RunResult {
             replay_selection: None,
             native_replay_consumed: None,
+            provider_replay_consumed: None,
             observation: Default::default(),
             recording: None,
             execution: None,
@@ -3301,9 +3352,11 @@ mod tests {
             replica_index: None,
             execution_cohort: None,
             schema_version: 2,
+            approximate_replay: false,
             disposition: RunDisposition {
                 status: RunStatus::Completed,
                 failure: None,
+                ignored_failures: Vec::new(),
                 success: true,
             },
             agent: "codex",
@@ -3452,6 +3505,21 @@ mod tests {
             match evidence {
                 Some(consumed) => assert_eq!(value["native_replay_consumed"], consumed),
                 None => assert!(value.get("native_replay_consumed").is_none()),
+            }
+        }
+    }
+
+    #[test]
+    fn json_summary_reports_only_observed_provider_replay_completion() {
+        let mut result = result();
+        for evidence in [None, Some(true), Some(false)] {
+            result.provider_replay_consumed = evidence;
+            let mut output = Vec::new();
+            render_json(&result, &mut output).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            match evidence {
+                Some(consumed) => assert_eq!(value["provider_replay_consumed"], consumed),
+                None => assert!(value.get("provider_replay_consumed").is_none()),
             }
         }
     }

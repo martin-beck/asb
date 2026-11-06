@@ -123,7 +123,11 @@ fn fixture_prelude_rejects_invalid_oversized_and_missing_events() {
     }
 }
 
-fn sweep(project: &Project, provider: Option<&RecordingProvider>, arguments: &[&str]) -> Output {
+pub(super) fn sweep(
+    project: &Project,
+    provider: Option<&RecordingProvider>,
+    arguments: &[&str],
+) -> Output {
     sweep_command(project, provider, arguments)
         .output()
         .unwrap()
@@ -208,6 +212,491 @@ pub(super) fn registered_project(concurrency: usize) -> Project {
     fs::write(config_path, configuration).unwrap();
     fs::write(project.0.join("sweep.toml"), "configs=['benchmark.toml']\n").unwrap();
     project
+}
+
+#[test]
+fn replay_sweep_ignores_only_selected_failures_and_persists_policy() {
+    let project = registered_project(1);
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("input.jsonl"),
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    fs::write(project.0.join("false-grade-first"), "true").unwrap();
+    let output = sweep(
+        &project,
+        None,
+        &[
+            "--replay",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+            "--ignore-evaluation",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = records(&output.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["ignored_failures"].is_array())
+        .unwrap();
+    assert_eq!(row["ignored_failures"][0]["kind"], "workload_check_failed");
+    assert_eq!(row["ignored_failures"][0]["ignored"], true);
+    assert_eq!(row["success_rate"], 0.0);
+    let plan: Value =
+        serde_json::from_slice(&fs::read(project.0.join("sweep-results/plan.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan["ignore_evaluation"], true);
+    let resumed = sweep(
+        &project,
+        None,
+        &[
+            "--replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+        ],
+    );
+    assert!(
+        !resumed.status.success(),
+        "resume must not silently change the saved policy"
+    );
+    let resumed = sweep(
+        &project,
+        None,
+        &[
+            "--replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+            "--ignore-evaluation",
+        ],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+}
+
+#[test]
+fn replay_sweep_persists_ignored_compatibility_and_resumes() {
+    let project = registered_project(1);
+    let provider = RecordingProvider::new();
+    let recorded = record_to_with_mode(
+        &project,
+        &provider,
+        None,
+        Some("new-recording.jsonl"),
+        "--llm-record",
+    );
+    assert!(
+        recorded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    drop(provider);
+    rewrite_bundle(&project, |manifest, _| {
+        manifest.compatibility.model = "different-model".into()
+    });
+    let config_path = project.0.join("benchmark.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        format!(
+            "{config}\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=[]\n"
+        ),
+    )
+    .unwrap();
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("new-recording.jsonl"),
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    let args = [
+        "--llm-replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-compatibility",
+        "--verbose",
+    ];
+    let output = sweep(&project, None, &args);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        records(&output.stdout)
+            .iter()
+            .any(|row| row["ignored_failures"][0]["kind"] == "replay_compatibility")
+    );
+    let report_dir = project.0.join("results/sweep-comparison");
+    let report: Value =
+        serde_json::from_slice(&fs::read(report_dir.join("comparison.json")).unwrap()).unwrap();
+    assert_eq!(report["benchmarks"][0]["approximate_replay"], true);
+    assert!(
+        fs::read_to_string(report_dir.join("report.html"))
+            .unwrap()
+            .contains("Approximate replay:")
+    );
+    let plan: Value =
+        serde_json::from_slice(&fs::read(project.0.join("sweep-results/plan.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan["ignore_compatibility"], true);
+    let without = sweep(
+        &project,
+        None,
+        &[
+            "--llm-replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+        ],
+    );
+    assert!(!without.status.success());
+    let resumed = sweep(
+        &project,
+        None,
+        &[
+            "--llm-replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+            "--ignore-compatibility",
+        ],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_sweep_ignores_confirmed_collector_failure_and_resumes() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = registered_project(1);
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("input.jsonl"),
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    let agent = project.0.join("tools/pi/bin/pi");
+    let script = fs::read_to_string(&agent)
+        .unwrap()
+        .replace("time.sleep(.06)", "time.sleep(1)");
+    fixture_writer::write_file(&project.0, &agent, script).unwrap();
+    let bpftrace = project.0.join("tools/bpftrace/bin/bpftrace");
+    fs::create_dir_all(bpftrace.parent().unwrap()).unwrap();
+    fs::write(&bpftrace, "#!/bin/sh\nif [ \"$1\" = -B ]; then echo ASB_BPFTRACE_READY; sleep 0.2; exit 7; fi\nexit 0\n").unwrap();
+    fs::set_permissions(&bpftrace, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = project.0.join("benchmark.toml");
+    let text = fs::read_to_string(&config).unwrap()
+        + "\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['bpftrace']\n";
+    fs::write(config, text).unwrap();
+    let args = [
+        "--replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-collector",
+    ];
+    let output = sweep_command(&project, None, &args)
+        .env("ASB_BPFTRACE_PROFILES", "sched-latency")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = records(&output.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["ignored_failures"].is_array())
+        .expect("ignored collector event");
+    assert_eq!(row["ignored_failures"][0]["kind"], "collector_error");
+    assert_eq!(row["ignored_failures"][0]["ignored"], true);
+    let plan: Value =
+        serde_json::from_slice(&fs::read(project.0.join("sweep-results/plan.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan["ignore_collector"], true);
+    let resumed = sweep_command(
+        &project,
+        None,
+        &[
+            "--replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+            "--ignore-collector",
+        ],
+    )
+    .env("ASB_BPFTRACE_PROFILES", "sched-latency")
+    .output()
+    .unwrap();
+    assert!(
+        resumed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let changed = sweep_command(
+        &project,
+        None,
+        &[
+            "--replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+        ],
+    )
+    .env("ASB_BPFTRACE_PROFILES", "sched-latency")
+    .output()
+    .unwrap();
+    assert!(
+        !changed.status.success(),
+        "resume must retain its original ignore policy"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_sweep_skips_unexecutable_collector_and_resumes() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = registered_project(1);
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("input.jsonl"),
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    let marker = project.0.join("pidstat-ran");
+    let tool = project.0.join("tools/mpstat/bin/pidstat");
+    fs::create_dir_all(tool.parent().unwrap()).unwrap();
+    fs::write(
+        &tool,
+        format!("#!/bin/sh\ntouch '{}'\nexit 7\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o644)).unwrap();
+    let config = project.0.join("benchmark.toml");
+    let text = fs::read_to_string(&config).unwrap()
+        + "\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['mpstat']\n";
+    fs::write(config, text).unwrap();
+    let args = [
+        "--replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-collector",
+    ];
+    let output = sweep(&project, None, &args);
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!marker.exists());
+    let row = records(&output.stdout)
+        .into_iter()
+        .find(|row| row["ignored_failures"].is_array())
+        .expect("ignored collector event");
+    assert_eq!(row["ignored_failures"][0]["kind"], "collector_error");
+    assert!(
+        row["ignored_failures"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("mpstat")
+    );
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    let changed = sweep(
+        &project,
+        None,
+        &[
+            "--replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+            "--ignore-collector",
+        ],
+    );
+    assert!(
+        !changed.status.success(),
+        "a newly executable collector changes the sealed inputs"
+    );
+    assert!(!marker.exists());
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o644)).unwrap();
+    let resumed = sweep(
+        &project,
+        None,
+        &[
+            "--replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+            "--ignore-collector",
+        ],
+    );
+    assert!(
+        resumed.status.success(),
+        "first_stdout={} first_stderr={} stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(!marker.exists());
+}
+
+#[test]
+fn approximate_provider_replay_sweep_keeps_policy_and_diagnostics_on_resume() {
+    let project = registered_project(1);
+    let executable = project.0.join("tools/pi/bin/pi");
+    let old = fs::read_to_string(&executable).unwrap();
+    let changed = old.replace("'model':'fixture'", "'model':'changed-fixture'");
+    assert_ne!(old, changed);
+    fixture_writer::write_file(&project.0, &executable, changed).unwrap();
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("input.jsonl"),
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    let options = [
+        "--replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-provider-mismatch",
+    ];
+    let output = sweep(&project, None, &options);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = records(&output.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["approximate_replay"] == true)
+        .unwrap();
+    assert_eq!(row["ignored_failures"][0]["kind"], "provider_mismatch");
+    let plan: Value =
+        serde_json::from_slice(&fs::read(project.0.join("sweep-results/plan.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan["ignore_provider_mismatch"], true);
+    let mut resume = options.to_vec();
+    resume.push("--resume");
+    let output = sweep(&project, None, &resume);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        records(&output.stdout)
+            .iter()
+            .any(|row| row["reused"] == true && row["approximate_replay"] == true)
+    );
+}
+
+#[test]
+fn provider_unconsumed_replay_sweep_is_approximate_and_resumable() {
+    let project = registered_project(1);
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    let cassette = fs::read_to_string(project.0.join("input.jsonl")).unwrap();
+    fs::write(
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+        format!("{cassette}{cassette}"),
+    )
+    .unwrap();
+    let options = [
+        "--replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-provider-unconsumed",
+    ];
+    let output = sweep(&project, None, &options);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = records(&output.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["approximate_replay"] == true)
+        .unwrap();
+    assert!(
+        row["ignored_failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|failure| failure["kind"] == "provider_unconsumed")
+    );
+    let mut resume = options.to_vec();
+    resume.push("--resume");
+    let output = sweep(&project, None, &resume);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        records(&output.stdout)
+            .iter()
+            .any(|row| row["reused"] == true && row["approximate_replay"] == true)
+    );
 }
 
 #[test]
@@ -1982,16 +2471,13 @@ fn profile_enabled_sweep_records_seals_and_replays_offline() {
         String::from_utf8_lossy(&recorded.stderr)
     );
     let plan: Value = serde_json::from_slice(&fs::read(campaign_plan(&recorded)).unwrap()).unwrap();
-    let digest = plan["normalization_policy"]["sha256"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    assert!(plan["normalization_policy"].is_null());
     let seal: Value = serde_json::from_slice(
         &fs::read(project.0.join("sweep-results/.checkpoint/inputs.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(seal["status"], "stable");
-    assert!(seal["roots"].as_array().unwrap().iter().any(|root| {
+    assert!(!seal["roots"].as_array().unwrap().iter().any(|root| {
         root["name"]
             .as_str()
             .is_some_and(|name| name.ends_with("-normalization"))
@@ -2014,12 +2500,8 @@ fn profile_enabled_sweep_records_seals_and_replays_offline() {
     .unwrap();
     let changed = sweep(&project, Some(&provider), &["--llm-record", "--resume"]);
     assert!(
-        !changed.status.success(),
-        "a changed normalizer must invalidate completed-only resume"
-    );
-    assert!(
-        String::from_utf8_lossy(&changed.stderr).contains("normalizer policy changed"),
-        "{}",
+        changed.status.success(),
+        "recording resume must not depend on replay normalizers: {}",
         String::from_utf8_lossy(&changed.stderr)
     );
     assert_eq!(
@@ -2039,6 +2521,11 @@ fn profile_enabled_sweep_records_seals_and_replays_offline() {
         String::from_utf8_lossy(&replayed.stdout),
         String::from_utf8_lossy(&replayed.stderr)
     );
+    let replay_plan: Value =
+        serde_json::from_slice(&fs::read(campaign_plan(&replayed)).unwrap()).unwrap();
+    let digest = replay_plan["normalization_policy"]["sha256"]
+        .as_str()
+        .unwrap();
     let report: Value = serde_json::from_slice(
         &fs::read(project.0.join("results/sweep-comparison/comparison.json")).unwrap(),
     )
@@ -2046,5 +2533,21 @@ fn profile_enabled_sweep_records_seals_and_replays_offline() {
     assert_eq!(
         report["benchmarks"][0]["planned_normalization_policy"]["sha256"],
         digest
+    );
+    fs::write(
+        project.0.join("normalizer.mjs"),
+        "export function normalizeToolResult({text}) { return text; }\n// revised after recording\n",
+    ).unwrap();
+    let changed_replay = sweep(&project, None, &["--llm-replay"]);
+    assert!(
+        changed_replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&changed_replay.stderr)
+    );
+    let resumed = sweep(&project, None, &["--llm-replay", "--resume"]);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
     );
 }

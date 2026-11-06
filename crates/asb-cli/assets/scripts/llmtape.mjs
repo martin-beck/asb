@@ -142,6 +142,11 @@ if (!Number.isInteger(port) || port < (readyFile ? 0 : 1) || port > 65535) usage
 const cassette = mode === "record" ? option(args, "--out") : option(args, "--cassette");
 const upstream = mode === "record" ? option(args, "--upstream") : undefined;
 const mismatchEvidence = process.env.ASB_TAPE_MISMATCH_EVIDENCE;
+const ignoreProviderMismatch = process.env.ASB_TAPE_IGNORE_PROVIDER_MISMATCH === "1";
+const ignoredMismatchJournal = process.env.ASB_TAPE_IGNORED_MISMATCH_JOURNAL;
+delete process.env.ASB_TAPE_IGNORE_PROVIDER_MISMATCH;
+delete process.env.ASB_TAPE_IGNORED_MISMATCH_JOURNAL;
+if (ignoreProviderMismatch && (mode !== "replay" || !ignoredMismatchJournal || !isAbsolute(ignoredMismatchJournal))) usage("invalid ignored mismatch journal destination");
 const respectRecordTimings = args.includes("--respect-record-timings");
 const captureReceipt = process.env.ASB_TAPE_CAPTURE_RECEIPT;
 const captureNonce = process.env.ASB_TAPE_CAPTURE_NONCE;
@@ -218,17 +223,16 @@ async function replayResponse(response, interaction) {
   // recording workspace path. Materialize the current run's canonical path
   // before replay so agents never execute commands in the record directory.
   const workspace = process.env.ASB_TAPE_WORKSPACE;
-  const originalBody = workspace && interaction.asb_request_policy === 3 && interaction.recorded_workspace
-    ? normalizeRecordedResponse(interaction.response.body || "", interaction.recorded_workspace)
-    : interaction.response.body || "";
-  const body = workspace
-    ? replaceExactWorkspace(normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(
-        originalBody,
-        "<asb-workspace>",
-        workspace,
-        true,
-      ), "<asb-workspace>", workspace, true), "<asb-workspace>", workspace)
-    : originalBody;
+  const originalBody = interaction.response.body || "";
+  const body = interaction.asb_request_policy === 3
+    ? (workspace && interaction.recorded_workspace
+        ? normalizeRecordedResponse(originalBody, interaction.recorded_workspace, workspace)
+        : originalBody)
+    : (workspace
+        ? replaceExactWorkspace(normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(
+            originalBody, "<asb-workspace>", workspace, true,
+          ), "<asb-workspace>", workspace, true), "<asb-workspace>", workspace)
+        : originalBody);
   // Request matching intentionally redacts provider-generated tool-call IDs,
   // but Claude requires IDs to be unique across turns. Give each replayed
   // response a fresh local ID without changing the cassette evidence.
@@ -321,8 +325,7 @@ function normalizeRequestBody(url, body) {
 // Preserve provider response content exactly, apart from workspace paths that
 // must point into the replay replica. Request canonicalization is only for
 // matching and must never rewrite dates, UUIDs or other model-generated data.
-function normalizeRecordedResponse(body, workspace) {
-  const marker = "<asb-workspace>";
+function normalizeRecordedResponse(body, workspace, marker) {
   // JSON may escape slashes, so rewrite decoded string values before
   // serializing rather than relying on bytewise path matching.
   try {
@@ -585,18 +588,26 @@ function advanceNativeTools() {
 }
 let rejected = 0;
 let firstMismatch = null;
+let ignoredMismatchCount = 0;
+let replayEvidenceFailure = false;
+// Only hold this while committing a selected exchange. Waiting for a later
+// recorded request happens outside the lock, so out-of-order peers can still
+// advance the cursor. Delivery itself is also outside the lock.
+let replayCommitPending = null;
+let replayCommitWaiters = 0;
 const progressPath = `${cassette}.progress.json`;
 function writeProgress() {
   if (mode === "replay") {
-    writeFileSync(progressPath, JSON.stringify({
+    try { writeFileSync(progressPath, JSON.stringify({
       schema_version: 2,
       consumed: cursor,
       total: interactions.length,
       rejected,
+      ignored_mismatches: ignoredMismatchCount,
       unrequested_optional_probes: deferredProbes.length,
       ...(customSupervisor ? { normalization: normalizationEvidence() } : {}),
       ...(firstMismatch ? { first_mismatch: firstMismatch } : {}),
-    }));
+    })); } catch (error) { replayEvidenceFailure = true; throw error; }
   }
 }
 
@@ -889,6 +900,30 @@ async function handle(request, response, recording) {
   if (mode === "replay") {
     const deadline = performance.now() + MAX_REPLAY_ORDER_WAIT_MS;
     while (true) {
+      if (replayCommitPending) {
+        if (replayCommitWaiters >= MAX_REPLAY_ORDER_WAITERS) {
+          reject({ sequence: cursor + 1, category: "replay_commit_capacity", path: "$" });
+          response.writeHead(503, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: "too many requests waiting for replay" }));
+          return;
+        }
+        replayCommitWaiters += 1;
+        let timer;
+        try {
+          await Promise.race([replayCommitPending, new Promise(resolve => { timer = setTimeout(resolve, Math.max(0, deadline - performance.now())); })]);
+        } finally {
+          clearTimeout(timer);
+          replayCommitWaiters -= 1;
+        }
+        if (response.destroyed || stopping) return;
+        if (replayCommitPending && performance.now() >= deadline) {
+          reject({ sequence: cursor + 1, category: "replay_commit_timeout", path: "$" });
+          response.writeHead(409, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: "timed out waiting for replay" }));
+          return;
+        }
+        continue;
+      }
       advanceNativeTools();
       if (isReplayProbe(recordedRequest)) {
         const deferred = deferredProbes.findIndex((index) => requestKey(interactions[index].request) === requestKey(recordedRequest));
@@ -935,8 +970,18 @@ async function handle(request, response, recording) {
       if (!await awaitReplayTurn(recordedRequest, response, deadline)) return;
       // Another request may have advanced to a probe, a duplicate, or the
       // end while this one waited. Reevaluate before choosing a response.
-      if (cursor === expectedCursor) break;
+      if (cursor === expectedCursor && !replayCommitPending) break;
     }
+    let unlockCommit;
+    replayCommitPending = new Promise((resolve) => { unlockCommit = resolve; });
+    const releaseCommit = () => {
+      if (!unlockCommit) return;
+      const release = unlockCommit;
+      unlockCommit = null;
+      replayCommitPending = null;
+      release();
+    };
+    try {
     const interaction = interactions[cursor];
     if (!interaction) {
       reject({ sequence: cursor + 1, category: "cassette_exhausted", path: "$" });
@@ -957,15 +1002,33 @@ async function handle(request, response, recording) {
         }
       }
       if (retry) {
+        releaseCommit();
         await deliverRecordedResponse(response, retry);
         return;
       }
       const mismatch = requestMismatch(interaction.request, recordedRequest, cursor + 1);
       retainMismatchEvidence(interaction.request, recordedRequest, mismatch);
-      reject(mismatch);
-      response.writeHead(409, { "content-type": "application/json" });
-      response.end(JSON.stringify({ error: "request does not match cassette" }));
-      return;
+      if (!ignoreProviderMismatch) {
+        reject(mismatch);
+        response.writeHead(409, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: "request does not match cassette" }));
+        return;
+      }
+      const event = { ...mismatch, ignored: true, severity: "warning", kind: "provider_mismatch" };
+      // A very deep diagnostic path is kept out of the public journal; the
+      // private first-mismatch evidence retains its detailed comparison.
+      if (event.path.length > 256) event.path = "$";
+      try {
+        appendFileSync(ignoredMismatchJournal, `${JSON.stringify(event)}\n`, {encoding: "utf8", mode: 0o600});
+      } catch (error) {
+        replayEvidenceFailure = true;
+        reject({ sequence: cursor + 1, category: "mismatch_journal_error", path: "$" });
+        throw error;
+      }
+      ignoredMismatchCount += 1;
+      // Deliberately consume the next recorded response. This does not assert
+      // semantic equivalence: the owning run marks the replay approximate.
+      writeProgress();
     }
     if (agentWireExtension?.observeReplayExchange) {
       let parsed;
@@ -975,8 +1038,10 @@ async function handle(request, response, recording) {
     cursor += 1;
     advanceNativeTools();
     writeProgress();
+    releaseCommit();
     await deliverRecordedResponse(response, interaction);
     return;
+    } finally { releaseCommit(); }
   }
 
   // Preserve provider-specific prefixes (e.g. OpenRouter's /api) while
@@ -1137,6 +1202,7 @@ async function shutdown() {
         { encoding: "utf8", mode: 0o600, flag: "wx" });
     }
     await customSupervisor?.close();
+    if (replayEvidenceFailure) throw new Error("replay evidence publication failed");
     process.exit(0);
   } catch {
     try { capture?.close(); } catch { /* sticky uncertainty: never report cleanup success */ }

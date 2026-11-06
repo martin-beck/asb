@@ -456,12 +456,11 @@ impl Inputs {
                         "prepared campaign identity has an unknown protocol",
                     ));
                 }
-                if let Some(expected) = layout
-                    .plan
-                    .replay_compatibility
-                    .as_ref()
-                    .or_else(|| identities.get(&record.configuration))
-                {
+                if let Some(expected) = identities.get(&record.configuration).or_else(|| {
+                    (!layout.plan.ignore_compatibility)
+                        .then_some(layout.plan.replay_compatibility.as_ref())
+                        .flatten()
+                }) {
                     expected
                         .require_match(&value.compatibility)
                         .map_err(|error| resume_error(&error.to_string()))?;
@@ -687,7 +686,26 @@ fn slot_roots(
         || !normalization_protocol_matches(
             compatibility,
             &base_protocol,
-            layout.plan.normalization_policy.as_ref(),
+            if layout.plan.mode == crate::planning::ExecutionMode::Replay {
+                layout
+                    .plan
+                    .replay_compatibility
+                    .as_ref()
+                    .map(|recorded| recorded.normalization_sha256.as_deref())
+                    .unwrap_or_else(|| {
+                        layout
+                            .plan
+                            .normalization_policy
+                            .as_ref()
+                            .map(|policy| policy.sha256.as_str())
+                    })
+            } else {
+                layout
+                    .plan
+                    .normalization_policy
+                    .as_ref()
+                    .map(|policy| policy.sha256.as_str())
+            },
         )?
     {
         return Err(resume_error(
@@ -850,9 +868,8 @@ fn slot_roots(
 fn normalization_protocol_matches(
     compatibility: &crate::cassette::Compatibility,
     base_protocol: &str,
-    policy: Option<&crate::project::replay_normalization::PolicyDescriptor>,
+    normalization: Option<&str>,
 ) -> Result<bool, Error> {
-    let normalization = policy.map(|policy| policy.sha256.as_str());
     let expected =
         crate::runner::replay_protocol_with_normalizer_digest(base_protocol, normalization)?;
     Ok(
@@ -898,12 +915,21 @@ mod normalizer_tests {
             protocol_sha256: Some(derived),
             normalization_sha256: Some(descriptor.sha256.clone()),
         };
-        assert!(normalization_protocol_matches(&compatibility, &base, Some(&descriptor)).unwrap());
+        assert!(
+            normalization_protocol_matches(&compatibility, &base, Some(&descriptor.sha256))
+                .unwrap()
+        );
         compatibility.normalization_sha256 = None;
-        assert!(!normalization_protocol_matches(&compatibility, &base, Some(&descriptor)).unwrap());
+        assert!(
+            !normalization_protocol_matches(&compatibility, &base, Some(&descriptor.sha256))
+                .unwrap()
+        );
         compatibility.normalization_sha256 = Some(descriptor.sha256.clone());
         compatibility.protocol_sha256 = Some(base.clone());
-        assert!(!normalization_protocol_matches(&compatibility, &base, Some(&descriptor)).unwrap());
+        assert!(
+            !normalization_protocol_matches(&compatibility, &base, Some(&descriptor.sha256))
+                .unwrap()
+        );
         compatibility.normalization_sha256 = None;
         assert!(normalization_protocol_matches(&compatibility, &base, None).unwrap());
     }

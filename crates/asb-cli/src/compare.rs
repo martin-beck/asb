@@ -34,6 +34,7 @@ const Y_TICKS: usize = 5;
 
 #[derive(Debug)]
 struct BenchmarkData {
+    approximate_replay: bool,
     replay_selection: Option<crate::runner::ReplaySelection>,
     observation: crate::process_termination::Observation,
     native_replay_consumed: Option<bool>,
@@ -135,20 +136,27 @@ pub(crate) fn run_links_at(
 pub(crate) fn run_in_sweep(
     path: &str,
     output_parent: &Path,
+    invocation: Option<&Path>,
     output: &mut dyn Write,
     _owner: &crate::sweep::lock::OutputLock,
 ) -> Result<(), Error> {
-    generate_owned_with_links(path, Some(output_parent), output, false).map(|_| ())
+    generate_owned_with_links(path, Some(output_parent), invocation, output, false).map(|_| ())
 }
 
 pub(crate) fn run_links_in_sweep(
     path: &str,
     output_parent: &Path,
+    invocation: Option<&Path>,
     output: &mut dyn Write,
     _owner: &crate::sweep::lock::OutputLock,
 ) -> Result<(), Error> {
-    let (_, links) =
-        generate_owned_with_links(path, Some(output_parent), &mut std::io::sink(), false)?;
+    let (_, links) = generate_owned_with_links(
+        path,
+        Some(output_parent),
+        invocation,
+        &mut std::io::sink(),
+        false,
+    )?;
     write_public_links(links, output)
 }
 
@@ -186,7 +194,8 @@ fn generate_at_with_links(
     }
     let anchor = crate::project::configuration_anchor(source, Some(invocation))?;
     if anchor == source {
-        return generate_with_links(path, output, parquet);
+        let _owner = crate::sweep::lock::OutputLock::for_comparison(source)?;
+        return generate_owned_with_links(path, None, Some(invocation), output, parquet);
     }
     let parent = anchor.parent().unwrap_or_else(|| Path::new("."));
     let stem = anchor
@@ -195,7 +204,7 @@ fn generate_at_with_links(
         .filter(|s| !s.is_empty())
         .unwrap_or("sweep");
     let _owner = crate::sweep::lock::OutputLock::acquire_for_source(parent, stem, source)?;
-    generate_owned_with_links(path, Some(parent), output, parquet)
+    generate_owned_with_links(path, Some(parent), Some(invocation), output, parquet)
 }
 
 fn generate_with_links(
@@ -204,16 +213,17 @@ fn generate_with_links(
     parquet: bool,
 ) -> Result<(PathBuf, Vec<(String, String)>), Error> {
     let _owner = crate::sweep::lock::OutputLock::for_comparison(Path::new(path))?;
-    generate_owned_with_links(path, None, output, parquet)
+    generate_owned_with_links(path, None, None, output, parquet)
 }
 
 fn generate_owned_with_links(
     path: &str,
     output_parent: Option<&Path>,
+    invocation: Option<&Path>,
     output: &mut dyn Write,
     parquet: bool,
 ) -> Result<(PathBuf, Vec<(String, String)>), Error> {
-    let loaded = source::load_at(path, output_parent)?;
+    let loaded = source::load_at(path, output_parent, invocation)?;
     let validated = ValidatedReport::validate(loaded)?;
     let prepared = PreparedReport::prepare(validated)?;
     let mut files = prepared.graph_names();
@@ -620,6 +630,11 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             let mcp = if selection.mcp_replay { "MCP replay selected" } else { "MCP replay not selected" };
             format!("<p>Replay selection: {provider}; {tools}; {mcp}. Selection is not proof of complete tool or filesystem coverage.</p>")
         });
+        let approximate_details = if benchmark.approximate_replay {
+            "<p class=\"status\"><strong>Approximate replay:</strong> one or more replay differences were explicitly ignored. Inspect the retained ignored-failure evidence before comparing results.</p>"
+        } else {
+            ""
+        };
         let native_replay_details = if benchmark.native_replay_consumed == Some(true) {
             "<p>The agent adapter consumed its recorded native tool stream. This does not establish coverage of all processes, filesystem effects, or network access.</p>"
         } else {
@@ -731,7 +746,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload), escape(trial), escape(&attempt),
             runtime, success, tokens,
             format_args!("{primary_details}{}{}<p>{dispatch_details}</p>", evaluation_details, if benchmark.reconciled { "<p>Reconciled retained local outcome: current artifact consistency checked; no agent rerun or historical attestation.</p>" } else { "" }),
-            format_args!("{execution_details}{replay_selection_details}{native_replay_details}{normalization_details}{normalization_observation}{component_details}{analysis_details}"),
+            format_args!("{approximate_details}{execution_details}{replay_selection_details}{native_replay_details}{normalization_details}{normalization_observation}{component_details}{analysis_details}"),
             host_details,
             metrics_details,
             artifacts,

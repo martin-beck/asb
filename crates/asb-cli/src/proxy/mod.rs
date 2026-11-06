@@ -14,6 +14,8 @@ pub(crate) struct RecordingRequest<'a> {
     pub recorder: Option<&'a str>,
     pub cassette: &'a std::path::Path,
     pub respect_record_timings: bool,
+    pub ignore_provider_mismatch: bool,
+    pub ignore_provider_unconsumed: bool,
     pub workspace: &'a std::path::Path,
     pub invocation_dir: &'a std::path::Path,
     pub wire_extension: Option<&'static str>,
@@ -65,6 +67,9 @@ pub(crate) trait ProxyAdapter: Sync {
     }
     /// This adapter can operate during replay without any online backend.
     fn supports_offline_replay(&self) -> bool {
+        false
+    }
+    fn supports_approximate_replay(&self) -> bool {
         false
     }
     fn supports_custom_normalization(&self) -> bool {
@@ -200,6 +205,14 @@ fn start_recording_chain_with(
     registry: &[&dyn ProxyAdapter],
 ) -> Result<Chain, Error> {
     let adapter = resolve_recorder(registry, request.recorder)?;
+    if (request.ignore_provider_mismatch || request.ignore_provider_unconsumed)
+        && !adapter.supports_approximate_replay()
+    {
+        return Err(Error::Input(format!(
+            "recording proxy `{}` does not support approximate replay",
+            adapter.name()
+        )));
+    }
     if request.custom_normalization.is_some() && !adapter.supports_custom_normalization() {
         return Err(Error::Input(format!(
             "recording proxy `{}` does not support project replay normalizers",
@@ -320,6 +333,9 @@ pub(crate) trait ProxySession {
     fn cleanup_confirmed(&self) -> bool {
         false
     }
+    fn replay_divergences(&self) -> Vec<ReplayDivergence> {
+        Vec::new()
+    }
     fn capture_evidence(&self) -> Option<capture::CaptureEvidence> {
         None
     }
@@ -334,7 +350,14 @@ pub(crate) struct Completion {
     pub evidence: Evidence,
 }
 
+#[derive(Clone)]
+pub(crate) struct ReplayDivergence {
+    pub kind: crate::runner::disposition::FailureKind,
+    pub reason: String,
+}
+
 pub(crate) struct Evidence {
+    pub replay_divergences: Vec<ReplayDivergence>,
     pub captures: Vec<capture::CaptureEvidence>,
     pub output_files: Vec<std::path::PathBuf>,
     pub cleanup_confirmed: bool,
@@ -424,21 +447,29 @@ impl Chain {
 
     pub(crate) fn finish(mut self) -> Completion {
         let mut failure = None;
+        // Some adapters declare outputs before shutdown; others publish their
+        // final private evidence during shutdown. Preserve both sets.
         let mut output_files = self
             .hops
             .iter()
             .flat_map(|hop| hop.output_files())
             .collect::<Vec<_>>();
-        output_files.sort();
-        output_files.dedup();
         for hop in self.hops.iter_mut().rev() {
             if let Err(error) = hop.finish() {
                 failure.get_or_insert(error);
             }
         }
+        output_files.extend(self.hops.iter().flat_map(|hop| hop.output_files()));
+        output_files.sort();
+        output_files.dedup();
         Completion {
             result: failure.map_or(Ok(()), Err),
             evidence: Evidence {
+                replay_divergences: self
+                    .hops
+                    .iter()
+                    .flat_map(|hop| hop.replay_divergences())
+                    .collect(),
                 captures: self
                     .hops
                     .iter()
@@ -488,6 +519,37 @@ fn parse_chain(raw: &str) -> Result<Vec<String>, Error> {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn chain_retains_outputs_declared_before_and_after_finish() {
+        struct OutputLifecycle(bool);
+        impl ProxySession for OutputLifecycle {
+            fn url(&self) -> &str {
+                "fixture"
+            }
+            fn output_files(&self) -> Vec<std::path::PathBuf> {
+                vec![if self.0 { "after" } else { "before" }.into()]
+            }
+            fn finish(&mut self) -> Result<(), Error> {
+                self.0 = true;
+                Ok(())
+            }
+            fn abort(&mut self) {}
+        }
+        let completion = Chain {
+            hops: vec![Box::new(OutputLifecycle(false))],
+            url: "fixture".into(),
+        }
+        .finish();
+        assert!(completion.result.is_ok());
+        assert_eq!(
+            completion.evidence.output_files,
+            vec![
+                std::path::PathBuf::from("after"),
+                std::path::PathBuf::from("before")
+            ]
+        );
+    }
 
     #[test]
     fn frozen_policy_rejects_different_prepared_task_or_agent() {
@@ -614,6 +676,8 @@ mod tests {
             mode: crate::tape::Mode::Replay,
             cassette: std::path::Path::new("fixture"),
             respect_record_timings: false,
+            ignore_provider_mismatch: false,
+            ignore_provider_unconsumed: false,
             workspace: std::path::Path::new("."),
             invocation_dir: std::path::Path::new("."),
             wire_extension: None,
@@ -744,6 +808,8 @@ mod tests {
         assert_eq!(selected.name(), "other-recorder");
         let cassette = std::path::Path::new("fixture.jsonl");
         let request = RecordingRequest {
+            ignore_provider_mismatch: false,
+            ignore_provider_unconsumed: false,
             recorder: None,
             mode: crate::tape::Mode::Replay,
             cassette,

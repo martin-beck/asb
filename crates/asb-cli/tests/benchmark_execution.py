@@ -102,6 +102,12 @@ class API:
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_offline_workspace_has_no_routed_network_from_creation(self):
+        workspace, _container, _api, creation = self.workspace()
+        workspace.offline = True
+        workspace.__enter__()
+        self.assertEqual(creation[0]['network_mode'], 'none')
+
     def test_submission_output_limit_accepts_sixty_four_mib(self):
         workspace, _container, _api = self.retained_workspace()
         workspace.__enter__()

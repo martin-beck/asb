@@ -33,6 +33,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     source: include_str!("../../../assets/scripts/agent-normalizers/codex.mjs"),
 }])
 .with_tool_replay(prepare_tool_replay)
+.with_approximate_local_tool_replay()
 .with_mcp_servers()
 .with_mcp_relay()
 .with_native_tool_transport()
@@ -908,6 +909,7 @@ mod tests {
             false,
             &declarations,
             Some(McpTapeContext {
+                ignore_mcp_mismatch: false,
                 mode: crate::tape::Mode::Record,
                 cassette: None,
             }),
@@ -926,6 +928,7 @@ mod tests {
         assert!(!run_dir.join("mcp-relay/filesystem").exists());
 
         let artifacts = super::super::mcp_relay::collect_artifacts(&CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &Default::default(),
             provider_capture: None,
             run_dir: &run_dir,
@@ -933,6 +936,7 @@ mod tests {
             anthropic_input_includes_cache: false,
             mcp_servers: &declarations,
             mcp_tape: Some(McpTapeContext {
+                ignore_mcp_mismatch: false,
                 mode: crate::tape::Mode::Record,
                 cassette: None,
             }),
@@ -976,6 +980,7 @@ mod tests {
             false,
             &declarations,
             Some(McpTapeContext {
+                ignore_mcp_mismatch: false,
                 mode: crate::tape::Mode::Replay,
                 cassette: Some(&cassette),
             }),
@@ -1012,6 +1017,7 @@ mod tests {
         let error = declared_mcp_configuration(
             &declarations,
             Some(McpTapeContext {
+                ignore_mcp_mismatch: false,
                 mode: crate::tape::Mode::Replay,
                 cassette: Some(&cassette),
             }),
@@ -1114,6 +1120,7 @@ mod tests {
                 mcp_servers: &[],
                 mcp_tape: None,
                 tape: Some(crate::agents::TapeContext {
+                    ignore_tool_mismatch: false,
                     mode,
                     cassette: &cassette,
                 }),
@@ -1187,6 +1194,7 @@ mod tests {
                 mcp_servers: &mcp_servers,
                 mcp_tape: None,
                 tape: Some(crate::agents::TapeContext {
+                    ignore_tool_mismatch: false,
                     mode: crate::tape::Mode::Record,
                     cassette: &cassette,
                 }),
