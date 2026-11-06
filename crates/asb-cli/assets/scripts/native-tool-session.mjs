@@ -24,10 +24,13 @@ export function decodeThrown(value) {
 }
 
 export class RecordingSession {
-  constructor() { this.next = 0; this.completed = []; this.active = new Set(); this.closed = false; this.invalid = false; }
+  constructor({agent} = {}) { this.next = 0; this.completed = []; this.active = new Set(); this.closed = false; this.invalid = false; this.pi = agent === 'pi'; this.invalidIdentity = false; }
   async invoke(request, execute) {
     if (this.closed || typeof execute !== 'function') throw new Error('Native tool recording session is unavailable');
     const normalized = clone(request);
+    // Keep the tool running, but refuse to publish a new Pi recording that
+    // cannot distinguish its tool calls on replay.
+    if (this.pi && (typeof normalized.call_id !== 'string' || !normalized.call_id)) this.invalidIdentity = true;
     const ordinal = this.next++;
     this.active.add(ordinal);
     let value;
@@ -46,6 +49,7 @@ export class RecordingSession {
     return value;
   }
   preview() {
+    if (this.invalidIdentity) throw new Error('Pi native recording lacks stable tool call identities');
     if (this.closed || this.invalid || this.active.size) throw new Error('Native tool recording has unfinished tool calls');
     return clone(this.completed);
   }
@@ -54,9 +58,20 @@ export class RecordingSession {
 }
 
 export class ReplaySession {
-  constructor(events, applyEffects = async () => {}) {
+  constructor(events, applyEffects = async () => {}, {agent} = {}) {
     this.events = clone(events);
     if (!Array.isArray(this.events) || typeof applyEffects !== 'function') throw new TypeError('Native tool replay input is invalid');
+    this.pi = agent === 'pi';
+    // Historical Pi sidecars have no call identity. Only this adapter can
+    // remove the newly introduced field when matching those old recordings.
+    const identities = this.events.map(event => Object.hasOwn(event.request || {}, 'call_id'));
+    if (this.pi && identities.some(Boolean) && !identities.every(Boolean)) {
+      throw new Error('Pi native replay has inconsistent tool call identities');
+    }
+    if (this.pi && identities.some(Boolean) && this.events.some(event => typeof event.request.call_id !== 'string' || !event.request.call_id)) {
+      throw new Error('Pi native replay has invalid tool call identities');
+    }
+    this.legacyPi = this.pi && !identities.some(Boolean);
     this.byDispatch = [...this.events].sort((a, b) => a.ordinal - b.ordinal);
     if (this.byDispatch.some((event, index) => event.ordinal !== index || !event.request || !event.outcome ||
         typeof event.outcome.ok !== 'boolean' ||
@@ -88,8 +103,21 @@ export class ReplaySession {
   reserve(request) {
     if (this.closed) throw new Error('Native tool replay session is closed');
     let key;
-    try { key = canonical(request); }
-    catch (error) { this.abort(error); throw error; }
+    try {
+      let selected = request;
+      if (this.legacyPi && request && Object.getPrototypeOf(request) === Object.prototype && Object.hasOwn(request, 'call_id')) {
+        selected = {...request};
+        delete selected.call_id;
+      }
+      key = canonical(selected);
+    } catch (error) { this.abort(error); throw error; }
+    // Concurrent identical legacy calls (or repeated call IDs) cannot be
+    // assigned to distinct recorded outcomes without inventing an identity.
+    if (this.pi && [...this.pending, ...this.assigned.values()].some(item => item.key === key)) {
+      const error = new Error('Pi native replay has ambiguous concurrent tool call identities');
+      this.abort(error);
+      throw error;
+    }
     const available = this.byDispatch.slice(this.nextDispatch).filter(event => canonical(event.request) === key).length;
     const queued = this.pending.filter(item => item.key === key).length;
     if (queued >= available) {

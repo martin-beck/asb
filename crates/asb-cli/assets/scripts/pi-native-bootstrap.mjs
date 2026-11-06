@@ -11,7 +11,8 @@ if (!bundle || !socket || !marker || !['record','replay'].includes(mode)) throw 
 installFetchDiagnostic();
 const expected = pathToFileURL(realpathSync(bundle)).href;
 const dispatch = createNativeDispatcher(mode, socket, {
-  toRequest: prepared => ({ tool: prepared.toolCall.name, args: prepared.args }),
+  toRequest: prepared => ({ tool: prepared.toolCall.name, args: prepared.args,
+    ...(typeof prepared.toolCall.id === 'string' && prepared.toolCall.id ? {call_id: prepared.toolCall.id} : {}) }),
   encodeResult: result => {
     if (result && Object.getPrototypeOf(result) === Object.prototype && result.details === undefined) {
       const { details: _details, ...remaining } = result;

@@ -49,13 +49,13 @@ export const result = await executePreparedToolCall({toolCall:{id:'one',name:'ba
     assert.equal(existsSync(effect),false,'missing snapshot marker must stop the native tool');
   }
   async function run(mode,events=[],socketPath=socket) {
-    const broker=new NativeToolBroker(mode,events,replayEffects(markerPath,'pi'));await broker.listen(socketPath);
+    const broker=new NativeToolBroker(mode,events,replayEffects(markerPath,'pi'),{agent:'pi'});await broker.listen(socketPath);
     const child=spawn(process.execPath,[entry],{cwd:root,env:{PATH:process.env.PATH||'',NODE_OPTIONS:`--import=${JSON.stringify(bootstrap)}`,ASB_NATIVE_BUNDLE:bundle,ASB_NATIVE_MODE:mode,ASB_NATIVE_SOCKET:socketPath,ASB_NATIVE_MARKER:markerPath,FIXTURE_EFFECT:effect,FIXTURE_URL:fixtureUrl},stdio:['ignore','ignore','pipe']});
     let stderr='';child.stderr.on('data',chunk=>stderr+=chunk);
     const [code]=await once(child,'exit');assert.equal(code,0,stderr);
     return broker.finish();
   }
-  const events=await run('record');assert.equal(events.length,1);assert.ok(existsSync(effect));unlinkSync(effect);
+  const events=await run('record');assert.equal(events.length,1);assert.equal(events[0].request.call_id,'one');assert.ok(existsSync(effect));unlinkSync(effect);
   const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
   const sidecar=encodeSidecar(events,hash(readFileSync(bundle)),hash('snapshot'),'pi');
   assert.equal(decodeSidecar(sidecar,'pi').exchanges.length,1);
@@ -64,6 +64,9 @@ export const result = await executePreparedToolCall({toolCall:{id:'one',name:'ba
   await new Promise(resolve=>upstream.close(resolve));
   await Promise.all(Array.from({length:4},(_,replica)=>
     run('replay',decodeSidecar(sidecar,'pi').exchanges,join(root,`broker-${replica}.sock`))));
+  // Prior Pi recordings did not contain call IDs; preserve their replay.
+  const legacy=decodeSidecar(sidecar,'pi').exchanges.map(event=>{const copy=structuredClone(event);delete copy.request.call_id;return copy;});
+  await run('replay',legacy,join(root,'legacy.sock'));
   assert.equal(existsSync(effect),false,'replay must not execute the tool');
   assert.equal(httpRequests,1,'replay must not contact the fixture service');
   assert.match(markers[0],/^tool-begin:pi-0:\d+:\d+$/);
