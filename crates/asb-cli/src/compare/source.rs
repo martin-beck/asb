@@ -124,6 +124,7 @@ impl Request {
             .is_some_and(|table| table.contains_key("configs"));
         let sweep = if single {
             crate::sweep::SweepFile {
+                sampled_trials: Vec::new(),
                 resources: None,
                 repeat: None,
                 configs: vec![
@@ -1293,6 +1294,7 @@ mod pricing_tests {
             parent: root.to_path_buf(),
             single: false,
             sweep: crate::sweep::SweepFile {
+                sampled_trials: Vec::new(),
                 resources: None,
                 repeat: None,
                 configs: Vec::new(),

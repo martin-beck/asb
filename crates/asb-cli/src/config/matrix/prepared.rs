@@ -151,10 +151,20 @@ impl Sweep {
         Self::new_with_repeat(path, configs, None)
     }
 
+    #[cfg(test)]
     pub(super) fn new_with_repeat(
+        path: &Path,
+        configs: Vec<BenchmarkConfig>,
+        repeat: Option<u64>,
+    ) -> Result<Self, Error> {
+        Self::new_with_samples(path, configs, repeat, Vec::new())
+    }
+
+    pub(super) fn new_with_samples(
         path: &Path,
         mut configs: Vec<BenchmarkConfig>,
         repeat: Option<u64>,
+        sampled_trials: Vec<crate::sweep::SampledTrials>,
     ) -> Result<Self, Error> {
         if configs.is_empty() || configs.len() > crate::sweep::MAX_CONFIGS {
             return Err(Error::Input(
@@ -210,7 +220,7 @@ impl Sweep {
             references.push(format!("{group}/{filename}"));
             configurations.push((filename, text));
         }
-        let manifest = render_manifest(references, repeat)?;
+        let manifest = render_manifest(references, repeat, sampled_trials)?;
         Ok(Self {
             directory,
             configurations,
@@ -228,7 +238,11 @@ fn unrepresentable_path(path: &Path) -> Error {
 fn manifest_size_error() -> Error {
     Error::Input("generated sweep manifest exceeds 16 MiB; shorten the output filename or select a smaller batch; no setup files were written".into())
 }
-fn render_manifest(references: Vec<String>, repeat: Option<u64>) -> Result<String, Error> {
+fn render_manifest(
+    references: Vec<String>,
+    repeat: Option<u64>,
+    sampled_trials: Vec<crate::sweep::SampledTrials>,
+) -> Result<String, Error> {
     let mut remaining = crate::sweep::MAX_SWEEP_BYTES as usize;
     for reference in &references {
         remaining = remaining
@@ -236,6 +250,7 @@ fn render_manifest(references: Vec<String>, repeat: Option<u64>) -> Result<Strin
             .ok_or_else(manifest_size_error)?;
     }
     let text = toml::to_string_pretty(&crate::sweep::SweepFile {
+        sampled_trials,
         resources: None,
         configs: references,
         repeat,
@@ -436,16 +451,18 @@ mod tests {
 
     #[test]
     fn manifest_serialization_accepts_exact_16_mib_and_rejects_one_extra_byte() {
-        let overhead = render_manifest(vec![String::new()], None).unwrap().len();
+        let overhead = render_manifest(vec![String::new()], None, Vec::new())
+            .unwrap()
+            .len();
         let reference = "x".repeat(crate::sweep::MAX_SWEEP_BYTES as usize - overhead);
         assert_eq!(
-            render_manifest(vec![reference.clone()], None)
+            render_manifest(vec![reference.clone()], None, Vec::new())
                 .unwrap()
                 .len() as u64,
             crate::sweep::MAX_SWEEP_BYTES
         );
         assert!(
-            render_manifest(vec![format!("{reference}x")], None)
+            render_manifest(vec![format!("{reference}x")], None, Vec::new())
                 .unwrap_err()
                 .to_string()
                 .contains("16 MiB")

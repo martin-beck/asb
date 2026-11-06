@@ -939,6 +939,7 @@ fn manifest_and_benchmark_snapshots_preserve_plan_identity_across_path_replaceme
     let plan_path = fixture.write("sweep-results/plan.json", &bytes);
     fs::remove_file(fixture.0.join("sweep-results/000-0/measurements/run.json")).unwrap();
     let sweep = crate::sweep::SweepFile {
+        sampled_trials: Vec::new(),
         repeat: None,
         resources: None,
         configs: vec!["0.toml".into()],
@@ -1092,6 +1093,7 @@ fn retained_configuration_budget_is_bounded_before_loading_results_or_writing_ou
     let manifest = fixture.write(
         "sweep.toml",
         toml::to_string(&crate::sweep::SweepFile {
+            sampled_trials: Vec::new(),
             repeat: None,
             resources: None,
             configs: references,
