@@ -2363,16 +2363,13 @@ fn profile_enabled_sweep_records_seals_and_replays_offline() {
         String::from_utf8_lossy(&recorded.stderr)
     );
     let plan: Value = serde_json::from_slice(&fs::read(campaign_plan(&recorded)).unwrap()).unwrap();
-    let digest = plan["normalization_policy"]["sha256"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    assert!(plan["normalization_policy"].is_null());
     let seal: Value = serde_json::from_slice(
         &fs::read(project.0.join("sweep-results/.checkpoint/inputs.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(seal["status"], "stable");
-    assert!(seal["roots"].as_array().unwrap().iter().any(|root| {
+    assert!(!seal["roots"].as_array().unwrap().iter().any(|root| {
         root["name"]
             .as_str()
             .is_some_and(|name| name.ends_with("-normalization"))
@@ -2395,12 +2392,8 @@ fn profile_enabled_sweep_records_seals_and_replays_offline() {
     .unwrap();
     let changed = sweep(&project, Some(&provider), &["--llm-record", "--resume"]);
     assert!(
-        !changed.status.success(),
-        "a changed normalizer must invalidate completed-only resume"
-    );
-    assert!(
-        String::from_utf8_lossy(&changed.stderr).contains("normalizer policy changed"),
-        "{}",
+        changed.status.success(),
+        "recording resume must not depend on replay normalizers: {}",
         String::from_utf8_lossy(&changed.stderr)
     );
     assert_eq!(
@@ -2420,6 +2413,11 @@ fn profile_enabled_sweep_records_seals_and_replays_offline() {
         String::from_utf8_lossy(&replayed.stdout),
         String::from_utf8_lossy(&replayed.stderr)
     );
+    let replay_plan: Value =
+        serde_json::from_slice(&fs::read(campaign_plan(&replayed)).unwrap()).unwrap();
+    let digest = replay_plan["normalization_policy"]["sha256"]
+        .as_str()
+        .unwrap();
     let report: Value = serde_json::from_slice(
         &fs::read(project.0.join("results/sweep-comparison/comparison.json")).unwrap(),
     )
@@ -2427,5 +2425,21 @@ fn profile_enabled_sweep_records_seals_and_replays_offline() {
     assert_eq!(
         report["benchmarks"][0]["planned_normalization_policy"]["sha256"],
         digest
+    );
+    fs::write(
+        project.0.join("normalizer.mjs"),
+        "export function normalizeToolResult({text}) { return text; }\n// revised after recording\n",
+    ).unwrap();
+    let changed_replay = sweep(&project, None, &["--llm-replay"]);
+    assert!(
+        changed_replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&changed_replay.stderr)
+    );
+    let resumed = sweep(&project, None, &["--llm-replay", "--resume"]);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
     );
 }

@@ -1,4 +1,4 @@
-//! Read-only cassette navigation, using ASB's own cassette source reader.
+//! Cassette navigation using ASB's own cassette source reader.
 use crate::{app, diff};
 use asb_cli::cassette::{Limits, Source};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -263,6 +263,8 @@ pub(crate) fn open(
     native: bool,
     artifact: Option<&str>,
     print: bool,
+    project: Option<&Path>,
+    workload: Option<&str>,
 ) -> Result<(), String> {
     let stream = if native {
         Stream::Native
@@ -277,7 +279,16 @@ pub(crate) fn open(
             .print(io::stdout().lock())
             .map_err(|e| e.to_string());
     }
-    let (_guard, mut terminal) = app::start_terminal().map_err(|e| e.to_string())?;
+    let project = project
+        .map(Path::to_owned)
+        .or_else(|| crate::normalizers::find_project(path));
+    let workload = workload.map(str::to_owned).or_else(|| {
+        browser
+            .source
+            .manifest()
+            .map(|m| m.compatibility.workload.clone())
+    });
+    let (mut guard, mut terminal) = app::start_terminal().map_err(|e| e.to_string())?;
     let mut error = None::<String>;
     loop {
         terminal
@@ -373,7 +384,7 @@ pub(crate) fn open(
                     right[1],
                 );
                 let footer = error.as_deref().unwrap_or(
-                    "Tab: tracks/entries  Up/Down: select  s: stream  PgUp/PgDn: scroll  q: quit",
+                    "Tab: tracks/entries  Up/Down: select  s: stream  m: normalizers  q: quit",
                 );
                 frame.render_widget(
                     Paragraph::new(diff::visible(footer))
@@ -398,6 +409,22 @@ pub(crate) fn open(
             return Ok(());
         }
         match key.code {
+            KeyCode::Char('m') => {
+                let Some(root) = project.as_ref() else {
+                    error = Some("No ASB project found; reopen with --project PATH".into());
+                    continue;
+                };
+                let sample = browser
+                    .events
+                    .get(browser.event)
+                    .and_then(crate::normalizers::tool_output_example)
+                    .map(|s| (s.clone(), s));
+                drop(terminal);
+                drop(guard);
+                let result = crate::normalizers::run(root, workload.clone(), sample);
+                (guard, terminal) = app::start_terminal().map_err(|e| e.to_string())?;
+                error = result.err();
+            }
             KeyCode::Tab => browser.focus_tracks = !browser.focus_tracks,
             KeyCode::Char('s') => {
                 let streams = browser.streams(browser.selected);

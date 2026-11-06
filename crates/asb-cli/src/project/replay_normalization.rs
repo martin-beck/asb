@@ -329,6 +329,8 @@ pub struct ReplayConfig {
 struct Profile {
     id: String,
     module: String,
+    #[serde(default = "enabled_by_default", skip_serializing_if = "is_enabled")]
+    enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agents: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -339,9 +341,16 @@ struct Profile {
     tasks: Option<Vec<String>>,
 }
 
+fn enabled_by_default() -> bool {
+    true
+}
+fn is_enabled(value: &bool) -> bool {
+    *value
+}
+
 impl ReplayConfig {
     pub(crate) fn is_empty(&self) -> bool {
-        self.normalizers.is_empty()
+        self.normalizers.iter().all(|profile| !profile.enabled)
     }
 
     pub(super) fn validate(&self) -> Result<(), String> {
@@ -515,7 +524,8 @@ impl Profile {
                 .as_ref()
                 .is_none_or(|list| value.is_some_and(|item| list.iter().any(|v| v == item)))
         };
-        contains(&self.agents, Some(selection.agent))
+        self.enabled
+            && contains(&self.agents, Some(selection.agent))
             && contains(&self.workloads, Some(selection.workload))
             && contains(&self.workload_families, selection.family)
             && self.tasks.as_ref().is_none_or(|tasks| {
@@ -590,6 +600,30 @@ fn valid_value(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{NormalizationSelection, ReplayConfig, glob_matches};
+
+    #[test]
+    fn disabled_profiles_are_not_loaded_or_selected() {
+        let root = std::env::temp_dir();
+        let text = "[[normalizers]]\nid='off'\nmodule='missing.mjs'\nworkloads=['swe-bench']\nenabled=false\n";
+        let config: ReplayConfig = toml::from_str(text).unwrap();
+        assert!(config.is_empty());
+        let selected = NormalizationSelection {
+            agent: "pi",
+            workload: "swe-bench",
+            family: None,
+            task: "case",
+        };
+        assert!(
+            config
+                .freeze(&root, &selected)
+                .unwrap()
+                .normalizers
+                .is_empty()
+        );
+        let enabled: ReplayConfig = toml::from_str(&text.replace("false", "true")).unwrap();
+        assert!(!enabled.is_empty());
+        assert!(enabled.freeze(&root, &selected).is_err());
+    }
 
     #[test]
     fn profile_selection_snapshots_bytes_and_binds_selectors() {

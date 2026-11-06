@@ -45,6 +45,47 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// A changed replay policy is safe only for exchanges recorded without a
+/// comparison normalizer. Validate every bounded JSONL row before admission.
+pub(crate) fn require_raw_requests(mut reader: impl std::io::BufRead) -> Result<(), Error> {
+    use std::io::{BufRead, Read};
+    // Each request and response may contain up to 16 MiB before JSON string
+    // escaping; control characters can expand to six bytes per input byte.
+    const MAX_ROW: u64 = 256 * 1024 * 1024;
+    let mut count = 0usize;
+    loop {
+        let mut row = Vec::new();
+        let size = reader
+            .by_ref()
+            .take(MAX_ROW + 1)
+            .read_until(b'\n', &mut row)
+            .map_err(|_| Error("cannot read selected cassette requests".into()))?;
+        if size == 0 {
+            break;
+        }
+        if size as u64 > MAX_ROW {
+            return Err(Error(
+                "selected cassette request exceeds the comparison limit".into(),
+            ));
+        }
+        if row.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_slice(&row)
+            .map_err(|_| Error("selected cassette has invalid request evidence".into()))?;
+        if value["asb_request_policy"] != 3 || !value["request"].is_object() {
+            return Err(Error("selected recording does not contain raw requests; use its original normalizer policy".into()));
+        }
+        count += 1;
+    }
+    if count == 0 {
+        return Err(Error(
+            "an empty recording cannot prove raw request format".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Canonical content identity; excludes concurrency, repetition and measurements.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
