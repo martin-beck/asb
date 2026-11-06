@@ -19,6 +19,27 @@ spec.loader.exec_module(module)
 
 
 class CustodyTest(unittest.TestCase):
+    def test_transient_guest_copy_retries_are_bounded_and_do_not_starve_other_paths(self):
+        schedule = module.GuestCaptureSchedule(limit=2)
+        first, second, third = ('first', 1), ('second', 2), ('third', 3)
+        self.assertEqual(schedule.eligibility(first, 10), 'ready')
+        schedule.failure(first, 10)
+        self.assertEqual(schedule.eligibility(first, 10.5), 'waiting')
+        self.assertEqual(schedule.eligibility(second, 10.5), 'ready')
+        schedule.success(second)
+        self.assertEqual(schedule.eligibility(third, 11), 'full')
+        self.assertEqual(schedule.eligibility(first, 11), 'ready')
+        schedule.failure(first, 11)
+        schedule.failure(first, 12)
+        self.assertEqual(schedule.eligibility(first, 99), 'settled')
+        self.assertEqual(schedule.eligibility(second, 99), 'settled')
+        recovered = module.GuestCaptureSchedule(limit=1)
+        recovered.failure(first, 0)
+        self.assertEqual(recovered.eligibility(first, 1), 'ready')
+        recovered.success(first)
+        self.assertEqual(recovered.eligibility(first, 10), 'settled')
+        self.assertFalse(recovered.pending)
+
     def test_guest_helper_output_is_bounded_and_timeout_is_enforced(self):
         with tempfile.TemporaryDirectory(prefix='asb-guest-command-') as directory:
             root = Path(directory); docker = root / 'docker'; script = root / 'helper'
