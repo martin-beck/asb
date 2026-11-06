@@ -5,6 +5,7 @@
 //! detect corruption; they are not an authenticated provenance claim.
 
 mod archive;
+mod candidate;
 mod journal;
 mod metadata;
 mod native;
@@ -15,6 +16,7 @@ mod source;
 mod trial_order;
 
 pub use archive::{Archive, Limits};
+pub use candidate::record_and_replay_candidate;
 pub use journal::{
     ArtifactInput, NativeInput, ProofLimits, Publication, RecordingJournal, RecordingReservation,
     TrackEvidence,

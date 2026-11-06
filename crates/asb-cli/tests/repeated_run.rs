@@ -455,6 +455,93 @@ fn campaign_comparison_rejects_intermediate_symlink_aliases() {
 #[path = "support/recording_provider.rs"]
 mod recording_provider;
 use recording_provider::RecordingProvider;
+
+#[test]
+fn sampled_candidate_child() {
+    let Some(root) = std::env::var_os("ASB_SAMPLED_CANDIDATE_TEST_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let config = root.join("benchmark.toml");
+    let cassette = root.join("sample-recording.asb.zip");
+    let attempt =
+        asb_cli::cassette::record_and_replay_candidate(&config, &config, &cassette, &root, None)
+            .expect("local fixture recording and offline replay should qualify");
+    assert_eq!(attempt.expected_replicas, 1);
+    assert_eq!(attempt.replicas.len(), 1);
+    assert_eq!(
+        attempt.replicas[0].provider_consumed,
+        Some(std::env::var_os("ASB_SAMPLED_MISMATCH").is_none())
+    );
+    assert_eq!(attempt.replicas[0].cleanup_confirmed, Some(true));
+}
+
+#[test]
+fn sampled_candidate_records_once_then_replays_without_provider_calls() {
+    sampled_candidate_fixture(false);
+}
+
+#[test]
+fn sampled_candidate_reports_replay_mismatch_without_new_provider_calls() {
+    sampled_candidate_fixture(true);
+}
+
+fn sampled_candidate_fixture(mismatch: bool) {
+    let project = Project::new();
+    project.config(1);
+    if mismatch {
+        let agent = project.0.join("fixture-agent");
+        let script = fs::read_to_string(&agent).unwrap().replace(
+            "url = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
+            "if (root/'attempts.jsonl').exists(): body['model'] = 'different-on-replay'\nurl = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
+        );
+        fs::write(agent, script).unwrap();
+    }
+    let config = project.0.join("benchmark.toml");
+    let content = fs::read_to_string(&config)
+        .unwrap()
+        .replace("provider='fixture'", "provider='openrouter'");
+    fs::write(
+        project.0.join("workloads/sample.workload.toml"),
+        "workload='bug-fix'\n[[trials]]\nid='bug-fix'\n",
+    )
+    .unwrap();
+    fs::write(
+        &config,
+        format!("{content}\ntrial='bug-fix'\ntrial_set='sample.workload.toml'\n"),
+    )
+    .unwrap();
+    let provider = RecordingProvider::new();
+    let mut child = Command::new(std::env::current_exe().unwrap());
+    child.current_dir(&project.0).isolated_env();
+    if mismatch {
+        child.env("ASB_SAMPLED_MISMATCH", "1");
+    }
+    retain_host_rust_toolchain(&mut child);
+    let result = child
+        .env("HOME", &project.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("ASB_SAMPLED_CANDIDATE_TEST_ROOT", &project.0)
+        .env("ASB_RUNTIME_EXECUTABLE", env!("CARGO_BIN_EXE_asb"))
+        .env("ASB_PROVIDER_BASE_URL", &provider.endpoint)
+        .env("OPENROUTER_API_KEY", "fixture-only-key")
+        .env("OPENROUTER_BASE_URL", format!("{}/v1", provider.endpoint))
+        .env(
+            "OPENROUTER_MODELS_URL",
+            format!("{}/models", provider.endpoint),
+        )
+        .args(["--exact", "sampled_candidate_child", "--nocapture"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 fn record(project: &Project, provider: &RecordingProvider, repeat: Option<&str>) -> Output {
     record_to(project, provider, repeat, Some("new-recording.jsonl"))
 }
