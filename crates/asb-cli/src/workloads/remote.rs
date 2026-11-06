@@ -1240,6 +1240,7 @@ impl Session {
                 "tape_cassette":tape_cassette,
                 "tool_replay":context.tool_replay,
                 "ignore_tool_mismatch":context.ignore_tool_mismatch,
+                "ignore_mcp_mismatch":context.ignore_mcp_mismatch,
                 "tool_tape_cassette":tool_tape_cassette,
                 "mcp_mode":context.mcp_mode,
                 "mcp_tape_cassette":mcp_tape_cassette,

@@ -29,6 +29,233 @@ const BUNDLE_SCHEMA_VERSION: u32 = 1;
 // durable representation small enough for the existing auxiliary-artifact
 // path rather than allowing a single server to dominate a run's disk budget.
 const MAX_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const IGNORED_MCP_FILENAME: &str = "ignored-mcp.jsonl";
+pub(crate) const IGNORED_MCP_SPEC: super::ArtifactSpec = super::ArtifactSpec {
+    namespace: "mcp-replay-evidence",
+    filename: IGNORED_MCP_FILENAME,
+    format: super::ArtifactFormat::JsonLines,
+};
+
+pub(crate) fn initialize_ignored_journal(run_dir: &Path) -> Result<(), Error> {
+    let path = run_dir
+        .join("mcp-replay-evidence")
+        .join(IGNORED_MCP_FILENAME);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| Error::Run("cannot initialize MCP replay divergence journal".into()))
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum McpIgnoredKind {
+    Started,
+    Finished,
+    Fatal,
+    Request {
+        sequence: u64,
+        expected_sha256: String,
+        actual_sha256: String,
+    },
+    Unconsumed {
+        next_sequence: u64,
+        client_messages: usize,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct McpIgnoredEvent {
+    pub server: String,
+    pub session: String,
+    pub event: McpIgnoredKind,
+}
+
+struct McpJournal {
+    path: PathBuf,
+    server: String,
+    session: String,
+}
+impl McpJournal {
+    fn write(&self, event: McpIgnoredKind) -> Result<(), Error> {
+        let mut options = OpenOptions::new();
+        options.append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let mut file = options
+            .open(&self.path)
+            .map_err(|_| Error::Run("cannot open MCP replay divergence journal".into()))?;
+        file.lock()
+            .map_err(|_| Error::Run("cannot lock MCP replay divergence journal".into()))?;
+        let metadata = file.metadata().map_err(crate::io_error)?;
+        let event = McpIgnoredEvent {
+            server: self.server.clone(),
+            session: self.session.clone(),
+            event,
+        };
+        let mut bytes = serde_json::to_vec(&event)
+            .map_err(|_| Error::Run("cannot encode MCP replay divergence".into()))?;
+        bytes.push(b'\n');
+        if !metadata.is_file() || metadata.len() + bytes.len() as u64 > 256 * 1024 {
+            return Err(Error::Run(
+                "MCP replay divergence journal is invalid or full".into(),
+            ));
+        }
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|_| Error::Run("cannot persist MCP replay divergence".into()))
+    }
+}
+
+/// Validate per-session evidence after agent shutdown. A start without a
+/// completion is fatal even when mismatches are ignorable. A server that
+/// never reported a start cannot prove why its recorded requests were absent.
+pub(crate) fn settle_ignored_journal(
+    bytes: &[u8],
+    cassette: &Path,
+    declarations: &[crate::benchmark::McpServerConfig],
+) -> Result<Vec<McpIgnoredEvent>, Error> {
+    if bytes.len() > 256 * 1024 {
+        return Err(Error::Run(
+            "MCP replay divergence journal exceeds its bound".into(),
+        ));
+    }
+    let mut sessions = BTreeMap::<String, (String, bool)>::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut ignored = Vec::new();
+    let mut recordings = BTreeMap::new();
+    for declaration in declarations {
+        let path = replay_bundle_path(cassette, &declaration.id)?;
+        recordings.insert(
+            declaration.id.as_str(),
+            decode_bundle(&read_bundle(&path)?)?,
+        );
+    }
+    for line in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let event: McpIgnoredEvent = serde_json::from_slice(line)
+            .map_err(|_| Error::Run("MCP replay divergence journal is malformed".into()))?;
+        if !declarations.iter().any(|decl| decl.id == event.server)
+            || event.session.is_empty()
+            || event.session.len() > 128
+        {
+            return Err(Error::Run(
+                "MCP replay divergence journal has an invalid identity".into(),
+            ));
+        }
+        match &event.event {
+            McpIgnoredKind::Started => {
+                if sessions
+                    .insert(event.session.clone(), (event.server.clone(), false))
+                    .is_some()
+                {
+                    return Err(Error::Run("duplicate MCP replay session".into()));
+                }
+                seen.insert(event.server.clone());
+            }
+            McpIgnoredKind::Finished | McpIgnoredKind::Fatal => {
+                let (server, finished) = sessions
+                    .get_mut(&event.session)
+                    .ok_or_else(|| Error::Run("MCP replay session was not started".into()))?;
+                if server != &event.server || *finished {
+                    return Err(Error::Run("MCP replay session is inconsistent".into()));
+                }
+                *finished = true;
+                if matches!(event.event, McpIgnoredKind::Fatal) {
+                    return Err(Error::Run(
+                        "MCP replay could not safely supply its recorded response".into(),
+                    ));
+                }
+            }
+            McpIgnoredKind::Request { .. } | McpIgnoredKind::Unconsumed { .. } => {
+                if !sessions
+                    .get(&event.session)
+                    .is_some_and(|(server, finished)| server == &event.server && !finished)
+                {
+                    return Err(Error::Run(
+                        "MCP replay divergence has no active session".into(),
+                    ));
+                }
+                let recording = &recordings[event.server.as_str()].transcript;
+                match &event.event {
+                    McpIgnoredKind::Request {
+                        sequence,
+                        expected_sha256,
+                        actual_sha256,
+                    } => {
+                        let actual_valid = actual_sha256.len() == 64
+                            && actual_sha256.bytes().all(|byte| byte.is_ascii_hexdigit());
+                        if !actual_valid
+                            || !recording.events().iter().any(|recorded| {
+                                recorded.sequence == *sequence
+                                    && recorded.direction
+                                        == mcp_transcript::Direction::ClientToServer
+                                    && recorded.message.sha256 == *expected_sha256
+                            })
+                        {
+                            return Err(Error::Run(
+                                "MCP replay divergence does not bind its recording".into(),
+                            ));
+                        }
+                    }
+                    McpIgnoredKind::Unconsumed {
+                        next_sequence,
+                        client_messages,
+                    } => {
+                        let tail = recording
+                            .events()
+                            .iter()
+                            .skip_while(|recorded| recorded.sequence < *next_sequence)
+                            .collect::<Vec<_>>();
+                        if *client_messages == 0
+                            || !tail.first().is_some_and(|recorded| {
+                                recorded.sequence == *next_sequence
+                                    && recorded.direction
+                                        == mcp_transcript::Direction::ClientToServer
+                            })
+                            || tail
+                                .iter()
+                                .filter(|recorded| {
+                                    recorded.direction == mcp_transcript::Direction::ClientToServer
+                                })
+                                .count()
+                                != *client_messages
+                        {
+                            return Err(Error::Run(
+                                "MCP replay unconsumed count differs from its recording".into(),
+                            ));
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+                ignored.push(event);
+            }
+        }
+    }
+    if sessions.values().any(|(_, finished)| !finished) {
+        return Err(Error::Run("MCP replay session did not settle".into()));
+    }
+    for declaration in declarations {
+        if !seen.contains(&declaration.id) {
+            return Err(Error::Run(
+                "MCP replay server did not report a settled session; replay cannot prove its outcome".into(),
+            ));
+        }
+    }
+    Ok(ignored)
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -83,10 +310,12 @@ pub(crate) fn server_launches(
                 Some(super::McpTapeContext {
                     mode: crate::tape::Mode::Replay,
                     cassette: Some(cassette),
-                }) => replay_launch(run_dir, declaration, cassette)?,
+                    ignore_mcp_mismatch,
+                }) => replay_launch(run_dir, declaration, cassette, ignore_mcp_mismatch)?,
                 Some(super::McpTapeContext {
                     mode: crate::tape::Mode::Replay,
                     cassette: None,
+                    ..
                 }) => {
                     return Err(Error::Run(
                         "MCP replay needs its selected sealed relay bundle".into(),
@@ -179,6 +408,7 @@ pub(crate) fn replay_launch(
     run_dir: &Path,
     declaration: &crate::benchmark::McpServerConfig,
     cassette: &Path,
+    ignore_mcp_mismatch: bool,
 ) -> Result<super::tool_replay_mcp::Launch, Error> {
     let bundle = replay_bundle_path(cassette, &declaration.id)?;
     let bytes = read_bundle(&bundle)?;
@@ -199,14 +429,26 @@ pub(crate) fn replay_launch(
     })?;
     let program =
         super::tool_replay_mcp::runtime_program(std::env::var_os("ASB_RUNTIME_EXECUTABLE"))?;
-    Ok(super::tool_replay_mcp::Launch {
+    let mut launch = super::tool_replay_mcp::Launch {
         program,
         args: vec![
             "__asb-mcp-relay".into(),
             "--replay-dir".into(),
             recording.into_os_string(),
         ],
-    })
+    };
+    if ignore_mcp_mismatch {
+        launch.args.extend([
+            "--ignored-events".into(),
+            run_dir
+                .join("mcp-replay-evidence")
+                .join("ignored-mcp.jsonl")
+                .into_os_string(),
+            "--server-id".into(),
+            declaration.id.clone().into(),
+        ]);
+    }
+    Ok(launch)
 }
 
 pub(crate) fn replay_bundle_path(cassette: &Path, id: &str) -> Result<PathBuf, Error> {
@@ -245,6 +487,7 @@ enum Options {
     Record(RecordOptions),
     Replay {
         directory: PathBuf,
+        ignored_events: Option<(PathBuf, String)>,
     },
     Bundle {
         directory: PathBuf,
@@ -259,7 +502,10 @@ enum Options {
 fn run(args: &[OsString]) -> Result<(), Error> {
     match options(args)? {
         Options::Record(options) => run_record(options),
-        Options::Replay { directory } => run_replay(&directory),
+        Options::Replay {
+            directory,
+            ignored_events,
+        } => run_replay(&directory, ignored_events),
         Options::Bundle { directory, output } => write_bundle(&directory, &output),
         Options::Materialize {
             bundle,
@@ -305,10 +551,33 @@ fn run_record(options: RecordOptions) -> Result<(), Error> {
     Ok(())
 }
 
-fn run_replay(directory: &Path) -> Result<(), Error> {
-    validate_recording(directory)?;
-    let replay = Replayer::load(directory)?;
-    replay_messages(std::io::stdin(), std::io::stdout().lock(), &replay)
+fn run_replay(directory: &Path, ignored_events: Option<(PathBuf, String)>) -> Result<(), Error> {
+    let mut journal = ignored_events.map(|(path, server)| McpJournal {
+        path,
+        server,
+        session: crate::tools::runtime::unique_id(),
+    });
+    if let Some(journal) = journal.as_ref() {
+        journal.write(McpIgnoredKind::Started)?;
+    }
+    let result = (|| {
+        validate_recording(directory)?;
+        let replay = Replayer::load(directory)?;
+        replay_messages_with(
+            std::io::stdin(),
+            std::io::stdout().lock(),
+            &replay,
+            journal.as_mut(),
+        )
+    })();
+    if let Some(journal) = journal.as_ref() {
+        journal.write(if result.is_ok() {
+            McpIgnoredKind::Finished
+        } else {
+            McpIgnoredKind::Fatal
+        })?;
+    }
+    result
 }
 
 fn options(args: &[OsString]) -> Result<Options, Error> {
@@ -329,6 +598,21 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
     if args.len() == 2 && args[0] == "--replay-dir" {
         return Ok(Options::Replay {
             directory: PathBuf::from(&args[1]),
+            ignored_events: None,
+        });
+    }
+    if let [flag, directory, journal_flag, journal, server_flag, server] = args
+        && flag == "--replay-dir"
+        && journal_flag == "--ignored-events"
+        && server_flag == "--server-id"
+    {
+        let server = server
+            .to_str()
+            .filter(|s| !s.is_empty() && s.len() <= 128)
+            .ok_or_else(|| Error::Input("invalid MCP server ID".into()))?;
+        return Ok(Options::Replay {
+            directory: PathBuf::from(directory),
+            ignored_events: Some((PathBuf::from(journal), server.to_owned())),
         });
     }
     let mut record_dir = None;
@@ -998,22 +1282,53 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     file.sync_all().map_err(crate::io_error)
 }
 
+#[cfg(test)]
 fn replay_messages<R: Read, W: Write>(
+    reader: R,
+    writer: W,
+    replay: &Replayer,
+) -> Result<(), Error> {
+    replay_messages_with(reader, writer, replay, None)
+}
+
+fn replay_messages_with<R: Read, W: Write>(
     reader: R,
     mut writer: W,
     replay: &Replayer,
+    journal: Option<&mut McpJournal>,
 ) -> Result<(), Error> {
     let mut observation = super::tool_tracing::Trace::from_environment();
     let mut reader = BufReader::new(reader);
     let mut ids = BTreeMap::<String, serde_json::Value>::new();
     let mut pending = BTreeMap::<String, Option<u64>>::new();
-    for event in replay.transcript.events() {
+    let mut outstanding = std::collections::BTreeSet::<String>::new();
+    for (index, event) in replay.transcript.events().iter().enumerate() {
         let recorded = replay.payload(&event.message)?;
         match event.direction {
             mcp_transcript::Direction::ClientToServer => {
-                let actual = mcp_framing::read(&mut reader, SERVICE)?.ok_or_else(|| {
-                    Error::Run("MCP replay ended before its recorded client message".into())
-                })?;
+                let actual = match mcp_framing::read(&mut reader, SERVICE)? {
+                    Some(actual) => actual,
+                    None if journal.is_some() && outstanding.is_empty() => {
+                        journal
+                            .as_ref()
+                            .expect("checked")
+                            .write(McpIgnoredKind::Unconsumed {
+                                next_sequence: event.sequence,
+                                client_messages: replay.transcript.events()[index..]
+                                    .iter()
+                                    .filter(|event| {
+                                        event.direction == mcp_transcript::Direction::ClientToServer
+                                    })
+                                    .count(),
+                            })?;
+                        return Ok(());
+                    }
+                    None => {
+                        return Err(Error::Run(
+                            "MCP replay ended before its recorded client message".into(),
+                        ));
+                    }
+                };
                 if actual.framing != event.framing {
                     return Err(Error::Run(
                         "MCP replay client framing differs from recording".into(),
@@ -1029,10 +1344,23 @@ fn replay_messages<R: Read, W: Write>(
                         let actual_id = actual.value.get("id").cloned().ok_or_else(|| {
                             Error::Run("MCP replay request has no client ID".into())
                         })?;
+                        if journal.is_some() && !actual_id.is_string() && !actual_id.is_number() {
+                            return Err(Error::Run("MCP replay client ID is invalid".into()));
+                        }
                         if without_id(&expected) != without_id(&actual.value) {
-                            return Err(Error::Run(
-                                "MCP replay request differs from recording".into(),
-                            ));
+                            let compatible = compatible_request(&expected, &actual.value);
+                            if compatible && let Some(journal) = journal.as_ref() {
+                                journal.write(McpIgnoredKind::Request {
+                                    sequence: event.sequence,
+                                    expected_sha256: mcp_transcript::payload_ref(&recorded).sha256,
+                                    actual_sha256: mcp_transcript::payload_ref(&actual.bytes)
+                                        .sha256,
+                                })?;
+                            } else {
+                                return Err(Error::Run(
+                                    "MCP replay request differs from recording".into(),
+                                ));
+                            }
                         }
                         let recorded_id = event.id.as_ref().ok_or_else(|| {
                             Error::Run("MCP replay request transcript has no ID".into())
@@ -1045,7 +1373,16 @@ fn replay_messages<R: Read, W: Write>(
                                 "MCP replay request ID differs from transcript".into(),
                             ));
                         }
+                        if journal.is_some()
+                            && (outstanding.contains(&recorded_id.sha256)
+                                || outstanding.iter().any(|id| ids.get(id) == Some(&actual_id)))
+                        {
+                            return Err(Error::Run(
+                                "MCP replay request ID is already outstanding".into(),
+                            ));
+                        }
                         ids.insert(recorded_id.sha256.clone(), actual_id);
+                        outstanding.insert(recorded_id.sha256.clone());
                         if actual
                             .value
                             .get("method")
@@ -1057,9 +1394,20 @@ fn replay_messages<R: Read, W: Write>(
                     }
                     mcp_transcript::MessageKind::Notification => {
                         if expected != actual.value {
-                            return Err(Error::Run(
-                                "MCP replay notification differs from recording".into(),
-                            ));
+                            if compatible_request(&expected, &actual.value)
+                                && let Some(journal) = journal.as_ref()
+                            {
+                                journal.write(McpIgnoredKind::Request {
+                                    sequence: event.sequence,
+                                    expected_sha256: mcp_transcript::payload_ref(&recorded).sha256,
+                                    actual_sha256: mcp_transcript::payload_ref(&actual.bytes)
+                                        .sha256,
+                                })?;
+                            } else {
+                                return Err(Error::Run(
+                                    "MCP replay notification differs from recording".into(),
+                                ));
+                            }
                         }
                     }
                     _ => {
@@ -1078,6 +1426,12 @@ fn replay_messages<R: Read, W: Write>(
                         let actual_id = ids.get(&recorded_id.sha256).ok_or_else(|| {
                             Error::Run("MCP replay response has no matching client request".into())
                         })?;
+                        let was_outstanding = outstanding.remove(&recorded_id.sha256);
+                        if journal.is_some() && !was_outstanding {
+                            return Err(Error::Run(
+                                "MCP replay response has no outstanding request".into(),
+                            ));
+                        }
                         let mut value: serde_json::Value = serde_json::from_slice(&recorded)
                             .map_err(|_| Error::Run("MCP replay payload is not JSON".into()))?;
                         value["id"] = actual_id.clone();
@@ -1109,6 +1463,32 @@ fn replay_messages<R: Read, W: Write>(
         ));
     }
     Ok(())
+}
+
+fn compatible_request(expected: &serde_json::Value, actual: &serde_json::Value) -> bool {
+    if expected.get("jsonrpc") != Some(&serde_json::json!("2.0"))
+        || actual.get("jsonrpc") != Some(&serde_json::json!("2.0"))
+    {
+        return false;
+    }
+    let Some(method) = expected.get("method").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    if actual.get("method").and_then(serde_json::Value::as_str) != Some(method)
+        || expected.get("id").is_some() != actual.get("id").is_some()
+    {
+        return false;
+    }
+    method != "tools/call"
+        || expected
+            .pointer("/params/name")
+            .and_then(serde_json::Value::as_str)
+            .zip(
+                actual
+                    .pointer("/params/name")
+                    .and_then(serde_json::Value::as_str),
+            )
+            .is_some_and(|(a, b)| a == b)
 }
 
 fn without_id(value: &serde_json::Value) -> serde_json::Value {
@@ -1913,6 +2293,186 @@ mod tests {
         assert_eq!(notification.value["method"], "notifications/progress");
         assert_eq!(response.value["id"], 42);
         let _ = fs::remove_dir_all(record.parent().unwrap());
+    }
+
+    #[test]
+    fn approximate_replay_preserves_id_mapping_and_records_only_digests() {
+        let record = replay_recording("approximate-mcp");
+        let replay = Replayer::load(&record).unwrap();
+        let path = record.parent().unwrap().join("journal.jsonl");
+        fs::write(&path, b"").unwrap();
+        let mut journal = McpJournal {
+            path: path.clone(),
+            server: "fixture".into(),
+            session: "one".into(),
+        };
+        journal.write(McpIgnoredKind::Started).unwrap();
+        let mut output = Vec::new();
+        let request = b"{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/list\",\"params\":{\"private\":\"secret-value\"}}\n";
+        assert!(replay_messages(Cursor::new(request), Vec::new(), &replay).is_err());
+        replay_messages_with(
+            Cursor::new(request),
+            &mut output,
+            &replay,
+            Some(&mut journal),
+        )
+        .unwrap();
+        journal.write(McpIgnoredKind::Finished).unwrap();
+        let result = String::from_utf8(output).unwrap();
+        assert!(result.contains("\"id\":42"));
+        let events = fs::read_to_string(path).unwrap();
+        assert!(events.contains("\"kind\":\"request\""));
+        assert!(!events.contains("secret-value"));
+        assert!(replay_messages_with(Cursor::new(b"{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\",\"params\":{\"name\":\"other\"}}\n"), Vec::new(), &replay, Some(&mut journal)).is_err());
+        assert!(replay_messages_with(Cursor::new(b"{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/list\"}\n{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"tools/list\"}\n"), Vec::new(), &replay, Some(&mut journal)).is_err(), "an extra request has no recorded response");
+        let payload = replay.transcript.events()[0].message.sha256.clone();
+        fs::write(
+            record.join("payloads").join(format!("{payload}.json")),
+            b"{}\n",
+        )
+        .unwrap();
+        assert!(
+            replay_messages_with(
+                Cursor::new(request),
+                Vec::new(),
+                &replay,
+                Some(&mut journal)
+            )
+            .is_err(),
+            "a corrupt payload must not be approximated"
+        );
+        fs::remove_dir_all(record.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn approximate_replay_reports_unconsumed_messages_but_not_outstanding_responses() {
+        let record = replay_recording("approximate-mcp-eof");
+        let replay = Replayer::load(&record).unwrap();
+        let path = record.parent().unwrap().join("journal.jsonl");
+        fs::write(&path, b"").unwrap();
+        let mut journal = McpJournal {
+            path: path.clone(),
+            server: "fixture".into(),
+            session: "one".into(),
+        };
+        replay_messages_with(Cursor::new(b""), Vec::new(), &replay, Some(&mut journal)).unwrap();
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("\"kind\":\"unconsumed\"")
+        );
+        let record2 = record_dir("approximate-outstanding");
+        let mut recorder = Recorder::new(&record2).unwrap();
+        for payload in [
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#.as_slice(),
+        ] {
+            recorder
+                .record(
+                    mcp_transcript::Direction::ClientToServer,
+                    mcp_framing::Framing::JsonLines,
+                    0,
+                    payload,
+                )
+                .unwrap();
+        }
+        recorder.finish().unwrap();
+        let replay2 = Replayer::load(&record2).unwrap();
+        assert!(
+            replay_messages_with(
+                Cursor::new(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n"),
+                Vec::new(),
+                &replay2,
+                Some(&mut journal)
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(record.parent().unwrap()).unwrap();
+        fs::remove_dir_all(record2.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn duplicate_response_preserves_strict_behavior_but_approximation_rejects_it() {
+        let record = record_dir("duplicate-mcp-response");
+        let mut recorder = Recorder::new(&record).unwrap();
+        recorder
+            .record(
+                mcp_transcript::Direction::ClientToServer,
+                mcp_framing::Framing::JsonLines,
+                0,
+                br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            )
+            .unwrap();
+        for _ in 0..2 {
+            recorder
+                .record(
+                    mcp_transcript::Direction::ServerToClient,
+                    mcp_framing::Framing::JsonLines,
+                    1,
+                    br#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+                )
+                .unwrap();
+        }
+        recorder.finish().unwrap();
+        let replay = Replayer::load(&record).unwrap();
+        let request = b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n";
+        assert!(replay_messages(Cursor::new(request), Vec::new(), &replay).is_ok());
+        let path = record.parent().unwrap().join("journal.jsonl");
+        fs::write(&path, b"").unwrap();
+        let mut journal = McpJournal {
+            path,
+            server: "fixture".into(),
+            session: "one".into(),
+        };
+        assert!(
+            replay_messages_with(
+                Cursor::new(request),
+                Vec::new(),
+                &replay,
+                Some(&mut journal)
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(record.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn approximate_journal_requires_settled_known_sessions() {
+        let root = replay_recording("approximate-journal");
+        let cassette = root.parent().unwrap().join("replay.jsonl");
+        let bundle = replay_bundle_path(&cassette, "fixture").unwrap();
+        fs::write(bundle, bundle_recording(&root).unwrap()).unwrap();
+        let expected_sha256 = Replayer::load(&root).unwrap().transcript.events()[0]
+            .message
+            .sha256
+            .clone();
+        let path = root.parent().unwrap().join("journal.jsonl");
+        fs::write(&path, b"").unwrap();
+        let journal = McpJournal {
+            path: path.clone(),
+            server: "fixture".into(),
+            session: "one".into(),
+        };
+        let servers = [crate::benchmark::McpServerConfig {
+            id: "fixture".into(),
+            program: "unused".into(),
+            args: vec![],
+        }];
+        journal.write(McpIgnoredKind::Started).unwrap();
+        assert!(settle_ignored_journal(&fs::read(&path).unwrap(), &cassette, &servers).is_err());
+        journal
+            .write(McpIgnoredKind::Request {
+                sequence: 1,
+                expected_sha256,
+                actual_sha256: "b".repeat(64),
+            })
+            .unwrap();
+        journal.write(McpIgnoredKind::Finished).unwrap();
+        let ignored =
+            settle_ignored_journal(&fs::read(&path).unwrap(), &cassette, &servers).unwrap();
+        assert_eq!(ignored.len(), 1);
+        assert!(settle_ignored_journal(b"invalid\n", &cassette, &servers).is_err());
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
     #[test]

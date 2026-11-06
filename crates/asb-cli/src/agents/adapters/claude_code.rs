@@ -1201,6 +1201,7 @@ if (normalizeRequest(altered).system[0].text === a.system[0].text) throw Error('
             run_dir: &root.join("run"),
             mcp_servers: &declarations,
             mcp_tape: Some(super::super::McpTapeContext {
+                ignore_mcp_mismatch: false,
                 mode: crate::tape::Mode::Record,
                 cassette: None,
             }),
