@@ -238,6 +238,7 @@ pub(crate) struct RunOptions<'a> {
     pub respect_record_timings: bool,
     pub ignore_evaluation: bool,
     pub ignore_agent: bool,
+    pub ignore_collector: bool,
     pub replica: replica::Identity,
     pub on_completion: Option<&'a dyn replica::CompletionObserver>,
     pub reused: Option<&'a std::collections::BTreeMap<usize, serde_json::Value>>,

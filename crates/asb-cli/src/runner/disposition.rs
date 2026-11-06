@@ -51,7 +51,7 @@ pub(crate) struct RunFailure {
 }
 
 impl RunFailure {
-    fn new(kind: FailureKind, reason: impl Into<String>) -> Self {
+    pub(crate) fn new(kind: FailureKind, reason: impl Into<String>) -> Self {
         Self {
             kind,
             reason: reason.into(),
@@ -86,6 +86,7 @@ pub(super) struct RunFacts<'a> {
     pub evaluation: &'a EvaluationOutcome,
     pub ignore_evaluation: bool,
     pub ignore_agent: bool,
+    pub ignore_collector: bool,
     pub evaluation_kind: crate::workloads::KnownEvaluationKind,
     pub process_success: bool,
     pub agent_failure: Option<&'a str>,
@@ -188,7 +189,7 @@ impl RunDisposition {
             facts
                 .collector_error
                 .map(|reason| RunFailure::new(FailureKind::CollectorError, reason)),
-            false,
+            facts.ignore_collector,
         );
         consider(
             facts
@@ -253,6 +254,7 @@ mod tests {
             evaluation,
             ignore_evaluation: false,
             ignore_agent: false,
+            ignore_collector: false,
             evaluation_kind: crate::workloads::KnownEvaluationKind::BundledFixture,
             process_success: true,
             agent_failure: None,
@@ -306,6 +308,21 @@ mod tests {
         let result = RunDisposition::from_facts(input);
         assert!(!result.success);
         assert!(result.ignored_failures.is_empty());
+    }
+
+    #[test]
+    fn ignored_collector_failure_does_not_hide_other_failures() {
+        let grade = EvaluationOutcome::binary(true);
+        let mut input = facts(&grade);
+        input.ignore_collector = true;
+        input.collector_error = Some("fixture collector failed");
+        input.process_success = false;
+        input.agent_failure = Some("agent exited 7");
+        let result = RunDisposition::from_facts(input);
+        assert!(!result.success);
+        assert_eq!(result.failure.unwrap().kind, FailureKind::AgentFailure);
+        assert_eq!(result.ignored_failures.len(), 1);
+        assert_eq!(result.ignored_failures[0].kind, FailureKind::CollectorError);
     }
 
     #[test]

@@ -302,6 +302,7 @@ pub(crate) fn run_with_interactive(
                     respect_record_timings: options.respect_record_timings,
                     ignore_evaluation: options.ignore_evaluation,
                     ignore_agent: options.ignore_agent,
+                    ignore_collector: options.ignore_collector,
                     interactive: interactive && !options.json,
                     ..Default::default()
                 },
@@ -379,6 +380,7 @@ pub(crate) fn run_with_interactive(
                     respect_record_timings: options.respect_record_timings,
                     ignore_evaluation: options.ignore_evaluation,
                     ignore_agent: options.ignore_agent,
+                    ignore_collector: options.ignore_collector,
                     cassette_root: cassette_root.as_deref(),
                     jobs: usize::from(options.jobs),
                     max_active_attempts: options.max_active_attempts.map(usize::from),
@@ -1254,6 +1256,9 @@ struct RunArgs {
     /// Ignore an agent process failure for replay while retaining its actual status.
     #[arg(long, requires = "replay-direction")]
     ignore_agent: bool,
+    /// Ignore collector failures during replay when evidence publication and cleanup succeed.
+    #[arg(long, requires = "replay-direction")]
+    ignore_collector: bool,
     #[arg(value_name = "CONFIG", value_hint = clap::ValueHint::FilePath)]
     path: String,
     /// Sequential batches of fresh isolated executions at configured concurrency.
@@ -1324,6 +1329,9 @@ struct SweepArgs {
     /// Ignore an agent process failure for replay while retaining its actual status.
     #[arg(long, requires = "replay-direction")]
     ignore_agent: bool,
+    /// Ignore collector failures during replay when evidence publication and cleanup succeed.
+    #[arg(long, requires = "replay-direction")]
+    ignore_collector: bool,
     #[arg(value_name = "SWEEP", value_hint = clap::ValueHint::FilePath, group = "sweep-input")]
     path: Option<String>,
     /// Materialize a repository-owned preset in this initialized project, then run its sweep.

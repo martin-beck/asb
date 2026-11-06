@@ -1429,6 +1429,7 @@ impl ResultFacts {
             evaluation: &evaluation,
             ignore_evaluation: options.ignore_evaluation,
             ignore_agent: options.ignore_agent,
+            ignore_collector: options.ignore_collector,
             evaluation_kind,
             process_success,
             agent_failure: agent_failure.as_deref(),
@@ -1741,15 +1742,23 @@ impl Publication<'_, '_> {
         if let Some(error) = &recording_error {
             result.disposition.recording_failed(error.to_string());
         }
-        let log_publication =
+        // Replay collector errors can be known only after finalization. Delay
+        // the immutable log in that mode so it contains the complete warnings.
+        let early_log = (!options.ignore_collector).then(|| {
             phases::LogPublication::publish(&context.publication_config, &config.log_file, result)
-                .with_artifact_evidence(&artifact_evidence);
+                .with_artifact_evidence(&artifact_evidence)
+        });
         progress::status(
             options.interactive,
             "tearing down collectors and publishing measurements",
         );
-        let measurement_completion = phases::finish_measurements(measurement_session, result)
-            .with_artifact_evidence(&artifact_evidence);
+        let measurement_completion =
+            phases::finish_measurements(measurement_session, result, options.ignore_collector)
+                .with_artifact_evidence(&artifact_evidence);
+        let log_publication = early_log.unwrap_or_else(|| {
+            phases::LogPublication::publish(&context.publication_config, &config.log_file, result)
+                .with_artifact_evidence(&artifact_evidence)
+        });
         // A compact attempt may release only its ASB-created task workspace.
         // Installed adapters, downloaded workloads, cassettes, logs and
         // collector captures remain project inputs or sealed evidence.

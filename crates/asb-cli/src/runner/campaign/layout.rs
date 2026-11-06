@@ -90,7 +90,10 @@ impl Plan {
             || self.max_steps.is_some()
                 && !crate::agents::find(&self.configuration.agent)
                     .is_some_and(|adapter| adapter.supports_max_steps())
-            || ((self.respect_record_timings || self.ignore_evaluation || self.ignore_agent)
+            || ((self.respect_record_timings
+                || self.ignore_evaluation
+                || self.ignore_agent
+                || self.ignore_collector)
                 && self.mode != ExecutionMode::Replay)
             || self.source.as_os_str().is_empty()
         {
