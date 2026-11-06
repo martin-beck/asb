@@ -38,7 +38,10 @@ test("recursive grep ordering is normalized only for complete unambiguous result
   const joined = 'sympy/vector/a.py:3: barsympy/vector/z.py:2: foo\n';
   assert.equal(grepOrder({text:joined,tool}), joined);
   const truncated = {...tool, arguments:{command:'grep -rn "_latex" sympy/vector/ | head -2'}};
-  assert.equal(grepOrder({text:a,tool:truncated}), a);
+  assert.equal(grepOrder({text:a,tool:truncated}), grepOrder({text:b,tool:truncated}));
+  assert.notEqual(grepOrder({text:a.replace('foo','different'),tool:truncated}), grepOrder({text:b,tool:truncated}));
+  const alternate = {...tool, arguments:{command:'grep -n "_latex" -r sympy/vector/ | head -2'}};
+  assert.equal(grepOrder({text:a,tool:alternate}), grepOrder({text:b,tool:alternate}));
   const unrelated = {...tool, arguments:{command:'cat log'}};
   assert.equal(grepOrder({text:a,tool:unrelated}), a);
   const multiple = {...tool, arguments:{command:'grep -rn "BaseScalar" sympy/printing/*.py sympy/vector/*.py | head -50'}};
