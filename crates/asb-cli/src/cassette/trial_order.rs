@@ -3,6 +3,7 @@ use super::Error;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::io::{self, Write};
 
 /// A reproducible candidate order, including spare trials for failed replays.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,6 +36,9 @@ pub struct BoundTrialPreparation {
 }
 
 impl BoundTrialPreparation {
+    /// Maximum size of a serialized per-combination ledger.
+    pub const MAX_BYTES: usize = 32 * 1024 * 1024;
+
     /// Bind a new ledger to canonical digests of the sweep and one combination.
     pub fn new(
         sweep_sha256: &str,
@@ -72,6 +76,36 @@ impl BoundTrialPreparation {
         self.preparation.validate()
     }
 
+    /// Encode validated state before durable publication by its locked owner.
+    pub fn encode(
+        &self,
+        sweep_sha256: &str,
+        configuration_sha256: &str,
+        order: &TrialOrder,
+    ) -> Result<Vec<u8>, Error> {
+        self.validate(sweep_sha256, configuration_sha256, order)?;
+        let mut output = BoundedLedger(Vec::new());
+        serde_json::to_writer(&mut output, self)
+            .map_err(|_| Error("cannot encode sample preparation ledger within 32 MiB".into()))?;
+        Ok(output.0)
+    }
+
+    /// Decode and validate a bounded saved ledger against its current inputs.
+    pub fn decode(
+        bytes: &[u8],
+        sweep_sha256: &str,
+        configuration_sha256: &str,
+        order: &TrialOrder,
+    ) -> Result<Self, Error> {
+        if bytes.len() > Self::MAX_BYTES {
+            return Err(Error("sample preparation ledger exceeds 32 MiB".into()));
+        }
+        let value: Self = serde_json::from_slice(bytes)
+            .map_err(|_| Error("invalid sample preparation ledger".into()))?;
+        value.validate(sweep_sha256, configuration_sha256, order)?;
+        Ok(value)
+    }
+
     /// Access the underlying ledger after validating its bindings.
     pub fn preparation(&self) -> &TrialPreparation {
         &self.preparation
@@ -80,6 +114,20 @@ impl BoundTrialPreparation {
     /// Modify the ledger after validating its bindings while holding its owner lock.
     pub fn preparation_mut(&mut self) -> &mut TrialPreparation {
         &mut self.preparation
+    }
+}
+
+struct BoundedLedger(Vec<u8>);
+impl Write for BoundedLedger {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > BoundTrialPreparation::MAX_BYTES.saturating_sub(self.0.len()) {
+            return Err(io::Error::other("sample preparation ledger exceeds 32 MiB"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -642,8 +690,8 @@ mod tests {
         let config = "b".repeat(64);
         let mut bound = BoundTrialPreparation::new(&sweep, &config, order.clone()).unwrap();
         let started = bound.preparation_mut().start().unwrap().unwrap();
-        let bytes = serde_json::to_vec(&bound).unwrap();
-        let restored: BoundTrialPreparation = serde_json::from_slice(&bytes).unwrap();
+        let bytes = bound.encode(&sweep, &config, &order).unwrap();
+        let restored = BoundTrialPreparation::decode(&bytes, &sweep, &config, &order).unwrap();
         restored.validate(&sweep, &config, &order).unwrap();
         assert_eq!(
             restored.preparation().in_flight().unwrap(),
