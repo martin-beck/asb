@@ -21,6 +21,11 @@ test('temporary listings normalize only modification times', () => {
   assert.notEqual(tmpListing({text:other.replace('5783941','5783942'),tool}), canonical);
   assert.notEqual(tmpListing({text:other.replace('sympy.whl','different.whl'),tool}), canonical);
   assert.equal(tmpListing({text,tool:{...tool,arguments:{command:'cat output'}}}),text);
+  const downloadTool = {name:'Bash',arguments:{command:'ls -la /tmp/sd 2>/dev/null; pip download sympy==1.12 -d /tmp/sd --no-deps 2>&1 | tail -5'}};
+  const download = 'total 1\n-rw-r--r-- 1 user user 4 Nov  6 16:09 a.whl\nDownloading foo';
+  assert.equal(tmpListing({text:download,tool:downloadTool}),tmpListing({text:download.replace('16:09','16:12'),tool:downloadTool}));
+  assert.notEqual(tmpListing({text:download,tool:downloadTool}),tmpListing({text:download.replace('Downloading foo','Downloading bar'),tool:downloadTool}));
+  assert.notEqual(tmpListing({text:download,tool:downloadTool}),tmpListing({text:download.replace('a.whl','b.whl'),tool:downloadTool}));
   const warning = text + '\nls: denied';
   assert.equal(tmpListing({text:warning,tool}), warning);
 });
@@ -42,6 +47,17 @@ test("recursive grep ordering is normalized only for complete unambiguous result
   assert.notEqual(grepOrder({text:a.replace('foo','different'),tool:truncated}), grepOrder({text:b,tool:truncated}));
   const alternate = {...tool, arguments:{command:'grep -n "_latex" -r sympy/vector/ | head -2'}};
   assert.equal(grepOrder({text:a,tool:alternate}), grepOrder({text:b,tool:alternate}));
+  const absolute = {...tool, arguments:{command:'grep -rn "x" /testbed/sympy/vector/ | grep -i "latex"'}};
+  const absoluteA = '/testbed/' + a.replaceAll('\nsympy/', '\n/testbed/sympy/');
+  const absoluteB = '/testbed/' + b.replaceAll('\nsympy/', '\n/testbed/sympy/');
+  assert.equal(grepOrder({text:absoluteA,tool:absolute}),grepOrder({text:absoluteB,tool:absolute}));
+  assert.notEqual(grepOrder({text:absoluteA.replace('foo','different'),tool:absolute}),grepOrder({text:absoluteB,tool:absolute}));
+  const archive = {...tool, arguments:{command:'cd /tmp/sympy_dl && python -m zipfile -e sympy-1.6-py3-none-any.whl s16 && grep -rn "latex_scalars\\|latex_vects" s16/sympy/vector/coordsysrect.py; grep -n "BaseScalar\\|BaseVector" s16/sympy/printing/latex.py | head; grep -rn "mathbf" s16/sympy/vector/tests/test_coordsysrect.py s16/sympy/vector/tests/test_printing.py 2>/dev/null | head -30'}};
+  const archiveA = 'prefix output\ns16/sympy/vector/tests/test_printing.py:2: x\ns16/sympy/vector/tests/test_coordsysrect.py:3: y\nShell cwd was reset to /testbed';
+  const archiveB = 'prefix output\ns16/sympy/vector/tests/test_coordsysrect.py:3: y\ns16/sympy/vector/tests/test_printing.py:2: x\nShell cwd was reset to /testbed';
+  assert.equal(grepOrder({text:archiveA,tool:archive}),grepOrder({text:archiveB,tool:archive}));
+  assert.notEqual(grepOrder({text:archiveA.replace('prefix output','changed prefix'),tool:archive}),grepOrder({text:archiveB,tool:archive}));
+  assert.notEqual(grepOrder({text:archiveA.replace(':2: x',':2: z'),tool:archive}),grepOrder({text:archiveB,tool:archive}));
   const unrelated = {...tool, arguments:{command:'cat log'}};
   assert.equal(grepOrder({text:a,tool:unrelated}), a);
   const multiple = {...tool, arguments:{command:'grep -rn "BaseScalar" sympy/printing/*.py sympy/vector/*.py | head -50'}};
@@ -63,6 +79,11 @@ test("recursive grep ordering is normalized only for complete unambiguous result
   const history = 'abcdef0123 first\n1234567890 second\n';
   assert.equal(grepOrder({text:history+a,tool:compound}),grepOrder({text:history+b,tool:compound}));
   assert.notEqual(grepOrder({text:history.replace('first','changed')+a,tool:compound}),grepOrder({text:history+b,tool:compound}));
+  const semicolon = {...tool, arguments:{command:'git config --global --add safe.directory /testbed; cd /testbed; git log --oneline -3; grep -rn "x" sympy/vector/ | head -50'}};
+  const three = history + '234567890a third\n';
+  assert.equal(grepOrder({text:three+a,tool:semicolon}),grepOrder({text:three+b,tool:semicolon}));
+  assert.notEqual(grepOrder({text:three+a.replace('foo','changed'),tool:semicolon}),grepOrder({text:three+b,tool:semicolon}));
+  assert.equal(grepOrder({text:'fatal: no history\n'+a,tool:semicolon}),'fatal: no history\n'+a);
 });
 
 test('long nonmatching grep commands do not exhaust the normalizer deadline', async () => {
