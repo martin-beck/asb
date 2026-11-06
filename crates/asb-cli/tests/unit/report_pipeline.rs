@@ -199,12 +199,20 @@ fn external_compare_cannot_read_a_sweep_owned_by_an_active_writer() {
     run_in_sweep(
         manifest.to_str().unwrap(),
         &fixture.0,
+        Some(&fixture.0),
         &mut Vec::new(),
         &owner,
     )
     .unwrap();
     let mut quiet = Vec::new();
-    run_links_in_sweep(manifest.to_str().unwrap(), &fixture.0, &mut quiet, &owner).unwrap();
+    run_links_in_sweep(
+        manifest.to_str().unwrap(),
+        &fixture.0,
+        Some(&fixture.0),
+        &mut quiet,
+        &owner,
+    )
+    .unwrap();
     let quiet = String::from_utf8(quiet).unwrap();
     assert!(quiet.contains("Result report: "));
     assert!(!quiet.contains("Compared "));
@@ -939,6 +947,7 @@ fn manifest_and_benchmark_snapshots_preserve_plan_identity_across_path_replaceme
     let plan_path = fixture.write("sweep-results/plan.json", &bytes);
     fs::remove_file(fixture.0.join("sweep-results/000-0/measurements/run.json")).unwrap();
     let sweep = crate::sweep::SweepFile {
+        sampled_trials: Vec::new(),
         repeat: None,
         resources: None,
         configs: vec!["0.toml".into()],
@@ -1092,6 +1101,7 @@ fn retained_configuration_budget_is_bounded_before_loading_results_or_writing_ou
     let manifest = fixture.write(
         "sweep.toml",
         toml::to_string(&crate::sweep::SweepFile {
+            sampled_trials: Vec::new(),
             repeat: None,
             resources: None,
             configs: references,

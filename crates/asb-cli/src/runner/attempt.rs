@@ -532,6 +532,7 @@ impl<'a> ReadyAttempt<'a> {
                         project_root,
                         project_config,
                         agent: &config.agent,
+                        offline: options.mode == Some(tape::Mode::Replay),
                     },
                 )?;
                 std::fs::create_dir_all(&workspace).map_err(|error| {
@@ -1777,6 +1778,8 @@ impl ResultFacts {
         let result = RunResult {
             approximate_replay,
             replay_selection: options.replay_selection(&config.agent),
+            provider_replay_consumed: (options.mode == Some(tape::Mode::Replay))
+                .then_some(cassette_usage_verified && proxy_evidence.cleanup_confirmed),
             native_replay_consumed: options
                 .native_snapshot_replay()
                 .then(|| {

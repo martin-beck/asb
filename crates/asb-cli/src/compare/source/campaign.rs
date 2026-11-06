@@ -13,6 +13,7 @@ pub(super) fn load(path: &str) -> Result<LoadedReport, Error> {
         parent: layout.root.clone(),
         single: true,
         sweep: crate::sweep::SweepFile {
+            sampled_trials: Vec::new(),
             configs: vec!["benchmark.toml".into()],
             repeat: None,
             resources: None,

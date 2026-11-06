@@ -13,9 +13,9 @@ asb workload tui
 asb provider models [PROVIDER] [--free]
 asb setup tui
 asb setup --preset PRESET.toml [--output FILE]
-asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--trial INSTANCE] [--trial-set FILE] [--workspace DIR] [--output FILE]
+asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--trial INSTANCE] [--trial-count COUNT] [--trial-set FILE] [--workspace DIR] [--output FILE]
 asb run CONFIG [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette FILE] [--json] [--measurements DIR]
-asb sweep SWEEP.toml [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette-root DIR] [--respect-record-timings] [--resume] [--json]
+asb sweep SWEEP.toml [--prepare-replay|--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette-root DIR] [--respect-record-timings] [--resume] [--json]
 asb sweep --preset PRESET.toml [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette-root DIR] [--json]
 asb compare BENCHMARK_OR_SWEEP.toml [--report] [--parquet]
 ```
@@ -843,3 +843,5 @@ asb setup \
 
 asb run benchmark.toml
 ```
+
+For randomly sampled workload trials and offline replay preparation, see [sampled trial preparation](docs/RANDOM_REPLAY_PREPARATION.md).

@@ -408,6 +408,7 @@ pub(crate) fn run_with_interactive(
                 &path,
                 sweep::Options {
                     invocation_dir: Some(&base),
+                    input_parent: None,
                     repeat: options
                         .repeat
                         .or(generated_preset.as_ref().map(|preset| preset.repeat)),
@@ -442,6 +443,7 @@ pub(crate) fn run_with_interactive(
                     import_grades: options.import_grades,
                     recover_recording: options.recover_recording,
                     recover_continuation: options.recover_continuation,
+                    prepare_replay: options.prepare_replay,
                 },
                 stdout,
             )
@@ -1247,6 +1249,9 @@ struct SetupArgs {
     /// Repeatable instance ID; optionally WORKLOAD=INSTANCE for scoped trials.
     #[arg(long, value_name = "INSTANCE")]
     trial: Vec<String>,
+    /// Sample this many distinct trials; optionally scope as WORKLOAD=COUNT.
+    #[arg(long, value_name = "COUNT", conflicts_with_all = ["mode", "preset"])]
+    trial_count: Vec<String>,
     /// Repeatable trial-set TOML; includes all enabled trials unless --trial is given.
     #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
     trial_set: Vec<String>,
@@ -1280,6 +1285,7 @@ impl From<SetupArgs> for config::SetupOptions {
             agent: value.agent,
             workload: value.workload,
             trial: value.trial,
+            trial_count: value.trial_count,
             trial_set: value.trial_set,
             provider: value.provider,
             model: value.model,
@@ -1417,6 +1423,9 @@ struct SweepArgs {
     /// Materialize a repository-owned preset in this initialized project, then run its sweep.
     #[arg(long, value_name = "PRESET.toml", group = "sweep-input")]
     preset: Option<String>,
+    /// Record and verify sweep trials, replacing failed sampled trials before publication.
+    #[arg(long, conflicts_with_all = ["preset", "record", "replay", "llm_record", "llm_replay", "tool_record", "tool_replay", "mcp_record", "mcp_replay", "resume", "continue_after_failures", "recover_recording", "recover_continuation", "reconcile_completed", "import_grades", "track", "seed", "cassette_root", "respect_record_timings"])]
+    prepare_replay: bool,
     /// Sequential fresh batches per configuration, at its configured concurrency.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=65533))]
     repeat: Option<u64>,
@@ -1878,6 +1887,23 @@ mod tests {
             vec!["asb", "sweep", "suite.toml", "--continue", "3"],
         ] {
             Cli::try_parse_from(args).expect("continue sweep option parses");
+        }
+    }
+
+    #[test]
+    fn replay_preparation_is_a_separate_mode_from_record_and_replay() {
+        Cli::try_parse_from(["asb", "sweep", "sweep.toml", "--prepare-replay"]).unwrap();
+        for other in [
+            "--record",
+            "--replay",
+            "--llm-replay",
+            "--tool-record",
+            "--resume",
+        ] {
+            assert!(
+                Cli::try_parse_from(["asb", "sweep", "sweep.toml", "--prepare-replay", other])
+                    .is_err()
+            );
         }
     }
 

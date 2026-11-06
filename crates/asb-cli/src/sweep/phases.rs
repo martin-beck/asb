@@ -57,7 +57,9 @@ impl<'a> PreparedSweep<'a> {
         output: &mut dyn std::io::Write,
     ) -> Result<Self, Error> {
         let sweep_path = Path::new(source);
-        let parent = sweep_path.parent().unwrap_or_else(|| Path::new("."));
+        let parent = options
+            .input_parent
+            .unwrap_or_else(|| sweep_path.parent().unwrap_or_else(|| Path::new(".")));
         let output_anchor =
             crate::project::configuration_anchor(sweep_path, options.invocation_dir)?;
         let output_parent = output_anchor.parent().unwrap_or_else(|| Path::new("."));
@@ -227,6 +229,7 @@ impl<'a> PreparedSweep<'a> {
                         project_root: &root,
                         project_config: &project,
                         agent: &entry.configuration.agent,
+                        offline: options.mode == Some(crate::tape::Mode::Replay),
                     },
                 )?;
             }
@@ -745,11 +748,32 @@ impl SettledSweep<'_> {
         tests::before_comparison(Path::new(&source));
         let output_parent = results.parent().unwrap_or_else(|| Path::new("."));
         let comparison_error = if options.json || output.failed() {
-            compare::run_in_sweep(&source, output_parent, &mut std::io::sink(), &_output_lock).err()
+            compare::run_in_sweep(
+                &source,
+                output_parent,
+                options.invocation_dir,
+                &mut std::io::sink(),
+                &_output_lock,
+            )
+            .err()
         } else if options.quiet_output {
-            compare::run_links_in_sweep(&source, output_parent, output, &_output_lock).err()
+            compare::run_links_in_sweep(
+                &source,
+                output_parent,
+                options.invocation_dir,
+                output,
+                &_output_lock,
+            )
+            .err()
         } else {
-            compare::run_in_sweep(&source, output_parent, output, &_output_lock).err()
+            compare::run_in_sweep(
+                &source,
+                output_parent,
+                options.invocation_dir,
+                output,
+                &_output_lock,
+            )
+            .err()
         };
         let primary = if failures.is_empty() {
             comparison_error.map_or(Ok(()), Err)

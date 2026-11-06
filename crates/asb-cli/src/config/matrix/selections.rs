@@ -218,6 +218,7 @@ mod tests {
             model: vec!["explicit-offline-model".into()],
             native_snapshot_record: false,
             trial: vec![],
+            trial_count: vec![],
             trial_set: vec![],
             concurrency: None,
             workspace: None,

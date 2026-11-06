@@ -57,6 +57,7 @@ fetch(url + '/responses', {method:'POST', headers:{'content-type':'application/j
     )
     .unwrap();
     std::fs::write(root.join("sweep.toml"), "configs=['benchmark.toml']\n").unwrap();
+    let mut qualification_jsonl = Vec::new();
     for index in 1..=8 {
         let workspace = root.join(format!(
             "sweep-results/000-benchmark/workspace-concurrency-{index}/src"
@@ -108,7 +109,14 @@ fetch(url + '/responses', {method:'POST', headers:{'content-type':'application/j
         ));
         let value: serde_json::Value =
             serde_json::from_str(std::fs::read_to_string(log).unwrap().trim()).unwrap();
+        qualification_jsonl.extend_from_slice(serde_json::to_string(&value).unwrap().as_bytes());
+        qualification_jsonl.push(b'\n');
         assert_eq!(value["status"], "completed");
+        assert_eq!(value["provider_replay_consumed"], true);
+        let observation = asb_cli::cassette::ReplayObservation::from_summary(&value).unwrap();
+        assert_eq!(observation.replica, index);
+        assert_eq!(observation.provider_consumed, Some(true));
+        assert_eq!(observation.cleanup_confirmed, Some(true));
         let receipt: serde_json::Value = serde_json::from_slice(
             &std::fs::read(root.join(format!(
                 "sweep-results/.checkpoint/replicas/000000/{index:03}.json"
@@ -123,6 +131,10 @@ fetch(url + '/responses', {method:'POST', headers:{'content-type':'application/j
         assert_eq!(receipt["scope"], "completed-replica-declared-evidence");
         assert_eq!(receipt["fingerprint"]["digest"].as_str().unwrap().len(), 64);
     }
+    let qualified =
+        asb_cli::cassette::ReplayAttempt::from_jsonl("a".repeat(64), &qualification_jsonl, 8)
+            .unwrap();
+    assert_eq!(qualified.replicas.len(), 8);
     let comparison: serde_json::Value = serde_json::from_slice(
         &std::fs::read(root.join("results/sweep-comparison/comparison.json")).unwrap(),
     )

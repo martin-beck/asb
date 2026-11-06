@@ -114,7 +114,11 @@ pub(super) struct LoadedReport {
 }
 
 impl Request {
-    fn read(path: &str, output_parent: Option<&Path>) -> Result<Self, Error> {
+    fn read(
+        path: &str,
+        output_parent: Option<&Path>,
+        invocation: Option<&Path>,
+    ) -> Result<Self, Error> {
         let sweep_path = Path::new(path);
         let input_text = read_text(sweep_path, "TOML")?;
         let input: toml::Value = toml::from_str(&input_text)
@@ -122,8 +126,9 @@ impl Request {
         let single = !input
             .as_table()
             .is_some_and(|table| table.contains_key("configs"));
-        let sweep = if single {
+        let mut sweep = if single {
             crate::sweep::SweepFile {
+                sampled_trials: Vec::new(),
                 resources: None,
                 repeat: None,
                 configs: vec![
@@ -137,13 +142,80 @@ impl Request {
         } else {
             crate::sweep::parse_manifest(sweep_path, input)?
         };
-        let parent = sweep_path.parent().unwrap_or_else(|| Path::new("."));
+        let original_parent = sweep_path.parent().unwrap_or_else(|| Path::new("."));
         let stem = sweep_path
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("sweep");
-        let output_parent = output_parent.unwrap_or(parent);
+        let output_parent = output_parent.unwrap_or(original_parent);
         let sweep_results = output_parent.join(format!("{stem}-results"));
+        // Reopen the exact prepared winner set when reporting a sampled replay.
+        // Resolving validates the retained ledgers and archives and never records.
+        let plan_path = sweep_results.join("plan.json");
+        let may_be_prepared = !sweep.sampled_trials.is_empty()
+            || crate::sweep::sampled::has_preparation(
+                sweep_path,
+                crate::sweep::Options {
+                    invocation_dir: invocation.or(Some(output_parent)),
+                    ..Default::default()
+                },
+            )?;
+        let sampled_replay = may_be_prepared
+            && match fs::symlink_metadata(&plan_path) {
+                Ok(_) => {
+                    let text = read_text_limit(
+                        &plan_path,
+                        "sweep plan",
+                        crate::sweep::plan::MAX_PLAN_BYTES as u64,
+                    )?;
+                    let value: Value = serde_json::from_str(&text)
+                        .map_err(|error| Error::Input(format!("invalid sweep plan: {error}")))?;
+                    let replay =
+                        value.get("execution_mode").and_then(Value::as_str) == Some("replay");
+                    let references =
+                        value
+                            .get("entries")
+                            .and_then(Value::as_array)
+                            .map(|entries| {
+                                entries
+                                    .iter()
+                                    .filter_map(|entry| {
+                                        entry.get("reference").and_then(Value::as_str)
+                                    })
+                                    .collect::<Vec<_>>()
+                            });
+                    let originals = sweep.configs.iter().map(String::as_str).collect::<Vec<_>>();
+                    replay
+                        && (!sweep.sampled_trials.is_empty()
+                            || references.is_some_and(|refs| refs != originals))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(Error::Input(format!(
+                        "cannot inspect sweep plan {}: {error}",
+                        plan_path.display()
+                    )));
+                }
+            };
+        let selected = if sampled_replay {
+            Some(crate::sweep::sampled::resolve(
+                sweep_path,
+                &sweep,
+                crate::sweep::Options {
+                    invocation_dir: invocation.or(Some(output_parent)),
+                    ..Default::default()
+                },
+            )?)
+        } else {
+            None
+        };
+        let parent = if let Some(ref selected) = selected {
+            sweep.configs = selected.references.clone();
+            sweep.sampled_trials.clear();
+            selected.parent.as_path()
+        } else {
+            original_parent
+        };
         let mut configurations = BTreeMap::new();
         let mut configuration_bytes = 0usize;
         for reference in &sweep.configs {
@@ -222,17 +294,21 @@ impl Request {
 
 #[cfg(test)]
 pub(super) fn load(path: &str) -> Result<LoadedReport, Error> {
-    load_at(path, None)
+    load_at(path, None, None)
 }
 
-pub(super) fn load_at(path: &str, output_parent: Option<&Path>) -> Result<LoadedReport, Error> {
+pub(super) fn load_at(
+    path: &str,
+    output_parent: Option<&Path>,
+    invocation: Option<&Path>,
+) -> Result<LoadedReport, Error> {
     if Path::new(path)
         .file_name()
         .is_some_and(|name| name == "plan.json")
     {
         return campaign::load(path);
     }
-    let request = Request::read(path, output_parent)?;
+    let request = Request::read(path, output_parent, invocation)?;
     if request
         .plan
         .as_ref()
@@ -1311,6 +1387,7 @@ mod pricing_tests {
             parent: root.to_path_buf(),
             single: false,
             sweep: crate::sweep::SweepFile {
+                sampled_trials: Vec::new(),
                 resources: None,
                 repeat: None,
                 configs: Vec::new(),

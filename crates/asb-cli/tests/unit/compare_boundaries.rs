@@ -24,6 +24,28 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn compare_inside_retained_sweep_does_not_create_inner_sweep_lock() {
+    let root = Fixture::new();
+    root.write(
+        ".asb/project.toml",
+        "tools_dir='tools'\nworkloads_dir='workloads'\nworkspace_dir='workspace'\n",
+    );
+    let input = root.write(
+        "outer-results/000-one/benchmark.toml",
+        "agent='pi'\nprovider='openrouter'\nmodel='m'\nworkload='bug-fix'\n",
+    );
+    let _ = generate_at(input.to_str().unwrap(), &root.0, &mut Vec::new(), false);
+    assert!(
+        !input
+            .parent()
+            .unwrap()
+            .join(".benchmark-asb-sweep.lock")
+            .exists()
+    );
+    assert!(root.0.join(".outer-asb-sweep.lock").exists());
+}
+
+#[test]
 fn structured_reward_without_execution_task_is_rejected() {
     use crate::workloads::outcome::*;
     let root = Fixture::new();

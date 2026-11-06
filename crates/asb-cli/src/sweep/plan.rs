@@ -172,6 +172,7 @@ fn build_with_catalog(
             selection,
         });
     }
+    sampled_templates(manifest, entries.iter().map(|entry| &entry.configuration))?;
     Ok(SweepPlan {
         schema_version: 1,
         execution: None,
@@ -190,6 +191,103 @@ fn build_with_catalog(
         entries,
         resources: manifest.resources,
     })
+}
+
+pub(super) type SampledKey = (String, String, String, String);
+
+pub(super) fn sampled_templates<'a>(
+    manifest: &SweepFile,
+    configurations: impl Iterator<Item = &'a BenchmarkConfig>,
+) -> Result<BTreeMap<SampledKey, BenchmarkConfig>, Error> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut groups: BTreeMap<SampledKey, BTreeSet<String>> = BTreeMap::new();
+    let mut configurations_by_group = BTreeMap::<SampledKey, String>::new();
+    let mut templates = BTreeMap::new();
+    let samples: BTreeMap<_, _> = manifest
+        .sampled_trials
+        .iter()
+        .map(|sample| (sample.workload.as_str(), sample))
+        .collect();
+    for config in configurations {
+        if !samples.contains_key(config.workload.as_str()) {
+            continue;
+        }
+        let trial = config.trial.as_ref().ok_or_else(|| {
+            Error::Input(format!(
+                "sampled workload `{}` has a benchmark without a trial",
+                config.workload
+            ))
+        })?;
+        let key = (
+            config.workload.clone(),
+            config.agent.clone(),
+            config.provider.clone(),
+            config.model.clone(),
+        );
+        // Setup gives each generated file its own output paths. All other
+        // settings must agree before one file can serve as the replacement
+        // template for this combination.
+        let mut template = config.clone();
+        template.trial = None;
+        template.log_file.clear();
+        if let Some(measurements) = template.measurements.as_mut() {
+            measurements.directory.clear();
+        }
+        let bytes = serde_json::to_vec(&template)
+            .map_err(|_| Error::Input("cannot encode sampled benchmark template".into()))?;
+        let fingerprint = crate::cassette::digest(&bytes);
+        if configurations_by_group
+            .get(&key)
+            .is_some_and(|prior| *prior != fingerprint)
+        {
+            return Err(Error::Input(format!(
+                "sampled workload `{}` has inconsistent benchmark settings within a combination",
+                config.workload
+            )));
+        }
+        configurations_by_group.insert(key.clone(), fingerprint);
+        templates
+            .entry(key.clone())
+            .or_insert_with(|| config.clone());
+        if !groups.entry(key).or_default().insert(trial.clone()) {
+            return Err(Error::Input(format!(
+                "sampled workload `{}` contains a duplicate trial in a benchmark combination",
+                config.workload
+            )));
+        }
+    }
+    let expected: BTreeMap<_, BTreeSet<_>> = samples
+        .iter()
+        .map(|(workload, sample)| {
+            (
+                *workload,
+                sample
+                    .candidates
+                    .iter()
+                    .take(sample.count)
+                    .cloned()
+                    .collect(),
+            )
+        })
+        .collect();
+    let mut found = BTreeSet::new();
+    for (key, actual) in &groups {
+        found.insert(key.0.as_str());
+        if actual != &expected[key.0.as_str()] {
+            return Err(Error::Input(format!(
+                "sampled workload `{}` has an incomplete or changed benchmark combination; regenerate setup",
+                key.0
+            )));
+        }
+    }
+    for workload in samples.keys() {
+        if !found.contains(workload) {
+            return Err(Error::Input(format!(
+                "sampled workload `{workload}` has no benchmarks"
+            )));
+        }
+    }
+    Ok(templates)
 }
 
 impl SweepPlan {
@@ -212,6 +310,7 @@ impl SweepPlan {
         let snapshot: Self = serde_json::from_slice(&bytes)
             .map_err(|_| Error::Input("invalid historical sweep source index".into()))?;
         let manifest = SweepFile {
+            sampled_trials: Vec::new(),
             configs: snapshot
                 .entries
                 .iter()
@@ -540,6 +639,47 @@ mod tests {
     use serde_json::{Value, json};
 
     #[test]
+    fn sampled_population_requires_each_combination_to_match_the_frozen_trials() {
+        let ids = vec!["one".into(), "two".into(), "three".into()];
+        let order = crate::cassette::TrialOrder::new(&ids, 2, 42).unwrap();
+        let manifest = SweepFile {
+            configs: vec!["a.toml".into()],
+            repeat: None,
+            resources: None,
+            sampled_trials: vec![super::super::SampledTrials {
+                workload: "fixture".into(),
+                count: 2,
+                seed: format!("{:016x}", 42),
+                candidates: order.candidates().to_vec(),
+            }],
+        };
+        let mut configs = Vec::new();
+        for agent in ["pi", "opencode"] {
+            for trial in order.initial() {
+                let config: BenchmarkConfig = toml::from_str(&format!(
+                    "agent='{agent}'\nprovider='openrouter'\nmodel='fixture'\nworkload='fixture'\ntrial='{trial}'\n"
+                )).unwrap();
+                configs.push(config);
+            }
+        }
+        let templates = sampled_templates(&manifest, configs.iter()).unwrap();
+        assert_eq!(templates.len(), 2);
+        assert!(
+            templates
+                .values()
+                .all(|template| template.trial.as_deref() == Some(order.initial()[0].as_str()))
+        );
+        configs[0].concurrency = 2;
+        assert!(sampled_templates(&manifest, configs.iter()).is_err());
+        configs[0].concurrency = 1;
+        let removed = configs.pop().unwrap();
+        assert!(sampled_templates(&manifest, configs.iter()).is_err());
+        configs.push(removed);
+        configs.push(configs[0].clone());
+        assert!(sampled_templates(&manifest, configs.iter()).is_err());
+    }
+
+    #[test]
     #[ignore = "requires explicit installed original catalogs; no agent, provider or Docker execution"]
     fn installed_original_populations_plan_and_report_all_instances_without_execution() {
         let root = PathBuf::from(
@@ -559,6 +699,7 @@ mod tests {
             ("terminal-bench-2.1", 89),
         ];
         let mut manifest = SweepFile {
+            sampled_trials: Vec::new(),
             repeat: None,
             resources: None,
             configs: Vec::new(),
@@ -644,6 +785,7 @@ mod tests {
             )
             .unwrap();
             SweepFile {
+                sampled_trials: Vec::new(),
                 repeat: None,
                 resources: None,
                 configs: vec!["one.toml".into(), "two.toml".into()],
