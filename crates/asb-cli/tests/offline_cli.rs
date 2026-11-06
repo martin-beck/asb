@@ -4309,6 +4309,7 @@ fn replay_ignore_collector_skips_unexecutable_sysstat_without_spawning_it() {
             "preflight must not execute the unavailable tool"
         );
         let row: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(row["replay_operational_success"], false);
         let events = row["ignored_failures"].as_array().unwrap();
         assert!(events.iter().any(|event| {
             event["kind"] == "collector_error"
@@ -4511,6 +4512,7 @@ fn collector_ignore_without_a_failure_does_not_invent_a_warning() {
     );
     expect_success(&result);
     let row: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(row["replay_operational_success"], true);
     assert!(row.get("ignored_failures").is_none());
     let measurement_dir = row["measurement_directory"].as_str().unwrap();
     let measured: serde_json::Value = serde_json::from_slice(
