@@ -235,6 +235,16 @@ impl RunOptions<'_> {
         }
     }
 
+    fn native_snapshot_replay(&self) -> bool {
+        self.effective_tool_mode() == Some(tape::Mode::Replay)
+            && self
+                .native_tool_inputs
+                .and_then(|inputs| inputs.get(self.replica.index.checked_sub(1)?))
+                .is_some_and(|input| {
+                    input.native_tool.is_some() && input.workspace_snapshots.is_some()
+                })
+    }
+
     fn replay_statistics(&self) -> Option<crate::cassette::Statistics> {
         self.batch
             .and_then(|batch| batch.replay_statistics(self.replica.index))
@@ -2068,6 +2078,46 @@ mod tests {
         assert_eq!(options.effective_max_steps(), Some(300));
         options.replica.index = 0;
         assert_eq!(options.effective_max_steps(), Some(300));
+    }
+
+    #[test]
+    fn snapshot_replay_uses_the_selected_track_and_tool_mode() {
+        let input = |snapshot: bool, native: bool| {
+            let mut value: super::campaign::ReplayInput =
+                serde_json::from_value(serde_json::json!({
+                    "source":"source.asb.zip", "private":"input.jsonl", "bytes":3,
+                    "sha256":"a".repeat(64),
+                    "workspace_snapshots": snapshot.then_some("snapshot.tar")
+                }))
+                .unwrap();
+            value.native_tool = native.then(|| "native.jsonl".into());
+            value
+        };
+        let first = input(true, true);
+        let second = input(true, false);
+        let third = input(false, true);
+        let inputs = [&first, &second, &third];
+        let mut options = super::RunOptions {
+            native_tool_inputs: Some(&inputs),
+            mode: Some(crate::tape::Mode::Replay),
+            ..Default::default()
+        };
+        assert!(options.native_snapshot_replay());
+        options.replica.index = 2;
+        assert!(!options.native_snapshot_replay());
+        options.replica.index = 3;
+        assert!(!options.native_snapshot_replay());
+        options.replica.index = 1;
+        options.tool_mode_explicit = true;
+        assert!(
+            !options.native_snapshot_replay(),
+            "provider-only replay stays provider-only"
+        );
+        options.tool_mode = Some(crate::tape::Mode::Replay);
+        assert!(options.native_snapshot_replay());
+        options.mode = Some(crate::tape::Mode::Record);
+        options.tool_mode = Some(crate::tape::Mode::Record);
+        assert!(!options.native_snapshot_replay());
     }
 
     #[test]

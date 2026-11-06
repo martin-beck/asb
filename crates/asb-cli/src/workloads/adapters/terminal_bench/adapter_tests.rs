@@ -163,6 +163,7 @@ fn preparation_checks_selection_runtime_and_allocation_before_any_task_launch() 
         };
         let mut context = PreparationContext {
             tool_mode: None,
+            native_snapshot_replay: false,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: Some(&observer),

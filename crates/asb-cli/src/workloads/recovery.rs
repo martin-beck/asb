@@ -353,6 +353,7 @@ mod tests {
             fixture.reference.dataset.clone(),
             &super::super::PreparationContext {
                 tool_mode: None,
+                native_snapshot_replay: false,
                 verify_initial_material: false,
                 budgets: Default::default(),
                 on_allocation: Some(&refused),

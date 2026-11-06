@@ -41,6 +41,13 @@ connections through those Docker networks, but does not by itself prove that
 all tools were captured, that all filesystem effects are covered, or that a
 configured loopback service cannot itself reach another network.
 
+For a selected track with both a verified native-tool sidecar and workspace
+snapshots, tool replay selects experimental snapshot mode automatically for
+the supported SWE-bench workload family. Provider-only replay does not select
+it. Recording still requires the experimental opt-in. Additional captured
+roots are configured separately and must match the recording; automatic mode
+selection is not evidence of complete filesystem coverage.
+
 ## Implementation sequence
 
 1. Define a Pi-owned, versioned native tool event contract with stable call
