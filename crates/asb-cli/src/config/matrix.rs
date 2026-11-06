@@ -47,15 +47,6 @@ pub(super) fn setup_at(
         .any(|values| values.iter().any(|value| value == "all"));
     selections::expand(&mut options, base)?;
     validate_concurrency_before_install(options.concurrency)?;
-    if options.native_snapshot_record
-        && (options.agent.iter().any(|agent| agent != "pi")
-            || options
-                .workload
-                .iter()
-                .any(|workload| !workload.starts_with("swe-bench")))
-    {
-        return Err(Error::Input("experimental native snapshot recording currently supports Pi with SWE-bench workloads only".into()));
-    }
     if !filter_incompatible {
         validate_before_install(&options)?;
     }

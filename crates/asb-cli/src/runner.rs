@@ -325,15 +325,13 @@ pub(crate) fn validate_native_snapshot_record(
     mode: Option<tape::Mode>,
     tool_mode: Option<tape::Mode>,
 ) -> Result<(), Error> {
-    if config.native_snapshot_record {
-        if config.agent != "pi" || !config.workload.starts_with("swe-bench") {
-            return Err(Error::Input("experimental native snapshot recording currently supports Pi with SWE-bench workloads only".into()));
-        }
-        if mode == Some(tape::Mode::Record) && tool_mode != Some(tape::Mode::Record) {
-            return Err(Error::Input(
-                "native snapshot recording requires tool recording; use --record".into(),
-            ));
-        }
+    if config.native_snapshot_record
+        && mode == Some(tape::Mode::Record)
+        && tool_mode != Some(tape::Mode::Record)
+    {
+        return Err(Error::Input(
+            "native snapshot recording requires tool recording; use --record".into(),
+        ));
     }
     Ok(())
 }
@@ -2311,15 +2309,10 @@ mod tests {
         assert!(super::validate_native_snapshot_record(&config, Some(Mode::Record), None).is_err());
         assert!(super::validate_native_snapshot_record(&config, Some(Mode::Replay), None).is_ok());
         config.agent = "opencode".into();
-        assert!(
-            super::validate_native_snapshot_record(&config, Some(Mode::Record), Some(Mode::Record))
-                .is_err()
-        );
-        config.agent = "pi".into();
         config.workload = "bug-fix".into();
         assert!(
             super::validate_native_snapshot_record(&config, Some(Mode::Record), Some(Mode::Record))
-                .is_err()
+                .is_ok()
         );
     }
 

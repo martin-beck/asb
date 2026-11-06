@@ -18,6 +18,24 @@ record/replay hop; additional registered hops can be named in `ASB_PROXY_CHAIN`.
 The agent receives the chain's loopback ingress, so its provider configuration
 does not change when a hop is added or removed.
 
+## Workspace snapshots and execution environments
+
+Workspace snapshot storage and execution environments are separate concerns.
+The snapshot backend receives an already provisioned guest transport, tool paths,
+selected roots, mode and lifecycle deadline. It starts a session and owns its
+settlement and cleanup; it does not select an execution environment. The Btrfs
+implementation currently uses the task container transport and supports ordinary
+or separate snapshot custody. A VM execution backend may supply its own guest
+transport and must implement its own compatible snapshot session; a QEMU disk
+used for Btrfs storage does not select or replace an execution VM.
+
+Snapshot recording can be selected for any setup combination. Support and
+fidelity vary: a successful recording requires both a settled workspace archive
+and agent-owned tool-boundary evidence. Missing evidence is reported as a run
+failure. Adapter implementations must capture their own tool calls and workload
+roots, and offline replay must not re-execute captured tools. Selection alone
+is not evidence that a particular combination has been qualified.
+
 ## Adapter-owned replay extensions
 
 Record/replay has a deliberately narrow shared core.  The core may create an

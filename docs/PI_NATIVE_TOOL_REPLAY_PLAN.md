@@ -44,12 +44,12 @@ configured loopback service cannot itself reach another network.
 For a selected track with both a verified native-tool sidecar and workspace
 snapshots, tool replay selects experimental snapshot mode automatically for
 the supported SWE-bench workload family. Provider-only replay does not select
-it. Opt in to recording when creating a Pi/SWE-bench configuration with
+it. Opt in to recording when creating a configuration with
 `asb setup --native-snapshot-record` or press Ctrl-N in the setup TUI, then
 run or sweep that configuration with `--record`. The choice is
 stored in each benchmark configuration and applies when tool recording is
 selected; an ordinary live run does not create a snapshot cassette. The
-experimental mode requires a snapshot-capable Linux guest and available
+experimental mode has been qualified for the Pi/SWE-bench route and requires a snapshot-capable Linux guest and available
 `btrfs`, `mkfs.btrfs`, and `rsync` tools. Replay restores the
 recorded extra-root layout when present; an explicit override must match it.
 Automatic mode selection is not evidence of complete filesystem coverage.

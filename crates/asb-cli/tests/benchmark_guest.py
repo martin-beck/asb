@@ -33,6 +33,31 @@ def elf(interpreter=False):
     return data
 
 
+class SnapshotBackendTests(unittest.TestCase):
+    def test_backend_passes_guest_transport_and_selects_custody(self):
+        from asb_snapshot_backend import BTRFS, SnapshotRequest
+        task, transport = object(), object()
+        request = SnapshotRequest(task, {'btrfs': 'tool'}, (1, 2), transport, 123,
+                                  replay=True, extra_roots=('/tmp',))
+        with patch('asb_snapshot_control.GuestSnapshot') as ordinary, \
+             patch('asb_snapshot_independent.IndependentSnapshot') as separate:
+            self.assertIs(BTRFS.start(request), ordinary.return_value)
+            ordinary.assert_called_once_with(task, request.tools, (1, 2), transport, 123,
+                                             replay=True, extra_roots=['/tmp'])
+            separate.assert_not_called()
+            from dataclasses import replace
+            self.assertIs(BTRFS.start(replace(request, independent_custody=True)), separate.return_value)
+            separate.assert_called_once_with(task, request.tools, (1, 2), transport, 123,
+                                             replay=True, extra_roots=['/tmp'])
+
+    def test_backend_propagates_startup_failure(self):
+        from asb_snapshot_backend import BTRFS, SnapshotRequest
+        request = SnapshotRequest(object(), {}, None, object(), 0)
+        with patch('asb_snapshot_control.GuestSnapshot', side_effect=ExecutionError('failed')):
+            with self.assertRaisesRegex(ExecutionError, 'failed'):
+                BTRFS.start(request)
+
+
 class Container:
     def __init__(self):
         self.files = []

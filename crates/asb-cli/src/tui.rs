@@ -206,8 +206,7 @@ impl App {
     fn toggle_native_snapshot_record(&mut self) {
         self.native_snapshot_record = !self.native_snapshot_record;
         self.message = if self.native_snapshot_record {
-            "Experimental snapshot recording enabled for Pi and SWE-bench; use --record to capture."
-                .into()
+            "Experimental snapshot recording enabled; use --record to capture.".into()
         } else {
             "Experimental snapshot recording disabled.".into()
         };
@@ -2469,7 +2468,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
                 },
             ]),
             Line::from(format!(
-                "Ctrl-N: snapshot record {} (Pi/SWE)",
+                "Ctrl-N: snapshot record {} (experimental)",
                 if app.native_snapshot_record {
                     "on"
                 } else {
@@ -3094,14 +3093,6 @@ fn prepare_configs(app: &App) -> Result<(usize, PathBuf, Vec<BenchmarkConfig>), 
         .filter(|choice| !choice.key.is_control())
         .map(|choice| selected_workload_trials(app, &choice.key))
         .collect::<Result<Vec<_>, _>>()?;
-    if app.native_snapshot_record
-        && (agents.iter().any(|agent| agent != "pi")
-            || workloads
-                .iter()
-                .any(|(workload, _, _)| !workload.starts_with("swe-bench")))
-    {
-        return Err(Error::Input("experimental native snapshot recording currently supports Pi with SWE-bench workloads only".into()));
-    }
     let mut measures = crate::collectors::expand_dependencies(
         &app.panes[PaneKind::Measurements.index()]
             .selected_choices()
@@ -4643,7 +4634,7 @@ mod tests {
     }
 
     #[test]
-    fn preselection_preserves_snapshot_setting_and_rejects_incompatible_output() {
+    fn preselection_preserves_snapshot_setting_for_untested_workload() {
         let root =
             std::env::temp_dir().join(format!("asb-tui-snapshot-setting-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -4664,10 +4655,11 @@ mod tests {
         let screen = (0..24)
             .flat_map(|y| (0..80).map(move |x| buffer[(x, y)].symbol()))
             .collect::<String>();
-        assert!(screen.contains("Ctrl-N: snapshot record on (Pi/SWE)"));
-        assert!(
-            matches!(super::prepare_configs(&app), Err(error) if error.to_string().contains("Pi with SWE-bench"))
-        );
+        assert!(screen.contains("Ctrl-N: snapshot record on (experimental)"));
+        let (_, _, configs) = super::prepare_configs(&app).unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].workload, "bug-fix");
+        assert!(configs[0].native_snapshot_record);
         let _ = std::fs::remove_dir_all(root);
     }
 
