@@ -361,7 +361,12 @@ function normalizeCassetteBody(body, url = "", recordedWorkspace = process.env.A
     if (normalizerValue !== undefined && (!normalizerValue || typeof normalizerValue !== "object" || Array.isArray(normalizerValue))) {
       throw new Error("adapter normalizer must return an object or undefined");
     }
-    const canonical = normalizerValue === undefined ? extensionCanonical : normalizerValue;
+    let canonical = normalizerValue === undefined ? extensionCanonical : normalizerValue;
+    const comparisonValue = agentNormalizer?.normalizeComparison?.({ url, body: canonical });
+    if (comparisonValue !== undefined && (!comparisonValue || typeof comparisonValue !== "object" || Array.isArray(comparisonValue))) {
+      throw new Error("adapter comparison normalizer must return an object or undefined");
+    }
+    if (comparisonValue !== undefined) canonical = comparisonValue;
     if (legacyRequestPolicy && url.includes('/responses') && canonical?.client_metadata &&
         Object.hasOwn(canonical.client_metadata, 'x-codex-installation-id')) {
       delete canonical.parallel_tool_calls;

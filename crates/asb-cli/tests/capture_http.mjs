@@ -226,6 +226,33 @@ test("custom policy applies once on replay and rejects changed prompts", { timeo
 
 });
 
+test("Claude parallel results replay by call identity after scoped text normalization", {timeout:10000}, async (t) => {
+  const policy = {sha256:'b'.repeat(64), workload:{id:'fixture',task_id:'one'}, profiles:[{id:'tool', source:"export function normalizeToolResult({text,tool}) { return tool.name + ':' + text.replace(/seed=\\d+/, 'seed=<seed>'); }"}]};
+  const {port, stop, output} = await fixture(t, (_req,res) => res.end('{}'), {policy});
+  const calls = [{type:'tool_use',id:'call-a',name:'Read',input:{path:'a'}},{type:'tool_use',id:'call-b',name:'Bash',input:{command:'b'}}];
+  const a = {type:'tool_result',tool_use_id:'call-a',content:'seed=1'};
+  const b = {type:'tool_result',tool_use_id:'call-b',content:'output'};
+  const body = content => JSON.stringify({model:'m',messages:[{role:'assistant',content:calls},{role:'user',content}]});
+  assert.equal((await request(port,'/v1/messages',body([a,{...b,cache_control:{type:'ephemeral'}}]))).status,200);
+  await stop();
+  const root = fs.mkdtempSync(join(process.cwd(),'target/capture-http-fixtures/replay-parallel-'));
+  const cassette = join(root,'cassette.jsonl'), policyPath = join(root,'policy.json'), ready = join(root,'ready.json');
+  fs.copyFileSync(output,cassette); fs.writeFileSync(policyPath,JSON.stringify(policy));
+  const script = fileURLToPath(new URL('../assets/scripts/llmtape.mjs',import.meta.url));
+  const normalizer = fileURLToPath(new URL('../assets/scripts/agent-normalizers/claude-code.mjs',import.meta.url));
+  const child = spawn(process.execPath,[script,'replay','--port','0','--cassette',cassette],{
+    env:{PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:'1',ASB_TAPE_READY_FILE:ready,ASB_TAPE_CUSTOM_NORMALIZERS:policyPath,ASB_TAPE_AGENT_NORMALIZER:normalizer},stdio:['pipe','ignore','pipe']});
+  let stderr=''; child.stderr.on('data',data=>{stderr+=data});
+  const exited=new Promise(resolve=>child.once('exit',(code,signal)=>resolve({code,signal})));
+  t.after(async()=>{if(child.exitCode===null&&child.signalCode===null) child.kill('SIGKILL'); await exited; fs.rmSync(root,{recursive:true});});
+  const deadline=performance.now()+3000;
+  while(!fs.existsSync(ready)){assert.equal(child.exitCode,null,stderr); assert.ok(performance.now()<deadline,stderr); await delay(10);}
+  const replayPort=JSON.parse(fs.readFileSync(ready)).port;
+  assert.equal((await request(replayPort,'/v1/messages',body([{...b,content:'changed'},{...a,cache_control:{type:'ephemeral'}}]))).status,409);
+  assert.equal((await request(replayPort,'/v1/messages',body([b,{...a,content:'seed=2',cache_control:{type:'ephemeral'}}]))).status,200);
+  child.stdin.end(); assert.deepEqual(await exited,{code:0,signal:null},stderr);
+});
+
 test("a failing replay normalizer rejects the raw cassette without changing it", { timeout: 10000 }, async (t) => {
   const { port, stop, output } = await fixture(t, (_req, res) => res.end("{}"));
   const body = JSON.stringify({ model: "m", messages: [{ role: "tool", content: "result" }] });
