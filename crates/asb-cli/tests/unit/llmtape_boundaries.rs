@@ -153,7 +153,7 @@ fn capture_evidence_and_retained_diagnostics_survive_independent_cleanup_failure
         .unwrap();
         let mut session = RunningLlmtape {
             ignore_provider_mismatch: false,
-            replay_divergence: None,
+            replay_divergences: Vec::new(),
             retained_mismatch_evidence: None,
             child: Some(child),
             builtin: true,
@@ -216,7 +216,7 @@ fn sealed_incomplete_capture_retains_only_its_private_receipt_scratch() {
     child.wait().unwrap();
     let mut session = RunningLlmtape {
         ignore_provider_mismatch: false,
-        replay_divergence: None,
+        replay_divergences: Vec::new(),
         retained_mismatch_evidence: None,
         child: Some(child),
         builtin: true,
@@ -443,7 +443,7 @@ fn replay_finish_reports_absent_and_malformed_progress_then_is_idempotent() {
         }
         let mut session = RunningLlmtape {
             ignore_provider_mismatch: false,
-            replay_divergence: None,
+            replay_divergences: Vec::new(),
             retained_mismatch_evidence: None,
             child: Some(child),
             builtin: false,
@@ -483,7 +483,7 @@ fn replay_finish_reports_only_validated_structural_mismatch_context() {
         fs::write(&progress, contents).unwrap();
         let mut session = RunningLlmtape {
             ignore_provider_mismatch: false,
-            replay_divergence: None,
+            replay_divergences: Vec::new(),
             retained_mismatch_evidence: None,
             child: Some(child),
             builtin: false,

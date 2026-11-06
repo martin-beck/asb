@@ -330,8 +330,8 @@ pub(crate) trait ProxySession {
     fn cleanup_confirmed(&self) -> bool {
         false
     }
-    fn replay_divergence(&self) -> Option<ReplayDivergence> {
-        None
+    fn replay_divergences(&self) -> Vec<ReplayDivergence> {
+        Vec::new()
     }
     fn capture_evidence(&self) -> Option<capture::CaptureEvidence> {
         None
@@ -461,7 +461,7 @@ impl Chain {
                 replay_divergences: self
                     .hops
                     .iter()
-                    .filter_map(|hop| hop.replay_divergence())
+                    .flat_map(|hop| hop.replay_divergences())
                     .collect(),
                 captures: self
                     .hops

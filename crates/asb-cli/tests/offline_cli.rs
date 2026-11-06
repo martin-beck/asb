@@ -1368,9 +1368,10 @@ if (process.argv.includes('--fixture-agent-worker')) {
 const behavior = process.env.ASB_FIXTURE_BEHAVIOR || 'success';
 async function main() {
   if (behavior === 'skip') { console.log('fixture-no-request'); return; }
-  const body = {model:'test-model',input:behavior === 'mismatch' ? 'changed' : 'offline',tools:[{type:'function'}]};
+  const body = {model:'test-model',input:['mismatch', 'mismatch-twice'].includes(behavior) ? 'changed' : 'offline',tools:[{type:'function'}]};
   const send = () => fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   let response = await send();
+  if (behavior === 'mismatch-twice') response = await send();
   if (behavior === 'extra') response = await send();
   if (!response.ok) { console.error('fixture-rejected', response.status); process.exitCode = 8; return; }
   if (behavior === 'noop') { console.log('No task edits were made.'); return; }
@@ -3633,6 +3634,37 @@ fn approximate_replay_serves_a_recorded_response_and_exhaustion_remains_fatal() 
     assert!(String::from_utf8_lossy(&no_response.stderr).contains("replay rejected"));
     let rejected = replay(&replay_project(1), "mismatch", &[]);
     assert!(!rejected.status.success());
+    let twice_project = replay_project(1);
+    let cassette = std::fs::read_to_string(twice_project.0.join("tape.jsonl")).unwrap();
+    std::fs::write(
+        twice_project.0.join("tape.jsonl"),
+        format!("{cassette}{cassette}"),
+    )
+    .unwrap();
+    let twice = replay(
+        &twice_project,
+        "mismatch-twice",
+        &["--ignore-provider-mismatch", "--json"],
+    );
+    assert!(
+        twice.status.success(),
+        "{}",
+        String::from_utf8_lossy(&twice.stderr)
+    );
+    let twice: serde_json::Value = serde_json::from_slice(&twice.stdout).unwrap();
+    assert_eq!(twice["ignored_failures"].as_array().unwrap().len(), 2);
+    assert!(
+        twice["ignored_failures"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("request 1")
+    );
+    assert!(
+        twice["ignored_failures"][1]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("request 2")
+    );
     let rejected = replay_project(1).command(&[
         "run",
         "benchmark.toml",

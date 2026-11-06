@@ -587,8 +587,8 @@ function advanceNativeTools() {
 }
 let rejected = 0;
 let firstMismatch = null;
-let ignoredMismatches = 0;
-let firstIgnoredMismatch = null;
+const ignoredMismatchEvents = [];
+const MAX_IGNORED_MISMATCHES = 1024;
 const progressPath = `${cassette}.progress.json`;
 function writeProgress() {
   if (mode === "replay") {
@@ -597,8 +597,8 @@ function writeProgress() {
       consumed: cursor,
       total: interactions.length,
       rejected,
-      ignored_mismatches: ignoredMismatches,
-      ...(firstIgnoredMismatch ? { first_ignored_mismatch: firstIgnoredMismatch } : {}),
+      ignored_mismatches: ignoredMismatchEvents.length,
+      ignored_mismatch_events: ignoredMismatchEvents,
       unrequested_optional_probes: deferredProbes.length,
       ...(customSupervisor ? { normalization: normalizationEvidence() } : {}),
       ...(firstMismatch ? { first_mismatch: firstMismatch } : {}),
@@ -974,8 +974,13 @@ async function handle(request, response, recording) {
         response.end(JSON.stringify({ error: "request does not match cassette" }));
         return;
       }
-      ignoredMismatches += 1;
-      firstIgnoredMismatch ??= mismatch;
+      if (ignoredMismatchEvents.length >= MAX_IGNORED_MISMATCHES) {
+        reject({ sequence: cursor + 1, category: "ignored_mismatch_limit", path: "$" });
+        response.writeHead(409, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: "ignored provider mismatch limit reached" }));
+        return;
+      }
+      ignoredMismatchEvents.push(mismatch);
       // Deliberately consume the next recorded response. This does not assert
       // semantic equivalence: the owning run marks the replay approximate.
       writeProgress();

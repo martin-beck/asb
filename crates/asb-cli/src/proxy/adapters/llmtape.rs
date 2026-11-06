@@ -110,7 +110,7 @@ struct RunningLlmtape {
     progress: Option<PathBuf>,
     mismatch_evidence: Option<PathBuf>,
     retained_mismatch_evidence: Option<PathBuf>,
-    replay_divergence: Option<crate::proxy::ReplayDivergence>,
+    replay_divergences: Vec<crate::proxy::ReplayDivergence>,
     ignore_provider_mismatch: bool,
     normalization_evidence: Option<PathBuf>,
     cassette: PathBuf,
@@ -487,7 +487,7 @@ impl ProxyAdapter for LlmtapeAdapter {
             mismatch_evidence: (request.mode == Mode::Replay)
                 .then(|| scratch.path.join("mismatch.json")),
             retained_mismatch_evidence: None,
-            replay_divergence: None,
+            replay_divergences: Vec::new(),
             ignore_provider_mismatch: request.ignore_provider_mismatch,
             normalization_evidence,
             cassette: cassette.clone(),
@@ -664,8 +664,8 @@ impl ProxySession for RunningLlmtape {
     fn cleanup_confirmed(&self) -> bool {
         self.cleanup_confirmed
     }
-    fn replay_divergence(&self) -> Option<crate::proxy::ReplayDivergence> {
-        self.replay_divergence.clone()
+    fn replay_divergences(&self) -> Vec<crate::proxy::ReplayDivergence> {
+        self.replay_divergences.clone()
     }
     fn capture_evidence(&self) -> Option<crate::proxy::capture::CaptureEvidence> {
         self.capture.clone()
@@ -759,9 +759,13 @@ impl ProxySession for RunningLlmtape {
                 }
             };
             if ignored > 0 {
+                let events = value["ignored_mismatch_events"].as_array().ok_or_else(|| {
+                    Error::Run("approximate replay mismatch events are missing".into())
+                })?;
                 if !self.ignore_provider_mismatch
                     || ignored > consumed
-                    || !value["first_ignored_mismatch"].is_object()
+                    || ignored > 1024
+                    || events.len() as u64 != ignored
                 {
                     return Err(Error::Run(
                         "invalid approximate replay mismatch evidence".into(),
@@ -775,16 +779,15 @@ impl ProxySession for RunningLlmtape {
                         Error::Run("ignored provider mismatch evidence was not retained".into())
                     })?;
                 let retained = self._scratch.retain_mismatch_evidence(path)?;
-                let details =
-                    serde_json::json!({"first_mismatch": value["first_ignored_mismatch"]});
-                let context = replay_mismatch_context(&details)
-                    .unwrap_or_else(|| "mismatch details unavailable".into());
-                self.replay_divergence = Some(crate::proxy::ReplayDivergence {
-                    reason: format!(
-                        "approximate replay served {ignored} recorded response(s) despite provider request mismatch; {context}; evidence: {}",
-                        retained.display()
-                    ),
-                });
+                for event in events {
+                    let details = serde_json::json!({"first_mismatch": event});
+                    let context = replay_mismatch_context(&details).ok_or_else(|| {
+                        Error::Run("invalid approximate replay mismatch event".into())
+                    })?;
+                    self.replay_divergences.push(crate::proxy::ReplayDivergence {
+                        reason: format!("approximate replay served a recorded response despite provider request mismatch; {context}; first mismatch evidence: {}", retained.display()),
+                    });
+                }
                 self.retained_mismatch_evidence = Some(retained);
             }
             if rejected != 0 {
@@ -1330,7 +1333,7 @@ mod tests {
             child.wait().unwrap();
             let mut session = super::RunningLlmtape {
                 ignore_provider_mismatch: false,
-                replay_divergence: None,
+                replay_divergences: Vec::new(),
                 retained_mismatch_evidence: None,
                 child: Some(child),
                 builtin: true,
@@ -1390,7 +1393,7 @@ mod tests {
             }
             let mut session = super::RunningLlmtape {
                 ignore_provider_mismatch: false,
-                replay_divergence: None,
+                replay_divergences: Vec::new(),
                 retained_mismatch_evidence: None,
                 child: None,
                 builtin: true,
