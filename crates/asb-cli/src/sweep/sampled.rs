@@ -1,10 +1,33 @@
 //! Explicit, sweep-owned preparation of sampled replay candidates.
 use super::{Options, SweepFile, lock, plan};
 use crate::{Error, cassette, project};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReadySelection {
+    schema_version: u8,
+    sweep_sha256: String,
+    max_steps: Option<u64>,
+    winners: Vec<Winner>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Winner {
+    workload: String,
+    agent: String,
+    provider: String,
+    model: String,
+    trial: String,
+    replay_config: String,
+    cassette: String,
+    cassette_sha256: String,
+}
 
 pub(super) fn prepare(
     path: &Path,
@@ -43,9 +66,12 @@ pub(super) fn prepare(
     }
     let mut digest = Sha256::new();
     digest.update(b"asb-sampled-sweep-input-v1\0");
-    digest.update(super::read_manifest_text(path)?.as_bytes());
+    let manifest_text = super::read_manifest_text(path)?;
+    digest.update((manifest_text.len() as u64).to_le_bytes());
+    digest.update(manifest_text.as_bytes());
     let entries = serde_json::to_vec(&plan.entries)
         .map_err(|_| Error::Input("cannot encode sampled sweep inputs".into()))?;
+    digest.update((entries.len() as u64).to_le_bytes());
     digest.update(entries);
     let sweep_digest = format!("{:x}", digest.finalize());
     let root = owner.join(format!(".{stem}-sample-preparation"));
@@ -62,6 +88,7 @@ pub(super) fn prepare(
         .iter()
         .map(|sample| (sample.workload.as_str(), sample))
         .collect();
+    let mut winners = Vec::new();
     for (key, config) in templates {
         let sample = samples[config.workload.as_str()];
         let seed = u64::from_str_radix(&sample.seed, 16)
@@ -70,7 +97,8 @@ pub(super) fn prepare(
             .map_err(|error| Error::Input(error.to_string()))?;
         let key_bytes = serde_json::to_vec(&key)
             .map_err(|_| Error::Input("cannot encode sampled combination".into()))?;
-        let group = root.join(cassette::digest(&key_bytes));
+        let group_name = cassette::digest(&key_bytes);
+        let group = root.join(&group_name);
         std::fs::create_dir_all(&group).map_err(crate::io_error)?;
         let template = group.join("template.toml");
         let text = toml::to_string_pretty(&config)
@@ -90,6 +118,22 @@ pub(super) fn prepare(
         )
         .map_err(|error| Error::Run(format!("sampled workload `{}`: {error}", config.workload)))?;
         let count = state.preparation().successful().len();
+        for (trial, digest) in state.preparation().successful() {
+            let candidate = format!(
+                "{group_name}/candidates/candidate-{}",
+                cassette::digest(trial.as_bytes())
+            );
+            winners.push(Winner {
+                workload: config.workload.clone(),
+                agent: config.agent.clone(),
+                provider: config.provider.clone(),
+                model: config.model.clone(),
+                trial: trial.to_owned(),
+                replay_config: format!("{candidate}/replay.toml"),
+                cassette: format!("{candidate}/recording.asb.zip"),
+                cassette_sha256: digest.to_owned(),
+            });
+        }
         if options.json {
             writeln!(output, "{}", serde_json::json!({"type":"sample-prepared","workload":config.workload,"agent":config.agent,"provider":config.provider,"model":config.model,"qualified":count})).map_err(crate::io_error)?;
         } else {
@@ -101,5 +145,61 @@ pub(super) fn prepare(
             .map_err(crate::io_error)?;
         }
     }
+    let ready = ReadySelection {
+        schema_version: 1,
+        sweep_sha256: sweep_digest,
+        max_steps: options.max_steps,
+        winners,
+    };
+    let mut bytes = BoundedReady(Vec::new());
+    serde_json::to_writer(&mut bytes, &ready).map_err(|_| {
+        Error::Input("sampled replay selection exceeds 16 MiB or cannot be encoded".into())
+    })?;
+    let ready_path = root.join("ready.json");
+    let created = crate::config::matrix::scalar_if_absent(&ready_path, &bytes.0)?;
+    if !created {
+        let metadata = std::fs::symlink_metadata(&ready_path).map_err(crate::io_error)?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::Input(
+                "sampled replay selection must be a regular file".into(),
+            ));
+        }
+        let mut open = std::fs::OpenOptions::new();
+        open.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = open.open(&ready_path).map_err(crate::io_error)?;
+        if !file.metadata().map_err(crate::io_error)?.is_file() {
+            return Err(Error::Input(
+                "sampled replay selection must be a regular file".into(),
+            ));
+        }
+        let mut existing = Vec::new();
+        file.take(16 * 1024 * 1024 + 1)
+            .read_to_end(&mut existing)
+            .map_err(crate::io_error)?;
+        if existing != bytes.0 {
+            return Err(Error::Input("existing sampled replay selection differs; preserve its evidence and create a new sweep".into()));
+        }
+    }
     Err(Error::Run("sampled candidates were verified, but publication of the replay selection is not yet available; existing evidence was retained".into()))
+}
+
+struct BoundedReady(Vec<u8>);
+impl Write for BoundedReady {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > (16 * 1024 * 1024usize).saturating_sub(self.0.len()) {
+            return Err(std::io::Error::other(
+                "sampled replay selection exceeds 16 MiB",
+            ));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
