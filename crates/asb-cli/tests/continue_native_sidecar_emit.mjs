@@ -9,5 +9,5 @@ if (process.argv.includes('--sequence')) {
   exchanges[0].snapshot_sequence = 3;
   exchanges[1].snapshot_sequence = 2;
 }
-const agent=process.argv.includes('--qwen-code')?'qwen-code':process.argv.includes('--pi')?'pi':'continue';
+const agent=['qwen-code','pi','opencode','claude-code'].find(name => process.argv.includes(`--${name}`)) || 'continue';
 process.stdout.write(process.argv.includes('--pending') ? encodePendingSidecar(exchanges,hash('fixture-program'),agent) : encodeSidecar(exchanges,hash('fixture-program'),hash('verified-fixture-workspace'),agent));

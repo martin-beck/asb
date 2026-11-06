@@ -262,6 +262,38 @@ mod tests {
     }
 
     #[test]
+    fn opencode_and_claude_bind_only_their_own_snapshot_boundaries() {
+        let root =
+            crate::fixture_namespace::allocate(&std::env::temp_dir(), "snapshot-agent-binding")
+                .unwrap();
+        for agent in ["opencode", "claude-code"] {
+            let archive = root.join(format!("{agent}.tar"));
+            archive_for(agent, &archive, false, true);
+            let native = native_for(agent, true);
+            let adapter = crate::agents::find(agent).unwrap();
+            assert!(
+                adapter
+                    .verify_native_snapshot(
+                        &native,
+                        &mut File::open(&archive).unwrap(),
+                        &"a".repeat(64)
+                    )
+                    .is_ok()
+            );
+            assert!(
+                adapter
+                    .verify_native_snapshot(
+                        &native,
+                        &mut File::open(&archive).unwrap(),
+                        &"b".repeat(64)
+                    )
+                    .is_err()
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn shared_snapshot_validation_checks_qwen_identity_and_order() {
         let root =
             std::env::temp_dir().join(format!("asb-qwen-snapshot-binding-{}", std::process::id()));

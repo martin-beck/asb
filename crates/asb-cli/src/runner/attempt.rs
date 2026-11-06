@@ -1298,6 +1298,26 @@ impl<'a> CompletedAttempt<'a> {
         {
             issues.run_error(error.clone());
         }
+        if context.config.native_snapshot_record
+            && context.options.effective_tool_mode() == Some(tape::Mode::Record)
+        {
+            let has_snapshot = guest
+                .as_ref()
+                .and_then(|metadata| metadata.snapshot_artifact.as_ref())
+                .is_some();
+            let has_native = guest
+                .as_ref()
+                .and_then(|metadata| metadata.native_tool_sidecar.as_ref())
+                .is_some()
+                || adapter_artifacts.native_tool_sidecar.is_some()
+                || adapter_artifacts
+                    .sealed_artifacts
+                    .iter()
+                    .any(|item| item.kind == "native-tool-deferred");
+            for error in missing_snapshot_evidence(has_snapshot, has_native) {
+                issues.run_error(error.into());
+            }
+        }
 
         Ok(FinalResult {
             context,
@@ -1312,6 +1332,17 @@ impl<'a> CompletedAttempt<'a> {
             },
         })
     }
+}
+
+fn missing_snapshot_evidence(has_snapshot: bool, has_native: bool) -> Vec<&'static str> {
+    let mut errors = Vec::new();
+    if !has_snapshot {
+        errors.push("snapshot recording did not produce a workspace archive; this workload did not start or settle the selected snapshot backend");
+    }
+    if !has_native {
+        errors.push("snapshot recording did not produce native tool boundaries; inspect the agent adapter and retained logs");
+    }
+    errors
 }
 
 struct PublicationResources {
@@ -1876,6 +1907,13 @@ impl Publication<'_, '_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn snapshot_recording_requires_both_workspace_and_native_evidence() {
+        assert!(super::missing_snapshot_evidence(true, true).is_empty());
+        assert!(super::missing_snapshot_evidence(false, true)[0].contains("workspace archive"));
+        assert!(super::missing_snapshot_evidence(true, false)[0].contains("tool boundaries"));
+        assert_eq!(super::missing_snapshot_evidence(false, false).len(), 2);
+    }
     #[test]
     fn normalizer_decoder_requires_a_supported_negotiated_interface() {
         use crate::endpoint::Interface;

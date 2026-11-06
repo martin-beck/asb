@@ -32,6 +32,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_guest_replay_evidence(extract_guest_replay_evidence)
 .with_guest_service(start_native_service)
 .with_deferred_native_recording(finalize_native_recording)
+.with_native_snapshot_check(verify_native_snapshot)
 .with_artifact_specs(&[
     super::super::ArtifactSpec {
         namespace: "tool-replay",
@@ -271,6 +272,14 @@ fn extract_guest_replay_evidence(track: &Path) -> Result<Vec<u8>, Error> {
 
 fn finalize_native_recording(pending: &[u8], snapshot_sha256: &str) -> Result<Vec<u8>, Error> {
     super::super::native_guest::finalize("claude-code", pending, snapshot_sha256)
+}
+
+fn verify_native_snapshot(
+    native: &[u8],
+    snapshot: &mut std::fs::File,
+    digest: &str,
+) -> Result<(), Error> {
+    super::pi::snapshot::verify_for("claude-code", native, snapshot, digest)
 }
 
 fn collect_native(context: &CollectionContext<'_>) -> AgentArtifacts {
