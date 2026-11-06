@@ -38,6 +38,9 @@ for (const mode of ['existing', 'temporary']) test(`replay discovers ${mode} nor
   const port=JSON.parse(fs.readFileSync(ready)).port;
   assert.equal((await request(port,'/v1/responses',JSON.stringify(body(actual)))).status,200,stderr);
   assert.equal(fs.existsSync(store),false, 'a single matched response must not promote a candidate');
+  const retried=await request(port,'/v1/responses',JSON.stringify(body(actual)));
+  assert.equal(retried.status,200,stderr);assert.equal(JSON.parse(retried.body).id,1);
+  assert.equal(fs.existsSync(store),false, 'a retry must not count as a later replay step');
   assert.equal((await request(port,'/v1/responses',JSON.stringify(body(actual,'next')))).status,200,stderr);
   if (mode === 'temporary') {
     const until=performance.now()+2000;
@@ -126,6 +129,48 @@ test('a replay already running discovers a candidate promoted by a peer', {timeo
   const event=JSON.parse(fs.readFileSync(peer.journal,'utf8').trim());
   assert.equal(event.suggestion,'existing');assert.match(event.normalizer,/^explore-/);
   first.child.stdin.end();peer.child.stdin.end();assert.deepEqual(await first.exited,{code:0,signal:null});assert.deepEqual(await peer.exited,{code:0,signal:null});
+});
+
+test('a stateful candidate that fails whole-request verification falls back to a temporary rule', {timeout:15000}, async (t) => {
+  const parent=join(process.cwd(),'target/capture-http-fixtures');fs.mkdirSync(parent,{recursive:true});
+  const root=fs.mkdtempSync(join(parent,'stateful-discovery-'));
+  const cassette=join(root,'cassette.jsonl'),ready=join(root,'ready.json'),journal=join(root,'journal.jsonl'),catalog=join(root,'catalog.json');
+  const source="let n=0; export function normalizeToolResult({text}) { n+=1; return n<=2 ? 'same' : text; }";
+  fs.writeFileSync(catalog,JSON.stringify([{id:'stateful',source}]));
+  const body=value=>({model:'fixture',input:[{type:'function_call',call_id:'a',name:'bash',arguments:'{"command":"cat x"}'},{type:'function_call_output',call_id:'a',output:'same output'},{type:'function_call_output',call_id:'a',output:value}]});
+  fs.writeFileSync(cassette,JSON.stringify({asb_request_policy:3,request:{method:'POST',url:'/v1/responses',body:JSON.stringify(body('recorded'))},response:{status:200,headers:{},body:'{}'}})+'\n');
+  const script=fileURLToPath(new URL('../assets/scripts/llmtape.mjs',import.meta.url));
+  const child=spawn(process.execPath,[script,'replay','--port','0','--cassette',cassette],{env:{PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:'1',ASB_TAPE_READY_FILE:ready,ASB_TAPE_DISCOVERY_CATALOG:catalog,ASB_TAPE_IGNORED_MISMATCH_JOURNAL:journal,ASB_TAPE_MISMATCH_EVIDENCE:join(root,'mismatch.json')},stdio:['pipe','ignore','pipe']});
+  let stderr='';child.stderr.on('data',data=>{stderr+=data;});
+  const exited=new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({code,signal}));});
+  t.after(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');await exited;fs.rmSync(root,{recursive:true,force:true});});
+  const until=performance.now()+4000;while(!fs.existsSync(ready)){assert.equal(child.exitCode,null,stderr);assert.ok(performance.now()<until,stderr);await delay(10);}
+  assert.equal((await request(JSON.parse(fs.readFileSync(ready)).port,'/v1/responses',JSON.stringify(body('actual')))).status,200,stderr);
+  const event=JSON.parse(fs.readFileSync(journal,'utf8').trim());assert.equal(event.suggestion,'temporary');
+  const progress=JSON.parse(fs.readFileSync(`${cassette}.progress.json`));assert.ok(progress.normalizer_exploration.catalog_failures>=1);
+  child.stdin.end();assert.deepEqual(await exited,{code:0,signal:null});
+});
+
+test('discovered normalization preserves ordering for concurrent later requests', {timeout:15000}, async (t) => {
+  const parent=join(process.cwd(),'target/capture-http-fixtures');fs.mkdirSync(parent,{recursive:true});
+  const root=fs.mkdtempSync(join(parent,'discovery-order-'));
+  const cassette=join(root,'cassette.jsonl'),ready=join(root,'ready.json'),journal=join(root,'journal.jsonl'),catalog=join(root,'catalog.json');fs.writeFileSync(catalog,'[]');
+  const body=(output,turn)=>({model:'fixture',input:[{type:'function_call',call_id:'a',name:'bash',arguments:'{"command":"cat x"}'},{type:'function_call_output',call_id:'a',output},...(turn?[{role:'user',content:turn}]:[])]});
+  const row=(turn,id)=>JSON.stringify({asb_request_policy:3,request:{method:'POST',url:'/v1/responses',body:JSON.stringify(body('recorded',turn))},response:{status:200,headers:{},body:JSON.stringify({id})}});
+  fs.writeFileSync(cassette,[row('',1),row('second',2),row('third',3)].join('\n')+'\n');
+  const script=fileURLToPath(new URL('../assets/scripts/llmtape.mjs',import.meta.url));
+  const child=spawn(process.execPath,[script,'replay','--port','0','--cassette',cassette],{env:{PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:'1',ASB_TAPE_READY_FILE:ready,ASB_TAPE_DISCOVERY_CATALOG:catalog,ASB_TAPE_IGNORED_MISMATCH_JOURNAL:journal,ASB_TAPE_MISMATCH_EVIDENCE:join(root,'mismatch.json')},stdio:['pipe','ignore','pipe']});
+  let stderr='';child.stderr.on('data',data=>{stderr+=data;});
+  const exited=new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({code,signal}));});
+  t.after(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');await exited;fs.rmSync(root,{recursive:true,force:true});});
+  const until=performance.now()+4000;while(!fs.existsSync(ready)){assert.equal(child.exitCode,null,stderr);assert.ok(performance.now()<until,stderr);await delay(10);}
+  const port=JSON.parse(fs.readFileSync(ready)).port;
+  assert.equal(JSON.parse((await request(port,'/v1/responses',JSON.stringify(body('actual','')))).body).id,1);
+  const third=request(port,'/v1/responses',JSON.stringify(body('actual','third')));await delay(50);
+  const second=request(port,'/v1/responses',JSON.stringify(body('actual','second')));
+  assert.equal(JSON.parse((await second).body).id,2);assert.equal(JSON.parse((await third).body).id,3);
+  assert.equal(fs.readFileSync(journal,'utf8').trim().split('\n').length,1);
+  child.stdin.end();assert.deepEqual(await exited,{code:0,signal:null},stderr);
 });
 
 test("ignored mismatch journal write failure makes replay shutdown fail", { timeout: 10000 }, async (t) => {

@@ -658,7 +658,8 @@ async function discoverRequestMatch(expected, actual) {
     }
     let found;
     try { found = await findNormalizer(left, right, candidates); }
-    finally { await Promise.all(supervisors.map(supervisor => supervisor.close())); }
+    catch { discoveryCatalogFailures += 1; return null; }
+    finally { await Promise.all(supervisors.map(supervisor => supervisor.close().catch(() => {}))); }
     if (!found) return null;
     const id = found.id || `temporary-${discoveredNormalizers.length + 1}`;
     const supervisor = new NormalizerSupervisor([{id, source: found.source}], {callTimeoutMs: 100, startupTimeoutMs: 2000});
@@ -908,6 +909,20 @@ async function awaitReplayTurn(request, response, deadline) {
       break;
     }
   }
+  // Preserve recorded order when a concurrent request matches a later turn
+  // only after applying this session's exploratory rules.
+  if (target < 0 && discoveredNormalizers.length) {
+    try {
+      const actual = JSON.stringify(await applyDiscovered(request));
+      if (actual === JSON.stringify(await applyDiscovered(interactions[cursor].request))) return true;
+      for (let index = cursor + 1; index < interactions.length && performance.now() < deadline; index += 1) {
+        if (interactions[index]?.request && actual === JSON.stringify(await applyDiscovered(interactions[index].request))) {
+          target = index;
+          break;
+        }
+      }
+    } catch { discoveryCatalogFailures += 1; }
+  }
   if (target < 0 || replayOrderWaiters >= MAX_REPLAY_ORDER_WAITERS) return true;
   replayOrderWaiters += 1;
   try {
@@ -1113,6 +1128,18 @@ async function handle(request, response, recording) {
           retry = interactions[index];
           break;
         }
+      }
+      if (!retry && discoveredNormalizers.length) {
+        try {
+          const actual = await applyDiscovered(recordedRequest);
+          for (let index = cursor - 1; index >= 0; index -= 1) {
+            if (!skippedProbeIndices.has(index) && interactions[index]?.request
+                && JSON.stringify(actual) === JSON.stringify(await applyDiscovered(interactions[index].request))) {
+              retry = interactions[index];
+              break;
+            }
+          }
+        } catch { discoveryCatalogFailures += 1; }
       }
       if (retry) {
         releaseCommit();
