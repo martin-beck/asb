@@ -19,6 +19,10 @@ assert.deepEqual(await Promise.all([a,b]), ['result-a','result-b']);
 assert.deepEqual(effects, [1,0]);
 modern.finish();
 
+const changed = new ReplaySession([exchange(0,request('expected'),'value')], async()=>{}, {agent:'pi'});
+await assert.rejects(changed.invoke(request('different')), /no matching/);
+assert.throws(() => changed.finish(), /incomplete/);
+
 // Existing Pi cassettes did not store IDs. Sequential matching remains usable.
 const oldRequest = {tool:'bash', args:{command:'same'}};
 const legacyEvents = [exchange(0,oldRequest,'first'), exchange(1,oldRequest,'second')];
