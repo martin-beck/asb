@@ -24,7 +24,7 @@ def settle_on_exit(supervisor, exc_type, exc, traceback):
 
 
 class GuestSnapshot:
-    def __init__(self, task, tools, owner, docker_command, deadline, replay=False, extra_roots=(), direct_send=False):
+    def __init__(self, task, tools, owner, docker_command, deadline, replay=False, extra_roots=(), direct_send=False, target='/testbed'):
         self.task=task;self.docker_command=list(docker_command);self.process=None
         self.replay=replay
         self.log=(task.artifacts/'snapshot-supervisor.log').open('wb')
@@ -35,7 +35,7 @@ class GuestSnapshot:
         upload(task.workspace.container,'/opt/asb-private',files,temporary_dir=task.artifacts,owner=owner)
         container=task.workspace.container.id
         args=self.docker_command+['exec','--user','0','-i',container,'python3',
-            '/opt/asb-private/asb_snapshot_guest.py','--target','/testbed',
+            '/opt/asb-private/asb_snapshot_guest.py','--target',target,
             '--root','/asb-snapshot-storage/snapshot','--socket','/opt/asb-private/snapshot.sock',
             '--output','/asb-snapshot-storage/snapshot-streams','--btrfs',tools['btrfs'],
             '--mkfs',tools['mkfs.btrfs'],'--rsync',tools['rsync'],'--apply-final']

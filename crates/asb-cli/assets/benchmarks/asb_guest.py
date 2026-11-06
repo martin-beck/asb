@@ -574,6 +574,9 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
                 path.write_bytes(detail.output)
                 path.chmod(0o600)
             raise ExecutionError("selected agent runtime installation failed; inspect private install artifacts")
+    snapshot_requested = os.environ.get('ASB_EXPERIMENTAL_SNAPSHOT') == '1'
+    if snapshot_requested and not getattr(task, 'snapshot', False):
+        raise ExecutionError('snapshot workspace was requested but the workload did not provision snapshot storage and a guest mount')
     if getattr(task,'snapshot',False):
         if task.tool_mode not in ('record', 'replay'):
             raise ExecutionError('experimental snapshot requires tool recording or replay')
@@ -591,7 +594,8 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
         from asb_snapshot_backend import BTRFS, SnapshotRequest
         supervisor = BTRFS.start(SnapshotRequest(
             task=task, tools=auxiliary, owner=owner, transport=docker_command(),
-            deadline=deadline, replay=replay, extra_roots=tuple(extra_roots),
+            deadline=deadline, target=getattr(task.workspace, 'workdir', '/testbed'),
+            replay=replay, extra_roots=tuple(extra_roots),
             independent_custody=os.environ.get('ASB_EXPERIMENTAL_SNAPSHOT_CUSTODY') == '1'))
         resources.push(lambda exc_type, exc, traceback: settle_on_exit(supervisor, exc_type, exc, traceback))
         environment['ASB_FS_REPLAY_SOCKET' if replay else 'ASB_FS_MARKER_SOCKET']='/opt/asb-private/snapshot.sock'
