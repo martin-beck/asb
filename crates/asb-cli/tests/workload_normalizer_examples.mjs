@@ -42,6 +42,11 @@ test("recursive grep ordering is normalized only for complete unambiguous result
   assert.notEqual(grepOrder({text:a.replace('foo','different'),tool:truncated}), grepOrder({text:b,tool:truncated}));
   const alternate = {...tool, arguments:{command:'grep -n "_latex" -r sympy/vector/ | head -2'}};
   assert.equal(grepOrder({text:a,tool:alternate}), grepOrder({text:b,tool:alternate}));
+  const absolute = {...tool, arguments:{command:'grep -rn "x" /testbed/sympy/vector/ | grep -i "latex"'}};
+  const absoluteA = '/testbed/' + a.replaceAll('\nsympy/', '\n/testbed/sympy/');
+  const absoluteB = '/testbed/' + b.replaceAll('\nsympy/', '\n/testbed/sympy/');
+  assert.equal(grepOrder({text:absoluteA,tool:absolute}),grepOrder({text:absoluteB,tool:absolute}));
+  assert.notEqual(grepOrder({text:absoluteA.replace('foo','different'),tool:absolute}),grepOrder({text:absoluteB,tool:absolute}));
   const unrelated = {...tool, arguments:{command:'cat log'}};
   assert.equal(grepOrder({text:a,tool:unrelated}), a);
   const multiple = {...tool, arguments:{command:'grep -rn "BaseScalar" sympy/printing/*.py sympy/vector/*.py | head -50'}};

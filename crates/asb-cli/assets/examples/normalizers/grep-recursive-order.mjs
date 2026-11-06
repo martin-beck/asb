@@ -7,7 +7,7 @@ export function normalizeToolResult({ text, tool }) {
   if (typeof command !== 'string') return text;
   const compound = /^(?:git config --global --add safe\.directory \/testbed; )?cd \/testbed(?: &&|;) git log --oneline -([1-9][0-9]*)(?: &&|;) (grep .*)$/.exec(command);
   const search = (compound ? compound[2] : command).replace(/ --include="(\*\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+)"/, ' --include=$1');
-  const match = /^grep (?:-rn|-n) "[^"\r\n]+"(?: -r)? ([A-Za-z0-9_.*\/-]+(?: [A-Za-z0-9_.*\/-]+)*)(?: --include=(\*\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+))?(?: 2>\/dev\/null)?(?: \| grep -(?:v|iv|vi) "[^"\r\n]+")* \| head -([1-9][0-9]*)$/.exec(search);
+  const match = /^grep (?:-rn|-n) "[^"\r\n]+"(?: -r)? ([A-Za-z0-9_.*\/-]+(?: [A-Za-z0-9_.*\/-]+)*)(?: --include=(\*\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+))?(?: 2>\/dev\/null)?(?: \| grep -(?:v|iv|vi|i) "[^"\r\n]+")*(?: \| head -([1-9][0-9]*))?$/.exec(search);
   if (!match || !text) return text;
   const paths = match[1].split(' ');
   if (paths.some((path) => !path || path.includes('..') ||
@@ -17,7 +17,7 @@ export function normalizeToolResult({ text, tool }) {
     return new RegExp('^' + escaped + (path.endsWith('/') ? '.+' : '') + '$');
   });
   const include = match[2] && new RegExp('^' + match[2].replace(/[.]/g, '\\.').replace(/\*/g, '[^/]*') + '$');
-  const limit = Number(match[3]);
+  const limit = match[3] === undefined ? Number.MAX_SAFE_INTEGER : Number(match[3]);
   // Claude's Bash adapter strips the final newline. Preserve its absence;
   // other shell adapters still require a complete newline-terminated result.
   const trailing = text.endsWith('\n');
