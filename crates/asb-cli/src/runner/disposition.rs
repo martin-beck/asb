@@ -118,6 +118,22 @@ pub(super) struct RunFacts<'a> {
     pub proxy_cleanup_confirmed: bool,
 }
 
+impl RunFacts<'_> {
+    // Replay qualification requires all operational facts to settle even when
+    // an evaluation failure is the primary reported disposition.
+    pub fn replay_operational_success(&self) -> bool {
+        self.process_success
+            && self.agent_failure.is_none()
+            && !self.capture_incomplete
+            && self.run_error.is_none()
+            && self.collector_error.is_none()
+            && self.output_error.is_none()
+            && self.provider_cleanup_error.is_none()
+            && self.workload_cleanup_confirmed
+            && self.proxy_cleanup_confirmed
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct RunDisposition {
     pub status: RunStatus,
@@ -279,6 +295,23 @@ mod tests {
             workload_cleanup_confirmed: true,
             proxy_cleanup_confirmed: true,
         }
+    }
+
+    #[test]
+    fn replay_operational_settlement_does_not_hide_collector_or_output_failure_behind_grade() {
+        let grade = EvaluationOutcome::binary(false);
+        let mut healthy = facts(&grade);
+        assert!(healthy.replay_operational_success());
+        healthy.collector_error = Some("collector failed");
+        assert!(!healthy.replay_operational_success());
+        let disposition = RunDisposition::from_facts(healthy);
+        assert_eq!(
+            disposition.failure.unwrap().kind,
+            FailureKind::WorkloadCheckFailed
+        );
+        let mut output = facts(&grade);
+        output.output_error = Some("output failed");
+        assert!(!output.replay_operational_success());
     }
 
     #[test]

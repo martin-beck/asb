@@ -107,6 +107,9 @@ struct RunResult<'a> {
     /// Whether the replay proxy validated and settled the selected tape.
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_replay_consumed: Option<bool>,
+    /// Independent operational settlement, excluding workload grade.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replay_operational_success: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recording: Option<recording::Evidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -175,6 +178,17 @@ struct RunResult<'a> {
 }
 
 impl RunResult<'_> {
+    fn settle_replay_publication(
+        &mut self,
+        log_confirmed: bool,
+        measurements_confirmed: bool,
+        recording_confirmed: bool,
+    ) {
+        if let Some(success) = &mut self.replay_operational_success {
+            *success &= log_confirmed && measurements_confirmed && recording_confirmed;
+        }
+    }
+
     fn tool_call_count(&self) -> Option<usize> {
         if self.tool_calls_available {
             Some(self.tool_calls.len())
@@ -1726,6 +1740,9 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
     }
     if let Some(consumed) = result.provider_replay_consumed {
         summary["provider_replay_consumed"] = serde_json::Value::Bool(consumed);
+    }
+    if let Some(success) = result.replay_operational_success {
+        summary["replay_operational_success"] = serde_json::Value::Bool(success);
     }
     if let Some(execution) = &result.execution {
         summary["execution"] =
@@ -3319,6 +3336,7 @@ mod tests {
             replay_selection: None,
             native_replay_consumed: None,
             provider_replay_consumed: None,
+            replay_operational_success: None,
             observation: Default::default(),
             recording: None,
             execution: None,
@@ -3506,6 +3524,28 @@ mod tests {
                 Some(consumed) => assert_eq!(value["provider_replay_consumed"], consumed),
                 None => assert!(value.get("provider_replay_consumed").is_none()),
             }
+        }
+    }
+
+    #[test]
+    fn replay_operational_summary_requires_late_publication_success() {
+        for (log, measurements, recording, expected) in [
+            (true, true, true, true),
+            (false, true, true, false),
+            (true, false, true, false),
+            (true, true, false, false),
+        ] {
+            let mut result = result();
+            result.workload_success = Some(false);
+            result.disposition.failure = super::disposition::RunFailure::evaluation(
+                &crate::workloads::outcome::EvaluationOutcome::binary(false),
+            );
+            result.replay_operational_success = Some(true);
+            result.settle_replay_publication(log, measurements, recording);
+            let mut output = Vec::new();
+            render_json(&result, &mut output).unwrap();
+            let summary: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(summary["replay_operational_success"], expected);
         }
     }
 
