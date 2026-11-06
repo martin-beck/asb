@@ -7,6 +7,8 @@ import { normalizeToolResult as search } from "../assets/examples/normalizers/op
 import { normalizeToolResult as ls } from "../assets/examples/normalizers/shell-ls-diagnostics.mjs";
 import { normalizeToolResult as repr } from "../assets/examples/normalizers/python-repr-address.mjs";
 import { normalizeToolResult as pip } from "../assets/examples/normalizers/pip-transfer-progress.mjs";
+import { NormalizerSupervisor } from "../assets/scripts/normalizer-supervisor.mjs";
+import { readFileSync } from "node:fs";
 import { normalizeToolResult as grepOrder } from "../assets/examples/normalizers/grep-recursive-order.mjs";
 import { normalizeToolResult as tmpListing } from "../assets/examples/normalizers/tmp-listing-time.mjs";
 
@@ -36,7 +38,10 @@ test("recursive grep ordering is normalized only for complete unambiguous result
   const joined = 'sympy/vector/a.py:3: barsympy/vector/z.py:2: foo\n';
   assert.equal(grepOrder({text:joined,tool}), joined);
   const truncated = {...tool, arguments:{command:'grep -rn "_latex" sympy/vector/ | head -2'}};
-  assert.equal(grepOrder({text:a,tool:truncated}), a);
+  assert.equal(grepOrder({text:a,tool:truncated}), grepOrder({text:b,tool:truncated}));
+  assert.notEqual(grepOrder({text:a.replace('foo','different'),tool:truncated}), grepOrder({text:b,tool:truncated}));
+  const alternate = {...tool, arguments:{command:'grep -n "_latex" -r sympy/vector/ | head -2'}};
+  assert.equal(grepOrder({text:a,tool:alternate}), grepOrder({text:b,tool:alternate}));
   const unrelated = {...tool, arguments:{command:'cat log'}};
   assert.equal(grepOrder({text:a,tool:unrelated}), a);
   const multiple = {...tool, arguments:{command:'grep -rn "BaseScalar" sympy/printing/*.py sympy/vector/*.py | head -50'}};
@@ -47,6 +52,27 @@ test("recursive grep ordering is normalized only for complete unambiguous result
   assert.equal(grepOrder({text:foreign,tool:multiple}), foreign);
   const filtered = {...tool, arguments:{command:'grep -rn "x" sympy/vector/ sympy/printing/ 2>/dev/null | grep -v "test.py" | head -50'}};
   assert.equal(grepOrder({text:first,tool:filtered}), grepOrder({text:second,tool:filtered}));
+  const included = {...tool, arguments:{command:'grep -rn "x" sympy/ --include=*.py | head -50'}};
+  assert.equal(grepOrder({text:first,tool:included}), grepOrder({text:second,tool:included}));
+  const wrongExtension = first.replace('z.py','z.txt');
+  assert.equal(grepOrder({text:wrongExtension,tool:included}),wrongExtension);
+  const quoted = {...tool, arguments:{command:'grep -rn "x" sympy/ --include="*.py" | grep -v "test.py" | grep -iv "name" | head -50'}};
+  assert.equal(grepOrder({text:first,tool:quoted}), grepOrder({text:second,tool:quoted}));
+  assert.notEqual(grepOrder({text:first.replace('foo','changed'),tool:quoted}), grepOrder({text:second,tool:quoted}));
+  const compound = {...tool, arguments:{command:'git config --global --add safe.directory /testbed; cd /testbed && git log --oneline -2 && grep -rn "x" sympy/vector/ | head -50'}};
+  const history = 'abcdef0123 first\n1234567890 second\n';
+  assert.equal(grepOrder({text:history+a,tool:compound}),grepOrder({text:history+b,tool:compound}));
+  assert.notEqual(grepOrder({text:history.replace('first','changed')+a,tool:compound}),grepOrder({text:history+b,tool:compound}));
+});
+
+test('long nonmatching grep commands do not exhaust the normalizer deadline', async () => {
+  const source = readFileSync(new URL('../assets/examples/normalizers/grep-recursive-order.mjs', import.meta.url),'utf8');
+  const supervisor = new NormalizerSupervisor([{id:'grep',source}], {callTimeoutMs:100});
+  try {
+    const text = 'unchanged';
+    const tool = {name:'Bash',arguments:{command:'grep -rn "x" ' + 'a'.repeat(10000) + '!'}};
+    assert.equal(await supervisor.normalize({text,tool}),text);
+  } finally { await supervisor.close(); }
 });
 
 test("unittest elapsed normalization requires the command and a complete summary", () => {
