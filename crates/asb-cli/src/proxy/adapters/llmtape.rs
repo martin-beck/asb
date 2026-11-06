@@ -18,6 +18,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
+// Replay may normalize a long retained conversation before publishing ready.
+const REPLAY_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const BUILTIN_PROXY: &str = include_str!("../../../assets/scripts/llmtape.mjs");
 const NETWORK_FETCH: &str = include_str!("../../../assets/scripts/network-fetch.mjs");
 const CAPTURE_SESSION: &str = include_str!("../../../assets/scripts/capture-session.mjs");
@@ -446,7 +448,11 @@ impl ProxyAdapter for LlmtapeAdapter {
             &mut child,
             builtin.then_some(ready_file.as_path()),
             port,
-            STARTUP_TIMEOUT,
+            if builtin && request.mode == Mode::Replay {
+                REPLAY_STARTUP_TIMEOUT
+            } else {
+                STARTUP_TIMEOUT
+            },
         )?;
         let capture_request = capture.map(|(receipt, nonce)| crate::proxy::capture::Request {
             receipt,
