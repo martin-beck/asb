@@ -229,13 +229,14 @@ provider to replace a missing replay response.
 `--ignore-provider-mismatch` additionally permits an unmatched provider request
 when a next recorded response exists. ASB returns that next response and marks
 the attempt `approximate_replay: true`, emits an ignored `provider_mismatch`
-warning, and retains the redacted mismatch evidence. This is an exploratory
+warning, and retains a private JSONL journal of each ignored mismatch plus
+the first redacted mismatch evidence. The journal is written incrementally and
+validated one bounded record at a time. This is an exploratory
 continuation, not proof that the model would have produced the response to the
 new request. The original cassette is unchanged, and replay does not fall back
 to an online provider. An exhausted cassette, oversized request, unretained
 divergence evidence, unsupported external proxy, or other independent failure
-still fails. At most 1,024 request mismatches can be ignored per attempt;
-further mismatches fail rather than discarding their diagnostics. Replay-derived usage is not treated as verified on an approximate
+still fails. Replay-derived usage is not treated as verified on an approximate
 attempt. The policy is frozen in repeated campaign and sweep plans.
 
 `--ignore-provider-unconsumed` separately allows an otherwise completed replay

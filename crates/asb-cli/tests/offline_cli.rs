@@ -1368,10 +1368,11 @@ if (process.argv.includes('--fixture-agent-worker')) {
 const behavior = process.env.ASB_FIXTURE_BEHAVIOR || 'success';
 async function main() {
   if (behavior === 'skip') { console.log('fixture-no-request'); return; }
-  const body = {model:'test-model',input:['mismatch', 'mismatch-twice'].includes(behavior) ? 'changed' : 'offline',tools:[{type:'function'}]};
+  const body = {model:'test-model',input:['mismatch', 'mismatch-twice', 'mismatch-many'].includes(behavior) ? 'changed' : 'offline',tools:[{type:'function'}]};
   const send = () => fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   let response = await send();
   if (behavior === 'mismatch-twice') response = await send();
+  if (behavior === 'mismatch-many') for (let i=1;i<128;i++) response = await send();
   if (behavior === 'extra') response = await send();
   if (!response.ok) { console.error('fixture-rejected', response.status); process.exitCode = 8; return; }
   if (behavior === 'noop') { console.log('No task edits were made.'); return; }
@@ -3690,19 +3691,52 @@ fn approximate_replay_serves_a_recorded_response_and_exhaustion_remains_fatal() 
         String::from_utf8_lossy(&twice.stderr)
     );
     let twice: serde_json::Value = serde_json::from_slice(&twice.stdout).unwrap();
-    assert_eq!(twice["ignored_failures"].as_array().unwrap().len(), 2);
-    assert!(
-        twice["ignored_failures"][0]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("request 1")
+    assert_eq!(twice["ignored_failures"].as_array().unwrap().len(), 1);
+    let reason = twice["ignored_failures"][0]["reason"].as_str().unwrap();
+    assert!(reason.contains("served 2 recorded response(s)"));
+    let journal = reason
+        .split_once("journal: ")
+        .unwrap()
+        .1
+        .split_once("; first mismatch evidence:")
+        .unwrap()
+        .0;
+    let events: Vec<serde_json::Value> = std::fs::read_to_string(journal)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["sequence"], 1);
+    assert_eq!(events[1]["sequence"], 2);
+    assert!(events.iter().all(|event| event["ignored"] == true
+        && event["severity"] == "warning"
+        && event["kind"] == "provider_mismatch"));
+    let many_project = replay_project(1);
+    let cassette = std::fs::read_to_string(many_project.0.join("tape.jsonl")).unwrap();
+    std::fs::write(many_project.0.join("tape.jsonl"), cassette.repeat(128)).unwrap();
+    let many = replay(
+        &many_project,
+        "mismatch-many",
+        &["--ignore-provider-mismatch", "--json"],
     );
     assert!(
-        twice["ignored_failures"][1]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("request 2")
+        many.status.success(),
+        "{}",
+        String::from_utf8_lossy(&many.stderr)
     );
+    let many: serde_json::Value = serde_json::from_slice(&many.stdout).unwrap();
+    let reason = many["ignored_failures"][0]["reason"].as_str().unwrap();
+    assert!(reason.contains("served 128 recorded response(s)"));
+    let journal = reason
+        .split_once("journal: ")
+        .unwrap()
+        .1
+        .split_once("; first mismatch evidence:")
+        .unwrap()
+        .0;
+    let events = std::fs::read_to_string(journal).unwrap();
+    assert_eq!(events.lines().count(), 128);
     let rejected = replay_project(1).command(&[
         "run",
         "benchmark.toml",

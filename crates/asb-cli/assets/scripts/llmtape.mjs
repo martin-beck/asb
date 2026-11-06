@@ -143,7 +143,10 @@ const cassette = mode === "record" ? option(args, "--out") : option(args, "--cas
 const upstream = mode === "record" ? option(args, "--upstream") : undefined;
 const mismatchEvidence = process.env.ASB_TAPE_MISMATCH_EVIDENCE;
 const ignoreProviderMismatch = process.env.ASB_TAPE_IGNORE_PROVIDER_MISMATCH === "1";
+const ignoredMismatchJournal = process.env.ASB_TAPE_IGNORED_MISMATCH_JOURNAL;
 delete process.env.ASB_TAPE_IGNORE_PROVIDER_MISMATCH;
+delete process.env.ASB_TAPE_IGNORED_MISMATCH_JOURNAL;
+if (ignoreProviderMismatch && (mode !== "replay" || !ignoredMismatchJournal || !isAbsolute(ignoredMismatchJournal))) usage("invalid ignored mismatch journal destination");
 const respectRecordTimings = args.includes("--respect-record-timings");
 const captureReceipt = process.env.ASB_TAPE_CAPTURE_RECEIPT;
 const captureNonce = process.env.ASB_TAPE_CAPTURE_NONCE;
@@ -587,8 +590,7 @@ function advanceNativeTools() {
 }
 let rejected = 0;
 let firstMismatch = null;
-const ignoredMismatchEvents = [];
-const MAX_IGNORED_MISMATCHES = 1024;
+let ignoredMismatchCount = 0;
 const progressPath = `${cassette}.progress.json`;
 function writeProgress() {
   if (mode === "replay") {
@@ -597,8 +599,7 @@ function writeProgress() {
       consumed: cursor,
       total: interactions.length,
       rejected,
-      ignored_mismatches: ignoredMismatchEvents.length,
-      ignored_mismatch_events: ignoredMismatchEvents,
+      ignored_mismatches: ignoredMismatchCount,
       unrequested_optional_probes: deferredProbes.length,
       ...(customSupervisor ? { normalization: normalizationEvidence() } : {}),
       ...(firstMismatch ? { first_mismatch: firstMismatch } : {}),
@@ -974,13 +975,17 @@ async function handle(request, response, recording) {
         response.end(JSON.stringify({ error: "request does not match cassette" }));
         return;
       }
-      if (ignoredMismatchEvents.length >= MAX_IGNORED_MISMATCHES) {
-        reject({ sequence: cursor + 1, category: "ignored_mismatch_limit", path: "$" });
-        response.writeHead(409, { "content-type": "application/json" });
-        response.end(JSON.stringify({ error: "ignored provider mismatch limit reached" }));
-        return;
+      const event = { ...mismatch, ignored: true, severity: "warning", kind: "provider_mismatch" };
+      // A very deep diagnostic path is kept out of the public journal; the
+      // private first-mismatch evidence retains its detailed comparison.
+      if (event.path.length > 256) event.path = "$";
+      try {
+        appendFileSync(ignoredMismatchJournal, `${JSON.stringify(event)}\n`, {encoding: "utf8", mode: 0o600});
+      } catch (error) {
+        reject({ sequence: cursor + 1, category: "mismatch_journal_error", path: "$" });
+        throw error;
       }
-      ignoredMismatchEvents.push(mismatch);
+      ignoredMismatchCount += 1;
       // Deliberately consume the next recorded response. This does not assert
       // semantic equivalence: the owning run marks the replay approximate.
       writeProgress();

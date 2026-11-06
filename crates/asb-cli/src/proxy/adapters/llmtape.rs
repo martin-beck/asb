@@ -111,6 +111,8 @@ struct RunningLlmtape {
     progress: Option<PathBuf>,
     mismatch_evidence: Option<PathBuf>,
     retained_mismatch_evidence: Option<PathBuf>,
+    ignored_mismatch_journal: Option<PathBuf>,
+    retained_mismatch_journal: Option<PathBuf>,
     replay_divergences: Vec<crate::proxy::ReplayDivergence>,
     ignore_provider_mismatch: bool,
     ignore_provider_unconsumed: bool,
@@ -343,8 +345,13 @@ impl ProxyAdapter for LlmtapeAdapter {
         command.env_remove("ASB_TAPE_CAPTURE_NONCE");
         command.env_remove("ASB_TAPE_MISMATCH_EVIDENCE");
         command.env_remove("ASB_TAPE_IGNORE_PROVIDER_MISMATCH");
+        command.env_remove("ASB_TAPE_IGNORED_MISMATCH_JOURNAL");
         if request.ignore_provider_mismatch {
             command.env("ASB_TAPE_IGNORE_PROVIDER_MISMATCH", "1");
+            command.env(
+                "ASB_TAPE_IGNORED_MISMATCH_JOURNAL",
+                scratch.path.join("ignored-mismatches.jsonl"),
+            );
         }
         command.env_remove("ASB_TAPE_AGENT_WIRE_EXTENSION");
         command.env_remove("ASB_TAPE_AGENT_NORMALIZER");
@@ -490,6 +497,10 @@ impl ProxyAdapter for LlmtapeAdapter {
             mismatch_evidence: (request.mode == Mode::Replay)
                 .then(|| scratch.path.join("mismatch.json")),
             retained_mismatch_evidence: None,
+            ignored_mismatch_journal: request
+                .ignore_provider_mismatch
+                .then(|| scratch.path.join("ignored-mismatches.jsonl")),
+            retained_mismatch_journal: None,
             replay_divergences: Vec::new(),
             ignore_provider_mismatch: request.ignore_provider_mismatch,
             ignore_provider_unconsumed: request.ignore_provider_unconsumed,
@@ -663,6 +674,7 @@ impl ProxySession for RunningLlmtape {
             outputs.push(self.cassette.clone());
         }
         outputs.extend(self.retained_mismatch_evidence.iter().cloned());
+        outputs.extend(self.retained_mismatch_journal.iter().cloned());
         outputs
     }
     fn cleanup_confirmed(&self) -> bool {
@@ -763,18 +775,66 @@ impl ProxySession for RunningLlmtape {
                 }
             };
             if ignored > 0 {
-                let events = value["ignored_mismatch_events"].as_array().ok_or_else(|| {
-                    Error::Run("approximate replay mismatch events are missing".into())
-                })?;
-                if !self.ignore_provider_mismatch
-                    || ignored > consumed
-                    || ignored > 1024
-                    || events.len() as u64 != ignored
-                {
+                use std::io::{BufRead, Read};
+                if !self.ignore_provider_mismatch || ignored > consumed {
                     return Err(Error::Run(
                         "invalid approximate replay mismatch evidence".into(),
                     ));
                 }
+                // Journal is streamed one bounded record at a time. A replay
+                // with many divergences cannot make memory or progress writes
+                // grow quadratically with the number of requests.
+                self._scratch.retain = true;
+                let journal = self.ignored_mismatch_journal.as_deref().ok_or_else(|| {
+                    Error::Run("ignored provider mismatch journal is missing".into())
+                })?;
+                let mut reader =
+                    std::io::BufReader::new(std::fs::File::open(journal).map_err(crate::io_error)?);
+                let mut count = 0u64;
+                let mut previous_sequence = 0;
+                loop {
+                    let mut row = Vec::new();
+                    let size = reader
+                        .by_ref()
+                        .take(65537)
+                        .read_until(b'\n', &mut row)
+                        .map_err(crate::io_error)?;
+                    if size == 0 {
+                        break;
+                    }
+                    if size > 65536 {
+                        return Err(Error::Run(
+                            "approximate replay mismatch journal record is oversized".into(),
+                        ));
+                    }
+                    let event: serde_json::Value = serde_json::from_slice(&row).map_err(|_| {
+                        Error::Run("invalid approximate replay mismatch journal".into())
+                    })?;
+                    let sequence = event["sequence"]
+                        .as_u64()
+                        .filter(|sequence| *sequence > previous_sequence && *sequence <= consumed)
+                        .ok_or_else(|| {
+                            Error::Run("invalid approximate replay mismatch sequence".into())
+                        })?;
+                    if event["ignored"] != true
+                        || event["severity"] != "warning"
+                        || event["kind"] != "provider_mismatch"
+                    {
+                        return Err(Error::Run(
+                            "invalid approximate replay mismatch event".into(),
+                        ));
+                    }
+                    previous_sequence = sequence;
+                    count = count.checked_add(1).ok_or_else(|| {
+                        Error::Run("approximate replay mismatch count overflow".into())
+                    })?;
+                }
+                if count != ignored {
+                    return Err(Error::Run(
+                        "approximate replay mismatch journal count differs from progress".into(),
+                    ));
+                }
+                reader.get_ref().sync_all().map_err(crate::io_error)?;
                 let path = self
                     .mismatch_evidence
                     .as_deref()
@@ -783,28 +843,14 @@ impl ProxySession for RunningLlmtape {
                         Error::Run("ignored provider mismatch evidence was not retained".into())
                     })?;
                 let retained = self._scratch.retain_mismatch_evidence(path)?;
-                let mut previous_sequence = 0;
-                for event in events {
-                    let sequence = event["sequence"]
-                        .as_u64()
-                        .filter(|sequence| *sequence > previous_sequence && *sequence <= consumed)
-                        .ok_or_else(|| {
-                            Error::Run("invalid approximate replay mismatch sequence".into())
-                        })?;
-                    previous_sequence = sequence;
-                    let details = serde_json::json!({"first_mismatch": event});
-                    // Structural paths may be deeply nested or contain
-                    // unusual keys. Keep them private when they cannot be
-                    // safely represented in the public diagnostic.
-                    let context = replay_mismatch_context(&details).unwrap_or_else(|| {
-                        format!("request {sequence}, mismatch details unavailable")
-                    });
-                    self.replay_divergences.push(crate::proxy::ReplayDivergence {
-                        kind: crate::runner::disposition::FailureKind::ProviderMismatch,
-                        reason: format!("approximate replay served a recorded response despite provider request mismatch; {context}; first mismatch evidence: {}", retained.display()),
-                    });
-                }
+                let retained_journal = self._scratch.retain_mismatch_journal()?;
+                self.replay_divergences.push(crate::proxy::ReplayDivergence {
+                    kind: crate::runner::disposition::FailureKind::ProviderMismatch,
+                    reason: format!("approximate replay served {ignored} recorded response(s) despite provider request mismatch; journal: {}; first mismatch evidence: {}", retained_journal.display(), retained.display()),
+                });
                 self.retained_mismatch_evidence = Some(retained);
+                self.retained_mismatch_journal = Some(retained_journal);
+                self._scratch.retain = false;
             }
             if rejected != 0 {
                 let mismatch = replay_mismatch_context(&value)
@@ -1163,6 +1209,23 @@ impl Scratch {
         ))
     }
 
+    fn retain_mismatch_journal(&mut self) -> Result<PathBuf, Error> {
+        let name = self
+            .path
+            .file_name()
+            .ok_or_else(|| Error::Run("cannot derive replay mismatch journal name".into()))?;
+        let destination = self.path.with_file_name(format!(
+            "{}.ignored-mismatches.jsonl",
+            name.to_string_lossy()
+        ));
+        let source = self.path.join("ignored-mismatches.jsonl");
+        std::fs::hard_link(&source, &destination).map_err(|error| {
+            Error::Run(format!("cannot retain replay mismatch journal: {error}"))
+        })?;
+        std::fs::remove_file(source).map_err(crate::io_error)?;
+        Ok(destination)
+    }
+
     fn retain_mismatch_evidence(&mut self, evidence: &Path) -> Result<PathBuf, Error> {
         let name = self.path.file_name().ok_or_else(|| {
             Error::Run("cannot derive private replay mismatch evidence name".into())
@@ -1361,6 +1424,8 @@ mod tests {
                 ignore_provider_unconsumed: false,
                 replay_divergences: Vec::new(),
                 retained_mismatch_evidence: None,
+                ignored_mismatch_journal: None,
+                retained_mismatch_journal: None,
                 child: Some(child),
                 builtin: true,
                 url: String::new(),
@@ -1422,6 +1487,8 @@ mod tests {
                 ignore_provider_unconsumed: false,
                 replay_divergences: Vec::new(),
                 retained_mismatch_evidence: None,
+                ignored_mismatch_journal: None,
+                retained_mismatch_journal: None,
                 child: None,
                 builtin: true,
                 url: String::new(),
