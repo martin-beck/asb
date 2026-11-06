@@ -28,11 +28,13 @@ async def _snapshot_boundary(mode, action, alias):
                 connection.connect(path)
                 connection.sendall(f"tool-{action}:{alias}{identity}\n".encode("ascii"))
                 with connection.makefile("rb") as response:
-                    if not response.readline(32).strip().isdigit():
+                    value = response.readline(32).strip()
+                    if not value.isdigit():
                         raise RuntimeError("OpenJiuwen snapshot boundary was rejected")
+                    return int(value)
         except (OSError, UnicodeError) as error:
             raise RuntimeError("OpenJiuwen snapshot boundary is unavailable") from error
-    await asyncio.to_thread(exchange)
+    return await asyncio.to_thread(exchange)
 
 # OpenJiuwen exposes its turn limit through this environment setting, not a
 # CLI option. Consume the adapter-private argument before importing its CLI.
@@ -64,6 +66,8 @@ if os.environ.pop("ASB_OPENJIUWEN_BEARER_AUTH", None) == "1":
 # Its package initialization may inspect argv while building provider features,
 # so record and replay must expose an identical upstream CLI shape.
 _record_path = os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_RECORD")
+if _record_path and os.environ.get("ASB_FS_MARKER_SOCKET"):
+    _record_path = os.path.join(os.path.dirname(_record_path), "native-tool-pending.jsonl")
 _replay_path = None
 if "--asb-native-tool-replay" in sys.argv:
     _index = sys.argv.index("--asb-native-tool-replay")
@@ -403,7 +407,10 @@ def _invocation(write):
     value = _recorded_request(write)["_asb_openjiuwen_invocation"]
     if (
         not isinstance(value, dict)
-        or set(value) != {"ordinal", "parent_ordinal", "depth"}
+        or set(value) not in ({"ordinal", "parent_ordinal", "depth"},
+                              {"ordinal", "parent_ordinal", "depth", "snapshot_sequence"})
+        or ("snapshot_sequence" in value and
+            (type(value["snapshot_sequence"]) is not int or value["snapshot_sequence"] < 2))
         or not isinstance(value["ordinal"], int)
         or value["ordinal"] < 0
         or value["parent_ordinal"] is not None
@@ -778,7 +785,9 @@ try:
                     output = await original_invoke(self, inputs, **kwargs)
                 finally:
                     if snapshot_alias is not None:
-                        await _snapshot_boundary("record", "end", snapshot_alias)
+                        sequence = await _snapshot_boundary("record", "end", snapshot_alias)
+                        if sequence is not None:
+                            invocation["snapshot_sequence"] = sequence
             finally:
                 if invocation is not None:
                     _record_invocation_stack.reset(invocation_token)

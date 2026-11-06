@@ -17,6 +17,7 @@ pub(crate) mod mcp_relay;
 pub(crate) mod mcp_transcript;
 mod native_guest;
 pub(crate) mod native_trace;
+mod snapshot_markers;
 pub(crate) mod tool_replay;
 pub(crate) mod tool_replay_mcp;
 pub(crate) mod tool_tracing;
