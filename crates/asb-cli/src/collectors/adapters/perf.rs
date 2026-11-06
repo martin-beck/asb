@@ -434,7 +434,7 @@ fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
                     needs_sudo = true;
                     continue;
                 }
-                return Err(format!("perf {name} preflight failed ({}). Inspect the host configuration with `perf {name} -- sleep 0.01` and retry.", output.status));
+                return Err(perf_preflight_failure(name, &executable, output.status.code()));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err("perf is required for the selected collector. Run `asb tool install perf` and retry.".into()),
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Err(format!("cannot execute perf at {}: {error}. Check parent-directory access and reinstall with `asb tool install perf`.", executable.display())),
@@ -475,6 +475,25 @@ fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
     }
     context.sudo_collectors.insert("perf".into());
     Ok(())
+}
+
+fn perf_preflight_failure(name: &str, executable: &std::path::Path, code: Option<i32>) -> String {
+    let status = code.map_or_else(
+        || "terminated by a signal".to_owned(),
+        |value| format!("exit status: {value}"),
+    );
+    if code == Some(127) {
+        return format!(
+            "perf {name} preflight failed ({status}) using {}. A runtime library or interpreter may be missing. Run `{} --version` to inspect the selected executable, then reinstall it with `asb tool install perf` and retry.",
+            executable.display(),
+            executable.display()
+        );
+    }
+    format!(
+        "perf {name} preflight failed ({status}) using {}. Inspect the host configuration with `{} {name} -- sleep 0.01` and retry.",
+        executable.display(),
+        executable.display()
+    )
 }
 
 fn perf_probe(
@@ -945,6 +964,16 @@ pub(crate) fn perf_permission_error() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_perf_probe_identifies_the_actual_binary_and_missing_runtime_hint() {
+        let path = std::path::Path::new("/project/tools/perf/bin/perf");
+        let missing = super::perf_preflight_failure("stat", path, Some(127));
+        assert!(missing.contains("/project/tools/perf/bin/perf --version"));
+        assert!(missing.contains("asb tool install perf"));
+        let other = super::perf_preflight_failure("record", path, Some(2));
+        assert!(other.contains("/project/tools/perf/bin/perf record -- sleep 0.01"));
+        assert!(!other.contains("runtime library"));
+    }
     #[test]
     fn generic_and_hybrid_integer_counts_are_exact_and_never_cross_domains() {
         let data = super::parse_perf_stat(std::io::Cursor::new(
