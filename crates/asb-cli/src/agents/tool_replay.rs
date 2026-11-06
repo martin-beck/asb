@@ -53,6 +53,25 @@ pub(crate) struct Transcript {
     cursor: usize,
 }
 
+/// A replay approximation is evidence, never a replacement transcript.
+/// Argument values stay private; digests make the observed divergence auditable.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum IgnoredToolMismatch {
+    Request {
+        sequence: u64,
+        tool: String,
+        expected_arguments_sha256: String,
+        actual_arguments_sha256: String,
+    },
+    Unconsumed {
+        next_index: usize,
+        count: usize,
+    },
+    Fatal,
+}
+pub(crate) type MismatchJournal<'a> = dyn FnMut(&IgnoredToolMismatch) -> Result<(), Error> + 'a;
+
 impl Transcript {
     pub(crate) fn record(&mut self, event: Event) -> Result<(), Error> {
         if self.events.len() >= MAX_EVENTS
@@ -147,6 +166,7 @@ impl Transcript {
 
     /// Restore independently dispatched observations and disjoint file
     /// removals in the order in which an agent returns them to its model.
+    #[cfg(test)]
     pub(crate) fn replay_with_commuted_observations(
         &mut self,
         root: &Path,
@@ -154,23 +174,50 @@ impl Transcript {
         request: &Value,
         allow_commuted_observations: bool,
     ) -> Result<Value, Error> {
+        self.replay_with_policy(root, tool, request, allow_commuted_observations, None)
+    }
+
+    /// `journal` opts into approximate matching. The next recorded event may
+    /// supply a result only for the same tool; journal the divergence before
+    /// applying any effects or exposing the response.
+    pub(crate) fn replay_with_policy(
+        &mut self,
+        root: &Path,
+        tool: &str,
+        request: &Value,
+        allow_commuted_observations: bool,
+        journal: Option<&mut MismatchJournal<'_>>,
+    ) -> Result<Value, Error> {
         let current = self.events.get(self.cursor).ok_or_else(|| {
             Error::Run("local-tool replay has no remaining recorded event".into())
         })?;
         let matching_index = self.matching_index(tool, request, allow_commuted_observations);
-        let Some(index) = matching_index else {
+        let index = if let Some(index) = matching_index {
+            index
+        } else {
             let digest = |value: &Value| {
                 let bytes = serde_json::to_vec(value).unwrap_or_default();
                 format!("{:x}", Sha256::digest(bytes))
             };
-            return Err(Error::Run(format!(
-                "local-tool replay request differs from its causal recording \
+            let expected = digest(&current.request);
+            let actual = digest(request);
+            if current.tool == tool
+                && let Some(journal) = journal
+            {
+                journal(&IgnoredToolMismatch::Request {
+                    sequence: current.sequence,
+                    tool: current.tool.clone(),
+                    expected_arguments_sha256: expected,
+                    actual_arguments_sha256: actual,
+                })?;
+                self.cursor
+            } else {
+                return Err(Error::Run(format!(
+                    "local-tool replay request differs from its causal recording \
                      (expected tool {}, arguments sha256 {}; actual tool {}, arguments sha256 {})",
-                current.tool,
-                digest(&current.request),
-                tool,
-                digest(request),
-            )));
+                    current.tool, expected, tool, actual,
+                )));
+            }
         };
         self.events[self.cursor..=index].rotate_right(1);
         let event = &self.events[self.cursor];
@@ -258,6 +305,17 @@ impl Transcript {
                 "local-tool replay left recorded events unconsumed".into(),
             ))
         }
+    }
+
+    /// Return the residual event count as explicit evidence; no recorded
+    /// effects are applied for events the agent never requested.
+    pub(crate) fn ignored_unconsumed(&self) -> Option<IgnoredToolMismatch> {
+        self.events
+            .get(self.cursor)
+            .map(|_| IgnoredToolMismatch::Unconsumed {
+                next_index: self.cursor,
+                count: self.events.len() - self.cursor,
+            })
     }
 
     pub(crate) fn cursor(&self) -> usize {
@@ -1161,6 +1219,102 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn approximate_matching_journals_before_recorded_effects_and_never_guesses_a_tool() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-tool-ignore-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut transcript = Transcript::default();
+        transcript.record(event(1)).unwrap();
+        let changed = serde_json::json!({"path":"other.txt"});
+        let mut journal = Vec::new();
+        let mut save = |entry: &IgnoredToolMismatch| {
+            journal.push(entry.clone());
+            Ok(())
+        };
+        assert!(
+            transcript
+                .replay_with_policy(&root, "read_file", &changed, false, Some(&mut save))
+                .is_err()
+        );
+        assert!(
+            transcript
+                .replay_with_policy(&root, "write_file", &changed, false, None)
+                .is_err()
+        );
+        assert!(!root.join("answer.txt").exists());
+        let failure =
+            &mut |_entry: &IgnoredToolMismatch| Err(Error::Run("journal unavailable".into()));
+        assert!(
+            transcript
+                .replay_with_policy(&root, "write_file", &changed, false, Some(failure))
+                .is_err()
+        );
+        assert!(!root.join("answer.txt").exists());
+        assert_eq!(transcript.cursor(), 0);
+        assert!(
+            transcript
+                .replay_with_policy(&root, "write_file", &changed, false, Some(&mut save))
+                .is_ok()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("answer.txt")).unwrap(),
+            "recorded"
+        );
+        assert!(
+            transcript
+                .replay_with_policy(&root, "write_file", &changed, false, Some(&mut save))
+                .is_err()
+        );
+        assert!(
+            matches!(&journal[..], [IgnoredToolMismatch::Request { sequence: 1, tool, .. }] if tool == "write_file")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unconsumed_records_remain_unapplied_and_invalid_effects_still_fail() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-tool-unconsumed-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut transcript = Transcript::default();
+        transcript.record(event(1)).unwrap();
+        assert_eq!(
+            transcript.ignored_unconsumed(),
+            Some(IgnoredToolMismatch::Unconsumed {
+                next_index: 0,
+                count: 1
+            })
+        );
+        assert!(transcript.finish().is_err());
+        assert!(!root.join("answer.txt").exists());
+        let mut invalid = event(1);
+        invalid.effects = vec![Effect::WriteText {
+            path: "../escape".into(),
+            content: "bad".into(),
+        }];
+        let mut transcript = Transcript::default();
+        transcript.record(invalid).unwrap();
+        let mut journal = |_entry: &IgnoredToolMismatch| Ok(());
+        assert!(
+            transcript
+                .replay_with_policy(
+                    &root,
+                    "write_file",
+                    &serde_json::json!({"path":"different"}),
+                    false,
+                    Some(&mut journal)
+                )
+                .is_err()
+        );
+        assert_eq!(transcript.cursor(), 0);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

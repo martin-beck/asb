@@ -32,6 +32,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_estimated_disk_mib(1024)
 .with_tool_replay(prepare_tool_replay)
+.with_approximate_local_tool_replay()
 .with_native_tool_transport()
 .with_guest_service(start_native_service)
 .with_deferred_native_recording(finalize_native_recording)
@@ -1076,6 +1077,7 @@ mod tests {
                 mcp_servers: &[],
                 mcp_tape: None,
                 tape: Some(crate::agents::TapeContext {
+                    ignore_tool_mismatch: false,
                     mode: crate::tape::Mode::Replay,
                     cassette: &replay,
                 }),

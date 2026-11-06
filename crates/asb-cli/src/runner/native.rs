@@ -10,6 +10,7 @@ pub(super) struct NativeRoute<'a> {
     pub tape_mode: Option<tape::Mode>,
     pub max_steps: Option<u64>,
     pub tool_tape_mode: Option<tape::Mode>,
+    pub ignore_tool_mismatch: bool,
     pub tool_tape_cassette: Option<&'a Path>,
     pub mcp_tape_mode: Option<tape::Mode>,
     pub mcp_tape_cassette: Option<&'a Path>,
@@ -95,6 +96,7 @@ impl NativePlan<'_> {
             tape_mode,
             max_steps,
             tool_tape_mode,
+            ignore_tool_mismatch,
             tool_tape_cassette,
             mcp_tape_mode,
             mcp_tape_cassette,
@@ -232,6 +234,10 @@ impl NativePlan<'_> {
         ));
         let mut artifact_specs = agents::find(&config.agent)
             .map_or_else(Vec::new, |adapter| adapter.artifact_specs().to_vec());
+        if ignore_tool_mismatch {
+            artifact_specs.push(agents::tool_replay_mcp::IGNORED_EVENTS_SPEC);
+            artifact_specs.push(agents::tool_replay_mcp::IGNORED_PROGRESS_SPEC);
+        }
         artifact_specs.push(agents::ArtifactSpec {
             namespace: "native-trace",
             filename: "native-trace.jsonl",
@@ -275,7 +281,11 @@ impl NativePlan<'_> {
                         }),
                         tape: tool_tape_mode
                             .zip(tool_tape_cassette)
-                            .map(|(mode, cassette)| agents::TapeContext { mode, cassette }),
+                            .map(|(mode, cassette)| agents::TapeContext {
+                                ignore_tool_mismatch,
+                                mode,
+                                cassette,
+                            }),
                     },
                 )?;
             }
@@ -529,6 +539,7 @@ mod tests {
                     tape_mode: Some(tape::Mode::Replay),
                     max_steps: None,
                     tool_tape_mode: None,
+                    ignore_tool_mismatch: false,
                     tool_tape_cassette: None,
                     mcp_tape_mode: None,
                     mcp_tape_cassette: None,
@@ -656,6 +667,7 @@ mod tests {
                 tape_mode: Some(tape::Mode::Replay),
                 max_steps: None,
                 tool_tape_mode: None,
+                ignore_tool_mismatch: false,
                 tool_tape_cassette: None,
                 mcp_tape_mode: None,
                 mcp_tape_cassette: None,

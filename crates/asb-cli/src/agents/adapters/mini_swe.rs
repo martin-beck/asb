@@ -517,6 +517,7 @@ mod tests {
         let doc = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1","info":{"exit_status":"LimitsExceeded","submission":""},"messages":[{"role":"user","content":"tool output"}]});
         let frozen = super::super::super::FrozenArtifacts::for_test("trajectory.json", doc);
         let context = super::CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &frozen,
             provider_capture: None,
             run_dir: std::path::Path::new("."),
@@ -529,6 +530,7 @@ mod tests {
         let successful = serde_json::json!({"trajectory_format":"mini-swe-agent-1.1","info":{"exit_status":"Submitted","submission":"final answer"},"messages":[{"role":"user","content":"tool output"}]});
         let frozen = super::super::super::FrozenArtifacts::for_test("trajectory.json", successful);
         let context = super::CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &frozen,
             ..context
         };
@@ -653,6 +655,7 @@ mod tests {
                 mcp_servers: &[],
                 mcp_tape: None,
                 tape: Some(super::super::TapeContext {
+                    ignore_tool_mismatch: false,
                     mode: crate::tape::Mode::Record,
                     cassette: &cassette,
                 }),
@@ -700,6 +703,7 @@ mod tests {
                 mcp_servers: &[],
                 mcp_tape: None,
                 tape: Some(super::super::TapeContext {
+                    ignore_tool_mismatch: false,
                     mode: crate::tape::Mode::Replay,
                     cassette: &cassette,
                 }),
@@ -733,6 +737,7 @@ mod tests {
                     mcp_servers: &[],
                     mcp_tape: None,
                     tape: Some(super::super::TapeContext {
+                        ignore_tool_mismatch: false,
                         mode: crate::tape::Mode::Replay,
                         cassette: &cassette,
                     }),
@@ -818,6 +823,7 @@ mod tests {
         ] {
             std::fs::write(&trajectory, document).unwrap();
             let artifacts = collect(&CollectionContext {
+                ignore_tool_mismatch: false,
                 provider_capture: None,
                 frozen: &serde_json::from_str(document)
                     .ok()
@@ -846,6 +852,7 @@ mod tests {
             .expect("trajectory exists");
 
         let artifacts = collect(&CollectionContext {
+            ignore_tool_mismatch: false,
             provider_capture: None,
             frozen: &super::super::super::FrozenArtifacts::for_test(
                 "trajectory.json",

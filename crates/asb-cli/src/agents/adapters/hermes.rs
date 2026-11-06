@@ -554,6 +554,7 @@ mod tests {
                 tape: None,
             },
             super::super::TapeContext {
+                ignore_tool_mismatch: false,
                 mode: crate::tape::Mode::Record,
                 cassette: &tape,
             },
@@ -659,6 +660,7 @@ mod tests {
                 tape: None,
             },
             super::super::TapeContext {
+                ignore_tool_mismatch: false,
                 mode: crate::tape::Mode::Replay,
                 cassette: &tape,
             },
@@ -764,6 +766,7 @@ assert stable(None) is None
                 }),
             );
             let artifacts = collect(&CollectionContext {
+                ignore_tool_mismatch: false,
                 frozen: &frozen,
                 provider_capture: None,
                 run_dir: Path::new("/fixture"),
@@ -787,6 +790,7 @@ assert stable(None) is None
             }),
         );
         let artifacts = collect(&CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &frozen,
             provider_capture: None,
             run_dir: Path::new("/fixture"),
@@ -814,6 +818,7 @@ assert stable(None) is None
             }),
         );
         let artifacts = collect(&CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &frozen,
             provider_capture: None,
             run_dir: Path::new("/fixture"),
@@ -841,6 +846,7 @@ assert stable(None) is None
             }),
         );
         let artifacts = collect(&CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &malformed,
             provider_capture: None,
             run_dir: Path::new("/fixture"),
@@ -867,6 +873,7 @@ assert stable(None) is None
             }),
         );
         let artifacts = collect(&CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &frozen,
             provider_capture: None,
             run_dir: Path::new("/fixture"),
@@ -892,6 +899,7 @@ assert stable(None) is None
         )
         .unwrap();
         let artifacts = collect(&CollectionContext {
+            ignore_tool_mismatch: false,
             provider_capture: None,
             frozen: &super::super::super::FrozenArtifacts::for_test(
                 "usage.json",
