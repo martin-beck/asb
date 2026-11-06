@@ -102,6 +102,15 @@ class API:
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_submission_output_limit_accepts_sixty_four_mib(self):
+        workspace, _container, _api = self.retained_workspace()
+        workspace.__enter__()
+        cancelled = SimpleNamespace(is_set=lambda: True)
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, 'cancelled before starting'):
+            workspace.execute(['git', 'diff'], output_limit=64 * 1024**2, cancelled=cancelled)
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, 'invalid execution timeout or output limit'):
+            workspace.execute(['git', 'diff'], output_limit=64 * 1024**2 + 1, cancelled=cancelled)
+
     def test_optional_principal_facts_never_infer_signal_from_carrier(self):
         for code in [-(2**31), -1, 0, 137, 143, 2**31-1]:
             exact = {"kind":"code", "code":code}
