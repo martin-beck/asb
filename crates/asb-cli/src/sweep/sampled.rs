@@ -235,6 +235,7 @@ pub(super) fn prepare(
         winners,
     };
     ready.validate()?;
+    publish_cassette_aliases(&root, &ready)?;
     let mut bytes = BoundedReady(Vec::new());
     serde_json::to_writer(&mut bytes, &ready).map_err(|_| {
         Error::Input("sampled replay selection exceeds 16 MiB or cannot be encoded".into())
@@ -245,6 +246,78 @@ pub(super) fn prepare(
         return Err(Error::Input("existing sampled replay selection differs; preserve its evidence and create a new sweep".into()));
     }
     Err(Error::Run("sampled candidates were verified, but publication of the replay selection is not yet available; existing evidence was retained".into()))
+}
+
+fn publish_cassette_aliases(root: &Path, ready: &ReadySelection) -> Result<(), Error> {
+    let destination = root.join("cassettes");
+    std::fs::create_dir_all(&destination).map_err(crate::io_error)?;
+    let metadata = std::fs::symlink_metadata(&destination).map_err(crate::io_error)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(Error::Input(
+            "sample cassette destination must be a real directory".into(),
+        ));
+    }
+    for (index, winner) in ready.winners.iter().enumerate() {
+        let source = root.join(&winner.cassette);
+        let metadata = std::fs::symlink_metadata(&source).map_err(crate::io_error)?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::Input(
+                "sample cassette must be a regular file".into(),
+            ));
+        }
+        cassette::Archive::open_verified(
+            &source,
+            metadata.len(),
+            &winner.cassette_sha256,
+            cassette::Limits::default(),
+        )
+        .map_err(|error| Error::Input(format!("sample cassette verification failed: {error}")))?;
+        let name = super::execution::result_name(index, Path::new(&winner.replay_config));
+        let directory = destination.join(name);
+        std::fs::create_dir_all(&directory).map_err(crate::io_error)?;
+        let metadata = std::fs::symlink_metadata(&directory).map_err(crate::io_error)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(Error::Input(
+                "sample cassette alias must be a real directory".into(),
+            ));
+        }
+        let alias = directory.join("recording.asb.zip");
+        match std::fs::hard_link(&source, &alias) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(error) => {
+                return Err(Error::Io(format!(
+                    "cannot retain sampled cassette alias: {error}"
+                )));
+            }
+        }
+        let metadata = std::fs::symlink_metadata(&alias).map_err(crate::io_error)?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::Input(
+                "sample cassette alias must be a regular file".into(),
+            ));
+        }
+        cassette::Archive::open_verified(
+            &alias,
+            metadata.len(),
+            &winner.cassette_sha256,
+            cassette::Limits::default(),
+        )
+        .map_err(|error| {
+            Error::Input(format!(
+                "sample cassette alias verification failed: {error}"
+            ))
+        })?;
+        #[cfg(unix)]
+        std::fs::File::open(&directory)
+            .and_then(|directory| directory.sync_all())
+            .map_err(crate::io_error)?;
+    }
+    #[cfg(unix)]
+    std::fs::File::open(&destination)
+        .and_then(|directory| directory.sync_all())
+        .map_err(crate::io_error)?;
+    Ok(())
 }
 
 struct BoundedReady(Vec<u8>);
