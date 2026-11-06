@@ -45,6 +45,32 @@ def reflog_digest(entries):
     return hashlib.sha256(b"".join(sorted(entries.splitlines(keepends=True)))).hexdigest()
 
 
+def source_image_material(image, image_id, source, owner_labels):
+    """Bind executable image content while excluding verified attempt labels."""
+    if (not isinstance(source, dict) or source.get("status") != "built"
+            or source.get("image_id") != image_id or getattr(image, "id", None) != image_id
+            or not isinstance(owner_labels, dict)
+            or set(owner_labels) != {"asb.owner", "asb.attempt", "asb.recovery"}):
+        raise ExecutionError("source image identity or ownership is unavailable")
+    attrs = image.attrs
+    config = attrs.get("Config")
+    rootfs = attrs.get("RootFS")
+    if not isinstance(config, dict) or not isinstance(rootfs, dict):
+        raise ExecutionError("source image runtime configuration is unavailable")
+    labels = config.get("Labels")
+    layers = rootfs.get("Layers")
+    if (not isinstance(labels, dict) or any(labels.get(key) != value for key,value in owner_labels.items())
+            or rootfs.get("Type") != "layers" or not isinstance(layers, list) or not layers
+            or any(not isinstance(item, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", item) for item in layers)
+            or not isinstance(attrs.get("Architecture"), str) or attrs.get("Os") != "linux"):
+        raise ExecutionError("source image content or ownership does not match its receipt")
+    config = dict(config)
+    config["Labels"] = {key:value for key,value in labels.items() if key not in owner_labels}
+    return {"kind":"owned-source-image-content-v1", "architecture":attrs["Architecture"],
+            "os":attrs["Os"], "variant":attrs.get("Variant"), "os_version":attrs.get("OsVersion"),
+            "os_features":attrs.get("OsFeatures"), "rootfs":rootfs, "config":config}
+
+
 class SweBenchTask:
     def __init__(self, client, catalog_path, task_id, artifacts, tool_mode="none", snapshot=False):
         if tool_mode not in ("none", "record", "replay"):
@@ -255,16 +281,30 @@ class SweBenchTask:
         image_id = self.workspace.image_identity.get("image_id")
         if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
             raise ExecutionError("prepared task image has no immutable identity")
-        # A SWE-bench workspace is a new private container from this immutable
-        # image, reset to the pinned commit above. The previous generic path
-        # streamed and hashed its whole source tree merely to prove those same
-        # facts. Bind the image, exact Git state and workload definition instead.
-        return {"schema_version":1,"scope":"prepared-workload-material-v1","sha256":canonical_digest({
-            "scope":"swe-bench-clean-git-worktree-and-image-v1",
-            "baseline":self.invocation["baseline"],
-            "dataset":self.invocation["identity"]["dataset"],
-            "sdk":self.invocation["sdk"],"image_id":image_id,"git":before},
-            "asb-prepared-workload-material-v1")}
+        # Attempt ownership labels change a source-built image ID even when its
+        # ordered rootfs layers and effective runtime configuration are equal.
+        # Normalize only those verified labels; prebuilt images stay bound to
+        # their original immutable ID. Actual image IDs remain in task evidence.
+        source = self.invocation.get("environment_source")
+        if isinstance(source, dict) and source.get("status") == "built":
+            image = source_image_material(self.workspace.image, image_id, source, self.journal.labels)
+            scope = "swe-bench-clean-git-worktree-and-source-image-v2"
+            image_key = "image_material"
+        else:
+            image = image_id
+            scope = "swe-bench-clean-git-worktree-and-image-v1"
+            image_key = "image_id"
+        common = {"baseline":self.invocation["baseline"],
+                  "dataset":self.invocation["identity"]["dataset"],
+                  "sdk":self.invocation["sdk"], "git":before}
+        material = {"schema_version":1,"scope":"prepared-workload-material-v1",
+                    "sha256":canonical_digest({"scope":scope, **common, image_key:image},
+                                               "asb-prepared-workload-material-v1")}
+        if image_key == "image_material":
+            material["legacy_sha256"] = canonical_digest({
+                "scope":"swe-bench-clean-git-worktree-and-image-v1", **common, "image_id":image_id},
+                "asb-prepared-workload-material-v1")
+        return material
 
     def __exit__(self, *_exception):
         self.interrupted = self.interrupted or bool(_exception and _exception[0] is not None)
