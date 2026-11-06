@@ -135,6 +135,7 @@ impl BatchRun<'_> {
                 respect_record_timings: self.plan.respect_record_timings,
                 ignore_evaluation: self.plan.ignore_evaluation,
                 ignore_agent: self.plan.ignore_agent,
+                ignore_collector: self.plan.ignore_collector,
                 policy: Some(&policy),
                 requirements_prepared: self.options.requirements_prepared,
                 batch: Some(&self.identity),

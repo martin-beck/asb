@@ -96,6 +96,7 @@ impl<'a> PreparedSweep<'a> {
         plan.respect_record_timings = options.respect_record_timings;
         plan.ignore_evaluation = options.ignore_evaluation;
         plan.ignore_agent = options.ignore_agent;
+        plan.ignore_collector = options.ignore_collector;
         let weights: Vec<_> = plan
             .entries
             .iter()
@@ -137,6 +138,7 @@ impl<'a> PreparedSweep<'a> {
                 || saved.respect_record_timings != plan.respect_record_timings
                 || saved.ignore_evaluation != plan.ignore_evaluation
                 || saved.ignore_agent != plan.ignore_agent
+                || saved.ignore_collector != plan.ignore_collector
                 || saved.scheduling != plan.scheduling
                 || saved.resources != plan.resources
                 || saved

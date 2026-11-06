@@ -261,6 +261,7 @@ pub(super) fn prepare(
                 respect_record_timings: options.respect_record_timings,
                 ignore_evaluation: options.ignore_evaluation,
                 ignore_agent: options.ignore_agent,
+                ignore_collector: options.ignore_collector,
                 // PreparedSweep warmed this fresh population before campaign
                 // construction, so each repeated task must not revalidate the
                 // same shared installations.

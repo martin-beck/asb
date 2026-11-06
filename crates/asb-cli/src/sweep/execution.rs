@@ -199,6 +199,7 @@ impl Execution<'_> {
                 respect_record_timings: self.options.respect_record_timings,
                 ignore_evaluation: self.options.ignore_evaluation,
                 ignore_agent: self.options.ignore_agent,
+                ignore_collector: self.options.ignore_collector,
                 requirements_prepared: !self.options.resume,
                 architecture_confirmed: true,
                 on_completion: observer
