@@ -333,7 +333,14 @@ fn collector_versions(tool_dir: Option<&Path>) -> BTreeMap<String, String> {
     .into_iter()
     .filter_map(|(name, argument)| {
         let executable = measurements::resolve_executable(tool_dir, name);
-        command_version(executable.to_str()?, argument).map(|version| (name.to_owned(), version))
+        // Collector binaries such as bpftrace can start slowly under software
+        // emulation. Keep the probe bounded, but allow time for dynamic linking.
+        command_version_with_deadline(
+            executable.to_str()?,
+            argument,
+            std::time::Duration::from_secs(15),
+        )
+        .map(|version| (name.to_owned(), version))
     })
     .collect()
 }
@@ -417,6 +424,31 @@ mod tests {
         let started = Instant::now();
         assert!(check(&hanging).is_none());
         assert!(started.elapsed() < Duration::from_secs(3));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn collector_versions_allow_slow_startup() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "asb-slow-collector-version-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        for name in ["perf", "bpftrace", "perfetto", "mpstat", "iostat"] {
+            let bin = root.join(name).join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let path = bin.join(crate::measurements::tool_binary_name(name));
+            let delay = if name == "bpftrace" { "sleep 3\n" } else { "" };
+            std::fs::write(&path, format!("#!/bin/sh\n{delay}echo fixture-1.2\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let versions = super::collector_versions(Some(&root));
+        assert_eq!(
+            versions.get("bpftrace").map(String::as_str),
+            Some("fixture-1.2")
+        );
+        assert_eq!(versions.len(), 5);
         std::fs::remove_dir_all(root).unwrap();
     }
 
