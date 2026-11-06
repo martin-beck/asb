@@ -79,7 +79,7 @@ fn emit_warning(
 
 #[derive(Serialize)]
 struct RunResult<'a> {
-    /// Guest-attested Pi native tool stream consumption, not total effect coverage.
+    /// Guest-attested native tool stream consumption, not total effect coverage.
     #[serde(skip_serializing_if = "Option::is_none")]
     native_replay_consumed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3248,6 +3248,20 @@ mod tests {
         assert!(text.contains("total_tokens=7"));
         assert!(!text.contains("done"));
         assert!(!text.starts_with('{'));
+    }
+
+    #[test]
+    fn json_reports_only_observed_native_replay_consumption() {
+        let mut run = result();
+        let mut bytes = Vec::new();
+        render_json(&run, &mut bytes).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(value.get("native_replay_consumed").is_none());
+        run.native_replay_consumed = Some(true);
+        bytes.clear();
+        render_json(&run, &mut bytes).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["native_replay_consumed"], true);
     }
 
     #[test]

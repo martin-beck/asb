@@ -31,6 +31,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_native_tool_transport()
 .with_guest_replay_evidence(extract_guest_replay_evidence)
 .with_guest_service(start_native_service)
+.with_snapshot_replay_settlement()
 .with_deferred_native_recording(finalize_native_recording)
 .with_native_snapshot_check(verify_native_snapshot)
 .with_artifact_specs(&[

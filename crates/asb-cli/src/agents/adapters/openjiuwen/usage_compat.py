@@ -942,3 +942,9 @@ if _replay_path:
                 _recorded_history_messages += len(envelope["history"])
     if _history_cursor != _recorded_history_messages:
         raise SystemExit("ASB OpenJiuwen native replay left final history messages unconsumed")
+    if os.environ.get("ASB_FS_REPLAY_SOCKET") and os.environ.get("ASB_OPENJIUWEN_REPLAY_RECEIPT"):
+        receipt = os.environ["ASB_OPENJIUWEN_REPLAY_RECEIPT"]
+        fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump({"version": 1, "consumed": True}, output)
+            output.write("\n")
