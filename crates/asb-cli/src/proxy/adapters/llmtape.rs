@@ -779,11 +779,22 @@ impl ProxySession for RunningLlmtape {
                         Error::Run("ignored provider mismatch evidence was not retained".into())
                     })?;
                 let retained = self._scratch.retain_mismatch_evidence(path)?;
+                let mut previous_sequence = 0;
                 for event in events {
+                    let sequence = event["sequence"]
+                        .as_u64()
+                        .filter(|sequence| *sequence > previous_sequence && *sequence <= consumed)
+                        .ok_or_else(|| {
+                            Error::Run("invalid approximate replay mismatch sequence".into())
+                        })?;
+                    previous_sequence = sequence;
                     let details = serde_json::json!({"first_mismatch": event});
-                    let context = replay_mismatch_context(&details).ok_or_else(|| {
-                        Error::Run("invalid approximate replay mismatch event".into())
-                    })?;
+                    // Structural paths may be deeply nested or contain
+                    // unusual keys. Keep them private when they cannot be
+                    // safely represented in the public diagnostic.
+                    let context = replay_mismatch_context(&details).unwrap_or_else(|| {
+                        format!("request {sequence}, mismatch details unavailable")
+                    });
                     self.replay_divergences.push(crate::proxy::ReplayDivergence {
                         reason: format!("approximate replay served a recorded response despite provider request mismatch; {context}; first mismatch evidence: {}", retained.display()),
                     });
