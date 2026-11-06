@@ -216,6 +216,28 @@ _native_workspace = os.path.realpath(
     os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", "")
 ) if os.environ.get("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE") else ""
 
+# The pinned CLI supplies a private agent workspace but leaves DeepAgent.cwd
+# unset; upstream then uses that private directory for shell and relative file
+# operations. Keep agent state private while seeding the primary agent's cwd
+# from the workload workspace. Respect explicit cwd and inherited subagents.
+if _native_workspace:
+    try:
+        from openjiuwen.harness.deep_agent import DeepAgent
+    except ImportError:
+        pass
+    else:
+        _original_ensure_initialized = DeepAgent._ensure_initialized
+        async def _ensure_workload_cwd(self):
+            config = getattr(self, "_deep_config", None)
+            if (config is not None and not getattr(self, "_initialized", False)
+                    and not getattr(self, "_inherited_artifact_root", None)):
+                if not getattr(config, "cwd", None):
+                    config.cwd = _native_workspace
+                if not getattr(config, "project_root", None):
+                    config.project_root = config.cwd
+            return await _original_ensure_initialized(self)
+        DeepAgent._ensure_initialized = _ensure_workload_cwd
+
 def _canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
