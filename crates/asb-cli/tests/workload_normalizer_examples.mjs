@@ -52,6 +52,10 @@ test("recursive grep ordering is normalized only for complete unambiguous result
   assert.equal(grepOrder({text:foreign,tool:multiple}), foreign);
   const filtered = {...tool, arguments:{command:'grep -rn "x" sympy/vector/ sympy/printing/ 2>/dev/null | grep -v "test.py" | head -50'}};
   assert.equal(grepOrder({text:first,tool:filtered}), grepOrder({text:second,tool:filtered}));
+  const included = {...tool, arguments:{command:'grep -rn "x" sympy/ --include=*.py | head -50'}};
+  assert.equal(grepOrder({text:first,tool:included}), grepOrder({text:second,tool:included}));
+  const wrongExtension = first.replace('z.py','z.txt');
+  assert.equal(grepOrder({text:wrongExtension,tool:included}),wrongExtension);
 });
 
 test('long nonmatching grep commands do not exhaust the normalizer deadline', async () => {

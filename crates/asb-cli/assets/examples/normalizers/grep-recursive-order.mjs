@@ -5,15 +5,17 @@ export function normalizeToolResult({ text, tool }) {
   if (!['Bash', 'bash', 'shell_command'].includes(tool?.name)) return text;
   const command = tool?.arguments?.command;
   if (typeof command !== 'string') return text;
-  const match = /^grep (?:-rn|-n) "[^"\r\n]+"(?: -r)? ([A-Za-z0-9_.*\/-]+(?: [A-Za-z0-9_.*\/-]+)*)(?: 2>\/dev\/null)?(?: \| grep -v "[^"\r\n]+")? \| head -([1-9][0-9]*)$/.exec(command);
+  const match = /^grep (?:-rn|-n) "[^"\r\n]+"(?: -r)? ([A-Za-z0-9_.*\/-]+(?: [A-Za-z0-9_.*\/-]+)*)(?: --include=(\*\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+))?(?: 2>\/dev\/null)?(?: \| grep -v "[^"\r\n]+")? \| head -([1-9][0-9]*)$/.exec(command);
   if (!match || !text) return text;
   const paths = match[1].split(' ');
-  if (paths.some((path) => !path || path.includes('..') || path.includes('**'))) return text;
+  if (paths.some((path) => !path || path.includes('..') ||
+      path.split('/').some((part) => part.includes('*') && !/^\*\.[A-Za-z0-9_-]+$/.test(part)))) return text;
   const allowed = paths.map((path) => {
     const escaped = path.replace(/[.]/g, '\\.').replace(/\*/g, '[^/]*');
     return new RegExp('^' + escaped + (path.endsWith('/') ? '.+' : '') + '$');
   });
-  const limit = Number(match[2]);
+  const include = match[2] && new RegExp('^' + match[2].replace(/[.]/g, '\\.').replace(/\*/g, '[^/]*') + '$');
+  const limit = Number(match[3]);
   // Claude's Bash adapter strips the final newline. Preserve its absence;
   // other shell adapters still require a complete newline-terminated result.
   const trailing = text.endsWith('\n');
@@ -22,7 +24,8 @@ export function normalizeToolResult({ text, tool }) {
   if (!Number.isSafeInteger(limit) || lines.length > limit) return text;
   for (const line of lines) {
     const entry = /^([A-Za-z0-9_./-]+):[1-9][0-9]*:/.exec(line);
-    if (!entry || !allowed.some((path) => path.test(entry[1]))) return text;
+    if (!entry || !allowed.some((path) => path.test(entry[1])) ||
+        (include && !include.test(entry[1].split('/').at(-1)))) return text;
     // A second path/line prefix can indicate a preceding unterminated file.
     if (/[A-Za-z0-9_./-]+\/[A-Za-z0-9_./-]+:[1-9][0-9]*:/.test(line.slice(entry[0].length))) return text;
   }
