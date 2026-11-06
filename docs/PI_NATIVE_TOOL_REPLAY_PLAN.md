@@ -34,6 +34,13 @@ live execution. Do not change the provider tape, task tests or grades to hide
 a real difference. Cassettes can contain private tool output and must inherit
 the existing private artifact and retention contract.
 
+For experimental snapshot replay, ASB disconnects the owned task container
+from routed Docker networks before starting the agent. The private provider
+relay continues over Docker exec and container loopback. This blocks direct
+connections through those Docker networks, but does not by itself prove that
+all tools were captured, that all filesystem effects are covered, or that a
+configured loopback service cannot itself reach another network.
+
 ## Implementation sequence
 
 1. Define a Pi-owned, versioned native tool event contract with stable call
