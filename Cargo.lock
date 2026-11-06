@@ -108,6 +108,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "asb-replay-debug"
+version = "0.2.51"
+dependencies = [
+ "clap",
+ "crossterm",
+ "ratatui",
+ "serde_json",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

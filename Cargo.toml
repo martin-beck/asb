@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/asb-cli"]
+members = ["crates/asb-cli", "crates/asb-replay-debug"]
+default-members = ["crates/asb-cli"]
 resolver = "3"
 
 [workspace.package]
