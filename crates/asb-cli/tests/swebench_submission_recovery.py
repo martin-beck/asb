@@ -36,12 +36,14 @@ class SubmissionRecoveryTests(unittest.TestCase):
         task.preparing_repository = True
         self.assertEqual(task.checked(['git', 'status']), b'ok')
         options = task.workspace.execute.call_args.kwargs
-        self.assertEqual(options['timeout'], 60)
+        self.assertEqual(options['timeout'], 600)
         self.assertEqual(options['preparation_timeout'], 600)
-        task.preparing_repository = False
         task.checked(['git', 'status'], timeout=4)
+        self.assertEqual(task.workspace.execute.call_args.kwargs['timeout'], 4)
+        task.preparing_repository = False
+        task.checked(['git', 'status'])
         options = task.workspace.execute.call_args.kwargs
-        self.assertEqual(options['timeout'], 4)
+        self.assertEqual(options['timeout'], 60)
         self.assertNotIn('preparation_timeout', options)
 
     def test_agent_environment_activates_sdk_environment_and_preserves_private_values(self):
