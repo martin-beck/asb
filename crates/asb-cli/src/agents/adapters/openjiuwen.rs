@@ -3,12 +3,20 @@ use super::{
     StaticAdapter,
 };
 use crate::{Error, install::Recipe};
+mod snapshot;
 
-const ARTIFACTS: &[super::super::ArtifactSpec] = &[super::super::ArtifactSpec {
-    namespace: "openjiuwen",
-    filename: "native-tool-sidecar.jsonl",
-    format: super::super::ArtifactFormat::JsonLines,
-}];
+const ARTIFACTS: &[super::super::ArtifactSpec] = &[
+    super::super::ArtifactSpec {
+        namespace: "openjiuwen",
+        filename: "native-tool-sidecar.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+    super::super::ArtifactSpec {
+        namespace: "openjiuwen",
+        filename: "native-tool-pending.jsonl",
+        format: super::super::ArtifactFormat::JsonLines,
+    },
+];
 
 // OpenJiuwen recreates a provider-wire tool-result id after replaying an
 // Anthropic tool-use response. The response's immediate assistant turn is
@@ -108,6 +116,8 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_final_response_failure(final_response_failure)
 .with_execution_failure(execution_failure)
 .with_native_tool_transport()
+.with_deferred_native_recording(snapshot::finalize)
+.with_native_snapshot_check(snapshot::verify)
 .with_artifact_specs(ARTIFACTS)
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_collection(collect)
@@ -385,14 +395,25 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
-    AgentArtifacts {
+    let mut result = AgentArtifacts {
         native_tool_sidecar: context
             .frozen
             .bytes("native-tool-sidecar.jsonl")
             .map(ToOwned::to_owned)
             .filter(|bytes| !bytes.is_empty()),
         ..Default::default()
+    };
+    if let Some(bytes) = context
+        .frozen
+        .bytes("native-tool-pending.jsonl")
+        .filter(|bytes| !bytes.is_empty())
+    {
+        result.sealed_artifacts.push(super::super::SealedArtifact {
+            kind: "native-tool-deferred".into(),
+            bytes: bytes.to_vec(),
+        });
     }
+    result
 }
 
 #[cfg(test)]
@@ -1246,6 +1267,7 @@ asyncio.run(main())
         let server_stop = stop.clone();
         let server = std::thread::spawn(move || {
             use std::io::{BufRead, Write};
+            let mut sequence = 1_u64;
             while !server_stop.load(std::sync::atomic::Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
@@ -1253,8 +1275,11 @@ asyncio.run(main())
                         std::io::BufReader::new(stream.try_clone().unwrap())
                             .read_line(&mut line)
                             .unwrap();
+                        if line.starts_with("tool-end:") {
+                            sequence += 1;
+                        }
                         server_messages.lock().unwrap().push(line);
-                        stream.write_all(b"1\n").unwrap();
+                        writeln!(stream, "{sequence}").unwrap();
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1263,7 +1288,7 @@ asyncio.run(main())
                 }
             }
         });
-        let sidecar = root.join("native.jsonl");
+        let sidecar = root.join("native-tool-pending.jsonl");
         let marker = root.join("executed");
         let log_marker = root.join("log-configured");
         let record_workspace = root.join("record-workspace");
@@ -1277,7 +1302,10 @@ asyncio.run(main())
             .env("ASB_TEST_LOG_CONFIGURED", &log_marker)
             .env("ASB_TEST_WORKSPACE", &record_workspace)
             .env("ASB_TEST_RENDER_PREFIX", "record:")
-            .env("ASB_OPENJIUWEN_NATIVE_TOOL_RECORD", &sidecar)
+            .env(
+                "ASB_OPENJIUWEN_NATIVE_TOOL_RECORD",
+                root.join("native-tool-sidecar.jsonl"),
+            )
             .env("ASB_FS_MARKER_SOCKET", &socket)
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &record_workspace)
             .output()
@@ -1292,6 +1320,91 @@ asyncio.run(main())
             "record stdout={} stderr={}",
             String::from_utf8_lossy(&record.stdout),
             String::from_utf8_lossy(&record.stderr)
+        );
+        // Build a bounded fixture archive from the actual marker exchanges;
+        // a matching digest alone is insufficient to bind tool effects.
+        let journal = messages.lock().unwrap().clone();
+        let mut boundaries = vec![
+            serde_json::json!({"sequence":1,"kind":"baseline","alias":null,"snapshot":"snapshot-00000001"}),
+        ];
+        let mut markers = Vec::new();
+        let mut snapshot_sequence = 1_u64;
+        for line in &journal {
+            let mut parts = line.trim().split(':');
+            let kind = match parts.next().unwrap() {
+                "tool-begin" => "begin",
+                "tool-end" => "end",
+                _ => panic!("unexpected marker"),
+            };
+            let alias = parts.next().unwrap();
+            if kind == "end" {
+                snapshot_sequence += 1;
+                boundaries.push(serde_json::json!({"sequence":snapshot_sequence,"kind":"tool-end","alias":alias,"snapshot":format!("snapshot-{snapshot_sequence:08}")}));
+            }
+            markers.push(serde_json::json!({"sequence":markers.len()+1,"kind":kind,"alias":alias,"snapshot_sequence":snapshot_sequence}));
+        }
+        snapshot_sequence += 1;
+        boundaries.push(serde_json::json!({"sequence":snapshot_sequence,"kind":"final","alias":null,"snapshot":format!("snapshot-{snapshot_sequence:08}")}));
+        let archive = root.join("boundaries.tar");
+        let mut tar = tar::Builder::new(std::fs::File::create(&archive).unwrap());
+        let mut append = |name: &str, bytes: &[u8]| {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o600);
+            header.set_cksum();
+            tar.append_data(&mut header, name, bytes).unwrap();
+        };
+        for (name, rows) in [
+            ("boundaries.jsonl", &boundaries),
+            ("markers.jsonl", &markers),
+        ] {
+            let mut bytes = Vec::new();
+            for row in rows {
+                serde_json::to_writer(&mut bytes, row).unwrap();
+                bytes.push(b'\n');
+            }
+            append(name, &bytes);
+        }
+        for sequence in 1..=snapshot_sequence {
+            append(&format!("snapshot-{sequence:08}.btrfs"), b"fixture");
+        }
+        tar.finish().unwrap();
+        drop(tar);
+        let native = std::fs::read(&sidecar).unwrap();
+        let bound = super::snapshot::finalize(&native, &"a".repeat(64)).unwrap();
+        assert!(
+            super::snapshot::verify(
+                &bound,
+                &mut std::fs::File::open(&archive).unwrap(),
+                &"a".repeat(64)
+            )
+            .is_ok()
+        );
+        assert!(
+            super::snapshot::verify(
+                &bound,
+                &mut std::fs::File::open(&archive).unwrap(),
+                &"b".repeat(64)
+            )
+            .is_err()
+        );
+        assert!(super::snapshot::finalize(&bound, &"a".repeat(64)).is_err());
+        let mut changed_archive = std::fs::read(&archive).unwrap();
+        let marker_text = b"openjiuwen-0";
+        let offset = changed_archive
+            .windows(marker_text.len())
+            .position(|window| window == marker_text)
+            .unwrap();
+        changed_archive[offset] = b'X';
+        let changed_path = root.join("changed-boundaries.tar");
+        std::fs::write(&changed_path, changed_archive).unwrap();
+        assert!(
+            super::snapshot::verify(
+                &bound,
+                &mut std::fs::File::open(changed_path).unwrap(),
+                &"a".repeat(64)
+            )
+            .is_err()
         );
         assert_eq!(
             std::fs::read_to_string(&marker).unwrap().lines().count(),
