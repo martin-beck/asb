@@ -18,7 +18,7 @@ class ComponentTargetTests(unittest.TestCase):
     def test_adapter_source_uses_owning_component(self):
         self.assertEqual(
             component_targets(["crates/asb-cli/src/agents/adapters/pi.rs"]),
-            ("lib:agents::",),
+            ("lib:adapter_layout_tests::", "lib:agents::"),
         )
 
     def test_named_integration_test_is_selected_directly(self):
@@ -36,8 +36,16 @@ class ComponentTargetTests(unittest.TestCase):
     def test_shared_source_keeps_cross_command_smoke_coverage(self):
         self.assertEqual(
             component_targets(["crates/asb-cli/src/lib.rs"]),
-            ("lib:config::", "lib:parser::", "lib:project::"),
+            ("lib:adapter_layout_tests::", "lib:config::", "lib:parser::", "lib:project::"),
         )
+
+    def test_each_adapter_category_checks_shared_layout(self):
+        for category in ("agents", "collectors", "providers", "workloads", "proxy"):
+            with self.subTest(category=category):
+                self.assertIn(
+                    "lib:adapter_layout_tests::",
+                    component_targets([f"crates/asb-cli/src/{category}/shared.rs"]),
+                )
 
     def test_documentation_needs_no_rust_test_target(self):
         self.assertEqual(component_targets(["docs/DEVELOPMENT.md"]), ())

@@ -41,6 +41,8 @@ def component_targets(paths: list[str]) -> tuple[str, ...]:
             continue
         if path.is_relative_to(SOURCE_ROOT):
             relative = path.relative_to(SOURCE_ROOT)
+            if relative.parts[0] in {"agents", "collectors", "providers", "workloads", "proxy", "lib.rs"}:
+                targets.add("lib:adapter_layout_tests::")
             if len(relative.parts) == 1:
                 stem = relative.stem
                 if stem in {"lib", "main"}:
