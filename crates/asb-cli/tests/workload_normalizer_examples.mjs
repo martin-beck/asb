@@ -56,6 +56,9 @@ test("recursive grep ordering is normalized only for complete unambiguous result
   assert.equal(grepOrder({text:first,tool:included}), grepOrder({text:second,tool:included}));
   const wrongExtension = first.replace('z.py','z.txt');
   assert.equal(grepOrder({text:wrongExtension,tool:included}),wrongExtension);
+  const quoted = {...tool, arguments:{command:'grep -rn "x" sympy/ --include="*.py" | grep -v "test.py" | grep -iv "name" | head -50'}};
+  assert.equal(grepOrder({text:first,tool:quoted}), grepOrder({text:second,tool:quoted}));
+  assert.notEqual(grepOrder({text:first.replace('foo','changed'),tool:quoted}), grepOrder({text:second,tool:quoted}));
   const compound = {...tool, arguments:{command:'git config --global --add safe.directory /testbed; cd /testbed && git log --oneline -2 && grep -rn "x" sympy/vector/ | head -50'}};
   const history = 'abcdef0123 first\n1234567890 second\n';
   assert.equal(grepOrder({text:history+a,tool:compound}),grepOrder({text:history+b,tool:compound}));
