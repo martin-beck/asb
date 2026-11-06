@@ -869,13 +869,12 @@ fn replay_string_feature_context(
 }
 
 fn stop_proxy(child: &mut Child, builtin: bool) -> std::io::Result<()> {
-    let was_running = child.try_wait()?.is_none();
     crate::project::stop_network_child(child)?;
     let status = child.try_wait()?;
-    // A running built-in producer is deliberately terminated by ASB. Its
-    // signal status is not a failed cleanup when the owned child was reaped.
-    // An already-exited producer must still have succeeded on its own.
-    if builtin && !was_running && !status.is_some_and(|status| status.success()) {
+    // The built-in proxy handles TERM and exits successfully only after its
+    // shutdown completes. An error exit or forced kill cannot confirm cleanup,
+    // even when the proxy was running when shutdown was requested.
+    if builtin && !status.is_some_and(|status| status.success()) {
         return Err(std::io::Error::other(
             "embedded tape proxy exited without confirming owned subprocess cleanup; inspect retained attempt artifacts",
         ));
@@ -1262,6 +1261,32 @@ mod tests {
             assert_eq!(session.cleanup_confirmed(), code == 0);
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn builtin_shutdown_failure_cannot_confirm_proxy_cleanup() {
+        use std::io::BufRead;
+        use std::process::Stdio;
+        for (handler, expected) in [
+            ("process.exit(0)", true),
+            ("process.exit(2)", false),
+            ("", false),
+        ] {
+            let script = format!(
+                "process.on('SIGTERM', () => {{{handler}}}); console.log('ready'); setInterval(() => {{}}, 1000);"
+            );
+            let mut child = std::process::Command::new("node")
+                .args(["-e", &script])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            assert_eq!(line.trim(), "ready");
+            assert_eq!(super::stop_proxy(&mut child, true).is_ok(), expected);
+        }
     }
 
     #[test]
