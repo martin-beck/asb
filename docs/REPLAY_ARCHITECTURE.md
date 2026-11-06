@@ -187,3 +187,25 @@ only for adapter-neutral artifact custody, lifecycle dispatch, resource bounds,
 or cross-adapter contract tests. A named adapter, wire field, protocol-specific
 JSON path, or replay special case in shared code is a design defect: move it
 back into the owning extension.
+
+### Ignoring specific completed-attempt failures
+
+For exploratory replay, `asb run --replay --ignore-evaluation CONFIG` and
+`asb sweep --replay --ignore-evaluation SWEEP` allow an unresolved workload
+or a grader error to be reported without failing the command solely for that
+reason. `--ignore-agent` separately allows a failed agent process to be treated
+likewise. The flags may be combined and also apply to the explicit replay modes.
+Each ignored failure is printed as a warning, or emitted in JSON under
+`ignored_failures` with its original kind and reason and `ignored: true`.
+The same evidence is retained in the run log and measurement summary. The
+actual process outcome, evaluator result and success rate are never changed;
+ignored failures do not make a failed workload pass. Ignored attempts retain
+their workspace even if compact retention is enabled. Repeated campaign and
+sweep plans freeze these choices; resume requires the original sweep choices.
+
+These flags cover only failures observed after an attempt reaches a disposition.
+They cannot manufacture missing or corrupt cassette data, turn a rejected
+provider/tool request into a valid recorded response, recover an agent that
+cannot start, or establish missing resource cleanup and measurement evidence.
+Such independent failures still fail the command. ASB does not contact a live
+provider to replace a missing replay response.

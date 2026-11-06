@@ -236,6 +236,8 @@ pub(crate) struct RunOptions<'a> {
     /// Verified native workspace capsule restored before an LLM replay.
     pub native_capsule_replay: Option<&'a str>,
     pub respect_record_timings: bool,
+    pub ignore_evaluation: bool,
+    pub ignore_agent: bool,
     pub replica: replica::Identity,
     pub on_completion: Option<&'a dyn replica::CompletionObserver>,
     pub reused: Option<&'a std::collections::BTreeMap<usize, serde_json::Value>>,
@@ -1689,6 +1691,7 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
         "workload_baseline": result.workload_baseline,
         "workload_failure": result.workload_failure,
         "adapter_smoke_success": result.adapter_smoke_success,
+        "ignored_failures": result.disposition.ignored_failures,
         "failure_kind": result.disposition.failure.as_ref().map(|f| f.kind),
         "failure_reason": result.disposition.failure.as_ref().map(|f| &f.reason),
         "success_rate": result.success_rate,
@@ -1698,6 +1701,12 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
         "tool_call_count": result.tool_call_count(),
         "token_usage": result.token_usage,
     });
+    if result.disposition.ignored_failures.is_empty() {
+        summary
+            .as_object_mut()
+            .expect("summary object")
+            .remove("ignored_failures");
+    }
     if let Some(selection) = result.replay_selection {
         summary["replay_selection"] =
             serde_json::to_value(selection).map_err(|error| Error::Io(error.to_string()))?;
@@ -1741,6 +1750,15 @@ fn render_human(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Er
         result.workload_evaluation,
     )
     .map_err(io_error)?;
+    for failure in &result.disposition.ignored_failures {
+        writeln!(
+            output,
+            "Warning: ignored {}: {}",
+            failure.kind.as_str(),
+            failure.reason
+        )
+        .map_err(io_error)?;
+    }
     Ok(())
 }
 
@@ -2833,6 +2851,7 @@ mod tests {
             .unwrap();
         session
             .finish(crate::measurements::RunMeasurement {
+                ignored_failures: &[],
                 replay_selection: None,
                 native_replay_consumed: None,
                 planning: None,
@@ -3304,6 +3323,7 @@ mod tests {
             disposition: RunDisposition {
                 status: RunStatus::Completed,
                 failure: None,
+                ignored_failures: Vec::new(),
                 success: true,
             },
             agent: "codex",

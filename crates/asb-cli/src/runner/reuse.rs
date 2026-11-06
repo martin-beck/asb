@@ -17,6 +17,19 @@ pub(crate) fn render_reused(
         let native_completed = structured
             .as_ref()
             .is_some_and(|o| o.evaluation.completed() && o.evaluation.resolution().is_none());
+        let ignored = |kinds: &[&str]| {
+            summary["ignored_failures"]
+                .as_array()
+                .is_some_and(|events| {
+                    events.iter().any(|event| {
+                        event["ignored"] == true
+                            && event["severity"] == "warning"
+                            && event["kind"]
+                                .as_str()
+                                .is_some_and(|kind| kinds.contains(&kind))
+                    })
+                })
+        };
         if json {
             let mut summary = summary.clone();
             summary["reused"] = Value::Bool(true);
@@ -45,12 +58,25 @@ pub(crate) fn render_reused(
                 }
             )
             .map_err(io_error)?;
+            if let Some(events) = summary["ignored_failures"].as_array() {
+                for event in events.iter().filter(|event| event["ignored"] == true) {
+                    writeln!(
+                        output,
+                        "Warning: ignored {}: {}",
+                        event["kind"].as_str().unwrap_or("failure"),
+                        event["reason"].as_str().unwrap_or("unknown")
+                    )
+                    .map_err(io_error)?;
+                }
+            }
         }
         if summary["recovered_grade_only"] == true && summary["process_success"].is_null() {
             unknown += 1;
             unresolved_grades += usize::from(summary["workload_success"] == false);
-        } else if summary["process_success"] != true
-            || (summary["workload_success"] != true && !native_completed)
+        } else if (summary["process_success"] != true && !ignored(&["agent_failure"]))
+            || (summary["workload_success"] != true
+                && !native_completed
+                && !ignored(&["workload_check_failed", "grader_error"]))
             || !summary["failure_reason"].is_null()
         {
             failed += 1;
@@ -74,6 +100,24 @@ pub(crate) fn render_reused(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn reuse_requires_the_correct_explicit_ignored_class_and_no_remaining_failure() {
+        let mut summary = json!({"task":{"task_id":"fixture"},"process_success":false,"workload_success":false,"failure_reason":null,
+            "ignored_failures":[{"kind":"agent_failure","ignored":true,"severity":"warning","reason":"exit 7"},{"kind":"workload_check_failed","ignored":true,"severity":"warning","reason":"unresolved"}]});
+        let mut output = Vec::new();
+        render_reused(&[summary.clone()], false, &mut output).unwrap();
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("Warning: ignored")
+        );
+        summary["ignored_failures"][1]["ignored"] = json!(false);
+        assert!(render_reused(&[summary.clone()], true, &mut Vec::new()).is_err());
+        summary["ignored_failures"][1]["ignored"] = json!(true);
+        summary["failure_reason"] = json!("independent collector failure");
+        assert!(render_reused(&[summary], true, &mut Vec::new()).is_err());
+    }
 
     #[test]
     fn native_rewards_reuse_without_inventing_boolean_resolution() {

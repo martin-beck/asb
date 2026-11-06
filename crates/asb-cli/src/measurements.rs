@@ -216,6 +216,8 @@ pub struct RunMeasurement<'a> {
     pub workload_success: Option<bool>,
     pub workload_resource_disposition: Option<crate::workloads::ResourceDisposition>,
     pub workload_artifacts: &'a [PathBuf],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub(crate) ignored_failures: &'a [crate::runner::disposition::RunFailure],
     pub(crate) failure_kind: Option<crate::runner::disposition::FailureKind>,
     pub failure_reason: Option<&'a str>,
     pub success_rate: Option<f64>,
@@ -2129,6 +2131,7 @@ mod tests {
             classes: vec!["filesystem.read".into()],
         }];
         let run = RunMeasurement {
+            ignored_failures: &[],
             replay_selection: None,
             native_replay_consumed: None,
             planning: None,

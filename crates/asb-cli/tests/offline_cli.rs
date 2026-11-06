@@ -3476,6 +3476,97 @@ fn no_op_zero_exit_cannot_resolve_a_failing_task() {
 
 #[cfg(unix)]
 #[test]
+fn replay_ignored_failures_are_warned_and_preserve_real_outcomes() {
+    for (behavior, args, success, expected) in [
+        (
+            "noop",
+            vec!["--ignore-evaluation"],
+            true,
+            "workload_check_failed",
+        ),
+        (
+            "invalid-utf8",
+            vec!["--ignore-evaluation"],
+            true,
+            "grader_error",
+        ),
+        ("exit", vec!["--ignore-agent"], true, "agent_failure"),
+        (
+            "exit-unresolved",
+            vec!["--ignore-agent"],
+            false,
+            "agent_failure",
+        ),
+        (
+            "exit-unresolved",
+            vec!["--ignore-agent", "--ignore-evaluation"],
+            true,
+            "agent_failure",
+        ),
+        (
+            "mismatch",
+            vec!["--ignore-agent", "--ignore-evaluation"],
+            false,
+            "agent_failure",
+        ),
+    ] {
+        let project = replay_project(1);
+        let mut options = args;
+        options.push("--json");
+        let result = replay(&project, behavior, &options);
+        assert_eq!(
+            result.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let rows: Vec<serde_json::Value> = String::from_utf8_lossy(&result.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let row = rows
+            .iter()
+            .find(|row| {
+                row.get("ignored_failures")
+                    .is_some_and(|value| value.as_array().is_some_and(|values| !values.is_empty()))
+            })
+            .expect("ignored failure in JSON");
+        assert_eq!(row["ignored_failures"][0]["kind"], expected);
+        assert_eq!(row["ignored_failures"][0]["ignored"], true);
+        assert_eq!(row["ignored_failures"][0]["severity"], "warning");
+        let log: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+        assert_eq!(log["ignored_failures"], row["ignored_failures"]);
+        if behavior == "noop" || behavior == "exit-unresolved" {
+            assert_eq!(log["workload_success"], false);
+            assert_eq!(log["success_rate"], 0.0);
+        }
+    }
+    let project = replay_project(1);
+    let human = replay(&project, "noop", &["--ignore-evaluation"]);
+    assert!(human.status.success());
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("Warning: ignored workload_check_failed")
+    );
+    let rejected = project.command(&["run", "benchmark.toml", "--ignore-evaluation"]);
+    assert!(!rejected.status.success());
+    let missing = project.command(&[
+        "run",
+        "benchmark.toml",
+        "--replay",
+        "--cassette",
+        "missing.jsonl",
+        "--ignore-agent",
+        "--ignore-evaluation",
+    ]);
+    assert!(
+        !missing.status.success(),
+        "missing replay input cannot produce a successful run"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn pre_solved_workspace_is_preserved_but_never_earns_resolution_credit() {
     let project = replay_project(1);
     project.write(
