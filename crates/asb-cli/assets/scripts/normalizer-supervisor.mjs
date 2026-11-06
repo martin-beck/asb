@@ -4,11 +4,13 @@ import { createHash } from "node:crypto";
 // One worker per proxy session, with deadlines enforced independently of the
 // worker's event loop. It is intentionally not advertised as a sandbox.
 export class NormalizerSupervisor {
-  constructor(profiles, { callTimeoutMs = 100, startupTimeoutMs = 5000, maxOutputBytes = 16 * 1024 * 1024, maxPending = 64 } = {}) {
+  constructor(profiles, { callTimeoutMs = 1000, startupTimeoutMs = 5000, maxOutputBytes = 16 * 1024 * 1024, maxPending = 64 } = {}) {
     this.pending = new Map();
     this.nextId = 0;
     this.closed = false;
-    this.callTimeoutMs = callTimeoutMs;
+    // Each profile has its own VM deadline; the parent must allow for all
+    // profiles and normal worker scheduling latency.
+    this.requestTimeoutMs = callTimeoutMs * Math.max(1, profiles.length) + 2000;
     this.maxPending = maxPending;
     this.counts = new Map(profiles.map(({ id }) => [id, { observations: 0, changed: 0 }]));
     this.changes = [];
@@ -71,7 +73,7 @@ export class NormalizerSupervisor {
     if (this.pending.size >= this.maxPending) throw new Error("normalizer worker queue is full");
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.fail(new Error("normalizer execution timed out")), this.callTimeoutMs);
+      const timer = setTimeout(() => this.fail(new Error("normalizer execution timed out")), this.requestTimeoutMs);
       this.pending.set(id, { resolve, reject, timer, before: createHash("sha256").update(context.text, "utf8").digest("hex") });
       this.worker.postMessage({ id, context });
     });

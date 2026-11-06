@@ -68,7 +68,7 @@ export function normalizeToolResults(body, transform) {
 }
 
 /** Apply a supervised asynchronous normalizer in deterministic block order. */
-export async function normalizeToolResultsAsync(body, transform, { maxTotalMs = 5000, maxResults = 4096, maxOutputBytes = 16 * 1024 * 1024, associationBody = body } = {}) {
+export async function normalizeToolResultsAsync(body, transform, { maxTotalMs = 30000, maxResults = 4096, maxOutputBytes = 16 * 1024 * 1024, associationBody = body } = {}) {
   const started = performance.now();
   const contexts = [];
   normalizeToolResults(body, (context) => {

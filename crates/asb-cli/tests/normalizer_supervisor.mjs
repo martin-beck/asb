@@ -18,6 +18,13 @@ test("worker applies selected profiles in order without mutating input", async (
   await supervisor.close();
 });
 
+test('multiple valid profiles can complete despite ordinary worker delays', async () => {
+  const source = "export function normalizeToolResult({text}) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150); return text + '!'; }";
+  const supervisor = new NormalizerSupervisor([{id:'one',source},{id:'two',source}]);
+  try { assert.equal(await supervisor.normalize({text:'result'}), 'result!!'); }
+  finally { await supervisor.close(); }
+});
+
 test("bad modules, exceptions, promises and infinite loops fail", async () => {
   for (const source of [
     "export function wrong() {}",
