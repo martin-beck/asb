@@ -67,6 +67,15 @@ pub(super) struct PerfCollector;
 pub(super) static ADAPTER: PerfCollector = PerfCollector;
 
 impl CollectorAdapter for PerfCollector {
+    fn private_service_entry(&self, args: &[std::ffi::OsString]) -> Option<std::process::ExitCode> {
+        Some(match streaming_validation_service(args) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("perf validation service: {error}");
+                std::process::ExitCode::from(1)
+            }
+        })
+    }
     #[cfg(any(target_os = "linux", test))]
     fn host_settings(&self) -> &'static [(&'static str, &'static str, &'static str)] {
         &[(
@@ -273,15 +282,23 @@ fn validate_record(
     let executable = measurements::resolve_executable(session.tool_dir.as_deref(), "perf");
     let executable = crate::tools::host_executable(&executable)
         .ok_or("selected perf executable is unavailable for offline record validation")?;
-    let mut launch = crate::launch::ProcessLaunch::new(executable);
-    launch.arg("script").arg("-i").arg(&artifact);
+    let runtime = crate::process_gate::executable().map_err(|error| error.to_string())?;
+    let mut launch = crate::launch::ProcessLaunch::new(runtime);
+    launch
+        .arg("__asb-collector-service")
+        .arg("perf")
+        .arg("validate-v1")
+        .arg(executable)
+        .arg(&artifact);
+    if let Some(cache) = session.artifact(SharedArtifact::PerfSymbolCache)
+        && cache.join("symfs-ready").is_file()
+    {
+        launch.arg(cache.join("symfs"));
+    }
     let (mut command, route) = measurements::producer_command(&mut launch)?;
     configure_offline_decoder_environment(&mut command, &session.dir);
     if let Some(cache) = session.artifact(SharedArtifact::PerfSymbolCache) {
         command.env("HOME", cache);
-        if cache.join("symfs-ready").is_file() {
-            command.arg("--symfs").arg(cache.join("symfs"));
-        }
     }
     let mut captures = [
         crate::evidence::Capture::create(&session.dir.join("perf-validation.stdout"))?,
@@ -326,7 +343,7 @@ fn validate_record(
     for capture in &mut captures {
         capture.freeze()?;
     }
-    let quality = symbol_quality(captures[0].reader()?)?;
+    let quality = parse_validation_summary(captures[0].reader()?)?;
     measurements::write_json(
         &session.dir.join("perf-symbol-quality.json"),
         &serde_json::json!({
@@ -340,6 +357,69 @@ fn validate_record(
     for capture in &captures {
         capture.consume()?;
     }
+    Ok(())
+}
+
+fn parse_validation_summary(input: impl std::io::Read) -> Result<(u64, u64), String> {
+    let summary: serde_json::Value = serde_json::from_reader(input)
+        .map_err(|error| format!("invalid perf decoder summary: {error}"))?;
+    let total = summary
+        .get("decoded_frames")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("perf decoder summary lacks decoded frame count")?;
+    let unknown = summary
+        .get("unknown_frames")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|unknown| *unknown <= total)
+        .ok_or("perf decoder summary has invalid unknown frame count")?;
+    if summary
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+    {
+        return Err("unsupported perf decoder summary version".into());
+    }
+    Ok((total, unknown))
+}
+
+/// Decode every record while retaining only a bounded frame-count summary.
+/// The enclosing producer gate retains custody of this service and its child.
+fn streaming_validation_service(args: &[std::ffi::OsString]) -> Result<(), String> {
+    if !(args.len() == 3 || args.len() == 4) || args[0] != "validate-v1" {
+        return Err("invalid validation service arguments".into());
+    }
+    let mut command = Command::new(&args[1]);
+    command.arg("script").arg("-i").arg(&args[2]);
+    if let Some(symfs) = args.get(3) {
+        command.arg("--symfs").arg(symfs);
+    }
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("cannot start perf decoder: {error}"))?;
+    let output = child
+        .stdout
+        .take()
+        .ok_or("perf decoder stdout unavailable")?;
+    let quality = match symbol_quality(output) {
+        Ok(quality) => quality,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    let status = child
+        .wait()
+        .map_err(|error| format!("cannot reap perf decoder: {error}"))?;
+    if !status.success() {
+        return Err(format!("perf decoder failed: {status}"));
+    }
+    println!(
+        "{}",
+        serde_json::json!({"schema_version": 1, "decoded_frames": quality.0, "unknown_frames": quality.1})
+    );
     Ok(())
 }
 
@@ -964,6 +1044,88 @@ pub(crate) fn perf_permission_error() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires an existing local perf.data and matching perf tool"]
+    fn installed_perf_record_streaming_validation() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/perf-stream-validation")
+            .join(crate::tools::runtime::unique_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let mut session =
+            crate::measurements::Session::start_with_collectors(&root, &[], None).unwrap();
+        session.tool_dir = Some(std::path::PathBuf::from(
+            std::env::var_os("ASB_TEST_PERF_TOOLS").expect("ASB_TEST_PERF_TOOLS"),
+        ));
+        if let Some(cache) = std::env::var_os("ASB_TEST_PERF_CACHE") {
+            session.set_artifact(super::SharedArtifact::PerfSymbolCache, cache.into());
+        }
+        let artifact = std::path::PathBuf::from(
+            std::env::var_os("ASB_TEST_PERF_DATA").expect("ASB_TEST_PERF_DATA"),
+        );
+        super::validate_record(
+            &session,
+            &artifact,
+            std::time::Duration::from_secs(300),
+            1024 * 1024,
+        )
+        .unwrap();
+        let quality = std::fs::read_to_string(root.join("perf-symbol-quality.json")).unwrap();
+        println!("{quality}");
+    }
+
+    #[test]
+    fn validation_summary_rejects_incomplete_or_inconsistent_counts() {
+        assert_eq!(
+            super::parse_validation_summary(
+                &b"{\"schema_version\":1,\"decoded_frames\":8,\"unknown_frames\":2}"[..]
+            )
+            .unwrap(),
+            (8, 2)
+        );
+        for input in [
+            "",
+            "{}",
+            "{\"schema_version\":2,\"decoded_frames\":1,\"unknown_frames\":0}",
+            "{\"schema_version\":1,\"decoded_frames\":1,\"unknown_frames\":2}",
+            "{\"schema_version\":1,\"decoded_frames\":1}",
+        ] {
+            assert!(
+                super::parse_validation_summary(input.as_bytes()).is_err(),
+                "{input}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validation_service_streams_large_decode_and_reports_child_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("perf-fixture");
+        std::fs::write(&executable, "#!/usr/bin/python3\nimport sys\nchunk = b'\\t1 [unknown] (module)\\n' * 4096\nfor _ in range(3000): sys.stdout.buffer.write(chunk)\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let args = vec![
+            "validate-v1".into(),
+            executable.as_os_str().to_owned(),
+            "fixture.data".into(),
+        ];
+        assert!(super::streaming_validation_service(&args).is_ok());
+        std::fs::write(
+            &executable,
+            "#!/usr/bin/python3\nimport sys\nsys.stdout.write('partial\\n')\nsys.exit(7)\n",
+        )
+        .unwrap();
+        assert!(
+            super::streaming_validation_service(&args)
+                .unwrap_err()
+                .contains("perf decoder failed")
+        );
+        assert!(super::streaming_validation_service(&args[..2]).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn failed_perf_probe_identifies_the_actual_binary_and_missing_runtime_hint() {
         let path = std::path::Path::new("/project/tools/perf/bin/perf");
