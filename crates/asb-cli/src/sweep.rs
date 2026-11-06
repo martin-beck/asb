@@ -83,6 +83,7 @@ impl SampledTrials {
 
 #[derive(Clone, Copy)]
 pub(crate) struct Options<'a> {
+    pub prepare_replay: bool,
     pub invocation_dir: Option<&'a Path>,
     pub repeat: Option<u64>,
     pub max_steps: Option<u64>,
@@ -119,6 +120,7 @@ pub(crate) struct Options<'a> {
 impl Default for Options<'_> {
     fn default() -> Self {
         Self {
+            prepare_replay: false,
             invocation_dir: None,
             repeat: None,
             max_steps: None,
@@ -189,6 +191,11 @@ pub(crate) fn run_with_options(
     }
     let sweep_path = Path::new(path);
     let sweep = read_manifest(sweep_path)?;
+    if options.prepare_replay && sweep.sampled_trials.is_empty() {
+        return Err(Error::Input(
+            "--prepare-replay requires a sweep created with --trial-count".into(),
+        ));
+    }
     if !sweep.sampled_trials.is_empty() {
         return Err(Error::Input(
             "sampled trial preparation is not yet available; no benchmark was started".into(),
