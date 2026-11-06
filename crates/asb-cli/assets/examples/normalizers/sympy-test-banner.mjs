@@ -2,7 +2,7 @@
 // different random seeds caused identical execution or make a run deterministic.
 export function normalizeToolResult({ text, tool }) {
   const command = tool?.arguments?.command;
-  if (!['bash', 'shell_command'].includes(tool?.name) || typeof command !== 'string'
+  if (!['bash', 'Bash', 'shell_command'].includes(tool?.name) || typeof command !== 'string'
       || !(command.includes('sympy.test(') || /(?:^|[\s;&|])(?:python(?:\d+(?:\.\d+)*)?\s+)?(?:\.\/|\/testbed\/)?bin\/test(?:\s|$)/.test(command))) return text;
   const starts = [...text.matchAll(/^=+ test process starts =+\r?$/gm)];
   const finishes = [...text.matchAll(/^=*[ \t]*tests finished: .+?(?:=+|seconds)[ \t]*\r?$/gm)];

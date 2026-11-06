@@ -1,7 +1,7 @@
 // Select only for agent/workload combinations that invoke pytest. Keep test
 // counts, statuses, diagnostic content and command arguments significant.
 export function normalizeToolResult({ text, tool }) {
-  if (tool?.name !== "bash" || typeof tool.arguments?.command !== "string"
+  if (!["bash", "Bash", "shell_command"].includes(tool?.name) || typeof tool.arguments?.command !== "string"
       || !/(?:^|[\s;&|])(?:pytest\b|python(?:3(?:\.\d+)?)?\s+-m\s+pytest\b)/.test(tool.arguments.command)) return text;
   return text
     .replace(/(^|\r?\n)((?:\d+ (?:failed|passed|skipped|deselected|errors?|warnings?),? )+in )\d+(?:\.\d+)?s\b/g, "$1$2<asb-elapsed>")
