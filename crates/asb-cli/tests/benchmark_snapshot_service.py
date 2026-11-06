@@ -677,6 +677,17 @@ class SnapshotServiceTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'different hard-link topology'):
                 SnapshotApplier(store,workspace,['rsync'])(2)
 
+    def test_snapshot_settlement_reports_recorded_agent_timeout(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root=Path(directory);(root/'guest-error-stderr.log').write_text('failure')
+            (root/'execution.json').write_text(json.dumps({'timed_out':True}))
+            process=SimpleNamespace(returncode=1,communicate=lambda *_args,**_kwargs:(b'',None),poll=lambda:1)
+            supervisor=GuestSnapshot.__new__(GuestSnapshot)
+            supervisor.task=SimpleNamespace(artifacts=root);supervisor.process=process
+            supervisor.log=io.BytesIO();supervisor.replay=False
+            with self.assertRaisesRegex(RuntimeError,'after agent execution timeout'):
+                supervisor.close()
+
     def test_snapshot_settlement_points_to_retained_guest_failure(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
             root=Path(directory);(root/'guest-error-stderr.log').write_text('failure')

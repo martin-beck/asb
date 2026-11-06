@@ -1055,7 +1055,27 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     let native_replay_selected = snapshot_replay
         && super::find(&request.config.agent)
             .is_some_and(|adapter| adapter.snapshot_replay_uses_settlement_service());
-    let mut native_replay_consumed = settle_auxiliary(&mut auxiliary, native_replay_selected)?;
+    let mut native_replay_consumed = match settle_auxiliary(&mut auxiliary, native_replay_selected)
+    {
+        Ok(value) => value,
+        Err(error) if execution_timed_out => {
+            // A stopped principal can leave native calls unfinished. Preserve
+            // the owner-confirmed timeout while retaining all unsettled raw
+            // artifacts; do not publish a complete native replay receipt.
+            let _ = artifact_owner.freeze();
+            let partial =
+                unsettled_timeout_result(observation, cfg!(target_os = "linux") && !retained);
+            if let Err(publication) = publish_result(&request.run_dir, &partial) {
+                return Err(Error::Run(format!(
+                    "agent execution exceeded its time budget; {error}; cannot publish timeout evidence: {publication}"
+                )));
+            }
+            return Err(Error::Run(format!(
+                "agent execution exceeded its time budget; {error}"
+            )));
+        }
+        Err(error) => return Err(error),
+    };
     let namespace_collectors = capture
         .as_mut()
         .map(|session| session.export_execution_namespace_state())
@@ -1364,7 +1384,29 @@ fn publish_artifacts(
     Ok(())
 }
 
-fn publish_result(run_dir: &Path, result: &GuestResult) -> Result<(), Error> {
+fn unsettled_timeout_result(
+    observation: crate::process_termination::Observation,
+    tree_quiesced: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "timed_out": true,
+        "process_termination": observation.process_termination,
+        "process_termination_diagnostic": observation.process_termination_diagnostic,
+        "exit_code": observation.process_termination.and_then(|termination| match termination {
+            crate::process_termination::ProcessTermination::Code(code) => Some(code),
+            _ => None,
+        }),
+        "final_response": null,
+        "token_usage": {},
+        "steps": null,
+        "tree_quiesced": tree_quiesced,
+        "artifact_error": "native tool settlement incomplete; raw artifacts retained",
+        "execution_failure": "agent execution exceeded its time budget",
+    })
+}
+
+fn publish_result(run_dir: &Path, result: &impl Serialize) -> Result<(), Error> {
     let destination = run_dir.join("agent-result.json");
     let temporary = run_dir.join(format!(".agent-result-{}", std::process::id()));
     let mut options = fs::OpenOptions::new();
@@ -1432,6 +1474,24 @@ mod artifact_publication_tests {
         let mut failed =
             Some(super::super::auxiliary::AuxiliaryService::start(&mut command).unwrap());
         assert!(settle_auxiliary(&mut failed, true).is_err());
+    }
+
+    #[test]
+    fn unsettled_timeout_keeps_timeout_and_never_claims_replay_completion() {
+        let value =
+            unsettled_timeout_result(crate::process_termination::Observation::default(), true);
+        assert_eq!(value["timed_out"], true);
+        assert_eq!(value["tree_quiesced"], true);
+        assert!(
+            value["artifact_error"]
+                .as_str()
+                .unwrap()
+                .contains("incomplete")
+        );
+        assert!(value.get("native_replay_consumed").is_none());
+        assert!(value.get("native_tool_sidecar").is_none());
+        assert!(value.get("exported_artifacts").is_none());
+        assert_eq!(value["steps"], serde_json::Value::Null);
     }
 
     #[test]
