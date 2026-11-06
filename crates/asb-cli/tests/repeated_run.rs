@@ -496,6 +496,7 @@ fn sampled_candidate_child() {
                 &"a".repeat(64),
                 &order,
                 None,
+                &root,
             )
             .is_err()
         );
@@ -507,6 +508,7 @@ fn sampled_candidate_child() {
             &"a".repeat(64),
             &order,
             None,
+            &root,
         )
         .unwrap();
         return;
@@ -646,6 +648,28 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
     }
     let configs = configs.join(",");
     fs::write(project.0.join("sample-sweep.toml"), format!("configs=[{configs}]\n[[sampled_trials]]\nworkload='bug-fix'\ncount={count}\nseed='0000000000000007'\ncandidates=[{candidates}]\n")).unwrap();
+    let sweep_dir = if normalize {
+        let nested = project.0.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::rename(
+            project.0.join("benchmark.toml"),
+            nested.join("benchmark.toml"),
+        )
+        .unwrap();
+        fs::rename(
+            project.0.join("sample-sweep.toml"),
+            nested.join("sample-sweep.toml"),
+        )
+        .unwrap();
+        nested
+    } else {
+        project.0.clone()
+    };
+    let sweep_arg = if normalize {
+        "nested/sample-sweep.toml"
+    } else {
+        "sample-sweep.toml"
+    };
     let provider = RecordingProvider::new();
     let run = || {
         let mut command = Command::new(env!("CARGO_BIN_EXE_asb"));
@@ -654,6 +678,7 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
         command
             .env("HOME", &project.0)
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("ASB_WORKLOAD_DIR", "workloads")
             .env("ASB_PROVIDER_BASE_URL", &provider.endpoint)
             .env("OPENROUTER_API_KEY", "fixture-only-key")
             .env("OPENROUTER_BASE_URL", format!("{}/v1", provider.endpoint))
@@ -661,7 +686,7 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
                 "OPENROUTER_MODELS_URL",
                 format!("{}/models", provider.endpoint),
             )
-            .args(["sweep", "sample-sweep.toml", "--prepare-replay"])
+            .args(["sweep", sweep_arg, "--prepare-replay"])
             .output()
             .unwrap()
     };
@@ -692,7 +717,8 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
     let json_output = json_prepare
         .env("HOME", &project.0)
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .args(["sweep", "sample-sweep.toml", "--prepare-replay", "--json"])
+        .env("ASB_WORKLOAD_DIR", "workloads")
+        .args(["sweep", sweep_arg, "--prepare-replay", "--json"])
         .output()
         .unwrap();
     assert!(
@@ -710,12 +736,7 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
         expected_count
     );
     let ready: Value = serde_json::from_slice(
-        &fs::read(
-            project
-                .0
-                .join(".sample-sweep-sample-preparation/ready.json"),
-        )
-        .unwrap(),
+        &fs::read(sweep_dir.join(".sample-sweep-sample-preparation/ready.json")).unwrap(),
     )
     .unwrap();
     let winners = ready["winners"].as_array().unwrap();
@@ -730,9 +751,8 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
         .collect();
     assert_eq!(actual_trials, expected_trials);
     assert_eq!(winners[0]["cassette_sha256"].as_str().unwrap().len(), 64);
-    let alias = project
-        .0
-        .join(".sample-sweep-sample-preparation/cassettes/000-replay/recording.asb.zip");
+    let alias =
+        sweep_dir.join(".sample-sweep-sample-preparation/cassettes/000-replay/recording.asb.zip");
     let mut archive =
         asb_cli::cassette::Archive::open(&alias, asb_cli::cassette::Limits::default()).unwrap();
     assert_eq!(
@@ -762,7 +782,8 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
     let result = replay
         .env("HOME", &project.0)
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .args(["sweep", "sample-sweep.toml", "--replay"])
+        .env("ASB_WORKLOAD_DIR", "workloads")
+        .args(["sweep", sweep_arg, "--replay"])
         .output()
         .unwrap();
     assert!(
@@ -788,9 +809,78 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
         provider.calls.load(std::sync::atomic::Ordering::SeqCst),
         expected_count
     );
-    let path = project
-        .0
-        .join(".sample-sweep-sample-preparation/ready.json");
+    if normalize {
+        assert!(
+            sweep_dir
+                .join("results/sample-sweep-comparison/report.html")
+                .is_file()
+        );
+        let mut compare = Command::new(env!("CARGO_BIN_EXE_asb"));
+        compare
+            .current_dir(project.0.parent().unwrap())
+            .isolated_env();
+        retain_host_rust_toolchain(&mut compare);
+        let compared = compare
+            .env("HOME", &project.0)
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("ASB_WORKLOAD_DIR", "workloads")
+            .arg("--project-dir")
+            .arg(&project.0)
+            .arg("compare")
+            .arg(sweep_dir.join("sample-sweep.toml"))
+            .output()
+            .unwrap();
+        assert!(
+            compared.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compared.stderr)
+        );
+    }
+    if normalize {
+        let normalizer = project.0.join("normalizer.mjs");
+        let original = fs::read(&normalizer).unwrap();
+        fs::write(
+            &normalizer,
+            "export function normalizeToolResult({text}) { return text; }",
+        )
+        .unwrap();
+        let stale = run();
+        assert!(!stale.status.success());
+        assert!(
+            String::from_utf8_lossy(&stale.stderr).contains("normalization policy changed"),
+            "{}",
+            String::from_utf8_lossy(&stale.stderr)
+        );
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            expected_count
+        );
+        let attempts_before = fs::read(project.0.join("attempts.jsonl")).unwrap();
+        let mut stale_replay = Command::new(env!("CARGO_BIN_EXE_asb"));
+        stale_replay.current_dir(&project.0).isolated_env();
+        retain_host_rust_toolchain(&mut stale_replay);
+        let stale_replay = stale_replay
+            .env("HOME", &project.0)
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("ASB_WORKLOAD_DIR", "workloads")
+            .args(["sweep", sweep_arg, "--replay"])
+            .output()
+            .unwrap();
+        assert!(!stale_replay.status.success());
+        assert!(
+            String::from_utf8_lossy(&stale_replay.stderr).contains("normalization policy changed")
+        );
+        assert_eq!(
+            fs::read(project.0.join("attempts.jsonl")).unwrap(),
+            attempts_before
+        );
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            expected_count
+        );
+        fs::write(normalizer, original).unwrap();
+    }
+    let path = sweep_dir.join(".sample-sweep-sample-preparation/ready.json");
     let original_ready = fs::read(&path).unwrap();
     fs::write(&path, b"unrelated existing evidence").unwrap();
     let rejected = run();
@@ -811,10 +901,11 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
     let result = offline
         .env("HOME", &project.0)
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("ASB_WORKLOAD_DIR", "workloads")
         .arg("--project-dir")
         .arg(&project.0)
         .arg("sweep")
-        .arg(project.0.join("sample-sweep.toml"))
+        .arg(sweep_dir.join("sample-sweep.toml"))
         .arg("--replay")
         .output()
         .unwrap();

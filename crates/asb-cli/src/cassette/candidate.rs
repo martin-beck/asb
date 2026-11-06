@@ -75,7 +75,7 @@ pub fn prepare_sampled_group(
             )
         },
     )?;
-    verify_winners(&state, &base, &root)?;
+    verify_winners(&state, &base, &root, template, invocation_dir)?;
     Ok(state)
 }
 
@@ -88,6 +88,7 @@ pub fn load_sampled_group(
     sweep_sha256: &str,
     order: &TrialOrder,
     max_steps: Option<u64>,
+    invocation_dir: &Path,
 ) -> Result<BoundTrialPreparation, Error> {
     let text = crate::read_config(template).map_err(|error| Error(error.to_string()))?;
     let base: BenchmarkConfig = toml::from_str(&text)
@@ -103,7 +104,7 @@ pub fn load_sampled_group(
         &configuration_digest(&text, max_steps),
         order,
     )?;
-    verify_winners(&state, &base, &root)?;
+    verify_winners(&state, &base, &root, template, invocation_dir)?;
     Ok(state)
 }
 
@@ -119,7 +120,15 @@ fn verify_winners(
     state: &BoundTrialPreparation,
     base: &BenchmarkConfig,
     root: &Path,
+    template: &Path,
+    invocation_dir: &Path,
 ) -> Result<(), Error> {
+    let (project_root, settings) =
+        crate::project::load_for_invocation(template, Some(invocation_dir))
+            .map_err(|error| Error(error.to_string()))?;
+    let workload_directory = crate::project::environment_path("ASB_WORKLOAD_DIR", invocation_dir)
+        .unwrap_or_else(|| crate::project::resolve(&project_root, &settings.workloads_dir));
+    let mut cached_catalog = None;
     // A completed ledger is not sufficient by itself: verify its winning
     // cassette and replay configuration still match before returning it.
     for (trial, expected_digest) in state.preparation().successful() {
@@ -143,7 +152,61 @@ fn verify_winners(
                 "prepared cassette changed; preserve the existing evidence".into(),
             ));
         }
-        Archive::open_verified(&path, length, expected_digest, Limits::default())?;
+        let archive = Archive::open_verified(&path, length, expected_digest, Limits::default())?;
+        let compatibility = &archive.manifest().compatibility;
+        if !settings.replay.is_empty() || compatibility.normalization_sha256.is_some() {
+            if cached_catalog.is_none() {
+                cached_catalog = Some(
+                    crate::workloads::planning_catalog(&actual.workload, &workload_directory)
+                        .map_err(Error)?,
+                );
+            }
+            let selection = crate::workloads::describe_selection(
+                &actual,
+                &workload_directory,
+                cached_catalog.as_ref().and_then(Option::as_ref),
+            )
+            .map_err(Error)?;
+            let policy = settings
+                .replay
+                .freeze_for_task(&project_root, &actual.agent, &selection)
+                .map_err(Error)?;
+            let current = (!policy.normalizers.is_empty()).then_some(policy.sha256.as_str());
+            if current != compatibility.normalization_sha256.as_deref() {
+                return Err(Error("prepared cassette normalization policy changed; preserve its evidence and run `asb setup` to create a new sweep, then run `asb sweep NEW_SWEEP.toml --prepare-replay`".into()));
+            }
+        }
+        verify_current_protocol(compatibility)?;
+    }
+    Ok(())
+}
+
+// Readiness must not outlive a change in the replay protocol. Reconstruct the
+// same static descriptor and default policy used by workload sessions. Dataset
+// matching mirrors WorkloadSession::module_descriptor without launching a task.
+fn verify_current_protocol(compatibility: &super::Compatibility) -> Result<(), Error> {
+    let descriptor = crate::workloads::descriptor(&compatibility.workload);
+    let module = match descriptor {
+        Some(module)
+            if module.support != crate::workloads::contracts::SupportLevel::ReferenceSmoke
+                && crate::runner::batch::dataset_fingerprint(module.dataset.as_ref())
+                    .map_err(|error| Error(error.to_string()))?
+                    == compatibility.dataset_sha256 =>
+        {
+            Some(module)
+        }
+        _ => None,
+    };
+    let policy = crate::workloads::outcome::MetricPolicy::default();
+    let base = crate::runner::batch::replay_protocol_fingerprint(module.as_ref(), &policy)
+        .map_err(|error| Error(error.to_string()))?;
+    let expected = crate::runner::batch::replay_protocol_with_normalizer_digest(
+        &base,
+        compatibility.normalization_sha256.as_deref(),
+    )
+    .map_err(|error| Error(error.to_string()))?;
+    if compatibility.protocol_sha256.as_deref() != Some(expected.as_str()) {
+        return Err(Error("prepared cassette uses an incompatible replay protocol; preserve its evidence and run `asb setup` to create a new sweep, then run `asb sweep NEW_SWEEP.toml --prepare-replay`".into()));
     }
     Ok(())
 }
@@ -321,5 +384,61 @@ impl Write for Capture {
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+    #[test]
+    fn current_protocol_is_required_for_prepared_cassette_reuse() {
+        let module = crate::workloads::descriptor("swe-bench").unwrap();
+        let dataset = crate::runner::batch::dataset_fingerprint(module.dataset.as_ref()).unwrap();
+        let protocol = crate::runner::batch::replay_protocol_fingerprint(
+            Some(&module),
+            &crate::workloads::outcome::MetricPolicy::default(),
+        )
+        .unwrap();
+        let mut identity = super::super::Compatibility {
+            agent: "pi".into(),
+            provider: "fixture".into(),
+            model: "model".into(),
+            workload: "swe-bench".into(),
+            task: "task".into(),
+            dataset_sha256: dataset,
+            prompt_sha256: "a".repeat(64),
+            material_sha256: "b".repeat(64),
+            protocol_sha256: Some(protocol),
+            normalization_sha256: None,
+        };
+        assert!(verify_current_protocol(&identity).is_ok());
+        let original = identity.clone();
+        identity.normalization_sha256 = Some("d".repeat(64));
+        identity.protocol_sha256 = Some(
+            crate::runner::batch::replay_protocol_with_normalizer_digest(
+                original.protocol_sha256.as_deref().unwrap(),
+                identity.normalization_sha256.as_deref(),
+            )
+            .unwrap(),
+        );
+        assert!(verify_current_protocol(&identity).is_ok());
+        identity.normalization_sha256 = Some("e".repeat(64));
+        assert!(verify_current_protocol(&identity).is_err());
+        identity = original;
+        identity.dataset_sha256 = Some("f".repeat(64));
+        identity.protocol_sha256 = Some(
+            crate::runner::batch::replay_protocol_fingerprint(
+                None,
+                &crate::workloads::outcome::MetricPolicy::default(),
+            )
+            .unwrap(),
+        );
+        assert!(verify_current_protocol(&identity).is_ok());
+        identity.protocol_sha256 = Some("c".repeat(64));
+        let error = verify_current_protocol(&identity).unwrap_err().to_string();
+        assert!(error.contains("incompatible replay protocol"));
+        assert!(error.contains("asb setup"));
+        identity.protocol_sha256 = None;
+        assert!(verify_current_protocol(&identity).is_err());
     }
 }
