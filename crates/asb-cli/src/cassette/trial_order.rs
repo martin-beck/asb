@@ -123,6 +123,12 @@ impl TrialPreparation {
         Ok(self.candidates.get(self.outcomes.len()).map(String::as_str))
     }
 
+    /// Return a previously started candidate that needs explicit settlement.
+    pub fn in_flight(&self) -> Result<Option<&str>, Error> {
+        self.validate()?;
+        Ok(self.in_flight.as_deref())
+    }
+
     /// Mark the next candidate as in-flight before starting its recording.
     /// The owner must persist this transition before starting any process.
     pub fn start(&mut self) -> Result<Option<String>, Error> {
@@ -331,6 +337,7 @@ mod tests {
         let encoded = serde_json::to_vec(&state).unwrap();
         let mut restored: TrialPreparation = serde_json::from_slice(&encoded).unwrap();
         assert!(restored.start().is_err());
+        assert_eq!(restored.in_flight().unwrap(), Some(started.as_str()));
         assert!(!restored.complete().unwrap());
         restored.settle(&started, None).unwrap();
         assert_ne!(restored.start().unwrap().unwrap(), started);
