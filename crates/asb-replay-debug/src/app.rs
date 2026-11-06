@@ -599,7 +599,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
         .wrap(Wrap { trim:false }).block(Block::default().borders(Borders::ALL).title("Help")),popup);
 }
 
-struct ScreenGuard;
+pub(crate) struct ScreenGuard;
 impl Drop for ScreenGuard {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
@@ -607,17 +607,23 @@ impl Drop for ScreenGuard {
     }
 }
 
-pub(crate) fn run(app: &mut App) -> io::Result<()> {
+pub(crate) fn start_terminal() -> io::Result<(ScreenGuard, Terminal<CrosstermBackend<io::Stdout>>)>
+{
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::other(
             "interactive mode needs a terminal; use --print for redirected output",
         ));
     }
     terminal::enable_raw_mode()?;
-    let _guard = ScreenGuard;
+    let guard = ScreenGuard;
     execute!(io::stdout(), terminal::EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.hide_cursor()?;
+    Ok((guard, terminal))
+}
+
+pub(crate) fn run(app: &mut App) -> io::Result<()> {
+    let (_guard, mut terminal) = start_terminal()?;
     loop {
         terminal.draw(|frame| app.draw(frame))?;
         if event::poll(Duration::from_millis(200))?

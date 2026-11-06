@@ -50,3 +50,29 @@ fn reports_invalid_input_and_noninteractive_mode_without_terminal_escapes() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("use --print"));
     assert!(output.stdout.is_empty());
 }
+
+#[test]
+fn prints_selected_legacy_cassette_without_modifying_it() {
+    let fixture = Fixture::new();
+    let original = "{\"request\":{\"method\":\"POST\"},\"response\":\"fixture\"}\n";
+    let path = fixture.write("recording.jsonl", original);
+    let output = Command::new(env!("CARGO_BIN_EXE_asb-replay-debug"))
+        .args([
+            "--cassette",
+            path.to_str().unwrap(),
+            "--track",
+            "1",
+            "--print",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("legacy (completion unknown)"));
+    assert!(text.contains("fixture"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+}

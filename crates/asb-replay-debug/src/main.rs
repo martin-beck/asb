@@ -2,6 +2,7 @@
 
 mod app;
 mod artifacts;
+mod cassette_browser;
 mod diff;
 #[cfg(test)]
 mod test_support;
@@ -19,18 +20,30 @@ struct Args {
     /// Campaign directory, batch directory, or retained .mismatch.json file.
     #[arg(
         value_name = "PATH",
-        required_unless_present = "latest",
-        conflicts_with = "latest"
+        required_unless_present_any = ["latest", "cassette"],
+        conflicts_with_all = ["latest", "cassette"]
     )]
     path: Option<PathBuf>,
     /// Open the newest campaign in PROJECT/results/asb-executions.
-    #[arg(long, value_name = "PROJECT")]
+    #[arg(long, value_name = "PROJECT", conflicts_with = "cassette")]
     latest: Option<PathBuf>,
+    /// Browse a recorded cassette bundle or legacy JSONL source offline.
+    #[arg(long, value_name = "PATH")]
+    cassette: Option<PathBuf>,
+    /// Select a cassette track by its recorded ID.
+    #[arg(long, requires = "cassette", conflicts_with = "replica", value_parser = clap::value_parser!(u64).range(1..))]
+    track: Option<u64>,
+    /// Inspect the selected track's native interaction stream.
+    #[arg(long, requires = "cassette", conflicts_with = "artifact")]
+    native: bool,
+    /// Inspect a named auxiliary artifact belonging to the selected track.
+    #[arg(long, requires = "cassette", value_name = "KIND")]
+    artifact: Option<String>,
     /// Initially select this replica, using its saved run record attribution.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=64))]
+    #[arg(long, conflicts_with = "cassette", value_parser = clap::value_parser!(u64).range(1..=64))]
     replica: Option<u64>,
     /// Include matching fields and unchanged text context initially.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cassette")]
     all: bool,
     /// Print the selected case's differences and outcomes without a terminal UI.
     #[arg(long)]
@@ -38,6 +51,15 @@ struct Args {
 }
 
 fn run(args: Args) -> Result<(), String> {
+    if let Some(path) = &args.cassette {
+        return cassette_browser::open(
+            path,
+            args.track,
+            args.native,
+            args.artifact.as_deref(),
+            args.print,
+        );
+    }
     let path = match args.latest {
         Some(project) => artifacts::latest_campaign(&project)?,
         None => args.path.expect("clap requires an input"),

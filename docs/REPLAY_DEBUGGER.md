@@ -123,6 +123,36 @@ The same `--all` flag starts the TUI with matching fields and full context
 visible. Opening a valid diagnostic successfully returns exit status 0 even
 when the inspected replay failed; unreadable or invalid inputs return nonzero.
 
+## Browse a recording cassette
+
+Use the same debugger to inspect a multi-track cassette bundle or a legacy
+JSONL tape without starting replay:
+
+```sh
+asb-replay-debug --cassette /path/to/recording.asb.zip
+asb-replay-debug --cassette /path/to/recording.asb.zip --track 2 --print
+asb-replay-debug --cassette /path/to/recording.asb.zip --track 1 --native --print
+asb-replay-debug --cassette /path/to/recording.asb.zip --track 1 --artifact local-tools --print
+```
+
+Tab switches focus between tracks and recorded interactions. Use Up/Down or
+`j`/`k` to select, `s` to cycle through provider, native and named artifact
+streams, PageUp/PageDown to scroll the selected entry, and `q` to exit. A
+legacy tape has unknown completion and grading status. Incomplete native
+sidecars cannot be read by the shared cassette reader and are reported as an
+error rather than assumed complete. The
+viewer uses ASB's existing cassette source reader and checks a selected
+track's recorded length and digest. Selected tracks are limited to 32 MiB
+and 50,000 JSONL interactions; a single interactive preview is capped at
+200,000 characters. `--print` writes the complete selected text stream.
+Non-UTF-8 artifacts show a hexadecimal preview of at most 65,536 bytes in
+both modes, with an explicit truncation flag; they are not exported as files.
+
+Cassette contents may contain prompts, tool output and other sensitive data.
+The browser shows the recorded contents as stored; protect terminal history
+and redirected output accordingly. It reads only the selected track and does
+not execute agents, providers, tools or replay.
+
 ## What this version can establish
 
 The viewer compares all retained request fields rather than stopping at the
