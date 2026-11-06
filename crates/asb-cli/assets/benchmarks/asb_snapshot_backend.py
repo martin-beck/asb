@@ -13,12 +13,17 @@ class SnapshotSession(Protocol):
     def abort(self): ...
 
 
+class SnapshotTransport(Protocol):
+    """Execution adapter supplies snapshot lifecycle without selecting a VM."""
+    def start_btrfs(self, request: 'SnapshotRequest') -> SnapshotSession: ...
+
+
 @dataclass(frozen=True)
 class SnapshotRequest:
     task: object
     tools: dict
     owner: object
-    transport: object
+    transport: SnapshotTransport
     deadline: float
     target: str = '/testbed'
     replay: bool = False
@@ -31,8 +36,17 @@ class SnapshotBackend(Protocol):
 
 
 class BtrfsSnapshotBackend:
-    """Btrfs workspace snapshots in an already provisioned guest."""
+    """Delegate Btrfs operations to the already selected guest transport."""
     def start(self, request):
+        return request.transport.start_btrfs(request)
+
+
+class DockerSnapshotTransport:
+    """Btrfs custody inside an existing Docker-owned task environment."""
+    def __init__(self, docker_command):
+        self.command = list(docker_command)
+
+    def start_btrfs(self, request):
         if request.independent_custody:
             from asb_snapshot_independent import IndependentSnapshot
             supervisor = IndependentSnapshot
@@ -40,7 +54,7 @@ class BtrfsSnapshotBackend:
             from asb_snapshot_control import GuestSnapshot
             supervisor = GuestSnapshot
         return supervisor(request.task, request.tools, request.owner,
-                          request.transport, request.deadline, target=request.target,
+                          self.command, request.deadline, target=request.target,
                           replay=request.replay, extra_roots=list(request.extra_roots))
 
 
