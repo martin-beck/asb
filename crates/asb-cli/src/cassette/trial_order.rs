@@ -486,6 +486,12 @@ impl ReplayObservation {
             .get("process_success")
             .and_then(serde_json::Value::as_bool)
             .ok_or_else(invalid)?;
+        // Exploration may serve recorded responses after changing the
+        // comparison policy. It must never qualify a strict replay cassette.
+        let approximate = summary
+            .get("approximate_replay")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(invalid)?;
         let failure = summary.get("failure_kind").ok_or_else(invalid)?;
         let operational_success = if failure.is_null() {
             true
@@ -503,7 +509,7 @@ impl ReplayObservation {
         Ok(Self {
             trial,
             replica,
-            process_success: process_success && operational_success,
+            process_success: process_success && operational_success && !approximate,
             provider_consumed: summary
                 .get("provider_replay_consumed")
                 .and_then(serde_json::Value::as_bool),
@@ -952,11 +958,26 @@ mod tests {
             "failure_kind": "workload_check_failed",
             "replay_selection": {"provider_replay": true, "tools": "not-selected"},
             "provider_replay_consumed": true,
+            "approximate_replay": false,
             "benchmark_outcome": {"cleanup_confirmed": true}
         });
         let observation = ReplayObservation::from_summary(&summary).unwrap();
         assert!(observation.process_success);
         assert_eq!(observation.provider_consumed, Some(true));
+        summary["approximate_replay"] = serde_json::json!(true);
+        assert!(
+            !ReplayObservation::from_summary(&summary)
+                .unwrap()
+                .process_success
+        );
+        summary
+            .as_object_mut()
+            .unwrap()
+            .remove("approximate_replay");
+        assert!(ReplayObservation::from_summary(&summary).is_err());
+        summary["approximate_replay"] = serde_json::json!("false");
+        assert!(ReplayObservation::from_summary(&summary).is_err());
+        summary["approximate_replay"] = serde_json::json!(false);
         summary["failure_kind"] = serde_json::json!("run_error");
         assert!(
             !ReplayObservation::from_summary(&summary)
