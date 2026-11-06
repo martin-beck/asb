@@ -87,11 +87,15 @@ export class ReplaySession {
   // adapter signals that its corresponding native completion hook has fired.
   reserve(request) {
     if (this.closed) throw new Error('Native tool replay session is closed');
-    const key = canonical(request);
+    let key;
+    try { key = canonical(request); }
+    catch (error) { this.abort(error); throw error; }
     const available = this.byDispatch.slice(this.nextDispatch).filter(event => canonical(event.request) === key).length;
     const queued = this.pending.filter(item => item.key === key).length;
     if (queued >= available) {
-      throw new Error('Native tool replay has no matching remaining tool request');
+      const error = new Error('Native tool replay has no matching remaining tool request');
+      this.abort(error);
+      throw error;
     }
     let item, assign, rejectAssignment, identify, rejectIdentity;
     const assignment = new Promise((resolve, reject) => { assign = resolve; rejectAssignment = reject; });

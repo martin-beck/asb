@@ -34,10 +34,8 @@ failedReplay.finish();
 
 const incomplete = new ReplaySession(events);
 await assert.rejects(incomplete.invoke({ tool: 'unknown' }), /no matching/);
-const blocked = incomplete.invoke({ tool: 'Fetch', args: { url: 'fixture' } });
+await assert.rejects(incomplete.invoke({ tool: 'Fetch', args: { url: 'fixture' } }), /closed/);
 assert.throws(() => incomplete.finish(), /incomplete/);
-incomplete.abort();
-await assert.rejects(blocked, /cancelled/);
 assert.throws(() => new ReplaySession([{ ordinal: 1, request: {}, outcome: { ok: true, value: null } }]), /incomplete/);
 console.log('Continue native session checks passed');
 
@@ -87,9 +85,16 @@ const duplicates = new ReplaySession([
   {ordinal: 1, request: {tool: 'later'}, outcome: {ok: true, value: 1}},
 ]);
 const later = duplicates.reserve({tool: 'later'});
+const lateResult = later.outcome;
+lateResult.catch(() => {});
 assert.throws(() => duplicates.reserve({tool: 'later'}), /no matching/);
-const firstReservation = duplicates.reserve({tool: 'first'});
-const lateResult = later.release();
-assert.equal(await firstReservation.release(), 0);
-assert.equal(await lateResult, 1);
-duplicates.finish();
+await assert.rejects(lateResult, /no matching/);
+assert.throws(() => duplicates.reserve({tool: 'first'}), /closed/);
+assert.throws(() => duplicates.finish(), /incomplete/);
+
+// An extra request after every recorded tool has completed is still a replay
+// mismatch, even if the agent catches that request's error.
+const extra = new ReplaySession([{ordinal: 0, request: {tool: 'known'}, outcome: {ok: true, value: 1}}]);
+assert.equal(await extra.invoke({tool: 'known'}), 1);
+await assert.rejects(extra.invoke({tool: 'extra'}), /no matching/);
+assert.throws(() => extra.finish(), /incomplete/);
