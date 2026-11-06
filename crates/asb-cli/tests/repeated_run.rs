@@ -630,6 +630,17 @@ fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
         Some(order.candidates()[1].as_str())
     );
     assert_eq!(winners[0]["cassette_sha256"].as_str().unwrap().len(), 64);
+    let alias = project
+        .0
+        .join(".sample-sweep-sample-preparation/cassettes/000-replay/recording.asb.zip");
+    let length = fs::metadata(&alias).unwrap().len();
+    asb_cli::cassette::Archive::open_verified(
+        &alias,
+        length,
+        winners[0]["cassette_sha256"].as_str().unwrap(),
+        asb_cli::cassette::Limits::default(),
+    )
+    .unwrap();
     let path = project
         .0
         .join(".sample-sweep-sample-preparation/ready.json");
