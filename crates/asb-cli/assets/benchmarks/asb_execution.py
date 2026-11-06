@@ -298,7 +298,7 @@ class ManagedDockerWorkspace:
             raise ExecutionError("invalid execution arguments or environment")
         if sum(len(value.encode()) for value in argv) + sum(len(key) + len(value.encode()) for key, value in environment.items()) > MAX_ARGUMENT_BYTES:
             raise ExecutionError("execution arguments and environment exceed 1 MiB")
-        if not 0 < timeout <= 86400 or not 1 <= output_limit <= 16 * 1024**2:
+        if not 0 < timeout <= 86400 or not 1 <= output_limit <= 64 * 1024**2:
             raise ExecutionError("invalid execution timeout or output limit")
         # Starting an owned Docker exec can be slow on emulated guests. Its
         # setup budget is independent of the command's execution timeout.
