@@ -909,6 +909,7 @@ mod tests {
             false,
             &declarations,
             Some(McpTapeContext {
+                ignore_mcp_mismatch: false,
                 mode: crate::tape::Mode::Record,
                 cassette: None,
             }),
@@ -935,6 +936,7 @@ mod tests {
             anthropic_input_includes_cache: false,
             mcp_servers: &declarations,
             mcp_tape: Some(McpTapeContext {
+                ignore_mcp_mismatch: false,
                 mode: crate::tape::Mode::Record,
                 cassette: None,
             }),
@@ -978,6 +980,7 @@ mod tests {
             false,
             &declarations,
             Some(McpTapeContext {
+                ignore_mcp_mismatch: false,
                 mode: crate::tape::Mode::Replay,
                 cassette: Some(&cassette),
             }),
@@ -1014,6 +1017,7 @@ mod tests {
         let error = declared_mcp_configuration(
             &declarations,
             Some(McpTapeContext {
+                ignore_mcp_mismatch: false,
                 mode: crate::tape::Mode::Replay,
                 cassette: Some(&cassette),
             }),

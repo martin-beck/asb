@@ -7,6 +7,7 @@ fn planned(root: &Path, destination: PathBuf) -> crate::runner::campaign::Plan {
             .unwrap();
     let mut plan = crate::runner::campaign::Plan {
         ignore_tool_mismatch: false,
+        ignore_mcp_mismatch: false,
         ignore_evaluation: false,
         ignore_agent: false,
         ignore_collector: false,

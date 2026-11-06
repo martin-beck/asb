@@ -421,6 +421,7 @@ impl Inspection {
             ignore_provider_mismatch: options.ignore_provider_mismatch,
             ignore_provider_unconsumed: options.ignore_provider_unconsumed,
             ignore_tool_mismatch: options.ignore_tool_mismatch,
+            ignore_mcp_mismatch: options.ignore_mcp_mismatch,
             measurement_root: measurement_root.clone(),
             replay_inputs: Vec::new(),
             slots,

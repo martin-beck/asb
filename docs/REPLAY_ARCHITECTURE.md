@@ -258,3 +258,18 @@ response, ignores invalid or escaping effects, or manufactures an exhausted
 transcript. Transparent MCP relay and native snapshot replay are separate
 transports and are not covered. This policy is frozen in sweep and campaign
 plans and must match on resume.
+
+`--ignore-mcp-mismatch` enables transparent MCP replay for a cassette recorded
+with `--mcp-record`, and permits a client
+request with changed arguments only when the JSON-RPC method, message kind,
+framing and, for `tools/call`, tool name still match. ASB returns the recorded
+response with the current request ID, writes bounded digest-only divergence
+evidence, warns, and marks the result approximate. A clean client EOF may leave
+recorded client messages unused only when all issued requests were answered;
+the remaining count is reported. Each declared server must report a settled
+relay session so ASB can distinguish an unused server from lost evidence. A
+missing or unsettled relay session, invalid
+payload, changed tool or method, unrecorded extra request, or missing response
+remains fatal. The option never starts the live MCP server during replay, and
+does not reproduce external server side effects. Repeated-campaign and sweep
+plans freeze the policy for resume.

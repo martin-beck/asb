@@ -960,6 +960,7 @@ impl<'a> ReadyAttempt<'a> {
                         .as_ref()
                         .map(|(_, cassette)| cassette.as_path()),
                     ignore_tool_mismatch: options.ignore_tool_mismatch,
+                    ignore_mcp_mismatch: options.ignore_mcp_mismatch,
                     tool_replay: tool_tape_cassette
                         .as_ref()
                         .is_some_and(|(mode, _)| *mode == tape::Mode::Replay),
@@ -1036,6 +1037,7 @@ impl<'a> ReadyAttempt<'a> {
                         tape_mode,
                         max_steps: effective_max_steps,
                         ignore_tool_mismatch: options.ignore_tool_mismatch,
+                        ignore_mcp_mismatch: options.ignore_mcp_mismatch,
                         tool_tape_mode: tool_tape_cassette.as_ref().map(|(mode, _)| *mode),
                         tool_tape_cassette: tool_tape_cassette
                             .as_ref()
@@ -1142,6 +1144,7 @@ struct ResultFacts {
     provider_cleanup_error: Option<String>,
     artifact_evidence: Vec<String>,
     ignored_tool_mismatches: Vec<agents::tool_replay::IgnoredToolMismatch>,
+    ignored_mcp_mismatches: Vec<agents::mcp_relay::McpIgnoredEvent>,
 }
 
 fn sealed_step_count(guest: Option<u64>, adapter: Option<u64>) -> Option<u64> {
@@ -1227,6 +1230,27 @@ impl<'a> CompletedAttempt<'a> {
             .ok()
             .and_then(Option::as_ref)
             .unwrap_or(&frozen);
+        let mut ignored_mcp_mismatches = Vec::new();
+        if context.options.ignore_mcp_mismatch {
+            match (
+                collection_frozen.bytes(agents::mcp_relay::IGNORED_MCP_FILENAME),
+                context.mcp_tape_cassette.as_ref(),
+            ) {
+                (Some(bytes), Some((tape::Mode::Replay, cassette))) => {
+                    match agents::mcp_relay::settle_ignored_journal(
+                        bytes,
+                        cassette,
+                        &config.mcp_servers,
+                    ) {
+                        Ok(events) => ignored_mcp_mismatches = events,
+                        Err(error) => settled.issues.run_error(error.to_string()),
+                    }
+                }
+                _ => settled
+                    .issues
+                    .run_error("MCP replay divergence evidence is unavailable".into()),
+            }
+        }
         let mut ignored_tool_mismatches = Vec::new();
         if context.options.ignore_tool_mismatch {
             match collection_frozen.bytes(agents::tool_replay_mcp::IGNORED_EVENTS_FILENAME) {
@@ -1267,6 +1291,7 @@ impl<'a> CompletedAttempt<'a> {
                     mcp_servers: &config.mcp_servers,
                     mcp_tape: context.mcp_tape_cassette.as_ref().map(|(mode, cassette)| {
                         agents::McpTapeContext {
+                            ignore_mcp_mismatch: context.options.ignore_mcp_mismatch,
                             mode: *mode,
                             cassette: Some(cassette),
                         }
@@ -1403,6 +1428,7 @@ impl<'a> CompletedAttempt<'a> {
                 provider_cleanup_error,
                 artifact_evidence,
                 ignored_tool_mismatches,
+                ignored_mcp_mismatches,
             },
         })
     }
@@ -1446,6 +1472,7 @@ impl ResultFacts {
             provider_cleanup_error,
             artifact_evidence,
             ignored_tool_mismatches,
+            ignored_mcp_mismatches,
         } = self;
         let WorkloadMetadata {
             workspace,
@@ -1483,7 +1510,9 @@ impl ResultFacts {
             issues,
             resource_disposition: workload_resource_disposition,
         } = finalized;
-        let cassette_usage_verified = cassette_usage_verified && ignored_tool_mismatches.is_empty();
+        let cassette_usage_verified = cassette_usage_verified
+            && ignored_tool_mismatches.is_empty()
+            && ignored_mcp_mismatches.is_empty();
         let workload_artifacts = workload_session.checkpoint_evidence();
         let workload_success = outcome.success();
         let grading_failure = RunFailure::evaluation(&outcome.evaluation);
@@ -1531,8 +1560,15 @@ impl ResultFacts {
                 serde_json::to_string(event).expect("bounded replay divergence serializes"),
             ));
         }
-        let approximate_replay =
-            !proxy_evidence.replay_divergences.is_empty() || !ignored_tool_mismatches.is_empty();
+        for event in &ignored_mcp_mismatches {
+            disposition.ignored_failures.push(RunFailure::ignored(
+                FailureKind::McpMismatch,
+                serde_json::to_string(event).expect("bounded MCP divergence serializes"),
+            ));
+        }
+        let approximate_replay = !proxy_evidence.replay_divergences.is_empty()
+            || !ignored_tool_mismatches.is_empty()
+            || !ignored_mcp_mismatches.is_empty();
         let success = disposition.success;
         let workload_failure =
             grading_failure

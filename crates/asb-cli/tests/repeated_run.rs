@@ -1135,6 +1135,276 @@ fn workload_output_mentioning_provider_error_does_not_fail_successful_agent() {
 }
 
 #[test]
+fn replay_can_ignore_mcp_argument_divergence_with_offline_evidence() {
+    let project = sweep_tests::registered_project(1);
+    let original = project.0.join("tools/pi/bin/pi");
+    let executable = project.0.join("tools/codex/bin/codex");
+    fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    let script = fs::read_to_string(&original).unwrap().replace(
+        "body = {'model':'fixture'",
+        "import subprocess,tomllib\ncfg=tomllib.loads((pathlib.Path(os.environ['CODEX_HOME'])/'config.toml').read_text())\nserver=cfg['mcp_servers']['fixture']\nrequest={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'other' if (root/'other-mcp').exists() else 'fixture','arguments':{'value':'changed' if (root/'change-mcp').exists() else 'original'}}}\nif not (root/'skip-mcp-launch').exists():\n    relay=subprocess.run([server['command'],*server['args']],input='' if (root/'skip-mcp').exists() else json.dumps(request)+'\\n',text=True,capture_output=True,check=True)\n    assert not relay.stdout if (root/'skip-mcp').exists() else 'result' in json.loads(relay.stdout), relay.stdout+' '+relay.stderr\nbody = {'model':'fixture'",
+    );
+    fixture_writer::write_file(&project.0, &executable, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let server = project.0.join("mcp-server");
+    let sentinel = project.0.join("mcp-server-starts");
+    let server_script = format!(
+        "#!/usr/bin/env python3\nimport json,sys,pathlib\np=pathlib.Path({}); p.write_text(str(int(p.read_text())+1) if p.exists() else '1')\nfor line in sys.stdin:\n m=json.loads(line); print(json.dumps({{'jsonrpc':'2.0','id':m['id'],'result':{{'ok':True}}}}),flush=True)\n",
+        serde_json::to_string(sentinel.to_str().unwrap()).unwrap()
+    );
+    fixture_writer::write_file(&project.0, &server, server_script).unwrap();
+    fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
+    let config_path = project.0.join("benchmark.toml");
+    let mut config = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("agent='pi'", "agent='codex'");
+    config.push_str(&format!(
+        "\n[[mcp_servers]]\nid='fixture'\nprogram={}\n",
+        serde_json::to_string(server.to_str().unwrap()).unwrap()
+    ));
+    fs::write(config_path, config).unwrap();
+    let provider = RecordingProvider::new();
+    let record = Command::new(env!("CARGO_BIN_EXE_asb"))
+        .current_dir(&project.0)
+        .isolated_env()
+        .env("HOME", &project.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("ASB_PROVIDER_BASE_URL", &provider.endpoint)
+        .env("OPENROUTER_API_KEY", "fixture-only-key")
+        .env("OPENROUTER_BASE_URL", format!("{}/v1", provider.endpoint))
+        .env(
+            "OPENROUTER_MODELS_URL",
+            format!("{}/models", provider.endpoint),
+        )
+        .args([
+            "run",
+            "benchmark.toml",
+            "--record",
+            "--mcp-record",
+            "--cassette",
+            "mcp.zip",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        record.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&record.stdout),
+        String::from_utf8_lossy(&record.stderr)
+    );
+    drop(provider);
+    let cassette_bytes = fs::read(project.0.join("mcp.zip")).unwrap();
+    fs::write(project.0.join("change-mcp"), "1").unwrap();
+    let strict = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &["--mcp-replay"],
+        true,
+        "--replay",
+    );
+    assert!(!strict.status.success());
+    let ignored = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &["--ignore-mcp-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(
+        ignored.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&ignored.stdout),
+        String::from_utf8_lossy(&ignored.stderr)
+    );
+    let rows = records(&ignored.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["approximate_replay"] == true)
+        .unwrap();
+    assert!(
+        row["ignored_failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|failure| failure["kind"] == "mcp_mismatch" && failure["ignored"] == true)
+    );
+    let human = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &["--ignore-mcp-mismatch"],
+        false,
+        "--replay",
+    );
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(String::from_utf8_lossy(&human.stdout).contains("Warning: ignored mcp_mismatch"));
+    let combined = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &["--ignore-mcp-mismatch", "--ignore-tool-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(
+        combined.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&combined.stdout),
+        String::from_utf8_lossy(&combined.stderr)
+    );
+    assert!(
+        records(&combined.stdout)
+            .iter()
+            .any(|row| row["approximate_replay"] == true && row["ignored_failures"].is_array())
+    );
+    fs::write(project.0.join("other-mcp"), "1").unwrap();
+    let different = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &["--ignore-mcp-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(!different.status.success());
+    fs::write(project.0.join("skip-mcp"), "1").unwrap();
+    let skipped = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &["--ignore-mcp-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(
+        skipped.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&skipped.stdout),
+        String::from_utf8_lossy(&skipped.stderr)
+    );
+    let rows = records(&skipped.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["ignored_failures"].is_array())
+        .unwrap();
+    assert!(
+        row["ignored_failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|failure| failure["kind"] == "mcp_mismatch"
+                && failure["reason"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("unconsumed"))
+    );
+    fs::write(project.0.join("skip-mcp-launch"), "1").unwrap();
+    let unlaunched = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &["--ignore-mcp-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(
+        !unlaunched.status.success(),
+        "missing server receipt must not become success"
+    );
+    fs::remove_file(project.0.join("skip-mcp-launch")).unwrap();
+    fs::remove_file(project.0.join("skip-mcp")).unwrap();
+    fs::remove_file(project.0.join("other-mcp")).unwrap();
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("mcp.zip"),
+        input.join("benchmark-codex-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    let options = [
+        "--replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-mcp-mismatch",
+    ];
+    let sweep = sweep_tests::sweep(&project, None, &options);
+    assert!(
+        sweep.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&sweep.stdout),
+        String::from_utf8_lossy(&sweep.stderr)
+    );
+    assert!(
+        records(&sweep.stdout)
+            .iter()
+            .any(|row| row["approximate_replay"] == true && row["ignored_failures"].is_array())
+    );
+    let plan: Value =
+        serde_json::from_slice(&fs::read(project.0.join("sweep-results/plan.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan["ignore_mcp_mismatch"], true);
+    let mut resume = options.to_vec();
+    resume.push("--resume");
+    let resumed = sweep_tests::sweep(&project, None, &resume);
+    assert!(
+        resumed.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(
+        records(&resumed.stdout)
+            .iter()
+            .any(|row| row["reused"] == true && row["approximate_replay"] == true)
+    );
+    let changed_provider = fs::read_to_string(&executable)
+        .unwrap()
+        .replace("'model':'fixture'", "'model':'changed-fixture'");
+    fixture_writer::write_file(&project.0, &executable, changed_provider).unwrap();
+    let all = replay_using_mode(
+        &project,
+        Some("mcp.zip"),
+        &[
+            "--ignore-mcp-mismatch",
+            "--ignore-tool-mismatch",
+            "--ignore-provider-mismatch",
+        ],
+        true,
+        "--replay",
+    );
+    assert!(
+        all.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&all.stdout),
+        String::from_utf8_lossy(&all.stderr)
+    );
+    let rows = records(&all.stdout);
+    let failures = rows
+        .iter()
+        .find_map(|row| row["ignored_failures"].as_array())
+        .unwrap();
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure["kind"] == "mcp_mismatch")
+    );
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure["kind"] == "provider_mismatch")
+    );
+    assert_eq!(fs::read(project.0.join("mcp.zip")).unwrap(), cassette_bytes);
+    assert_eq!(
+        fs::read_to_string(sentinel).unwrap(),
+        "1",
+        "replay must not launch the real MCP server"
+    );
+}
+
+#[test]
 fn replay_can_explicitly_ignore_same_tool_argument_divergence_with_evidence() {
     let project = sweep_tests::registered_project(1);
     let executable = project.0.join("tools/pi/bin/pi");

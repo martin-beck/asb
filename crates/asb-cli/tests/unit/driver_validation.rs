@@ -80,6 +80,7 @@ impl Fixture {
         .unwrap();
         GuestRequest {
             ignore_tool_mismatch: false,
+            ignore_mcp_mismatch: false,
             owned_instrumentation: None,
             task_identity: None,
             tape_cassette: None,
