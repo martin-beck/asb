@@ -891,11 +891,18 @@ def main(argv=None):
     harness.add_argument("--timeout", type=int, required=True)
     arguments = parser.parse_args(argv)
     if arguments.operation == "session":
-        from asb_docker import DockerSession
+        from asb_docker import DockerProbeError, DockerSession
         from asb_swebench_task import SweBenchTask
         from asb_task_server import serve
         install_session_cancel_handlers()
-        with DockerSession() as client:
+        with contextlib.ExitStack() as stack:
+            try:
+                client = stack.enter_context(DockerSession())
+            except DockerProbeError as error:
+                # Only session startup gets this disposition: no task was created.
+                print(json.dumps({"event": "error", "error_class": "ExecutionError", "reason": str(error)}), flush=True)
+                print(json.dumps({"event": "closed", "cleanup": "not_created"}), flush=True)
+                return 1
             return serve(SweBenchTask(client, arguments.catalog, arguments.task, arguments.artifacts,
                                       tool_mode=os.environ.get("ASB_WORKLOAD_TOOL_MODE", "none"),
                                       snapshot=os.environ.get("ASB_EXPERIMENTAL_SNAPSHOT") == "1"),
