@@ -18,7 +18,7 @@ pub(crate) mod plan;
 mod presentation;
 pub(crate) mod recovered;
 mod resume;
-mod sampled;
+pub(crate) mod sampled;
 pub(crate) mod scheduler;
 mod spool;
 
@@ -86,6 +86,7 @@ impl SampledTrials {
 pub(crate) struct Options<'a> {
     pub prepare_replay: bool,
     pub invocation_dir: Option<&'a Path>,
+    pub input_parent: Option<&'a Path>,
     pub repeat: Option<u64>,
     pub max_steps: Option<u64>,
     pub track: Option<crate::cassette::Selector>,
@@ -123,6 +124,7 @@ impl Default for Options<'_> {
         Self {
             prepare_replay: false,
             invocation_dir: None,
+            input_parent: None,
             repeat: None,
             max_steps: None,
             track: None,
@@ -191,7 +193,7 @@ pub(crate) fn run_with_options(
         ));
     }
     let sweep_path = Path::new(path);
-    let sweep = read_manifest(sweep_path)?;
+    let mut sweep = read_manifest(sweep_path)?;
     if options.prepare_replay && sweep.sampled_trials.is_empty() {
         return Err(Error::Input(
             "--prepare-replay requires a sweep created with --trial-count".into(),
@@ -200,17 +202,11 @@ pub(crate) fn run_with_options(
     if options.prepare_replay {
         return sampled::prepare(sweep_path, &sweep, options, output);
     }
-    if !sweep.sampled_trials.is_empty() && options.mode == Some(crate::tape::Mode::Replay) {
-        return Err(Error::Input(
-            "sampled trial preparation is not yet available; no benchmark was started".into(),
-        ));
-    }
     let options = Options {
         repeat: options.repeat.or(sweep.repeat),
         ..options
     };
     let Options { json, mode, .. } = options;
-    let parent = sweep_path.parent().unwrap_or_else(|| Path::new("."));
     let output_anchor = crate::project::configuration_anchor(sweep_path, options.invocation_dir)?;
     let output_parent = output_anchor.parent().unwrap_or_else(|| Path::new("."));
     let stem = sweep_path
@@ -220,6 +216,31 @@ pub(crate) fn run_with_options(
         .unwrap_or("sweep");
     // Keep ownership through comparison, including moving older output trees.
     let _output_lock = lock::OutputLock::acquire_for_source(output_parent, stem, sweep_path)?;
+    let resolved = if !sweep.sampled_trials.is_empty() && mode == Some(crate::tape::Mode::Replay) {
+        if options.cassette_root.is_some() {
+            return Err(Error::Input(
+                "sampled replay uses its verified prepared cassettes; omit --cassette-root".into(),
+            ));
+        }
+        Some(sampled::resolve(sweep_path, &sweep, options)?)
+    } else {
+        None
+    };
+    let options = if let Some(ref selected) = resolved {
+        sweep.configs = selected.references.clone();
+        sweep.sampled_trials.clear();
+        Options {
+            input_parent: Some(&selected.parent),
+            cassette_root: Some(&selected.cassette_root),
+            max_steps: selected.max_steps,
+            ..options
+        }
+    } else {
+        options
+    };
+    let parent = options
+        .input_parent
+        .unwrap_or_else(|| sweep_path.parent().unwrap_or_else(|| Path::new(".")));
     if options.recover_continuation {
         if !options.resume
             || mode.is_some()

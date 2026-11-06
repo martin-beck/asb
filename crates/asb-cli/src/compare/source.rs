@@ -122,7 +122,7 @@ impl Request {
         let single = !input
             .as_table()
             .is_some_and(|table| table.contains_key("configs"));
-        let sweep = if single {
+        let mut sweep = if single {
             crate::sweep::SweepFile {
                 sampled_trials: Vec::new(),
                 resources: None,
@@ -138,13 +138,55 @@ impl Request {
         } else {
             crate::sweep::parse_manifest(sweep_path, input)?
         };
-        let parent = sweep_path.parent().unwrap_or_else(|| Path::new("."));
+        let original_parent = sweep_path.parent().unwrap_or_else(|| Path::new("."));
         let stem = sweep_path
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("sweep");
-        let output_parent = output_parent.unwrap_or(parent);
+        let output_parent = output_parent.unwrap_or(original_parent);
         let sweep_results = output_parent.join(format!("{stem}-results"));
+        // Reopen the exact prepared winner set when reporting a sampled replay.
+        // Resolving validates the retained ledgers and archives and never records.
+        let plan_path = sweep_results.join("plan.json");
+        let sampled_replay = !sweep.sampled_trials.is_empty()
+            && match fs::symlink_metadata(&plan_path) {
+                Ok(_) => {
+                    let text = read_text_limit(
+                        &plan_path,
+                        "sweep plan",
+                        crate::sweep::plan::MAX_PLAN_BYTES as u64,
+                    )?;
+                    let value: Value = serde_json::from_str(&text)
+                        .map_err(|error| Error::Input(format!("invalid sweep plan: {error}")))?;
+                    value.get("execution_mode").and_then(Value::as_str) == Some("replay")
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(Error::Input(format!(
+                        "cannot inspect sweep plan {}: {error}",
+                        plan_path.display()
+                    )));
+                }
+            };
+        let selected = if sampled_replay {
+            Some(crate::sweep::sampled::resolve(
+                sweep_path,
+                &sweep,
+                crate::sweep::Options {
+                    invocation_dir: Some(output_parent),
+                    ..Default::default()
+                },
+            )?)
+        } else {
+            None
+        };
+        let parent = if let Some(ref selected) = selected {
+            sweep.configs = selected.references.clone();
+            sweep.sampled_trials.clear();
+            selected.parent.as_path()
+        } else {
+            original_parent
+        };
         let mut configurations = BTreeMap::new();
         let mut configuration_bytes = 0usize;
         for reference in &sweep.configs {
