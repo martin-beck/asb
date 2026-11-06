@@ -35,6 +35,16 @@ test('normalizes only the hash seed in an intact SymPy metadata banner', () => {
   assert.equal(normalizeToolResult({text:replay,tool:unrelated}), replay);
 });
 
+test('normalizes duration while retaining exception and failure counts', () => {
+  const tool = {name:'bash', arguments:{command:'python bin/test sympy/vector/tests/test_printing.py'}};
+  const record = 'AssertionError\n===== tests finished: 122 passed, 1 failed, 2 exceptions, in 2.29 seconds ======\nDO *NOT* COMMIT!\n';
+  const replay = record.replace('2.29 seconds', '2.42 seconds');
+  const canonical = normalizeToolResult({text:record,tool});
+  assert.equal(normalizeToolResult({text:replay,tool}), canonical);
+  assert.notEqual(normalizeToolResult({text:replay.replace('2 exceptions', '1 exceptions'),tool}), canonical);
+  assert.notEqual(normalizeToolResult({text:replay.replace('AssertionError', 'ValueError'),tool}), canonical);
+});
+
 test('tailed SymPy metadata and elapsed summaries preserve substantive differences', () => {
   const tool = {name:'bash', arguments:{command:'cd /testbed && python bin/test sympy/example.py 2>&1 | tail -40'}};
   const metadata = 'architecture:       64-bit\ncache:              yes\nground types:       python \nnumpy:              None\nrandom seed:        12345\nhash randomization: off\n';
