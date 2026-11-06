@@ -443,16 +443,19 @@ impl Chain {
 
     pub(crate) fn finish(mut self) -> Completion {
         let mut failure = None;
-        for hop in self.hops.iter_mut().rev() {
-            if let Err(error) = hop.finish() {
-                failure.get_or_insert(error);
-            }
-        }
+        // Some adapters declare outputs before shutdown; others publish their
+        // final private evidence during shutdown. Preserve both sets.
         let mut output_files = self
             .hops
             .iter()
             .flat_map(|hop| hop.output_files())
             .collect::<Vec<_>>();
+        for hop in self.hops.iter_mut().rev() {
+            if let Err(error) = hop.finish() {
+                failure.get_or_insert(error);
+            }
+        }
+        output_files.extend(self.hops.iter().flat_map(|hop| hop.output_files()));
         output_files.sort();
         output_files.dedup();
         Completion {
@@ -512,6 +515,37 @@ fn parse_chain(raw: &str) -> Result<Vec<String>, Error> {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn chain_retains_outputs_declared_before_and_after_finish() {
+        struct OutputLifecycle(bool);
+        impl ProxySession for OutputLifecycle {
+            fn url(&self) -> &str {
+                "fixture"
+            }
+            fn output_files(&self) -> Vec<std::path::PathBuf> {
+                vec![if self.0 { "after" } else { "before" }.into()]
+            }
+            fn finish(&mut self) -> Result<(), Error> {
+                self.0 = true;
+                Ok(())
+            }
+            fn abort(&mut self) {}
+        }
+        let completion = Chain {
+            hops: vec![Box::new(OutputLifecycle(false))],
+            url: "fixture".into(),
+        }
+        .finish();
+        assert!(completion.result.is_ok());
+        assert_eq!(
+            completion.evidence.output_files,
+            vec![
+                std::path::PathBuf::from("after"),
+                std::path::PathBuf::from("before")
+            ]
+        );
+    }
 
     #[test]
     fn frozen_policy_rejects_different_prepared_task_or_agent() {
