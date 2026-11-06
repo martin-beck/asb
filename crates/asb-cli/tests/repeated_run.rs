@@ -714,12 +714,18 @@ fn sampled_sweep_fixture(mixed: bool) {
     fs::write(path, original_ready).unwrap();
     drop(provider);
     let mut offline = Command::new(env!("CARGO_BIN_EXE_asb"));
-    offline.current_dir(&project.0).isolated_env();
+    offline
+        .current_dir(project.0.parent().unwrap())
+        .isolated_env();
     retain_host_rust_toolchain(&mut offline);
     let result = offline
         .env("HOME", &project.0)
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .args(["sweep", "sample-sweep.toml", "--replay"])
+        .arg("--project-dir")
+        .arg(&project.0)
+        .arg("sweep")
+        .arg(project.0.join("sample-sweep.toml"))
+        .arg("--replay")
         .output()
         .unwrap();
     assert!(
