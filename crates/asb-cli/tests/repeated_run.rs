@@ -541,15 +541,20 @@ fn sampled_preparation_replaces_a_failed_replay_and_reuses_success() {
 
 #[test]
 fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
-    sampled_sweep_fixture(false);
+    sampled_sweep_fixture(false, 1);
 }
 
 #[test]
 fn sampled_sweep_preserves_a_fixed_workload() {
-    sampled_sweep_fixture(true);
+    sampled_sweep_fixture(true, 1);
 }
 
-fn sampled_sweep_fixture(mixed: bool) {
+#[test]
+fn sampled_sweep_replaces_one_of_multiple_trials() {
+    sampled_sweep_fixture(false, 2);
+}
+
+fn sampled_sweep_fixture(mixed: bool, count: usize) {
     let project = Project::new();
     project.config(1);
     let agent = project.0.join("fixture-agent");
@@ -565,29 +570,37 @@ fn sampled_sweep_fixture(mixed: bool) {
     fs::write(agent, script).unwrap();
     fs::write(
         project.0.join("workloads/sample.workload.toml"),
-        "workload='bug-fix'\n[[trials]]\nid='one'\n[[trials]]\nid='two'\n",
+        "workload='bug-fix'\n[[trials]]\nid='one'\n[[trials]]\nid='two'\n[[trials]]\nid='three'\n",
     )
     .unwrap();
-    let order = asb_cli::cassette::TrialOrder::new(&["one".into(), "two".into()], 1, 7).unwrap();
+    let order =
+        asb_cli::cassette::TrialOrder::new(&["one".into(), "two".into(), "three".into()], count, 7)
+            .unwrap();
     let config = project.0.join("benchmark.toml");
     let text = fs::read_to_string(&config)
         .unwrap()
         .replace("provider='fixture'", "provider='openrouter'");
-    fs::write(
-        &config,
-        format!(
-            "{text}\ntrial='{}'\ntrial_set='sample.workload.toml'\n",
-            order.initial()[0]
-        ),
-    )
-    .unwrap();
+    let mut configs = Vec::new();
+    for (index, trial) in order.initial().iter().enumerate() {
+        let name = if index == 0 {
+            "benchmark.toml".to_owned()
+        } else {
+            format!("benchmark-{index}.toml")
+        };
+        fs::write(
+            project.0.join(&name),
+            format!("{text}\ntrial='{trial}'\ntrial_set='sample.workload.toml'\n"),
+        )
+        .unwrap();
+        configs.push(format!("'{name}'"));
+    }
     let candidates = order
         .candidates()
         .iter()
         .map(|id| format!("'{id}'"))
         .collect::<Vec<_>>()
         .join(",");
-    let configs = if mixed {
+    if mixed {
         let fixed = text.replace("workload='bug-fix'", "workload='repository-navigation'");
         fs::write(project.0.join("fixed.toml"), fixed).unwrap();
         fs::write(
@@ -595,11 +608,10 @@ fn sampled_sweep_fixture(mixed: bool) {
             "Find the requested file.",
         )
         .unwrap();
-        "'benchmark.toml','fixed.toml'"
-    } else {
-        "'benchmark.toml'"
-    };
-    fs::write(project.0.join("sample-sweep.toml"), format!("configs=[{configs}]\n[[sampled_trials]]\nworkload='bug-fix'\ncount=1\nseed='0000000000000007'\ncandidates=[{candidates}]\n")).unwrap();
+        configs.push("'fixed.toml'".into());
+    }
+    let configs = configs.join(",");
+    fs::write(project.0.join("sample-sweep.toml"), format!("configs=[{configs}]\n[[sampled_trials]]\nworkload='bug-fix'\ncount={count}\nseed='0000000000000007'\ncandidates=[{candidates}]\n")).unwrap();
     let provider = RecordingProvider::new();
     let run = || {
         let mut command = Command::new(env!("CARGO_BIN_EXE_asb"));
@@ -619,7 +631,7 @@ fn sampled_sweep_fixture(mixed: bool) {
             .output()
             .unwrap()
     };
-    let expected_count = if mixed { 3 } else { 2 };
+    let expected_count = count + 1 + usize::from(mixed);
     for expected_calls in [expected_count, expected_count] {
         let result = run();
         assert!(
@@ -629,7 +641,8 @@ fn sampled_sweep_fixture(mixed: bool) {
             String::from_utf8_lossy(&result.stderr)
         );
         assert!(
-            String::from_utf8_lossy(&result.stdout).contains("Prepared 1 replayable trials"),
+            String::from_utf8_lossy(&result.stdout)
+                .contains(&format!("Prepared {count} replayable trials")),
             "stdout={} stderr={}",
             String::from_utf8_lossy(&result.stdout),
             String::from_utf8_lossy(&result.stderr)
@@ -672,11 +685,16 @@ fn sampled_sweep_fixture(mixed: bool) {
     )
     .unwrap();
     let winners = ready["winners"].as_array().unwrap();
-    assert_eq!(winners.len(), if mixed { 2 } else { 1 });
-    assert_eq!(
-        winners[0]["trial"].as_str(),
-        Some(order.candidates()[1].as_str())
-    );
+    assert_eq!(winners.len(), count + usize::from(mixed));
+    let actual_trials: Vec<_> = winners[..count]
+        .iter()
+        .map(|winner| winner["trial"].as_str().unwrap())
+        .collect();
+    let expected_trials: Vec<_> = order.candidates()[1..=count]
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(actual_trials, expected_trials);
     assert_eq!(winners[0]["cassette_sha256"].as_str().unwrap().len(), 64);
     let alias = project
         .0
