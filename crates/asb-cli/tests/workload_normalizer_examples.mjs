@@ -63,6 +63,11 @@ test("recursive grep ordering is normalized only for complete unambiguous result
   const history = 'abcdef0123 first\n1234567890 second\n';
   assert.equal(grepOrder({text:history+a,tool:compound}),grepOrder({text:history+b,tool:compound}));
   assert.notEqual(grepOrder({text:history.replace('first','changed')+a,tool:compound}),grepOrder({text:history+b,tool:compound}));
+  const semicolon = {...tool, arguments:{command:'git config --global --add safe.directory /testbed; cd /testbed; git log --oneline -3; grep -rn "x" sympy/vector/ | head -50'}};
+  const three = history + '234567890a third\n';
+  assert.equal(grepOrder({text:three+a,tool:semicolon}),grepOrder({text:three+b,tool:semicolon}));
+  assert.notEqual(grepOrder({text:three+a.replace('foo','changed'),tool:semicolon}),grepOrder({text:three+b,tool:semicolon}));
+  assert.equal(grepOrder({text:'fatal: no history\n'+a,tool:semicolon}),'fatal: no history\n'+a);
 });
 
 test('long nonmatching grep commands do not exhaust the normalizer deadline', async () => {
