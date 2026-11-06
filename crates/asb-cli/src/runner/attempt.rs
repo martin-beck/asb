@@ -1787,7 +1787,10 @@ impl Publication<'_, '_> {
         });
         result.settle_replay_publication(
             log_publication.confirmed(),
-            matches!(&measurement_completion, phases::MeasurementCompletion::Confirmed),
+            matches!(
+                &measurement_completion,
+                phases::MeasurementCompletion::Confirmed
+            ),
             recording_error.is_none(),
         );
         // A compact attempt may release only its ASB-created task workspace.

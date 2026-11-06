@@ -107,8 +107,8 @@ struct RunResult<'a> {
     /// Whether the replay proxy validated and settled the selected tape.
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_replay_consumed: Option<bool>,
-    /// Independent operational settlement, excluding workload grade.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// This is settled after immutable log publication and emitted only in the final summary.
+    #[serde(skip)]
     replay_operational_success: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recording: Option<recording::Evidence>,
@@ -3541,6 +3541,14 @@ mod tests {
                 &crate::workloads::outcome::EvaluationOutcome::binary(false),
             );
             result.replay_operational_success = Some(true);
+            // The immutable log is written before final settlement and must not
+            // claim a success that a later collector failure can invalidate.
+            assert!(
+                serde_json::to_value(&result)
+                    .unwrap()
+                    .get("replay_operational_success")
+                    .is_none()
+            );
             result.settle_replay_publication(log, measurements, recording);
             let mut output = Vec::new();
             render_json(&result, &mut output).unwrap();
