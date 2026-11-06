@@ -318,6 +318,7 @@ mod adapter_layout_tests {
                     "mcp_relay.rs",
                     "mcp_transcript.rs",
                     "native_trace.rs",
+                    "snapshot_markers.rs", // Shared native snapshot boundary verification.
                     "tool_replay.rs",
                     "tool_replay_mcp.rs",
                     "tool_tracing.rs", // Shared MCP and local-tool Perfetto observation.
