@@ -1,9 +1,131 @@
 //! Execute one explicitly requested sampled-cassette qualification.
-use super::{Archive, Error, Limits, RecordingReceipt, ReplayAttempt};
+use super::{
+    Archive, BoundTrialPreparation, Error, Limits, RecordingReceipt, ReplayAttempt, TrialOrder,
+};
 use crate::{benchmark::BenchmarkConfig, runner, tape};
 use sha2::{Digest, Sha256};
 use std::io::{self, Read, Write};
 use std::path::Path;
+
+/// Prepare and persist all replayable trials for one benchmark combination.
+///
+/// This operation records against the configured provider. The caller must
+/// invoke it only from an explicit preparation action. Finished candidate
+/// files remain under `artifact_root`; no existing candidate is overwritten.
+pub fn prepare_sampled_group(
+    ledger: &Path,
+    artifact_root: &Path,
+    template: &Path,
+    invocation_dir: &Path,
+    sweep_sha256: &str,
+    order: TrialOrder,
+    max_steps: Option<u64>,
+) -> Result<BoundTrialPreparation, Error> {
+    let text = crate::read_config(template).map_err(|error| Error(error.to_string()))?;
+    let base: BenchmarkConfig = toml::from_str(&text)
+        .map_err(|error| Error(format!("invalid sampled benchmark template: {error}")))?;
+    let mut hash = Sha256::new();
+    hash.update(b"asb-sampled-configuration-v1\0");
+    hash.update(text.as_bytes());
+    hash.update(max_steps.unwrap_or(0).to_le_bytes());
+    let configuration_sha256 = format!("{:x}", hash.finalize());
+    std::fs::create_dir_all(artifact_root)
+        .map_err(|error| Error(format!("cannot create sampled artifact directory: {error}")))?;
+    let root = artifact_root.canonicalize().map_err(|error| {
+        Error(format!(
+            "cannot resolve sampled artifact directory: {error}"
+        ))
+    })?;
+    let state = BoundTrialPreparation::prepare_file(
+        ledger,
+        sweep_sha256,
+        &configuration_sha256,
+        order,
+        |trial| {
+            let directory = root.join(format!("candidate-{}", super::digest(trial.as_bytes())));
+            std::fs::create_dir(&directory).map_err(|error| Error(format!(
+            "cannot claim sampled candidate directory {}: {error}; preserve existing evidence", directory.display()
+        )))?;
+            let replay = replay_configuration(&base, trial, &directory)?;
+            let as_string = |path: &Path| {
+                path.to_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| Error("sampled artifact path must be valid UTF-8".into()))
+            };
+            let mut record = replay.clone();
+            record.concurrency = 1;
+            record.workspace = as_string(&directory.join("record-workspace"))?;
+            record.log_file = as_string(&directory.join("record.log"))?;
+            if let Some(measurements) = record.measurements.as_mut() {
+                measurements.directory = as_string(&directory.join("record-measurements"))?;
+            }
+            let record_path = directory.join("record.toml");
+            let replay_path = directory.join("replay.toml");
+            for (path, config) in [(&record_path, &record), (&replay_path, &replay)] {
+                let bytes = toml::to_string_pretty(config)
+                    .map_err(|error| Error(format!("cannot encode sampled benchmark: {error}")))?;
+                if !crate::config::matrix::scalar_if_absent(path, bytes.as_bytes())
+                    .map_err(|error| Error(format!("cannot publish sampled benchmark: {error}")))?
+                {
+                    return Err(Error("sampled benchmark configuration already exists; preserve it for inspection".into()));
+                }
+            }
+            record_and_replay_candidate(
+                &record_path,
+                &replay_path,
+                &directory.join("recording.asb.zip"),
+                invocation_dir,
+                max_steps,
+            )
+        },
+    )?;
+    // A completed ledger is not sufficient by itself: verify its winning
+    // cassette and replay configuration still match before returning it.
+    for (trial, expected_digest) in state.preparation().successful() {
+        let directory = root.join(format!("candidate-{}", super::digest(trial.as_bytes())));
+        let replay_text = crate::read_config(&directory.join("replay.toml")).map_err(|error| {
+            Error(format!(
+                "cannot read prepared replay configuration: {error}"
+            ))
+        })?;
+        let actual: BenchmarkConfig = toml::from_str(&replay_text)
+            .map_err(|error| Error(format!("invalid prepared replay configuration: {error}")))?;
+        if actual != replay_configuration(&base, trial, &directory)? {
+            return Err(Error(
+                "prepared replay configuration changed; preserve the existing evidence".into(),
+            ));
+        }
+        let path = directory.join("recording.asb.zip");
+        let (length, digest) = hash_cassette(&path)?;
+        if digest != expected_digest {
+            return Err(Error(
+                "prepared cassette changed; preserve the existing evidence".into(),
+            ));
+        }
+        Archive::open_verified(&path, length, expected_digest, Limits::default())?;
+    }
+    Ok(state)
+}
+
+fn replay_configuration(
+    base: &BenchmarkConfig,
+    trial: &str,
+    directory: &Path,
+) -> Result<BenchmarkConfig, Error> {
+    let as_string = |path: &Path| {
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| Error("sampled artifact path must be valid UTF-8".into()))
+    };
+    let mut replay = base.clone();
+    replay.trial = Some(trial.to_owned());
+    replay.workspace = as_string(&directory.join("replay-workspace"))?;
+    replay.log_file = as_string(&directory.join("replay.log"))?;
+    if let Some(measurements) = replay.measurements.as_mut() {
+        measurements.directory = as_string(&directory.join("replay-measurements"))?;
+    }
+    Ok(replay)
+}
 
 /// Record one candidate and replay its single recorded track with the selected
 /// replay concurrency. This operation makes live provider calls during record;
