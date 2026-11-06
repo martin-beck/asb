@@ -1,6 +1,6 @@
 //! Live execution of one configured benchmark.
 mod attempt;
-mod batch;
+pub(crate) mod batch;
 pub(crate) use batch::{
     dataset_fingerprint, replay_protocol_fingerprint, replay_protocol_with_normalizer_digest,
 };

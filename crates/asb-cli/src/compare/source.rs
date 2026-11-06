@@ -114,7 +114,11 @@ pub(super) struct LoadedReport {
 }
 
 impl Request {
-    fn read(path: &str, output_parent: Option<&Path>) -> Result<Self, Error> {
+    fn read(
+        path: &str,
+        output_parent: Option<&Path>,
+        invocation: Option<&Path>,
+    ) -> Result<Self, Error> {
         let sweep_path = Path::new(path);
         let input_text = read_text(sweep_path, "TOML")?;
         let input: toml::Value = toml::from_str(&input_text)
@@ -173,7 +177,7 @@ impl Request {
                 sweep_path,
                 &sweep,
                 crate::sweep::Options {
-                    invocation_dir: Some(output_parent),
+                    invocation_dir: invocation.or(Some(output_parent)),
                     ..Default::default()
                 },
             )?)
@@ -265,17 +269,21 @@ impl Request {
 
 #[cfg(test)]
 pub(super) fn load(path: &str) -> Result<LoadedReport, Error> {
-    load_at(path, None)
+    load_at(path, None, None)
 }
 
-pub(super) fn load_at(path: &str, output_parent: Option<&Path>) -> Result<LoadedReport, Error> {
+pub(super) fn load_at(
+    path: &str,
+    output_parent: Option<&Path>,
+    invocation: Option<&Path>,
+) -> Result<LoadedReport, Error> {
     if Path::new(path)
         .file_name()
         .is_some_and(|name| name == "plan.json")
     {
         return campaign::load(path);
     }
-    let request = Request::read(path, output_parent)?;
+    let request = Request::read(path, output_parent, invocation)?;
     if request
         .plan
         .as_ref()

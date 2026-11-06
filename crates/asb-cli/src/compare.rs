@@ -135,20 +135,27 @@ pub(crate) fn run_links_at(
 pub(crate) fn run_in_sweep(
     path: &str,
     output_parent: &Path,
+    invocation: Option<&Path>,
     output: &mut dyn Write,
     _owner: &crate::sweep::lock::OutputLock,
 ) -> Result<(), Error> {
-    generate_owned_with_links(path, Some(output_parent), output, false).map(|_| ())
+    generate_owned_with_links(path, Some(output_parent), invocation, output, false).map(|_| ())
 }
 
 pub(crate) fn run_links_in_sweep(
     path: &str,
     output_parent: &Path,
+    invocation: Option<&Path>,
     output: &mut dyn Write,
     _owner: &crate::sweep::lock::OutputLock,
 ) -> Result<(), Error> {
-    let (_, links) =
-        generate_owned_with_links(path, Some(output_parent), &mut std::io::sink(), false)?;
+    let (_, links) = generate_owned_with_links(
+        path,
+        Some(output_parent),
+        invocation,
+        &mut std::io::sink(),
+        false,
+    )?;
     write_public_links(links, output)
 }
 
@@ -186,7 +193,8 @@ fn generate_at_with_links(
     }
     let anchor = crate::project::configuration_anchor(source, Some(invocation))?;
     if anchor == source {
-        return generate_with_links(path, output, parquet);
+        let _owner = crate::sweep::lock::OutputLock::for_comparison(source)?;
+        return generate_owned_with_links(path, None, Some(invocation), output, parquet);
     }
     let parent = anchor.parent().unwrap_or_else(|| Path::new("."));
     let stem = anchor
@@ -195,7 +203,7 @@ fn generate_at_with_links(
         .filter(|s| !s.is_empty())
         .unwrap_or("sweep");
     let _owner = crate::sweep::lock::OutputLock::acquire_for_source(parent, stem, source)?;
-    generate_owned_with_links(path, Some(parent), output, parquet)
+    generate_owned_with_links(path, Some(parent), Some(invocation), output, parquet)
 }
 
 fn generate_with_links(
@@ -204,16 +212,17 @@ fn generate_with_links(
     parquet: bool,
 ) -> Result<(PathBuf, Vec<(String, String)>), Error> {
     let _owner = crate::sweep::lock::OutputLock::for_comparison(Path::new(path))?;
-    generate_owned_with_links(path, None, output, parquet)
+    generate_owned_with_links(path, None, None, output, parquet)
 }
 
 fn generate_owned_with_links(
     path: &str,
     output_parent: Option<&Path>,
+    invocation: Option<&Path>,
     output: &mut dyn Write,
     parquet: bool,
 ) -> Result<(PathBuf, Vec<(String, String)>), Error> {
-    let loaded = source::load_at(path, output_parent)?;
+    let loaded = source::load_at(path, output_parent, invocation)?;
     let validated = ValidatedReport::validate(loaded)?;
     let prepared = PreparedReport::prepare(validated)?;
     let mut files = prepared.graph_names();

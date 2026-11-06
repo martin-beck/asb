@@ -741,11 +741,32 @@ impl SettledSweep<'_> {
         tests::before_comparison(Path::new(&source));
         let output_parent = results.parent().unwrap_or_else(|| Path::new("."));
         let comparison_error = if options.json || output.failed() {
-            compare::run_in_sweep(&source, output_parent, &mut std::io::sink(), &_output_lock).err()
+            compare::run_in_sweep(
+                &source,
+                output_parent,
+                options.invocation_dir,
+                &mut std::io::sink(),
+                &_output_lock,
+            )
+            .err()
         } else if options.quiet_output {
-            compare::run_links_in_sweep(&source, output_parent, output, &_output_lock).err()
+            compare::run_links_in_sweep(
+                &source,
+                output_parent,
+                options.invocation_dir,
+                output,
+                &_output_lock,
+            )
+            .err()
         } else {
-            compare::run_in_sweep(&source, output_parent, output, &_output_lock).err()
+            compare::run_in_sweep(
+                &source,
+                output_parent,
+                options.invocation_dir,
+                output,
+                &_output_lock,
+            )
+            .err()
         };
         let primary = if failures.is_empty() {
             comparison_error.map_or(Ok(()), Err)

@@ -238,6 +238,7 @@ pub(crate) fn resolve(
             &sweep_digest,
             &order,
             ready.max_steps,
+            options.invocation_dir.unwrap_or_else(|| Path::new(".")),
         )
         .map_err(|error| {
             Error::Input(format!("sampled replay evidence is unavailable: {error}"))
