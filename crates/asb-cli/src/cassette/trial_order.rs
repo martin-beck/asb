@@ -1,5 +1,6 @@
 //! Reproducible sampling without replacement for workload-trial preparation.
 use super::Error;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
@@ -8,6 +9,147 @@ use std::collections::BTreeSet;
 pub struct TrialOrder {
     candidates: Vec<String>,
     target: usize,
+}
+
+/// A bounded, resumable per-combination qualification ledger.
+///
+/// The owner must verify and durably publish the referenced cassette before
+/// marking a replay successful; this ledger does not itself verify archives.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrialPreparation {
+    target: usize,
+    candidates: Vec<String>,
+    outcomes: Vec<TrialOutcome>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TrialOutcome {
+    trial: String,
+    /// A content digest of an independently verified cassette, when qualified.
+    cassette_sha256: Option<String>,
+}
+
+impl TrialPreparation {
+    /// Begin qualification with a precomputed complete candidate order.
+    pub fn new(order: TrialOrder) -> Self {
+        Self {
+            target: order.target,
+            candidates: order.candidates,
+            outcomes: Vec::new(),
+        }
+    }
+
+    /// Validate loaded state before it can select or reuse any recording.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.target == 0
+            || self.target > self.candidates.len()
+            || self.candidates.len() > 65_536
+            || self.outcomes.len() > self.candidates.len()
+        {
+            return Err(Error(
+                "invalid trial preparation population or progress".into(),
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        let mut bytes = 0usize;
+        for id in &self.candidates {
+            bytes = bytes
+                .checked_add(id.len())
+                .filter(|n| *n <= 16 * 1024 * 1024)
+                .ok_or_else(|| Error("trial preparation identifiers exceed 16 MiB".into()))?;
+            if id.is_empty()
+                || id.len() > 4096
+                || id.chars().any(char::is_control)
+                || !seen.insert(id)
+            {
+                return Err(Error(
+                    "invalid or duplicate trial preparation candidate".into(),
+                ));
+            }
+        }
+        for (index, outcome) in self.outcomes.iter().enumerate() {
+            if outcome.trial != self.candidates[index]
+                || outcome.cassette_sha256.as_ref().is_some_and(|digest| {
+                    digest.len() != 64
+                        || !digest
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+            {
+                return Err(Error(
+                    "invalid trial preparation outcome or cassette digest".into(),
+                ));
+            }
+        }
+        let successes = self
+            .outcomes
+            .iter()
+            .filter(|outcome| outcome.cassette_sha256.is_some())
+            .count();
+        if successes > self.target
+            || (successes == self.target
+                && self
+                    .outcomes
+                    .last()
+                    .is_some_and(|outcome| outcome.cassette_sha256.is_none()))
+        {
+            return Err(Error(
+                "trial preparation contains outcomes after completion".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Next candidate, or none once the target is met or the pool is exhausted.
+    pub fn next(&self) -> Result<Option<&str>, Error> {
+        self.validate()?;
+        if self.successful().len() == self.target {
+            return Ok(None);
+        }
+        Ok(self.candidates.get(self.outcomes.len()).map(String::as_str))
+    }
+
+    /// Record one outcome in candidate order after the attempt has settled.
+    /// A digest means recording and offline replay both succeeded; `None`
+    /// marks a failed candidate and advances to a different trial.
+    pub fn settle(&mut self, trial: &str, cassette_sha256: Option<String>) -> Result<(), Error> {
+        if self.next()? != Some(trial) {
+            return Err(Error(
+                "trial outcome is not the next preparation candidate".into(),
+            ));
+        }
+        let outcome = TrialOutcome {
+            trial: trial.into(),
+            cassette_sha256,
+        };
+        self.outcomes.push(outcome);
+        if let Err(error) = self.validate() {
+            self.outcomes.pop();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Verified-cassette identities in their original sampled order.
+    pub fn successful(&self) -> Vec<(&str, &str)> {
+        self.outcomes
+            .iter()
+            .filter_map(|outcome| {
+                outcome
+                    .cassette_sha256
+                    .as_deref()
+                    .map(|digest| (outcome.trial.as_str(), digest))
+            })
+            .collect()
+    }
+
+    /// Whether the requested number of successful trials was reached.
+    pub fn complete(&self) -> Result<bool, Error> {
+        self.validate()?;
+        Ok(self.successful().len() == self.target)
+    }
 }
 
 impl TrialOrder {
@@ -112,5 +254,49 @@ mod tests {
         assert!(TrialOrder::new(&ids, 3, 1).is_err());
         assert!(TrialOrder::new(&["one".into(), "one".into()], 1, 1).is_err());
         assert!(TrialOrder::new(&["bad\nid".into()], 1, 1).is_err());
+    }
+
+    #[test]
+    fn failed_replay_uses_a_distinct_replacement_and_recovers_successes() {
+        let ids = (0..4).map(|n| format!("trial-{n}")).collect::<Vec<_>>();
+        let mut state = TrialPreparation::new(TrialOrder::new(&ids, 2, 4).unwrap());
+        let first = state.next().unwrap().unwrap().to_owned();
+        state.settle(&first, None).unwrap();
+        let second = state.next().unwrap().unwrap().to_owned();
+        assert_ne!(first, second);
+        state.settle(&second, Some("a".repeat(64))).unwrap();
+        let serialized = serde_json::to_string(&state).unwrap();
+        let mut restored: TrialPreparation = serde_json::from_str(&serialized).unwrap();
+        let third = restored.next().unwrap().unwrap().to_owned();
+        assert_ne!(first, third);
+        assert_ne!(second, third);
+        restored.settle(&third, Some("b".repeat(64))).unwrap();
+        assert!(restored.complete().unwrap());
+        assert_eq!(restored.next().unwrap(), None);
+        assert_eq!(
+            restored.successful(),
+            vec![
+                (second.as_str(), "a".repeat(64).as_str()),
+                (third.as_str(), "b".repeat(64).as_str())
+            ]
+        );
+        assert!(restored.settle(&third, None).is_err());
+    }
+
+    #[test]
+    fn exhausted_pool_and_tampered_receipts_do_not_qualify() {
+        let ids = vec!["a".into(), "b".into()];
+        let mut state = TrialPreparation::new(TrialOrder::new(&ids, 2, 9).unwrap());
+        let first = state.next().unwrap().unwrap().to_owned();
+        assert!(state.settle(&first, Some("bad-digest".into())).is_err());
+        assert_eq!(state.next().unwrap(), Some(first.as_str()));
+        state.settle(&first, None).unwrap();
+        let second = state.next().unwrap().unwrap().to_owned();
+        state.settle(&second, None).unwrap();
+        assert_eq!(state.next().unwrap(), None);
+        assert!(!state.complete().unwrap());
+        let mut bad = state.clone();
+        bad.outcomes[0].trial = "unrelated".into();
+        assert!(bad.validate().is_err());
     }
 }
