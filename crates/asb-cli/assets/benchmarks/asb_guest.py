@@ -580,7 +580,7 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
         if resources is None or not {'btrfs','mkfs.btrfs','rsync'}.issubset(auxiliary):
             raise ExecutionError('experimental snapshot preparation needs staged filesystem tools')
         from asb_docker import docker_command
-        from asb_snapshot_control import GuestSnapshot, settle_on_exit
+        from asb_snapshot_control import settle_on_exit
         replay = task.tool_mode == 'replay'
         if replay and not any(item['target'] == 'workspace-snapshots.tar' for item in request.get('private_inputs', [])):
             raise ExecutionError('snapshot replay archive is missing from the selected cassette')
@@ -588,11 +588,11 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
             # The staging step has verified these exact bytes while copying.
             guest['snapshot_archive_sha256'] = next(item['sha256'] for item in request['private_inputs'] if item['target'] == 'workspace-snapshots.tar')
         extra_roots = experimental_snapshot_roots(os.environ.get('ASB_EXPERIMENTAL_SNAPSHOT_ROOTS'))
-        if os.environ.get('ASB_EXPERIMENTAL_SNAPSHOT_CUSTODY') == '1':
-            from asb_snapshot_independent import IndependentSnapshot
-            supervisor=IndependentSnapshot(task,auxiliary,owner,docker_command(),deadline,replay=replay,extra_roots=extra_roots)
-        else:
-            supervisor=GuestSnapshot(task,auxiliary,owner,docker_command(),deadline,replay=replay,extra_roots=extra_roots)
+        from asb_snapshot_backend import BTRFS, SnapshotRequest
+        supervisor = BTRFS.start(SnapshotRequest(
+            task=task, tools=auxiliary, owner=owner, transport=docker_command(),
+            deadline=deadline, replay=replay, extra_roots=tuple(extra_roots),
+            independent_custody=os.environ.get('ASB_EXPERIMENTAL_SNAPSHOT_CUSTODY') == '1'))
         resources.push(lambda exc_type, exc, traceback: settle_on_exit(supervisor, exc_type, exc, traceback))
         environment['ASB_FS_REPLAY_SOCKET' if replay else 'ASB_FS_MARKER_SOCKET']='/opt/asb-private/snapshot.sock'
         guest['snapshot_private_mount'] = True

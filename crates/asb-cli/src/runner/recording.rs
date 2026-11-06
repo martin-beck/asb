@@ -605,6 +605,7 @@ impl Recorder {
                     .or(result.native_tool_sidecar.as_deref()),
                 snapshot_artifact.as_ref(),
             ) {
+                require_snapshot_identity(native, &metadata.sha256)?;
                 crate::agents::find(result.agent)
                     .ok_or_else(|| Error::Run("native recording agent is unavailable".into()))?
                     .verify_native_snapshot(native, snapshot, &metadata.sha256)?;
@@ -837,6 +838,23 @@ fn seal_native_tool_sidecar(bytes: &[u8]) -> Result<(NativeTrack, std::io::Curso
     NativeToolTransport::from_sidecar(&native, bytes)
         .map_err(|_| Error::Run("adapter native tool sidecar is invalid or incomplete".into()))?;
     Ok((native, std::io::Cursor::new(bytes)))
+}
+
+fn require_snapshot_identity(native: &[u8], digest: &str) -> Result<(), Error> {
+    let track = NativeTrack {
+        complete: true,
+        events: native.iter().filter(|byte| **byte == b'\n').count() as u64,
+        bytes: native.len() as u64,
+        sha256: crate::cassette::digest(native),
+    };
+    let transport = NativeToolTransport::from_sidecar(&track, native)
+        .map_err(|_| Error::Run("native tool recording is invalid or incomplete".into()))?;
+    if transport.workspace_effect_sha256() != digest {
+        return Err(Error::Run(
+            "native tool recording refers to a different snapshot archive".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn finalize_deferred_native(
@@ -1476,6 +1494,9 @@ mod tests {
         let (native, _) = seal_native_tool_sidecar(&complete).unwrap();
         let transport = NativeToolTransport::from_sidecar(&native, &complete).unwrap();
         assert_eq!(transport.workspace_effect_sha256(), snapshot.sha256);
+        assert!(require_snapshot_identity(&complete, &snapshot.sha256).is_ok());
+        assert!(require_snapshot_identity(&complete, &"0".repeat(64)).is_err());
+        assert!(require_snapshot_identity(b"invalid\n", &snapshot.sha256).is_err());
         assert!(
             finalize_deferred_native("continue", std::slice::from_ref(&pending), None, None)
                 .is_err()

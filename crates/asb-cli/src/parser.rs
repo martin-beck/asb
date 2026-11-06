@@ -1199,7 +1199,7 @@ struct SetupArgs {
     /// Repeat to select models; use PROVIDER=MODEL to scope a model to one provider.
     #[arg(long)]
     model: Vec<String>,
-    /// Experimentally capture Pi native tools and supported filesystem effects when recording SWE-bench.
+    /// Experimentally capture native tool and workspace effects during recording.
     #[arg(long, conflicts_with_all = ["mode", "preset"])]
     native_snapshot_record: bool,
     /// Repeat to select collectors (alias: --collector). Dependencies are included.
