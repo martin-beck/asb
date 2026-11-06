@@ -57,7 +57,9 @@ impl<'a> PreparedSweep<'a> {
         output: &mut dyn std::io::Write,
     ) -> Result<Self, Error> {
         let sweep_path = Path::new(source);
-        let parent = sweep_path.parent().unwrap_or_else(|| Path::new("."));
+        let parent = options
+            .input_parent
+            .unwrap_or_else(|| sweep_path.parent().unwrap_or_else(|| Path::new(".")));
         let output_anchor =
             crate::project::configuration_anchor(sweep_path, options.invocation_dir)?;
         let output_parent = output_anchor.parent().unwrap_or_else(|| Path::new("."));

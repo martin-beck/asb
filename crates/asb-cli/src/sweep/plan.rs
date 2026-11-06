@@ -184,7 +184,7 @@ fn build_with_catalog(
     })
 }
 
-type SampledKey = (String, String, String, String);
+pub(super) type SampledKey = (String, String, String, String);
 
 pub(super) fn sampled_templates<'a>(
     manifest: &SweepFile,

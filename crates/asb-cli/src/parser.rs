@@ -381,6 +381,7 @@ pub(crate) fn run_with_interactive(
                 &path,
                 sweep::Options {
                     invocation_dir: Some(&base),
+                    input_parent: None,
                     repeat: options
                         .repeat
                         .or(generated_preset.as_ref().map(|preset| preset.repeat)),

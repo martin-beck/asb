@@ -596,18 +596,16 @@ fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
     for expected_calls in [2, 2] {
         let result = run();
         assert!(
-            !result.status.success(),
-            "publication remains intentionally unavailable"
+            result.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
         );
         assert!(
             String::from_utf8_lossy(&result.stdout).contains("Prepared 1 replayable trials"),
             "stdout={} stderr={}",
             String::from_utf8_lossy(&result.stdout),
             String::from_utf8_lossy(&result.stderr)
-        );
-        assert!(
-            String::from_utf8_lossy(&result.stderr)
-                .contains("publication of the replay selection is not yet available")
         );
         assert_eq!(
             provider.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -641,6 +639,22 @@ fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
         asb_cli::cassette::Limits::default(),
     )
     .unwrap();
+    let mut replay = Command::new(env!("CARGO_BIN_EXE_asb"));
+    replay.current_dir(&project.0).isolated_env();
+    retain_host_rust_toolchain(&mut replay);
+    let result = replay
+        .env("HOME", &project.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .args(["sweep", "sample-sweep.toml", "--replay"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     let path = project
         .0
         .join(".sample-sweep-sample-preparation/ready.json");

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +27,14 @@ struct Winner {
     replay_config: String,
     cassette: String,
     cassette_sha256: String,
+}
+
+/// A read-only, verified mapping for the ordinary sweep replay engine.
+pub(crate) struct Resolved {
+    pub(crate) parent: PathBuf,
+    pub(crate) references: Vec<String>,
+    pub(crate) cassette_root: PathBuf,
+    pub(crate) max_steps: Option<u64>,
 }
 
 impl ReadySelection {
@@ -112,18 +120,13 @@ fn read_ready(path: &Path) -> Result<ReadySelection, Error> {
     Ok(ready)
 }
 
-pub(super) fn prepare(
-    path: &Path,
-    sweep: &SweepFile,
-    options: Options<'_>,
-    output: &mut dyn Write,
-) -> Result<(), Error> {
-    if options.repeat.is_some() || options.jobs != 1 || options.max_active_attempts.is_some() {
-        return Err(Error::Input(
-            "sample preparation currently requires the default repeat and sequential scheduling"
-                .into(),
-        ));
-    }
+struct Inputs {
+    root: PathBuf,
+    sweep_digest: String,
+    templates: BTreeMap<plan::SampledKey, crate::benchmark::BenchmarkConfig>,
+}
+
+fn inputs(path: &Path, sweep: &SweepFile, options: Options<'_>) -> Result<Inputs, Error> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let base = options.invocation_dir.unwrap_or_else(|| Path::new("."));
     let anchor = project::configuration_anchor(path, options.invocation_dir)?;
@@ -133,12 +136,9 @@ pub(super) fn prepare(
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
         .unwrap_or("sweep");
-    let _lock = lock::OutputLock::acquire_for_source(owner, stem, path)?;
     let plan = plan::build_at(parent, sweep, base)?;
     let templates =
         plan::sampled_templates(sweep, plan.entries.iter().map(|entry| &entry.configuration))?;
-    // All entries must participate in preparation. Do not silently omit a
-    // fixed workload while its cassette mapping is not yet supported.
     if plan.entries.iter().any(|entry| {
         !sweep
             .sampled_trials
@@ -156,8 +156,147 @@ pub(super) fn prepare(
         .map_err(|_| Error::Input("cannot encode sampled sweep inputs".into()))?;
     digest.update((entries.len() as u64).to_le_bytes());
     digest.update(entries);
-    let sweep_digest = format!("{:x}", digest.finalize());
-    let root = owner.join(format!(".{stem}-sample-preparation"));
+    Ok(Inputs {
+        root: owner.join(format!(".{stem}-sample-preparation")),
+        sweep_digest: format!("{:x}", digest.finalize()),
+        templates,
+    })
+}
+
+/// Resolve previously published winners without starting a provider or
+/// creating any files. The caller holds the sweep output lock.
+pub(crate) fn resolve(
+    path: &Path,
+    sweep: &SweepFile,
+    options: Options<'_>,
+) -> Result<Resolved, Error> {
+    let Inputs {
+        root,
+        sweep_digest,
+        templates,
+    } = inputs(path, sweep, options)?;
+    let ready = read_ready(&root.join("ready.json")).map_err(|error| {
+        Error::Input(format!(
+            "sampled replay is not ready: {error}; run `asb sweep {} --prepare-replay`",
+            path.display()
+        ))
+    })?;
+    if ready.sweep_sha256 != sweep_digest
+        || options
+            .max_steps
+            .is_some_and(|value| Some(value) != ready.max_steps)
+    {
+        return Err(Error::Input("sampled replay inputs or max-steps changed; preserve the prepared evidence and create a new sweep".into()));
+    }
+    let samples: BTreeMap<_, _> = sweep
+        .sampled_trials
+        .iter()
+        .map(|sample| (sample.workload.as_str(), sample))
+        .collect();
+    let mut expected = Vec::new();
+    for (key, config) in templates {
+        let sample = samples[config.workload.as_str()];
+        let seed = u64::from_str_radix(&sample.seed, 16)
+            .map_err(|_| Error::Input("invalid sample seed".into()))?;
+        let order = cassette::TrialOrder::new(&sample.candidates, sample.count, seed)
+            .map_err(|error| Error::Input(error.to_string()))?;
+        let group_name = cassette::digest(
+            &serde_json::to_vec(&key)
+                .map_err(|_| Error::Input("cannot encode sampled combination".into()))?,
+        );
+        let group = root.join(&group_name);
+        let template = group.join("template.toml");
+        let expected_template = toml::to_string_pretty(&config)
+            .map_err(|error| Error::Input(format!("cannot encode sampled template: {error}")))?;
+        if crate::read_config(&template)? != expected_template {
+            return Err(Error::Input(
+                "sampled benchmark template changed; preserve existing evidence".into(),
+            ));
+        }
+        let state = cassette::load_sampled_group(
+            &group.join("ledger.json"),
+            &group.join("candidates"),
+            &template,
+            &sweep_digest,
+            &order,
+            ready.max_steps,
+        )
+        .map_err(|error| {
+            Error::Input(format!("sampled replay evidence is unavailable: {error}"))
+        })?;
+        append_winners(&mut expected, &group_name, &config, &state);
+    }
+    if expected != ready.winners {
+        return Err(Error::Input(
+            "sampled replay selection does not match the completed group ledgers".into(),
+        ));
+    }
+    verify_cassette_aliases(&root, &ready)?;
+    Ok(Resolved {
+        parent: root.canonicalize().map_err(crate::io_error)?,
+        references: ready
+            .winners
+            .iter()
+            .map(|winner| winner.replay_config.clone())
+            .collect(),
+        cassette_root: root
+            .join("cassettes")
+            .canonicalize()
+            .map_err(crate::io_error)?,
+        max_steps: ready.max_steps,
+    })
+}
+
+fn append_winners(
+    winners: &mut Vec<Winner>,
+    group_name: &str,
+    config: &crate::benchmark::BenchmarkConfig,
+    state: &cassette::BoundTrialPreparation,
+) {
+    for (trial, digest) in state.preparation().successful() {
+        let candidate = format!(
+            "{group_name}/candidates/candidate-{}",
+            cassette::digest(trial.as_bytes())
+        );
+        winners.push(Winner {
+            workload: config.workload.clone(),
+            agent: config.agent.clone(),
+            provider: config.provider.clone(),
+            model: config.model.clone(),
+            trial: trial.to_owned(),
+            replay_config: format!("{candidate}/replay.toml"),
+            cassette: format!("{candidate}/recording.asb.zip"),
+            cassette_sha256: digest.to_owned(),
+        });
+    }
+}
+
+pub(super) fn prepare(
+    path: &Path,
+    sweep: &SweepFile,
+    options: Options<'_>,
+    output: &mut dyn Write,
+) -> Result<(), Error> {
+    if options.repeat.is_some() || options.jobs != 1 || options.max_active_attempts.is_some() {
+        return Err(Error::Input(
+            "sample preparation currently requires the default repeat and sequential scheduling"
+                .into(),
+        ));
+    }
+    let base = options.invocation_dir.unwrap_or_else(|| Path::new("."));
+    let anchor = project::configuration_anchor(path, options.invocation_dir)?;
+    let owner = anchor.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("sweep");
+    let _lock = lock::OutputLock::acquire_for_source(owner, stem, path)?;
+    let Inputs {
+        root,
+        sweep_digest,
+        templates,
+    } = inputs(path, sweep, options)?;
     if let Ok(metadata) = std::fs::symlink_metadata(&root)
         && (!metadata.is_dir() || metadata.file_type().is_symlink())
     {
@@ -201,22 +340,7 @@ pub(super) fn prepare(
         )
         .map_err(|error| Error::Run(format!("sampled workload `{}`: {error}", config.workload)))?;
         let count = state.preparation().successful().len();
-        for (trial, digest) in state.preparation().successful() {
-            let candidate = format!(
-                "{group_name}/candidates/candidate-{}",
-                cassette::digest(trial.as_bytes())
-            );
-            winners.push(Winner {
-                workload: config.workload.clone(),
-                agent: config.agent.clone(),
-                provider: config.provider.clone(),
-                model: config.model.clone(),
-                trial: trial.to_owned(),
-                replay_config: format!("{candidate}/replay.toml"),
-                cassette: format!("{candidate}/recording.asb.zip"),
-                cassette_sha256: digest.to_owned(),
-            });
-        }
+        append_winners(&mut winners, &group_name, &config, &state);
         if options.json {
             writeln!(output, "{}", serde_json::json!({"type":"sample-prepared","workload":config.workload,"agent":config.agent,"provider":config.provider,"model":config.model,"qualified":count})).map_err(crate::io_error)?;
         } else {
@@ -245,7 +369,48 @@ pub(super) fn prepare(
     if read_ready(&ready_path).ok().as_ref() != Some(&ready) {
         return Err(Error::Input("existing sampled replay selection differs; preserve its evidence and create a new sweep".into()));
     }
-    Err(Error::Run("sampled candidates were verified, but publication of the replay selection is not yet available; existing evidence was retained".into()))
+    let resolved = resolve(path, sweep, options)?;
+    if resolved.references.len() != ready.winners.len()
+        || resolved.max_steps != ready.max_steps
+        || !resolved.parent.is_dir()
+        || !resolved.cassette_root.is_dir()
+    {
+        return Err(Error::Run(
+            "published sampled replay selection could not be verified".into(),
+        ));
+    }
+    writeln!(
+        output,
+        "Replay preparation complete. Run: asb sweep {} --replay",
+        path.display()
+    )
+    .map_err(crate::io_error)?;
+    Ok(())
+}
+
+fn verify_cassette_aliases(root: &Path, ready: &ReadySelection) -> Result<(), Error> {
+    for (index, winner) in ready.winners.iter().enumerate() {
+        let name = super::execution::result_name(index, Path::new(&winner.replay_config));
+        let alias = root.join("cassettes").join(name).join("recording.asb.zip");
+        let metadata = std::fs::symlink_metadata(&alias).map_err(crate::io_error)?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::Input(
+                "sample cassette alias must be a regular file".into(),
+            ));
+        }
+        cassette::Archive::open_verified(
+            &alias,
+            metadata.len(),
+            &winner.cassette_sha256,
+            cassette::Limits::default(),
+        )
+        .map_err(|error| {
+            Error::Input(format!(
+                "sample cassette alias verification failed: {error}"
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 fn publish_cassette_aliases(root: &Path, ready: &ReadySelection) -> Result<(), Error> {
