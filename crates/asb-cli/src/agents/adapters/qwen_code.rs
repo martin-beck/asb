@@ -34,7 +34,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     Recipe::Npm {
         package: "@qwen-code/qwen-code@0.25.1",
         executable: "qwen",
-        manifest: None,
+        manifest: Some(r#"{"private":true,"allowScripts":{"@qwen-code/audio-capture":true}}"#),
     },
     &[crate::endpoint::CHAT, crate::endpoint::MESSAGES_KEY],
     command,

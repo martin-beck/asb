@@ -9,6 +9,7 @@ use crate::{Error, install::Recipe};
 // to the owning adapter, never to unrelated npm-installed tools or agents.
 const NPM_MANIFEST: &str = r#"{
   "private": true,
+  "allowScripts": {"opencode-ai": true},
   "overrides": {
     "@aws-sdk/client-bedrock-runtime": "3.1030.0",
     "@aws-sdk/credential-provider-http": "3.972.76"

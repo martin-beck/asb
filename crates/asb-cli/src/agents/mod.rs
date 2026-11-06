@@ -1367,6 +1367,31 @@ pub(crate) fn goose_archive_spec() -> crate::install::archive::ArchiveSpec {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn npm_agent_manifests_authorize_their_required_install_scripts() {
+        for (agent, packages) in [
+            ("opencode", &["opencode-ai"][..]),
+            ("claude-code", &["@anthropic-ai/claude-code"][..]),
+            ("cline", &["cline", "protobufjs"][..]),
+            ("pi", &["@google/genai", "protobufjs", "koffi"][..]),
+            ("qwen-code", &["@qwen-code/audio-capture"][..]),
+        ] {
+            let super::Recipe::Npm {
+                manifest: Some(manifest),
+                ..
+            } = super::find(agent).unwrap().recipe()
+            else {
+                panic!("{agent} needs an adapter-owned npm manifest");
+            };
+            let value: serde_json::Value = serde_json::from_str(manifest).unwrap();
+            let scripts = value["allowScripts"].as_object().unwrap();
+            assert_eq!(scripts.len(), packages.len());
+            for package in packages {
+                assert_eq!(scripts.get(*package), Some(&serde_json::Value::Bool(true)));
+            }
+        }
+    }
+
+    #[test]
     fn normalizer_selection_requires_the_matching_agent_and_workload() {
         let scripts = [super::TapeNormalizationScript {
             id: "fixture",
