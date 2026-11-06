@@ -39,7 +39,7 @@ class PreparedMaterialQualification(unittest.TestCase):
                         try:
                             self.assertEqual(metadata["name"],"/")
                             raw = client.api._get_raw_response_socket(chunks.response)
-                            self.assertEqual(getattr(raw,"_sock",raw).gettimeout(),120)
+                            self.assertEqual(getattr(raw,"_sock",raw).gettimeout(),600.0)
                             self.assertEqual(len(tar_digest(chunks,"/",root_metadata_only=True,
                                 expected_root_kind=b"5")),64)
                             self.assertTrue(chunks.closed)

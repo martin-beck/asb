@@ -20,6 +20,7 @@ class DockerAccessError(RuntimeError):
     pass
 
 
+_API_TIMEOUT_SECONDS = 600.0
 _CLOSE_SECONDS = 3.0
 _TERM_GRACE = 2.0
 
@@ -305,8 +306,8 @@ class DockerSession:
             # Explicit version suppresses constructor-time I/O before mounting
             # the transport. The unversioned /version request then negotiates
             # the actual daemon version, including newer minimum API versions.
-            self.client = BoundedDockerClient(base_url="unix:///unused", version="1.41", timeout=120)
-            self.client.api.mount("http+docker://", Adapter("http+unix:///unused", timeout=120))
+            self.client = BoundedDockerClient(base_url="unix:///unused", version="1.41", timeout=_API_TIMEOUT_SECONDS)
+            self.client.api.mount("http+docker://", Adapter("http+unix:///unused", timeout=_API_TIMEOUT_SECONDS))
             version = self.client.api.version(api_version=False)["ApiVersion"]
             self.client.api._version = version
             self.client.ping()

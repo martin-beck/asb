@@ -95,16 +95,7 @@ impl Controller {
             Err(error) => return Err(error),
         };
         if EventKind::of(&event) == Some(EventKind::Error) {
-            // ExecutionError reasons are fixed local diagnostics from our
-            // engine, not arbitrary SDK HTTP bodies or request dumps.
-            if event["error_class"] == "ExecutionError"
-                && let Some(reason) = event["reason"]
-                    .as_str()
-                    .filter(|reason| reason.len() <= 512 && !reason.contains(['\n', '\r']))
-            {
-                return Err(format!("workload execution failed: {reason}"));
-            }
-            return Err("workload controller could not complete the operation; inspect the private task artifacts".into());
+            return Err(super::controller_error(&event));
         }
         Ok(Some(event))
     }

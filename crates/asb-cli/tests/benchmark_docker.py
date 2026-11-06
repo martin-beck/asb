@@ -34,6 +34,8 @@ class ConnectionTests(unittest.TestCase):
              patch.object(docker.APIClient, "ping", return_value=True):
             with RUNTIME.DockerSession() as client:
                 self.assertEqual(client.api._version, "1.52")
+                self.assertEqual(client.api.timeout, 600.0)
+                self.assertEqual(client.api.get_adapter("http+docker://localhost").timeout, 600.0)
         self.assertEqual(requests, ["http+docker://localhost/version"])
 
     def test_blocked_inflight_spawn_cannot_extend_close_budget_or_lose_its_eventual_child(self):
