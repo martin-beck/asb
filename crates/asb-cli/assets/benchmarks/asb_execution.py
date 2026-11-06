@@ -361,7 +361,17 @@ class ManagedDockerWorkspace:
                 time.sleep(0.01)
             else:
                 raise ExecutionError("container gate never reached its stopped state")
-            target = execution_target(stream,container,namespace_pid)
+            try:
+                target = execution_target(stream,container,namespace_pid)
+            except ExecutionError:
+                # The watchdog may stop the container while Docker is returning
+                # the target inspection. Report the actual preparation expiry
+                # without accepting an absent or contradictory identity.
+                with phase_lock:
+                    if (expired.is_set() or interrupted.is_set() or time.monotonic() >= phase_deadline[0]
+                            or (cancelled is not None and cancelled.is_set())):
+                        raise ExecutionError("container execution preparation was cancelled or exceeded its deadline") from None
+                raise
             if before_resume is not None:
                 before_resume(target)
             with phase_lock:
