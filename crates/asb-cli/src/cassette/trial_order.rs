@@ -33,6 +33,97 @@ struct TrialOutcome {
     cassette_sha256: Option<String>,
 }
 
+/// Observed replay and cleanup facts for one execution replica.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplayObservation {
+    /// One-based replica index in this replay.
+    pub replica: usize,
+    /// The workload trial actually executed.
+    pub trial: String,
+    /// Whether the agent process completed successfully.
+    pub process_success: bool,
+    /// Whether the provider proxy confirmed complete replay consumption.
+    pub provider_consumed: Option<bool>,
+    /// Native replay consumption when that layer reports it.
+    pub native_consumed: Option<bool>,
+    /// Whether this execution selected native replay requiring a receipt.
+    pub native_required: bool,
+    /// Whether owned workload, proxy and provider resources settled.
+    pub cleanup_confirmed: Option<bool>,
+}
+
+impl ReplayObservation {
+    /// Extract qualification facts from one ASB JSON run summary.
+    /// Unknown or malformed evidence is never converted into success.
+    pub fn from_summary(summary: &serde_json::Value) -> Result<Self, Error> {
+        let invalid = || {
+            Error("replay result lacks valid trial, replica or provider-selection evidence".into())
+        };
+        let trial = summary
+            .pointer("/task/task_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|trial| !trial.is_empty())
+            .ok_or_else(invalid)?
+            .to_owned();
+        let replica = summary
+            .get("replica_index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(invalid)?;
+        let selection = summary.get("replay_selection").ok_or_else(invalid)?;
+        if selection
+            .get("provider_replay")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            return Err(invalid());
+        }
+        let tools = selection
+            .get("tools")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(invalid)?;
+        if !matches!(
+            tools,
+            "not-selected" | "pi-adapter-local" | "native-snapshot" | "other-selected"
+        ) {
+            return Err(invalid());
+        }
+        let process_success = summary
+            .get("process_success")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(invalid)?;
+        let failure = summary.get("failure_kind").ok_or_else(invalid)?;
+        let operational_success = if failure.is_null() {
+            true
+        } else {
+            match failure.as_str().ok_or_else(invalid)? {
+                "workload_check_failed" | "grader_error" | "collector_error" => true,
+                "run_error"
+                | "agent_failure"
+                | "recording_error"
+                | "output_error"
+                | "provider_cleanup_error" => false,
+                _ => return Err(invalid()),
+            }
+        };
+        Ok(Self {
+            trial,
+            replica,
+            process_success: process_success && operational_success,
+            provider_consumed: summary
+                .get("provider_replay_consumed")
+                .and_then(serde_json::Value::as_bool),
+            native_consumed: summary
+                .get("native_replay_consumed")
+                .and_then(serde_json::Value::as_bool),
+            native_required: tools == "native-snapshot",
+            cleanup_confirmed: summary
+                .pointer("/benchmark_outcome/cleanup_confirmed")
+                .and_then(serde_json::Value::as_bool),
+        })
+    }
+}
+
 impl TrialPreparation {
     /// Begin qualification with a precomputed complete candidate order.
     pub fn new(order: TrialOrder) -> Self {
@@ -143,7 +234,7 @@ impl TrialPreparation {
     /// Record one outcome after the in-flight attempt has settled.
     /// A digest means recording and offline replay both succeeded; `None`
     /// marks a failed candidate and advances to a different trial.
-    pub fn settle(&mut self, trial: &str, cassette_sha256: Option<String>) -> Result<(), Error> {
+    fn settle(&mut self, trial: &str, cassette_sha256: Option<String>) -> Result<(), Error> {
         self.validate()?;
         if self.in_flight.as_deref() != Some(trial) {
             return Err(Error(
@@ -162,6 +253,51 @@ impl TrialPreparation {
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Settle a replay attempt after verifying the immutable cassette bytes.
+    ///
+    /// A false workload grade is deliberately irrelevant. An explicit failed
+    /// replay advances to a different candidate only after cleanup is confirmed.
+    /// Missing evidence leaves the attempt in flight for explicit recovery.
+    pub fn settle_replay(
+        &mut self,
+        trial: &str,
+        cassette_sha256: String,
+        replicas: &[ReplayObservation],
+        expected_replicas: usize,
+    ) -> Result<bool, Error> {
+        if expected_replicas == 0 || expected_replicas > 64 || replicas.len() != expected_replicas {
+            return Err(Error(
+                "replay qualification lacks the expected replica observations".into(),
+            ));
+        }
+        let mut qualified = true;
+        let mut seen = BTreeSet::new();
+        for replica in replicas {
+            if !(1..=expected_replicas).contains(&replica.replica)
+                || !seen.insert(replica.replica)
+                || replica.trial != trial
+                || replica.cleanup_confirmed != Some(true)
+            {
+                return Err(Error(
+                    "replay trial identity or resource cleanup is unconfirmed".into(),
+                ));
+            }
+            let consumed = replica.provider_consumed.ok_or_else(|| {
+                Error("provider replay consumption was not observed; retain the attempt for inspection".into())
+            })?;
+            if replica.native_required && replica.native_consumed.is_none() {
+                return Err(Error(
+                    "native replay consumption was not observed; retain the attempt for inspection"
+                        .into(),
+                ));
+            }
+            qualified &=
+                replica.process_success && consumed && replica.native_consumed != Some(false);
+        }
+        self.settle(trial, qualified.then_some(cassette_sha256))?;
+        Ok(qualified)
     }
 
     /// Verified-cassette identities in their original sampled order.
@@ -347,5 +483,96 @@ mod tests {
         assert!(!restored.complete().unwrap());
         restored.settle(&started, None).unwrap();
         assert_ne!(restored.start().unwrap().unwrap(), started);
+    }
+
+    #[test]
+    fn qualification_requires_distinct_consumed_replicas_and_confirmed_cleanup() {
+        let ids = vec!["a".into(), "b".into(), "c".into()];
+        let mut state = TrialPreparation::new(TrialOrder::new(&ids, 1, 7).unwrap());
+        let first = state.start().unwrap().unwrap();
+        let observed = |replica, consumed, cleanup| ReplayObservation {
+            replica,
+            trial: first.clone(),
+            process_success: true,
+            provider_consumed: consumed,
+            native_consumed: None,
+            native_required: false,
+            cleanup_confirmed: cleanup,
+        };
+        let digest = "a".repeat(64);
+        let duplicate = [
+            observed(1, Some(true), Some(true)),
+            observed(1, Some(true), Some(true)),
+        ];
+        assert!(
+            state
+                .settle_replay(&first, digest.clone(), &duplicate, 2)
+                .is_err()
+        );
+        let missing = [observed(1, None, Some(true))];
+        assert!(
+            state
+                .settle_replay(&first, digest.clone(), &missing, 1)
+                .is_err()
+        );
+        let unclean = [observed(1, Some(false), None)];
+        assert!(
+            state
+                .settle_replay(&first, digest.clone(), &unclean, 1)
+                .is_err()
+        );
+        let mut missing_native = observed(1, Some(true), Some(true));
+        missing_native.native_required = true;
+        assert!(
+            state
+                .settle_replay(&first, digest.clone(), &[missing_native], 1)
+                .is_err()
+        );
+        assert_eq!(state.in_flight().unwrap(), Some(first.as_str()));
+        let failed = [observed(1, Some(false), Some(true))];
+        assert!(
+            !state
+                .settle_replay(&first, digest.clone(), &failed, 1)
+                .unwrap()
+        );
+        let next = state.start().unwrap().unwrap();
+        assert_ne!(first, next);
+        let success = [ReplayObservation {
+            replica: 1,
+            trial: next.clone(),
+            process_success: true,
+            provider_consumed: Some(true),
+            native_consumed: None,
+            native_required: false,
+            cleanup_confirmed: Some(true),
+        }];
+        assert!(state.settle_replay(&next, digest, &success, 1).unwrap());
+        assert!(state.complete().unwrap());
+    }
+
+    #[test]
+    fn summary_keeps_replay_evidence_separate_from_the_workload_grade() {
+        let mut summary = serde_json::json!({
+            "task": {"task_id": "case"}, "replica_index": 1,
+            "process_success": true, "workload_success": false,
+            "failure_kind": "workload_check_failed",
+            "replay_selection": {"provider_replay": true, "tools": "not-selected"},
+            "provider_replay_consumed": true,
+            "benchmark_outcome": {"cleanup_confirmed": true}
+        });
+        let observation = ReplayObservation::from_summary(&summary).unwrap();
+        assert!(observation.process_success);
+        assert_eq!(observation.provider_consumed, Some(true));
+        summary["failure_kind"] = serde_json::json!("run_error");
+        assert!(
+            !ReplayObservation::from_summary(&summary)
+                .unwrap()
+                .process_success
+        );
+        summary["replay_selection"]["provider_replay"] = serde_json::json!(false);
+        assert!(ReplayObservation::from_summary(&summary).is_err());
+        summary["replay_selection"]["provider_replay"] = serde_json::json!(true);
+        summary.as_object_mut().unwrap().remove("failure_kind");
+        assert!(ReplayObservation::from_summary(&summary).is_err());
     }
 }
