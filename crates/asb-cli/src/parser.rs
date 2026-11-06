@@ -1319,7 +1319,7 @@ struct SweepArgs {
     /// Materialize a repository-owned preset in this initialized project, then run its sweep.
     #[arg(long, value_name = "PRESET.toml", group = "sweep-input")]
     preset: Option<String>,
-    /// Record and verify sampled trials, replacing failed replays before publication.
+    /// Record and verify sweep trials, replacing failed sampled trials before publication.
     #[arg(long, conflicts_with_all = ["preset", "record", "replay", "llm_record", "llm_replay", "tool_record", "tool_replay", "mcp_record", "mcp_replay", "resume", "continue_after_failures", "recover_recording", "recover_continuation", "reconcile_completed", "import_grades", "track", "seed", "cassette_root", "respect_record_timings"])]
     prepare_replay: bool,
     /// Sequential fresh batches per configuration, at its configured concurrency.

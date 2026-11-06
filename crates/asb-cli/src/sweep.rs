@@ -194,11 +194,6 @@ pub(crate) fn run_with_options(
     }
     let sweep_path = Path::new(path);
     let mut sweep = read_manifest(sweep_path)?;
-    if options.prepare_replay && sweep.sampled_trials.is_empty() {
-        return Err(Error::Input(
-            "--prepare-replay requires a sweep created with --trial-count".into(),
-        ));
-    }
     if options.prepare_replay {
         return sampled::prepare(sweep_path, &sweep, options, output);
     }
@@ -216,7 +211,12 @@ pub(crate) fn run_with_options(
         .unwrap_or("sweep");
     // Keep ownership through comparison, including moving older output trees.
     let _output_lock = lock::OutputLock::acquire_for_source(output_parent, stem, sweep_path)?;
-    let resolved = if !sweep.sampled_trials.is_empty() && mode == Some(crate::tape::Mode::Replay) {
+    let prepared_fixed = mode == Some(crate::tape::Mode::Replay)
+        && options.cassette_root.is_none()
+        && sampled::has_preparation(sweep_path, options)?;
+    let resolved = if (!sweep.sampled_trials.is_empty() || prepared_fixed)
+        && mode == Some(crate::tape::Mode::Replay)
+    {
         if options.cassette_root.is_some() {
             return Err(Error::Input(
                 "sampled replay uses its verified prepared cassettes; omit --cassette-root".into(),

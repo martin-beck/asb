@@ -16,8 +16,8 @@ Preparation makes live provider calls and tests recordings by replaying them;
 ordinary replay only uses previously verified recordings and stays offline.
 If the replay protocol or selected normalizer changes, create a new sweep with
 `asb setup` and prepare it again; existing recordings are preserved.
-Fixed workload entries in a mixed sweep are also recorded and checked, with their
-specified trial retained. Preparation currently runs sequentially and does not
+Fixed workload entries, including a sweep with no sampled trials, are also
+recorded and checked, with their specified trial retained. Preparation currently runs sequentially and does not
 accept an explicit `--repeat` or parallel scheduling settings; set repeat in the
 sweep configuration or pass it to the subsequent replay instead.
 

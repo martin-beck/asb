@@ -543,25 +543,30 @@ fn sampled_preparation_replaces_a_failed_replay_and_reuses_success() {
 
 #[test]
 fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
-    sampled_sweep_fixture(false, 1, false);
+    sampled_sweep_fixture(false, 1, false, false);
 }
 
 #[test]
 fn sampled_sweep_preserves_a_fixed_workload() {
-    sampled_sweep_fixture(true, 1, false);
+    sampled_sweep_fixture(true, 1, false, false);
 }
 
 #[test]
 fn sampled_sweep_replaces_one_of_multiple_trials() {
-    sampled_sweep_fixture(false, 2, false);
+    sampled_sweep_fixture(false, 2, false, false);
 }
 
 #[test]
 fn sampled_sweep_replays_with_configured_normalizer() {
-    sampled_sweep_fixture(false, 1, true);
+    sampled_sweep_fixture(false, 1, true, false);
 }
 
-fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
+#[test]
+fn fixed_sweep_prepares_and_replays_without_provider() {
+    sampled_sweep_fixture(false, 1, false, true);
+}
+
+fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool, fixed_only: bool) {
     let project = if normalize {
         sweep_tests::registered_project(1)
     } else {
@@ -592,10 +597,14 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
     } else {
         "if (root/'attempts.jsonl').exists(): body['messages'] = [{'role':'user','content':'different-on-replay'}, {'role':'tool','content':'seed=18'}]\nurl = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')"
     };
-    let script = script.replace(
-        "url = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
-        altered,
-    );
+    let script = if fixed_only {
+        script
+    } else {
+        script.replace(
+            "url = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
+            altered,
+        )
+    };
     let script = if mixed {
         script.replace("before = (workspace/'src/parser.py').read_text()", "(workspace/'src').mkdir(exist_ok=True)\nif not (workspace/'src/parser.py').exists(): (workspace/'src/parser.py').write_text('fixture')\nbefore = (workspace/'src/parser.py').read_text()")
     } else {
@@ -647,7 +656,14 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
         configs.push("'fixed-second.toml'".into());
     }
     let configs = configs.join(",");
-    fs::write(project.0.join("sample-sweep.toml"), format!("configs=[{configs}]\n[[sampled_trials]]\nworkload='bug-fix'\ncount={count}\nseed='0000000000000007'\ncandidates=[{candidates}]\n")).unwrap();
+    let manifest = if fixed_only {
+        format!("configs=[{configs}]\n")
+    } else {
+        format!(
+            "configs=[{configs}]\n[[sampled_trials]]\nworkload='bug-fix'\ncount={count}\nseed='0000000000000007'\ncandidates=[{candidates}]\n"
+        )
+    };
+    fs::write(project.0.join("sample-sweep.toml"), manifest).unwrap();
     let sweep_dir = if normalize {
         let nested = project.0.join("nested");
         fs::create_dir(&nested).unwrap();
@@ -690,7 +706,7 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
             .output()
             .unwrap()
     };
-    let expected_count = count + 1 + 2 * usize::from(mixed);
+    let expected_count = count + usize::from(!fixed_only) + 2 * usize::from(mixed);
     for expected_calls in [expected_count, expected_count] {
         let result = run();
         assert!(
@@ -745,7 +761,8 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
         .iter()
         .map(|winner| winner["trial"].as_str().unwrap())
         .collect();
-    let expected_trials: Vec<_> = order.candidates()[1..=count]
+    let expected_trials: Vec<_> = order.candidates()
+        [usize::from(!fixed_only)..count + usize::from(!fixed_only)]
         .iter()
         .map(String::as_str)
         .collect();

@@ -132,9 +132,7 @@ struct Inputs {
     )>,
 }
 
-fn inputs(path: &Path, sweep: &SweepFile, options: Options<'_>) -> Result<Inputs, Error> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let base = options.invocation_dir.unwrap_or_else(|| Path::new("."));
+fn preparation_root(path: &Path, options: Options<'_>) -> Result<PathBuf, Error> {
     let anchor = project::configuration_anchor(path, options.invocation_dir)?;
     let owner = anchor.parent().unwrap_or_else(|| Path::new("."));
     let stem = path
@@ -142,6 +140,21 @@ fn inputs(path: &Path, sweep: &SweepFile, options: Options<'_>) -> Result<Inputs
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
         .unwrap_or("sweep");
+    Ok(owner.join(format!(".{stem}-sample-preparation")))
+}
+
+pub(super) fn has_preparation(path: &Path, options: Options<'_>) -> Result<bool, Error> {
+    let root = preparation_root(path, options)?;
+    match std::fs::symlink_metadata(root) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(crate::io_error(error)),
+    }
+}
+
+fn inputs(path: &Path, sweep: &SweepFile, options: Options<'_>) -> Result<Inputs, Error> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let base = options.invocation_dir.unwrap_or_else(|| Path::new("."));
     let plan = plan::build_at(parent, sweep, base)?;
     let templates =
         plan::sampled_templates(sweep, plan.entries.iter().map(|entry| &entry.configuration))?;
@@ -189,7 +202,7 @@ fn inputs(path: &Path, sweep: &SweepFile, options: Options<'_>) -> Result<Inputs
     digest.update((entries.len() as u64).to_le_bytes());
     digest.update(entries);
     Ok(Inputs {
-        root: owner.join(format!(".{stem}-sample-preparation")),
+        root: preparation_root(path, options)?,
         sweep_digest: format!("{:x}", digest.finalize()),
         groups,
     })
