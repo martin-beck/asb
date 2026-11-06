@@ -34,6 +34,10 @@ Its perf, Perfetto, flamegraph, mpstat and iostat records also report
 completion; agent memory and worker records report observations. CPU
 accounting used process sampling because the host's cgroup CPU controller
 was unavailable, so it can miss short-lived processes.
+Both Claude Code runs reported no verified agent root for memory sampling and
+no matching process for worker sampling; those measurements are unavailable,
+not zero. The native principal execution-window record was unavailable in all
+26 cases, so this sweep does not qualify that measurement.
 
 The table records original second-sweep outcomes. “Resolved” means the run
 record completed and the official evaluator resolved the task; individual
