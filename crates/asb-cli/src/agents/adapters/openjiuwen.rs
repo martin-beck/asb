@@ -1329,6 +1329,7 @@ async def main():
     await asyncio.gather(first, concurrent_root("final-second"))
     print(json.dumps(result, sort_keys=True))
 asyncio.run(main())
+raise SystemExit(int(os.environ.get("ASB_TEST_EXIT_CODE", "0")))
 "#,
                 python.trim()
             ),
@@ -1514,6 +1515,31 @@ asyncio.run(main())
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
             .output()
             .unwrap();
+        let failed_receipt = root.join("failed-consumed.json");
+        let failed = super::process(entry.to_str().unwrap())
+            .unwrap()
+            .direct()
+            .arg("--asb-native-tool-replay")
+            .arg(&sidecar)
+            .env("PYTHONPATH", &root)
+            .env("ASB_TEST_NATIVE_EXECUTED", &marker)
+            .env("ASB_OPENJIUWEN_LOG_DIR", root.join("private-logs"))
+            .env("ASB_TEST_LOG_CONFIGURED", &log_marker)
+            .env("ASB_TEST_WORKSPACE", &replay_workspace)
+            .env("ASB_TEST_RENDER_PREFIX", "replay:")
+            .env("ASB_FS_REPLAY_SOCKET", &socket)
+            .env("ASB_OPENJIUWEN_REPLAY_RECEIPT", &failed_receipt)
+            .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
+            .env("ASB_TEST_EXIT_CODE", "7")
+            .output()
+            .unwrap();
+        assert_eq!(
+            failed.status.code(),
+            Some(7),
+            "{}",
+            String::from_utf8_lossy(&failed.stderr)
+        );
+        assert!(!failed_receipt.exists());
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         server.join().unwrap();
         std::fs::remove_file(&socket).unwrap();
@@ -1530,7 +1556,7 @@ asyncio.run(main())
                 .iter()
                 .filter(|line| line.starts_with("tool-end:"))
                 .count(),
-            60
+            90
         );
         drop(messages);
         assert!(
