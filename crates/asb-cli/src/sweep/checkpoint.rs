@@ -629,13 +629,15 @@ impl Inputs {
         // such as `_`, `PWD`, and `OLDPWD` can happen to name regular files
         // and differ between otherwise identical invocations, making a safe
         // interrupted-sweep continuation impossible.
-        let mut runtime = crate::runtime_inputs::for_plan(parent, plan, mode, invocation_dir)?;
+        let planned_runtime = crate::runtime_inputs::for_plan(parent, plan, mode, invocation_dir)?;
+        let mut runtime = planned_runtime.dependencies.clone();
         runtime.extend(recorder_runtime);
         runtime.push(crate::runtime_inputs::Dependency::Python {
             path: python.clone(),
             site: false,
         });
         let runtime_paths = crate::runtime_inputs::discover_at(&python, &runtime, invocation_dir)?;
+        planned_runtime.verify_disabled()?;
         for (index, path) in runtime_paths.into_iter().enumerate() {
             roots.push(Root::path(format!("runtime-source-{index}"), path));
         }
@@ -648,6 +650,7 @@ impl Inputs {
         // be retained as checkpoint material.
         let context = json!({"protocol":"asb-input-seal-v1","scope":"declared-project-inputs"});
         let initial = snapshotter.fingerprint(&roots, &context, false, &[])?;
+        planned_runtime.verify_disabled()?;
         let state = Self {
             directory,
             snapshotter,

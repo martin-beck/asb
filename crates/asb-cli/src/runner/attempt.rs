@@ -163,6 +163,7 @@ impl<'a> ConfiguredAttempt<'a> {
                         .then_some(project_config.cgroup_parent.as_deref())
                         .flatten()
                         .map(Path::new),
+                    options.ignore_collector,
                 )
             })
             .transpose()
@@ -1396,7 +1397,7 @@ impl ResultFacts {
         let tape_cassette = &context.tape_cassette;
         let FinalizedAttempt {
             workload: workload_session,
-            measurements: measurement_session,
+            measurements: mut measurement_session,
             evidence:
                 ExecutionEvidence {
                     observation,
@@ -1420,13 +1421,16 @@ impl ResultFacts {
         let workload_success = outcome.success();
         let grading_failure = RunFailure::evaluation(&outcome.evaluation);
         let evaluation = outcome.evaluation;
+        let startup_ignored = measurement_session
+            .as_mut()
+            .map_or_else(Vec::new, |session| session.take_startup_ignored());
         let collector_error = issues.collector_failure();
         let run_error = issues.run_error;
         let output_error = issues.output_error;
         let configured_kind = workload_session.evaluation_kind();
         let evaluation_kind = configured_kind.scored(&workload_baseline);
         let resolution_eligible = evaluation_kind.resolution_eligible();
-        let disposition = RunDisposition::from_facts(RunFacts {
+        let mut disposition = RunDisposition::from_facts(RunFacts {
             evaluation: &evaluation,
             ignore_evaluation: options.ignore_evaluation,
             ignore_agent: options.ignore_agent,
@@ -1442,6 +1446,12 @@ impl ResultFacts {
             workload_cleanup_confirmed,
             proxy_cleanup_confirmed: proxy_evidence.cleanup_confirmed,
         });
+        for reason in startup_ignored {
+            let mut failure = RunFailure::new(FailureKind::CollectorError, reason);
+            failure.ignored = true;
+            failure.severity = "warning";
+            disposition.ignored_failures.push(failure);
+        }
         let success = disposition.success;
         let workload_failure =
             grading_failure

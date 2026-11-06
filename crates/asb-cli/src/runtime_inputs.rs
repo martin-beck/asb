@@ -79,12 +79,36 @@ struct Discovered {
     paths: Vec<PathBuf>,
 }
 
+pub(crate) struct PlannedInputs {
+    pub dependencies: Vec<Dependency>,
+    disabled: Vec<(PathBuf, Vec<String>, &'static str)>,
+}
+
+impl PlannedInputs {
+    /// Recheck the no-spawn observation across input discovery and the initial
+    /// file-tree seal. A newly executable tool must be admitted and sealed as
+    /// an executable, never run under a seal that skipped its runtime inputs.
+    pub fn verify_disabled(&self) -> Result<(), Error> {
+        for (tools, selected, id) in &self.disabled {
+            if !crate::collectors::find(id)
+                .and_then(|collector| collector.preflight_unavailable(selected, Some(tools)))
+                .is_some_and(|failure| failure.sealed_project_tool)
+            {
+                return Err(Error::Input(
+                    "disabled collector availability changed during input sealing".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn for_plan(
     parent: &Path,
     plan: &crate::sweep::plan::SweepPlan,
     mode: Option<crate::tape::Mode>,
     invocation_dir: &Path,
-) -> Result<Vec<Dependency>, Error> {
+) -> Result<PlannedInputs, Error> {
     let mut inputs = vec![
         Dependency::Process {
             pid: std::process::id(),
@@ -96,6 +120,7 @@ pub(crate) fn for_plan(
         Dependency::file("/etc/ld.so.conf.d"),
     ];
     let mut selected = std::collections::BTreeSet::new();
+    let mut disabled = Vec::new();
     for entry in &plan.entries {
         let (root, project) =
             project::load_for_invocation(&parent.join(&entry.reference), Some(invocation_dir))?;
@@ -133,8 +158,28 @@ pub(crate) fn for_plan(
             .filter(|settings| settings.enabled)
         {
             let expanded = crate::collectors::expand_dependencies(&settings.collectors);
+            let tools = crate::project::resolve(&root, &project.tools_dir);
+            let unavailable = if mode == Some(crate::tape::Mode::Replay) && plan.ignore_collector {
+                crate::collectors::unavailable_preflight(
+                    crate::collectors::all(),
+                    &expanded,
+                    Some(&tools),
+                )
+            } else {
+                Vec::new()
+            };
             for collector in crate::collectors::all() {
                 if crate::collectors::selected_or_environment(collector.id(), &expanded) {
+                    if unavailable
+                        .iter()
+                        .any(|(id, failure)| *id == collector.id() && failure.sealed_project_tool)
+                    {
+                        // The whole project tools tree, including this file's
+                        // permissions, is sealed by the caller. Do not ask
+                        // runtime discovery to execute the disabled program.
+                        disabled.push((tools.clone(), expanded.clone(), collector.id()));
+                        continue;
+                    }
                     inputs.extend(collector.runtime_inputs(&context)?);
                 }
             }
@@ -142,7 +187,10 @@ pub(crate) fn for_plan(
     }
     inputs.sort();
     inputs.dedup();
-    Ok(inputs)
+    Ok(PlannedInputs {
+        dependencies: inputs,
+        disabled,
+    })
 }
 
 #[cfg(test)]
@@ -341,6 +389,24 @@ mod tests {
         fn drop(&mut self) {
             let _ = crate::fixture_writer::cleanup(&self.0);
         }
+    }
+
+    #[test]
+    fn disabled_collector_availability_is_rechecked_during_sealing() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = Directory::new();
+        let tools = root.0.join("tools");
+        let executable = tools.join("mpstat/bin/pidstat");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "fixture").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let inputs = PlannedInputs {
+            dependencies: Vec::new(),
+            disabled: vec![(tools, vec!["mpstat".into()], "mpstat")],
+        };
+        inputs.verify_disabled().unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(inputs.verify_disabled().is_err());
     }
 
     #[test]

@@ -202,6 +202,15 @@ The task, JSON output, log and measurement summary retain the warning. It does
 not suppress an unconfirmed collector cleanup or failure to publish run and
 summary evidence; those remain fatal. Inspect measurement availability before
 using a result for performance comparisons.
+For `mpstat`, `iostat`, `perf`, `bpftrace` and `perfetto`, a missing or
+non-executable main tool can also be detected and skipped before any collector
+probe is launched. Selected dependents are skipped as well, with their own
+unavailable artifacts and warnings; their preflight commands are not run.
+Other startup and already-launched probe failures remain fatal unless cleanup is
+proved. A sweep can resume a skipped project-local tool only when its original
+input seal binds that tool and its permissions; unavailable tools outside the
+project or with skipped dependent runtimes retain the existing conservative
+resume behavior.
 Each ignored failure is printed as a warning, or emitted in JSON under
 `ignored_failures` with its original kind and reason and `ignored: true`.
 The same evidence is retained in the run log and measurement summary. The

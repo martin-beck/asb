@@ -385,6 +385,102 @@ fn replay_sweep_ignores_confirmed_collector_failure_and_resumes() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_sweep_skips_unexecutable_collector_and_resumes() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = registered_project(1);
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("input.jsonl"),
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    let marker = project.0.join("pidstat-ran");
+    let tool = project.0.join("tools/mpstat/bin/pidstat");
+    fs::create_dir_all(tool.parent().unwrap()).unwrap();
+    fs::write(
+        &tool,
+        format!("#!/bin/sh\ntouch '{}'\nexit 7\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o644)).unwrap();
+    let config = project.0.join("benchmark.toml");
+    let text = fs::read_to_string(&config).unwrap()
+        + "\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['mpstat']\n";
+    fs::write(config, text).unwrap();
+    let args = [
+        "--replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-collector",
+    ];
+    let output = sweep(&project, None, &args);
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!marker.exists());
+    let row = records(&output.stdout)
+        .into_iter()
+        .find(|row| row["ignored_failures"].is_array())
+        .expect("ignored collector event");
+    assert_eq!(row["ignored_failures"][0]["kind"], "collector_error");
+    assert!(
+        row["ignored_failures"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("mpstat")
+    );
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    let changed = sweep(
+        &project,
+        None,
+        &[
+            "--replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+            "--ignore-collector",
+        ],
+    );
+    assert!(
+        !changed.status.success(),
+        "a newly executable collector changes the sealed inputs"
+    );
+    assert!(!marker.exists());
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o644)).unwrap();
+    let resumed = sweep(
+        &project,
+        None,
+        &[
+            "--replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+            "--ignore-collector",
+        ],
+    );
+    assert!(
+        resumed.status.success(),
+        "first_stdout={} first_stderr={} stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(!marker.exists());
+}
+
 #[test]
 fn continuation_metadata_recovery_cli_rejects_execution_options_without_provider_setup() {
     let project = registered_project(1);

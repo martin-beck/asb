@@ -923,12 +923,31 @@ pub(crate) fn ensure_collector_dependencies(
 /// This is deliberately shared by direct runs and sweeps: record/replay alters
 /// transport only: replay still needs the agent, workload, and collectors,
 /// but its local tape endpoint does not need a live provider runtime.
+#[cfg(test)]
 pub(crate) fn ensure_execution_requirements(
     config: &BenchmarkConfig,
     config_path: &Path,
     mode: Option<crate::tape::Mode>,
     invocation_dir: &Path,
     output: &mut dyn std::io::Write,
+) -> Result<(), Error> {
+    ensure_execution_requirements_with_policy(
+        config,
+        config_path,
+        mode,
+        invocation_dir,
+        output,
+        false,
+    )
+}
+
+pub(crate) fn ensure_execution_requirements_with_policy(
+    config: &BenchmarkConfig,
+    config_path: &Path,
+    mode: Option<crate::tape::Mode>,
+    invocation_dir: &Path,
+    output: &mut dyn std::io::Write,
+    ignore_collector: bool,
 ) -> Result<(), Error> {
     let (root, project_config) = project::load_for_invocation(config_path, Some(invocation_dir))?;
     let tools_root = project::resolve(&root, &project_config.tools_dir);
@@ -982,9 +1001,30 @@ pub(crate) fn ensure_execution_requirements(
             }
         }
         if let Some(measures) = config.measurements.as_ref().filter(|value| value.enabled) {
+            let expanded = crate::collectors::expand_dependencies(&measures.collectors);
+            let unavailable = if ignore_collector && mode == Some(crate::tape::Mode::Replay) {
+                crate::collectors::unavailable_preflight(
+                    crate::collectors::all(),
+                    &expanded,
+                    Some(&tools_root),
+                )
+            } else {
+                Vec::new()
+            };
+            let selected: Vec<_> = measures
+                .collectors
+                .iter()
+                .filter(|selection| {
+                    !unavailable.iter().any(|(name, _)| {
+                        crate::collectors::find(name)
+                            .is_some_and(|adapter| adapter.accepts_selection(selection))
+                    })
+                })
+                .cloned()
+                .collect();
             ensure_collector_dependencies_in(
                 &context,
-                &measures.collectors,
+                &selected,
                 &root,
                 &tools_root,
                 output,

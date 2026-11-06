@@ -4104,6 +4104,218 @@ fn replay_cannot_ignore_unknown_collector_custody() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn replay_ignore_collector_skips_unexecutable_sysstat_without_spawning_it() {
+    use std::os::unix::fs::PermissionsExt;
+    for collector in ["mpstat", "iostat"] {
+        let project = replay_project(1);
+        let marker = project.0.join("pidstat-ran");
+        let script = format!("#!/bin/sh\ntouch '{}'\nexit 7\n", marker.display());
+        project.write(".asb-tools/mpstat/bin/pidstat", &script);
+        std::fs::set_permissions(
+            project.0.join(".asb-tools/mpstat/bin/pidstat"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
+            + &format!(
+                "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['{collector}']\n"
+            );
+        project.write("benchmark.toml", &config);
+        let output = replay(&project, "success", &["--json", "--ignore-collector"]);
+        expect_success(&output);
+        assert!(
+            !marker.exists(),
+            "preflight must not execute the unavailable tool"
+        );
+        let row: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let events = row["ignored_failures"].as_array().unwrap();
+        assert!(events.iter().any(|event| {
+            event["kind"] == "collector_error"
+                && event["ignored"] == true
+                && event["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains(collector))
+        }));
+        let dir = project
+            .0
+            .join(row["measurement_directory"].as_str().unwrap());
+        let artifact: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(format!("{collector}.json"))).unwrap())
+                .unwrap();
+        assert_eq!(artifact["status"], "unavailable");
+        assert!(artifact["metrics"].as_object().unwrap().is_empty());
+        let startup: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("collector-startup.json")).unwrap())
+                .unwrap();
+        assert_eq!(startup["stage"], "before-collector-probe");
+        assert_eq!(startup["events"][0]["collector"], collector);
+        assert_eq!(startup["events"][0]["ignored"], true);
+        let run: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("run.json")).unwrap()).unwrap();
+        assert_eq!(run["ignored_failures"], row["ignored_failures"]);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_ignore_collector_skips_unexecutable_trace_tools_without_spawning() {
+    use std::os::unix::fs::PermissionsExt;
+    for (collector, binary) in [
+        ("perf", "perf"),
+        ("bpftrace", "bpftrace"),
+        ("perfetto", "tracebox"),
+    ] {
+        let project = replay_project(1);
+        let marker = project.0.join("collector-ran");
+        let script = format!("#!/bin/sh\ntouch '{}'\nexit 7\n", marker.display());
+        let path = format!(".asb-tools/{collector}/bin/{binary}");
+        project.write(&path, &script);
+        std::fs::set_permissions(
+            project.0.join(&path),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
+            + &format!(
+                "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['{collector}']\n"
+            );
+        project.write("benchmark.toml", &config);
+        let output = replay(&project, "success", &["--json", "--ignore-collector"]);
+        expect_success(&output);
+        assert!(!marker.exists());
+        let row: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            row["ignored_failures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["kind"] == "collector_error"
+                    && event["ignored"] == true
+                    && event["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains(collector)))
+        );
+        let dir = project
+            .0
+            .join(row["measurement_directory"].as_str().unwrap());
+        let artifact: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(format!("{collector}.json"))).unwrap())
+                .unwrap();
+        assert_eq!(artifact["status"], "unavailable");
+        assert!(artifact["metrics"].as_object().unwrap().is_empty());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_ignore_collector_skips_dependents_without_running_their_probes() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = replay_project(1);
+    let marker = project.0.join("flamegraph-ran");
+    project.write(".asb-tools/perf/bin/perf", "#!/bin/sh\nexit 7\n");
+    std::fs::set_permissions(
+        project.0.join(".asb-tools/perf/bin/perf"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    for name in ["stackcollapse-perf.pl", "flamegraph.pl"] {
+        let path = format!(".asb-tools/flamegraph/bin/{name}");
+        project.write(
+            &path,
+            &format!("#!/bin/sh\ntouch '{}'\nexit 7\n", marker.display()),
+        );
+        std::fs::set_permissions(
+            project.0.join(&path),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
+        + "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['flamegraph']\n";
+    project.write("benchmark.toml", &config);
+    let output = replay(&project, "success", &["--json", "--ignore-collector"]);
+    expect_success(&output);
+    assert!(!marker.exists());
+    let row: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let events = row["ignored_failures"].as_array().unwrap();
+    assert!(events.iter().any(|event| {
+        event["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("perf"))
+    }));
+    assert!(events.iter().any(|event| {
+        event["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("flamegraph"))
+    }));
+    let dir = project
+        .0
+        .join(row["measurement_directory"].as_str().unwrap());
+    for collector in ["perf", "flamegraph"] {
+        let artifact: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(format!("{collector}.json"))).unwrap())
+                .unwrap();
+        assert_eq!(artifact["status"], "unavailable");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_ignore_collector_does_not_suppress_a_spawned_preflight_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = replay_project(1);
+    let marker = project.0.join("pidstat-ran");
+    let script = format!("#!/bin/sh\ntouch '{}'\nexit 7\n", marker.display());
+    project.write(".asb-tools/mpstat/bin/pidstat", &script);
+    std::fs::set_permissions(
+        project.0.join(".asb-tools/mpstat/bin/pidstat"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
+        + "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['mpstat']\n";
+    project.write("benchmark.toml", &config);
+    let output = replay(&project, "success", &["--json", "--ignore-collector"]);
+    assert!(!output.status.success());
+    assert!(marker.exists());
+    assert!(stderr(&output).contains("pidstat"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ignored_collector_startup_remains_auditable_when_replay_later_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = replay_project(1);
+    project.write(".asb-tools/mpstat/bin/pidstat", "#!/bin/sh\nexit 7\n");
+    std::fs::set_permissions(
+        project.0.join(".asb-tools/mpstat/bin/pidstat"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
+        + "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['mpstat']\n";
+    project.write("benchmark.toml", &config);
+    let output = replay(
+        &project,
+        "mismatch",
+        &[
+            "--json",
+            "--measurements",
+            "measurements",
+            "--ignore-collector",
+        ],
+    );
+    assert!(!output.status.success());
+    let startup: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.0.join("measurements/collector-startup.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(startup["events"][0]["collector"], "mpstat");
+    assert_eq!(startup["events"][0]["ignored"], true);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn collector_ignore_without_a_failure_does_not_invent_a_warning() {
     let project = replay_project(1);
     let result = replay(
