@@ -1650,6 +1650,9 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
         "tool_call_count": result.tool_call_count(),
         "token_usage": result.token_usage,
     });
+    if let Some(consumed) = result.native_replay_consumed {
+        summary["native_replay_consumed"] = serde_json::Value::Bool(consumed);
+    }
     if let Some(execution) = &result.execution {
         summary["execution"] =
             serde_json::to_value(execution).map_err(|error| Error::Io(error.to_string()))?;
@@ -3297,6 +3300,21 @@ mod tests {
         assert!(value.get("execution").is_none());
         assert!(value.get("recording").is_none());
         assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 1);
+    }
+
+    #[test]
+    fn json_summary_preserves_observed_native_replay_consumption() {
+        let mut result = result();
+        for evidence in [None, Some(true), Some(false)] {
+            result.native_replay_consumed = evidence;
+            let mut output = Vec::new();
+            render_json(&result, &mut output).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            match evidence {
+                Some(consumed) => assert_eq!(value["native_replay_consumed"], consumed),
+                None => assert!(value.get("native_replay_consumed").is_none()),
+            }
+        }
     }
 
     #[test]
