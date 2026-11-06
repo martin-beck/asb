@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::Path;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ReadySelection {
     schema_version: u8,
@@ -16,7 +16,7 @@ struct ReadySelection {
     winners: Vec<Winner>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Winner {
     workload: String,
@@ -27,6 +27,89 @@ struct Winner {
     replay_config: String,
     cassette: String,
     cassette_sha256: String,
+}
+
+impl ReadySelection {
+    fn validate(&self) -> Result<(), Error> {
+        use std::collections::BTreeSet;
+        if self.schema_version != 1
+            || !cassette::valid_digest(&self.sweep_sha256)
+            || self.max_steps == Some(0)
+            || self.winners.is_empty()
+            || self.winners.len() > super::MAX_CONFIGS
+        {
+            return Err(Error::Input(
+                "invalid sampled replay selection header".into(),
+            ));
+        }
+        let mut identities = BTreeSet::new();
+        for winner in &self.winners {
+            let names = [
+                &winner.workload,
+                &winner.agent,
+                &winner.provider,
+                &winner.model,
+                &winner.trial,
+            ];
+            if names.iter().any(|name| {
+                name.is_empty() || name.len() > 4096 || name.chars().any(char::is_control)
+            }) || !identities.insert(names)
+                || !cassette::valid_digest(&winner.cassette_sha256)
+                || !safe_reference(&winner.replay_config, "toml")
+                || !safe_reference(&winner.cassette, "zip")
+            {
+                return Err(Error::Input(
+                    "invalid or duplicate sampled replay winner".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn safe_reference(value: &str, extension: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        && path.extension().is_some_and(|value| value == extension)
+}
+
+fn read_ready(path: &Path) -> Result<ReadySelection, Error> {
+    let metadata = std::fs::symlink_metadata(path).map_err(crate::io_error)?;
+    if !metadata.file_type().is_file() {
+        return Err(Error::Input(
+            "sampled replay selection must be a regular file".into(),
+        ));
+    }
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = open.open(path).map_err(crate::io_error)?;
+    if !file.metadata().map_err(crate::io_error)?.is_file() {
+        return Err(Error::Input(
+            "sampled replay selection must be a regular file".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(crate::io_error)?;
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err(Error::Input(
+            "sampled replay selection exceeds 16 MiB".into(),
+        ));
+    }
+    let ready: ReadySelection = serde_json::from_slice(&bytes)
+        .map_err(|_| Error::Input("invalid sampled replay selection".into()))?;
+    ready.validate()?;
+    Ok(ready)
 }
 
 pub(super) fn prepare(
@@ -151,39 +234,15 @@ pub(super) fn prepare(
         max_steps: options.max_steps,
         winners,
     };
+    ready.validate()?;
     let mut bytes = BoundedReady(Vec::new());
     serde_json::to_writer(&mut bytes, &ready).map_err(|_| {
         Error::Input("sampled replay selection exceeds 16 MiB or cannot be encoded".into())
     })?;
     let ready_path = root.join("ready.json");
-    let created = crate::config::matrix::scalar_if_absent(&ready_path, &bytes.0)?;
-    if !created {
-        let metadata = std::fs::symlink_metadata(&ready_path).map_err(crate::io_error)?;
-        if !metadata.file_type().is_file() {
-            return Err(Error::Input(
-                "sampled replay selection must be a regular file".into(),
-            ));
-        }
-        let mut open = std::fs::OpenOptions::new();
-        open.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            open.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        }
-        let file = open.open(&ready_path).map_err(crate::io_error)?;
-        if !file.metadata().map_err(crate::io_error)?.is_file() {
-            return Err(Error::Input(
-                "sampled replay selection must be a regular file".into(),
-            ));
-        }
-        let mut existing = Vec::new();
-        file.take(16 * 1024 * 1024 + 1)
-            .read_to_end(&mut existing)
-            .map_err(crate::io_error)?;
-        if existing != bytes.0 {
-            return Err(Error::Input("existing sampled replay selection differs; preserve its evidence and create a new sweep".into()));
-        }
+    let _created = crate::config::matrix::scalar_if_absent(&ready_path, &bytes.0)?;
+    if read_ready(&ready_path).ok().as_ref() != Some(&ready) {
+        return Err(Error::Input("existing sampled replay selection differs; preserve its evidence and create a new sweep".into()));
     }
     Err(Error::Run("sampled candidates were verified, but publication of the replay selection is not yet available; existing evidence was retained".into()))
 }
@@ -201,5 +260,44 @@ impl Write for BoundedReady {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ready() -> ReadySelection {
+        ReadySelection {
+            schema_version: 1,
+            sweep_sha256: "a".repeat(64),
+            max_steps: None,
+            winners: vec![Winner {
+                workload: "suite".into(),
+                agent: "agent".into(),
+                provider: "provider".into(),
+                model: "model".into(),
+                trial: "trial".into(),
+                replay_config: "group/candidate/replay.toml".into(),
+                cassette: "group/candidate/recording.zip".into(),
+                cassette_sha256: "b".repeat(64),
+            }],
+        }
+    }
+
+    #[test]
+    fn winner_selection_rejects_unsafe_paths_and_invalid_or_duplicate_evidence() {
+        let mut value = ready();
+        assert!(value.validate().is_ok());
+        value.winners[0].cassette = "../outside.zip".into();
+        assert!(value.validate().is_err());
+        value = ready();
+        value.winners[0].cassette_sha256 = "not-a-digest".into();
+        assert!(value.validate().is_err());
+        value = ready();
+        let duplicate =
+            serde_json::from_value(serde_json::to_value(&value.winners[0]).unwrap()).unwrap();
+        value.winners.push(duplicate);
+        assert!(value.validate().is_err());
     }
 }
