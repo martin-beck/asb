@@ -12,49 +12,33 @@ pub(crate) fn display_name(name: &str) -> String {
     }
 }
 
-pub(crate) fn confirm_architecture<'a>(
+pub(crate) fn validate_architecture<'a>(
     names: impl Iterator<Item = &'a str>,
-    interactive: bool,
-    output: &mut dyn std::io::Write,
 ) -> Result<(), crate::Error> {
-    use std::io::IsTerminal;
-    confirm_architecture_with(
-        names,
-        std::env::consts::ARCH,
-        interactive && std::io::stdin().is_terminal(),
-        &mut std::io::stdin().lock(),
-        output,
-    )
+    validate_architecture_with(names, std::env::consts::ARCH)
 }
 
-fn confirm_architecture_with<'a>(
+fn validate_architecture_with<'a>(
     names: impl Iterator<Item = &'a str>,
     host: &str,
-    interactive: bool,
-    input: &mut dyn std::io::BufRead,
-    output: &mut dyn std::io::Write,
 ) -> Result<(), crate::Error> {
     let mismatched = mismatched_architectures(names, host);
     if mismatched.is_empty() {
         return Ok(());
     }
-    writeln!(output, "Architecture warning: {} uses x86_64 task images; this environment is {}. Execution requires x86 emulation and may be much slower.", mismatched.into_iter().collect::<Vec<_>>().join(", "), host).map_err(crate::io_error)?;
-    if !interactive {
-        return Err(crate::Error::Input(
-            "architecture mismatch requires confirmation in an interactive terminal".into(),
-        ));
-    }
-    write!(output, "Continue with x86 emulation? [y/N] ").map_err(crate::io_error)?;
-    output.flush().map_err(crate::io_error)?;
-    let mut answer = String::new();
-    input.read_line(&mut answer).map_err(crate::io_error)?;
-    if answer.trim().eq_ignore_ascii_case("y") {
-        Ok(())
-    } else {
-        Err(crate::Error::Input(
-            "benchmark cancelled because x86 emulation was not approved".into(),
-        ))
-    }
+    let details = mismatched
+        .into_iter()
+        .map(|name| {
+            let required = adapters::find(name)
+                .and_then(|adapter| adapter.task_architecture())
+                .unwrap_or("unknown");
+            format!("{name} requires {required}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(crate::Error::Input(format!(
+        "workload architecture unsupported on this host ({host}): {details}. Run the workload on a compatible native host."
+    )))
 }
 
 fn mismatched_architectures<'a>(
@@ -74,45 +58,17 @@ fn mismatched_architectures<'a>(
 mod architecture_tests {
     use super::*;
     #[test]
-    fn mismatch_requires_explicit_confirmation_once() {
-        for (answer, interactive, expected) in [
-            ("y\n", true, true),
-            ("Y\n", true, true),
-            ("\n", true, false),
-            ("n\n", true, false),
-            ("y\n", false, false),
-        ] {
-            let mut output = Vec::new();
-            let result = confirm_architecture_with(
-                ["swe-bench", "swe-bench"].into_iter(),
-                "aarch64",
-                interactive,
-                &mut answer.as_bytes(),
-                &mut output,
-            );
-            assert_eq!(result.is_ok(), expected);
-            let text = String::from_utf8(output).unwrap();
-            assert_eq!(text.matches("Architecture warning:").count(), 1);
-            assert_eq!(
-                text.matches("Continue with x86 emulation?").count(),
-                usize::from(interactive)
-            );
-        }
-        let mut output = Vec::new();
-        assert!(
-            confirm_architecture_with(
-                ["swe-bench"].into_iter(),
-                "x86_64",
-                false,
-                &mut &b""[..],
-                &mut output
-            )
-            .is_ok()
-        );
-        assert!(output.is_empty());
+    fn mismatch_is_an_actionable_error_without_a_confirmation_override() {
+        let error = validate_architecture_with(["swe-bench", "swe-bench"].into_iter(), "aarch64")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("aarch64"));
+        assert!(error.contains("swe-bench requires x86_64"));
+        assert_eq!(error.matches("swe-bench requires").count(), 1);
+        assert!(validate_architecture_with(["swe-bench"].into_iter(), "x86_64").is_ok());
     }
     #[test]
-    fn swe_variants_are_labelled_and_warn_only_for_mismatch() {
+    fn swe_variants_are_labelled_and_reject_only_mismatches() {
         let names = ["swe-bench", "swe-bench-lite", "swe-bench-verified"];
         for name in names {
             assert_eq!(display_name(name), format!("{name} (x86)"));

@@ -151,12 +151,10 @@ impl<'a> PreparedSweep<'a> {
         // source is a deterministic invocation error, not a capacity decision;
         // capacity is still checked before dependency preparation or output
         // publication can start.
-        crate::workloads::confirm_architecture(
+        crate::workloads::validate_architecture(
             plan.entries
                 .iter()
                 .map(|entry| entry.configuration.workload.as_str()),
-            options.interactive && !options.json,
-            output,
         )?;
         crate::disk_space::confirm_capacity(
             output_parent,

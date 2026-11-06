@@ -676,7 +676,10 @@ setup when tracing is not needed; other collectors remain usable.
 shows the `.txt` prompts available in the current project plus installable
 external workload aliases. Install one by its short name, for example
 `asb workload install swe-bench`; ASB installs the complete pinned dataset and
-its project-local official evaluator SDK. The original benchmark integrations
+its project-local official evaluator SDK. ASB executes workloads natively and
+reports an error before a run or sweep if a workload declares an architecture
+unsupported by the host. The original SWE-bench, Lite, and Verified workloads
+require an x86_64 host. The original benchmark integrations
 are:
 
 | Workload | Pinned population | Official evaluator |

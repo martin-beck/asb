@@ -204,7 +204,6 @@ pub(crate) struct RunOptions<'a> {
     /// requirements for this fresh run population. Direct and resumed runs
     /// leave this false and revalidate before execution.
     pub requirements_prepared: bool,
-    pub architecture_confirmed: bool,
     pub preparation_gate: Option<&'a batch::Gate>,
     pub launch_gate: Option<&'a batch::Gate>,
     /// Holds official grading and post-processing until every admitted peer
@@ -418,13 +417,7 @@ pub(crate) fn run_with_diagnostics(
     // Reject an invalid replay request before asking about capacity for work
     // which cannot start.  Every executable run remains subject to the
     // conservative capacity preflight before any repetition or execution.
-    if !options.architecture_confirmed {
-        crate::workloads::confirm_architecture(
-            std::iter::once(config.workload.as_str()),
-            options.interactive && !options.json,
-            output,
-        )?;
-    }
+    crate::workloads::validate_architecture(std::iter::once(config.workload.as_str()))?;
     crate::disk_space::confirm_capacity(
         output_directory,
         crate::disk_space::benchmark(
