@@ -813,6 +813,26 @@ class GuestBootstrapTests(unittest.TestCase):
             with self.assertRaises(ExecutionError):
                 stage_npm_package_tree(task, tree, tools, "other-agent")
 
+    def test_npm_package_tree_accepts_larger_payload_and_enforces_unpacked_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = root / "tools"
+            archive = tools / "opencode/cache/guest-node-modules.tar"
+            archive.parent.mkdir(parents=True)
+            with tarfile.open(archive, "w") as output:
+                payload = b"x" * 600
+                member = tarfile.TarInfo("node_modules/example/payload")
+                member.size = len(payload)
+                output.addfile(member, io.BytesIO(payload))
+            task = SimpleNamespace(workspace=SimpleNamespace(container=Container()),
+                                   checked=lambda argv: None, artifacts=root)
+            tree = {"source": str(archive), "target": "opencode", "executable": "opencode"}
+            with patch("asb_guest.NPM_TREE_UNPACKED_LIMIT", 1024):
+                stage_npm_package_tree(task, tree, tools, "opencode")
+            with patch("asb_guest.NPM_TREE_UNPACKED_LIMIT", 512):
+                with self.assertRaisesRegex(ExecutionError, "unpacked bound"):
+                    stage_npm_package_tree(task, tree, tools, "opencode")
+
     def test_python_package_tree_stages_only_selected_bounded_archives(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

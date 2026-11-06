@@ -367,6 +367,11 @@ def stage_auxiliary_tools(task, tools, owner):
     return paths
 
 
+NPM_TREE_ARCHIVE_LIMIT = 4 * 1024**3
+NPM_TREE_UNPACKED_LIMIT = 4 * 1024**3
+NPM_TREE_MEMBER_LIMIT = 1024**3
+
+
 def stage_npm_package_tree(task, tree, tools, selected, owner=None):
     """Stage a declared, bounded npm tree without exposing a host mount.
 
@@ -383,8 +388,8 @@ def stage_npm_package_tree(task, tree, tools, selected, owner=None):
             or not source.is_absolute() or source.is_symlink() or not source.is_file()
             or not source.resolve().is_relative_to(tools.resolve())):
         raise ExecutionError("npm package-tree bootstrap escapes its selected guest tool")
-    if source.stat().st_size > 512 * 1024**2:
-        raise ExecutionError("npm package-tree bootstrap exceeds 512 MiB")
+    if source.stat().st_size > NPM_TREE_ARCHIVE_LIMIT:
+        raise ExecutionError("npm package-tree bootstrap exceeds 4 GiB")
     members,total = [],0
     try:
         with tarfile.open(source,mode="r:") as archive:
@@ -400,7 +405,7 @@ def stage_npm_package_tree(task, tree, tools, selected, owner=None):
                     raise ExecutionError("npm package-tree bootstrap contains an unsafe member")
                 if member.isfile():
                     total += member.size
-                    if member.size > 256 * 1024**2 or total > 512 * 1024**2:
+                    if member.size > NPM_TREE_MEMBER_LIMIT or total > NPM_TREE_UNPACKED_LIMIT:
                         raise ExecutionError("npm package-tree bootstrap exceeds its unpacked bound")
                 if member.issym() or member.islnk():
                     link = member.linkname
