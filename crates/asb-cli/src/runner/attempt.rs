@@ -782,6 +782,8 @@ impl<'a> ReadyAttempt<'a> {
                             respect_record_timings,
                             tape::AgentContext {
                                 workspace: &workspace,
+                                ignore_provider_mismatch: options.ignore_provider_mismatch,
+                                ignore_provider_unconsumed: options.ignore_provider_unconsumed,
                                 agent: Some(&config.agent),
                                 workload: Some(&config.workload),
                                 task: Some(&workload_session.invocation().identity.task_id),
@@ -1452,6 +1454,13 @@ impl ResultFacts {
             failure.severity = "warning";
             disposition.ignored_failures.push(failure);
         }
+        for divergence in &proxy_evidence.replay_divergences {
+            disposition.ignored_failures.push(RunFailure::ignored(
+                divergence.kind,
+                divergence.reason.clone(),
+            ));
+        }
+        let approximate_replay = !proxy_evidence.replay_divergences.is_empty();
         let success = disposition.success;
         let workload_failure =
             grading_failure
@@ -1582,6 +1591,7 @@ impl ResultFacts {
             stderr.push('\n');
         }
         let result = RunResult {
+            approximate_replay,
             replay_selection: options.replay_selection(&config.agent),
             provider_replay_consumed: (options.mode == Some(tape::Mode::Replay))
                 .then_some(cassette_usage_verified && proxy_evidence.cleanup_confirmed),

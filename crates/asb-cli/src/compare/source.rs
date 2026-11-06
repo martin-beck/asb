@@ -1028,7 +1028,14 @@ fn load_attempt(
         host_metadata,
         components,
         collector_documents,
-        status: run_status,
+        status: if run_value["approximate_replay"] == true {
+            Some(format!(
+                "approximate replay; {}",
+                run_status.as_deref().unwrap_or("recorded outcome")
+            ))
+        } else {
+            run_status
+        },
         artifacts,
         artifact_sources,
     })

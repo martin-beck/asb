@@ -1368,9 +1368,11 @@ if (process.argv.includes('--fixture-agent-worker')) {
 const behavior = process.env.ASB_FIXTURE_BEHAVIOR || 'success';
 async function main() {
   if (behavior === 'skip') { console.log('fixture-no-request'); return; }
-  const body = {model:'test-model',input:behavior === 'mismatch' ? 'changed' : 'offline',tools:[{type:'function'}]};
+  const body = {model:'test-model',input:['mismatch', 'mismatch-twice', 'mismatch-many'].includes(behavior) ? 'changed' : 'offline',tools:[{type:'function'}]};
   const send = () => fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   let response = await send();
+  if (behavior === 'mismatch-twice') response = await send();
+  if (behavior === 'mismatch-many') for (let i=1;i<128;i++) response = await send();
   if (behavior === 'extra') response = await send();
   if (!response.ok) { console.error('fixture-rejected', response.status); process.exitCode = 8; return; }
   if (behavior === 'noop') { console.log('No task edits were made.'); return; }
@@ -3563,6 +3565,185 @@ fn replay_ignored_failures_are_warned_and_preserve_real_outcomes() {
         !missing.status.success(),
         "missing replay input cannot produce a successful run"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn approximate_replay_serves_a_recorded_response_and_exhaustion_remains_fatal() {
+    let project = replay_project(1);
+    let result = replay(
+        &project,
+        "mismatch",
+        &[
+            "--ignore-provider-mismatch",
+            "--json",
+            "--measurements",
+            "measurement",
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(json["approximate_replay"], true);
+    assert_eq!(json["ignored_failures"][0]["kind"], "provider_mismatch");
+    assert_eq!(json["ignored_failures"][0]["ignored"], true);
+    assert_eq!(json["ignored_failures"][0]["severity"], "warning");
+    assert!(
+        json["ignored_failures"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("approximate replay")
+    );
+    let reason = json["ignored_failures"][0]["reason"].as_str().unwrap();
+    let evidence_path = reason.rsplit_once("evidence: ").unwrap().1;
+    let evidence: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(evidence_path).unwrap()).unwrap();
+    assert_eq!(evidence["mismatch"]["sequence"], 1);
+    assert!(json["token_usage"]["total_tokens"].is_null());
+    let log: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+    assert_eq!(log["approximate_replay"], true);
+    assert_eq!(log["ignored_failures"], json["ignored_failures"]);
+    expect_success(&project.command(&["compare", "benchmark.toml"]));
+    let comparison = project.0.join("results/benchmark-comparison");
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(comparison.join("comparison.json")).unwrap())
+            .unwrap();
+    assert!(
+        report["benchmarks"][0]["status"]
+            .as_str()
+            .unwrap()
+            .contains("approximate replay")
+    );
+    assert!(
+        std::fs::read_to_string(comparison.join("report.html"))
+            .unwrap()
+            .contains("approximate replay")
+    );
+    let human = replay(
+        &replay_project(1),
+        "mismatch",
+        &["--ignore-provider-mismatch"],
+    );
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stdout).contains("Warning: ignored provider_mismatch"));
+    let no_response = replay(&replay_project(1), "extra", &["--ignore-provider-mismatch"]);
+    assert!(!no_response.status.success());
+    assert!(String::from_utf8_lossy(&no_response.stderr).contains("replay rejected"));
+    let rejected = replay(&replay_project(1), "mismatch", &[]);
+    assert!(!rejected.status.success());
+    let partial = replay(
+        &replay_project(1),
+        "skip",
+        &[
+            "--ignore-provider-unconsumed",
+            "--ignore-evaluation",
+            "--json",
+        ],
+    );
+    assert!(
+        partial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&partial.stderr)
+    );
+    let partial: serde_json::Value = serde_json::from_slice(&partial.stdout).unwrap();
+    assert_eq!(partial["approximate_replay"], true);
+    let failures = partial["ignored_failures"].as_array().unwrap();
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure["kind"] == "provider_unconsumed"
+                && failure["ignored"] == true
+                && failure["reason"].as_str().unwrap().contains("0 of 1"))
+    );
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure["kind"] == "workload_check_failed")
+    );
+    let partial_without_evaluation = replay(
+        &replay_project(1),
+        "skip",
+        &["--ignore-provider-unconsumed"],
+    );
+    assert!(
+        !partial_without_evaluation.status.success(),
+        "an independent false grade remains fatal"
+    );
+    let twice_project = replay_project(1);
+    let cassette = std::fs::read_to_string(twice_project.0.join("tape.jsonl")).unwrap();
+    std::fs::write(
+        twice_project.0.join("tape.jsonl"),
+        format!("{cassette}{cassette}"),
+    )
+    .unwrap();
+    let twice = replay(
+        &twice_project,
+        "mismatch-twice",
+        &["--ignore-provider-mismatch", "--json"],
+    );
+    assert!(
+        twice.status.success(),
+        "{}",
+        String::from_utf8_lossy(&twice.stderr)
+    );
+    let twice: serde_json::Value = serde_json::from_slice(&twice.stdout).unwrap();
+    assert_eq!(twice["ignored_failures"].as_array().unwrap().len(), 1);
+    let reason = twice["ignored_failures"][0]["reason"].as_str().unwrap();
+    assert!(reason.contains("served 2 recorded response(s)"));
+    let journal = reason
+        .split_once("journal: ")
+        .unwrap()
+        .1
+        .split_once("; first mismatch evidence:")
+        .unwrap()
+        .0;
+    let events: Vec<serde_json::Value> = std::fs::read_to_string(journal)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["sequence"], 1);
+    assert_eq!(events[1]["sequence"], 2);
+    assert!(events.iter().all(|event| event["ignored"] == true
+        && event["severity"] == "warning"
+        && event["kind"] == "provider_mismatch"));
+    let many_project = replay_project(1);
+    let cassette = std::fs::read_to_string(many_project.0.join("tape.jsonl")).unwrap();
+    std::fs::write(many_project.0.join("tape.jsonl"), cassette.repeat(128)).unwrap();
+    let many = replay(
+        &many_project,
+        "mismatch-many",
+        &["--ignore-provider-mismatch", "--json"],
+    );
+    assert!(
+        many.status.success(),
+        "{}",
+        String::from_utf8_lossy(&many.stderr)
+    );
+    let many: serde_json::Value = serde_json::from_slice(&many.stdout).unwrap();
+    let reason = many["ignored_failures"][0]["reason"].as_str().unwrap();
+    assert!(reason.contains("served 128 recorded response(s)"));
+    let journal = reason
+        .split_once("journal: ")
+        .unwrap()
+        .1
+        .split_once("; first mismatch evidence:")
+        .unwrap()
+        .0;
+    let events = std::fs::read_to_string(journal).unwrap();
+    assert_eq!(events.lines().count(), 128);
+    let rejected = replay_project(1).command(&[
+        "run",
+        "benchmark.toml",
+        "--tool-replay",
+        "--ignore-provider-mismatch",
+    ]);
+    assert!(!rejected.status.success());
 }
 
 #[cfg(unix)]

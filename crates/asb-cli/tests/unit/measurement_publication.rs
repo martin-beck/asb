@@ -331,6 +331,7 @@ fn native_consumption_measurement_preserves_unknown_and_observed_states() {
 #[cfg(unix)]
 fn fixture_measurement() -> RunMeasurement<'static> {
     RunMeasurement {
+        approximate_replay: false,
         ignored_failures: &[],
         replay_selection: None,
         native_replay_consumed: None,

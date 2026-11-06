@@ -19,6 +19,8 @@ pub(crate) enum RunStatus {
 pub(crate) enum FailureKind {
     RunError,
     AgentFailure,
+    ProviderMismatch,
+    ProviderUnconsumed,
     WorkloadCheckFailed,
     GraderError,
     CollectorError,
@@ -32,6 +34,8 @@ impl FailureKind {
         match self {
             Self::RunError => "run_error",
             Self::AgentFailure => "agent_failure",
+            Self::ProviderMismatch => "provider_mismatch",
+            Self::ProviderUnconsumed => "provider_unconsumed",
             Self::WorkloadCheckFailed => "workload_check_failed",
             Self::GraderError => "grader_error",
             Self::CollectorError => "collector_error",
@@ -57,6 +61,15 @@ impl RunFailure {
             reason: reason.into(),
             ignored: false,
             severity: "error",
+        }
+    }
+
+    pub(super) fn ignored(kind: FailureKind, reason: impl Into<String>) -> Self {
+        Self {
+            kind,
+            reason: reason.into(),
+            ignored: true,
+            severity: "warning",
         }
     }
 
