@@ -15,6 +15,8 @@ from asb_resources import ResourceJournal
 
 SUBMISSION_GIT_DIR = "/opt/asb-swebench-baseline.git"
 SUBMISSION_WORKTREE = "/testbed"
+# The per-command execution budget starts after the container gate is ready.
+_REPOSITORY_GATE_PREPARATION_SECONDS = 600
 
 
 def snapshot_storage_path(artifacts, attempt, tool_mode):
@@ -56,6 +58,7 @@ class SweBenchTask:
         self.catalog = None
         self.cancelled = None
         self.interrupted = False
+        self.preparing_repository = False
         self.attempt = "asb-" + uuid.uuid4().hex
         self.source_image_tag = None
         self.journal = None
@@ -70,6 +73,7 @@ class SweBenchTask:
         self.catalog, self.row = read_task(self.catalog_path, self.task_id)
         spec = make_test_spec(self.row)
         self.artifacts.mkdir(mode=0o700, parents=True, exist_ok=False)
+        self.preparing_repository = True
         try:
             self.journal = ResourceJournal(self.client, self.artifacts, self.attempt)
             image, source = resolve_image(self.client, spec.image, lambda: build_image(
@@ -120,9 +124,15 @@ class SweBenchTask:
             self.interrupted = True
             self.__exit__(None, None, None)
             raise
+        finally:
+            self.preparing_repository = False
 
     def checked(self, argv, output_limit=256 * 1024, environment=None, timeout=60):
-        result = self.workspace.execute(argv, environment=environment, timeout=timeout, output_limit=output_limit, cancelled=self.cancelled)
+        options = {"environment": environment, "timeout": timeout,
+                   "output_limit": output_limit, "cancelled": self.cancelled}
+        if self.preparing_repository:
+            options["preparation_timeout"] = _REPOSITORY_GATE_PREPARATION_SECONDS
+        result = self.workspace.execute(argv, **options)
         if result["timed_out"] or result["cancelled"] or result["exit_code"] != 0 or result["output_truncated"]:
             # Command output can contain agent-controlled data. Keep diagnostics
             # structured and do not echo it into human/measurement records.
