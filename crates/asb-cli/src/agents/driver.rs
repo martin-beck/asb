@@ -817,6 +817,13 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
 
 fn run(request: GuestRequest) -> Result<u8, Error> {
     request.capsule.validate()?;
+    validate_snapshot_marker(
+        request.snapshot_private_mount,
+        request.tool_tape_cassette.is_some(),
+        request.tool_replay,
+        std::env::var_os("ASB_FS_MARKER_SOCKET").as_deref(),
+        std::env::var_os("ASB_FS_REPLAY_SOCKET").as_deref(),
+    )?;
     // Establish this before preparation or collectors can start threads;
     // Linux cannot unshare the filesystem context after it is shared.
     if request.snapshot_private_mount {
@@ -1160,6 +1167,54 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         .code()
         .and_then(|code| u8::try_from(code).ok())
         .unwrap_or(1))
+}
+
+// The adapter selects native snapshot interception from these environment
+// variables. Losing one must not silently turn a snapshot replay into live
+// tool execution. Ordinary non-snapshot runs retain their existing behavior.
+fn validate_snapshot_marker(
+    snapshot: bool,
+    tool_tape: bool,
+    replay: bool,
+    record_marker: Option<&std::ffi::OsStr>,
+    replay_marker: Option<&std::ffi::OsStr>,
+) -> Result<(), Error> {
+    if !snapshot {
+        return Ok(());
+    }
+    let (expected, unexpected) = if replay {
+        (replay_marker, record_marker)
+    } else {
+        (record_marker, replay_marker)
+    };
+    if !tool_tape || expected.is_none_or(|value| value.is_empty()) || unexpected.is_some() {
+        return Err(Error::Input(
+            "snapshot tool capture requires exactly one matching nonempty marker and a tool cassette".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn snapshot_guest_requires_the_matching_marker_before_launch() {
+    use std::ffi::OsStr;
+    let socket = Some(OsStr::new("/opt/asb-private/snapshot.sock"));
+    let empty = Some(OsStr::new(""));
+    assert!(validate_snapshot_marker(false, false, false, None, None).is_ok());
+    for replay in [false, true] {
+        assert!(validate_snapshot_marker(true, true, replay, None, None).is_err());
+        assert!(validate_snapshot_marker(true, true, replay, empty, empty).is_err());
+        assert!(validate_snapshot_marker(true, true, replay, socket, socket).is_err());
+        let (record, replay_socket) = if replay {
+            (None, socket)
+        } else {
+            (socket, None)
+        };
+        assert!(validate_snapshot_marker(true, true, replay, record, replay_socket).is_ok());
+        assert!(validate_snapshot_marker(true, false, replay, record, replay_socket).is_err());
+        assert!(validate_snapshot_marker(true, true, !replay, record, replay_socket).is_err());
+    }
 }
 
 /// Move replay sidecars into receipt-backed files before the result reaches
