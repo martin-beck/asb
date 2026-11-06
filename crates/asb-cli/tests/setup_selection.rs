@@ -90,6 +90,86 @@ impl Drop for Project {
 }
 
 #[test]
+fn trial_count_writes_a_sampled_sweep_with_a_frozen_replacement_pool() {
+    let project = Project::new();
+    project.seed_pi();
+    project.write(
+        "catalogs/agentbench/ASB-BUNDLE",
+        "THUDM/AgentBench@d1e4a10db08c87075c78972e48ecc182be03e2d5\n",
+    );
+    project.write(
+        "catalogs/agentbench/asb-trial/ASB-ADAPTER-FIXTURE",
+        "fixture\n",
+    );
+    project.write("catalogs/agentbench.txt", "fixture workload\n");
+    for id in ["one", "two", "three"] {
+        project.write(
+            &format!("catalogs/agentbench/source/configs/tasks/{id}.yaml"),
+            "name: fixture\n",
+        );
+    }
+    project.write("catalogs/selected.workload.toml", "workload='agentbench'\n[[trials]]\nid='one'\n[[trials]]\nid='two'\n[[trials]]\nid='three'\n");
+    let result = project.setup(
+        "agentbench",
+        &[
+            "--trial-set",
+            "selected.workload.toml",
+            "--trial-count",
+            "2",
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let text = std::fs::read_to_string(project.0.join("selected.toml")).unwrap();
+    let sweep: toml::Value = toml::from_str(&text).unwrap();
+    let configs = sweep["configs"].as_array().unwrap();
+    assert_eq!(configs.len(), 2);
+    let sample = &sweep["sampled_trials"].as_array().unwrap()[0];
+    assert_eq!(sample["workload"].as_str(), Some("agentbench"));
+    assert_eq!(sample["count"].as_integer(), Some(2));
+    let candidates = sample["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 3);
+    let actual = configs
+        .iter()
+        .map(|path| {
+            let contents = std::fs::read_to_string(project.0.join(path.as_str().unwrap())).unwrap();
+            let config: toml::Value = toml::from_str(&contents).unwrap();
+            config["trial"].as_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        candidates[..2]
+            .iter()
+            .map(|id| id.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    );
+    let replay = project.command(&["sweep", "selected.toml", "--replay"]);
+    assert!(!replay.status.success());
+    assert!(String::from_utf8_lossy(&replay.stderr).contains("no benchmark was started"));
+    let original = std::fs::read(project.0.join("selected.toml")).unwrap();
+    for count in ["0", "4", "not-a-number"] {
+        let rejected = project.setup(
+            "agentbench",
+            &[
+                "--trial-set",
+                "selected.workload.toml",
+                "--trial-count",
+                count,
+            ],
+        );
+        assert!(!rejected.status.success(), "accepted invalid count {count}");
+        assert_eq!(
+            original,
+            std::fs::read(project.0.join("selected.toml")).unwrap()
+        );
+    }
+}
+
+#[test]
 fn all_five_catalogs_accept_explicit_instances_and_reject_missing_or_unknown_before_writing() {
     for (workload, source, revision, split, population, sdk, version) in [
         (

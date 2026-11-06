@@ -203,6 +203,7 @@ impl SweepPlan {
         let snapshot: Self = serde_json::from_slice(&bytes)
             .map_err(|_| Error::Input("invalid historical sweep source index".into()))?;
         let manifest = SweepFile {
+            sampled_trials: Vec::new(),
             configs: snapshot
                 .entries
                 .iter()
@@ -547,6 +548,7 @@ mod tests {
             ("terminal-bench-2.1", 89),
         ];
         let mut manifest = SweepFile {
+            sampled_trials: Vec::new(),
             repeat: None,
             resources: None,
             configs: Vec::new(),
@@ -632,6 +634,7 @@ mod tests {
             )
             .unwrap();
             SweepFile {
+                sampled_trials: Vec::new(),
                 repeat: None,
                 resources: None,
                 configs: vec!["one.toml".into(), "two.toml".into()],

@@ -37,10 +37,48 @@ pub(crate) const MAX_CONFIGS: usize = 65536;
 #[serde(deny_unknown_fields)]
 pub(crate) struct SweepFile {
     pub configs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sampled_trials: Vec<SampledTrials>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<crate::planning::Resources>,
+}
+
+/// A frozen workload sample and its ordered replacement population.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SampledTrials {
+    pub workload: String,
+    pub count: usize,
+    pub seed: String,
+    pub candidates: Vec<String>,
+}
+
+impl SampledTrials {
+    fn validate(&self) -> Result<(), Error> {
+        if self.workload.is_empty()
+            || self.workload.len() > 4096
+            || self.workload.chars().any(char::is_control)
+            || self.seed.len() != 16
+            || !self
+                .seed
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(Error::Input("invalid sampled workload or seed".into()));
+        }
+        let seed = u64::from_str_radix(&self.seed, 16)
+            .map_err(|_| Error::Input("invalid sampled trial seed".into()))?;
+        let expected = crate::cassette::TrialOrder::new(&self.candidates, self.count, seed)
+            .map_err(|error| Error::Input(error.to_string()))?;
+        if expected.candidates() != self.candidates {
+            return Err(Error::Input(
+                "sampled trial order does not match its seed and catalog".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -161,6 +199,11 @@ pub(crate) fn run_with_options(
     }
     let sweep_path = Path::new(path);
     let sweep = read_manifest(sweep_path)?;
+    if !sweep.sampled_trials.is_empty() {
+        return Err(Error::Input(
+            "sampled trial preparation is not yet available; no benchmark was started".into(),
+        ));
+    }
     let options = Options {
         repeat: options.repeat.or(sweep.repeat),
         ..options
@@ -468,6 +511,16 @@ pub(crate) fn parse_manifest(path: &Path, value: toml::Value) -> Result<SweepFil
             sweep.configs.len()
         )));
     }
+    let mut sampled_workloads = BTreeSet::new();
+    for selection in &sweep.sampled_trials {
+        selection.validate()?;
+        if !sampled_workloads.insert(&selection.workload) {
+            return Err(Error::Input(format!(
+                "sweep {label} contains duplicate sampled workload `{}`",
+                selection.workload
+            )));
+        }
+    }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     for reference in &sweep.configs {
         checked_benchmark_reference(parent, reference, &label)?;
@@ -511,11 +564,52 @@ mod tests {
     }
 
     #[test]
+    fn sampled_manifest_validates_its_frozen_order_and_rejects_duplicates() {
+        let catalog = vec!["one".to_owned(), "two".to_owned(), "three".to_owned()];
+        let order = crate::cassette::TrialOrder::new(&catalog, 2, 42).unwrap();
+        let selection = super::SampledTrials {
+            workload: "fixture".into(),
+            count: 2,
+            seed: format!("{:016x}", 42),
+            candidates: order.candidates().to_vec(),
+        };
+        let mut manifest = super::SweepFile {
+            configs: vec!["benchmark.toml".into()],
+            sampled_trials: vec![selection.clone()],
+            repeat: None,
+            resources: None,
+        };
+        let benchmark = temp_file("benchmark.toml", "");
+        let path = benchmark.parent().unwrap().join("sweep.toml");
+        let parse = |manifest: &super::SweepFile| {
+            let value = toml::Value::try_from(manifest).unwrap();
+            super::parse_manifest(&path, value)
+        };
+        assert!(parse(&manifest).is_ok());
+        std::fs::write(&path, toml::to_string(&manifest).unwrap()).unwrap();
+        let error = super::run_with_options(
+            path.to_str().unwrap(),
+            super::Options {
+                mode: Some(crate::tape::Mode::Replay),
+                ..Default::default()
+            },
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no benchmark was started"));
+        manifest.sampled_trials[0].candidates.reverse();
+        assert!(parse(&manifest).is_err());
+        manifest.sampled_trials = vec![selection.clone(), selection];
+        assert!(parse(&manifest).is_err());
+    }
+
+    #[test]
     fn manifest_supports_complete_original_populations_and_multi_agent_matrices() {
         for count in [300, 500, 2294, (2294 + 300 + 500 + 80 + 89) * 8] {
             let reference = "original-instance-selection-agent-provider-model-configuration.toml";
             let configs = vec![reference.to_owned(); count];
             let text = toml::to_string(&super::SweepFile {
+                sampled_trials: Vec::new(),
                 resources: None,
                 configs,
                 repeat: None,
@@ -547,6 +641,7 @@ mod tests {
         std::fs::write(
             &path,
             toml::to_string(&super::SweepFile {
+                sampled_trials: Vec::new(),
                 resources: None,
                 configs,
                 repeat: None,

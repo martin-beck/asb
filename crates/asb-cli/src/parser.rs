@@ -1217,6 +1217,9 @@ struct SetupArgs {
     /// Repeatable instance ID; optionally WORKLOAD=INSTANCE for scoped trials.
     #[arg(long, value_name = "INSTANCE")]
     trial: Vec<String>,
+    /// Sample this many distinct trials; optionally scope as WORKLOAD=COUNT.
+    #[arg(long, value_name = "COUNT", conflicts_with_all = ["trial", "mode", "preset"])]
+    trial_count: Vec<String>,
     /// Repeatable trial-set TOML; includes all enabled trials unless --trial is given.
     #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
     trial_set: Vec<String>,
@@ -1250,6 +1253,7 @@ impl From<SetupArgs> for config::SetupOptions {
             agent: value.agent,
             workload: value.workload,
             trial: value.trial,
+            trial_count: value.trial_count,
             trial_set: value.trial_set,
             provider: value.provider,
             model: value.model,

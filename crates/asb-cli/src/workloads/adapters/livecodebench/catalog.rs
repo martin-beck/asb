@@ -433,6 +433,7 @@ mod tests {
             )
             .unwrap();
             let manifest = crate::sweep::SweepFile {
+                sampled_trials: Vec::new(),
                 repeat: None,
                 configs: vec![reference],
                 resources: None,

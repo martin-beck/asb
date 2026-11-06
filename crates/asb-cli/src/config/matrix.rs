@@ -33,6 +33,7 @@ pub(super) fn setup_at(
         .chain(&options.model)
         .chain(&options.workload)
         .chain(&options.trial)
+        .chain(&options.trial_count)
         .chain(&options.trial_set)
         .chain(&options.measure)
     {
@@ -109,6 +110,7 @@ pub(super) fn setup_at(
     for (values, selected, flag) in [
         (&options.model, &options.provider, "model"),
         (&options.trial, &options.workload, "trial"),
+        (&options.trial_count, &options.workload, "trial-count"),
     ] {
         for value in values {
             if let Some((scope, _)) = value.split_once('=')
@@ -120,6 +122,12 @@ pub(super) fn setup_at(
             }
         }
     }
+    if !options.trial_count.is_empty() && !options.trial.is_empty() {
+        return Err(Error::Input(
+            "--trial-count cannot be combined with --trial".into(),
+        ));
+    }
+    let mut sampled_trials = Vec::new();
     let mut configs = Population::default();
     for workload in unique(&options.workload) {
         let catalog =
@@ -132,7 +140,46 @@ pub(super) fn setup_at(
                 .collect::<BTreeSet<_>>()
         });
         let mut validated_trials = BTreeSet::new();
-        let trials: Vec<Option<String>> = if options.trial.is_empty() {
+        let counts = scoped(&options.trial_count, workload);
+        if counts.len() > 1 {
+            return Err(Error::Input(format!(
+                "select one --trial-count for workload `{workload}`"
+            )));
+        }
+        let trials: Vec<Option<String>> = if let Some(value) = counts.first() {
+            use std::hash::BuildHasher;
+            let count = value
+                .parse::<usize>()
+                .ok()
+                .filter(|count| *count > 0)
+                .ok_or_else(|| {
+                    Error::Input(format!(
+                        "--trial-count `{value}` must be a positive integer"
+                    ))
+                })?;
+            let available = enabled_trials
+                .as_ref()
+                .or_else(|| catalog.as_ref().map(|catalog| &catalog.task_ids))
+                .ok_or_else(|| {
+                    Error::Input(format!(
+                        "workload `{workload}` has no installed trial catalog to sample"
+                    ))
+                })?;
+            let ids: Vec<_> = available.iter().cloned().collect();
+            let identity = crate::workloads::TaskIdentity::local("trial-sample", Some(workload));
+            let seed = std::collections::hash_map::RandomState::new().hash_one(identity.attempt_id);
+            let order = crate::cassette::TrialOrder::new(&ids, count, seed).map_err(|error| {
+                Error::Input(format!("cannot sample workload `{workload}`: {error}"))
+            })?;
+            let trials = order.initial().iter().cloned().map(Some).collect();
+            sampled_trials.push(crate::sweep::SampledTrials {
+                workload: workload.clone(),
+                count,
+                seed: format!("{seed:016x}"),
+                candidates: order.candidates().to_vec(),
+            });
+            trials
+        } else if options.trial.is_empty() {
             set.map_or_else(
                 || vec![None],
                 |(_, set)| {
@@ -192,6 +239,7 @@ pub(super) fn setup_at(
                             native_snapshot_record: options.native_snapshot_record,
                             workload: vec![workload.clone()],
                             trial: trial.iter().cloned().collect(),
+                            trial_count: Vec::new(),
                             trial_set: set
                                 .map(|(filename, _)| filename.clone())
                                 .into_iter()
@@ -220,12 +268,19 @@ pub(super) fn setup_at(
     }
     let manifest_repeat = options.repeat;
     let configs = configs.into_configs();
-    if repeated || configs.len() > 1 {
+    if repeated || configs.len() > 1 || !sampled_trials.is_empty() {
         let path = options
             .output
             .map(|path| base.join(path))
             .unwrap_or_else(|| root.join(format!("asb-sweep-{}.toml", stamp())));
-        publish_sweep_with_repeat(&path, configs, manifest_repeat, output)?;
+        publish_sweep_with_progress_and_repeat(
+            &path,
+            configs,
+            manifest_repeat,
+            sampled_trials,
+            output,
+            &mut |_, _| {},
+        )?;
     } else {
         let config = &configs[0];
         let text = render(config)?;
@@ -514,7 +569,14 @@ fn publish_sweep_with_repeat(
     repeat: Option<u64>,
     output: &mut dyn Write,
 ) -> Result<(), Error> {
-    publish_sweep_with_progress_and_repeat(path, configs, repeat, output, &mut |_, _| {})
+    publish_sweep_with_progress_and_repeat(
+        path,
+        configs,
+        repeat,
+        Vec::new(),
+        output,
+        &mut |_, _| {},
+    )
 }
 
 /// Publish a sweep while reporting each durable benchmark configuration and
@@ -526,18 +588,19 @@ pub(crate) fn publish_sweep_with_progress(
     output: &mut dyn Write,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<(), Error> {
-    publish_sweep_with_progress_and_repeat(path, configs, None, output, progress)
+    publish_sweep_with_progress_and_repeat(path, configs, None, Vec::new(), output, progress)
 }
 
 fn publish_sweep_with_progress_and_repeat(
     path: &Path,
     configs: Vec<BenchmarkConfig>,
     repeat: Option<u64>,
+    sampled_trials: Vec<crate::sweep::SampledTrials>,
     output: &mut dyn Write,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<(), Error> {
     let native_snapshot_record = configs.iter().any(|config| config.native_snapshot_record);
-    let prepared = prepared::Sweep::new_with_repeat(path, configs, repeat)?;
+    let prepared = prepared::Sweep::new_with_samples(path, configs, repeat, sampled_trials)?;
     if fs::symlink_metadata(path).is_ok() {
         return Err(Error::Input(format!(
             "sweep {} already exists; choose a new --output filename",
