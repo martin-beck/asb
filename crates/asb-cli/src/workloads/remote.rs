@@ -1226,9 +1226,7 @@ impl Session {
             artifact_output: &artifact_output,
             private_inputs,
             auxiliary_tools: snapshot_auxiliary_tools(
-                self.snapshot
-                    && context.tool_tape_cassette.is_some()
-                    && context.config.workload.starts_with("swe-bench"),
+                self.snapshot && context.tool_tape_cassette.is_some(),
                 &tools_root,
                 std::env::var_os("PATH").as_deref(),
             )?,
