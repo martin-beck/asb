@@ -621,6 +621,31 @@ def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=N
             raise
 
 
+def isolate_snapshot_replay_network(task):
+    """Disconnect only this attempt's task container before native replay."""
+    container = task.workspace.container
+    container.reload()
+    attrs = container.attrs
+    labels = attrs.get('Config', {}).get('Labels', {}) or {}
+    mode = attrs.get('HostConfig', {}).get('NetworkMode')
+    if (labels.get('asb.owner') != 'asb' or labels.get('asb.attempt') != task.workspace.attempt
+            or not isinstance(mode, str) or mode == 'host' or mode.startswith('container:')):
+        raise ExecutionError('snapshot replay requires an owned, private container network')
+    networks = attrs.get('NetworkSettings', {}).get('Networks')
+    if not isinstance(networks, dict):
+        raise ExecutionError('snapshot replay network state is unavailable')
+    for name in list(networks):
+        if name != 'none':
+            container.client.networks.get(name).disconnect(container)
+    container.reload()
+    remaining = container.attrs.get('NetworkSettings', {}).get('Networks')
+    if not isinstance(remaining, dict) or any(name != 'none' for name in remaining):
+        raise ExecutionError('snapshot replay container still has a routed network')
+    if any(not isinstance(value, dict) or value.get('IPAddress') or value.get('GlobalIPv6Address')
+           for value in remaining.values()):
+        raise ExecutionError('snapshot replay container still has a routed address')
+
+
 def _execute_agent(task, request, before_resume, on_output, cancelled, resources, relays, on_ended, preparation_budget):
     guest,environment = prepare_agent(task,request,cancelled,resources,relays,preparation_budget)
     # The workload may select an already-prepared runtime for the client.
@@ -648,6 +673,10 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
         for previous in list(container.attrs["NetworkSettings"]["Networks"]):
             if previous != network:
                 container.client.networks.get(previous).disconnect(container)
+    if getattr(task, 'snapshot', False) and task.tool_mode == 'replay':
+        # The provider relay listens on loopback inside the container and uses
+        # docker exec streams; it does not require a routed container network.
+        isolate_snapshot_replay_network(task)
     guest = dict(guest)
     lifetime = guest.get("process_lifetime", "quiesce")
     lifetime_options = {}
