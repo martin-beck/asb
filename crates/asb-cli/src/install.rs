@@ -1669,9 +1669,93 @@ fn install_recipe_in(
     output: &mut dyn std::io::Write,
     progress: &mut dyn FnMut(u8, ProgressStage),
 ) -> InstallResult<PathBuf> {
+    if let Recipe::Npm {
+        manifest: Some(manifest),
+        ..
+    } = recipe
+        && fs::symlink_metadata(root).is_ok()
+    {
+        return reinstall_npm_in(context, recipe, root, manifest, output, progress);
+    }
     fs::create_dir_all(root)
         .map_err(|error| Error::Io(format!("cannot create {}: {error}", root.display())))?;
     PreparedRecipe::resolve(context, recipe, root)?.install(output, progress)
+}
+
+fn merge_npm_defaults(existing: &mut serde_json::Value, defaults: &serde_json::Value) {
+    if let (Some(existing), Some(defaults)) = (existing.as_object_mut(), defaults.as_object()) {
+        for (key, value) in defaults {
+            match existing.get_mut(key) {
+                Some(existing) => merge_npm_defaults(existing, value),
+                None => {
+                    existing.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+}
+
+fn reinstall_npm_in(
+    context: &OperationContext,
+    recipe: Recipe,
+    root: &Path,
+    manifest: &str,
+    output: &mut dyn io::Write,
+    progress: &mut dyn FnMut(u8, ProgressStage),
+) -> InstallResult<PathBuf> {
+    let metadata = fs::symlink_metadata(root).map_err(crate::io_error)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(Error::Io(format!(
+            "cannot reinstall npm tool: {} is not a directory",
+            root.display()
+        ))
+        .into());
+    }
+    let parent = root
+        .parent()
+        .ok_or_else(|| Error::Io("npm tool has no parent directory".into()))?;
+    let unique = tools::runtime::unique_id();
+    let staged = parent.join(format!(".asb-npm-stage-{unique}"));
+    let backup = parent.join(format!(".asb-npm-previous-{unique}"));
+    fs::create_dir(&staged).map_err(crate::io_error)?;
+    let defaults: serde_json::Value = serde_json::from_str(manifest)
+        .map_err(|error| Error::Io(format!("invalid adapter npm manifest: {error}")))?;
+    let old_manifest = root.join("package.json");
+    let mut merged = match fs::read(&old_manifest) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            Error::Io(format!(
+                "invalid existing npm manifest {}: {error}",
+                old_manifest.display()
+            ))
+        })?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => defaults.clone(),
+        Err(error) => return Err(crate::io_error(error).into()),
+    };
+    if !merged.is_object() || !defaults.is_object() {
+        return Err(Error::Io("npm manifest must be a JSON object".into()).into());
+    }
+    merge_npm_defaults(&mut merged, &defaults);
+    fs::write(
+        staged.join("package.json"),
+        serde_json::to_vec_pretty(&merged).map_err(|error| Error::Io(error.to_string()))?,
+    )
+    .map_err(crate::io_error)?;
+    let staged_executable = install_package(context, recipe, &staged, output, progress)?;
+    let relative = staged_executable
+        .strip_prefix(&staged)
+        .map_err(|_| Error::Io("npm executable escaped staging directory".into()))?;
+    fs::rename(root, &backup).map_err(crate::io_error)?;
+    if let Err(error) = fs::rename(&staged, root) {
+        let restore = fs::rename(&backup, root);
+        return Err(Error::Io(format!("cannot publish npm reinstall: {error}; previous installation restore: {restore:?}; staged installation retained at {}", staged.display())).into());
+    }
+    writeln!(
+        output,
+        "Preserved previous tool installation at {}.",
+        backup.display()
+    )
+    .map_err(crate::io_error)?;
+    Ok(root.join(relative))
 }
 
 fn install_package(

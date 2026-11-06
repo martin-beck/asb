@@ -731,6 +731,55 @@ fn npm_contract(root: &Path) {
             .unwrap()
             .contains("preserved")
     );
+    fs::write(directory.join("prior-evidence"), "keep").unwrap();
+    let with_manifest = |package| Recipe::Npm {
+        package,
+        executable: "fixture-client",
+        manifest: Some(r#"{"private":true,"allowScripts":{"fixture-success":true}}"#),
+    };
+    let mut report = Vec::new();
+    install_recipe(
+        with_manifest("fixture-success@1"),
+        &directory,
+        root,
+        &mut report,
+        &mut |_, _| {},
+    )
+    .unwrap();
+    let updated: serde_json::Value =
+        serde_json::from_slice(&fs::read(directory.join("package.json")).unwrap()).unwrap();
+    assert_eq!(updated["name"], "preserved");
+    assert_eq!(updated["allowScripts"]["fixture-success"], true);
+    assert!(
+        String::from_utf8(report)
+            .unwrap()
+            .contains("Preserved previous tool installation")
+    );
+    assert!(
+        fs::read_dir(directory.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".asb-npm-previous-")
+                && entry.path().join("prior-evidence").is_file())
+    );
+    fs::write(directory.join("current-evidence"), "still active").unwrap();
+    assert!(
+        install_recipe(
+            with_manifest("fixture-fail@1"),
+            &directory,
+            root,
+            &mut Vec::new(),
+            &mut |_, _| {}
+        )
+        .is_err()
+    );
+    assert_eq!(
+        fs::read_to_string(directory.join("current-evidence")).unwrap(),
+        "still active"
+    );
     let absent = install_recipe(
         package("fixture-missing-executable@1"),
         &root.join("tools/npm-missing-executable"),
@@ -783,7 +832,7 @@ fn npm_contract(root: &Path) {
             .unwrap()
             .lines()
             .count(),
-        5
+        7
     );
     assert!(
         missing.to_string().contains("curl"),

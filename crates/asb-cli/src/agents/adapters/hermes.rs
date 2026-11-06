@@ -318,10 +318,26 @@ fn yaml_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+fn usage_from_ledger(value: &serde_json::Value) -> crate::measurements::TokenUsage {
+    let mut usage = super::super::usage_fields(value);
+    // Hermes' canonical input_tokens excludes both cache reads and cache
+    // writes. ASB's input includes them; don't invent a complete input
+    // when any component is absent from the usage ledger.
+    let write = value
+        .get("cache_write_tokens")
+        .and_then(serde_json::Value::as_u64);
+    usage.input_tokens = usage
+        .input_tokens
+        .zip(usage.cached_tokens)
+        .zip(write)
+        .and_then(|((input, read), write)| input.checked_add(read)?.checked_add(write));
+    usage.with_derived_total()
+}
+
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
     let mut artifacts = AgentArtifacts::default();
     if let Some(value) = context.frozen.document("usage.json") {
-        artifacts.token_usage = Some(super::super::usage_fields(value).with_derived_total());
+        artifacts.token_usage = Some(usage_from_ledger(value));
         artifacts.steps = value.get("api_calls").and_then(serde_json::Value::as_u64);
     }
     let Some(progress) = context.frozen.document("native-tool-progress.json") else {
@@ -872,7 +888,7 @@ assert stable(None) is None
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            r#"{"input_tokens":11,"output_tokens":7,"cache_read_tokens":3,"total_tokens":21,"api_calls":4}"#,
+            r#"{"input_tokens":11,"output_tokens":7,"cache_read_tokens":3,"cache_write_tokens":2,"total_tokens":23,"api_calls":4}"#,
         )
         .unwrap();
         let artifacts = collect(&CollectionContext {
@@ -888,12 +904,23 @@ assert stable(None) is None
             mcp_tape: None,
         });
         let usage = artifacts.token_usage.unwrap();
-        assert_eq!(usage.input_tokens, Some(11));
+        assert_eq!(usage.input_tokens, Some(16));
         assert_eq!(usage.output_tokens, Some(7));
         assert_eq!(usage.cached_tokens, Some(3));
-        assert_eq!(usage.total_tokens, Some(18));
+        assert_eq!(usage.total_tokens, Some(23));
         assert_eq!(artifacts.steps, Some(4));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn incomplete_hermes_cache_ledger_does_not_invent_total_input() {
+        let usage = usage_from_ledger(&serde_json::json!({
+            "input_tokens": 11, "output_tokens": 7, "cache_read_tokens": 3
+        }));
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, Some(7));
+        assert_eq!(usage.cached_tokens, Some(3));
+        assert_eq!(usage.total_tokens, None);
     }
 
     #[test]

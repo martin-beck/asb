@@ -723,7 +723,7 @@ struct Session {
     controller: Controller,
     invocation: TaskInvocation,
     baseline: BaselineEvidence,
-    initial_material: Result<String, String>,
+    initial_material: Result<MaterialIdentities, String>,
     guest_workspace: String,
     agent_timeout: Duration,
     measurement_active: bool,
@@ -983,14 +983,14 @@ pub(crate) fn launch(
     }))
 }
 
-fn request_initial_material(controller: &mut Controller) -> Result<String, String> {
+fn request_initial_material(controller: &mut Controller) -> Result<MaterialIdentities, String> {
     request_initial_material_until(controller, Instant::now() + INITIAL_MATERIAL_TIMEOUT)
 }
 
 fn request_initial_material_until(
     controller: &mut Controller,
     deadline: Instant,
-) -> Result<String, String> {
+) -> Result<MaterialIdentities, String> {
     controller.send(
         &Request::InitialMaterial {
             binary: &runtime_binary()?,
@@ -1008,13 +1008,21 @@ fn request_initial_material_until(
     validate_initial_material(&response["material"])
 }
 
-fn validate_initial_material(value: &Value) -> Result<String, String> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MaterialIdentities {
+    primary: String,
+    legacy: Option<String>,
+}
+
+fn validate_initial_material(value: &Value) -> Result<MaterialIdentities, String> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Material {
         schema_version: u32,
         scope: String,
         sha256: String,
+        #[serde(default)]
+        legacy_sha256: Option<String>,
     }
     let invalid = || {
         "official prepared material identity has an unsupported schema, scope or digest".to_owned()
@@ -1023,14 +1031,25 @@ fn validate_initial_material(value: &Value) -> Result<String, String> {
     if material.schema_version != 1
         || material.scope != "prepared-workload-material-v1"
         || material.sha256.len() != 64
-        || !material
-            .sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !valid_material_digest(&material.sha256)
+        || material
+            .legacy_sha256
+            .as_deref()
+            .is_some_and(|digest| !valid_material_digest(digest))
     {
         return Err(invalid());
     }
-    Ok(material.sha256)
+    Ok(MaterialIdentities {
+        primary: material.sha256,
+        legacy: material.legacy_sha256,
+    })
+}
+
+fn valid_material_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 impl Session {
@@ -1540,7 +1559,14 @@ impl WorkloadSession for Session {
     }
 
     fn initial_material_sha256(&self) -> Result<String, String> {
-        self.initial_material.clone()
+        self.initial_material
+            .clone()
+            .map(|material| material.primary)
+    }
+    fn legacy_initial_material_sha256(&self) -> Result<Option<String>, String> {
+        self.initial_material
+            .clone()
+            .map(|material| material.legacy)
     }
     fn cancel_prepared(&mut self) -> Result<(), String> {
         self.cancel().map(|_| ())
@@ -1753,7 +1779,7 @@ mod tests {
             let mut controller = super::Controller::spawn(&mut command).unwrap();
             let result = super::request_initial_material(&mut controller);
             if event["event"] == "initial-material" {
-                assert_eq!(result.unwrap(), "a".repeat(64));
+                assert_eq!(result.unwrap().primary, "a".repeat(64));
             } else {
                 let error = result.unwrap_err();
                 if event["error_class"] == "ExecutionError" {
@@ -1771,7 +1797,7 @@ mod tests {
     fn prepared_material_requires_exact_scope_schema_digest_and_no_unknown_fields() {
         let original = serde_json::json!({"schema_version":1,"scope":"prepared-workload-material-v1","sha256":"a".repeat(64)});
         assert_eq!(
-            super::validate_initial_material(&original).unwrap(),
+            super::validate_initial_material(&original).unwrap().primary,
             "a".repeat(64)
         );
         for (key, value) in [
@@ -1785,6 +1811,16 @@ mod tests {
             let error = super::validate_initial_material(&changed).unwrap_err();
             assert!(!error.contains("must-not-appear"));
         }
+        let mut with_legacy = original.clone();
+        with_legacy["legacy_sha256"] = serde_json::json!("c".repeat(64));
+        assert_eq!(
+            super::validate_initial_material(&with_legacy)
+                .unwrap()
+                .legacy,
+            Some("c".repeat(64))
+        );
+        with_legacy["legacy_sha256"] = serde_json::json!("invalid");
+        assert!(super::validate_initial_material(&with_legacy).is_err());
         assert!(super::validate_initial_material(&serde_json::Value::Null).is_err());
     }
 
