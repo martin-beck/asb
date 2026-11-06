@@ -915,7 +915,8 @@ fn rename_directory_noreplace(source: &Path, target: &Path) -> std::io::Result<(
     // SAFETY: both pointers refer to live, NUL-terminated filesystem paths.
     #[cfg(target_os = "linux")]
     let status = unsafe {
-        libc::renameat2(
+        libc::syscall(
+            libc::SYS_renameat2,
             libc::AT_FDCWD,
             source.as_ptr(),
             libc::AT_FDCWD,

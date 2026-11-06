@@ -750,7 +750,7 @@ fn parse_host_settings_confirmation(answer: &str) -> Option<bool> {
     host_setup::parse_confirmation(answer)
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 fn configure_cgroup_parent(
     output: &mut dyn std::io::Write,
     yes: bool,
@@ -961,7 +961,7 @@ fn clean_project(root: &Path, config_path: &Path) -> Result<PathBuf, Error> {
     Ok(cleanup)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 fn reset_project(root: &Path, config_path: &Path) -> Result<(), Error> {
     let existing = fs::read_to_string(config_path)
         .map_err(|error| Error::Io(format!("cannot read {}: {error}", config_path.display())))?;
