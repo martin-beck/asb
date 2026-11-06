@@ -5,6 +5,13 @@ const exchanges = [
   {ordinal:1,request:{tool:'Fetch',args:{url:'fixture'}},outcome:{ok:true,value:'answer'}},
   {ordinal:0,request:{tool:'Read',args:{path:'fixture'}},outcome:{ok:false,name:'Error',message:'failed'}},
 ];
+if (process.argv.includes('--same-request')) {
+  exchanges[0].request = {tool:'Read',args:{path:'fixture'}};
+  if (process.argv.includes('--call-ids')) {
+    exchanges[0].request.call_id = 'second';
+    exchanges[1].request.call_id = 'first';
+  }
+}
 if (process.argv.includes('--sequence')) {
   exchanges[0].snapshot_sequence = 3;
   exchanges[1].snapshot_sequence = 2;

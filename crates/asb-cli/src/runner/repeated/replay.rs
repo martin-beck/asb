@@ -315,7 +315,12 @@ impl Prepared {
         Ok(inputs)
     }
 
-    pub fn stage(&mut self, root: &Path, inputs: &mut [ReplayInput]) -> Result<(), Error> {
+    pub fn stage(
+        &mut self,
+        root: &Path,
+        inputs: &mut [ReplayInput],
+        validate_pi_native: bool,
+    ) -> Result<(), Error> {
         private_directory(&root.join("inputs"), false)?;
         for input in inputs {
             if let Some(manifest) = self.source.manifest() {
@@ -425,6 +430,29 @@ impl Prepared {
                     .source
                     .read_native(input.track.expect("selected bundle track"))
                     .map_err(input_error)?;
+                if let Some(snapshot) = &input.workspace_snapshots {
+                    let digest = self
+                        .source
+                        .manifest()
+                        .and_then(|manifest| {
+                            manifest
+                                .track(input.track.expect("selected bundle track"))
+                                .ok()
+                        })
+                        .and_then(|track| {
+                            track
+                                .artifacts
+                                .iter()
+                                .find(|item| item.kind == "workspace-snapshots")
+                        })
+                        .map(|item| item.sha256.as_str());
+                    validate_pi_snapshot_replay(
+                        validate_pi_native,
+                        &bytes,
+                        &root.join(snapshot),
+                        digest,
+                    )?;
+                }
                 // Validate before publication. Later consumers receive only
                 // the payload-free launch descriptor.
                 #[cfg(not(test))]
@@ -494,6 +522,24 @@ impl Prepared {
             statistics,
         }
     }
+}
+
+fn validate_pi_snapshot_replay(
+    enabled: bool,
+    native: &[u8],
+    snapshot: &Path,
+    digest: Option<&str>,
+) -> Result<(), Error> {
+    if !enabled {
+        return Ok(());
+    }
+    let digest = digest
+        .ok_or_else(|| Error::Input("selected snapshot archive identity is unavailable".into()))?;
+    let mut archive = fs::File::open(snapshot)
+        .map_err(|_| Error::Input("selected snapshot archive is unavailable".into()))?;
+    crate::agents::find("pi")
+        .expect("Pi adapter is registered")
+        .verify_native_snapshot(native, &mut archive, digest)
 }
 
 /// Each batch has its own replica aliases; each proxy still owns its own cursor.
@@ -747,6 +793,12 @@ fn input_error(error: crate::cassette::Error) -> Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_only_replay_does_not_read_native_snapshots() {
+        let missing = std::path::Path::new("/nonexistent-asb-snapshot-preflight-test");
+        assert!(super::validate_pi_snapshot_replay(false, b"invalid", missing, None).is_ok());
+        assert!(super::validate_pi_snapshot_replay(true, b"invalid", missing, None).is_err());
+    }
     use super::*;
 
     #[test]

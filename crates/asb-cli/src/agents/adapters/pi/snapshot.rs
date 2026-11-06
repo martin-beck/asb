@@ -3,7 +3,10 @@ use crate::{
     Error,
     cassette::{NativeToolTransport, NativeTrack},
 };
-use std::{collections::BTreeSet, fs::File};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::File,
+};
 
 fn invalid() -> Error {
     Error::Run("native recording does not match its settled snapshot markers".into())
@@ -39,6 +42,8 @@ pub(in crate::agents::adapters) fn verify_for(
     }
     let requests = transport.recorded_requests(&tools).ok_or_else(invalid)?;
     let mut expected = Vec::with_capacity(requests.len());
+    let mut identities = BTreeMap::new();
+    let mut pi_ids = BTreeSet::new();
     let mut ordinals = BTreeSet::new();
     for request in requests {
         let value: serde_json::Value = serde_json::from_slice(request).map_err(|_| invalid())?;
@@ -55,11 +60,34 @@ pub(in crate::agents::adapters) fn verify_for(
         if !ordinals.insert(ordinal) {
             return Err(invalid());
         }
+        if agent == "pi" {
+            let request = value
+                .get("request")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(invalid)?;
+            let has_id = request.contains_key("call_id");
+            if has_id
+                && request
+                    .get("call_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(str::is_empty)
+            {
+                return Err(invalid());
+            }
+            pi_ids.insert(has_id);
+            identities.insert(
+                format!("{agent}-{ordinal}"),
+                serde_json::to_vec(request).map_err(|_| invalid())?,
+            );
+        }
         let sequence = value
             .get("snapshot_sequence")
             .map(|item| item.as_u64().ok_or_else(invalid))
             .transpose()?;
         expected.push((sequence, format!("{agent}-{ordinal}")));
+    }
+    if pi_ids.len() > 1 {
+        return Err(invalid());
     }
     if ordinals.iter().copied().ne(0..ordinals.len() as u64) {
         return Err(invalid());
@@ -79,7 +107,15 @@ pub(in crate::agents::adapters) fn verify_for(
     }
     let expected: Vec<String> = expected.into_iter().map(|(_, alias)| alias).collect();
 
-    crate::agents::snapshot_markers::verify_markers(snapshot, &expected)
+    if agent == "pi" {
+        crate::agents::snapshot_markers::verify_markers_with_identities(
+            snapshot,
+            &expected,
+            Some(&identities),
+        )
+    } else {
+        crate::agents::snapshot_markers::verify_markers(snapshot, &expected)
+    }
 }
 
 #[cfg(test)]
@@ -92,6 +128,10 @@ mod tests {
     }
 
     fn native_for(agent: &str, sequenced: bool) -> Vec<u8> {
+        native_with_flags(agent, sequenced, &[])
+    }
+
+    fn native_with_flags(agent: &str, sequenced: bool, flags: &[&str]) -> Vec<u8> {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/continue_native_sidecar_emit.mjs");
         let mut command = std::process::Command::new("node");
@@ -102,6 +142,7 @@ mod tests {
         if sequenced {
             command.arg("--sequence");
         }
+        command.args(flags);
         let output = command.output().unwrap();
         assert!(output.status.success());
         crate::agents::native_guest::finalize(agent, &output.stdout, &"a".repeat(64)).unwrap()
@@ -136,6 +177,33 @@ mod tests {
         }
         tar.finish().unwrap();
         tar.into_inner().unwrap().flush().unwrap();
+    }
+
+    #[test]
+    fn pi_rejects_legacy_overlaps_but_accepts_distinct_call_ids() {
+        let root =
+            crate::fixture_namespace::allocate(&std::env::temp_dir(), "pi-snapshot-call-identity")
+                .unwrap();
+        let snapshot = root.join("overlap.tar");
+        archive(&snapshot, false, true);
+        let legacy = native_with_flags("pi", true, &["--same-request"]);
+        let error = verify(
+            &legacy,
+            &mut File::open(&snapshot).unwrap(),
+            &"a".repeat(64),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("overlapping indistinguishable"));
+        let modern = native_with_flags("pi", true, &["--same-request", "--call-ids"]);
+        assert!(
+            verify(
+                &modern,
+                &mut File::open(&snapshot).unwrap(),
+                &"a".repeat(64)
+            )
+            .is_ok()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
