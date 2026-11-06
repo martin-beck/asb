@@ -702,7 +702,14 @@ impl<'a> ReadyAttempt<'a> {
                             .map(|custom| custom.policy.sha256.clone()),
                     })
                 })();
-                identity.and_then(|identity| arrival.ready(identity))?;
+                let identity = identity?;
+                match workload_session
+                    .legacy_initial_material_sha256()
+                    .map_err(Error::Run)?
+                {
+                    Some(legacy) => arrival.ready_with_legacy(identity, Some(legacy))?,
+                    None => arrival.ready(identity)?,
+                }
             }
 
             let launch = options

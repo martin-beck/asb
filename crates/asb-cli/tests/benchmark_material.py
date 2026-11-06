@@ -95,6 +95,34 @@ class MaterialTests(unittest.TestCase):
         with self.assertRaisesRegex(MATERIAL.MaterialError,"outside declared roots"):
             MATERIAL.capture_workdir(nested,definition)
 
+    def test_swe_source_image_identity_excludes_only_verified_ownership_labels(self):
+        from asb_swebench_task import source_image_material
+        from asb_execution import ExecutionError
+        labels = {"asb.owner":"asb", "asb.attempt":"asb-"+"a"*32, "asb.recovery":"a"*32}
+        attrs = {"Architecture":"arm64", "Os":"linux", "RootFS":{"Type":"layers", "Layers":["sha256:"+"1"*64]},
+                 "Config":{"Labels":dict(labels, vendor="fixture"), "Env":["PATH=/bin"], "WorkingDir":"/testbed"}}
+        first = SimpleNamespace(id="sha256:"+"a"*64,attrs=attrs)
+        source = {"status":"built", "image_id":first.id}
+        expected = source_image_material(first,first.id,source,labels)
+        changed = copy.deepcopy(attrs)
+        other_labels = {"asb.owner":"asb", "asb.attempt":"asb-"+"b"*32, "asb.recovery":"b"*32}
+        changed["Config"]["Labels"].update(other_labels)
+        other = SimpleNamespace(id="sha256:"+"b"*64,attrs=changed)
+        other_source = {"status":"built", "image_id":other.id}
+        self.assertEqual(expected,source_image_material(other,other.id,other_source,other_labels))
+        changed["Config"]["Env"] = ["PATH=/other"]
+        self.assertNotEqual(expected,source_image_material(other,other.id,other_source,other_labels))
+        changed["Config"]["Env"] = ["PATH=/bin"]
+        changed["RootFS"]["Layers"] = ["sha256:"+"2"*64]
+        self.assertNotEqual(expected,source_image_material(other,other.id,other_source,other_labels))
+        changed["Config"]["Labels"]["vendor"] = "changed"
+        self.assertNotEqual(expected,source_image_material(other,other.id,other_source,other_labels))
+        changed["Config"]["Labels"]["asb.recovery"] = "wrong"
+        with self.assertRaisesRegex(ExecutionError,"ownership"):
+            source_image_material(other,other.id,other_source,other_labels)
+        with self.assertRaisesRegex(ExecutionError,"identity or ownership"):
+            source_image_material(first,first.id,{"status":"built","image_id":other.id},labels)
+
     def test_swe_capture_normalizes_only_proven_reset_artifacts_and_binds_git_config(self):
         from asb_swebench_task import SweBenchTask
         import asb_material
@@ -133,6 +161,15 @@ class MaterialTests(unittest.TestCase):
         finally:
             asb_material.capture_task = original_capture
         self.assertEqual(archive_calls, 0)
+        image_id = task.workspace.image_identity["image_id"]
+        task.workspace.image = SimpleNamespace(id=image_id,attrs={"Architecture":"amd64","Os":"linux",
+            "RootFS":{"Type":"layers","Layers":["sha256:"+"d"*64]},
+            "Config":{"Labels":dict(labels),"Env":["PATH=/bin"]}})
+        task.invocation["environment_source"] = {"status":"built","image_id":image_id}
+        current = task.initial_material()
+        self.assertEqual(current["legacy_sha256"],before["sha256"])
+        self.assertNotEqual(current["sha256"],before["sha256"])
+        del task.invocation["environment_source"]
         task.workspace = tree(index=b"different reset timestamps")
         self.assertEqual(before,task.initial_material())
         task.workspace = tree(config=b"changed hooks/config")
