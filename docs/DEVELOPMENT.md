@@ -7,9 +7,9 @@ consumption for each replica. It is not run by CI or a live-provider test.
 
 The opt-in `crates/asb-cli/tests/fixtures/pi_native/swe_snapshot_c4.py`
 qualifies one original `sympy__sympy-22236` task through ASB's experimental Pi
-native snapshot cassette. In a disposable x86-64 VM, initialize a project,
+native snapshot cassette. On a disposable x86-64 Linux host, initialize a project,
 install Pi and the official `swe-bench` workload, and make the task image,
-Docker, Node, Btrfs, rsync and QEMU storage tools available. Set
+Docker, Node, Btrfs, rsync and sparse-file capable storage available. Set
 `ASB_TEST_SWECATALOG_ROOT` to that project, `ASB_TEST_BENCHMARK_ASB` to the
 ASB binary, and run the script with the installed SWE-bench Python. It records
 one local HTTP tool call and applies the upstream reference patch using a
@@ -26,15 +26,22 @@ its original HTTP request counter.
 
 The opt-in `tests/fixtures/pi_native/snapshot_http_c4.py` runs the installed
 pinned Pi core and native Bash tool with the real Btrfs snapshot supervisor.
-In a disposable VM, set `ASB_PI_FIXTURE_DIR` to an existing writable directory,
+On a disposable native Linux host, set `ASB_PI_FIXTURE_DIR` to an existing writable directory,
 `ASB_TEST_PI_BUNDLE` and `ASB_TEST_PI_BASH` to the installed Pi modules, and
-put Node 22 on `PATH`. The VM needs passwordless sudo, user/mount/network
-namespaces, loop devices, Btrfs, rsync, QEMU storage tools, curl and iproute2.
+put Node 22 on `PATH`. The host needs passwordless sudo, user/mount/network
+namespaces, loop devices, Btrfs, rsync, sparse-file capable storage, curl and iproute2.
 One tool records a loopback HTTP request and writes to the workspace and a
 second captured root. Four parallel network-isolated replays restore both
 effects and never rerun the command. The synthetic model and direct broker
 sidecar do not establish a complete ASB cassette or SWE-bench qualification.
 The fixture retains its owned images, streams and logs for inspection.
+
+ASB runs workload containers using the host CPU architecture, without a VM or
+CPU-emulation fallback. On Linux ARM64 it selects the upstream ARM64 SWE-bench
+image for a task and validates the image architecture before starting it. The
+upstream ARM64 image set is incomplete and experimental: tasks without an image
+cannot run on ARM64, and older images require careful qualification. ASB
+reconstructs the repository's base-only Git history before agent execution.
 
 SWE-bench clients execute in the conda environment named by the pinned SDK,
 after ASB has installed the agent. The task adapter retains the client's HOME
@@ -160,8 +167,7 @@ The offline `crates/asb-cli/tests/fixtures/fs_snapshot/multiroot.py` probe
 records a workspace and a separate temporary directory, then checks four
 concurrent replays in private mount namespaces. Run it as root in a private
 mount namespace with `ASB_MULTIROOT_FIXTURE_DIR` set to a new disposable
-project-local directory. It needs Btrfs, rsync, loop devices and the optional
-QEMU storage tools used by the guest supervisor. It preserves its evidence.
+project-local directory. It needs Btrfs, rsync, loop devices and sparse-file capable storage. It preserves its evidence.
 
 The opt-in `crates/asb-cli/tests/fixtures/claude_native/edit.mjs` probe uses
 an installed Claude Code binary and a synthetic loopback provider to record

@@ -69,6 +69,10 @@ pub(super) trait WorkloadAdapter: Sync {
     fn task_architecture(&self) -> Option<&'static str> {
         None
     }
+    fn supports_architecture(&self, host: &str) -> bool {
+        self.task_architecture()
+            .is_none_or(|required| required == host)
+    }
     /// Override the default task-environment preparation budget when needed.
     fn preparation_default_seconds(&self) -> Option<u64> {
         None

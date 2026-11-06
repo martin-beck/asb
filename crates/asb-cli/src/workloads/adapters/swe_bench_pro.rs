@@ -37,6 +37,10 @@ pub(super) struct SweBenchProAdapter;
 pub(super) static ADAPTER: SweBenchProAdapter = SweBenchProAdapter;
 
 impl WorkloadAdapter for SweBenchProAdapter {
+    fn task_architecture(&self) -> Option<&'static str> {
+        Some("x86_64")
+    }
+
     fn estimated_disk_mib(&self) -> u64 {
         8192
     }

@@ -186,7 +186,6 @@ fn diagnostic_program(program: &OsStr) -> &'static str {
         Some("uv") => "uv",
         Some("rsync") => "rsync",
         Some("btrfs" | "mkfs.btrfs") => "btrfs",
-        Some("qemu-img" | "qemu-storage-daemon") => "qemu-storage",
         _ => "other",
     }
 }

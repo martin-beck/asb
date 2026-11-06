@@ -787,6 +787,10 @@ def official_harness(arguments):
         def create_container(test_spec, docker_client, run_id, logger):
             if cancelled.is_set():
                 raise InterruptedError("ASB evaluation was cancelled before container creation")
+            # Evaluation must use the same native image as task execution; never
+            # let the upstream harness launch an architecture-mismatched image.
+            from asb_execution import require_native_image
+            require_native_image(client, client.images.get(test_spec.image))
             container = original_create(test_spec, ScopedClient(), run_id, logger)
             try:
                 if cancelled.is_set():

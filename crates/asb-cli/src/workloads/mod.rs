@@ -6,55 +6,37 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn display_name(name: &str) -> String {
-    match adapters::find(name).and_then(|adapter| adapter.task_architecture()) {
-        Some("x86_64") => format!("{name} (x86)"),
-        _ => name.to_owned(),
-    }
+    name.to_owned()
+}
+
+pub(crate) fn compatible_with_host(name: &str) -> bool {
+    compatible_with_architecture(name, std::env::consts::ARCH)
+}
+
+pub(crate) fn compatible_with_architecture(name: &str, host: &str) -> bool {
+    adapters::find(name).is_none_or(|adapter| adapter.supports_architecture(host))
 }
 
 pub(crate) fn confirm_architecture<'a>(
     names: impl Iterator<Item = &'a str>,
-    interactive: bool,
-    output: &mut dyn std::io::Write,
+    _interactive: bool,
+    _output: &mut dyn std::io::Write,
 ) -> Result<(), crate::Error> {
-    use std::io::IsTerminal;
-    confirm_architecture_with(
-        names,
-        std::env::consts::ARCH,
-        interactive && std::io::stdin().is_terminal(),
-        &mut std::io::stdin().lock(),
-        output,
-    )
+    ensure_native_architecture(names, std::env::consts::ARCH)
 }
 
-fn confirm_architecture_with<'a>(
+pub(crate) fn ensure_native_architecture<'a>(
     names: impl Iterator<Item = &'a str>,
     host: &str,
-    interactive: bool,
-    input: &mut dyn std::io::BufRead,
-    output: &mut dyn std::io::Write,
 ) -> Result<(), crate::Error> {
     let mismatched = mismatched_architectures(names, host);
     if mismatched.is_empty() {
         return Ok(());
     }
-    writeln!(output, "Architecture warning: {} uses x86_64 task images; this environment is {}. Execution requires x86 emulation and may be much slower.", mismatched.into_iter().collect::<Vec<_>>().join(", "), host).map_err(crate::io_error)?;
-    if !interactive {
-        return Err(crate::Error::Input(
-            "architecture mismatch requires confirmation in an interactive terminal".into(),
-        ));
-    }
-    write!(output, "Continue with x86 emulation? [y/N] ").map_err(crate::io_error)?;
-    output.flush().map_err(crate::io_error)?;
-    let mut answer = String::new();
-    input.read_line(&mut answer).map_err(crate::io_error)?;
-    if answer.trim().eq_ignore_ascii_case("y") {
-        Ok(())
-    } else {
-        Err(crate::Error::Input(
-            "benchmark cancelled because x86 emulation was not approved".into(),
-        ))
-    }
+    Err(crate::Error::Input(format!(
+        "{} requires a different CPU architecture than this {host} host; ASB only runs workloads natively. Use a matching host or workload.",
+        mismatched.into_iter().collect::<Vec<_>>().join(", ")
+    )))
 }
 
 fn mismatched_architectures<'a>(
@@ -62,11 +44,7 @@ fn mismatched_architectures<'a>(
     host: &str,
 ) -> std::collections::BTreeSet<&'a str> {
     names
-        .filter(|name| {
-            adapters::find(name)
-                .and_then(|adapter| adapter.task_architecture())
-                .is_some_and(|architecture| architecture != host)
-        })
+        .filter(|name| !compatible_with_architecture(name, host))
         .collect()
 }
 
@@ -74,60 +52,14 @@ fn mismatched_architectures<'a>(
 mod architecture_tests {
     use super::*;
     #[test]
-    fn mismatch_requires_explicit_confirmation_once() {
-        for (answer, interactive, expected) in [
-            ("y\n", true, true),
-            ("Y\n", true, true),
-            ("\n", true, false),
-            ("n\n", true, false),
-            ("y\n", false, false),
-        ] {
-            let mut output = Vec::new();
-            let result = confirm_architecture_with(
-                ["swe-bench", "swe-bench"].into_iter(),
-                "aarch64",
-                interactive,
-                &mut answer.as_bytes(),
-                &mut output,
-            );
-            assert_eq!(result.is_ok(), expected);
-            let text = String::from_utf8(output).unwrap();
-            assert_eq!(text.matches("Architecture warning:").count(), 1);
-            assert_eq!(
-                text.matches("Continue with x86 emulation?").count(),
-                usize::from(interactive)
-            );
+    fn native_architecture_selection_supports_swe_on_arm_and_x86() {
+        for name in ["swe-bench", "swe-bench-lite", "swe-bench-verified"] {
+            assert!(compatible_with_architecture(name, "x86_64"));
+            assert!(compatible_with_architecture(name, "aarch64"));
+            assert!(!compatible_with_architecture(name, "riscv64"));
+            assert!(ensure_native_architecture([name].into_iter(), "riscv64").is_err());
         }
-        let mut output = Vec::new();
-        assert!(
-            confirm_architecture_with(
-                ["swe-bench"].into_iter(),
-                "x86_64",
-                false,
-                &mut &b""[..],
-                &mut output
-            )
-            .is_ok()
-        );
-        assert!(output.is_empty());
-    }
-    #[test]
-    fn swe_variants_are_labelled_and_warn_only_for_mismatch() {
-        let names = ["swe-bench", "swe-bench-lite", "swe-bench-verified"];
-        for name in names {
-            assert_eq!(display_name(name), format!("{name} (x86)"));
-            assert!(mismatched_architectures(std::iter::once(name), "aarch64").contains(name));
-            assert!(mismatched_architectures(std::iter::once(name), "x86_64").is_empty());
-        }
-        assert_eq!(display_name("bug-fix"), "bug-fix");
-        assert!(
-            mismatched_architectures(["bug-fix", "swe-bench-pro"].into_iter(), "aarch64")
-                .is_empty()
-        );
-        assert_eq!(
-            mismatched_architectures(["swe-bench", "swe-bench"].into_iter(), "aarch64").len(),
-            1
-        );
+        assert!(compatible_with_architecture("bug-fix", "riscv64"));
     }
 }
 

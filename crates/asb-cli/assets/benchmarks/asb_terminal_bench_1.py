@@ -18,7 +18,7 @@ import sys
 import uuid
 
 from asb_docker import DockerSession, docker_command
-from asb_execution import ExecutionError, ManagedDockerWorkspace
+from asb_execution import ExecutionError, ManagedDockerWorkspace, require_native_compose_service, require_native_docker_host
 from asb_resources import ResourceJournal
 from asb_terminal_catalog import verify, tree_manifest
 from asb_harness import (quiet_sdk, restore_task_networks, original_networks,
@@ -219,6 +219,7 @@ class TerminalBenchTask:
 
     @quiet_sdk
     def __enter__(self):
+        require_native_docker_host(self.client)
         os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
         import docker
         import terminal_bench.terminal.terminal as terminal_module
@@ -273,6 +274,7 @@ class TerminalBenchTask:
                 if not services or len(services) > 16:
                     raise ExecutionError("official task declares an invalid number of services")
                 for name, service in services.items():
+                    require_native_compose_service(service)
                     if (service.get("privileged") or service.get("network_mode") == "host"
                             or service.get("pid") == "host" or service.get("ipc") == "host" or service.get("devices")):
                         raise ExecutionError("this task needs a separately isolated host for privileged/device/host-namespace access")

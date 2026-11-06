@@ -25,7 +25,6 @@ def start(label, archive=None):
             '--root', str(directory/'storage'), '--socket', str(directory/'marker'),
             '--output', str(directory/'streams'), '--btrfs', '/usr/bin/btrfs',
             '--mkfs', '/usr/sbin/mkfs.btrfs', '--rsync', '/usr/bin/rsync',
-            '--qemu-img', '/usr/bin/qemu-img', '--qemu-storage', '/usr/bin/qemu-storage-daemon',
             '--size', str(512*1024*1024)]
     args += ['--replay-archive', str(archive)] if archive else ['--apply-final']
     log = (directory/'error.log').open('wb')

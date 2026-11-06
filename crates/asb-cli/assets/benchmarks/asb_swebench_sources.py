@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import io
 import json
+import platform
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -191,9 +192,29 @@ def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
         raise
 
 
-def resolve_image(client, name, build):
+def resolve_image(client, name, build, host_arch=None):
     import docker.errors
     import requests.exceptions
+    arch = host_arch or platform.machine()
+    if arch in ("aarch64", "arm64"):
+        prefix = "swebench/sweb.eval.x86_64."
+        if not name.startswith(prefix):
+            raise CatalogError("official SWE-bench image name does not support native ARM64 selection")
+        arm_name = "swebench/sweb.eval.arm64." + name[len(prefix):]
+        try:
+            try:
+                image = client.images.get(arm_name)
+                source = "prebuilt-local"
+            except docker.errors.ImageNotFound:
+                image = client.images.pull(arm_name)
+                source = "prebuilt-pull"
+        except (docker.errors.DockerException, requests.exceptions.RequestException) as error:
+            raise CatalogError(
+                "could not load the upstream ARM64 image for this SWE-bench task; check registry access or select a task with an available ARM64 image"
+            ) from error
+        if image.attrs.get("Architecture") != "arm64" or image.attrs.get("Os") != "linux":
+            raise CatalogError("upstream SWE-bench image is not a native Linux ARM64 image")
+        return image, {"source": source, "declared_image": arm_name, "architecture": "arm64"}
     try:
         return client.images.get(name), {"source": "prebuilt-local"}
     except docker.errors.ImageNotFound:

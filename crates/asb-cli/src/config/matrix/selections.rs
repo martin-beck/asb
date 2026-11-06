@@ -161,7 +161,10 @@ fn workload_names(directory: &Path) -> Result<Vec<String>, Error> {
     for name in &names {
         validate(name, "workload").map_err(Error::Input)?;
     }
-    Ok(names.into_iter().collect())
+    Ok(names
+        .into_iter()
+        .filter(|name| crate::workloads::compatible_with_host(name))
+        .collect())
 }
 
 pub(super) fn trials(

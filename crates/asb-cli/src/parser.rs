@@ -91,6 +91,7 @@ fn possible_owned(argument: clap::Arg, values: Vec<String>) -> clap::Arg {
 fn registered_workload_names() -> Vec<&'static str> {
     let mut values = crate::workloads::builtin_names()
         .chain(crate::install::external_workload_names())
+        .filter(|name| crate::workloads::compatible_with_host(name))
         .collect::<Vec<_>>();
     values.sort_unstable();
     values.dedup();

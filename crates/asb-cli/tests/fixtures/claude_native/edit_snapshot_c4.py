@@ -30,7 +30,6 @@ def supervisor(root, label, phase, uid, gid, node, binary, fixture, delegated):
     args=[sys.executable,str(GUEST),'--target',str(target),'--extra-root',str(temporary),
           '--root',str(base/'storage'),'--socket',str(base/'marker'),'--output',str(base/'streams'),
           '--btrfs','/usr/bin/btrfs','--mkfs','/usr/sbin/mkfs.btrfs','--rsync','/usr/bin/rsync',
-          '--qemu-img','/usr/bin/qemu-img','--qemu-storage','/usr/bin/qemu-storage-daemon',
           '--size',str(512*1024*1024),'--apply-final']
     if phase=='replay':args+=['--replay-archive',str(root/'snapshots.tar')]
     with (base/'supervisor.log').open('wb') as log:

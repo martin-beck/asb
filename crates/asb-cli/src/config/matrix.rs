@@ -46,6 +46,10 @@ pub(super) fn setup_at(
         .into_iter()
         .any(|values| values.iter().any(|value| value == "all"));
     selections::expand(&mut options, base)?;
+    crate::workloads::ensure_native_architecture(
+        options.workload.iter().map(String::as_str),
+        std::env::consts::ARCH,
+    )?;
     validate_concurrency_before_install(options.concurrency)?;
     if !filter_incompatible {
         validate_before_install(&options)?;

@@ -25,9 +25,8 @@ The snapshot backend receives an already provisioned guest transport, tool paths
 selected roots, mode and lifecycle deadline. It starts a session and owns its
 settlement and cleanup; it does not select an execution environment. Btrfs
 delegates startup to the selected transport. The Docker transport supports
-ordinary or separate snapshot custody; a VM adapter can implement the same
-transport contract and provide its own Btrfs session. A QEMU disk used for
-Btrfs storage does not select or replace an execution VM.
+ordinary or separate snapshot custody. ASB executes workloads on the native
+host architecture and does not provide a VM or CPU-emulation backend.
 
 Snapshot recording can be selected for any setup combination. Support and
 fidelity vary: a successful recording requires both a settled workspace archive

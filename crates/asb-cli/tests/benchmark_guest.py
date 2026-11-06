@@ -244,7 +244,7 @@ class GuestBootstrapTests(unittest.TestCase):
             execute=lambda *args,**kwargs:{'stdout':b'','stderr':b'','exit_code':0,'timed_out':False,'cancelled':False}
             task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),image_identity={},execute=execute),
                                  artifacts=root,checked=lambda _:b'',snapshot=True,tool_mode='record')
-            tools={'btrfs':'a','mkfs.btrfs':'b','rsync':'c','qemu-img':'d','qemu-storage-daemon':'e'}
+            tools={'btrfs':'a','mkfs.btrfs':'b','rsync':'c'}
             request={'project_root':str(root),'tools_root':str(root),'binary':'fixture',
                      'request':{'config':{'agent':'fixture'}},'bootstrap':{},'auxiliary_tools':tools}
             resources=SimpleNamespace(push=lambda _:None)
@@ -278,18 +278,6 @@ class GuestBootstrapTests(unittest.TestCase):
                 guest,environment=prepare_agent(task,request,None,resources=SimpleNamespace(push=lambda _:None))
             self.assertEqual(guest['snapshot_archive_sha256'],'a'*64)
             self.assertEqual(environment['ASB_FS_REPLAY_SOCKET'],'/opt/asb-private/snapshot.sock')
-
-    def test_incompatible_optional_qemu_does_not_block_required_tools(self):
-        with tempfile.TemporaryDirectory() as directory:
-            task=SimpleNamespace(workspace=SimpleNamespace(container=Container(),image_identity={}),
-                                 artifacts=Path(directory),checked=lambda command:None)
-            def bundle(source,name,architecture,root):
-                if name == 'qemu-storage-daemon':
-                    raise ExecutionError('incompatible optional executable')
-                return ([],None)
-            with patch('asb_guest.bundle_tool',side_effect=bundle), patch('asb_guest.upload'):
-                paths=stage_auxiliary_tools(task,{'btrfs':'a','qemu-img':'b','qemu-storage-daemon':'c'},(1,2))
-            self.assertEqual(paths,{'btrfs':'/opt/asb-private/tools/btrfs/btrfs'})
 
     @unittest.skipUnless(os.environ.get('ASB_TEST_HOST_ASB'), 'needs just-built ASB')
     def test_auxiliary_tool_staging_uses_private_prefix(self):
