@@ -109,6 +109,7 @@ fetch(url + '/responses', {method:'POST', headers:{'content-type':'application/j
         let value: serde_json::Value =
             serde_json::from_str(std::fs::read_to_string(log).unwrap().trim()).unwrap();
         assert_eq!(value["status"], "completed");
+        assert_eq!(value["provider_replay_consumed"], true);
         let receipt: serde_json::Value = serde_json::from_slice(
             &std::fs::read(root.join(format!(
                 "sweep-results/.checkpoint/replicas/000000/{index:03}.json"

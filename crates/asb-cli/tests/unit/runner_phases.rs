@@ -1358,6 +1358,7 @@ fn result() -> RunResult<'static> {
         approximate_replay: false,
         replay_selection: None,
         native_replay_consumed: None,
+        provider_replay_consumed: None,
         observation: Default::default(),
         recording: None,
         execution: None,
