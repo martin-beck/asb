@@ -256,6 +256,7 @@ fn actual_python_producer_and_rust_session_keep_both_grades_and_consume_close_pe
         let connection = connection();
         let mut progress = ProgressSpy::default();
         let mut context = ExecutionContext {
+            ignore_tool_mismatch: false,
             config: &config,
             connection: Some(&connection),
             project_root: &fixture.0,
@@ -336,6 +337,7 @@ fn actual_python_task_loop_forwards_declared_termination_without_changing_grade_
             let project = crate::project::ProjectConfig::default();
             let connection = connection();
             let mut context = ExecutionContext {
+                ignore_tool_mismatch: false,
                 config: &config,
                 connection: Some(&connection),
                 project_root: &fixture.0,
@@ -502,6 +504,7 @@ fn unmeasured_shared_launch_requires_valid_target_and_aborts_before_cancellation
             aborted: Cell::new(false),
         };
         let mut context = ExecutionContext {
+            ignore_tool_mismatch: false,
             launch: Some(&launch),
             config: &config,
             connection: Some(&connection),
@@ -585,6 +588,7 @@ fn completed_guest_survives_capture_end_errors_and_still_grades_then_closes() {
         let project = crate::project::ProjectConfig::default();
         let connection = connection();
         let mut context = ExecutionContext {
+            ignore_tool_mismatch: false,
             launch: None,
             config: &config,
             connection: Some(&connection),
@@ -643,6 +647,7 @@ fn prepared_protocol_preserves_output_exit_time_and_grades_only_after_completion
         let project = crate::project::ProjectConfig::default();
         let connection = connection();
         let mut context = ExecutionContext {
+            ignore_tool_mismatch: false,
             launch: None,
             config: &config,
             connection: Some(&connection),
@@ -698,6 +703,7 @@ fn unknown_grade_settlement_never_repeats_evaluation_or_cancellation() {
     let project = crate::project::ProjectConfig::default();
     let connection = connection();
     let mut context = ExecutionContext {
+        ignore_tool_mismatch: false,
         launch: None,
         config: &config,
         connection: Some(&connection),
@@ -756,6 +762,7 @@ fn protocol_errors_preserve_original_reason_and_cancel_instead_of_grading() {
         let project = crate::project::ProjectConfig::default();
         let connection = connection();
         let mut context = ExecutionContext {
+            ignore_tool_mismatch: false,
             launch: None,
             config: &config,
             connection: Some(&connection),
@@ -821,6 +828,7 @@ fn broken_human_output_does_not_cancel_a_completed_guest_submission_or_grader() 
     let project = crate::project::ProjectConfig::default();
     let connection = connection();
     let mut context = ExecutionContext {
+        ignore_tool_mismatch: false,
         launch: None,
         config: &config,
         connection: Some(&connection),
@@ -873,6 +881,7 @@ fn broken_output_and_deadline_use_same_preserving_error_envelope() {
         let project = crate::project::ProjectConfig::default();
         let connection = connection();
         let mut context = ExecutionContext {
+            ignore_tool_mismatch: false,
             launch: None,
             config: &config,
             connection: Some(&connection),
@@ -926,6 +935,7 @@ fn production_preparation_still_rejects_unregistered_agent_without_protocol_disp
     let project = crate::project::ProjectConfig::default();
     let connection = connection();
     let mut context = ExecutionContext {
+        ignore_tool_mismatch: false,
         launch: None,
         config: &config,
         connection: Some(&connection),
@@ -977,6 +987,7 @@ fn measured_protocol_rejects_unverified_target_and_execution_end_before_start() 
         .unwrap();
         measurements.event(LifecycleEvent::RunStarted).unwrap();
         let mut context = ExecutionContext {
+            ignore_tool_mismatch: false,
             launch: None,
             config: &config,
             connection: Some(&connection),
@@ -1040,6 +1051,7 @@ fn completed_metadata_retains_unknown_timing_and_requires_valid_service_handoff(
         let project = crate::project::ProjectConfig::default();
         let connection = connection();
         let mut context = ExecutionContext {
+            ignore_tool_mismatch: false,
             launch: None,
             config: &config,
             connection: Some(&connection),
@@ -1098,6 +1110,7 @@ fn completed_metadata_retains_unknown_timing_and_requires_valid_service_handoff(
         let project = crate::project::ProjectConfig::default();
         let connection = connection();
         let mut context = ExecutionContext {
+            ignore_tool_mismatch: false,
             launch: None,
             config: &config,
             connection: Some(&connection),

@@ -36,6 +36,7 @@ impl SweepPlan {
                     || layout.plan.ignore_collector != self.ignore_collector
                     || layout.plan.ignore_provider_mismatch != self.ignore_provider_mismatch
                     || layout.plan.ignore_provider_unconsumed != self.ignore_provider_unconsumed
+                    || layout.plan.ignore_tool_mismatch != self.ignore_tool_mismatch
                     || !intent.matches_replay(&layout.plan)
                 {
                     return Err(Error::Input(

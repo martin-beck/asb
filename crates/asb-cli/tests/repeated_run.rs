@@ -1128,6 +1128,159 @@ fn workload_output_mentioning_provider_error_does_not_fail_successful_agent() {
 }
 
 #[test]
+fn replay_can_explicitly_ignore_same_tool_argument_divergence_with_evidence() {
+    let project = sweep_tests::registered_project(1);
+    let executable = project.0.join("tools/pi/bin/pi");
+    let script = fs::read_to_string(&executable).unwrap().replace(
+        "body = {'model':'fixture'",
+        "import subprocess\nspec=json.loads(os.environ['ASB_PI_LOCAL_TOOL_REPLAY'])\nrequest={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'read_file' if (root/'other-tool').exists() else 'write_file','arguments':{'path':'changed.txt' if (root/'change-tool').exists() else 'recorded.txt','content':'original'}}}\nif not (root/'skip-tool').exists():\n    tool=subprocess.run([spec['program'],*spec['args']],input=json.dumps(request)+'\\n',text=True,capture_output=True,check=True)\n    assert 'result' in json.loads(tool.stdout), tool.stdout+' '+tool.stderr\nbody = {'model':'fixture'",
+    );
+    fixture_writer::write_file(&project.0, &executable, script).unwrap();
+    let provider = RecordingProvider::new();
+    let record = record_to_with_mode(&project, &provider, None, Some("tool.zip"), "--record");
+    assert!(
+        record.status.success(),
+        "{}",
+        String::from_utf8_lossy(&record.stderr)
+    );
+    drop(provider);
+    fs::write(project.0.join("change-tool"), "1").unwrap();
+    let strict = replay_using_mode(&project, Some("tool.zip"), &[], true, "--replay");
+    assert!(!strict.status.success());
+    let ignored = replay_using_mode(
+        &project,
+        Some("tool.zip"),
+        &["--ignore-tool-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(
+        ignored.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&ignored.stdout),
+        String::from_utf8_lossy(&ignored.stderr)
+    );
+    let rows = records(&ignored.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["ignored_failures"].is_array())
+        .unwrap();
+    assert_eq!(row["approximate_replay"], true);
+    assert!(
+        row["ignored_failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|failure| failure["kind"] == "tool_mismatch"
+                && failure["ignored"] == true
+                && failure["severity"] == "warning")
+    );
+    let human = replay_using_mode(
+        &project,
+        Some("tool.zip"),
+        &["--ignore-tool-mismatch"],
+        false,
+        "--replay",
+    );
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(String::from_utf8_lossy(&human.stdout).contains("Warning: ignored tool_mismatch"));
+    fs::write(project.0.join("other-tool"), "1").unwrap();
+    let different_tool = replay_using_mode(
+        &project,
+        Some("tool.zip"),
+        &["--ignore-tool-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(
+        !different_tool.status.success(),
+        "a different tool has no safe recorded response"
+    );
+    fs::write(project.0.join("skip-tool"), "1").unwrap();
+    let skipped = replay_using_mode(
+        &project,
+        Some("tool.zip"),
+        &["--ignore-tool-mismatch"],
+        true,
+        "--replay",
+    );
+    assert!(
+        skipped.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&skipped.stdout),
+        String::from_utf8_lossy(&skipped.stderr)
+    );
+    let rows = records(&skipped.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["ignored_failures"].is_array())
+        .unwrap();
+    assert_eq!(row["approximate_replay"], true);
+    assert!(
+        row["ignored_failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|failure| failure["kind"] == "tool_mismatch"
+                && failure["reason"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("unconsumed"))
+    );
+    fs::remove_file(project.0.join("skip-tool")).unwrap();
+    fs::remove_file(project.0.join("other-tool")).unwrap();
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("tool.zip"),
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    let options = [
+        "--replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-tool-mismatch",
+    ];
+    let sweep = sweep_tests::sweep(&project, None, &options);
+    assert!(
+        sweep.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&sweep.stdout),
+        String::from_utf8_lossy(&sweep.stderr)
+    );
+    assert!(
+        records(&sweep.stdout)
+            .iter()
+            .any(|row| row["approximate_replay"] == true && row["ignored_failures"].is_array())
+    );
+    let plan: Value =
+        serde_json::from_slice(&fs::read(project.0.join("sweep-results/plan.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan["ignore_tool_mismatch"], true);
+    let mut resume = options.to_vec();
+    resume.push("--resume");
+    let resumed = sweep_tests::sweep(&project, None, &resume);
+    assert!(
+        resumed.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(
+        records(&resumed.stdout)
+            .iter()
+            .any(|row| row["reused"] == true && row["approximate_replay"] == true)
+    );
+}
+
+#[test]
 fn llm_only_record_and_replay_do_not_require_tool_capture() {
     let project = Project::new();
     project.config(1);

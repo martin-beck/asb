@@ -220,8 +220,8 @@ their workspace even if compact retention is enabled. Repeated campaign and
 sweep plans freeze these choices; resume requires the original sweep choices.
 
 These flags cover only failures observed after an attempt reaches a disposition.
-They cannot manufacture missing or corrupt cassette data, turn a rejected
-provider/tool request into a valid recorded response, recover an agent that
+They cannot manufacture missing or corrupt cassette data, validate an
+approximate provider/tool response as equivalent, recover an agent that
 cannot start, or establish missing resource cleanup or required run and summary evidence.
 Such independent failures still fail the command. ASB does not contact a live
 provider to replace a missing replay response.
@@ -245,3 +245,16 @@ consumed and total counts as an ignored warning, marks that attempt approximate,
 and does not claim verified cassette usage. It does not ignore an independently
 failed evaluation, a rejected request, or an attempt to request an exchange past
 the end of the cassette. This choice is also frozen for campaign and sweep resume.
+
+`--ignore-tool-mismatch` permits the semantic local-tool replayer to use its
+next recorded event when the requested tool name matches but arguments differ.
+It also permits a valid tool progress receipt with recorded events left unused.
+Every ignored event is persisted as a warning with its event index or argument
+digests; the run is marked approximate and replay-derived usage is unverified.
+The recorded event's workspace effects are applied as recorded, which can
+differ from what the new arguments request. Unused events have no effects.
+The option never runs an unrecorded tool, substitutes a different tool's
+response, ignores invalid or escaping effects, or manufactures an exhausted
+transcript. Transparent MCP relay and native snapshot replay are separate
+transports and are not covered. This policy is frozen in sweep and campaign
+plans and must match on resume.

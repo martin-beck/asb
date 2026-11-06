@@ -42,6 +42,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 )
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_tool_replay(prepare_tool_replay)
+.with_approximate_local_tool_replay()
 .with_native_tool_transport()
 .with_guest_service(start_native_service)
 .with_deferred_native_recording(finalize_native_recording)
@@ -152,17 +153,10 @@ fn final_response(output: &str, _workspace: &std::path::Path) -> Option<String> 
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
-    let mut artifacts =
-        match super::super::tool_replay_mcp::verify_persistent_per_call_completion_receipt(
-            context.frozen.document(TOOL_PROGRESS_FILENAME),
-            context.frozen.bytes("local-tools.jsonl"),
-        ) {
-            Ok(()) => AgentArtifacts::default(),
-            Err(error) => AgentArtifacts {
-                errors: vec![error.to_string()],
-                ..AgentArtifacts::default()
-            },
-        };
+    let mut artifacts = super::super::tool_replay_mcp::collect_persistent_completion(
+        context,
+        TOOL_PROGRESS_FILENAME,
+    );
     if let Some(bytes) = context
         .frozen
         .bytes("native-tool-pending.jsonl")
@@ -406,6 +400,7 @@ mod tests {
                 tape: None,
             },
             super::super::super::TapeContext {
+                ignore_tool_mismatch: false,
                 mode: crate::tape::Mode::Record,
                 cassette: &root.join("cassette"),
             },
@@ -471,6 +466,7 @@ mod tests {
             Vec::new(),
         );
         let artifacts = collect(&CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &frozen,
             provider_capture: None,
             run_dir: &root,
@@ -495,6 +491,7 @@ mod tests {
             Vec::new(),
         );
         let artifacts = collect(&CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &frozen,
             provider_capture: None,
             run_dir: &root,
@@ -538,6 +535,7 @@ mod tests {
                 mcp_servers: &[],
                 mcp_tape: None,
                 tape: Some(super::super::TapeContext {
+                    ignore_tool_mismatch: false,
                     mode: crate::tape::Mode::Record,
                     cassette: &root.join("recording.asb.zip"),
                 }),

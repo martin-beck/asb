@@ -6,6 +6,7 @@ fn planned(root: &Path, destination: PathBuf) -> crate::runner::campaign::Plan {
         toml::from_str("agent='fixture'\nprovider='fixture'\nmodel='fixture'\nworkload='fixture'")
             .unwrap();
     let mut plan = crate::runner::campaign::Plan {
+        ignore_tool_mismatch: false,
         ignore_evaluation: false,
         ignore_agent: false,
         ignore_collector: false,
