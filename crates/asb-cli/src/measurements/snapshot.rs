@@ -293,6 +293,9 @@ fn observe(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Drop the gate before its capture pipes on every return path. Its
+    // shutdown may still write diagnostics while settling the owned tree.
+    let (mut out, mut err);
     let mut gate = crate::process_gate::Admission::with_principal_control(
         route
             .validate_gate(&mut command)
@@ -300,8 +303,8 @@ fn observe(
     )
     .and_then(|admission| admission.spawn())
     .map_err(|error| error.to_string())?;
-    let mut out = gate.take_stdout().ok_or("missing snapshot stdout")?;
-    let mut err = gate.take_stderr().ok_or("missing snapshot stderr")?;
+    out = gate.take_stdout().ok_or("missing snapshot stdout")?;
+    err = gate.take_stderr().ok_or("missing snapshot stderr")?;
     nonblocking(&out)
         .and_then(|()| nonblocking(&err))
         .map_err(|error| error.to_string())?;
@@ -352,6 +355,9 @@ fn observe(
             drain = Some(Instant::now() + Duration::from_secs(1));
         }
         if !exited && Instant::now() >= deadline {
+            gate.stop().map_err(|error| {
+                format!("process-tree snapshot command exceeded its deadline; cleanup is unconfirmed: {error}")
+            })?;
             return Err("process-tree snapshot command exceeded its deadline".into());
         }
         for (index, pipe) in [
@@ -454,6 +460,24 @@ mod io_tests {
             "expired budget must never perform another read"
         );
     }
+    #[test]
+    fn timed_out_snapshot_settles_gate_before_closing_capture_pipes() {
+        let error = match observe(
+            std::path::Path::new("/bin/sleep"),
+            SnapshotCommand {
+                arguments: vec!["10".to_owned()],
+                runtime: Duration::from_millis(100),
+                stream_bytes: 8192,
+            },
+            &AtomicBool::new(false),
+            true,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a sleeping snapshot must time out"),
+        };
+        assert_eq!(error, "process-tree snapshot command exceeded its deadline");
+    }
+
     #[test]
     fn permanent_read_error_cannot_be_complete_eof_even_after_a_valid_prefix() {
         let mut reader = Reader {
