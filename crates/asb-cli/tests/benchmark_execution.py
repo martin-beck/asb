@@ -509,6 +509,27 @@ class ExecutionTests(unittest.TestCase):
             self.assertFalse(container.resumed)
             self.assertEqual(container.events[-4:],["kill","wait","start","remove"])
 
+    def test_invalid_target_before_deadline_still_rejects_identity(self):
+        workspace,container,api,_ = self.workspace()
+        api.pid = 0
+        with workspace,self.assertRaisesRegex(RUNTIME.ExecutionError,
+                "Docker did not identify the running execution target"):
+            workspace.execute(["agent"],timeout=60,preparation_timeout=2)
+        self.assertFalse(container.resumed)
+        self.assertIn("kill",container.events)
+
+    def test_expired_inspection_reports_preparation_deadline_without_resuming(self):
+        workspace,container,api,_ = self.workspace()
+        def delayed_inspection(_exec_id):
+            self.assertTrue(container.killed.wait(2), "watchdog must stop the owned container")
+            return {"Pid":0,"Running":False,"ExitCode":137}
+        api.exec_inspect = delayed_inspection
+        with workspace,self.assertRaisesRegex(RUNTIME.ExecutionError,
+                "container execution preparation was cancelled or exceeded its deadline"):
+            workspace.execute(["agent"],timeout=60,preparation_timeout=.02)
+        self.assertFalse(container.resumed)
+        self.assertIn("kill",container.events)
+
     def test_preparation_failure_notifies_peers_before_namespace_kill(self):
         for fault in ["transport","attach"]:
             workspace,container,api,_ = self.workspace()
