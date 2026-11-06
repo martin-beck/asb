@@ -30,7 +30,8 @@ pub(crate) use source::take_observation_count;
 pub use source::{LegacyTrack, Source};
 use std::fmt;
 pub use trial_order::{
-    BoundTrialPreparation, ReplayAttempt, ReplayObservation, TrialOrder, TrialPreparation,
+    BoundTrialPreparation, RecordingReceipt, ReplayAttempt, ReplayObservation, TrialOrder,
+    TrialPreparation,
 };
 
 /// Current manifest format. Unknown versions are refused, not guessed.

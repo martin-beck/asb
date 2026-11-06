@@ -3,7 +3,8 @@ use super::Error;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::path::Path;
 
 /// A reproducible candidate order, including spare trials for failed replays.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,6 +44,73 @@ pub struct ReplayAttempt {
     pub replicas: Vec<ReplayObservation>,
     /// Number of replay replicas required by the benchmark configuration.
     pub expected_replicas: usize,
+}
+
+/// A clean publication observation for one recorded candidate.
+pub struct RecordingReceipt {
+    /// Number of tracks published into the cassette.
+    pub tracks: u64,
+}
+
+impl RecordingReceipt {
+    /// Find one clean cassette-publication event for the requested output path.
+    /// A workload grade is not used to decide whether a cassette was published.
+    pub fn from_jsonl(output: &[u8], expected_path: &Path) -> Result<Self, Error> {
+        if output.len() > 16 * 1024 * 1024 {
+            return Err(Error("recording result exceeds 16 MiB".into()));
+        }
+        let mut receipt = None;
+        for line in output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let value: serde_json::Value = serde_json::from_slice(line)
+                .map_err(|_| Error("recording produced malformed JSON evidence".into()))?;
+            if value.get("type").and_then(serde_json::Value::as_str) != Some("cassette-publication")
+            {
+                continue;
+            }
+            if receipt.is_some() {
+                return Err(Error(
+                    "recording produced multiple publication events".into(),
+                ));
+            }
+            let publication = value
+                .get("publication")
+                .ok_or_else(|| Error("recording publication evidence is missing".into()))?;
+            let path = publication
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| Error("recording publication path is missing".into()))?;
+            let tracks = publication
+                .get("tracks")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|tracks| *tracks > 0)
+                .ok_or_else(|| Error("recording publication has no tracks".into()))?;
+            if Path::new(path) != expected_path
+                || publication
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("published")
+                || publication
+                    .get("format")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("asb-zip-v1")
+                || publication
+                    .get("cleanup_complete")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            {
+                return Err(Error(
+                    "recording publication or cleanup was not confirmed for the selected cassette"
+                        .into(),
+                ));
+            }
+            receipt = Some(Self { tracks });
+        }
+        receipt
+            .ok_or_else(|| Error("recording did not produce a cassette publication receipt".into()))
+    }
 }
 
 impl ReplayAttempt {
@@ -208,6 +276,87 @@ impl BoundTrialPreparation {
             )?;
             persist(&self.encode(sweep_sha256, configuration_sha256, order)?)?;
         }
+    }
+
+    /// Lock and durably update a per-combination preparation ledger.
+    ///
+    /// The parent directory must already exist. Each candidate is published as
+    /// in-flight before `execute` runs; an interrupted candidate is retained and
+    /// never silently retried. A completed matching ledger starts no processes.
+    pub fn prepare_file<E>(
+        path: &Path,
+        sweep_sha256: &str,
+        configuration_sha256: &str,
+        order: TrialOrder,
+        execute: E,
+    ) -> Result<Self, Error>
+    where
+        E: FnMut(&str) -> Result<ReplayAttempt, Error>,
+    {
+        let name = path
+            .file_name()
+            .ok_or_else(|| Error("sample ledger needs a file name".into()))?;
+        let mut lock_name = name.to_os_string();
+        lock_name.push(".lock");
+        let lock_path = path.with_file_name(lock_name);
+        let _lock = crate::output_lock::OutputLock::acquire(
+            &lock_path,
+            "another process is preparing this sampled benchmark combination",
+        )
+        .map_err(Error)?;
+        let mut state = match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+                }
+                let file = options
+                    .open(path)
+                    .map_err(|error| Error(format!("cannot open sample ledger: {error}")))?;
+                if !file
+                    .metadata()
+                    .map_err(|error| Error(format!("cannot inspect sample ledger: {error}")))?
+                    .is_file()
+                {
+                    return Err(Error("sample ledger must be a regular file".into()));
+                }
+                let mut bytes = Vec::new();
+                file.take((Self::MAX_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes)
+                    .map_err(|error| Error(format!("cannot read sample ledger: {error}")))?;
+                Self::decode(&bytes, sweep_sha256, configuration_sha256, &order)?
+            }
+            Ok(_) => {
+                return Err(Error(
+                    "sample ledger must be a regular file, not a symlink or directory".into(),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let state = Self::new(sweep_sha256, configuration_sha256, order.clone())?;
+                let bytes = state.encode(sweep_sha256, configuration_sha256, &order)?;
+                let published = crate::config::matrix::scalar_if_absent(path, &bytes)
+                    .map_err(|error| Error(format!("cannot publish sample ledger: {error}")))?;
+                if !published {
+                    return Err(Error("sample ledger appeared while it was being initialized; inspect it before retrying".into()));
+                }
+                state
+            }
+            Err(error) => return Err(Error(format!("cannot inspect sample ledger: {error}"))),
+        };
+        state.prepare(
+            sweep_sha256,
+            configuration_sha256,
+            &order,
+            |bytes| {
+                crate::config::matrix::publish_atomic(path, bytes)
+                    .map_err(|error| Error(format!("cannot persist sample ledger: {error}")))
+            },
+            execute,
+        )?;
+        Ok(state)
     }
 }
 
@@ -786,6 +935,29 @@ mod tests {
     }
 
     #[test]
+    fn recording_receipt_requires_matching_published_cassette_and_cleanup() {
+        let path = Path::new("sample.asb.zip");
+        let mut value = serde_json::json!({"type":"cassette-publication", "publication": {
+            "path":"sample.asb.zip", "status":"published", "format":"asb-zip-v1",
+            "tracks":1, "cleanup_complete":true
+        }});
+        let bytes = |value: &serde_json::Value| serde_json::to_vec(value).unwrap();
+        assert_eq!(
+            RecordingReceipt::from_jsonl(&bytes(&value), path)
+                .unwrap()
+                .tracks,
+            1
+        );
+        assert!(RecordingReceipt::from_jsonl(&bytes(&value), Path::new("other.zip")).is_err());
+        value["publication"]["cleanup_complete"] = serde_json::json!(false);
+        assert!(RecordingReceipt::from_jsonl(&bytes(&value), path).is_err());
+        value["publication"]["cleanup_complete"] = serde_json::json!(true);
+        value["publication"]["tracks"] = serde_json::json!(0);
+        assert!(RecordingReceipt::from_jsonl(&bytes(&value), path).is_err());
+        assert!(RecordingReceipt::from_jsonl(b"{}\n", path).is_err());
+    }
+
+    #[test]
     fn persisted_ledger_refuses_changed_sweep_configuration_or_catalog() {
         let ids = vec!["one".into(), "two".into(), "three".into()];
         let order = TrialOrder::new(&ids, 1, 42).unwrap();
@@ -943,5 +1115,94 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn file_backed_preparation_is_locked_and_reuses_completed_trials() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-sampled-ledger-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("ledger.json");
+        let order = TrialOrder::new(&["one".into(), "two".into(), "three".into()], 1, 1).unwrap();
+        let sweep = "a".repeat(64);
+        let config = "b".repeat(64);
+        let mut attempts = 0;
+        let state =
+            BoundTrialPreparation::prepare_file(&path, &sweep, &config, order.clone(), |trial| {
+                attempts += 1;
+                let contention = BoundTrialPreparation::prepare_file(
+                    &path,
+                    &sweep,
+                    &config,
+                    order.clone(),
+                    |_| panic!("a second preparation must not execute"),
+                );
+                assert!(contention.is_err());
+                Ok(ReplayAttempt {
+                    cassette_sha256: "c".repeat(64),
+                    expected_replicas: 1,
+                    replicas: vec![ReplayObservation {
+                        trial: trial.into(),
+                        replica: 1,
+                        process_success: true,
+                        provider_consumed: Some(attempts > 1),
+                        native_consumed: None,
+                        native_required: false,
+                        cleanup_confirmed: Some(true),
+                    }],
+                })
+            })
+            .unwrap();
+        assert_eq!(attempts, 2);
+        assert!(state.preparation().complete().unwrap());
+        let restored =
+            BoundTrialPreparation::prepare_file(&path, &sweep, &config, order.clone(), |_| {
+                panic!("completed preparation must not execute again")
+            })
+            .unwrap();
+        assert_eq!(state, restored);
+        assert!(
+            BoundTrialPreparation::prepare_file(&path, &"d".repeat(64), &config, order, |_| {
+                panic!("changed input must not execute")
+            })
+            .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_backed_interrupted_attempt_is_not_automatically_restarted() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-sampled-interrupted-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("ledger.json");
+        let order = TrialOrder::new(&["one".into(), "two".into()], 1, 2).unwrap();
+        let sweep = "a".repeat(64);
+        let config = "b".repeat(64);
+        assert!(
+            BoundTrialPreparation::prepare_file(&path, &sweep, &config, order.clone(), |_| {
+                Err(Error("uncertain cleanup".into()))
+            })
+            .is_err()
+        );
+        let err = BoundTrialPreparation::prepare_file(&path, &sweep, &config, order, |_| {
+            panic!("an unsettled attempt must not be relaunched")
+        })
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("unsettled attempt"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
