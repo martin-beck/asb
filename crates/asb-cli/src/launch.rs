@@ -33,12 +33,15 @@ pub(crate) struct CommandRoute {
 
 /// Validation holds exclusive command access until admission takes custody.
 #[cfg(target_os = "linux")]
-pub(crate) struct ValidatedGate<'a>(&'a mut Command);
+pub(crate) struct ValidatedGate<'a> {
+    command: &'a mut Command,
+    diagnostic_program: &'static str,
+}
 
 #[cfg(target_os = "linux")]
 impl<'a> ValidatedGate<'a> {
-    pub(crate) fn into_command(self) -> &'a mut Command {
-        self.0
+    pub(crate) fn into_parts(self) -> (&'a mut Command, &'static str) {
+        (self.command, self.diagnostic_program)
     }
 }
 
@@ -150,11 +153,41 @@ impl CommandRoute {
                 "prepared native command no longer matches its gate executable or target framing; configure the original command without replacing it",
             ));
         }
-        Ok(ValidatedGate(command))
+        Ok(ValidatedGate {
+            command,
+            diagnostic_program: diagnostic_program(&self.program),
+        })
     }
 
     pub(crate) fn target(&self, command: &Command) -> TargetLaunch {
         TargetLaunch::from_parts(&self.program, command.get_args().skip(self.prefix), command)
+    }
+}
+
+// Only publish familiar executable names. Arbitrary configured file names,
+// directory paths and arguments can contain private user data.
+#[cfg(target_os = "linux")]
+fn diagnostic_program(program: &OsStr) -> &'static str {
+    match Path::new(program).file_name().and_then(OsStr::to_str) {
+        Some("python" | "python3" | "python3.12" | "python3.11" | "python3.10" | "python3.9") => {
+            "python"
+        }
+        Some("node" | "nodejs") => "node",
+        Some("docker") => "docker",
+        Some("git") => "git",
+        Some("tar") => "tar",
+        Some("bpftrace") => "bpftrace",
+        Some("perf") => "perf",
+        Some("cargo") => "cargo",
+        Some("rustc") => "rustc",
+        Some("sh" | "bash" | "zsh") => "shell",
+        Some("npm" | "npx") => "npm",
+        Some("curl") => "curl",
+        Some("uv") => "uv",
+        Some("rsync") => "rsync",
+        Some("btrfs" | "mkfs.btrfs") => "btrfs",
+        Some("qemu-img" | "qemu-storage-daemon") => "qemu-storage",
+        _ => "other",
     }
 }
 

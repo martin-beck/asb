@@ -7,6 +7,26 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
+#[test]
+fn gate_diagnostic_program_never_echoes_arbitrary_names_or_paths() {
+    assert_eq!(
+        diagnostic_program(OsStr::new("/sensitive/path/python3.12")),
+        "python"
+    );
+    assert_eq!(
+        diagnostic_program(OsStr::new("/sensitive/path/docker")),
+        "docker"
+    );
+    assert_eq!(
+        diagnostic_program(OsStr::new("/sensitive/path/private-token")),
+        "other"
+    );
+    assert_eq!(
+        diagnostic_program(OsStr::from_bytes(b"/path/\xff")),
+        "other"
+    );
+}
+
 fn binary() -> PathBuf {
     let path = std::env::current_exe()
         .unwrap()
