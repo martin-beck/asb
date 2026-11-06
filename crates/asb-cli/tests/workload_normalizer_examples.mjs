@@ -31,6 +31,8 @@ test("recursive grep ordering is normalized only for complete unambiguous result
   assert.equal(grepOrder({text:first,tool:multiple}), grepOrder({text:second,tool:multiple}));
   const foreign = first.replace('sympy/vector/z.py','outside/z.py');
   assert.equal(grepOrder({text:foreign,tool:multiple}), foreign);
+  const filtered = {...tool, arguments:{command:'grep -rn "x" sympy/vector/ sympy/printing/ 2>/dev/null | grep -v "test.py" | head -50'}};
+  assert.equal(grepOrder({text:first,tool:filtered}), grepOrder({text:second,tool:filtered}));
 });
 
 test("unittest elapsed normalization requires the command and a complete summary", () => {
