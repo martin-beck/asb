@@ -772,6 +772,81 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
 }
 
 #[test]
+fn sympy_banner_profile_replays_changed_seed_and_elapsed_but_rejects_changed_results() {
+    let project = sweep_tests::registered_project(1);
+    let executable = project.0.join("tools/pi/bin/pi");
+    let template = fs::read_to_string(&executable).unwrap();
+    let messages = r#"'messages':[{'role':'assistant','tool_calls':[{'id':'call1','type':'function','function':{'name':'bash','arguments':json.dumps({'command':'python bin/test sympy/printing/tests/test_pretty.py'})}}]},{'role':'tool','tool_call_id':'call1','content':('architecture: 64-bit\ncache: yes\nground types: python\nnumpy: None\nrandom seed: %s\nhash randomization: off\n tests finished: %s, in %s seconds =\n' % (replica, '2 passed' if (root/'changed-sympy-result').exists() else '1 passed', '10.00' if replica == 1 else '11.00'))}]}"#;
+    let agent = template.replace("'messages':[]}", messages);
+    assert_ne!(agent, template);
+    fixture_writer::write_file(&project.0, &executable, agent).unwrap();
+    let module = include_str!("../assets/examples/normalizers/sympy-test-banner.mjs");
+    fs::write(project.0.join("sympy.mjs"), module).unwrap();
+    let config_path = project.0.join(".asb/project.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str("\n[[replay.normalizers]]\nid='sympy-test-banner-v1'\nmodule='sympy.mjs'\nagents=['pi']\nworkloads=['bug-fix']\ntasks=['bug-fix']\n");
+    fs::write(config_path, config).unwrap();
+    let provider = RecordingProvider::new();
+    let recorded = record_to_with_mode(
+        &project,
+        &provider,
+        None,
+        Some("sympy-policy.zip"),
+        "--llm-record",
+    );
+    assert!(
+        recorded.status.success(),
+        "record stderr={}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    drop(provider);
+    let benchmark = project.0.join("benchmark.toml");
+    fs::write(
+        &benchmark,
+        fs::read_to_string(&benchmark)
+            .unwrap()
+            .replace("concurrency=1", "concurrency=4"),
+    )
+    .unwrap();
+    fs::write(project.0.join("expected-concurrency"), "4").unwrap();
+    let replayed = replay_using_mode(
+        &project,
+        Some("sympy-policy.zip"),
+        &[],
+        true,
+        "--llm-replay",
+    );
+    assert!(
+        replayed.status.success(),
+        "replay stderr={}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    let outcomes = records(&replayed.stdout)
+        .into_iter()
+        .filter(|row| row["execution"]["replica"].is_u64())
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes.len(), 4);
+    assert!(outcomes.iter().all(|row| row["workload_success"] == true));
+    fs::write(project.0.join("changed-sympy-result"), "changed").unwrap();
+    let changed = replay_using_mode(
+        &project,
+        Some("sympy-policy.zip"),
+        &[],
+        true,
+        "--llm-replay",
+    );
+    assert!(
+        !changed.status.success(),
+        "changed test outcomes must not replay successfully"
+    );
+    let error = String::from_utf8_lossy(&changed.stderr);
+    assert!(
+        error.contains("replay rejected") && error.contains("$.messages[1].content"),
+        "{error}"
+    );
+}
+
+#[test]
 fn default_record_and_replay_pair_while_existing_legacy_default_keeps_precedence() {
     let project = Project::new();
     project.config(1);
