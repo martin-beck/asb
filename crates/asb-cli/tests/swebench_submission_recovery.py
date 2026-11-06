@@ -46,6 +46,17 @@ class SubmissionRecoveryTests(unittest.TestCase):
         self.assertEqual(options['timeout'], 60)
         self.assertNotIn('preparation_timeout', options)
 
+    def test_history_fetch_has_a_separate_bounded_setup_budget(self):
+        task = task_module.SweBenchTask(None, 'catalog', 'fixture', 'artifacts')
+        task.checked = MagicMock(return_value=b'')
+        task.prepare_base_history('/worktree', '/base.git', 'a' * 40)
+        fetches = [call for call in task.checked.call_args_list
+                   if call.args[0][:3] == ['git', '--git-dir=/base.git', 'fetch']]
+        self.assertEqual(len(fetches), 1)
+        self.assertEqual(fetches[0].kwargs['timeout'], 7200)
+        self.assertIn('--no-tags', fetches[0].args[0])
+        self.assertIn('--no-write-fetch-head', fetches[0].args[0])
+
     def test_agent_environment_activates_sdk_environment_and_preserves_private_values(self):
         task = task_module.SweBenchTask(None, 'catalog', 'fixture', 'artifacts')
         task.row = {'base_commit':'a' * 40}

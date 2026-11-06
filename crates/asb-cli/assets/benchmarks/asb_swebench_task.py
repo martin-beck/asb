@@ -185,7 +185,7 @@ class SweBenchTask:
         self.checked(['mkdir', clean_git])
         self.checked(['git', 'init', '--bare', clean_git])
         self.checked(['git', '--git-dir='+clean_git, 'fetch', '--no-tags',
-                      '--no-recurse-submodules', '--no-write-fetch-head', worktree, base], timeout=600)
+                      '--no-recurse-submodules', '--no-write-fetch-head', worktree, base], timeout=7200)
         self.checked(['git', '--git-dir='+clean_git, 'cat-file', '-e', base+'^{commit}'])
         self.checked(['git', '--git-dir='+clean_git, 'config', 'core.bare', 'false'])
         self.checked(['git', '--git-dir='+clean_git, 'update-ref', 'refs/heads/asb-base', base],
