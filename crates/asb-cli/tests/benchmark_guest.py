@@ -69,6 +69,12 @@ class ArchiveContainer:
 
 
 class GuestBootstrapTests(unittest.TestCase):
+    def test_shared_launch_preparation_budget_accepts_long_setup_but_is_bounded(self):
+        with patch("asb_guest.time.monotonic", return_value=100):
+            self.assertEqual(PreparationBudget(7200).deadline, 7300)
+        with self.assertRaises(ExecutionError):
+            PreparationBudget(7201)
+
     def test_snapshot_replay_disconnects_only_owned_routed_networks(self):
         class Network:
             def __init__(self, name): self.name = name
@@ -405,7 +411,7 @@ class GuestBootstrapTests(unittest.TestCase):
             with self.assertRaises(ExecutionError):
                 export_agent_artifacts(task, directory, [receipt] * 9)
     def test_preparation_budget_is_bounded_anchored_and_not_restarted(self):
-        for invalid in [True, False, 0, -1, 1801, float("nan"), float("inf"), "900"]:
+        for invalid in [True, False, 0, -1, 7201, float("nan"), float("inf"), "900"]:
             with self.subTest(invalid=invalid), self.assertRaises(ExecutionError):
                 PreparationBudget(invalid)
         now = [100.0]

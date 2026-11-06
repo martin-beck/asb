@@ -2118,8 +2118,8 @@ fn repeats_fresh_batches_preserve_users_collect_all_outcomes_and_continue_ordina
         .unwrap();
         assert_eq!(log["execution_cohort"], row["execution_cohort"]);
     }
-    assert_eq!(plan["admission"]["material_seconds"], 1800);
-    assert_eq!(plan["admission"]["launch_seconds"], 1800);
+    assert_eq!(plan["admission"]["material_seconds"], 7200);
+    assert_eq!(plan["admission"]["launch_seconds"], 7200);
     for batch in 1..=3 {
         assert!(root.join(format!("batch-{batch}/prepared.json")).is_file());
         assert_eq!(

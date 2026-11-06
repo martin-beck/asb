@@ -40,7 +40,7 @@ class SDKSessionLauncher:
         self.session,self.host_binary,self.artifacts = session,str(host_binary),artifacts
         self.require_host_target,self.transports = require_host_target,[]
         if preparation_deadline is not None and (type(preparation_deadline) not in [int,float]
-                or not math.isfinite(preparation_deadline) or not 0 < preparation_deadline-time.monotonic() <= 1800):
+                or not math.isfinite(preparation_deadline) or not 0 < preparation_deadline-time.monotonic() <= 7200):
             raise ExecutionError("invalid SDK launch preparation deadline")
         self.preparation_deadline = preparation_deadline
         self.on_preparation_failure = on_preparation_failure
