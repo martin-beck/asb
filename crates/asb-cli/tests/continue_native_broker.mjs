@@ -229,11 +229,18 @@ try {
   await duplicateBroker.listen(socket);
   const lateCall = await brokerRequest(socket, {op: 'reserve', request: {tool: 'later'}});
   await assert.rejects(brokerRequest(socket, {op: 'reserve', request: {tool: 'later'}}), /no matching/);
-  const firstCall = await brokerRequest(socket, {op: 'reserve', request: {tool: 'first'}});
-  const lateOutcome = brokerRequest(socket, {op: 'release', token: lateCall.token});
-  assert.equal((await brokerRequest(socket, {op: 'release', token: firstCall.token})).value, 'first');
-  assert.equal((await lateOutcome).value, 'later');
-  await duplicateBroker.finish();
+  await assert.rejects(brokerRequest(socket, {op: 'reserve', request: {tool: 'first'}}), /closed/);
+  await assert.rejects(brokerRequest(socket, {op: 'release', token: lateCall.token}), /unavailable/);
+  await assert.rejects(duplicateBroker.finish(), /incomplete/);
+  await duplicateBroker.abort();
+  const extraBroker = new NativeToolBroker('replay', [
+    {ordinal: 0, request: {tool: 'known'}, outcome: {ok: true, value: 'known'}},
+  ]);
+  await extraBroker.listen(socket);
+  assert.equal((await brokerRequest(socket, {op:'invoke', request:{tool:'known'}})).value, 'known');
+  await assert.rejects(brokerRequest(socket, {op:'invoke', request:{tool:'extra'}}), /no matching/);
+  await assert.rejects(extraBroker.finish(), /incomplete/);
+  await extraBroker.abort();
   // Preserve both the observed result order and the different snapshot order.
   const orderedRecord = new NativeToolBroker('record');
   await orderedRecord.listen(socket);
