@@ -45,6 +45,49 @@ pub struct ReplayAttempt {
     pub expected_replicas: usize,
 }
 
+impl ReplayAttempt {
+    /// Collect bounded replica summaries from an ASB JSONL replay result.
+    /// The caller must independently hash and verify the published cassette.
+    pub fn from_jsonl(
+        cassette_sha256: String,
+        output: &[u8],
+        expected_replicas: usize,
+    ) -> Result<Self, Error> {
+        if output.len() > 16 * 1024 * 1024 || !super::valid_digest(&cassette_sha256) {
+            return Err(Error(
+                "replay result or cassette identity exceeds its bound or is invalid".into(),
+            ));
+        }
+        if expected_replicas == 0 || expected_replicas > 64 {
+            return Err(Error("invalid replay qualification replica count".into()));
+        }
+        let mut replicas = Vec::new();
+        for line in output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let value: serde_json::Value = serde_json::from_slice(line)
+                .map_err(|_| Error("replay produced malformed JSON evidence".into()))?;
+            if value.get("task").is_some_and(serde_json::Value::is_object) {
+                if replicas.len() >= expected_replicas {
+                    return Err(Error("replay produced too many replica summaries".into()));
+                }
+                replicas.push(ReplayObservation::from_summary(&value)?);
+            }
+        }
+        if replicas.len() != expected_replicas {
+            return Err(Error(
+                "replay did not produce every expected replica summary".into(),
+            ));
+        }
+        Ok(Self {
+            cassette_sha256,
+            replicas,
+            expected_replicas,
+        })
+    }
+}
+
 impl BoundTrialPreparation {
     /// Maximum size of a serialized per-combination ledger.
     pub const MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -731,6 +774,15 @@ mod tests {
         summary["replay_selection"]["provider_replay"] = serde_json::json!(true);
         summary.as_object_mut().unwrap().remove("failure_kind");
         assert!(ReplayObservation::from_summary(&summary).is_err());
+    }
+
+    #[test]
+    fn replay_attempt_rejects_missing_or_malformed_replica_output() {
+        let digest = "a".repeat(64);
+        assert!(ReplayAttempt::from_jsonl(digest.clone(), b"{}\n", 1).is_err());
+        assert!(ReplayAttempt::from_jsonl(digest.clone(), b"not-json\n", 1).is_err());
+        assert!(ReplayAttempt::from_jsonl("bad".into(), b"", 1).is_err());
+        assert!(ReplayAttempt::from_jsonl(digest, b"", 0).is_err());
     }
 
     #[test]
