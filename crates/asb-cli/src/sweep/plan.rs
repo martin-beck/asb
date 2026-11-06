@@ -156,6 +156,7 @@ fn build_with_catalog(
             selection,
         });
     }
+    validate_sampled_population(manifest, entries.iter().map(|entry| &entry.configuration))?;
     Ok(SweepPlan {
         schema_version: 1,
         execution: None,
@@ -166,6 +167,75 @@ fn build_with_catalog(
         entries,
         resources: manifest.resources,
     })
+}
+
+fn validate_sampled_population<'a>(
+    manifest: &SweepFile,
+    configurations: impl Iterator<Item = &'a BenchmarkConfig>,
+) -> Result<(), Error> {
+    use std::collections::{BTreeMap, BTreeSet};
+    type Group = (String, String, String, String);
+    let mut groups: BTreeMap<Group, BTreeSet<String>> = BTreeMap::new();
+    let samples: BTreeMap<_, _> = manifest
+        .sampled_trials
+        .iter()
+        .map(|sample| (sample.workload.as_str(), sample))
+        .collect();
+    for config in configurations {
+        if !samples.contains_key(config.workload.as_str()) {
+            continue;
+        }
+        let trial = config.trial.as_ref().ok_or_else(|| {
+            Error::Input(format!(
+                "sampled workload `{}` has a benchmark without a trial",
+                config.workload
+            ))
+        })?;
+        let key = (
+            config.workload.clone(),
+            config.agent.clone(),
+            config.provider.clone(),
+            config.model.clone(),
+        );
+        if !groups.entry(key).or_default().insert(trial.clone()) {
+            return Err(Error::Input(format!(
+                "sampled workload `{}` contains a duplicate trial in a benchmark combination",
+                config.workload
+            )));
+        }
+    }
+    let expected: BTreeMap<_, BTreeSet<_>> = samples
+        .iter()
+        .map(|(workload, sample)| {
+            (
+                *workload,
+                sample
+                    .candidates
+                    .iter()
+                    .take(sample.count)
+                    .cloned()
+                    .collect(),
+            )
+        })
+        .collect();
+    let mut found = BTreeSet::new();
+    for (key, actual) in &groups {
+        found.insert(key.0.as_str());
+        if actual != &expected[key.0.as_str()] {
+            return Err(Error::Input(format!(
+                "sampled workload `{}` has an incomplete or changed benchmark combination; regenerate setup",
+                key.0
+            )));
+        }
+    }
+    for workload in samples.keys() {
+        if !found.contains(workload) {
+            return Err(Error::Input(format!(
+                "sampled workload `{workload}` has no benchmarks"
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl SweepPlan {
@@ -506,6 +576,38 @@ pub(crate) fn fresh_results(parent: &Path, stem: &str, plan: &SweepPlan) -> Resu
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn sampled_population_requires_each_combination_to_match_the_frozen_trials() {
+        let ids = vec!["one".into(), "two".into(), "three".into()];
+        let order = crate::cassette::TrialOrder::new(&ids, 2, 42).unwrap();
+        let manifest = SweepFile {
+            configs: vec!["a.toml".into()],
+            repeat: None,
+            resources: None,
+            sampled_trials: vec![super::super::SampledTrials {
+                workload: "fixture".into(),
+                count: 2,
+                seed: format!("{:016x}", 42),
+                candidates: order.candidates().to_vec(),
+            }],
+        };
+        let mut configs = Vec::new();
+        for agent in ["pi", "opencode"] {
+            for trial in order.initial() {
+                let config: BenchmarkConfig = toml::from_str(&format!(
+                    "agent='{agent}'\nprovider='openrouter'\nmodel='fixture'\nworkload='fixture'\ntrial='{trial}'\n"
+                )).unwrap();
+                configs.push(config);
+            }
+        }
+        assert!(validate_sampled_population(&manifest, configs.iter()).is_ok());
+        let removed = configs.pop().unwrap();
+        assert!(validate_sampled_population(&manifest, configs.iter()).is_err());
+        configs.push(removed);
+        configs.push(configs[0].clone());
+        assert!(validate_sampled_population(&manifest, configs.iter()).is_err());
+    }
 
     #[test]
     #[ignore = "requires explicit installed original catalogs; no agent, provider or Docker execution"]
