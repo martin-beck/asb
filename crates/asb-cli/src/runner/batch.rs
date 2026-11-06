@@ -514,7 +514,24 @@ impl Arrival<'_> {
     }
 
     pub(crate) fn ready(&mut self, identity: Compatibility) -> Result<(), Error> {
+        self.ready_with_legacy(identity, None)
+    }
+
+    pub(crate) fn ready_with_legacy(
+        &mut self,
+        mut identity: Compatibility,
+        legacy_material: Option<String>,
+    ) -> Result<(), Error> {
         let mut state = self.gate.state.lock().map_err(|_| unavailable())?;
+        if let (Some(expected), Some(legacy)) = (&state.identity, legacy_material)
+            && expected != &identity
+        {
+            let mut alternate = identity.clone();
+            alternate.material_sha256 = legacy;
+            if &alternate == expected {
+                identity = alternate;
+            }
+        }
         if let Some(reason) = &state.aborted {
             return Err(Error::Run(reason.clone()));
         }
@@ -957,6 +974,35 @@ mod tests {
             protocol_sha256: None,
             normalization_sha256: None,
         }
+    }
+
+    #[test]
+    fn legacy_material_only_matches_the_exact_expected_compatibility() {
+        let mut expected = material();
+        expected.material_sha256 = "a".repeat(64);
+        let gate = Gate::new(1, Some(expected.clone()), Duration::from_secs(1)).unwrap();
+        let mut arrival = gate.register(Identity { index: 1, total: 1 }).unwrap();
+        arrival
+            .ready_with_legacy(material(), Some("a".repeat(64)))
+            .unwrap();
+        assert_eq!(gate.confirmed_identity().unwrap(), expected);
+
+        let gate = Gate::new(1, Some(expected.clone()), Duration::from_secs(1)).unwrap();
+        let mut changed = material();
+        changed.model = "different".into();
+        let mut arrival = gate.register(Identity { index: 1, total: 1 }).unwrap();
+        assert!(
+            arrival
+                .ready_with_legacy(changed, Some("a".repeat(64)))
+                .is_err()
+        );
+
+        let gate = Gate::new(1, None, Duration::from_secs(1)).unwrap();
+        let mut arrival = gate.register(Identity { index: 1, total: 1 }).unwrap();
+        arrival
+            .ready_with_legacy(material(), Some("a".repeat(64)))
+            .unwrap();
+        assert_eq!(gate.confirmed_identity().unwrap(), material());
     }
 
     #[test]

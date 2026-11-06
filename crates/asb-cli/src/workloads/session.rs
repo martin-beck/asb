@@ -449,6 +449,10 @@ pub(crate) trait WorkloadSession {
     fn initial_material_sha256(&self) -> Result<String, String> {
         Err("workload adapter does not yet establish initial material identity".into())
     }
+    /// Optional exact legacy identity for previously recorded material.
+    fn legacy_initial_material_sha256(&self) -> Result<Option<String>, String> {
+        Ok(None)
+    }
     /// Abort preparation without authorizing normal destructive teardown.
     fn cancel_prepared(&mut self) -> Result<(), String> {
         Ok(())
