@@ -15,6 +15,17 @@ configuration/cassette mappings only after every requested combination is
 complete. Then resolve that published mapping only for ordinary replay. Do not
 remove the refusal until both paths are implemented and exercised end to end.
 
+Draft progress: `asb sweep --prepare-replay` now iterates sampled combinations
+and records/replays replacements through the locked group ledger. The CLI fixture
+checks a mismatch, a replacement, and a second preparation without additional
+provider calls. It deliberately reports that selection publication is missing;
+ordinary sampled replay is still refused. A completed group can now be reopened
+read-only and its cassette/configuration identities revalidated without running a
+provider. Remaining work includes publishing a whole-sweep winner mapping,
+resolving it from normal replay, preserving original sweep result/report naming,
+supporting mixed sampled/fixed workloads and `--project-dir`, and verifying the
+complete CLI record/prepare/replay path with the provider stopped.
+
 Setup should accept a numerical trial count for each selected workload. It must
 publish a sweep plus bounded sampling metadata: the workload, catalog identity,
 seed, requested count and candidate order. The count is a number of distinct
