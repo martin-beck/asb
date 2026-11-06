@@ -432,7 +432,7 @@ fn replay_private_inputs(
 
 pub(crate) fn prefetch(context: &super::PreflightContext<'_>) -> Result<(), crate::Error> {
     let tools = crate::project::resolve(context.project_root, &context.project_config.tools_dir);
-    crate::install::guest_bootstrap(context.agent, context.project_root, &tools)?;
+    crate::install::guest_bootstrap(context.agent, context.project_root, &tools, context.offline)?;
     Ok(())
 }
 
@@ -1522,6 +1522,7 @@ impl PreparedBootstrap {
             &context.config.agent,
             context.project_root,
             &tools_root,
+            context.replay,
         )
         .map_err(|error| {
             format!("cannot prepare selected agent installation artifacts: {error}")

@@ -218,6 +218,7 @@ fn preflight_missing_sdk_and_helper_failure_precede_guest_bootstrap() {
         project_root: &fixture.root,
         project_config: &fixture.project,
         agent: "missing-fixture-agent",
+        offline: false,
     };
     assert!(
         binding

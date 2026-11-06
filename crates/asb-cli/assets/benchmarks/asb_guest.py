@@ -641,6 +641,8 @@ def isolate_snapshot_replay_network(task):
 
 
 def _execute_agent(task, request, before_resume, on_output, cancelled, resources, relays, on_ended, preparation_budget):
+    if request.get("network") and getattr(task, 'tool_mode', None) == 'replay':
+        raise ExecutionError('replay cannot attach an external task network')
     guest,environment = prepare_agent(task,request,cancelled,resources,relays,preparation_budget)
     # The workload may select an already-prepared runtime for the client.
     # Do this after installation so its Python and tools remain independent.

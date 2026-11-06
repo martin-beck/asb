@@ -91,6 +91,7 @@ struct WorkerStartFault {
 
 #[derive(Clone)]
 pub(crate) struct OperationContext {
+    offline: bool,
     root: PathBuf,
     invocation_dir: PathBuf,
     config_path: PathBuf,
@@ -107,6 +108,13 @@ pub(crate) struct OperationContext {
     worker_start_fault: Arc<std::sync::Mutex<Option<WorkerStartFault>>>,
 }
 impl OperationContext {
+    pub(crate) fn offline(mut self) -> Self {
+        self.offline = true;
+        self
+    }
+    pub(crate) fn is_offline(&self) -> bool {
+        self.offline
+    }
     /// Explicit outer entry only; nested install steps reuse this snapshot.
     pub(crate) fn load(directory: &Path) -> InstallResult<Self> {
         let (root, config) = crate::project::load(directory)?;
@@ -183,6 +191,7 @@ impl OperationContext {
                 ))
             })?;
         Ok(Self {
+            offline: false,
             root: root.to_owned(),
             invocation_dir: std::path::absolute(invocation_dir)
                 .map_err(|error| crate::Error::Io(error.to_string()))?,

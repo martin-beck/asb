@@ -5,6 +5,7 @@
 //! detect corruption; they are not an authenticated provenance claim.
 
 mod archive;
+mod candidate;
 mod journal;
 mod metadata;
 mod native;
@@ -12,8 +13,10 @@ mod provenance;
 mod selection;
 mod serialization;
 mod source;
+mod trial_order;
 
 pub use archive::{Archive, Limits};
+pub use candidate::{load_sampled_group, prepare_sampled_group, record_and_replay_candidate};
 pub use journal::{
     ArtifactInput, NativeInput, ProofLimits, Publication, RecordingJournal, RecordingReservation,
     TrackEvidence,
@@ -28,6 +31,10 @@ pub(crate) use source::SourceInspection;
 pub(crate) use source::take_observation_count;
 pub use source::{LegacyTrack, Source};
 use std::fmt;
+pub use trial_order::{
+    BoundTrialPreparation, RecordingReceipt, ReplayAttempt, ReplayObservation, TrialOrder,
+    TrialPreparation,
+};
 
 /// Current manifest format. Unknown versions are refused, not guessed.
 pub const SCHEMA_VERSION: u32 = 2;

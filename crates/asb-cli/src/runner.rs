@@ -1,6 +1,6 @@
 //! Live execution of one configured benchmark.
 mod attempt;
-mod batch;
+pub(crate) mod batch;
 pub(crate) use batch::{
     dataset_fingerprint, replay_protocol_fingerprint, replay_protocol_with_normalizer_digest,
 };
@@ -104,6 +104,9 @@ struct RunResult<'a> {
     /// Guest-attested native tool stream consumption, not total effect coverage.
     #[serde(skip_serializing_if = "Option::is_none")]
     native_replay_consumed: Option<bool>,
+    /// Whether the replay proxy validated and settled the selected tape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_replay_consumed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recording: Option<recording::Evidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1736,6 +1739,9 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
     if let Some(consumed) = result.native_replay_consumed {
         summary["native_replay_consumed"] = serde_json::Value::Bool(consumed);
     }
+    if let Some(consumed) = result.provider_replay_consumed {
+        summary["provider_replay_consumed"] = serde_json::Value::Bool(consumed);
+    }
     if let Some(execution) = &result.execution {
         summary["execution"] =
             serde_json::to_value(execution).map_err(|error| Error::Io(error.to_string()))?;
@@ -3327,6 +3333,7 @@ mod tests {
         RunResult {
             replay_selection: None,
             native_replay_consumed: None,
+            provider_replay_consumed: None,
             observation: Default::default(),
             recording: None,
             execution: None,
@@ -3498,6 +3505,21 @@ mod tests {
             match evidence {
                 Some(consumed) => assert_eq!(value["native_replay_consumed"], consumed),
                 None => assert!(value.get("native_replay_consumed").is_none()),
+            }
+        }
+    }
+
+    #[test]
+    fn json_summary_reports_only_observed_provider_replay_completion() {
+        let mut result = result();
+        for evidence in [None, Some(true), Some(false)] {
+            result.provider_replay_consumed = evidence;
+            let mut output = Vec::new();
+            render_json(&result, &mut output).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            match evidence {
+                Some(consumed) => assert_eq!(value["provider_replay_consumed"], consumed),
+                None => assert!(value.get("provider_replay_consumed").is_none()),
             }
         }
     }

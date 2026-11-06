@@ -271,6 +271,34 @@ esac"#,
 }
 
 #[test]
+fn replay_requirement_check_never_installs_missing_inputs() {
+    let fixture = Fixture::new();
+    let tools = fixture.0.join("tools");
+    let workloads = fixture.0.join("workloads");
+    let mut config: BenchmarkConfig = toml::from_str(
+        "agent='pi'\nworkload='swe-bench'\nprovider='openrouter'\nmodel='fixture'\n",
+    )
+    .unwrap();
+    let missing = validate_offline_replay_requirements(&config, &tools, &workloads).unwrap_err();
+    assert!(missing.to_string().contains("locally installed tool `pi`"));
+    assert!(!tools.exists());
+    assert!(!workloads.exists());
+    let agent = tools.join("pi/bin/pi");
+    fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    fs::write(&agent, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    let missing = validate_offline_replay_requirements(&config, &tools, &workloads).unwrap_err();
+    assert!(
+        missing
+            .to_string()
+            .contains("workload `swe-bench` is not installed locally")
+    );
+    assert!(!workloads.exists());
+    config.workload = "bug-fix".into();
+    validate_offline_replay_requirements(&config, &tools, &workloads).unwrap();
+}
+
+#[test]
 fn guest_bootstrap_failures_leave_host_runtime_untouched() {
     let fixture = Fixture::new();
     fixture.run("guest-bootstrap");
@@ -529,7 +557,7 @@ fn host_recipe_contract(root: &Path) {
 
 fn guest_bootstrap_contract(root: &Path) {
     let tools = root.join("tools");
-    let unknown = guest_bootstrap("fixture-unregistered-agent", root, &tools)
+    let unknown = guest_bootstrap("fixture-unregistered-agent", root, &tools, false)
         .err()
         .expect("unregistered agent must be rejected");
     assert!(unknown.to_string().contains("no installation adapter"));
@@ -539,7 +567,7 @@ fn guest_bootstrap_contract(root: &Path) {
     fs::write(&host_node, "preserved host runtime").unwrap();
     // curl is absent from the child PATH: prefetch must stop, not launch an
     // agent or substitute a host executable for its declared distribution.
-    let error = guest_bootstrap("codex", root, &tools)
+    let error = guest_bootstrap("codex", root, &tools, false)
         .err()
         .expect("missing prefetch transport must fail");
     assert!(error.to_string().contains("curl"), "{error}");
@@ -547,7 +575,7 @@ fn guest_bootstrap_contract(root: &Path) {
     assert!(tools.join(".asb-guest-bootstrap.lock").is_file());
     let blocked = root.join("blocked-tools");
     fs::write(&blocked, "preserved").unwrap();
-    assert!(guest_bootstrap("codex", root, &blocked).is_err());
+    assert!(guest_bootstrap("codex", root, &blocked, false).is_err());
     assert_eq!(fs::read(&blocked).unwrap(), b"preserved");
     let error = ensure_runtime_dependency(
         "fixture-unknown-runtime",
