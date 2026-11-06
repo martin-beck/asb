@@ -4,7 +4,7 @@ export function normalizeToolResult({ text, tool }) {
   if (!['Bash', 'bash', 'shell_command'].includes(tool?.name)) return text;
   const command = tool?.arguments?.command;
   if (typeof command !== 'string') return text;
-  const match = /^grep -rn "[^"\r\n]+" ((?:[A-Za-z0-9_.*\/-]+ ?)+)(?: 2>\/dev\/null)?(?: \| grep -v "[^"\r\n]+")? \| head -([1-9][0-9]*)$/.exec(command);
+  const match = /^grep -rn "[^"\r\n]+" ([A-Za-z0-9_.*\/-]+(?: [A-Za-z0-9_.*\/-]+)*)(?: 2>\/dev\/null)?(?: \| grep -v "[^"\r\n]+")? \| head -([1-9][0-9]*)$/.exec(command);
   if (!match || !text) return text;
   const paths = match[1].split(' ');
   if (paths.some((path) => !path || path.includes('..') || path.includes('**'))) return text;

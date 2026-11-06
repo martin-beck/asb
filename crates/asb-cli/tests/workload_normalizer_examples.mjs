@@ -7,6 +7,8 @@ import { normalizeToolResult as search } from "../assets/examples/normalizers/op
 import { normalizeToolResult as ls } from "../assets/examples/normalizers/shell-ls-diagnostics.mjs";
 import { normalizeToolResult as repr } from "../assets/examples/normalizers/python-repr-address.mjs";
 import { normalizeToolResult as pip } from "../assets/examples/normalizers/pip-transfer-progress.mjs";
+import { NormalizerSupervisor } from "../assets/scripts/normalizer-supervisor.mjs";
+import { readFileSync } from "node:fs";
 import { normalizeToolResult as grepOrder } from "../assets/examples/normalizers/grep-recursive-order.mjs";
 import { normalizeToolResult as tmpListing } from "../assets/examples/normalizers/tmp-listing-time.mjs";
 
@@ -47,6 +49,16 @@ test("recursive grep ordering is normalized only for complete unambiguous result
   assert.equal(grepOrder({text:foreign,tool:multiple}), foreign);
   const filtered = {...tool, arguments:{command:'grep -rn "x" sympy/vector/ sympy/printing/ 2>/dev/null | grep -v "test.py" | head -50'}};
   assert.equal(grepOrder({text:first,tool:filtered}), grepOrder({text:second,tool:filtered}));
+});
+
+test('long nonmatching grep commands do not exhaust the normalizer deadline', async () => {
+  const source = readFileSync(new URL('../assets/examples/normalizers/grep-recursive-order.mjs', import.meta.url),'utf8');
+  const supervisor = new NormalizerSupervisor([{id:'grep',source}], {callTimeoutMs:100});
+  try {
+    const text = 'unchanged';
+    const tool = {name:'Bash',arguments:{command:'grep -rn "x" ' + 'a'.repeat(10000) + '!'}};
+    assert.equal(await supervisor.normalize({text,tool}),text);
+  } finally { await supervisor.close(); }
 });
 
 test("unittest elapsed normalization requires the command and a complete summary", () => {
