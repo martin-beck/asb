@@ -292,6 +292,110 @@ fn replay_sweep_ignores_only_selected_failures_and_persists_policy() {
     );
 }
 
+#[test]
+fn replay_sweep_persists_ignored_compatibility_and_resumes() {
+    let project = registered_project(1);
+    let provider = RecordingProvider::new();
+    let recorded = record_to_with_mode(
+        &project,
+        &provider,
+        None,
+        Some("new-recording.jsonl"),
+        "--llm-record",
+    );
+    assert!(
+        recorded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    drop(provider);
+    rewrite_bundle(&project, |manifest, _| {
+        manifest.compatibility.model = "different-model".into()
+    });
+    let config_path = project.0.join("benchmark.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        format!(
+            "{config}\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=[]\n"
+        ),
+    )
+    .unwrap();
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("new-recording.jsonl"),
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    let args = [
+        "--llm-replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-compatibility",
+        "--verbose",
+    ];
+    let output = sweep(&project, None, &args);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        records(&output.stdout)
+            .iter()
+            .any(|row| row["ignored_failures"][0]["kind"] == "replay_compatibility")
+    );
+    let report_dir = project.0.join("results/sweep-comparison");
+    let report: Value =
+        serde_json::from_slice(&fs::read(report_dir.join("comparison.json")).unwrap()).unwrap();
+    assert_eq!(report["benchmarks"][0]["approximate_replay"], true);
+    assert!(
+        fs::read_to_string(report_dir.join("report.html"))
+            .unwrap()
+            .contains("Approximate replay:")
+    );
+    let plan: Value =
+        serde_json::from_slice(&fs::read(project.0.join("sweep-results/plan.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan["ignore_compatibility"], true);
+    let without = sweep(
+        &project,
+        None,
+        &[
+            "--llm-replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+        ],
+    );
+    assert!(!without.status.success());
+    let resumed = sweep(
+        &project,
+        None,
+        &[
+            "--llm-replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+            "--ignore-compatibility",
+        ],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn replay_sweep_ignores_confirmed_collector_failure_and_resumes() {

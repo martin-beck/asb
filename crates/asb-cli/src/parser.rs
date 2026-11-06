@@ -327,6 +327,7 @@ pub(crate) fn run_with_interactive(
                     ignore_provider_unconsumed: options.ignore_provider_unconsumed,
                     ignore_tool_mismatch: options.ignore_tool_mismatch,
                     ignore_mcp_mismatch: options.ignore_mcp_mismatch,
+                    ignore_compatibility: options.ignore_compatibility,
                     interactive: interactive && !options.json,
                     ..Default::default()
                 },
@@ -430,6 +431,7 @@ pub(crate) fn run_with_interactive(
                     ignore_provider_unconsumed: options.ignore_provider_unconsumed,
                     ignore_tool_mismatch: options.ignore_tool_mismatch,
                     ignore_mcp_mismatch: options.ignore_mcp_mismatch,
+                    ignore_compatibility: options.ignore_compatibility,
                     cassette_root: cassette_root.as_deref(),
                     jobs: usize::from(options.jobs),
                     max_active_attempts: options.max_active_attempts.map(usize::from),
@@ -1325,6 +1327,9 @@ struct RunArgs {
     /// Continue on matching-method MCP request divergence; replay is approximate.
     #[arg(long, requires = "replay-direction")]
     ignore_mcp_mismatch: bool,
+    /// Continue with an explicitly approximate replay when recorded and prepared identities differ.
+    #[arg(long, requires = "replay-direction")]
+    ignore_compatibility: bool,
     #[arg(value_name = "CONFIG", value_hint = clap::ValueHint::FilePath)]
     path: String,
     /// Sequential batches of fresh isolated executions at configured concurrency.
@@ -1410,6 +1415,9 @@ struct SweepArgs {
     /// Continue on matching-method MCP request divergence; replay is approximate.
     #[arg(long, requires = "replay-direction")]
     ignore_mcp_mismatch: bool,
+    /// Continue with an explicitly approximate replay when recorded and prepared identities differ.
+    #[arg(long, requires = "replay-direction")]
+    ignore_compatibility: bool,
     #[arg(value_name = "SWEEP", value_hint = clap::ValueHint::FilePath, group = "sweep-input")]
     path: Option<String>,
     /// Materialize a repository-owned preset in this initialized project, then run its sweep.

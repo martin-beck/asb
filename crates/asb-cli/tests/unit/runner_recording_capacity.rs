@@ -13,6 +13,7 @@ fn planned(root: &Path, destination: PathBuf) -> crate::runner::campaign::Plan {
         ignore_collector: false,
         ignore_provider_mismatch: false,
         ignore_provider_unconsumed: false,
+        ignore_compatibility: false,
         normalization_policy: None,
         replay_compatibility: None,
         recording_selection: Some(workloads::TaskSelection {

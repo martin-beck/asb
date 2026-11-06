@@ -29,6 +29,7 @@ pub(crate) enum FailureKind {
     OutputError,
     ProviderCleanupError,
     RecordingError,
+    ReplayCompatibility,
 }
 
 impl FailureKind {
@@ -46,6 +47,7 @@ impl FailureKind {
             Self::OutputError => "output_error",
             Self::ProviderCleanupError => "provider_cleanup_error",
             Self::RecordingError => "recording_error",
+            Self::ReplayCompatibility => "replay_compatibility",
         }
     }
 }

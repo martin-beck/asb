@@ -446,6 +446,7 @@ impl<'a> ProviderAttempt<'a> {
 }
 
 struct WorkloadMetadata {
+    compatibility_warning: Option<String>,
     workspace: PathBuf,
     workload_baseline: workloads::BaselineEvidence,
     workload_baseline_passed: Option<bool>,
@@ -677,6 +678,7 @@ impl<'a> ReadyAttempt<'a> {
                         None,
                     )
                 };
+            let mut compatibility_warning = None;
             if let Some(arrival) = arrival.as_mut() {
                 let identity = (|| {
                     let task = &workload_session.invocation().identity;
@@ -684,7 +686,14 @@ impl<'a> ReadyAttempt<'a> {
                         .initial_material_sha256()
                         .map_err(Error::Run)?;
                     let dataset_sha256 = batch::dataset_fingerprint(task.dataset.as_ref())?;
-                    let normalization = if options.mode == Some(tape::Mode::Replay) {
+                    let normalization = if options.ignore_compatibility
+                        && options.mode == Some(tape::Mode::Replay)
+                        && options.replay_expected_compatibility.is_some()
+                    {
+                        options
+                            .replay_expected_compatibility
+                            .map(|expected| expected.normalization_sha256.clone())
+                    } else if options.mode == Some(tape::Mode::Replay) {
                         options
                             .preparation_gate
                             .map(|gate| gate.expected_normalization())
@@ -717,10 +726,69 @@ impl<'a> ReadyAttempt<'a> {
                     })
                 })();
                 let identity = identity?;
-                match workload_session
+                let legacy = workload_session
                     .legacy_initial_material_sha256()
-                    .map_err(Error::Run)?
+                    .map_err(Error::Run)?;
+                if options.ignore_compatibility
+                    && let Some(expected) = options.replay_expected_compatibility
                 {
+                    if expected.normalization_sha256 != identity.normalization_sha256 {
+                        return Err(Error::Input("cannot override normalization policy identity without proof that the recording contains raw requests".into()));
+                    }
+                    let mut compared = identity.clone();
+                    if let Some(legacy_material) = &legacy {
+                        let mut alternate = identity.clone();
+                        alternate.material_sha256.clone_from(legacy_material);
+                        if &alternate == expected {
+                            compared = alternate;
+                        }
+                    }
+                    let fields = expected.differing_fields(&compared);
+                    if !fields.is_empty() {
+                        compatibility_warning = Some(format!(
+                            "recorded and prepared identities differ in {}; replay is approximate",
+                            fields.join(", ")
+                        ));
+                        let reason = compatibility_warning.as_deref().expect("set above");
+                        if let Some(dir) = options.compatibility_warning_dir {
+                            let path = dir.join(format!(
+                                "compatibility-warning-{}.json",
+                                options.replica.index
+                            ));
+                            repeated::publish(
+                                &path,
+                                &serde_json::json!({
+                                    "schema_version": 1,
+                                    "kind": "replay_compatibility",
+                                    "ignored": true,
+                                    "severity": "warning",
+                                    "reason": reason,
+                                }),
+                            )?;
+                        }
+                        if json {
+                            serde_json::to_writer(
+                                &mut *output,
+                                &serde_json::json!({
+                                    "type": "replay-compatibility-warning",
+                                    "kind": "replay_compatibility",
+                                    "ignored": true,
+                                    "severity": "warning",
+                                    "reason": reason,
+                                }),
+                            )
+                            .map_err(|error| Error::Io(error.to_string()))?;
+                            writeln!(output).map_err(io_error)?;
+                        } else {
+                            emit_warning(
+                                warnings,
+                                output,
+                                format!("Warning: ignored replay compatibility: {reason}"),
+                            )?;
+                        }
+                    }
+                }
+                match legacy {
                     Some(legacy) => arrival.ready_with_legacy(identity, Some(legacy))?,
                     None => arrival.ready(identity)?,
                 }
@@ -837,6 +905,7 @@ impl<'a> ReadyAttempt<'a> {
 
             Ok((
                 WorkloadMetadata {
+                    compatibility_warning,
                     workspace,
                     workload_baseline,
                     workload_baseline_passed,
@@ -1475,6 +1544,7 @@ impl ResultFacts {
             ignored_mcp_mismatches,
         } = self;
         let WorkloadMetadata {
+            compatibility_warning,
             workspace,
             workload_baseline,
             workload_baseline_passed,
@@ -1568,7 +1638,14 @@ impl ResultFacts {
         }
         let approximate_replay = !proxy_evidence.replay_divergences.is_empty()
             || !ignored_tool_mismatches.is_empty()
-            || !ignored_mcp_mismatches.is_empty();
+            || !ignored_mcp_mismatches.is_empty()
+            || compatibility_warning.is_some();
+        if let Some(reason) = compatibility_warning {
+            let mut failure = RunFailure::new(FailureKind::ReplayCompatibility, reason);
+            failure.ignored = true;
+            failure.severity = "warning";
+            disposition.ignored_failures.push(failure);
+        }
         let success = disposition.success;
         let workload_failure =
             grading_failure
