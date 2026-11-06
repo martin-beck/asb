@@ -3572,7 +3572,12 @@ fn approximate_replay_serves_a_recorded_response_and_exhaustion_remains_fatal() 
     let result = replay(
         &project,
         "mismatch",
-        &["--ignore-provider-mismatch", "--json"],
+        &[
+            "--ignore-provider-mismatch",
+            "--json",
+            "--measurements",
+            "measurement",
+        ],
     );
     assert!(
         result.status.success(),
