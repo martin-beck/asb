@@ -209,18 +209,18 @@ impl Service {
             let mut daemons = Daemons { children, readers: Vec::new() };
             let result = (|| -> Result<(), String> {
                 daemons.start(traced, &directory.join(format!("{instance}-{nonce:x}-traced.log")))?;
-                let deadline = Instant::now() + Duration::from_secs(5);
+                let deadline = Instant::now() + Duration::from_secs(30);
                 while !socket_ready(&producer) || !socket_ready(&consumer) {
                     daemons.check_alive()?;
-                    if Instant::now() >= deadline { return Err("owned Perfetto service did not open private sockets within 5 seconds; inspect .asb/perfetto service logs".into()); }
+                    if Instant::now() >= deadline { return Err("owned Perfetto service did not open private sockets within 30 seconds; inspect .asb/perfetto service logs".into()); }
                     std::thread::sleep(Duration::from_millis(25));
                 }
                 daemons.start(probes, &directory.join(format!("{instance}-{nonce:x}-probes.log")))?;
-                let deadline = Instant::now() + Duration::from_secs(5);
+                let deadline = Instant::now() + Duration::from_secs(30);
                 loop {
                     daemons.check_alive()?;
                     if producer_registered(&mut query)? { break; }
-                    if Instant::now() >= deadline { return Err("manual traced_probes did not register linux.ftrace and linux.process_stats within 5 seconds; inspect .asb/perfetto logs and check unshare/user-mount namespace support".into()); }
+                    if Instant::now() >= deadline { return Err("manual traced_probes did not register linux.ftrace and linux.process_stats within 30 seconds; inspect .asb/perfetto logs and check unshare/user-mount namespace support".into()); }
                     std::thread::sleep(Duration::from_millis(25));
                 }
                 Ok(())
@@ -233,7 +233,7 @@ impl Service {
         }).map_err(|e| format!("cannot start Perfetto owner thread: {e}"))?;
         service.owner = Some(Owner { stop, thread });
         started
-            .recv_timeout(Duration::from_secs(12))
+            .recv_timeout(Duration::from_secs(75))
             .map_err(|_| "Perfetto service startup timed out or owner exited".to_owned())??;
         Ok(service)
     }
@@ -325,7 +325,7 @@ fn producer_registered(command: &mut Command) -> Result<bool, String> {
         let mut bytes = Vec::new();
         stdout.take(65537).read_to_end(&mut bytes).map(|_| bytes)
     });
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let success = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.success(),
@@ -644,6 +644,10 @@ mod tests {
     fn private_service_queries_require_both_sources_and_bounded_successful_output() {
         for (script, expected) in [
             ("print('linux.ftrace linux.process_stats')", true),
+            (
+                "import time; time.sleep(2); print('linux.ftrace linux.process_stats')",
+                true,
+            ),
             ("print('linux.ftrace')", false),
             ("print('linux.process_stats')", false),
             (
