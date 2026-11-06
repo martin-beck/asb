@@ -25,6 +25,33 @@ MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_GUEST_ROWS_BYTES = 40 * 1024 * 1024
 
 
+class GuestCaptureSchedule:
+    """Bound retry work without starving other live mappings."""
+    def __init__(self, limit=MAX_IMAGES):
+        self.limit = limit
+        self.settled = set()
+        self.pending = {}
+
+    def eligibility(self, observation, now):
+        if observation in self.settled:
+            return 'settled'
+        retry = self.pending.get(observation)
+        if retry is not None:
+            return 'ready' if now >= retry[1] else 'waiting'
+        return 'full' if len(self.settled) + len(self.pending) >= self.limit else 'ready'
+
+    def success(self, observation):
+        self.pending.pop(observation, None)
+        self.settled.add(observation)
+
+    def failure(self, observation, now):
+        attempts = self.pending.get(observation, (0, 0))[0] + 1
+        if attempts >= 3:
+            self.success(observation)
+        else:
+            self.pending[observation] = (attempts, now + 1.0)
+
+
 def namespace_pid(pid, start):
     current = identity(pid)
     if current is None or current[1] != start:
@@ -705,7 +732,7 @@ def main():
     size = 0
     skipped = 0
     guest_roots = []
-    guest_seen = set()
+    guest_schedule = GuestCaptureSchedule()
     guest_paths = {}
     guest_ambiguous = set()
     guest_captured_paths = set()
@@ -789,20 +816,25 @@ def main():
                                 guest_failures += 1
                         continue
                     observation = (path, key)
-                    if observation not in guest_seen and len(guest_seen) >= MAX_IMAGES:
+                    if path in guest_ambiguous:
+                        continue
+                    eligibility = guest_schedule.eligibility(observation, time.monotonic())
+                    if eligibility == 'full':
                         guest_failures += 1
                         continue
-                    if observation in guest_seen or path in guest_ambiguous:
+                    if eligibility != 'ready':
                         continue
-                    guest_seen.add(observation)
                     if row.get('has_build_id') is True:
                         # The settled perf listing recovers these images via
                         # their build IDs; prioritize no-ID files while live.
+                        guest_schedule.success(observation)
                         continue
                     copied = capture_guest_noid(container, guest_script, row, cache_home, MAX_TOTAL_BYTES - size)
                     if copied is None:
                         guest_failures += 1
+                        guest_schedule.failure(observation, time.monotonic())
                     else:
+                        guest_schedule.success(observation)
                         size += copied[0]
                         guest_noid += int(copied[1])
                         if copied[1]:
