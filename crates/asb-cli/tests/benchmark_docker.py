@@ -17,6 +17,26 @@ SPEC.loader.exec_module(RUNTIME)
 
 
 class ConnectionTests(unittest.TestCase):
+    def test_docker_access_probe_allows_slow_success_and_reports_timeout(self):
+        with patch.object(RUNTIME.shutil, "which", side_effect=lambda name: "/bin/docker" if name == "docker" else None), \
+             patch.object(RUNTIME.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
+            self.assertEqual(RUNTIME.docker_command(), ["/bin/docker"])
+            self.assertEqual(run.call_args.kwargs["timeout"], 120.0)
+        with patch.dict(RUNTIME.os.environ, {"DOCKER_HOST": "unix:///run/docker.sock"}), \
+             patch.object(RUNTIME.shutil, "which", side_effect=lambda name: "/bin/docker" if name == "docker" else None), \
+             patch.object(RUNTIME.subprocess, "run", side_effect=subprocess.TimeoutExpired("docker", 120)):
+            with self.assertRaisesRegex(RUNTIME.DockerAccessError, "probe timed out"):
+                RUNTIME.docker_command()
+        with patch.dict(RUNTIME.os.environ, {"DOCKER_HOST": "unix:///run/docker.sock"}), \
+             patch.object(RUNTIME.shutil, "which", side_effect=lambda name: "/bin/docker" if name == "docker" else None), \
+             patch.object(RUNTIME.subprocess, "run", return_value=SimpleNamespace(returncode=1)):
+            with self.assertRaisesRegex(RUNTIME.DockerAccessError, "permission was denied"):
+                RUNTIME.docker_command()
+        with patch.dict(RUNTIME.os.environ, {"DOCKER_HOST": "unix:///run/docker.sock"}), \
+             patch.object(RUNTIME.shutil, "which", side_effect=lambda name: "/bin/" + name), \
+             patch.object(RUNTIME.subprocess, "run", side_effect=[SimpleNamespace(returncode=1), SimpleNamespace(returncode=0)]):
+            self.assertEqual(RUNTIME.docker_command(), ["/bin/sudo", "-n", "--", "/bin/docker", "--host", "unix:///run/docker.sock"])
+
     def test_docker_negotiates_on_unversioned_endpoint_before_ping(self):
         try:
             import docker

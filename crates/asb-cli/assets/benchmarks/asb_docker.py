@@ -20,7 +20,12 @@ class DockerAccessError(RuntimeError):
     pass
 
 
+class DockerProbeError(DockerAccessError):
+    """Access preflight failed before any transport was created."""
+
+
 _API_TIMEOUT_SECONDS = 600.0
+_ACCESS_PROBE_TIMEOUT_SECONDS = 120.0
 _CLOSE_SECONDS = 3.0
 _TERM_GRACE = 2.0
 
@@ -38,15 +43,20 @@ class _CloseRecord:
 def docker_command():
     executable = shutil.which("docker")
     if not executable:
-        raise DockerAccessError("Docker CLI is missing; install Docker Engine and retry")
+        raise DockerProbeError("Docker CLI is missing; install Docker Engine and retry")
     environment = os.environ.copy()
+    timed_out = False
     # This is transport access, not an outbound provider request.
     def probe(command):
+        nonlocal timed_out
         try:
             return subprocess.run(command + ["version", "--format", "{{.Server.Version}}"],
                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL, timeout=15, env=environment).returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
+                                  stderr=subprocess.DEVNULL, timeout=_ACCESS_PROBE_TIMEOUT_SECONDS, env=environment).returncode == 0
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            return False
+        except OSError:
             return False
     direct = [executable]
     if probe(direct):
@@ -57,9 +67,12 @@ def docker_command():
         if not endpoint:
             endpoint = subprocess.check_output(
                 [executable, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
-                stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
+                stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=_ACCESS_PROBE_TIMEOUT_SECONDS,
                 env=environment, text=True,
             ).strip()
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        endpoint = None
     except (OSError, subprocess.SubprocessError):
         endpoint = None
     sudo = shutil.which("sudo")
@@ -67,7 +80,11 @@ def docker_command():
         elevated = [sudo, "-n", "--", executable, "--host", endpoint]
         if probe(elevated):
             return elevated
-    raise DockerAccessError(
+    if timed_out:
+        raise DockerProbeError(
+            "Docker access probe timed out; run `docker version` and check daemon responsiveness before retrying"
+        )
+    raise DockerProbeError(
         "Docker daemon is unavailable or permission was denied, and scoped passwordless "
         "Docker access is unavailable; run `docker info` and repair access before retrying"
     )
