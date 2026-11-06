@@ -293,42 +293,19 @@ impl BoundTrialPreparation {
     where
         E: FnMut(&str) -> Result<ReplayAttempt, Error>,
     {
-        let name = path
-            .file_name()
-            .ok_or_else(|| Error("sample ledger needs a file name".into()))?;
-        let mut lock_name = name.to_os_string();
-        lock_name.push(".lock");
-        let lock_path = path.with_file_name(lock_name);
+        let lock_path = ledger_lock_path(path)?;
         let _lock = crate::output_lock::OutputLock::acquire(
             &lock_path,
             "another process is preparing this sampled benchmark combination",
         )
         .map_err(Error)?;
         let mut state = match std::fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_file() => {
-                let mut options = std::fs::OpenOptions::new();
-                options.read(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-                }
-                let file = options
-                    .open(path)
-                    .map_err(|error| Error(format!("cannot open sample ledger: {error}")))?;
-                if !file
-                    .metadata()
-                    .map_err(|error| Error(format!("cannot inspect sample ledger: {error}")))?
-                    .is_file()
-                {
-                    return Err(Error("sample ledger must be a regular file".into()));
-                }
-                let mut bytes = Vec::new();
-                file.take((Self::MAX_BYTES + 1) as u64)
-                    .read_to_end(&mut bytes)
-                    .map_err(|error| Error(format!("cannot read sample ledger: {error}")))?;
-                Self::decode(&bytes, sweep_sha256, configuration_sha256, &order)?
-            }
+            Ok(metadata) if metadata.file_type().is_file() => Self::decode(
+                &read_ledger(path)?,
+                sweep_sha256,
+                configuration_sha256,
+                &order,
+            )?,
             Ok(_) => {
                 return Err(Error(
                     "sample ledger must be a regular file, not a symlink or directory".into(),
@@ -358,6 +335,74 @@ impl BoundTrialPreparation {
         )?;
         Ok(state)
     }
+
+    /// Read a completed ledger under its existing lock without recording or
+    /// creating files. Incomplete or changed state cannot authorize replay.
+    pub fn load_completed_file(
+        path: &Path,
+        sweep_sha256: &str,
+        configuration_sha256: &str,
+        order: &TrialOrder,
+    ) -> Result<Self, Error> {
+        let _lock = crate::output_lock::OutputLock::acquire_existing(
+            &ledger_lock_path(path)?,
+            "another process is preparing this sampled benchmark combination",
+        )
+        .map_err(Error)?;
+        let state = Self::decode(
+            &read_ledger(path)?,
+            sweep_sha256,
+            configuration_sha256,
+            order,
+        )?;
+        if !state.preparation.complete()? {
+            return Err(Error(
+                "sample preparation is incomplete; run asb sweep --prepare-replay first".into(),
+            ));
+        }
+        Ok(state)
+    }
+}
+
+fn ledger_lock_path(path: &Path) -> Result<std::path::PathBuf, Error> {
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| Error("sample ledger needs a file name".into()))?
+        .to_os_string();
+    name.push(".lock");
+    Ok(path.with_file_name(name))
+}
+
+fn read_ledger(path: &Path) -> Result<Vec<u8>, Error> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| Error(format!("cannot inspect sample ledger: {error}")))?;
+    if !metadata.file_type().is_file() {
+        return Err(Error(
+            "sample ledger must be a regular file, not a symlink or directory".into(),
+        ));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| Error(format!("cannot open sample ledger: {error}")))?;
+    if !file
+        .metadata()
+        .map_err(|error| Error(format!("cannot inspect sample ledger: {error}")))?
+        .is_file()
+    {
+        return Err(Error("sample ledger must be a regular file".into()));
+    }
+    let mut bytes = Vec::new();
+    file.take((BoundTrialPreparation::MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| Error(format!("cannot read sample ledger: {error}")))?;
+    Ok(bytes)
 }
 
 struct BoundedLedger(Vec<u8>);
@@ -1167,6 +1212,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state, restored);
+        let loaded =
+            BoundTrialPreparation::load_completed_file(&path, &sweep, &config, &order).unwrap();
+        assert_eq!(state, loaded);
+        let missing = root.join("missing.json");
+        assert!(
+            BoundTrialPreparation::load_completed_file(&missing, &sweep, &config, &order).is_err()
+        );
+        assert!(!missing.exists());
+        assert!(!missing.with_file_name("missing.json.lock").exists());
         assert!(
             BoundTrialPreparation::prepare_file(&path, &"d".repeat(64), &config, order, |_| {
                 panic!("changed input must not execute")
@@ -1196,6 +1250,9 @@ mod tests {
                 Err(Error("uncertain cleanup".into()))
             })
             .is_err()
+        );
+        assert!(
+            BoundTrialPreparation::load_completed_file(&path, &sweep, &config, &order).is_err()
         );
         let err = BoundTrialPreparation::prepare_file(&path, &sweep, &config, order, |_| {
             panic!("an unsettled attempt must not be relaunched")
