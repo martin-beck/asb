@@ -3588,6 +3588,7 @@ fn approximate_replay_serves_a_recorded_response_and_exhaustion_remains_fatal() 
     );
     let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(json["approximate_replay"], true);
+    assert_eq!(json["replay_operational_success"], false);
     assert_eq!(json["ignored_failures"][0]["kind"], "provider_mismatch");
     assert_eq!(json["ignored_failures"][0]["ignored"], true);
     assert_eq!(json["ignored_failures"][0]["severity"], "warning");
@@ -3651,6 +3652,7 @@ fn approximate_replay_serves_a_recorded_response_and_exhaustion_remains_fatal() 
     );
     let partial: serde_json::Value = serde_json::from_slice(&partial.stdout).unwrap();
     assert_eq!(partial["approximate_replay"], true);
+    assert_eq!(partial["replay_operational_success"], false);
     let failures = partial["ignored_failures"].as_array().unwrap();
     assert!(
         failures

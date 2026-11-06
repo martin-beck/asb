@@ -1447,7 +1447,9 @@ impl ResultFacts {
             workload_cleanup_confirmed,
             proxy_cleanup_confirmed: proxy_evidence.cleanup_confirmed,
         };
-        let operational_success = facts.replay_operational_success() && startup_ignored.is_empty();
+        let operational_success = facts.replay_operational_success()
+            && startup_ignored.is_empty()
+            && proxy_evidence.replay_divergences.is_empty();
         let mut disposition = RunDisposition::from_facts(facts);
         for reason in startup_ignored {
             let mut failure = RunFailure::new(FailureKind::CollectorError, reason);

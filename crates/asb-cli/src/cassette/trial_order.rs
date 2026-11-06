@@ -490,6 +490,10 @@ impl ReplayObservation {
             .get("replay_operational_success")
             .and_then(serde_json::Value::as_bool)
             .ok_or_else(invalid)?;
+        let approximate = summary
+            .get("approximate_replay")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(invalid)?;
         let failure = summary.get("failure_kind").ok_or_else(invalid)?;
         let operational_success = if failure.is_null() {
             true
@@ -508,7 +512,10 @@ impl ReplayObservation {
         Ok(Self {
             trial,
             replica,
-            process_success: process_success && operational_success && operational_settled,
+            process_success: process_success
+                && operational_success
+                && operational_settled
+                && !approximate,
             provider_consumed: summary
                 .get("provider_replay_consumed")
                 .and_then(serde_json::Value::as_bool),
@@ -957,11 +964,26 @@ mod tests {
             "failure_kind": "workload_check_failed",
             "replay_selection": {"provider_replay": true, "tools": "not-selected"},
             "provider_replay_consumed": true, "replay_operational_success": true,
+            "approximate_replay": false,
             "benchmark_outcome": {"cleanup_confirmed": true}
         });
         let observation = ReplayObservation::from_summary(&summary).unwrap();
         assert!(observation.process_success);
         assert_eq!(observation.provider_consumed, Some(true));
+        summary["approximate_replay"] = serde_json::json!(true);
+        assert!(
+            !ReplayObservation::from_summary(&summary)
+                .unwrap()
+                .process_success
+        );
+        summary
+            .as_object_mut()
+            .unwrap()
+            .remove("approximate_replay");
+        assert!(ReplayObservation::from_summary(&summary).is_err());
+        summary["approximate_replay"] = serde_json::json!("false");
+        assert!(ReplayObservation::from_summary(&summary).is_err());
+        summary["approximate_replay"] = serde_json::json!(false);
         // An evaluation failure can be the primary diagnosis while an
         // independent collector/output failure also occurred.
         summary["replay_operational_success"] = serde_json::json!(false);
