@@ -84,6 +84,7 @@ closed()
     }
     fn with_controller(&self, controller: Controller) -> Session {
         Session {
+            snapshot: false,
             evaluation_seconds: EVALUATION_TIMEOUT_SECONDS,
             preparation_seconds: WORKLOAD_READY_TIMEOUT.as_secs(),
             task_default_execution_seconds: 1.0,

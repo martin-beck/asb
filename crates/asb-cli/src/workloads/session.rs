@@ -102,6 +102,8 @@ impl TaskIdentity {
 pub(crate) struct PreparationContext<'a> {
     /// Local tool record/replay intent, available before the workload is created.
     pub tool_mode: Option<crate::tape::Mode>,
+    /// The selected verified native tool track includes workspace snapshots.
+    pub native_snapshot_replay: bool,
     pub verify_initial_material: bool,
     pub budgets: crate::planning::PhaseBudgets,
     pub on_allocation: Option<&'a super::recovery::AllocationObserver<'a>>,
@@ -648,6 +650,30 @@ impl WorkloadSession for FileSession {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn native_snapshot_replay_rejects_unsupported_workloads_before_preparation() {
+        let project = crate::project::ProjectConfig::default();
+        let root = std::path::Path::new("/nonexistent-snapshot-test");
+        let context = super::PreparationContext {
+            tool_mode: Some(crate::tape::Mode::Replay),
+            native_snapshot_replay: true,
+            verify_initial_material: false,
+            budgets: Default::default(),
+            on_allocation: None,
+            workload: "bug-fix",
+            trial: None,
+            trial_set: None,
+            workload_directory: root,
+            workspace: root,
+            project_root: root,
+            project_config: &project,
+        };
+        let error = match super::super::prepare_task(&context) {
+            Ok(_) => panic!("unsupported workload accepted snapshot replay"),
+            Err(error) => error,
+        };
+        assert!(error.contains("native snapshot replay is not supported"));
+    }
+    #[test]
     fn recorded_settlement_is_strict_without_inventing_legacy_removal() {
         use super::ResourceDisposition as D;
         use serde_json::json;
@@ -732,6 +758,7 @@ mod tests {
         let project = crate::project::ProjectConfig::default();
         let context = PreparationContext {
             tool_mode: None,
+            native_snapshot_replay: false,
             verify_initial_material: true,
             budgets: Default::default(),
             on_allocation: None,
@@ -769,6 +796,7 @@ mod tests {
         };
         let context = super::PreparationContext {
             tool_mode: None,
+            native_snapshot_replay: false,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,
@@ -888,6 +916,7 @@ mod tests {
         super::super::populate(&workloads).unwrap();
         let mut session = super::super::prepare_task(&PreparationContext {
             tool_mode: None,
+            native_snapshot_replay: false,
             verify_initial_material: true,
             budgets: Default::default(),
             on_allocation: None,
@@ -917,6 +946,7 @@ mod tests {
         assert_eq!(session.initial_material_sha256().unwrap(), initial_material);
         let later = super::super::prepare_task(&PreparationContext {
             tool_mode: None,
+            native_snapshot_replay: false,
             verify_initial_material: true,
             budgets: Default::default(),
             on_allocation: None,
@@ -947,6 +977,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
             tool_mode: None,
+            native_snapshot_replay: false,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,
@@ -987,6 +1018,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
             tool_mode: None,
+            native_snapshot_replay: false,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,
@@ -1024,6 +1056,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
             tool_mode: None,
+            native_snapshot_replay: false,
             verify_initial_material: false,
             budgets: Default::default(),
             on_allocation: None,

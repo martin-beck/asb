@@ -295,6 +295,9 @@ pub(crate) fn installed_available(name: &str, directory: &Path) -> Option<bool> 
 pub(crate) fn prepare_task(
     context: &PreparationContext<'_>,
 ) -> Result<Box<dyn WorkloadSession>, String> {
+    if context.native_snapshot_replay && !context.workload.starts_with("swe-bench") {
+        return Err("native snapshot replay is not supported by this workload".into());
+    }
     if descriptor(context.workload).is_some_and(|descriptor| !descriptor.valid()) {
         return Err("workload module has an invalid descriptor".into());
     }

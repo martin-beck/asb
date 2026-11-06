@@ -729,6 +729,7 @@ pub(crate) fn runtime_inputs(
 }
 
 struct Session {
+    snapshot: bool,
     evaluation_seconds: u64,
     preparation_seconds: u64,
     task_default_execution_seconds: f64,
@@ -892,15 +893,12 @@ pub(crate) fn launch(
         "ASB_WORKLOAD_TOOL_MODE",
         workload_tool_mode(context.tool_mode),
     );
+    let snapshot = context.native_snapshot_replay
+        || std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT").as_deref()
+            == Some(std::ffi::OsStr::new("1"));
     command.env(
         "ASB_EXPERIMENTAL_SNAPSHOT",
-        if std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-        {
-            "1"
-        } else {
-            "0"
-        },
+        if snapshot { "1" } else { "0" },
     );
     if let Some(roots) = std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT_ROOTS") {
         command.env("ASB_EXPERIMENTAL_SNAPSHOT_ROOTS", roots);
@@ -965,6 +963,7 @@ pub(crate) fn launch(
         }
     };
     Ok(Box::new(Session {
+        snapshot,
         evaluation_seconds: context
             .budgets
             .evaluation_seconds
@@ -1226,8 +1225,7 @@ impl Session {
             artifact_output: &artifact_output,
             private_inputs,
             auxiliary_tools: snapshot_auxiliary_tools(
-                std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT").as_deref()
-                    == Some(std::ffi::OsStr::new("1"))
+                self.snapshot
                     && context.tool_tape_cassette.is_some()
                     && context.config.workload.starts_with("swe-bench"),
                 &tools_root,
@@ -1454,8 +1452,7 @@ impl Session {
             .into_iter()
             .collect();
         let mut result = completed.into_execution()?;
-        if std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
+        if self.snapshot
             && context.tool_tape_cassette.is_some()
             && !context.tool_replay
             && context.config.workload.starts_with("swe-bench")
@@ -2344,6 +2341,7 @@ sys.stdout.write(result['project_configuration'])
             .receive(Instant::now() + Duration::from_secs(3))
             .unwrap();
         Session {
+            snapshot: false,
             initial_material: Err("fixture has no captured initial material".into()),
             evaluation_seconds: EVALUATION_TIMEOUT_SECONDS,
             preparation_seconds: WORKLOAD_READY_TIMEOUT.as_secs(),
