@@ -197,6 +197,8 @@ impl Execution<'_> {
                 mcp_mode: self.options.mcp_mode,
                 cassette: cassette.as_deref().and_then(Path::to_str),
                 respect_record_timings: self.options.respect_record_timings,
+                ignore_evaluation: self.options.ignore_evaluation,
+                ignore_agent: self.options.ignore_agent,
                 requirements_prepared: !self.options.resume,
                 architecture_confirmed: true,
                 on_completion: observer

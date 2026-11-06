@@ -94,6 +94,8 @@ impl<'a> PreparedSweep<'a> {
             Some(crate::tape::Mode::Replay) => plan::SavedExecutionMode::Replay,
         };
         plan.respect_record_timings = options.respect_record_timings;
+        plan.ignore_evaluation = options.ignore_evaluation;
+        plan.ignore_agent = options.ignore_agent;
         let weights: Vec<_> = plan
             .entries
             .iter()
@@ -133,6 +135,8 @@ impl<'a> PreparedSweep<'a> {
             campaigns::validate_resume_options(&results, &saved, options)?;
             if saved.execution_mode != plan.execution_mode
                 || saved.respect_record_timings != plan.respect_record_timings
+                || saved.ignore_evaluation != plan.ignore_evaluation
+                || saved.ignore_agent != plan.ignore_agent
                 || saved.scheduling != plan.scheduling
                 || saved.resources != plan.resources
                 || saved

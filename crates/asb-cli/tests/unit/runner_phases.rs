@@ -799,6 +799,8 @@ fn durable_truncated_guest_transcript_keeps_its_sealed_terminal_metadata() {
     let grade = workloads::outcome::EvaluationOutcome::binary(true);
     let decision = crate::runner::disposition::RunDisposition::from_facts(
         crate::runner::disposition::RunFacts {
+            ignore_evaluation: false,
+            ignore_agent: false,
             evaluation: &grade,
             evaluation_kind: workloads::KnownEvaluationKind::UpstreamHarness,
             process_success: agent.failure.is_none(),
@@ -1371,6 +1373,7 @@ fn result() -> RunResult<'static> {
         execution_cohort: None,
         schema_version: 2,
         disposition: RunDisposition {
+            ignored_failures: Vec::new(),
             status: RunStatus::Completed,
             failure: None,
             success: true,
@@ -1429,6 +1432,8 @@ fn postgrade_log_publication_is_independent_and_diagnostics_keep_primary_order()
     for primary in [
         None,
         Some(RunFailure {
+            ignored: false,
+            severity: "error",
             kind: FailureKind::RunError,
             reason: "original proxy failure".into(),
         }),
@@ -1489,9 +1494,12 @@ fn final_measurement_errors_preserve_grade_and_disallow_completion_receipts() {
         let mut result = result();
         if fault == "run-failed" {
             result.disposition = RunDisposition {
+                ignored_failures: Vec::new(),
                 status: RunStatus::Failed,
                 success: false,
                 failure: Some(RunFailure {
+                    ignored: false,
+                    severity: "error",
                     kind: FailureKind::RunError,
                     reason: "fixture operational fault".into(),
                 }),
