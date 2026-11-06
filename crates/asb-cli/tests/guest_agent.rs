@@ -80,6 +80,34 @@ impl Drop for Project {
 }
 
 #[test]
+fn snapshot_guest_without_marker_never_launches_agent() {
+    let project = Project::new();
+    for replay in [false, true] {
+        let mut request = project.request();
+        request["snapshot_private_mount"] = true.into();
+        request["tool_replay"] = replay.into();
+        request["tool_tape_cassette"] = project
+            .0
+            .join("cassette.jsonl")
+            .to_string_lossy()
+            .to_string()
+            .into();
+        let result = Command::new(env!("CARGO_BIN_EXE_asb"))
+            .arg("__asb-agent")
+            .isolated_env()
+            .env_remove("ASB_FS_MARKER_SOCKET")
+            .env_remove("ASB_FS_REPLAY_SOCKET")
+            .env("ASB_GUEST_AGENT_REQUEST", request.to_string())
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("matching nonempty marker"));
+        assert!(!project.0.join("private").exists());
+        assert!(!project.0.join("workspace/performed.txt").exists());
+    }
+}
+
+#[test]
 fn guest_refuses_unowned_or_controller_namespace_service_lifetimes_before_preparation() {
     use std::os::unix::fs::MetadataExt;
     let project = Project::new();
