@@ -266,6 +266,7 @@ pub(super) fn prepare(
                 ignore_provider_unconsumed: options.ignore_provider_unconsumed,
                 ignore_tool_mismatch: options.ignore_tool_mismatch,
                 ignore_mcp_mismatch: options.ignore_mcp_mismatch,
+                ignore_compatibility: options.ignore_compatibility,
                 // PreparedSweep warmed this fresh population before campaign
                 // construction, so each repeated task must not revalidate the
                 // same shared installations.

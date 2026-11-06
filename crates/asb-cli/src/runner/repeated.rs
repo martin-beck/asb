@@ -422,6 +422,7 @@ impl Inspection {
             ignore_provider_unconsumed: options.ignore_provider_unconsumed,
             ignore_tool_mismatch: options.ignore_tool_mismatch,
             ignore_mcp_mismatch: options.ignore_mcp_mismatch,
+            ignore_compatibility: options.ignore_compatibility,
             measurement_root: measurement_root.clone(),
             replay_inputs: Vec::new(),
             slots,
@@ -727,7 +728,13 @@ pub(crate) fn execute(
         plan.mode == crate::planning::ExecutionMode::Replay
     };
     replay::disclose_native_snapshot(&plan.replay_inputs, tool_replay, options.json, output)?;
-    let mut reference: Option<Compatibility> = plan.replay_compatibility.clone();
+    // Recorded identity can be explicitly overridden, but prepared material
+    // must still agree between all actual replicas and later batches.
+    let mut reference: Option<Compatibility> = if plan.ignore_compatibility {
+        None
+    } else {
+        plan.replay_compatibility.clone()
+    };
     let mut failures = 0u64;
     let mut completed_executions = 0usize;
     let mut completed_batches = 0u64;
@@ -1075,7 +1082,7 @@ fn encode(value: &impl Serialize) -> Result<Vec<u8>, Error> {
     Ok(bytes)
 }
 
-fn publish(path: &Path, value: &impl Serialize) -> Result<(), Error> {
+pub(super) fn publish(path: &Path, value: &impl Serialize) -> Result<(), Error> {
     publish_bytes(path, &encode(value)?)
 }
 

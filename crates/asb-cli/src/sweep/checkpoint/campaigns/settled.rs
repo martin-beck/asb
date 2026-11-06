@@ -456,12 +456,11 @@ impl Inputs {
                         "prepared campaign identity has an unknown protocol",
                     ));
                 }
-                if let Some(expected) = layout
-                    .plan
-                    .replay_compatibility
-                    .as_ref()
-                    .or_else(|| identities.get(&record.configuration))
-                {
+                if let Some(expected) = identities.get(&record.configuration).or_else(|| {
+                    (!layout.plan.ignore_compatibility)
+                        .then_some(layout.plan.replay_compatibility.as_ref())
+                        .flatten()
+                }) {
                     expected
                         .require_match(&value.compatibility)
                         .map_err(|error| resume_error(&error.to_string()))?;

@@ -213,6 +213,7 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     }
     let benchmark_rows = benchmark_data.iter().map(|benchmark| json!({
             "id": benchmark.id,
+            "approximate_replay": benchmark.approximate_replay,
             "execution": benchmark.execution,
             "native_replay_consumed": benchmark.native_replay_consumed,
             "replay_selection": benchmark.replay_selection,

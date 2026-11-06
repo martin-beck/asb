@@ -110,7 +110,8 @@ impl Plan {
                 || self.ignore_provider_mismatch
                 || self.ignore_provider_unconsumed
                 || self.ignore_tool_mismatch
-                || self.ignore_mcp_mismatch)
+                || self.ignore_mcp_mismatch
+                || self.ignore_compatibility)
                 && self.mode != ExecutionMode::Replay)
             || self.source.as_os_str().is_empty()
         {

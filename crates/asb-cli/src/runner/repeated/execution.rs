@@ -49,6 +49,10 @@ impl BatchRun<'_> {
             cleanup_confirmed: AtomicBool::new(true),
         };
         let material_path = self.material_path;
+        let compatibility_warning_dir = material_path
+            .parent()
+            .ok_or_else(|| Error::Input("prepared identity has no parent directory".into()))?
+            .to_path_buf();
         let recorder = self.recording.clone();
         let members = admission.cohort().admitted_slots.clone();
         let dispatch = admission.observe(Arc::new(move |compatibility| {
@@ -140,6 +144,9 @@ impl BatchRun<'_> {
                 ignore_provider_unconsumed: self.plan.ignore_provider_unconsumed,
                 ignore_tool_mismatch: self.plan.ignore_tool_mismatch,
                 ignore_mcp_mismatch: self.plan.ignore_mcp_mismatch,
+                ignore_compatibility: self.plan.ignore_compatibility,
+                replay_expected_compatibility: self.plan.replay_compatibility.as_ref(),
+                compatibility_warning_dir: Some(&compatibility_warning_dir),
                 policy: Some(&policy),
                 requirements_prepared: self.options.requirements_prepared,
                 batch: Some(&self.identity),
@@ -464,9 +471,11 @@ pub(crate) fn continue_campaign(
         let batch = batches.next().expect("peeked batch");
         let dispatch = batch::Admission::from_cohort(
             batch.cohort.clone(),
-            compatibility
-                .clone()
-                .or_else(|| plan.replay_compatibility.clone()),
+            compatibility.clone().or_else(|| {
+                (!plan.ignore_compatibility)
+                    .then(|| plan.replay_compatibility.clone())
+                    .flatten()
+            }),
             plan.admission,
         )?;
         let batch_root = root.join(format!("batch-{number}"));

@@ -101,6 +101,7 @@ impl<'a> PreparedSweep<'a> {
         plan.ignore_provider_unconsumed = options.ignore_provider_unconsumed;
         plan.ignore_tool_mismatch = options.ignore_tool_mismatch;
         plan.ignore_mcp_mismatch = options.ignore_mcp_mismatch;
+        plan.ignore_compatibility = options.ignore_compatibility;
         let weights: Vec<_> = plan
             .entries
             .iter()
@@ -147,6 +148,7 @@ impl<'a> PreparedSweep<'a> {
                 || saved.ignore_provider_unconsumed != plan.ignore_provider_unconsumed
                 || saved.ignore_tool_mismatch != plan.ignore_tool_mismatch
                 || saved.ignore_mcp_mismatch != plan.ignore_mcp_mismatch
+                || saved.ignore_compatibility != plan.ignore_compatibility
                 || saved.scheduling != plan.scheduling
                 || saved.resources != plan.resources
                 || saved
