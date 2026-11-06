@@ -5,7 +5,8 @@ export function normalizeToolResult({ text, tool }) {
   if (!['Bash', 'bash', 'shell_command'].includes(tool?.name)) return text;
   const command = tool?.arguments?.command;
   if (typeof command !== 'string') return text;
-  const match = /^grep (?:-rn|-n) "[^"\r\n]+"(?: -r)? ([A-Za-z0-9_.*\/-]+(?: [A-Za-z0-9_.*\/-]+)*)(?: --include=(\*\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+))?(?: 2>\/dev\/null)?(?: \| grep -v "[^"\r\n]+")? \| head -([1-9][0-9]*)$/.exec(command);
+  const compound = /^(?:git config --global --add safe\.directory \/testbed; )?cd \/testbed && git log --oneline -([1-9][0-9]*) && (grep .*)$/.exec(command);
+  const match = /^grep (?:-rn|-n) "[^"\r\n]+"(?: -r)? ([A-Za-z0-9_.*\/-]+(?: [A-Za-z0-9_.*\/-]+)*)(?: --include=(\*\.[A-Za-z0-9_-]+|[A-Za-z0-9_.-]+))?(?: 2>\/dev\/null)?(?: \| grep -v "[^"\r\n]+")? \| head -([1-9][0-9]*)$/.exec(compound ? compound[2] : command);
   if (!match || !text) return text;
   const paths = match[1].split(' ');
   if (paths.some((path) => !path || path.includes('..') ||
@@ -21,6 +22,9 @@ export function normalizeToolResult({ text, tool }) {
   const trailing = text.endsWith('\n');
   if (!trailing && tool.name !== 'Bash') return text;
   const lines = (trailing ? text.slice(0, -1) : text).split('\n');
+  if (compound && !Number.isSafeInteger(Number(compound[1]))) return text;
+  const prefix = compound ? lines.splice(0, Number(compound[1])) : [];
+  if (compound && (prefix.length !== Number(compound[1]) || prefix.some((line) => !/^[0-9a-f]{7,64} .+/.test(line)))) return text;
   if (!Number.isSafeInteger(limit) || lines.length > limit) return text;
   for (const line of lines) {
     const entry = /^([A-Za-z0-9_./-]+):[1-9][0-9]*:/.exec(line);
@@ -29,5 +33,5 @@ export function normalizeToolResult({ text, tool }) {
     // A second path/line prefix can indicate a preceding unterminated file.
     if (/[A-Za-z0-9_./-]+\/[A-Za-z0-9_./-]+:[1-9][0-9]*:/.test(line.slice(entry[0].length))) return text;
   }
-  return lines.sort().join('\n') + (trailing ? '\n' : '');
+  return [...prefix, ...lines.sort()].join('\n') + (trailing ? '\n' : '');
 }
