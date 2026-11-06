@@ -64,9 +64,38 @@ does not make tool execution deterministic or establish that a benchmark passed.
 For recordings that contain raw requests, profiles can be added, changed or
 disabled after recording. ASB checks every selected track is raw before allowing
 a policy change. Older cassettes that stored normalized requests still require
-their original policy. An archive never supplies executable scripts: replay
-uses the explicitly configured project modules. Normal live runs and recordings
+their original policy. An archive never supplies executable scripts: the selected
+policy uses explicitly configured project modules. Normal live runs and recordings
 do not run these scripts.
+
+## Exploratory mismatch recovery
+
+The built-in replay proxy also tries unselected candidates when an otherwise
+unmatched provider request differs in associated tool-result text. It checks
+the bundled examples, project-owned `normalizers/*.mjs` files, and previously
+generated project candidates. Candidates see the current workload and task;
+the whole normalized request must match before ASB serves the recorded response.
+An unrelated prompt, tool argument, endpoint, or other request difference still
+stops replay unless the separate ignore-mismatch option is selected.
+
+If no existing rule matches, ASB can draft an exact observed-pair rule for up to
+64 differing tool results. Such a rule is a hypothesis, not proof that the
+outputs are semantically interchangeable. The replay is marked **approximate**,
+and cassette-derived usage is not treated as verified. ASB retains the proposed
+module and mismatch journal privately and reports their paths. If a later
+response is delivered, an automatically generated candidate is saved as
+private data under `.asb/replay-normalizer-exploration/`. Later runs and sweeps
+in that project can try it as an unselected candidate; saving it does not change
+the configured replay policy. The candidate store can contain tool output and
+arguments, so treat it as sensitive. A user can remove unwanted candidate files.
+
+Each mismatch starts another search, including after a previous candidate has
+advanced replay. The current session can activate at most 32 discovered rules;
+project-module discovery is limited to 256 files, and the reusable store to 4096
+entries. Limits and candidate/store errors are reported in replay evidence.
+Project-owned unselected modules are executed in the same bounded worker as
+selected normalizers; that worker is not a security boundary for untrusted code.
+No executable code is loaded from a cassette or generated candidate data.
 
 Private tape evidence contains the effective policy digest and per-profile
 observation and change counts. These count visits to result blocks on both the

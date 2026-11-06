@@ -32,10 +32,122 @@ const TOOL_RESULT_NORMALIZATION: &str =
 const NORMALIZER_SUPERVISOR: &str =
     include_str!("../../../assets/scripts/normalizer-supervisor.mjs");
 const NORMALIZER_WORKER: &str = include_str!("../../../assets/scripts/normalizer-worker.mjs");
+const REPLAY_NORMALIZER_DISCOVERY: &str =
+    include_str!("../../../assets/scripts/replay-normalizer-discovery.mjs");
+const REPLAY_DISCOVERY_STORE: &str =
+    include_str!("../../../assets/scripts/replay-discovery-store.mjs");
+const DISCOVERY_PROFILES: &[(&str, &str)] = &[
+    (
+        "grep-recursive-order",
+        include_str!("../../../assets/examples/normalizers/grep-recursive-order.mjs"),
+    ),
+    (
+        "opencode-search-order",
+        include_str!("../../../assets/examples/normalizers/opencode-search-order.mjs"),
+    ),
+    (
+        "pip-transfer-progress",
+        include_str!("../../../assets/examples/normalizers/pip-transfer-progress.mjs"),
+    ),
+    (
+        "pytest-elapsed",
+        include_str!("../../../assets/examples/normalizers/pytest-elapsed.mjs"),
+    ),
+    (
+        "python-repr-address",
+        include_str!("../../../assets/examples/normalizers/python-repr-address.mjs"),
+    ),
+    (
+        "python-unittest-elapsed",
+        include_str!("../../../assets/examples/normalizers/python-unittest-elapsed.mjs"),
+    ),
+    (
+        "shell-ls-diagnostics",
+        include_str!("../../../assets/examples/normalizers/shell-ls-diagnostics.mjs"),
+    ),
+    (
+        "sympy-test-banner",
+        include_str!("../../../assets/examples/normalizers/sympy-test-banner.mjs"),
+    ),
+    (
+        "tmp-listing-time",
+        include_str!("../../../assets/examples/normalizers/tmp-listing-time.mjs"),
+    ),
+    (
+        "unified-diff-mtime",
+        include_str!("../../../assets/examples/normalizers/unified-diff-mtime.mjs"),
+    ),
+];
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 static START_LOCK: Mutex<()> = Mutex::new(());
 
 const NAME: &str = "llmtape";
+
+// Unselected project-owned modules are exploration candidates, never cassette
+// executable authority. Read only bounded, regular project files.
+fn project_discovery_profiles(root: &Path) -> (Vec<serde_json::Value>, u64) {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let directory = root.join("normalizers");
+    match std::fs::symlink_metadata(&directory) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), 0),
+        _ => return (Vec::new(), 1),
+    }
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), 0),
+        Err(_) => return (Vec::new(), 1),
+    };
+    let mut paths = Vec::new();
+    let mut failures = 0u64;
+    for entry in entries {
+        match entry {
+            Ok(entry) if entry.path().extension().is_some_and(|ext| ext == "mjs") => {
+                paths.push(entry.path())
+            }
+            Ok(_) => {}
+            Err(_) => failures += 1,
+        }
+        if paths.len() > 256 {
+            return (Vec::new(), failures + 1);
+        }
+    }
+    paths.sort();
+    let mut profiles = Vec::new();
+    for path in paths {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let source = (|| -> std::io::Result<String> {
+            let file = options.open(&path)?;
+            let meta = file.metadata()?;
+            if !meta.is_file() || meta.len() > 65536 {
+                return Err(std::io::ErrorKind::InvalidData.into());
+            }
+            let mut bytes = Vec::new();
+            file.take(65537).read_to_end(&mut bytes)?;
+            if bytes.len() > 65536 {
+                return Err(std::io::ErrorKind::InvalidData.into());
+            }
+            String::from_utf8(bytes).map_err(|_| std::io::ErrorKind::InvalidData.into())
+        })();
+        match source {
+            Ok(source) => {
+                let hash = format!("{:x}", Sha256::digest(source.as_bytes()));
+                profiles.push(
+                    serde_json::json!({"id":format!("project-{}", &hash[..40]), "source":source}),
+                );
+            }
+            Err(_) => failures += 1,
+        }
+    }
+    (profiles, failures)
+}
 
 /// Materialize the explicitly selected, adapter-owned modules as one bounded
 /// entry point.  The generated entry point applies them in declaration order
@@ -94,6 +206,8 @@ struct Settings {
     ignore_provider_unconsumed: bool,
     workspace: PathBuf,
     invocation_dir: PathBuf,
+    discovery_workload: Option<String>,
+    discovery_task: Option<String>,
     /// Opaque adapter-owned request extension; llmtape materializes and
     /// invokes it without interpreting its wire protocol.
     wire_extension: Option<&'static str>,
@@ -113,6 +227,7 @@ struct RunningLlmtape {
     retained_mismatch_evidence: Option<PathBuf>,
     ignored_mismatch_journal: Option<PathBuf>,
     retained_mismatch_journal: Option<PathBuf>,
+    retained_normalizer_suggestions: Vec<PathBuf>,
     replay_divergences: Vec<crate::proxy::ReplayDivergence>,
     ignore_provider_mismatch: bool,
     ignore_provider_unconsumed: bool,
@@ -201,6 +316,8 @@ impl ProxyAdapter for LlmtapeAdapter {
             ignore_provider_unconsumed: request.ignore_provider_unconsumed,
             workspace: request.workspace.to_path_buf(),
             invocation_dir: request.invocation_dir.to_path_buf(),
+            discovery_workload: request.discovery_workload.map(str::to_owned),
+            discovery_task: request.discovery_task.map(str::to_owned),
             wire_extension: request.wire_extension,
             normalization_scripts: request.normalization_scripts.clone(),
             custom_normalization: request.custom_normalization.clone(),
@@ -344,10 +461,16 @@ impl ProxyAdapter for LlmtapeAdapter {
         command.env_remove("ASB_TAPE_CAPTURE_RECEIPT");
         command.env_remove("ASB_TAPE_CAPTURE_NONCE");
         command.env_remove("ASB_TAPE_MISMATCH_EVIDENCE");
+        command.env_remove("ASB_TAPE_DISCOVERY_CATALOG");
+        command.env_remove("ASB_TAPE_DISCOVERY_STORE");
+        command.env_remove("ASB_TAPE_DISCOVERY_CONTEXT");
+        command.env_remove("ASB_TAPE_DISCOVERY_CATALOG_FAILURES");
         command.env_remove("ASB_TAPE_IGNORE_PROVIDER_MISMATCH");
         command.env_remove("ASB_TAPE_IGNORED_MISMATCH_JOURNAL");
         if request.ignore_provider_mismatch {
             command.env("ASB_TAPE_IGNORE_PROVIDER_MISMATCH", "1");
+        }
+        if request.ignore_provider_mismatch || (builtin && request.mode == Mode::Replay) {
             command.env(
                 "ASB_TAPE_IGNORED_MISMATCH_JOURNAL",
                 scratch.path.join("ignored-mismatches.jsonl"),
@@ -441,6 +564,36 @@ impl ProxyAdapter for LlmtapeAdapter {
                     "ASB_TAPE_MISMATCH_EVIDENCE",
                     scratch.path.join("mismatch.json"),
                 );
+                if builtin {
+                    let mut profiles: Vec<_> = DISCOVERY_PROFILES
+                        .iter()
+                        .map(|(id, source)| serde_json::json!({"id": id, "source": source}))
+                        .collect();
+                    if let Ok((root, _)) =
+                        crate::project::require_initialized(&request.invocation_dir)
+                    {
+                        let root = std::fs::canonicalize(root).map_err(crate::io_error)?;
+                        let (project_profiles, failures) = project_discovery_profiles(&root);
+                        profiles.extend(project_profiles);
+                        command.env("ASB_TAPE_DISCOVERY_CATALOG_FAILURES", failures.to_string());
+                        command.env(
+                            "ASB_TAPE_DISCOVERY_STORE",
+                            root.join(".asb/replay-normalizer-exploration"),
+                        );
+                    }
+                    let path = scratch.path.join("discovery-catalog.json");
+                    std::fs::write(
+                        &path,
+                        serde_json::to_vec(&profiles).map_err(|e| Error::Run(e.to_string()))?,
+                    )
+                    .map_err(|e| Error::Run(format!("cannot stage normalizer catalog: {e}")))?;
+                    command.env("ASB_TAPE_DISCOVERY_CATALOG", path);
+                    if let Some(workload) = &request.discovery_workload {
+                        let family = crate::workloads::descriptor(workload)
+                            .map(|descriptor| descriptor.family);
+                        command.env("ASB_TAPE_DISCOVERY_CONTEXT", serde_json::json!({"id":workload,"family":family,"task_id":request.discovery_task}).to_string());
+                    }
+                }
                 if request.respect_record_timings {
                     command.arg("--respect-record-timings");
                 }
@@ -497,10 +650,11 @@ impl ProxyAdapter for LlmtapeAdapter {
             mismatch_evidence: (request.mode == Mode::Replay)
                 .then(|| scratch.path.join("mismatch.json")),
             retained_mismatch_evidence: None,
-            ignored_mismatch_journal: request
-                .ignore_provider_mismatch
+            ignored_mismatch_journal: (request.ignore_provider_mismatch
+                || (builtin && request.mode == Mode::Replay))
                 .then(|| scratch.path.join("ignored-mismatches.jsonl")),
             retained_mismatch_journal: None,
+            retained_normalizer_suggestions: Vec::new(),
             replay_divergences: Vec::new(),
             ignore_provider_mismatch: request.ignore_provider_mismatch,
             ignore_provider_unconsumed: request.ignore_provider_unconsumed,
@@ -675,6 +829,7 @@ impl ProxySession for RunningLlmtape {
         }
         outputs.extend(self.retained_mismatch_evidence.iter().cloned());
         outputs.extend(self.retained_mismatch_journal.iter().cloned());
+        outputs.extend(self.retained_normalizer_suggestions.iter().cloned());
         outputs
     }
     fn cleanup_confirmed(&self) -> bool {
@@ -774,9 +929,10 @@ impl ProxySession for RunningLlmtape {
                     ));
                 }
             };
+            let mut automatic_suggestions = Vec::new();
             if ignored > 0 {
                 use std::io::{BufRead, Read};
-                if !self.ignore_provider_mismatch || ignored > consumed {
+                if (!self.ignore_provider_mismatch && !self.builtin) || ignored > consumed {
                     return Err(Error::Run(
                         "invalid approximate replay mismatch evidence".into(),
                     ));
@@ -824,6 +980,44 @@ impl ProxySession for RunningLlmtape {
                             "invalid approximate replay mismatch event".into(),
                         ));
                     }
+                    if let Some(kind) = event["suggestion"].as_str() {
+                        if !matches!(kind, "existing" | "temporary")
+                            || event["normalizer"].as_str().is_none_or(|id| {
+                                id.is_empty()
+                                    || id.len() > 64
+                                    || !id.bytes().all(|b| {
+                                        b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'
+                                    })
+                            })
+                        {
+                            return Err(Error::Run(
+                                "invalid discovered normalizer identity".into(),
+                            ));
+                        }
+                        let path = event["file"].as_str().map(Path::new).ok_or_else(|| {
+                            Error::Run("discovered normalizer path is missing".into())
+                        })?;
+                        let name = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("");
+                        let metadata = std::fs::symlink_metadata(path).map_err(crate::io_error)?;
+                        if path.parent() != Some(self._scratch.path.as_path())
+                            || !name.starts_with("suggested-normalizer-")
+                            || !name.ends_with(".mjs")
+                            || !metadata.is_file()
+                            || metadata.len() > 65536
+                        {
+                            return Err(Error::Run(
+                                "invalid discovered normalizer artifact".into(),
+                            ));
+                        }
+                        automatic_suggestions.push((path.to_owned(), sequence));
+                    } else if !self.ignore_provider_mismatch {
+                        return Err(Error::Run(
+                            "unapproved replay mismatch lacks normalizer evidence".into(),
+                        ));
+                    }
                     previous_sequence = sequence;
                     count = count.checked_add(1).ok_or_else(|| {
                         Error::Run("approximate replay mismatch count overflow".into())
@@ -844,29 +1038,114 @@ impl ProxySession for RunningLlmtape {
                     })?;
                 let retained = self._scratch.retain_mismatch_evidence(path)?;
                 let retained_journal = self._scratch.retain_mismatch_journal()?;
+                let automatic = !automatic_suggestions.is_empty();
+                let stats = value.get("normalizer_exploration");
+                let progressed = stats
+                    .and_then(|v| v.get("progressed"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let promoted = stats
+                    .and_then(|v| v.get("promoted"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let failures = stats
+                    .and_then(|v| v.get("failures"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let catalog_failures = stats
+                    .and_then(|v| v.get("catalog_failures"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let progressed_sequences = stats
+                    .and_then(|v| v.get("progressed_sequences"))
+                    .and_then(|v| v.as_array())
+                    .and_then(|entries| {
+                        entries
+                            .iter()
+                            .map(|entry| entry.as_u64())
+                            .collect::<Option<std::collections::BTreeSet<_>>>()
+                    });
+                if automatic
+                    && (stats.is_none()
+                        || progressed > automatic_suggestions.len() as u64
+                        || promoted > progressed
+                        || progressed_sequences.as_ref().is_none_or(|sequences| {
+                            sequences.len() != progressed as usize
+                                || sequences.iter().any(|sequence| {
+                                    *sequence >= consumed
+                                        || !automatic_suggestions
+                                            .iter()
+                                            .any(|(_, candidate)| candidate == sequence)
+                                })
+                        }))
+                {
+                    return Err(Error::Run("invalid normalizer exploration progress".into()));
+                }
+                self.retained_normalizer_suggestions
+                    .extend(automatic_suggestions.iter().map(|(path, _)| path.clone()));
+                let possible_fixes = automatic_suggestions
+                    .iter()
+                    .filter(|(_, sequence)| {
+                        progressed_sequences
+                            .as_ref()
+                            .is_some_and(|set| set.contains(sequence))
+                    })
+                    .filter_map(|(path, _)| {
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 self.replay_divergences.push(crate::proxy::ReplayDivergence {
                     kind: crate::runner::disposition::FailureKind::ProviderMismatch,
-                    reason: format!("approximate replay served {ignored} recorded response(s) despite provider request mismatch; journal: {}; first mismatch evidence: {}", retained_journal.display(), retained.display()),
+                    reason: format!("approximate replay served {ignored} recorded response(s) despite provider request mismatch; journal: {}; first mismatch evidence: {}{}", retained_journal.display(), retained.display(), if automatic { format!("; {progressed}/{} proposed normalizers reached a later response; possible replay fixes: {}; {promoted} saved for future exploration; {failures} store errors; {catalog_failures} candidate checks unavailable; proposed normalizers: {}", automatic_suggestions.len(), if possible_fixes.is_empty() { "none yet" } else { &possible_fixes }, self._scratch.path.display()) } else { String::new() }),
                 });
                 self.retained_mismatch_evidence = Some(retained);
                 self.retained_mismatch_journal = Some(retained_journal);
-                self._scratch.retain = false;
+                self._scratch.retain = automatic;
             }
             if rejected != 0 {
                 let mismatch = replay_mismatch_context(&value)
                     .map(|context| format!("; first mismatch: {context}"))
                     .unwrap_or_default();
                 let evidence = self
-                    .mismatch_evidence
-                    .as_deref()
-                    .filter(|path| path.is_file())
-                    .and_then(|path| self._scratch.retain_mismatch_evidence(path).ok())
+                    .retained_mismatch_evidence
+                    .as_ref()
                     .map(|path| {
                         format!("; private mismatch evidence retained at {}", path.display())
                     })
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| {
+                        self.mismatch_evidence
+                            .as_deref()
+                            .filter(|path| path.is_file())
+                            .and_then(|path| self._scratch.retain_mismatch_evidence(path).ok())
+                            .map(|path| {
+                                format!(
+                                    "; private mismatch evidence retained at {}",
+                                    path.display()
+                                )
+                            })
+                            .unwrap_or_default()
+                    });
+                let suggestions = if automatic_suggestions.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; proposed normalizers: {}; journal: {}",
+                        self._scratch.path.display(),
+                        self.retained_mismatch_journal
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default()
+                    )
+                };
+                let discovery = value.get("normalizer_exploration").map(|stats| {
+                    let failures = stats.get("catalog_failures").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let limit = stats.get("limit_reached").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if failures > 0 || limit { format!("; normalizer exploration: {failures} candidate checks unavailable{}", if limit { ", session candidate limit reached" } else { "" }) } else { String::new() }
+                }).unwrap_or_default();
                 return Err(Error::Run(format!(
-                    "replay rejected {rejected} request(s) for {}{mismatch}{evidence}; the normalized request or sequence differs from the recording",
+                    "replay rejected {rejected} request(s) for {}{mismatch}{evidence}{suggestions}{discovery}; the normalized request or sequence differs from the recording",
                     self.cassette.display(),
                 )));
             }
@@ -1092,6 +1371,11 @@ fn resolve_executable(directory: &Path, invocation_dir: &Path) -> Result<ProxyEx
         ("tool-result-normalization.mjs", TOOL_RESULT_NORMALIZATION),
         ("normalizer-supervisor.mjs", NORMALIZER_SUPERVISOR),
         ("normalizer-worker.mjs", NORMALIZER_WORKER),
+        (
+            "replay-normalizer-discovery.mjs",
+            REPLAY_NORMALIZER_DISCOVERY,
+        ),
+        ("replay-discovery-store.mjs", REPLAY_DISCOVERY_STORE),
     ] {
         std::fs::write(directory.join(name), source).map_err(|error| {
             Error::Run(format!("cannot materialize tape component {name}: {error}"))
@@ -1395,6 +1679,8 @@ mod tests {
             respect_record_timings: true,
             workspace: std::path::Path::new("/fixture/workspace"),
             invocation_dir: std::path::Path::new("/fixture/nested"),
+            discovery_workload: None,
+            discovery_task: None,
             wire_extension: None,
             normalization_scripts: Vec::new(),
             custom_normalization: None,
@@ -1426,6 +1712,7 @@ mod tests {
                 retained_mismatch_evidence: None,
                 ignored_mismatch_journal: None,
                 retained_mismatch_journal: None,
+                retained_normalizer_suggestions: Vec::new(),
                 child: Some(child),
                 builtin: true,
                 url: String::new(),
@@ -1489,6 +1776,7 @@ mod tests {
                 retained_mismatch_evidence: None,
                 ignored_mismatch_journal: None,
                 retained_mismatch_journal: None,
+                retained_normalizer_suggestions: Vec::new(),
                 child: None,
                 builtin: true,
                 url: String::new(),
@@ -3314,6 +3602,47 @@ mod tests {
     }
 
     #[test]
+    fn discovered_normalizer_is_retained_and_replay_is_marked_approximate() {
+        let root = test_root();
+        let cassette = root.join("discovery.jsonl");
+        let body = |text: &str| {
+            serde_json::json!({"model":"fixture", "input":[
+                {"type":"function_call","call_id":"call1","name":"bash","arguments":"{\"command\":\"cat fixture\"}"},
+                {"type":"function_call_output","call_id":"call1","output":text}
+            ]})
+        };
+        let line = serde_json::json!({
+            "asb_request_policy": 3,
+            "request": {"method":"POST", "url":"/v1/responses", "body":body("counter 101").to_string()},
+            "response": {"status":200,"headers":{"content-type":"application/json"},"body":"{}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+        let session = Session::start(Mode::Replay, &cassette, None, false, &root).unwrap();
+        assert!(
+            request_to(&session, "/v1/responses", &body("counter 202").to_string())
+                .contains("200 OK")
+        );
+        let completion = session.finish();
+        completion.result.unwrap();
+        assert_eq!(completion.evidence.replay_divergences.len(), 1);
+        let reason = &completion.evidence.replay_divergences[0].reason;
+        assert!(reason.contains("approximate replay"), "{reason}");
+        assert!(reason.contains("proposed normalizers:"), "{reason}");
+        let scratch = reason.split("proposed normalizers: ").nth(1).unwrap();
+        let source =
+            std::fs::read_to_string(Path::new(scratch).join("suggested-normalizer-1.mjs")).unwrap();
+        assert!(source.contains("normalizeToolResult"));
+        assert!(
+            completion
+                .evidence
+                .output_files
+                .iter()
+                .any(|p| p.to_string_lossy().ends_with("ignored-mismatches.jsonl"))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn replay_rejects_changed_body_and_extra_requests() {
         let root = test_root();
         let cassette = cassette(&root);
@@ -3321,7 +3650,8 @@ mod tests {
         let session = Session::start(Mode::Replay, &cassette, None, false, workspace).unwrap();
         let changed =
             r#"{"model":"m","messages":[{"content":"different"}],"tools":[{"type":"function"}]}"#;
-        assert!(request(&session, changed).contains("409 Conflict"));
+        let response = request(&session, changed);
+        assert!(response.contains("409 Conflict"), "{response}");
         let error = session.stop().unwrap_err().to_string();
         assert!(error.contains("rejected"), "{error}");
         assert!(

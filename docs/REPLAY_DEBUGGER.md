@@ -162,7 +162,10 @@ project, or use `--project /path/to/project` to select it. The manager lists
 profiles and their enabled state. Use Space to toggle, `e` to edit the module
 with `$VISUAL` or `$EDITOR`, `E` to edit project settings, `a` to add a blank
 starter, and `n` to draft one from the selected difference or tool result.
-New modules are disabled until reviewed and enabled. Suggestions match the
+New modules are disabled in the selected replay policy until reviewed and
+enabled. Replay mismatch exploration can still execute unselected modules in
+the project `normalizers` directory; see [exploratory mismatch recovery](REPLAY_NORMALIZERS.md#exploratory-mismatch-recovery).
+Suggestions match the
 observed complete text exactly; refine them for other cases as needed.
 The workload is inferred from a campaign plan or bundled cassette when
 available; `w` sets it otherwise. You can also open the manager directly:

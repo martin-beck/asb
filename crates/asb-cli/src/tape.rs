@@ -132,6 +132,8 @@ impl Session {
             ignore_provider_unconsumed: context.ignore_provider_unconsumed,
             workspace: context.workspace,
             invocation_dir: context.invocation_dir,
+            discovery_workload: context.workload,
+            discovery_task: context.task,
             wire_extension: context.agent.and_then(crate::agents::tape_wire_extension),
             normalization_scripts,
             custom_normalization: context.custom_normalization,
