@@ -24,10 +24,10 @@ function frame(socket) {
 function reply(socket, value) { socket.end(`${JSON.stringify(value)}\n`); }
 
 export class NativeToolBroker {
-  constructor(mode, events = [], applyEffects) {
+  constructor(mode, events = [], applyEffects, options = {}) {
     if (!['record', 'replay'].includes(mode)) throw new Error('Native tool broker mode is invalid');
     this.mode = mode;
-    this.session = mode === 'record' ? new RecordingSession() : new ReplaySession(events, applyEffects);
+    this.session = mode === 'record' ? new RecordingSession(options) : new ReplaySession(events, applyEffects, options);
     this.pending = new Map();
     this.connections = new Set();
     this.sealing = false;

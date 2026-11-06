@@ -24,6 +24,7 @@ fn native_dispatch_prototype_handles_loader_ordering_and_child_transport() {
         "continue_native_service.mjs",
         "pi_native_transform.mjs",
         "pi_native_integration.mjs",
+        "pi_native_identity.mjs",
     ] {
         let output = std::process::Command::new("node")
             .arg(root.join("tests").join(fixture))

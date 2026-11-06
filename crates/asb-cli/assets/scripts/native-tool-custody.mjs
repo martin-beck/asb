@@ -28,5 +28,5 @@ export function replayBroker(sidecar, { programSha256, workspaceEffectSha256, ap
     throw new Error('Native tool sidecar does not match the selected program and workspace effects');
   }
   if (typeof applyEffects !== 'function') throw new TypeError('Native tool replay requires workspace-effect application');
-  return new NativeToolBroker('replay', decoded.exchanges, applyEffects);
+  return new NativeToolBroker('replay', decoded.exchanges, applyEffects, {agent});
 }

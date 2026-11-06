@@ -58,6 +58,11 @@ For newly completed Pi snapshot replays, comparison evidence reports
 indicates that the captured native tool stream was consumed, not that every
 agent process or effect was captured. Historical or missing observations remain
 unknown; a task grade is not a substitute for this receipt.
+New Pi native recordings bind requests to Pi tool-call IDs, so overlapping
+calls with identical arguments can retain distinct outcomes. Older sidecars
+lack these IDs: sequential replay remains compatible, while observed concurrent
+identical calls are rejected as ambiguous. Older sidecars cannot prove every
+historical overlap was distinguishable; they are not promoted to full coverage.
 New run and comparison records also disclose the selected provider, tool and
 MCP replay modes. Provider-only selection warns that native tools can still
 execute and contact external services. Selection is not evidence that tools or
