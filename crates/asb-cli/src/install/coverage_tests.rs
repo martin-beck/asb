@@ -271,6 +271,34 @@ esac"#,
 }
 
 #[test]
+fn replay_requirement_check_never_installs_missing_inputs() {
+    let fixture = Fixture::new();
+    let tools = fixture.0.join("tools");
+    let workloads = fixture.0.join("workloads");
+    let mut config: BenchmarkConfig = toml::from_str(
+        "agent='pi'\nworkload='swe-bench'\nprovider='openrouter'\nmodel='fixture'\n",
+    )
+    .unwrap();
+    let missing = validate_offline_replay_requirements(&config, &tools, &workloads).unwrap_err();
+    assert!(missing.to_string().contains("locally installed tool `pi`"));
+    assert!(!tools.exists());
+    assert!(!workloads.exists());
+    let agent = tools.join("pi/bin/pi");
+    fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    fs::write(&agent, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    let missing = validate_offline_replay_requirements(&config, &tools, &workloads).unwrap_err();
+    assert!(
+        missing
+            .to_string()
+            .contains("workload `swe-bench` is not installed locally")
+    );
+    assert!(!workloads.exists());
+    config.workload = "bug-fix".into();
+    validate_offline_replay_requirements(&config, &tools, &workloads).unwrap();
+}
+
+#[test]
 fn guest_bootstrap_failures_leave_host_runtime_untouched() {
     let fixture = Fixture::new();
     fixture.run("guest-bootstrap");

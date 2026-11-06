@@ -924,6 +924,9 @@ pub(crate) fn ensure_execution_requirements(
     let tools_root = project::resolve(&root, &project_config.tools_dir);
     let workloads_root = project::environment_path("ASB_WORKLOAD_DIR", invocation_dir)
         .unwrap_or_else(|| project::resolve(&root, &project_config.workloads_dir));
+    if mode == Some(crate::tape::Mode::Replay) {
+        return validate_offline_replay_requirements(config, &tools_root, &workloads_root);
+    }
     let context = OperationContext::new_at(&root, &project_config, invocation_dir)
         .map_err(InstallFailure::into_public)?;
     let mut progress = |_percent: u8, _stage: ProgressStage| {};
@@ -984,6 +987,49 @@ pub(crate) fn ensure_execution_requirements(
     let diagnostic = context.report_diagnostics(output);
     result.map_err(InstallFailure::into_public)?;
     diagnostic
+}
+
+/// Check replay inputs without invoking an installer or package manager.
+fn validate_offline_replay_requirements(
+    config: &BenchmarkConfig,
+    tools_root: &Path,
+    workloads_root: &Path,
+) -> Result<(), Error> {
+    let mut required = execution_tool_ids(config, Some(crate::tape::Mode::Replay));
+    if let Some(measures) = config.measurements.as_ref().filter(|value| value.enabled) {
+        required.extend(
+            crate::collectors::dependency_tools(&measures.collectors)
+                .into_iter()
+                .map(str::to_owned),
+        );
+    }
+    required.sort();
+    required.dedup();
+    for id in required {
+        match local_lookup(&id, tools_root) {
+            crate::executables::Lookup::Found(_) => {}
+            crate::executables::Lookup::Missing => {
+                return Err(Error::Input(format!(
+                    "replay requires the locally installed tool `{id}`; prepare replay inputs or run `asb tool install {id}` before replay"
+                )));
+            }
+            crate::executables::Lookup::Unusable(path) => {
+                return Err(Error::Input(format!(
+                    "replay tool `{id}` at {} is not executable; repair or reinstall it before replay",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if external_workload(&config.workload).is_some()
+        && !workload_available(&config.workload, workloads_root)
+    {
+        return Err(Error::Input(format!(
+            "replay workload `{}` is not installed locally; prepare replay inputs or run `asb workload install {}` before replay",
+            config.workload, config.workload
+        )));
+    }
+    Ok(())
 }
 
 /// The project-local installation inputs for one executable benchmark.
