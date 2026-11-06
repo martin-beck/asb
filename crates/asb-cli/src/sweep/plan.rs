@@ -191,6 +191,7 @@ fn validate_sampled_population<'a>(
     use std::collections::{BTreeMap, BTreeSet};
     type Group = (String, String, String, String);
     let mut groups: BTreeMap<Group, BTreeSet<String>> = BTreeMap::new();
+    let mut configurations_by_group = BTreeMap::<Group, String>::new();
     let samples: BTreeMap<_, _> = manifest
         .sampled_trials
         .iter()
@@ -212,6 +213,28 @@ fn validate_sampled_population<'a>(
             config.provider.clone(),
             config.model.clone(),
         );
+        // Setup gives each generated file its own output paths. All other
+        // settings must agree before one file can serve as the replacement
+        // template for this combination.
+        let mut template = config.clone();
+        template.trial = None;
+        template.log_file.clear();
+        if let Some(measurements) = template.measurements.as_mut() {
+            measurements.directory.clear();
+        }
+        let bytes = serde_json::to_vec(&template)
+            .map_err(|_| Error::Input("cannot encode sampled benchmark template".into()))?;
+        let fingerprint = crate::cassette::digest(&bytes);
+        if configurations_by_group
+            .get(&key)
+            .is_some_and(|prior| *prior != fingerprint)
+        {
+            return Err(Error::Input(format!(
+                "sampled workload `{}` has inconsistent benchmark settings within a combination",
+                config.workload
+            )));
+        }
+        configurations_by_group.insert(key.clone(), fingerprint);
         if !groups.entry(key).or_default().insert(trial.clone()) {
             return Err(Error::Input(format!(
                 "sampled workload `{}` contains a duplicate trial in a benchmark combination",
@@ -623,6 +646,9 @@ mod tests {
             }
         }
         assert!(validate_sampled_population(&manifest, configs.iter()).is_ok());
+        configs[0].concurrency = 2;
+        assert!(validate_sampled_population(&manifest, configs.iter()).is_err());
+        configs[0].concurrency = 1;
         let removed = configs.pop().unwrap();
         assert!(validate_sampled_population(&manifest, configs.iter()).is_err());
         configs.push(removed);
