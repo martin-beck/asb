@@ -12,6 +12,7 @@ mod provenance;
 mod selection;
 mod serialization;
 mod source;
+mod trial_order;
 
 pub use archive::{Archive, Limits};
 pub use journal::{
@@ -28,6 +29,7 @@ pub(crate) use source::SourceInspection;
 pub(crate) use source::take_observation_count;
 pub use source::{LegacyTrack, Source};
 use std::fmt;
+pub use trial_order::TrialOrder;
 
 /// Current manifest format. Unknown versions are refused, not guessed.
 pub const SCHEMA_VERSION: u32 = 2;
