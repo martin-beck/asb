@@ -35,6 +35,16 @@ pub struct BoundTrialPreparation {
     preparation: TrialPreparation,
 }
 
+/// One settled recording and its offline replay observations.
+pub struct ReplayAttempt {
+    /// SHA-256 of the immutable, independently verified recording.
+    pub cassette_sha256: String,
+    /// Observations from all replicas of the candidate replay.
+    pub replicas: Vec<ReplayObservation>,
+    /// Number of replay replicas required by the benchmark configuration.
+    pub expected_replicas: usize,
+}
+
 impl BoundTrialPreparation {
     /// Maximum size of a serialized per-combination ledger.
     pub const MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -114,6 +124,47 @@ impl BoundTrialPreparation {
     /// Modify the ledger after validating its bindings while holding its owner lock.
     pub fn preparation_mut(&mut self) -> &mut TrialPreparation {
         &mut self.preparation
+    }
+
+    /// Prepare candidates in order, persisting ownership and every settlement.
+    ///
+    /// The caller owns the ledger lock. `persist` must durably publish its bytes;
+    /// `execute` must record the trial, independently verify the cassette, then
+    /// replay it offline and return all observed replica facts. A callback error
+    /// leaves the candidate in flight and does not launch a replacement.
+    pub fn prepare<P, E>(
+        &mut self,
+        sweep_sha256: &str,
+        configuration_sha256: &str,
+        order: &TrialOrder,
+        mut persist: P,
+        mut execute: E,
+    ) -> Result<(), Error>
+    where
+        P: FnMut(&[u8]) -> Result<(), Error>,
+        E: FnMut(&str) -> Result<ReplayAttempt, Error>,
+    {
+        self.validate(sweep_sha256, configuration_sha256, order)?;
+        loop {
+            if self.preparation.complete()? {
+                return Ok(());
+            }
+            let trial = self.preparation.start()?.ok_or_else(|| {
+                Error(
+                    "sampled trial pool exhausted before enough recordings replayed successfully"
+                        .into(),
+                )
+            })?;
+            persist(&self.encode(sweep_sha256, configuration_sha256, order)?)?;
+            let attempt = execute(&trial)?;
+            self.preparation.settle_replay(
+                &trial,
+                attempt.cassette_sha256,
+                &attempt.replicas,
+                attempt.expected_replicas,
+            )?;
+            persist(&self.encode(sweep_sha256, configuration_sha256, order)?)?;
+        }
     }
 }
 
@@ -705,5 +756,140 @@ mod tests {
                 .is_err()
         );
         assert!(BoundTrialPreparation::new("bad", &config, order).is_err());
+    }
+
+    #[test]
+    fn preparation_runs_replacements_and_reuses_persisted_successes() {
+        use std::cell::RefCell;
+        let ids = (0..5)
+            .map(|index| format!("case-{index}"))
+            .collect::<Vec<_>>();
+        let order = TrialOrder::new(&ids, 2, 42).unwrap();
+        let sweep = "a".repeat(64);
+        let config = "b".repeat(64);
+        let mut state = BoundTrialPreparation::new(&sweep, &config, order.clone()).unwrap();
+        let saved = RefCell::new(Vec::new());
+        let seen = RefCell::new(Vec::new());
+        state
+            .prepare(
+                &sweep,
+                &config,
+                &order,
+                |bytes| {
+                    *saved.borrow_mut() = bytes.to_vec();
+                    Ok(())
+                },
+                |trial| {
+                    let mut seen = seen.borrow_mut();
+                    seen.push(trial.to_owned());
+                    Ok(ReplayAttempt {
+                        cassette_sha256: "c".repeat(64),
+                        expected_replicas: 1,
+                        replicas: vec![ReplayObservation {
+                            trial: trial.into(),
+                            replica: 1,
+                            process_success: true,
+                            provider_consumed: Some(seen.len() != 1),
+                            native_consumed: None,
+                            native_required: false,
+                            cleanup_confirmed: Some(true),
+                        }],
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(seen.borrow().len(), 3);
+        assert_eq!(state.preparation().successful().len(), 2);
+        let mut restored =
+            BoundTrialPreparation::decode(&saved.borrow(), &sweep, &config, &order).unwrap();
+        restored
+            .prepare(
+                &sweep,
+                &config,
+                &order,
+                |_| panic!("completed state must not be rewritten"),
+                |_| panic!("completed state must not launch another recording"),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn preparation_persists_ownership_before_execution_and_stops_on_uncertainty() {
+        use std::cell::RefCell;
+        let order = TrialOrder::new(&["one".into(), "two".into()], 1, 1).unwrap();
+        let sweep = "a".repeat(64);
+        let config = "b".repeat(64);
+        let mut state = BoundTrialPreparation::new(&sweep, &config, order.clone()).unwrap();
+        let saved = RefCell::new(Vec::new());
+        let result = state.prepare(
+            &sweep,
+            &config,
+            &order,
+            |bytes| {
+                *saved.borrow_mut() = bytes.to_vec();
+                Ok(())
+            },
+            |_| Err(Error("unconfirmed process cleanup".into())),
+        );
+        assert!(result.is_err());
+        let mut restored =
+            BoundTrialPreparation::decode(&saved.borrow(), &sweep, &config, &order).unwrap();
+        assert!(restored.preparation().in_flight().unwrap().is_some());
+        assert!(
+            restored
+                .prepare(
+                    &sweep,
+                    &config,
+                    &order,
+                    |_| Ok(()),
+                    |_| panic!("must not retry an unsettled attempt")
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn preparation_stops_on_exhaustion_and_never_executes_after_failed_persist() {
+        let order = TrialOrder::new(&["one".into(), "two".into()], 1, 1).unwrap();
+        let sweep = "a".repeat(64);
+        let config = "b".repeat(64);
+        let mut state = BoundTrialPreparation::new(&sweep, &config, order.clone()).unwrap();
+        let error = state
+            .prepare(
+                &sweep,
+                &config,
+                &order,
+                |_| Ok(()),
+                |trial| {
+                    Ok(ReplayAttempt {
+                        cassette_sha256: "c".repeat(64),
+                        expected_replicas: 1,
+                        replicas: vec![ReplayObservation {
+                            trial: trial.into(),
+                            replica: 1,
+                            process_success: true,
+                            provider_consumed: Some(false),
+                            native_consumed: None,
+                            native_required: false,
+                            cleanup_confirmed: Some(true),
+                        }],
+                    })
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("pool exhausted"));
+        assert!(!state.preparation().complete().unwrap());
+        let mut fresh = BoundTrialPreparation::new(&sweep, &config, order.clone()).unwrap();
+        assert!(
+            fresh
+                .prepare(
+                    &sweep,
+                    &config,
+                    &order,
+                    |_| Err(Error("disk full".into())),
+                    |_| panic!("must persist ownership before starting a process")
+                )
+                .is_err()
+        );
     }
 }
