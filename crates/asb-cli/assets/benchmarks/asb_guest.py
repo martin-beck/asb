@@ -591,9 +591,9 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
             # The staging step has verified these exact bytes while copying.
             guest['snapshot_archive_sha256'] = next(item['sha256'] for item in request['private_inputs'] if item['target'] == 'workspace-snapshots.tar')
         extra_roots = experimental_snapshot_roots(os.environ.get('ASB_EXPERIMENTAL_SNAPSHOT_ROOTS'))
-        from asb_snapshot_backend import BTRFS, SnapshotRequest
+        from asb_snapshot_backend import BTRFS, DockerSnapshotTransport, SnapshotRequest
         supervisor = BTRFS.start(SnapshotRequest(
-            task=task, tools=auxiliary, owner=owner, transport=docker_command(),
+            task=task, tools=auxiliary, owner=owner, transport=DockerSnapshotTransport(docker_command()),
             deadline=deadline, target=getattr(task.workspace, 'workdir', '/testbed'),
             replay=replay, extra_roots=tuple(extra_roots),
             independent_custody=os.environ.get('ASB_EXPERIMENTAL_SNAPSHOT_CUSTODY') == '1'))
