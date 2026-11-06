@@ -149,7 +149,8 @@ fn trial_count_writes_a_sampled_sweep_with_a_frozen_replacement_pool() {
     );
     let replay = project.command(&["sweep", "selected.toml", "--replay"]);
     assert!(!replay.status.success());
-    assert!(String::from_utf8_lossy(&replay.stderr).contains("no benchmark was started"));
+    assert!(String::from_utf8_lossy(&replay.stderr).contains("--prepare-replay"));
+    assert!(!project.0.join("selected-results").exists());
     let original = std::fs::read(project.0.join("selected.toml")).unwrap();
     for count in ["0", "4", "not-a-number"] {
         let rejected = project.setup(
