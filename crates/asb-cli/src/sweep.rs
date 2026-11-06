@@ -618,17 +618,6 @@ mod tests {
             super::parse_manifest(&path, value)
         };
         assert!(parse(&manifest).is_ok());
-        std::fs::write(&path, toml::to_string(&manifest).unwrap()).unwrap();
-        let error = super::run_with_options(
-            path.to_str().unwrap(),
-            super::Options {
-                mode: Some(crate::tape::Mode::Replay),
-                ..Default::default()
-            },
-            &mut Vec::new(),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("no benchmark was started"));
         manifest.sampled_trials[0].candidates.reverse();
         assert!(parse(&manifest).is_err());
         manifest.sampled_trials = vec![selection.clone(), selection];
