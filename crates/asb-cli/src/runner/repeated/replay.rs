@@ -716,6 +716,31 @@ pub(super) fn disclose_incomplete<'a>(
     Ok(())
 }
 
+pub(super) fn disclose_native_snapshot<'a>(
+    inputs: impl IntoIterator<Item = &'a ReplayInput>,
+    tool_replay: bool,
+    json: bool,
+    output: &mut dyn std::io::Write,
+) -> Result<(), Error> {
+    if !tool_replay
+        || !inputs
+            .into_iter()
+            .any(|input| input.native_tool.is_some() && input.workspace_snapshots.is_some())
+    {
+        return Ok(());
+    }
+    if json {
+        serde_json::to_writer(&mut *output, &serde_json::json!({
+            "type":"replay-notice", "mode":"experimental-native-snapshot",
+            "scope":"captured-tool-results-and-filesystem-roots", "other_effects_guaranteed":false
+        })).map_err(|error| Error::Io(error.to_string()))?;
+        writeln!(output).map_err(crate::io_error)?;
+    } else {
+        writeln!(output, "Experimental native snapshot replay uses captured tool results and filesystem roots; other effects are not guaranteed.").map_err(crate::io_error)?;
+    }
+    Ok(())
+}
+
 fn input_error(error: crate::cassette::Error) -> Error {
     Error::Input(error.to_string())
 }
@@ -723,6 +748,35 @@ fn input_error(error: crate::cassette::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_snapshot_notice_requires_tool_replay_and_both_selected_artifacts() {
+        let mut input: ReplayInput = serde_json::from_value(serde_json::json!({
+            "source":"record.asb.zip", "private":"track.jsonl", "bytes":1,
+            "sha256":"a".repeat(64), "workspace_snapshots":"snapshot.tar"
+        }))
+        .unwrap();
+        let mut output = Vec::new();
+        disclose_native_snapshot([&input], true, false, &mut output).unwrap();
+        assert!(output.is_empty());
+        input.native_tool = Some("native.jsonl".into());
+        disclose_native_snapshot([&input], false, false, &mut output).unwrap();
+        assert!(
+            output.is_empty(),
+            "provider-only replay must not claim native coverage"
+        );
+        disclose_native_snapshot([&input], true, false, &mut output).unwrap();
+        assert!(
+            String::from_utf8(output.clone())
+                .unwrap()
+                .contains("other effects are not guaranteed")
+        );
+        output.clear();
+        disclose_native_snapshot([&input], true, true, &mut output).unwrap();
+        let notice: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(notice["mode"], "experimental-native-snapshot");
+        assert_eq!(notice["other_effects_guaranteed"], false);
+    }
 
     #[test]
     fn selected_local_tool_payload_is_linked_only_into_its_replica_batch() {
