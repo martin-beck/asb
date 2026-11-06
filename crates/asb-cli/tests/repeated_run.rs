@@ -541,26 +541,58 @@ fn sampled_preparation_replaces_a_failed_replay_and_reuses_success() {
 
 #[test]
 fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
-    sampled_sweep_fixture(false, 1);
+    sampled_sweep_fixture(false, 1, false);
 }
 
 #[test]
 fn sampled_sweep_preserves_a_fixed_workload() {
-    sampled_sweep_fixture(true, 1);
+    sampled_sweep_fixture(true, 1, false);
 }
 
 #[test]
 fn sampled_sweep_replaces_one_of_multiple_trials() {
-    sampled_sweep_fixture(false, 2);
+    sampled_sweep_fixture(false, 2, false);
 }
 
-fn sampled_sweep_fixture(mixed: bool, count: usize) {
-    let project = Project::new();
-    project.config(1);
-    let agent = project.0.join("fixture-agent");
-    let script = fs::read_to_string(&agent).unwrap().replace(
+#[test]
+fn sampled_sweep_replays_with_configured_normalizer() {
+    sampled_sweep_fixture(false, 1, true);
+}
+
+fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool) {
+    let project = if normalize {
+        sweep_tests::registered_project(1)
+    } else {
+        let project = Project::new();
+        project.config(1);
+        project
+    };
+    let agent = if normalize {
+        project.0.join("tools/pi/bin/pi")
+    } else {
+        project.0.join("fixture-agent")
+    };
+    if normalize {
+        fs::write(project.0.join("normalizer.mjs"), "export function normalizeToolResult({text}) { return text.replace(/seed=\\d+/, 'seed=<seed>'); }").unwrap();
+        let project_config = project.0.join(".asb/project.toml");
+        let config_text = fs::read_to_string(&project_config).unwrap();
+        fs::write(project_config, format!("{config_text}\n[[replay.normalizers]]\nid='fixture-seed'\nmodule='normalizer.mjs'\nworkloads=['bug-fix']\n")).unwrap();
+    }
+    let mut script = fs::read_to_string(&agent).unwrap();
+    if normalize {
+        script = script.replace(
+            "'messages':[]}",
+            "'messages':[{'role':'tool','content':'seed=17'}]}",
+        );
+    }
+    let altered = if normalize {
+        "if (root/'attempts.jsonl').exists():\n    n = len((root/'attempts.jsonl').read_text().splitlines())\n    body['messages'] = [{'role':'user','content':'different-on-replay'}, {'role':'tool','content':f'seed={18 if n == 1 else 19}'}]\nurl = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')"
+    } else {
+        "if (root/'attempts.jsonl').exists(): body['messages'] = [{'role':'user','content':'different-on-replay'}, {'role':'tool','content':'seed=18'}]\nurl = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')"
+    };
+    let script = script.replace(
         "url = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
-        "if (root/'attempts.jsonl').exists(): body['messages'] = [{'role':'user','content':'different-on-replay'}]\nurl = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
+        altered,
     );
     let script = if mixed {
         script.replace("before = (workspace/'src/parser.py').read_text()", "(workspace/'src').mkdir(exist_ok=True)\nif not (workspace/'src/parser.py').exists(): (workspace/'src/parser.py').write_text('fixture')\nbefore = (workspace/'src/parser.py').read_text()")
@@ -701,6 +733,21 @@ fn sampled_sweep_fixture(mixed: bool, count: usize) {
     let alias = project
         .0
         .join(".sample-sweep-sample-preparation/cassettes/000-replay/recording.asb.zip");
+    let mut archive =
+        asb_cli::cassette::Archive::open(&alias, asb_cli::cassette::Limits::default()).unwrap();
+    assert_eq!(
+        archive
+            .manifest()
+            .compatibility
+            .normalization_sha256
+            .is_some(),
+        normalize
+    );
+    if normalize {
+        let raw = archive.read_track(1).unwrap();
+        assert!(String::from_utf8_lossy(&raw).contains("seed=18"));
+        assert!(!String::from_utf8_lossy(&raw).contains("seed=<seed>"));
+    }
     let length = fs::metadata(&alias).unwrap().len();
     asb_cli::cassette::Archive::open_verified(
         &alias,
