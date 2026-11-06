@@ -62,7 +62,8 @@ class SDKSessionTests(unittest.TestCase):
             transport = SessionTransport(launcher,None,None)
             self.assertEqual(transport.deadline,1900)
             self.assertGreater(transport.deadline-now[0],90)
-            for invalid in [True,float("nan"),float("inf"),1100,3000]:
+            self.assertEqual(SDKSessionLauncher(None,"fixture",None,preparation_deadline=8300).preparation_deadline,8300)
+            for invalid in [True,float("nan"),float("inf"),1100,8300.01]:
                 with self.subTest(invalid=invalid),self.assertRaises(ExecutionError):
                     SDKSessionLauncher(None,"fixture",None,preparation_deadline=invalid)
 
