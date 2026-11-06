@@ -139,6 +139,7 @@ impl BatchRun<'_> {
                 ignore_provider_mismatch: self.plan.ignore_provider_mismatch,
                 ignore_provider_unconsumed: self.plan.ignore_provider_unconsumed,
                 ignore_tool_mismatch: self.plan.ignore_tool_mismatch,
+                ignore_mcp_mismatch: self.plan.ignore_mcp_mismatch,
                 policy: Some(&policy),
                 requirements_prepared: self.options.requirements_prepared,
                 batch: Some(&self.identity),

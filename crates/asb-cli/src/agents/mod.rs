@@ -386,6 +386,7 @@ pub(crate) struct TapeContext<'a> {
 /// adapter configuration supplies it in place of an ordinary stdio server.
 #[derive(Clone, Copy)]
 pub(crate) struct McpTapeContext<'a> {
+    pub ignore_mcp_mismatch: bool,
     pub mode: crate::tape::Mode,
     /// Selected replay payload. Recording owns a new private relay directory;
     /// replay needs the exact staged sidecar that supplied its sealed bundle.
