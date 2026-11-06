@@ -20,7 +20,7 @@ import time
 import uuid
 
 from asb_docker import DockerSession, docker_command
-from asb_execution import ExecutionError, ManagedDockerWorkspace
+from asb_execution import ExecutionError, ManagedDockerWorkspace, require_native_compose_service, require_native_docker_host
 from asb_resources import ResourceJournal, build_image_tag
 from asb_terminal_catalog import verify, tree_manifest, read_json, SPECS
 from asb_harness import (quiet_sdk, restore_task_networks, original_networks,
@@ -74,6 +74,7 @@ def scoped_configuration(config, attempt, artifacts, environment):
     if "main" not in services or len(services) > 16:
         raise ExecutionError("official Harbor task has an invalid service population")
     for name, service in services.items():
+        require_native_compose_service(service)
         if (service.get("privileged") or service.get("network_mode") == "host"
                 or service.get("pid") == "host" or service.get("ipc") == "host" or service.get("devices")):
             raise ExecutionError("task requires a separately isolated host for privileged/device/host-namespace access")
@@ -458,6 +459,7 @@ class HarborTask:
 
     @quiet_sdk
     def __enter__(self):
+        require_native_docker_host(self.client)
         self.catalog = verify_catalog(self.catalog_path, self.workload)
         self.workload = self.catalog["workload"]
         os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")

@@ -63,7 +63,7 @@ class SnapshotServiceTest(unittest.TestCase):
                 (baseline/'0').mkdir();(baseline/'1').mkdir()
                 (baseline/'.asb-snapshot-roots.json').write_text(json.dumps([str(target),str(extra)]))
             args=SimpleNamespace(root=str(root/'state'),size=None,mkfs='mkfs',btrfs='btrfs',rsync='rsync',
-                qemu_img=None,qemu_storage=None,target=str(target),extra_root=[],
+                target=str(target),extra_root=[],
                 replay_archive=str(root/'archive'),apply_final=False)
             with patch.object(asb_snapshot_handoff,'SnapshotWorkspace',return_value=workspace), \
                  patch.object(asb_snapshot_handoff,'receive_archive',side_effect=receive), \
@@ -80,7 +80,7 @@ class SnapshotServiceTest(unittest.TestCase):
             root=Path(directory);target=root/'target';target.mkdir();calls=[]
             workspace=SimpleNamespace(prepare=lambda *a,**k: root/'mounted', close=lambda:calls.append('closed'))
             args=SimpleNamespace(root=str(root/'state'),size=None,mkfs='mkfs',btrfs='btrfs',rsync='rsync',
-                                 qemu_img=None,qemu_storage=None,target=str(target),extra_root=[],
+                                 target=str(target),extra_root=[],
                                  replay_archive=None,apply_final=True)
             with patch.object(asb_snapshot_handoff,'SnapshotWorkspace',return_value=workspace), \
                  patch.object(asb_snapshot_handoff.subprocess,'run',side_effect=lambda args,**k:calls.append(args)), \
@@ -98,7 +98,7 @@ class SnapshotServiceTest(unittest.TestCase):
             root=Path(directory);target=root/'target';target.mkdir();calls=[]
             workspace=SimpleNamespace(prepare=lambda *a,**k: root/'mounted', close=lambda:calls.append('closed'))
             args=SimpleNamespace(root=str(root/'state'),size=None,mkfs='mkfs',btrfs='btrfs',rsync='rsync',
-                                 qemu_img=None,qemu_storage=None,target=str(target),extra_root=[],
+                                 target=str(target),extra_root=[],
                                  replay_archive=None,apply_final=True)
             with patch.object(asb_snapshot_handoff,'SnapshotWorkspace',return_value=workspace), \
                  patch.object(asb_snapshot_handoff.subprocess,'run',side_effect=lambda args,**k:calls.append(args)), \
@@ -390,23 +390,6 @@ class SnapshotServiceTest(unittest.TestCase):
                 selectors.return_value.__enter__.return_value.select.return_value=[True]
                 supervisor=GuestSnapshot(task,tools,(0,0),['docker'],time.monotonic()+5)
             self.assertNotIn('--size',popen.call_args.args[0])
-            supervisor.log.close()
-
-    def test_guest_supervisor_passes_optional_qcow_tools(self):
-        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
-            root=Path(directory);container=SimpleNamespace(id='fixture-container')
-            task=SimpleNamespace(artifacts=root,workspace=SimpleNamespace(container=container))
-            process=SimpleNamespace(stdout=io.BytesIO(b'READY\n'))
-            tools={'btrfs':'/btrfs','mkfs.btrfs':'/mkfs','rsync':'/rsync',
-                   'qemu-img':'/qemu-img','qemu-storage-daemon':'/qemu-storage'}
-            with patch('asb_snapshot_control.upload'), \
-                 patch('asb_snapshot_control.selectors.DefaultSelector') as selectors, \
-                 patch('asb_snapshot_control.subprocess.Popen',return_value=process) as popen:
-                selectors.return_value.__enter__.return_value.select.return_value=[True]
-                supervisor=GuestSnapshot(task,tools,(0,0),['docker'],time.monotonic()+5)
-            args=popen.call_args.args[0]
-            self.assertEqual(args[args.index('--qemu-img')+1],'/qemu-img')
-            self.assertEqual(args[args.index('--qemu-storage')+1],'/qemu-storage')
             supervisor.log.close()
 
     def test_guest_supervisor_forwards_extra_roots(self):

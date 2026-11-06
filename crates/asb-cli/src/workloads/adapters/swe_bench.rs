@@ -27,8 +27,8 @@ pub(super) static ADAPTER: SweBenchAdapter = SweBenchAdapter {
 };
 
 impl WorkloadAdapter for SweBenchAdapter {
-    fn task_architecture(&self) -> Option<&'static str> {
-        Some("x86_64")
+    fn supports_architecture(&self, host: &str) -> bool {
+        matches!(host, "x86_64" | "aarch64")
     }
     fn preparation_default_seconds(&self) -> Option<u64> {
         // Leave a cleanup margin after the official source-image build budget.

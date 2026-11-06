@@ -23,9 +23,7 @@ def prepare(args):
     root = Path(args.root)
     root.mkdir(parents=True, exist_ok=False)
     workspace = SnapshotWorkspace(root/'workspace.img', root/'filesystem', args.size,
-                                  [args.mkfs], [args.btrfs], [args.rsync],
-                                  [args.qemu_img] if args.qemu_img else None,
-                                  [args.qemu_storage] if args.qemu_storage else None)
+                                  [args.mkfs], [args.btrfs], [args.rsync])
     bound = []
     apply_final = False
     try:
@@ -133,15 +131,11 @@ def main():
     for name in ('target', 'root', 'socket', 'output', 'btrfs', 'mkfs', 'rsync'):
         parser.add_argument('--'+name, required=True)
     parser.add_argument('--size', type=int)
-    parser.add_argument('--qemu-img')
-    parser.add_argument('--qemu-storage')
     parser.add_argument('--apply-final', action='store_true')
     parser.add_argument('--verify-mount', action='store_true')
     parser.add_argument('--replay-archive')
     parser.add_argument('--extra-root', action='append', default=[])
     args = parser.parse_args()
-    if bool(args.qemu_img) != bool(args.qemu_storage):
-        parser.error('qemu-img and qemu-storage must be supplied together')
     (prepare if args.role == 'prepare' else custody)(args)
 
 

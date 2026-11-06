@@ -9,9 +9,9 @@ not re-executed merely by restoring files.
 
 The first implementation wraps the existing Btrfs guest supervisors in a
 backend interface. It retains the existing container transport and custody
-choices. An execution VM must provide a compatible transport and its own
-lifecycle; selecting a Btrfs filesystem image must not select a VM backend or
-change an already selected execution environment. Other snapshot backends must
+choices. ASB runs on the native host architecture and does not provide a VM
+or emulator backend. Selecting a Btrfs filesystem image must not change the
+execution environment. Other snapshot backends must
 implement the same session lifecycle rather than modify agent protocols.
 
 Users can select snapshot recording for untested configurations. The result
@@ -27,8 +27,7 @@ must not be presented as verified complete replay.
 Remaining integration work:
 
 1. Extend workload-owned root and transport interfaces with actual startup and
-   settlement evidence, including a native execution path and explicit separation
-   from VM lifecycle. The guest backend uses the workload's working directory
+   settlement evidence for the native execution path. The guest backend uses the workload's working directory
    as its primary root and reports missing storage when a workload has not
    provisioned it. The native file session does not yet start a snapshot
    backend; snapshot replay reports this actual missing capability.

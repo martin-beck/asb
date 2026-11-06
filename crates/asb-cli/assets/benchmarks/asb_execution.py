@@ -7,6 +7,7 @@ claimed to be local-host PIDs: the caller must establish that separately.
 """
 import json
 import math
+import platform
 from pathlib import Path
 import re
 import threading
@@ -15,6 +16,43 @@ import time
 
 class ExecutionError(RuntimeError):
     pass
+
+
+def require_native_compose_service(service):
+    """Pin delegated Compose services to the native host platform."""
+    host = {"x86_64":"amd64", "amd64":"amd64", "aarch64":"arm64", "arm64":"arm64"}.get(platform.machine().lower())
+    if host is None:
+        raise ExecutionError("cannot verify native platform for this Compose workload")
+    expected = "linux/" + host
+    requested = service.get("platform")
+    if requested is not None and requested != expected:
+        raise ExecutionError("workload service requests a non-native platform; emulation is not supported")
+    build = service.get("build")
+    if isinstance(build, dict) and any(item != expected for item in build.get("platforms", [])):
+        raise ExecutionError("workload build requests a non-native platform; emulation is not supported")
+    service["platform"] = expected
+
+
+def require_native_docker_host(client):
+    aliases = {"x86_64":"amd64", "amd64":"amd64", "aarch64":"arm64", "arm64":"arm64"}
+    host = aliases.get(platform.machine().lower())
+    try:
+        info = client.info()
+    except Exception as error:
+        raise ExecutionError("cannot verify Docker host architecture for native workload execution") from error
+    daemon = aliases.get(str(info.get("Architecture", "")).lower())
+    if host is None or daemon != host or info.get("OSType") != "linux":
+        raise ExecutionError("Docker host must match the native Linux host architecture; emulation is not supported")
+    return host
+
+
+def require_native_image(client, image):
+    """Reject mismatched images before creating any workload container."""
+    host = require_native_docker_host(client)
+    aliases = {"x86_64":"amd64", "amd64":"amd64", "aarch64":"arm64", "arm64":"arm64"}
+    actual = aliases.get(str(image.attrs.get("Architecture", "")).lower())
+    if actual != host or image.attrs.get("Os") != "linux":
+        raise ExecutionError("workload image and Docker host must match the native Linux host architecture; emulation is not supported")
 
 
 def principal_observation(metadata):
@@ -207,6 +245,7 @@ class ManagedDockerWorkspace:
     def __enter__(self):
         if self.container is not None:
             raise ExecutionError("workspace has already been created")
+        require_native_image(self.client, self.image)
         labels = {"asb.owner": "asb", "asb.attempt": self.attempt}
         if self.journal is not None:
             labels.update(self.journal.declare("containers", self.attempt))
@@ -218,7 +257,7 @@ class ManagedDockerWorkspace:
             pids_limit=self.limits["pids"],
         )
         if self.snapshot:
-            # Experimental isolated container/VM backend; ordinary workloads
+            # Experimental isolated container backend; ordinary workloads
             # retain their existing container configuration.
             if self.snapshot_storage is None or not self.snapshot_storage.is_dir():
                 raise ExecutionError('snapshot workspace requires an owned project storage directory')

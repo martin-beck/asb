@@ -1336,6 +1336,10 @@ struct WorkloadApp {
 }
 
 fn external_workload_choices(directory: &Path) -> Vec<Choice> {
+    external_workload_choices_for_arch(directory, std::env::consts::ARCH)
+}
+
+fn external_workload_choices_for_arch(directory: &Path, host: &str) -> Vec<Choice> {
     let mut names = install::external_workload_names()
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
@@ -1356,6 +1360,7 @@ fn external_workload_choices(directory: &Path) -> Vec<Choice> {
         .collect::<BTreeSet<_>>();
     let mut choices = names
         .into_iter()
+        .filter(|name| workloads::compatible_with_architecture(name, host))
         .map(|label| {
             let availability = if install::workload_available(&label, directory) {
                 Availability::Available
@@ -2814,6 +2819,10 @@ fn setup_install_request(app: &App, choice: &Choice) -> Option<install::operatio
 }
 
 fn workload_choices(root: &Path, directory: &str) -> Vec<Choice> {
+    workload_choices_for_arch(root, directory, std::env::consts::ARCH)
+}
+
+fn workload_choices_for_arch(root: &Path, directory: &str, host: &str) -> Vec<Choice> {
     let directory = project::resolve(root, directory);
     let choices = fs::read_dir(&directory)
         .ok()
@@ -2879,6 +2888,9 @@ fn workload_choices(root: &Path, directory: &str) -> Vec<Choice> {
         let Some(workload) = choice.key.workload().map(str::to_owned) else {
             continue;
         };
+        if !workloads::compatible_with_architecture(&workload, host) {
+            continue;
+        }
         match unique.get(&workload) {
             Some(existing)
                 if matches!(existing.key, ChoiceKey::TrialSet { .. })
@@ -4290,8 +4302,35 @@ mod tests {
                     .iter()
                     .find(|choice| choice.key.workload() == Some(name))
                     .unwrap();
-                assert_eq!(choice.label, format!("{name} (x86)"));
+                assert_eq!(choice.label, name);
             }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workload_choices_exclude_incompatible_architecture() {
+        let root = std::env::temp_dir().join(format!("asb-workload-arch-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for choices in [
+            super::external_workload_choices_for_arch(&root, "riscv64"),
+            super::workload_choices_for_arch(&root, ".", "riscv64"),
+        ] {
+            assert!(
+                !choices
+                    .iter()
+                    .any(|choice| choice.key.workload() == Some("swe-bench"))
+            );
+        }
+        for choices in [
+            super::external_workload_choices_for_arch(&root, "aarch64"),
+            super::workload_choices_for_arch(&root, ".", "aarch64"),
+        ] {
+            assert!(
+                choices
+                    .iter()
+                    .any(|choice| choice.key.workload() == Some("swe-bench"))
+            );
         }
         let _ = std::fs::remove_dir_all(root);
     }

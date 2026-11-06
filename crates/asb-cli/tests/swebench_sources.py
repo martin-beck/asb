@@ -48,6 +48,38 @@ def archive(root, files, extra=()):
 
 
 class SourceContracts(unittest.TestCase):
+    def test_arm64_uses_only_native_upstream_images_without_x86_fallback(self):
+        class DockerFailure(Exception): pass
+        class ImageNotFound(DockerFailure): pass
+        class NetworkFailure(Exception): pass
+        docker, errors = ModuleType("docker"), ModuleType("docker.errors")
+        requests, exceptions = ModuleType("requests"), ModuleType("requests.exceptions")
+        docker.errors, requests.exceptions = errors, exceptions
+        errors.DockerException, errors.ImageNotFound = DockerFailure, ImageNotFound
+        exceptions.RequestException = NetworkFailure
+        expected = "swebench/sweb.eval.arm64.org_1776_repo-1:latest"
+        original = "swebench/sweb.eval.x86_64.org_1776_repo-1:latest"
+        image = SimpleNamespace(attrs={"Architecture":"arm64", "Os":"linux"})
+        calls=[]
+        def get(name):
+            calls.append(("get",name)); raise ImageNotFound()
+        def pull(name):
+            calls.append(("pull",name)); return image
+        client=SimpleNamespace(images=SimpleNamespace(get=get,pull=pull))
+        def build(): raise AssertionError("must not build x86 on ARM")
+        with patch.dict(sys.modules, {"docker":docker,"docker.errors":errors,
+                                      "requests":requests,"requests.exceptions":exceptions}):
+            found, receipt = sources.resolve_image(client, original, build, host_arch="aarch64")
+            self.assertIs(found,image)
+            self.assertEqual(calls,[("get",expected),("pull",expected)])
+            self.assertEqual(receipt["architecture"],"arm64")
+            image.attrs["Architecture"]="amd64"
+            with self.assertRaisesRegex(sources.CatalogError,"not a native"):
+                sources.resolve_image(client,original,build,host_arch="aarch64")
+            client.images.pull=lambda name: (_ for _ in ()).throw(ImageNotFound())
+            with self.assertRaisesRegex(sources.CatalogError,"could not load"):
+                sources.resolve_image(client,original,build,host_arch="aarch64")
+
     def test_local_and_remote_prebuilt_images_are_preferred_and_only_pull_failures_build(self):
         class DockerFailure(Exception):
             pass
@@ -87,10 +119,10 @@ class SourceContracts(unittest.TestCase):
                 with self.subTest(mode=mode):
                     if mode in ["daemon-failure", "programming-error"]:
                         with self.assertRaises((DockerFailure, ValueError)):
-                            sources.resolve_image(client, "upstream/task", build)
+                            sources.resolve_image(client, "upstream/task", build, host_arch="x86_64")
                         self.assertNotIn("build", calls)
                     else:
-                        image, receipt = sources.resolve_image(client, "upstream/task", build)
+                        image, receipt = sources.resolve_image(client, "upstream/task", build, host_arch="x86_64")
                         expected = "local-image" if mode == "local" else "pulled-image" if mode == "pull" else "built-image"
                         self.assertEqual(image, expected)
                         self.assertEqual(calls, ["get"] if mode == "local" else ["get", "pull"] if mode == "pull" else ["get", "pull", "build"])

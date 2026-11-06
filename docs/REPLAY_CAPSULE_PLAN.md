@@ -53,8 +53,8 @@ they must not be described as complete native replay.
    a candidate, not a security boundary or an assumption that it works in every
    container. The backend must account for links, concurrent access, descriptor
    inheritance and mmap, and must be tested in the actual workload runner.
-   Provide an appropriate container or VM when the runner needs different kernel
-   facilities. Do not require a particular native host.
+   Require the necessary kernel facilities on the native Linux host; do not
+   substitute a VM or CPU emulator.
 3. **Process and non-filesystem observations.** Filesystem interception alone
    does not observe an executable's arguments, exit status, pipe output, or all
    direct system calls. Add a transparent observation/replay mechanism for
@@ -86,7 +86,7 @@ they must not be described as complete native replay.
 Use offline CI fixtures for concurrent tool calls, subprocess output and exit
 status, all file operations above, large binary and text payloads, links,
 failures, cancellation, interrupted publication and independent replicas.
-Exercise the real container or VM path as well as a native fixture. No CI test
+Exercise the real native container path as well as a native fixture. No CI test
 requires a live provider or a paid API key.
 
 Qualify the actual adapters locally: record one selected SWE-bench task with
@@ -110,7 +110,7 @@ native replay.
 
 ## Virtual-machine feasibility findings
 
-A software-emulated VM experiment recorded a normal Pi invocation against a
+A historical, external software-emulated VM experiment recorded a normal Pi invocation against a
 local mock provider inside a filesystem extracted from a SWE-bench task image.
 The agent used its native Bash tool to write a file; four offline replays had
 matching consoles and independent disks containing that effect. A separate
@@ -118,7 +118,8 @@ workload-filesystem probe exercised Git, Python and HTTP with the same result.
 These experiments did not run the official evaluator or a real provider and do
 not establish agent or workload qualification.
 
-The prototype required QEMU's documented block replay layer and network replay
+ASB does not include or plan a VM or emulator backend. The historical prototype
+required QEMU's documented block replay layer and network replay
 filter. An earlier direct disk setup and a virtio-network configuration stalled
 in some replay attempts; a different emulated network device succeeded in the
 small test. Treat device selection, transport behavior, extraction fidelity,
@@ -152,9 +153,6 @@ Snapshot workspace images are sparse and default to the storage space available
 on the project filesystem at preparation time. This removes the previous fixed
 4 GiB logical image size; actual writes can still fail if the filesystem fills
 or cannot represent the image. An explicit size remains available for offline
-fixtures. On a filesystem that allocates a small sparse probe eagerly, an
-available `qemu-img` and `qemu-storage-daemon` pair can provide a thin qcow2
-image through FUSE. Both tools must currently be installed project-locally or
-available on the host, and the guest needs FUSE and loop support. Automatic
-tool installation and a VM fallback are not yet implemented. This sizing change
+fixtures. A filesystem that allocates the sparse probe eagerly is not supported for
+snapshot workspaces; use sparse-file capable native storage. This sizing change
 does not establish complete native replay.

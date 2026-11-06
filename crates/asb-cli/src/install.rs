@@ -1494,6 +1494,15 @@ pub(crate) fn workload_list_at(
     directory: &Path,
     output: &mut dyn std::io::Write,
 ) -> Result<(), Error> {
+    workload_list_at_arch(options, directory, output, std::env::consts::ARCH)
+}
+
+fn workload_list_at_arch(
+    options: WorkloadListOptions,
+    directory: &Path,
+    output: &mut dyn std::io::Write,
+    host: &str,
+) -> Result<(), Error> {
     let (project_root, project_config) = project::load(directory)?;
     let directory = options
         .dir
@@ -1510,6 +1519,7 @@ pub(crate) fn workload_list_at(
                 .flatten()
         })
         .collect::<Vec<_>>();
+    names.retain(|name| crate::workloads::compatible_with_architecture(name, host));
     names.sort();
     for name in &names {
         crate::selection_names::validate(name, "workload").map_err(Error::Input)?;
@@ -1526,6 +1536,7 @@ pub(crate) fn workload_list_at(
     for name in &trial_sets {
         crate::selection_names::validate(name, "trial set").map_err(Error::Input)?;
     }
+    trial_sets.retain(|name| crate::workloads::compatible_with_architecture(name, host));
     trial_sets.sort();
     writeln!(output, "Available workloads in {}:", directory.display()).map_err(super::io_error)?;
     if names.is_empty() {
@@ -1550,7 +1561,9 @@ pub(crate) fn workload_list_at(
         }
     }
     writeln!(output, "Installable external workloads:").map_err(super::io_error)?;
-    for workload in external_workload_names() {
+    for workload in external_workload_names()
+        .filter(|name| crate::workloads::compatible_with_architecture(name, host))
+    {
         writeln!(output, "  {}", crate::workloads::display_name(workload))
             .map_err(super::io_error)?;
     }
@@ -2642,6 +2655,38 @@ mod tests {
         assert!(cmake.contains("Debian/Ubuntu:"));
         assert!(cmake.contains("openEuler:"));
         assert!(cmake.contains("rerun `asb tool install bpftrace`"));
+    }
+
+    #[test]
+    fn workload_list_hides_non_native_suites() {
+        let directory =
+            std::env::temp_dir().join(format!("asb-workload-list-arch-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("swe-bench.txt"), "fixture").unwrap();
+        fs::write(directory.join("swe-bench.workload.toml"), "fixture").unwrap();
+        let mut output = Vec::new();
+        workload_list_at_arch(
+            WorkloadListOptions {
+                dir: Some(directory.clone()),
+            },
+            &directory,
+            &mut output,
+            "riscv64",
+        )
+        .unwrap();
+        assert!(!String::from_utf8(output).unwrap().contains("swe-bench"));
+        let mut output = Vec::new();
+        workload_list_at_arch(
+            WorkloadListOptions {
+                dir: Some(directory.clone()),
+            },
+            &directory,
+            &mut output,
+            "aarch64",
+        )
+        .unwrap();
+        assert!(String::from_utf8(output).unwrap().contains("swe-bench"));
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]

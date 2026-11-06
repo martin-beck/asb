@@ -8,6 +8,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 SOURCE = Path(__file__).parents[1] / "assets/benchmarks/asb_execution.py"
@@ -352,10 +353,32 @@ class ExecutionTests(unittest.TestCase):
             creation.append(kwargs)
             container.attrs = {"Config": {"Labels": kwargs["labels"]}}
             return container
-        client = SimpleNamespace(api=api, containers=SimpleNamespace(create=create))
-        image = SimpleNamespace(id="sha256:" + "f" * 64, attrs={"RepoDigests": [], "Os": "linux", "Architecture": "amd64"})
+        host = RUNTIME.platform.machine()
+        image_arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(host, host)
+        client = SimpleNamespace(api=api, containers=SimpleNamespace(create=create),
+                                 info=lambda: {"Architecture":host, "OSType":"linux"})
+        image = SimpleNamespace(id="sha256:" + "f" * 64, attrs={"RepoDigests": [], "Os": "linux", "Architecture": image_arch})
         workspace = RUNTIME.ManagedDockerWorkspace(client, image, "asb-" + "a" * 32, "/task")
         return workspace, container, api, creation
+
+    def test_compose_services_are_pinned_to_native_architecture(self):
+        with patch.object(RUNTIME.platform, "machine", return_value="aarch64"):
+            service = {}
+            RUNTIME.require_native_compose_service(service)
+            self.assertEqual(service["platform"], "linux/arm64")
+            for incompatible in [{"platform":"linux/amd64"},
+                                 {"build":{"platforms":["linux/amd64"]}}]:
+                with self.assertRaises(RUNTIME.ExecutionError):
+                    RUNTIME.require_native_compose_service(incompatible)
+
+    def test_rejects_emulated_image_before_container_creation(self):
+        workspace, _, _, creation = self.workspace()
+        workspace.image.attrs["Architecture"] = "arm64"
+        workspace.client.info = lambda: {"Architecture":"x86_64", "OSType":"linux"}
+        with patch.object(RUNTIME.platform, "machine", return_value="x86_64"):
+            with self.assertRaisesRegex(RUNTIME.ExecutionError, "native Linux host architecture"):
+                workspace.__enter__()
+        self.assertEqual(creation, [])
 
     def test_snapshot_container_options_are_explicit_and_isolated(self):
         ordinary, _, _, normal_creation = self.workspace()

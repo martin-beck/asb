@@ -337,23 +337,8 @@ def stage_auxiliary_tools(task, tools, owner):
         raise ExecutionError('guest auxiliary tools must be a name-to-path mapping')
     paths = {}
     architecture = getattr(task.workspace,'image_identity',{}).get('architecture')
-    optional = {'qemu-img', 'qemu-storage-daemon'}
-    optional_bundles = {}
-    if optional.issubset(tools):
-        try:
-            optional_bundles = {name: bundle_tool(tools[name],name,architecture,root='/opt/asb-private')
-                                for name in optional}
-        except (ExecutionError, OSError):
-            # A sparse workspace does not use QEMU. An unavailable or
-            # incompatible optional fallback must not prevent its preparation.
-            optional_bundles = {}
     for name, source in tools.items():
-        if name in optional:
-            if name not in optional_bundles:
-                continue
-            files, _ = optional_bundles[name]
-        else:
-            files, _ = bundle_tool(source,name,architecture,root='/opt/asb-private')
+        files, _ = bundle_tool(source,name,architecture,root='/opt/asb-private')
         directories = set()
         for relative,_,_ in files:
             parent = Path(relative).parent
