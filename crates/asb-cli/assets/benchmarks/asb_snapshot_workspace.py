@@ -3,6 +3,7 @@ from pathlib import Path
 import fcntl
 import json
 import os
+import stat
 import subprocess
 
 
