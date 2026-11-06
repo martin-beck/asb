@@ -77,8 +77,64 @@ class SourceContracts(unittest.TestCase):
             with self.assertRaisesRegex(sources.CatalogError,"not a native"):
                 sources.resolve_image(client,original,build,host_arch="aarch64")
             client.images.pull=lambda name: (_ for _ in ()).throw(ImageNotFound())
-            with self.assertRaisesRegex(sources.CatalogError,"could not load"):
+            image.attrs["Architecture"]="arm64"
+            found, receipt = sources.resolve_image(client, original, lambda: (image, {"source":"adapted"}), host_arch="aarch64")
+            self.assertIs(found,image)
+            self.assertEqual(receipt["fallback_reason"],"upstream_arm64_image_unavailable")
+            client.images.pull=lambda name: (_ for _ in ()).throw(NetworkFailure())
+            with self.assertRaisesRegex(sources.CatalogError,"registry access"):
                 sources.resolve_image(client,original,build,host_arch="aarch64")
+
+    def test_arm64_source_adaptation_preserves_versions_and_rejects_unknown_layouts(self):
+        original = (b"FROM --platform=linux/amd64 ubuntu:jammy\n"
+                    b"RUN wget Miniconda3-py311_23.11.0-2-Linux-x86_64.sh\n"
+                    b"  - python=3.9.20=he870216_1\n"
+                    b"  - ld_impl_linux-64=2.40=h123_0\n"
+                    b"  - pip:\n      - mpmath==1.3.0\n")
+        adapted = sources.arm64_dockerfile(original)
+        self.assertIn(b"FROM --platform=linux/arm64", adapted)
+        self.assertIn(b"Linux-aarch64.sh", adapted)
+        self.assertIn(b"  - python=3.9.20\n", adapted)
+        self.assertIn(b"  - ld_impl_linux-aarch64=2.40\n", adapted)
+        self.assertIn(b"mpmath==1.3.0", adapted)
+        for invalid in [b"FROM scratch", original + b"RUN x86_64-tool\n",
+                        original.replace(b"Linux-x86_64.sh", b"Linux-unknown.sh")]:
+            with self.assertRaises(sources.CatalogError):
+                sources.arm64_dockerfile(invalid)
+
+    def test_arm64_source_build_records_adaptation_and_requires_native_host(self):
+        row, files = fixture()
+        files["Dockerfile"] = (b"FROM --platform=linux/amd64 ubuntu:jammy\n"
+                               b"RUN wget Miniconda3-py311_23.11.0-2-Linux-x86_64.sh\n"
+                               b"  - python=3.9.20=he870216_1\n")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, digest = archive(root, files)
+            image = SimpleNamespace(id="sha256:" + "d" * 64, attrs={"Architecture":"arm64", "Os":"linux"})
+            client = SimpleNamespace(images=SimpleNamespace(get=lambda _: image))
+            artifacts = root / "attempt"; artifacts.mkdir()
+            calls=[]
+            def execute(args, directory, log, timeout, **kwargs):
+                calls.append(args)
+                self.assertEqual(args[args.index("--platform")+1], "linux/arm64")
+                self.assertIn(b"python=3.9.20\n", (artifacts/"source-build/Dockerfile").read_bytes())
+                return 0
+            with patch("asb_execution.require_native_docker_host", return_value="arm64"):
+                actual, receipt = sources.build_image(client, row, DATASET, artifacts, ATTEMPT,
+                    archive=source, command=["docker"], executor=execute, yaml_loader=json.loads,
+                    expected_sha256=digest, host_arch="aarch64")
+            self.assertIs(actual,image)
+            self.assertEqual(receipt["adaptation"],"native-arm64-version-pinned-v1")
+            self.assertEqual(receipt["dockerfile_sha256"],hashlib.sha256(files["Dockerfile"]).hexdigest())
+            self.assertNotEqual(receipt["dockerfile_sha256"],receipt["build_dockerfile_sha256"])
+            self.assertEqual(len(calls),1)
+            other = root/"wrong-host"; other.mkdir()
+            with patch("asb_execution.require_native_docker_host", return_value="amd64"):
+                with self.assertRaisesRegex(sources.CatalogError,"native ARM64 Docker host"):
+                    sources.build_image(client, row, DATASET, other, ATTEMPT, archive=source,
+                        command=["docker"], executor=execute, yaml_loader=json.loads,
+                        expected_sha256=digest, host_arch="aarch64")
+            self.assertFalse((other/"source-build").exists())
 
     def test_local_and_remote_prebuilt_images_are_preferred_and_only_pull_failures_build(self):
         class DockerFailure(Exception):
@@ -216,7 +272,7 @@ class SourceContracts(unittest.TestCase):
             return code
         invoke = lambda: sources.build_image(client, row, DATASET, artifacts, ATTEMPT,
             cancelled=cancelled, archive=path, command=["scoped-docker"], executor=execute,
-            yaml_loader=json.loads, expected_sha256=digest,journal=journal)
+            yaml_loader=json.loads, expected_sha256=digest,journal=journal,host_arch="x86_64")
         return invoke, artifacts, client, removed, calls
 
     def test_failed_buildx_diagnosis_distinguishes_unavailable_from_working(self):

@@ -39,9 +39,15 @@ The fixture retains its owned images, streams and logs for inspection.
 ASB runs workload containers using the host CPU architecture, without a VM or
 CPU-emulation fallback. On Linux ARM64 it selects the upstream ARM64 SWE-bench
 image for a task and validates the image architecture before starting it. The
-upstream ARM64 image set is incomplete and experimental: tasks without an image
-cannot run on ARM64, and older images require careful qualification. ASB
-reconstructs the repository's base-only Git history before agent execution.
+upstream ARM64 image set is incomplete and experimental. When an image is
+missing, ASB can build a native ARM64 image from the pinned upstream task
+Dockerfile. The adaptation preserves Conda package versions but replaces
+x86-specific build identifiers, so its dependencies can differ from the upstream
+x86 image. The image receipt records the original and adapted Dockerfile hashes.
+Tasks whose definitions cannot be adapted or whose ARM dependencies are missing
+fail with their build evidence retained. Older images and adapted builds require
+per-task qualification. ASB reconstructs the repository's base-only Git
+history before agent execution.
 
 SWE-bench clients execute in the conda environment named by the pinned SDK,
 after ASB has installed the agent. The task adapter retains the client's HOME
