@@ -39,6 +39,14 @@ no matching process for worker sampling; those measurements are unavailable,
 not zero. The native principal execution-window record was unavailable in all
 26 cases, so this sweep does not qualify that measurement.
 
+A separate follow-up using the same `sympy__sympy-13091` task and provider
+resolved the task with Claude Code. With the cross-UID process observer and
+the bundled runtime launcher correction, both process collectors reported
+172 samples: peak sampled RSS was 375.52 MiB and one additional worker was
+observed. Sampling remains a lower bound; this follow-up does not change the
+original sweep's unavailable measurement records. An earlier follow-up using
+the observer without the launcher correction still returned no observations.
+
 The table records original second-sweep outcomes. “Resolved” means the run
 record completed and the official evaluator resolved the task; individual
 collector limitations are stated separately below.

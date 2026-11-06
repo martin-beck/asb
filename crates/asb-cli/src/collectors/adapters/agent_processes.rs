@@ -35,6 +35,8 @@ struct NamespaceSample {
     samples: u64,
     incomplete: bool,
     sampling_interval_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope_failure: Option<String>,
 }
 
 #[derive(Clone)]
@@ -137,7 +139,11 @@ pub(crate) fn proc_exe_entry(args: &[std::ffi::OsString]) -> std::process::ExitC
 
 #[cfg(target_os = "linux")]
 fn executable_observation(pid: u32) -> Option<ExecutableObservation> {
-    executable_observation_with(pid, Path::new("/proc/self/exe"))
+    #[cfg(test)]
+    if let Some(helper) = std::env::var_os("ASB_TEST_OBSERVER_BINARY") {
+        return executable_observation_with(pid, Path::new(&helper));
+    }
+    executable_observation_with(pid, &crate::process_gate::executable().ok()?)
 }
 
 #[cfg(target_os = "linux")]
@@ -313,6 +319,7 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
             samples: state.totals.samples,
             incomplete: state.totals.incomplete || state.scope_failure.is_some(),
             sampling_interval_ms: measurements::measurement_interval_ms(),
+            scope_failure: state.scope_failure.map(str::to_owned),
         })
         .map_err(|_| "cannot encode agent-process observations".into())
     }
@@ -329,6 +336,11 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
             || sample.distinct_processes > 100000
             || (sample.samples == 0 && sample.distinct_processes != 0)
             || (!sample.identity_available && sample.distinct_processes != 0)
+            || sample.scope_failure.as_deref().is_some_and(|reason| !sample.incomplete || !matches!(reason,
+                "Agent memory requires the live generation-bound agent root below ASB, excluding ASB, its ancestors and the owned guardian."
+                | "Agent process root changed after sampler attachment; no mixed-scope metrics are published."
+                | "Cannot establish the owning ASB process images; agent memory remains unavailable."
+            ))
         {
             return Err("inconsistent execution-namespace agent-process observations".into());
         }
@@ -558,6 +570,12 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
             Some("Agent process sampling requires Linux /proc.")
         } else if state.scope_failure.is_some() {
             state.scope_failure
+        } else if let Some(reason) = state
+            .imported
+            .as_ref()
+            .and_then(|sample| sample.scope_failure.as_deref())
+        {
+            Some(reason)
         } else if state.isolated && state.imported.is_none() {
             Some("Isolated execution did not return the requested agent-process observations.")
         } else if !identity_available {
@@ -892,6 +910,48 @@ fn process_memory(proc: &Path) -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires root and ASB_TEST_OBSERVER_BINARY inside a container"]
+    #[cfg(target_os = "linux")]
+    fn namespace_collectors_sample_the_unprivileged_agent() {
+        use std::os::unix::process::CommandExt;
+        let root =
+            crate::fixture_namespace::allocate(&std::env::temp_dir(), "asb-uid-sample-").unwrap();
+        let mut command = std::process::Command::new("/bin/sleep");
+        command.arg("10").uid(65534).gid(65534);
+        let target = crate::launch::TargetLaunch::direct(&command);
+        let child = FixtureChild(command.spawn().unwrap());
+        let mut capture = super::Session::start_in_execution_namespace(
+            &root.join("capture"),
+            &["agent-memory".into(), "agent-workers".into()],
+        )
+        .unwrap();
+        capture.agent_launch_prepared(&target);
+        capture.attach_pid(child.0.id()).unwrap();
+        capture.agent_process_spawned(child.0.id()).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let observations = capture.export_execution_namespace_state().unwrap();
+        assert!(
+            observations["agent-memory"]["identity_available"]
+                .as_bool()
+                .unwrap(),
+            "memory: {}",
+            observations["agent-memory"]
+        );
+        assert!(
+            observations["agent-memory"]["samples"].as_u64().unwrap() > 0,
+            "memory: {}",
+            observations["agent-memory"]
+        );
+        assert!(
+            observations["agent-workers"]["samples"].as_u64().unwrap() > 0,
+            "workers: {}",
+            observations["agent-workers"]
+        );
+        drop(capture);
+        drop(child);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     #[ignore = "requires root, an unprivileged UID, and ASB_TEST_OBSERVER_BINARY"]
     #[cfg(target_os = "linux")]
@@ -1348,6 +1408,7 @@ mod tests {
             ("sampling_interval_ms", serde_json::json!(0)),
             ("sampling_interval_ms", serde_json::json!(90000)),
             ("private_prompt", serde_json::json!("must-not-import")),
+            ("scope_failure", serde_json::json!("PRIVATE_REQUEST")),
         ] {
             let mut changed = valid.clone();
             changed[key] = value;
@@ -1357,6 +1418,20 @@ mod tests {
                     .is_err()
             );
         }
+        let mut valid_failure = valid.clone();
+        valid_failure["incomplete"] = serde_json::json!(true);
+        valid_failure["scope_failure"] = serde_json::json!("PRIVATE_REQUEST");
+        assert!(
+            adapter
+                .import_execution_namespace_state(&mut host, &valid_failure)
+                .is_err()
+        );
+        valid_failure["scope_failure"] = serde_json::json!(
+            "Agent process root changed after sampler attachment; no mixed-scope metrics are published."
+        );
+        adapter
+            .import_execution_namespace_state(&mut host, &valid_failure)
+            .unwrap();
         drop(host);
         fs::remove_dir_all(root).unwrap();
     }
