@@ -838,7 +838,11 @@ fn protocol_fixture_exit_without_quiescence_is_never_a_clean_completion() {
     crate::write_test_file(&root, &launcher, "#!/usr/bin/python3\nimport os,signal,socket,struct\ns=socket.socket(fileno=int(os.environ['ASB_GATE_RECEIPT_FD']))\ns.sendall(b'ASBGATE2'+bytes([1,0,0,0])+struct.pack('<I',os.getpid()))\nos.kill(os.getpid(),signal.SIGSTOP)\nos._exit(0)\n").unwrap();
     std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700)).unwrap();
     let scope = test_support::Scope::new();
-    let (mut command, route) = command(&launcher, "/bin/true", &[]);
+    let (mut command, route) = command(
+        &launcher,
+        "/private-user-path/python3",
+        &["private-argument".into()],
+    );
     let admission = Admission::new(route.validate_gate(&mut command).unwrap()).unwrap();
     let mut gate = admission.spawn().unwrap();
     gate.resume().unwrap();
@@ -846,6 +850,11 @@ fn protocol_fixture_exit_without_quiescence_is_never_a_clean_completion() {
     let error = gate.wait().unwrap_err().to_string();
     assert!(error.contains("without a quiescence receipt"), "{error}");
     assert!(error.contains("role=command"), "{error}");
+    assert!(error.contains("program=python"), "{error}");
+    assert!(
+        !error.contains("private-user-path") && !error.contains("private-argument"),
+        "{error}"
+    );
     assert!(error.contains(&format!("gate_pid={gate_pid}")), "{error}");
     assert!(error.contains("exit=ExitStatus"), "{error}");
     assert!(gate.observed.unwrap().success());

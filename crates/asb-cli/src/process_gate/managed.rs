@@ -19,6 +19,7 @@ pub(crate) struct Admission<'a> {
     command: &'a mut Command,
     observation_only: bool,
     role: &'static str,
+    diagnostic_program: &'static str,
 }
 
 impl<'a> Admission<'a> {
@@ -71,7 +72,7 @@ impl<'a> Admission<'a> {
         controlled: bool,
         role: &'static str,
     ) -> io::Result<Self> {
-        let command = validated.into_command();
+        let (command, diagnostic_program) = validated.into_parts();
         command.env_remove(super::MEASURE_PRINCIPAL);
         command.env_remove(super::WORKLOAD_CLEANUP);
         let keeper = OwnedReaper::new("asb-gate-custody").map_err(io::Error::other)?;
@@ -98,6 +99,7 @@ impl<'a> Admission<'a> {
             command,
             observation_only: false,
             role,
+            diagnostic_program,
         })
     }
 
@@ -110,6 +112,7 @@ impl<'a> Admission<'a> {
             control,
             observation_only,
             role,
+            diagnostic_program,
             ..
         } = self;
         drop(writer);
@@ -128,6 +131,7 @@ impl<'a> Admission<'a> {
             control,
             observation_only,
             role,
+            diagnostic_program,
             #[cfg(test)]
             readiness_delay: None,
         })
@@ -145,6 +149,7 @@ pub(crate) struct ManagedGate {
     control: Option<super::control::Parent>,
     observation_only: bool,
     role: &'static str,
+    diagnostic_program: &'static str,
     #[cfg(test)]
     readiness_delay: Option<Duration>,
 }
@@ -357,8 +362,8 @@ impl ManagedGate {
                 control.observe(id, true);
             }
             let code = self.receiver.quiescent.ok_or_else(|| io::Error::other(format!(
-                "native gate exited without a quiescence receipt; descendant cleanup is unconfirmed; role={} gate_pid={} exit={status:?}",
-                self.role, self.id()
+                "native gate exited without a quiescence receipt; descendant cleanup is unconfirmed; role={} program={} gate_pid={} exit={status:?}",
+                self.role, self.diagnostic_program, self.id()
             )))?;
             if status.code() != Some(i32::from(code)) {
                 return Err(io::Error::other(
