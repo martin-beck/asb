@@ -46,6 +46,16 @@ test('normalizes duration while retaining exception and failure counts', () => {
   assert.notEqual(normalizeToolResult({text:replay.replace('AssertionError', 'ValueError'),tool}), canonical);
 });
 
+test('wrapped elapsed summaries retain all counts and failure text', () => {
+  const tool = {name:'Bash',arguments:{command:'python bin/test sympy/vector/tests/test_printing.py 2>&1 | tail -15'}};
+  const text = 'AssertionError\n tests finished: 272 passed, 1 failed, 3 expected to fail, 4 exceptions, \nin 12.72 seconds \nDO *NOT* COMMIT!';
+  const canonical = normalizeToolResult({text,tool});
+  assert.equal(normalizeToolResult({text:text.replace('12.72','12.94'),tool}),canonical);
+  assert.notEqual(normalizeToolResult({text:text.replace('4 exceptions','3 exceptions'),tool}),canonical);
+  assert.notEqual(normalizeToolResult({text:text.replace('AssertionError','ValueError'),tool}),canonical);
+  assert.equal(normalizeToolResult({text,tool:{name:'Bash',arguments:{command:'cat output'}}}),text);
+});
+
 test('short explicit tail normalizes an intact SymPy metadata suffix', () => {
   const tool = {name:'bash', arguments:{command:'python bin/test sympy/tests/test_x.py 2>&1 | tail -8'}};
   const text = 'cache: yes\nground types: python\nnumpy: None\nrandom seed: 64522818\nhash randomization: off\n\n\n tests finished: 0 passed, in 1.00 seconds\n';
