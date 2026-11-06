@@ -106,8 +106,23 @@ test("shell, Python and pip rules require the matching associated command", () =
   for (const [normalize, command, text, expected] of samples) {
     const tool = { name: "bash", arguments: { command } };
     assert.equal(normalize({ text, tool }), expected);
+    assert.equal(normalize({ text, tool: {...tool,name:'Bash'} }), expected);
+    assert.equal(normalize({ text, tool: {...tool,name:'shell_command'} }), expected);
     assert.equal(normalize({ text: expected, tool }), expected);
     assert.equal(normalize({ text, tool: null }), text);
     assert.equal(normalize({ text, tool: { name: "bash", arguments: { command: "cat output" } } }), text);
+  }
+});
+
+test('all shell tool spellings retain command guards for pytest, unittest and diff', () => {
+  const cases = [[pytest,'python -m pytest tests','1 passed in 1.25s\n'],
+    [unittest,'python -m unittest tests','Ran 3 tests in 1.25s\n\nOK\n'],
+    [diff,'diff -u before after','--- before\t2026-01-01 10:10:10 +0000\n+++ after\t2026-01-01 10:10:11 +0000\n']];
+  for (const [normalize,command,text] of cases) {
+    const expected = normalize({text,tool:{name:'bash',arguments:{command}}});
+    for (const name of ['Bash','shell_command']) {
+      assert.equal(normalize({text,tool:{name,arguments:{command}}}),expected);
+      assert.equal(normalize({text,tool:{name,arguments:{command:'cat file'}}}),text);
+    }
   }
 });

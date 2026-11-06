@@ -9,6 +9,7 @@ test("only a complete SymPy banner from a matching shell command loses its seed"
   assert.equal(normalized, text.replace("123", "<asb-seed>"));
   assert.equal(normalizeToolResult({ text: normalized, tool }), normalized);
   assert.equal(normalizeToolResult({ text, tool: { ...tool, name: "shell_command" } }), normalized);
+  assert.equal(normalizeToolResult({ text, tool: { ...tool, name: "Bash" } }), normalized);
   assert.equal(normalizeToolResult({ text, tool: null }), text);
   assert.equal(normalizeToolResult({ text, tool: { ...tool, name: "read" } }), text);
   assert.equal(normalizeToolResult({ text, tool: { ...tool, arguments: { command: "echo seed" } } }), text);
