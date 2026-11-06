@@ -432,6 +432,57 @@ thread_local! {
 mod tests {
     use super::*;
 
+    // Raw fork does not honor CLOEXEC. A stopped test child must not keep
+    // another concurrently running test's installer lock or pipe alive.
+    fn close_fork_fixture_descriptors() {
+        let result = unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) };
+        if result != 0 {
+            for fd in 3..65_536 {
+                unsafe { libc::close(fd) };
+            }
+        }
+    }
+
+    #[test]
+    fn stopped_fork_fixture_does_not_retain_parallel_installer_lock() {
+        if std::env::var_os("ASB_FORK_FIXTURE_TEST").is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "process_gate::descendants::tests::stopped_fork_fixture_does_not_retain_parallel_installer_lock",
+                ])
+                .env("ASB_FORK_FIXTURE_TEST", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let path = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        let owner = crate::output_lock::OutputLock::acquire_retained(&path, "busy").unwrap();
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            close_fork_fixture_descriptors();
+            unsafe { libc::raise(libc::SIGSTOP) };
+            unsafe { libc::_exit(0) };
+        }
+        assert!(child > 0);
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(child, &mut status, libc::WUNTRACED) },
+            child
+        );
+        drop(owner);
+        let reacquired = crate::output_lock::OutputLock::acquire_retained(&path, "busy");
+        unsafe { libc::kill(child, libc::SIGKILL) };
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(
+            reacquired.is_ok(),
+            "fork fixture retained another test's lock"
+        );
+        drop(reacquired);
+        std::fs::remove_file(path).unwrap();
+    }
+
     struct CurrentTaskView(Option<u32>);
     impl CurrentTaskView {
         fn enter() -> Self {
@@ -706,6 +757,7 @@ mod tests {
         let mut scope = DescendantScope::new().unwrap();
         let child = unsafe { libc::fork() };
         if child == 0 {
+            close_fork_fixture_descriptors();
             if unsafe {
                 libc::ptrace(
                     libc::PTRACE_TRACEME,
@@ -777,6 +829,7 @@ mod tests {
         let mut scope = DescendantScope::new().unwrap();
         let child = unsafe { libc::fork() };
         if child == 0 {
+            close_fork_fixture_descriptors();
             if unsafe {
                 libc::ptrace(
                     libc::PTRACE_TRACEME,
@@ -891,6 +944,7 @@ mod tests {
         // zombie, which in turn keeps the exclusive gate's child census nonempty.
         let child = unsafe { libc::fork() };
         if child == 0 {
+            close_fork_fixture_descriptors();
             if unsafe {
                 libc::ptrace(
                     libc::PTRACE_TRACEME,

@@ -160,6 +160,21 @@ mod destination_lock_tests {
 
     #[test]
     fn active_bundle_extraction_cannot_be_removed_by_competing_install() {
+        // Other unit tests can fork without immediately execing; run this
+        // retained-lock ownership assertion in its own process so those
+        // unrelated children cannot inherit its open-file description.
+        if std::env::var_os("ASB_BUNDLE_LOCK_FIXTURE_TEST").is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "install::destination_lock_tests::active_bundle_extraction_cannot_be_removed_by_competing_install",
+                ])
+                .env("ASB_BUNDLE_LOCK_FIXTURE_TEST", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
         let root = std::env::temp_dir().join(tools::runtime::unique_id());
         fs::create_dir_all(&root).unwrap();
         let (ready_tx, ready_rx) = mpsc::channel();
