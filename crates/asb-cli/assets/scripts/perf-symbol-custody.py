@@ -154,6 +154,7 @@ def prepare_symfs(listing, cache_home, ambiguous):
         return False
     paths = {}
     missing_noid = 0
+    missing_buildid = 0
     try:
         for line in listing.splitlines():
             fields = line.split(None, 1)
@@ -181,7 +182,16 @@ def prepare_symfs(listing, cache_home, ambiguous):
                 if not target.is_file() or target.is_symlink():
                     missing_noid += 1
                 continue
-            image = (buildroot / buildid[:2] / buildid[2:] / 'elf').resolve(strict=True)
+            source = buildroot / buildid[:2] / buildid[2:] / 'elf'
+            try:
+                image = source.resolve(strict=True)
+            except FileNotFoundError:
+                # A prior no-build-ID snapshot at the same path must never be
+                # substituted for an unavailable recorded build ID.
+                if target.exists() or target.is_symlink():
+                    return False
+                missing_buildid += 1
+                continue
             with image.open('rb') as source:
                 if elf_buildid(source.fileno()) != buildid:
                     return False
@@ -199,7 +209,8 @@ def prepare_symfs(listing, cache_home, ambiguous):
                     os.link(debug.resolve(strict=True), target_debug)
         marker = pathlib.Path(cache_home) / 'symfs-ready'
         with marker.open('x') as output:
-            json.dump({'schema_version': 1, 'missing_no_build_id_images': missing_noid}, output)
+            json.dump({'schema_version': 1, 'missing_no_build_id_images': missing_noid,
+                       'missing_build_id_images': missing_buildid}, output)
         return True
     except (OSError, ValueError, TypeError):
         return False
@@ -655,17 +666,21 @@ def settle_recorded_images(root_fd, data, cache_home, perf, symbol_root, uid, gi
     final = verify_buildids(listing, cache_home)
     symfs_ready = prepare_symfs(listing, cache_home, ambiguous)
     missing_noid = None
+    missing_buildid = None
     if symfs_ready:
         try:
             with open(pathlib.Path(cache_home) / 'symfs-ready', encoding='utf-8') as marker:
-                missing_noid = json.load(marker)['missing_no_build_id_images']
+                manifest = json.load(marker)
+                missing_noid = manifest['missing_no_build_id_images']
+                missing_buildid = manifest['missing_build_id_images']
         except (OSError, ValueError, KeyError):
             symfs_ready = False
             (pathlib.Path(cache_home) / 'symfs-ready').unlink(missing_ok=True)
     return {'recovered_recorded_images': recovered, 'recovered_bytes': initial_remaining - remaining,
             'missing_recorded_images': len(final['missing']),
             'missing_debug_images': len(final['missing_debug']), 'unverified_entries': final['unverified'],
-            'symfs_ready': symfs_ready, 'symfs_missing_no_build_id_images': missing_noid}
+            'symfs_ready': symfs_ready, 'symfs_missing_no_build_id_images': missing_noid,
+            'symfs_missing_build_id_images': missing_buildid}
 
 
 def main():

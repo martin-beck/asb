@@ -284,10 +284,15 @@ impl measurements::Session {
             "perf",
         ));
         script.arg("script");
+        let mut partial_symbols = false;
         if let Some(cache) = self.artifact(super::super::SharedArtifact::PerfSymbolCache) {
             script.env("HOME", cache).env("DEBUGINFOD_URLS", "");
-            if cache.join("symfs-ready").is_file() {
-                script.arg("--symfs").arg(cache.join("symfs"));
+            if let Some((symfs, partial)) = super::perf::symfs_options(cache) {
+                script.arg("--symfs").arg(symfs);
+                if partial {
+                    script.arg("--no-inline");
+                }
+                partial_symbols = partial;
             }
         }
         let script = script
@@ -361,7 +366,16 @@ impl measurements::Session {
                 "the flamegraph renderer timed out after 300 seconds or exited unsuccessfully",
             );
         }
-        write_flamegraph_status(&self.dir, "completed", Some("flamegraph.svg"), "")
+        write_flamegraph_status(
+            &self.dir,
+            "completed",
+            Some("flamegraph.svg"),
+            if partial_symbols {
+                "Some recorded images were unavailable; inline frames were omitted."
+            } else {
+                ""
+            },
+        )
     }
 }
 

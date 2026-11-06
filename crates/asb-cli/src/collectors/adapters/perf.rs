@@ -66,6 +66,24 @@ fn stat_args(pid: u32, interval_ms: u64, hardware_events: &[String]) -> Vec<Stri
 pub(super) struct PerfCollector;
 pub(super) static ADAPTER: PerfCollector = PerfCollector;
 
+/// A symbol tree is usable only with its completed, parseable custody marker.
+pub(super) fn symfs_options(cache: &std::path::Path) -> Option<(std::path::PathBuf, bool)> {
+    let marker = cache.join("symfs-ready");
+    if std::fs::metadata(&marker).ok()?.len() > 4096 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(marker).ok()?).ok()?;
+    if value.get("schema_version")?.as_u64()? != 1 {
+        return None;
+    }
+    let no_id = value.get("missing_no_build_id_images")?.as_u64()?;
+    let missing = value
+        .get("missing_build_id_images")
+        .map_or(Some(0), serde_json::Value::as_u64)?;
+    let symfs = cache.join("symfs");
+    symfs.is_dir().then_some((symfs, no_id > 0 || missing > 0))
+}
+
 impl CollectorAdapter for PerfCollector {
     fn private_service_entry(&self, args: &[std::ffi::OsString]) -> Option<std::process::ExitCode> {
         Some(match streaming_validation_service(args) {
@@ -290,10 +308,14 @@ fn validate_record(
         .arg("validate-v1")
         .arg(executable)
         .arg(&artifact);
-    if let Some(cache) = session.artifact(SharedArtifact::PerfSymbolCache)
-        && cache.join("symfs-ready").is_file()
-    {
-        launch.arg(cache.join("symfs"));
+    let symfs = session
+        .artifact(SharedArtifact::PerfSymbolCache)
+        .and_then(symfs_options);
+    if let Some((path, partial)) = &symfs {
+        launch.arg(path);
+        if *partial {
+            launch.arg("--no-inline");
+        }
     }
     let (mut command, route) = measurements::producer_command(&mut launch)?;
     configure_offline_decoder_environment(&mut command, &session.dir);
@@ -348,9 +370,11 @@ fn validate_record(
         &session.dir.join("perf-symbol-quality.json"),
         &serde_json::json!({
             "schema_version": 1,
-            "status": if quality.1 > 0 { "partial" } else { "not-verified" },
+            "status": if quality.1 > 0 || symfs.as_ref().is_some_and(|(_, partial)| *partial) { "partial" } else { "not-verified" },
             "decoded_frames": quality.0,
             "unknown_frames": quality.1,
+            "partial_symbol_tree": symfs.as_ref().is_some_and(|(_, partial)| *partial),
+            "inline_frames_omitted": symfs.as_ref().is_some_and(|(_, partial)| *partial),
         "reason": "Unknown frames can reflect missing agent or library symbols, JIT code, or restricted kernel addresses (kernel.kptr_restrict). Zero unknown frames alone does not prove complete debug information."
         }),
     )?;
@@ -385,13 +409,19 @@ fn parse_validation_summary(input: impl std::io::Read) -> Result<(u64, u64), Str
 /// Decode every record while retaining only a bounded frame-count summary.
 /// The enclosing producer gate retains custody of this service and its child.
 fn streaming_validation_service(args: &[std::ffi::OsString]) -> Result<(), String> {
-    if !(args.len() == 3 || args.len() == 4) || args[0] != "validate-v1" {
+    if !(3..=5).contains(&args.len())
+        || args[0] != "validate-v1"
+        || (args.len() == 5 && args[4] != "--no-inline")
+    {
         return Err("invalid validation service arguments".into());
     }
     let mut command = Command::new(&args[1]);
     command.arg("script").arg("-i").arg(&args[2]);
     if let Some(symfs) = args.get(3) {
         command.arg("--symfs").arg(symfs);
+    }
+    if args.len() == 5 {
+        command.arg("--no-inline");
     }
     let mut child = command
         .stdin(Stdio::null())
@@ -1044,6 +1074,39 @@ pub(crate) fn perf_permission_error() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn symfs_marker_distinguishes_partial_complete_and_invalid_trees() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        std::fs::create_dir_all(root.join("symfs")).unwrap();
+        let marker = root.join("symfs-ready");
+        assert!(super::symfs_options(&root).is_none());
+        std::fs::write(
+            &marker,
+            r#"{"schema_version":1,"missing_no_build_id_images":0}"#,
+        )
+        .unwrap();
+        assert!(!super::symfs_options(&root).unwrap().1);
+        std::fs::write(
+            &marker,
+            r#"{"schema_version":1,"missing_no_build_id_images":0,"missing_build_id_images":2}"#,
+        )
+        .unwrap();
+        assert!(super::symfs_options(&root).unwrap().1);
+        std::fs::write(
+            &marker,
+            r#"{"schema_version":1,"missing_no_build_id_images":1,"missing_build_id_images":0}"#,
+        )
+        .unwrap();
+        assert!(super::symfs_options(&root).unwrap().1);
+        std::fs::write(
+            &marker,
+            r#"{"schema_version":1,"missing_no_build_id_images":0,"missing_build_id_images":-1}"#,
+        )
+        .unwrap();
+        assert!(super::symfs_options(&root).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires an existing local perf.data and matching perf tool"]
@@ -1072,6 +1135,13 @@ mod tests {
         .unwrap();
         let quality = std::fs::read_to_string(root.join("perf-symbol-quality.json")).unwrap();
         println!("{quality}");
+        session.set_artifact(super::SharedArtifact::StackSamples, artifact);
+        session.write_flamegraph().unwrap();
+        let flamegraph: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("flamegraph.json")).unwrap()).unwrap();
+        assert_eq!(flamegraph["status"], "completed");
+        assert!(root.join("flamegraph.svg").is_file());
+        println!("flamegraph={flamegraph}");
     }
 
     #[test]
