@@ -45,6 +45,15 @@ test('normalizes duration while retaining exception and failure counts', () => {
   assert.notEqual(normalizeToolResult({text:replay.replace('AssertionError', 'ValueError'),tool}), canonical);
 });
 
+test('short explicit tail normalizes an intact SymPy metadata suffix', () => {
+  const tool = {name:'bash', arguments:{command:'python bin/test sympy/tests/test_x.py 2>&1 | tail -8'}};
+  const text = 'cache: yes\nground types: python\nnumpy: None\nrandom seed: 64522818\nhash randomization: off\n\n\n tests finished: 0 passed, in 1.00 seconds\n';
+  const other = text.replace('64522818','34443566');
+  assert.equal(normalizeToolResult({text,tool}), normalizeToolResult({text:other,tool}));
+  assert.notEqual(normalizeToolResult({text:other.replace('0 passed','1 passed'),tool}), normalizeToolResult({text,tool}));
+  assert.match(normalizeToolResult({text,tool:{...tool,arguments:{command:'python bin/test sympy/tests/test_x.py'}}}), /random seed: 64522818/);
+});
+
 test('tailed SymPy metadata and elapsed summaries preserve substantive differences', () => {
   const tool = {name:'bash', arguments:{command:'cd /testbed && python bin/test sympy/example.py 2>&1 | tail -40'}};
   const metadata = 'architecture:       64-bit\ncache:              yes\nground types:       python \nnumpy:              None\nrandom seed:        12345\nhash randomization: off\n';

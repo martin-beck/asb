@@ -12,9 +12,13 @@ export function normalizeToolResult({ text, tool }) {
   // tail may remove the start banner, but only accept an exact contiguous
   // metadata suffix with an optional executable line, not an arbitrary seed.
   const tailed = /^(?:executable:[ \t]+\/[^\r\n]+[ \t]+\([^\r\n]+\)[ \t]+\[[^\r\n]+\]\r?\n)?architecture:[ \t]+[^\r\n]+\r?\ncache:[ \t]+[^\r\n]+\r?\nground types:[ \t]+[^\r\n]+\r?\nnumpy:[ \t]+[^\r\n]+\r?\nrandom seed:[ \t]*(?:\d+|<asb-seed>)\r?\nhash randomization:[ \t]+(?:off|on \(PYTHONHASHSEED=(?:\d+|<asb-hash-seed>)\))\r?\n/.test(text);
+  // A short explicit tail can also cut off the architecture line. Require
+  // the remaining contiguous metadata and a complete recognized summary.
+  const shortTailed = /\|\s*tail\s+-[1-9][0-9]*\s*$/.test(command) &&
+    /^cache:[ \t]+[^\r\n]+\r?\nground types:[ \t]+[^\r\n]+\r?\nnumpy:[ \t]+[^\r\n]+\r?\nrandom seed:[ \t]*(?:\d+|<asb-seed>)\r?\nhash randomization:[ \t]+(?:off|on \(PYTHONHASHSEED=(?:\d+|<asb-hash-seed>)\))\r?\n/.test(text);
   if (finishes.length !== 1 || starts.length > 1 || seeds.length > 1) return text;
   const seedSafe = seeds.length === 1 && seedLines.length === 1 && seeds[0].index < finishes[0].index
-      && (starts.length === 1 ? starts[0].index < seeds[0].index : tailed && elapsed.test(finishes[0][0]));
+      && (starts.length === 1 ? starts[0].index < seeds[0].index : (tailed || shortTailed) && elapsed.test(finishes[0][0]));
   let withSeed = seedSafe ? text.replace(/^(random seed:[ \t]*)\d+(?=\r?$)/m, '$1<asb-seed>') : text;
   // Only normalize the immediately adjacent, unique SymPy metadata line.
   // Preserve whether hash randomization is enabled and all other content.
