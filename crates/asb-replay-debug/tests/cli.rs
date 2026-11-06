@@ -76,3 +76,58 @@ fn prints_selected_legacy_cassette_without_modifying_it() {
     assert!(text.contains("fixture"));
     assert_eq!(std::fs::read_to_string(path).unwrap(), original);
 }
+
+#[cfg(unix)]
+#[test]
+fn terminal_manager_creates_edits_and_enables_rules_from_evidence() {
+    use std::os::unix::fs::PermissionsExt;
+    for mode in ["mismatch", "cassette"] {
+        let fixture = Fixture::new();
+        fixture.write(".asb/project.toml", "# retained project comment\n");
+        fixture.write("case.mismatch.json", r#"{"schema_version":1,"mismatch":{"sequence":1,"path":"$.body.input[0].output","category":"json_value"},"expected":{"method":"POST","url":"/responses","body":{"input":[{"output":"seed=1"}]}},"actual":{"method":"POST","url":"/responses","body":{"input":[{"output":"seed=2"}]}}}"#);
+        fixture.write("recording.jsonl", "{\"request\":{\"method\":\"POST\",\"body\":\"{\\\"messages\\\":[{\\\"role\\\":\\\"tool\\\",\\\"content\\\":\\\"seed=1\\\"}]}\"},\"response\":{}}\n");
+        let editor = fixture.write(
+            "editor",
+            "#!/bin/sh\nprintf '\\n// edited by test\\n' >> \"$1\"\n",
+        );
+        std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/normalizer_tui.py"
+            ))
+            .arg(env!("CARGO_BIN_EXE_asb-replay-debug"))
+            .arg(&fixture.path)
+            .arg(mode)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let config = std::fs::read_to_string(fixture.path.join(".asb/project.toml")).unwrap();
+        assert!(config.contains("# retained project comment"));
+        assert!(config.contains("enabled = true"));
+        assert!(config.contains("workloads = [\"swe-bench\"]"));
+        let module =
+            std::fs::read_to_string(fixture.path.join("normalizers/debugger-suggestion-1.mjs"))
+                .unwrap();
+        assert!(module.contains("seed=1"));
+        if mode == "mismatch" {
+            assert!(module.contains("seed=2"));
+        }
+        assert!(module.contains("// edited by test"));
+        let module_path = fixture.path.join("normalizers/debugger-suggestion-1.mjs");
+        let script = "import {pathToFileURL} from 'node:url'; const m=await import(pathToFileURL(process.argv[1])); if(m.normalizeToolResult({text:'seed=1'}) !== 'seed=1' || m.normalizeToolResult({text:'unrelated'}) !== 'unrelated' || (process.argv[2] === 'mismatch' && m.normalizeToolResult({text:'seed=2'}) !== 'seed=1')) process.exit(1);";
+        assert!(
+            std::process::Command::new("node")
+                .args(["--input-type=module", "-e", script])
+                .arg(module_path)
+                .arg(mode)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+}

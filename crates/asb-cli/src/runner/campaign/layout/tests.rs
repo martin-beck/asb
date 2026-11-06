@@ -3,7 +3,7 @@ use crate::runner::campaign::ReplayInput;
 use serde_json::{Value, json};
 
 #[test]
-fn profile_cannot_be_added_to_a_legacy_replay_campaign() {
+fn profile_on_unidentified_replay_requires_raw_requests() {
     use crate::project::replay_normalization::{FrozenNormalizer, FrozenPolicy, ProfileSelectors};
     let source = b"export function normalizeToolResult({text}) { return text; }";
     let policy = FrozenPolicy::from_normalizers(vec![FrozenNormalizer {
@@ -21,13 +21,8 @@ fn profile_cannot_be_added_to_a_legacy_replay_campaign() {
     .unwrap();
     let mut legacy = plan(ExecutionMode::Replay, 1, 1, false);
     legacy.normalization_policy = Some(policy);
-    assert!(
-        legacy
-            .validate_layout()
-            .unwrap_err()
-            .to_string()
-            .contains("legacy recordings have no normalizer policy identity")
-    );
+    legacy.validate_layout().unwrap();
+    assert!(legacy.requires_raw_replay_requests());
 }
 
 #[test]
@@ -52,13 +47,8 @@ fn source_replay_identity_is_optional_historical_data_not_observed_material() {
     let mut different_policy = expected.clone();
     different_policy.normalization_sha256 = Some(crate::cassette::digest(b"recorded policy"));
     value.replay_compatibility = Some(different_policy);
-    assert!(
-        value
-            .validate_layout()
-            .unwrap_err()
-            .to_string()
-            .contains("normalizer policy differs")
-    );
+    value.validate_layout().unwrap();
+    assert!(value.requires_raw_replay_requests());
     value.replay_compatibility = Some(expected.clone());
     let wire = serde_json::to_value(&value).unwrap();
     assert_eq!(

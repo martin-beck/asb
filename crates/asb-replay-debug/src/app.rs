@@ -1,4 +1,4 @@
-//! Ratatui presentation and navigation; the application only reads evidence.
+//! Ratatui evidence presentation and navigation.
 
 use crate::artifacts::{ArtifactSet, Evidence};
 use crate::diff::{self, Field, Segment, Status, TextDiff};
@@ -38,6 +38,9 @@ pub(crate) struct App {
     search: String,
     searching: bool,
     error: Option<String>,
+    project: Option<std::path::PathBuf>,
+    workload: Option<String>,
+    manage_normalizers: bool,
 }
 
 fn state(value: Option<bool>) -> &'static str {
@@ -80,9 +83,23 @@ impl App {
             search: String::new(),
             searching: false,
             error: None,
+            project: None,
+            workload: None,
+            manage_normalizers: false,
         };
         app.refilter();
         Ok(app)
+    }
+
+    pub(crate) fn configure_normalizers(
+        &mut self,
+        project: Option<std::path::PathBuf>,
+        workload: Option<String>,
+    ) {
+        self.project = project.or_else(|| crate::normalizers::find_project(&self.set.root));
+        self.workload = workload.or_else(|| {
+            crate::normalizers::workload_from_evidence(&self.set.cases[self.selected_case].path)
+        });
     }
 
     fn field(&self) -> Option<&Field> {
@@ -154,6 +171,7 @@ impl App {
         let mut refreshed = Self::new(set, None, self.all_fields)?;
         refreshed.all_context = self.all_context;
         refreshed.search = self.search.clone();
+        refreshed.configure_normalizers(self.project.clone(), self.workload.clone());
         refreshed.select_case(index)?;
         *self = refreshed;
         Ok(())
@@ -217,6 +235,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return true,
             KeyCode::Char('?') | KeyCode::F(1) => self.help = true,
+            KeyCode::Char('m') => self.manage_normalizers = true,
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = if self.focus == Focus::Fields {
                     Focus::Text
@@ -570,7 +589,7 @@ impl App {
                 diff::visible(&self.search)
             )
         } else {
-            "Tab focus | arrows/jk move | PgUp/Dn scroll | h/l horizontal | n/N difference | a equal | c context | r reload | ? help | q quit".into()
+            "Tab focus | arrows/jk move | n/N difference | m normalizers | a equal | c context | r reload | ? help | q quit".into()
         };
         frame.render_widget(Paragraph::new(footer).wrap(Wrap { trim: false }), chunks[4]);
         if self.help {
@@ -595,7 +614,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
     );
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(
-        "Read-only offline viewer. No agent, provider, container or replay is started.\n\n[ / ]       Previous / next retained mismatch case\nTab         Switch fields / text focus (cyan border)\nUp/Down jk  Select field or scroll text\nPgUp/PgDn   Scroll both text panes together\nHome/End    First/last field or text page\nh/l arrows  Horizontal text scrolling\nn / N       Next / previous differing field\na           Show/hide equal fields\nc           Expand/fold unchanged text (three context lines)\n/           Filter field paths; Enter accepts, Esc clears\nr           Reload this input from disk\nq / Esc     Quit; Ctrl-C also restores the terminal\n\nRed = expected changed characters. Green = actual changed characters.\nGray = matching context. ? = redacted/unknown, not proven equal.\n\nComparisons describe normalized/redacted evidence, not original raw requests.\nOnly the first captured mismatch per proxy is available. Snapshot files alone\ndo not establish the complete request timeline or all retry contents.\n\nPress any key to close help.")
+        "Offline viewer. No agent, provider, container or replay is started.\n\n[ / ]       Previous / next retained mismatch case\nTab         Switch fields / text focus (cyan border)\nUp/Down jk  Select field or scroll text\nPgUp/PgDn   Scroll both text panes together\nHome/End    First/last field or text page\nh/l arrows  Horizontal text scrolling\nn / N       Next / previous differing field\na           Show/hide equal fields\nc           Expand/fold unchanged text (three context lines)\n/           Filter field paths; Enter accepts, Esc clears\nr           Reload this input from disk\nm           Manage project normalizers\nq / Esc     Quit; Ctrl-C also restores the terminal\n\nRed = expected changed characters. Green = actual changed characters.\nGray = matching context. ? = redacted/unknown, not proven equal.\n\nComparisons describe normalized/redacted evidence, not original raw requests.\nOnly the first captured mismatch per proxy is available. Snapshot files alone\ndo not establish the complete request timeline or all retry contents.\n\nPress any key to close help.")
         .wrap(Wrap { trim:false }).block(Block::default().borders(Borders::ALL).title("Help")),popup);
 }
 
@@ -623,14 +642,38 @@ pub(crate) fn start_terminal() -> io::Result<(ScreenGuard, Terminal<CrosstermBac
 }
 
 pub(crate) fn run(app: &mut App) -> io::Result<()> {
-    let (_guard, mut terminal) = start_terminal()?;
+    let (mut guard, mut terminal) = start_terminal()?;
     loop {
         terminal.draw(|frame| app.draw(frame))?;
         if event::poll(Duration::from_millis(200))?
             && let Event::Key(key) = event::read()?
-            && app.key(key)
         {
-            return Ok(());
+            if app.key(key) {
+                return Ok(());
+            }
+            if app.manage_normalizers {
+                app.manage_normalizers = false;
+                let Some(project) = app.project.clone() else {
+                    app.error = Some("No ASB project found; reopen with --project PATH".into());
+                    continue;
+                };
+                let examples =
+                    app.field()
+                        .and_then(|field| match (&field.expected, &field.actual) {
+                            (
+                                Some(serde_json::Value::String(a)),
+                                Some(serde_json::Value::String(b)),
+                            ) if field.status == Status::Changed => Some((a.clone(), b.clone())),
+                            _ => None,
+                        });
+                drop(terminal);
+                drop(guard);
+                let result = crate::normalizers::run(&project, app.workload.clone(), examples);
+                (guard, terminal) = start_terminal()?;
+                if let Err(error) = result {
+                    app.error = Some(error);
+                }
+            }
         }
     }
 }

@@ -338,7 +338,9 @@ impl Inspection {
         };
         // Resolve once for the complete campaign using the planning-owned
         // task identity. Each replica receives this same source snapshot.
-        let normalization = if options.mode.is_some() && !settings.replay.is_empty() {
+        let normalization = if options.mode == Some(crate::tape::Mode::Replay)
+            && !settings.replay.is_empty()
+        {
             let selected = if let Some(selection) = selection {
                 selection.clone()
             } else if let Some(selection) = &recording_selection {
@@ -614,7 +616,13 @@ pub(crate) fn publish_campaign(prepared: Prepared) -> Result<PublishedCampaign, 
                 } else {
                     plan.mode == crate::planning::ExecutionMode::Replay
                 };
-            selected.stage(&root, &mut plan.replay_inputs, validate_pi_native)?;
+            let require_raw = plan.requires_raw_replay_requests();
+            selected.stage(
+                &root,
+                &mut plan.replay_inputs,
+                validate_pi_native,
+                require_raw,
+            )?;
             (None, Some(selected))
         }
         Some(PreparedReplay::Legacy(legacy)) => (legacy.stage(&root, &plan)?, None),
@@ -1231,7 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_policy_is_frozen_into_record_campaign_and_never_runs_live() {
+    fn configured_replay_policy_is_not_loaded_for_record_or_live_campaigns() {
         let (root, config, path) = planning_fixture();
         let source = "export function normalizeToolResult({text}) { return text; }";
         fs::write(root.join("normalizer.mjs"), source).unwrap();
@@ -1251,26 +1259,12 @@ mod tests {
             Some(&parent),
         )
         .unwrap();
-        let descriptor = prepared
-            .plan
-            .normalization_policy
-            .clone()
-            .expect("selected profile");
+        assert!(prepared.plan.normalization_policy.is_none());
         let campaign = prepared.root.clone();
-        // Planning owns the bytes, so later public changes cannot affect an
-        // already admitted campaign's frozen input.
+        // Recording must not freeze or execute replay-only source.
         fs::write(root.join("normalizer.mjs"), "changed after planning").unwrap();
         let published = publish_campaign(prepared).unwrap();
-        assert_eq!(
-            fs::read(campaign.join(".normalization/00.mjs")).unwrap(),
-            source.as_bytes()
-        );
-        let restored = crate::project::replay_normalization::FrozenPolicy::restore(
-            &campaign.join(".normalization"),
-            &descriptor,
-        )
-        .unwrap();
-        assert_eq!(restored.normalizers[0].source, source.as_bytes());
+        assert!(!campaign.join(".normalization").exists());
         drop(published);
         let report = crate::compare::generate(
             campaign.join("plan.json").to_str().unwrap(),
@@ -1281,17 +1275,8 @@ mod tests {
             &fs::read(report.parent().unwrap().join("comparison.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            comparison["campaign"]["normalization_policy"]["sha256"],
-            descriptor.sha256
-        );
-        assert_eq!(
-            comparison["benchmarks"][0]["planned_normalization_policy"]["profiles"][0]["id"],
-            "fixture"
-        );
-        let html = fs::read_to_string(report).unwrap();
-        assert!(html.contains("Planned replay normalization"));
-        assert!(html.contains("fixture"));
+        assert!(comparison["campaign"]["normalization_policy"].is_null());
+        assert!(comparison["benchmarks"][0]["planned_normalization_policy"].is_null());
         let live =
             Prepared::prepare(&path, config, 1, RunOptions::default(), Some(&parent)).unwrap();
         assert!(live.plan.normalization_policy.is_none());

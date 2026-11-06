@@ -360,7 +360,10 @@ pub(crate) fn continue_campaign(
     // A newly added matching policy also changes replay semantics. Resolve it
     // even when the original plan had no policy so continuation cannot
     // silently run under a different configuration.
-    let normalization = if plan.mode != crate::planning::ExecutionMode::Live {
+    let normalization = if plan.mode == crate::planning::ExecutionMode::Replay
+        || (plan.mode == crate::planning::ExecutionMode::Record
+            && plan.normalization_policy.is_some())
+    {
         restore_normalization(&root, &plan, &invocation, invocation_dir)?
     } else {
         None
