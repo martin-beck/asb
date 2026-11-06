@@ -42,8 +42,16 @@ fn install_perf(
     let owner = ProducerDirectory::open(&stage)?;
     let mut scope = owner.scope(context);
     let prepared = (|| -> InstallResult<(PathBuf, PathBuf)> {
+        let host = super::host_executable(Path::new("perf"));
+        let local_host = match host {
+            Some(path) => copy_runnable_host_perf(&mut scope, &path, &stage)?,
+            None => None,
+        };
         progress(20, crate::install::ProgressStage::Downloading);
-        let source = match distribution_perf(&mut scope, &stage) {
+        let source = match local_host
+            .map(Ok)
+            .unwrap_or_else(|| distribution_perf(&mut scope, &stage))
+        {
             Ok(path) => path,
             Err(InstallFailure::Abort(abort)) => return Err(InstallFailure::Abort(abort)),
             Err(InstallFailure::Ordinary(package_error)) => {
@@ -94,6 +102,57 @@ fn install_perf(
     };
     let _ = fs::remove_dir_all(&stage);
     result
+}
+
+// Test the copy itself: distribution wrappers can run in their original
+// location while depending on paths relative to that location.
+fn copy_runnable_host_perf(
+    scope: &mut ProcessScope,
+    source: &Path,
+    stage: &Path,
+) -> InstallResult<Option<PathBuf>> {
+    let copy = stage.join("host-perf");
+    if fs::copy(source, &copy).is_err() || make_executable(&copy).is_err() {
+        return Ok(None);
+    }
+    match runnable(scope, &copy) {
+        Ok(true) => Ok(Some(copy)),
+        Ok(false) | Err(InstallFailure::Ordinary(_)) => Ok(None),
+        Err(InstallFailure::Abort(abort)) => Err(InstallFailure::Abort(abort)),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod host_copy_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn copied_host_tool_must_run_from_its_new_location() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/perf-host-copy-fixtures")
+            .join(super::super::runtime::unique_id());
+        fs::create_dir_all(root.join("stage")).unwrap();
+        let source = root.join("perf");
+        fs::write(&source, b"#!/bin/sh\nprintf 'perf fixture\\n'\n").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+        let context =
+            OperationContext::new(&root, &crate::project::ProjectConfig::default()).unwrap();
+        let owner = ProducerDirectory::open(&root.join("stage")).unwrap();
+        let mut scope = owner.scope(&context);
+        let copied = copy_runnable_host_perf(&mut scope, &source, &root.join("stage"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(copied, root.join("stage/host-perf"));
+        fs::write(&source, b"#!/bin/sh\nexit 127\n").unwrap();
+        assert!(
+            copy_runnable_host_perf(&mut scope, &source, &root.join("stage"))
+                .unwrap()
+                .is_none()
+        );
+        owner.consume(scope.finish().unwrap()).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn runnable(scope: &mut ProcessScope, path: &Path) -> InstallResult<bool> {
