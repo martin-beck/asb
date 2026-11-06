@@ -700,6 +700,12 @@ pub(crate) fn execute(
         }
     }
     replay::disclose_incomplete(&plan.replay_inputs, options.json, output)?;
+    let tool_replay = if options.tool_mode_explicit {
+        options.tool_mode == Some(crate::tape::Mode::Replay)
+    } else {
+        plan.mode == crate::planning::ExecutionMode::Replay
+    };
+    replay::disclose_native_snapshot(&plan.replay_inputs, tool_replay, options.json, output)?;
     let mut reference: Option<Compatibility> = plan.replay_compatibility.clone();
     let mut failures = 0u64;
     let mut completed_executions = 0usize;
