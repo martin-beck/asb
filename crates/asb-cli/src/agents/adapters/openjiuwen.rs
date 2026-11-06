@@ -1038,6 +1038,20 @@ def configure_log_config(config):
         )
         .unwrap();
         std::fs::write(
+            package.join("harness/deep_agent.py"),
+            r#"
+from types import SimpleNamespace
+class DeepAgent:
+    def __init__(self, cwd=None, inherited=None):
+        self._deep_config = SimpleNamespace(cwd=cwd, project_root=None)
+        self._initialized = False
+        self._inherited_artifact_root = inherited
+    async def _ensure_initialized(self):
+        return self._deep_config.cwd, self._deep_config.project_root
+"#,
+        )
+        .unwrap();
+        std::fs::write(
             package.join("harness/cli/agent/factory.py"),
             r#"
 class Config:
@@ -1236,6 +1250,14 @@ from openjiuwen.core.single_agent.ability_manager import AbilityManager, ToolMes
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 from openjiuwen.core.context_engine.context.context import Context
 async def main():
+    from openjiuwen.harness.deep_agent import DeepAgent
+    root = DeepAgent()
+    cwd, project = await root._ensure_initialized()
+    assert cwd == os.path.realpath(os.environ["ASB_TEST_WORKSPACE"]) and project == cwd
+    explicit = DeepAgent(cwd="/explicit")
+    assert (await explicit._ensure_initialized())[0] == "/explicit"
+    child = DeepAgent(inherited="/child")
+    assert (await child._ensure_initialized())[0] is None
     agent, _tracker = factory.create_agent(None)
     assert agent._deep_config.enable_read_image_multimodal is True
     assert agent._deep_config.parallel_tool_calls is True
