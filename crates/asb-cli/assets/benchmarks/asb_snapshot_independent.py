@@ -29,7 +29,7 @@ def _line(process, deadline):
 
 class IndependentSnapshot:
     """Own a task preparer and separately journalled, namespace-bound custodian."""
-    def __init__(self, task, tools, owner, docker_command, deadline, replay=False, extra_roots=()):
+    def __init__(self, task, tools, owner, docker_command, deadline, replay=False, extra_roots=(), target='/testbed'):
         self.task, self.command, self.replay = task, list(docker_command), replay
         self.preparer = self.process = self.sidecar = None
         self.initial = None
@@ -40,7 +40,7 @@ class IndependentSnapshot:
         files = [(name, (Path(__file__).parent/name).read_bytes(), 0o600) for name in names]
         try:
             upload(task.workspace.container, '/opt/asb-private', files, temporary_dir=task.artifacts, owner=owner)
-            common = ['--target','/testbed','--root','/asb-snapshot-storage/snapshot',
+            common = ['--target',target,'--root','/asb-snapshot-storage/snapshot',
                       '--socket','/opt/asb-private/snapshot.sock',
                       '--output','/asb-snapshot-storage/snapshot-streams',
                       '--btrfs',tools['btrfs'],'--mkfs',tools['mkfs.btrfs'],'--rsync',tools['rsync'],

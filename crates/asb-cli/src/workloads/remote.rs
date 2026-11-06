@@ -1453,11 +1453,7 @@ impl Session {
             .into_iter()
             .collect();
         let mut result = completed.into_execution()?;
-        if self.snapshot
-            && context.tool_tape_cassette.is_some()
-            && !context.tool_replay
-            && context.config.workload.starts_with("swe-bench")
-        {
+        if self.snapshot && context.tool_tape_cassette.is_some() && !context.tool_replay {
             let archive = self.artifacts.join("snapshot-streams.tar");
             if !archive.is_file() {
                 return Err("snapshot stream archive is missing from controller artifacts".into());
@@ -1547,6 +1543,14 @@ fn runtime_binary() -> Result<PathBuf, String> {
 }
 
 impl WorkloadSession for Session {
+    fn prepare_snapshot_replay(&self) -> Result<(), String> {
+        if self.snapshot {
+            Ok(())
+        } else {
+            Err("the workload session did not provision a snapshot replay backend".into())
+        }
+    }
+
     fn uses_isolated_guest(&self) -> bool {
         true
     }

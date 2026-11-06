@@ -295,20 +295,26 @@ pub(crate) fn installed_available(name: &str, directory: &Path) -> Option<bool> 
 pub(crate) fn prepare_task(
     context: &PreparationContext<'_>,
 ) -> Result<Box<dyn WorkloadSession>, String> {
-    if context.native_snapshot_replay && !context.workload.starts_with("swe-bench") {
-        return Err("native snapshot replay is not supported by this workload".into());
-    }
     if descriptor(context.workload).is_some_and(|descriptor| !descriptor.valid()) {
         return Err("workload module has an invalid descriptor".into());
     }
-    adapters::find(context.workload)
+    let mut session = adapters::find(context.workload)
         .ok_or_else(|| {
             format!(
                 "no workload adapter is registered for `{}`",
                 context.workload
             )
         })?
-        .prepare_task(context)
+        .prepare_task(context)?;
+    if context.native_snapshot_replay
+        && let Err(error) = session.prepare_snapshot_replay()
+    {
+        return match session.cancel_prepared() {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(format!("{error}; workload cleanup also failed: {cleanup}")),
+        };
+    }
+    Ok(session)
 }
 
 const MAX_PROMPT_BYTES: u64 = 64 * 1024;
