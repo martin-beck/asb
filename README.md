@@ -665,8 +665,11 @@ results, prints the exact privileged commands and asks for y/N approval.
 `--yes` approves those commands without prompting. Setup delegates two named
 tracefs instances (recreate them after reboot), allowing concurrent replicas
 and two independent ASB processes without resetting global tracing. Perfetto
-also needs util-linux `unshare` and enabled unprivileged user/mount namespaces;
-its bootstrap privately maps only the owned instance's trace file, rather than
+also needs util-linux `unshare` and enabled unprivileged user/mount namespaces.
+when Ubuntu's AppArmor user-namespace restriction is enabled, setup separately
+offers to disable it for the entire host until reboot. Declining leaves it
+unchanged and Perfetto may be unavailable. `--yes` also approves this change.
+Its bootstrap privately maps only the owned instance's trace file, rather than
 granting access to the host-wide trace snapshot. Decline
 setup when tracing is not needed; other collectors remain usable.
 `asb tool list` shows all built-in agent and support-tool installers and `asb workload list`
