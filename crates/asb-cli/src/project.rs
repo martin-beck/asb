@@ -680,6 +680,12 @@ fn configure_host_capabilities_with(
             .map_err(super::io_error)?;
         }
     }
+    configure_perfetto_userns_with(
+        output,
+        yes,
+        policy,
+        current("kernel.apparmor_restrict_unprivileged_userns"),
+    )?;
     // Preserve the prior group policy: interactive approval for sysctls never
     // escalates cgroup setup. It requires the original passwordless capability
     // and a separate consent, even if interactive sudo refreshed credentials.
@@ -690,6 +696,45 @@ fn configure_host_capabilities_with(
             .map_err(super::io_error)?;
         Ok(None)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_perfetto_userns_with(
+    output: &mut dyn std::io::Write,
+    yes: bool,
+    policy: &mut host_setup::Policy<'_>,
+    value: Option<String>,
+) -> Result<(), Error> {
+    use host_setup::{Decision, FailurePolicy, Operation, Request, Requirement};
+    if value.is_none_or(|value| value.trim() != "1") {
+        return Ok(());
+    }
+    let request = Request {
+        heading: "Perfetto's private tracing namespace may require this system-wide change:",
+        explanation: "This disables AppArmor's unprivileged user-namespace restriction for the whole host until reboot. Enter y to approve; n or Enter leaves it unchanged. Perfetto may be unavailable if it remains enabled.",
+        operations: vec![Operation::command(
+            &[
+                "sysctl",
+                "-w",
+                "kernel.apparmor_restrict_unprivileged_userns=0",
+            ],
+            true,
+        )],
+        requirement: Requirement::AllowInteractive,
+        failure: FailurePolicy::Continue,
+    };
+    match policy.approve(output, yes, request)? {
+        Decision::Approved(approved) => {
+            let message = if policy.execute(approved).first() == Some(&true) {
+                "Host capability setup: changed kernel.apparmor_restrict_unprivileged_userns=0."
+            } else {
+                "Host capability setup: could not change the AppArmor user-namespace restriction; Perfetto may be unavailable."
+            };
+            writeln!(output, "{message}").map_err(super::io_error)?;
+        }
+        Decision::Declined | Decision::Unavailable => writeln!(output, "Host capability setup: AppArmor user-namespace restriction unchanged; Perfetto may be unavailable.").map_err(super::io_error)?,
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

@@ -8,6 +8,65 @@ struct Fake {
     calls: Vec<(SudoMode, Operation)>,
     failures: Vec<usize>,
 }
+
+#[test]
+fn perfetto_userns_change_requires_separate_consent_and_existing_restriction() {
+    for (value, answer, yes, expected) in [
+        (Some("1"), "n\n", false, 0),
+        (Some("1"), "y\n", false, 1),
+        (Some("1"), "", true, 1),
+        (Some("0"), "", true, 0),
+        (None, "", true, 0),
+    ] {
+        let mut executor = Fake {
+            available: true,
+            ..Default::default()
+        };
+        let mut input = Cursor::new(answer);
+        let mut output = Vec::new();
+        let mut policy = Policy::new(&mut input, &mut executor);
+        super::super::configure_perfetto_userns_with(
+            &mut output,
+            yes,
+            &mut policy,
+            value.map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(executor.calls.len(), expected);
+        if expected == 1 {
+            assert_eq!(
+                executor.calls[0].1.args,
+                [
+                    "sysctl",
+                    "-w",
+                    "kernel.apparmor_restrict_unprivileged_userns=0"
+                ]
+            );
+            let text = String::from_utf8(output).unwrap();
+            assert!(text.contains("whole host"));
+            assert!(text.contains("until reboot"));
+        }
+    }
+}
+
+#[test]
+fn perfetto_userns_change_reports_failed_sudo() {
+    let mut executor = Fake {
+        available: true,
+        failures: vec![1],
+        ..Default::default()
+    };
+    let mut input = Cursor::new("");
+    let mut output = Vec::new();
+    let mut policy = Policy::new(&mut input, &mut executor);
+    super::super::configure_perfetto_userns_with(&mut output, true, &mut policy, Some("1".into()))
+        .unwrap();
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("could not change")
+    );
+}
 impl Executor for Fake {
     fn passwordless(&mut self) -> bool {
         self.probes += 1;
@@ -304,15 +363,10 @@ fn existing_settings_need_no_consent_and_unavailable_sudo_never_mutates() {
             &mut output,
             false,
             &mut policy,
-            |setting| {
-                Some(
-                    if setting.ends_with("paranoid") {
-                        "-1\n"
-                    } else {
-                        "1\n"
-                    }
-                    .into(),
-                )
+            |setting| match setting {
+                "kernel.perf_event_paranoid" => Some("-1\n".into()),
+                "kernel.sched_schedstats" => Some("1\n".into()),
+                _ => None,
             }
         )
         .unwrap()
